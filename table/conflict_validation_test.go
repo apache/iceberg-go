@@ -82,6 +82,7 @@ func TestReadIsolationLevel(t *testing.T) {
 			got, err := readIsolationLevel(tt.props, tt.key, tt.defVal)
 			if tt.wantErr {
 				assert.ErrorIs(t, err, ErrInvalidIsolationLevel)
+
 				return
 			}
 
