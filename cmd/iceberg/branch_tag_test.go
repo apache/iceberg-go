@@ -122,6 +122,7 @@ func TestRunBranchCreateRejectsNegativeRetentionValues(t *testing.T) {
 			Yes:        true,
 			MinSnapshotsToKeep: func() *int {
 				v := -1
+
 				return &v
 			}(),
 		})
