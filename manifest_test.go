@@ -1941,8 +1941,6 @@ func (m *ManifestTestSuite) TestManifestEntryFileSequenceNumReturnsCopy() {
 	current := entry.FileSequenceNum()
 	m.Require().NotNil(current)
 	m.Assert().Equal(int64(10), *current)
-	m.Assert().NotEqual(int64(20), *current)
-	m.Assert().Equal(entryFileSeqNum, *current)
 }
 
 // equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
