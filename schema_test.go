@@ -219,6 +219,105 @@ func TestNestedFieldToString(t *testing.T) {
 	}
 }
 
+func TestSchemaAsStructClonesTopLevelFieldList(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	structType := schema.AsStruct()
+	structType.FieldList[0].Name = "hijacked"
+
+	assert.Equal(t, "foo", schema.Field(0).Name)
+}
+
+func TestSchemaAsStructClonesNestedTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "person",
+			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			}},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	personType, ok := structType.FieldList[0].Type.(*iceberg.StructType)
+	require.True(t, ok)
+	personType.FieldList[0].Name = "full_name"
+
+	clonedPersonType, ok := schema.Field(0).Type.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedPersonType.FieldList[0].Name)
+}
+
+func TestSchemaAsStructClonesNestedListTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "people",
+			Type: &iceberg.ListType{
+				ElementID:       2,
+				ElementRequired: true,
+				Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				}},
+			},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	listType, ok := structType.FieldList[0].Type.(*iceberg.ListType)
+	require.True(t, ok)
+
+	elementType, ok := listType.Element.(*iceberg.StructType)
+	require.True(t, ok)
+	elementType.FieldList[0].Name = "full_name"
+
+	clonedListType, ok := schema.Field(0).Type.(*iceberg.ListType)
+	require.True(t, ok)
+
+	clonedElementType, ok := clonedListType.Element.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedElementType.FieldList[0].Name)
+}
+
+func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "people_by_id",
+			Type: &iceberg.MapType{
+				KeyID:         2,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       3,
+				ValueRequired: true,
+				ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				}},
+			},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	mapType, ok := structType.FieldList[0].Type.(*iceberg.MapType)
+	require.True(t, ok)
+
+	valueType, ok := mapType.ValueType.(*iceberg.StructType)
+	require.True(t, ok)
+	valueType.FieldList[0].Name = "full_name"
+
+	clonedMapType, ok := schema.Field(0).Type.(*iceberg.MapType)
+	require.True(t, ok)
+
+	clonedValueType, ok := clonedMapType.ValueType.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedValueType.FieldList[0].Name)
+}
+
 func TestSchemaIndexByIDVisitor(t *testing.T) {
 	index, err := iceberg.IndexByID(tableSchemaNested)
 	require.NoError(t, err)
