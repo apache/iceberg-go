@@ -47,7 +47,12 @@ func (e ErrIncompatibleSchema) Error() string {
 					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
 				}
 			} else {
-				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+				if f.Field.InitialDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+				}
+				if f.Field.WriteDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid write default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.WriteDefault, f.InvalidDefault.MinFormatVersion)
+				}
 			}
 		}
 	}
@@ -72,7 +77,6 @@ type UnsupportedType struct {
 
 type InvalidDefault struct {
 	MinFormatVersion  int
-	WriteDefault      any
 	MustBeNullForType bool
 }
 
@@ -133,11 +137,11 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 				})
 			}
 		default:
-			if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+			if (field.InitialDefault != nil || field.WriteDefault != nil) && formatVersion < defaultValuesMinFormatVersion {
 				problems = append(problems, IncompatibleField{
 					Field:          field,
 					ColName:        colName,
-					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
+					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion},
 				})
 			}
 		}
