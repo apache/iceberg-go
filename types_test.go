@@ -49,6 +49,7 @@ func TestTypesBasic(t *testing.T) {
 		{"variant", iceberg.VariantType{}},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
+		{"decimal(5, 7)", iceberg.DecimalTypeOf(5, 7)},
 	}
 
 	for _, tt := range tests {
@@ -91,12 +92,10 @@ func TestDecimalType(t *testing.T) {
 		assert.PanicsWithError(t, "invalid argument: invalid precision 0: must be greater than 0", func() {
 			iceberg.DecimalTypeOf(0, 2)
 		})
-		assert.PanicsWithError(t, "invalid argument: invalid precision 40: must be less than 40", func() {
-			iceberg.DecimalTypeOf(40, 0)
+		assert.PanicsWithError(t, "invalid argument: invalid precision 39: must be less than or equal to 38", func() {
+			iceberg.DecimalTypeOf(39, 0)
 		})
-		assert.PanicsWithError(t, "invalid argument: invalid scale 11: must be less than or equal to precision 10", func() {
-			iceberg.DecimalTypeOf(10, 11)
-		})
+		assert.Equal(t, "decimal(10, 11)", iceberg.DecimalTypeOf(10, 11).String())
 		assert.PanicsWithError(t, "invalid argument: invalid scale -1: must be greater than or equal to 0", func() {
 			iceberg.DecimalTypeOf(10, -1)
 		})
@@ -117,16 +116,12 @@ func TestDecimalTypeInvalidParse(t *testing.T) {
 			data: `{"id": 1, "name": "d", "type": "decimal(0,2)", "required": true}`,
 		},
 		{
-			name: "scale exceeds precision",
-			data: `{"id": 1, "name": "d", "type": "decimal(10,11)", "required": true}`,
-		},
-		{
-			name: "negative scale",
+			name: "negative scale syntax",
 			data: `{"id": 1, "name": "d", "type": "decimal(10,-1)", "required": true}`,
 		},
 		{
 			name: "precision too large",
-			data: `{"id": 1, "name": "d", "type": "decimal(40,2)", "required": true}`,
+			data: `{"id": 1, "name": "d", "type": "decimal(39,2)", "required": true}`,
 		},
 	}
 

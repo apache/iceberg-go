@@ -52,7 +52,7 @@ func TestToDecimalLiteralUsesBoundFieldPrecision(t *testing.T) {
 		scale     int
 	}{
 		{"decimal(38,4)", 38, 4},
-		{"decimal(38,9)", 38, 9},
+		{"decimal(38,10)", 38, 10},
 		{"decimal(38,2)", 38, 2},
 	}
 
@@ -81,7 +81,7 @@ func TestToDecimalLiteralUsesBoundFieldPrecision(t *testing.T) {
 // fallback: when typ is not a DecimalType, the function uses the literal's
 // own (hardcoded-9) precision and must not panic.
 func TestToDecimalLiteralFallbackWhenTypIsNotDecimal(t *testing.T) {
-	lit := decimalLiteral16Bytes(4)
+	lit := decimalLiteral16Bytes(10)
 
 	got := toDecimalLiteral(iceberg.PrimitiveTypes.String, lit)
 	require.NotNil(t, got)
@@ -89,7 +89,7 @@ func TestToDecimalLiteralFallbackWhenTypIsNotDecimal(t *testing.T) {
 	dt, ok := got.GetType().(*types.DecimalType)
 	require.Truef(t, ok, "expected *types.DecimalType, got %T", got.GetType())
 	assert.Equal(t, int32(9), dt.Precision)
-	assert.Equal(t, int32(4), dt.Scale)
+	assert.Equal(t, int32(10), dt.Scale)
 }
 
 // TestToDecimalLiteralRealisticValues exercises values whose MarshalBinary

@@ -206,7 +206,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 				if err := validateDecimalPrecisionScale(prec, scale); err != nil {
-					return fmt.Errorf("%w: %s", ErrInvalidTypeString, err)
+					return fmt.Errorf("%w: %w", ErrInvalidTypeString, err)
 				}
 
 				t.Type = DecimalType{precision: prec, scale: scale}
@@ -599,14 +599,11 @@ func validateDecimalPrecisionScale(precision, scale int) error {
 	if precision <= 0 {
 		return fmt.Errorf("invalid precision %d: must be greater than 0", precision)
 	}
-	if precision >= 40 {
-		return fmt.Errorf("invalid precision %d: must be less than 40", precision)
+	if precision > 38 {
+		return fmt.Errorf("invalid precision %d: must be less than or equal to 38", precision)
 	}
 	if scale < 0 {
 		return fmt.Errorf("invalid scale %d: must be greater than or equal to 0", scale)
-	}
-	if scale > precision {
-		return fmt.Errorf("invalid scale %d: must be less than or equal to precision %d", scale, precision)
 	}
 
 	return nil
