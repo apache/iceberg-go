@@ -29,6 +29,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/table/dv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -520,4 +521,84 @@ func TestExecuteCompactionGroupPreservesLineageSubsetOnMixedTasks(t *testing.T) 
 		}
 		assert.Equal(t, before, post[id], "lineage-capable file rows should keep their original _row_id")
 	}
+}
+
+// TestExecuteCompactionGroupMixedLineageRetainsSiblingDeletionVectors verifies that
+// mixed-task compaction on a v3 table removes deletion vectors by referenced
+// data file, not by shared deletion-vector container path.
+func TestExecuteCompactionGroupMixedLineageRetainsSiblingDeletionVectors(t *testing.T) {
+	ctx := context.Background()
+	fs := iceio.LocalFS{}
+
+	tbl := newV3RowLineageTestTable(t)
+	mem := memory.DefaultAllocator
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	left, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(left.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(left, -1), nil)
+	require.NoError(t, err)
+
+	right, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id": 3, "data": "c"}, {"id": 4, "data": "d"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(right.Release)
+	tbl, err = tbl.Append(ctx, array.NewTableReader(right, -1), nil)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	rewriteTarget := tasks[0].File.FilePath()
+	siblingTarget := tasks[1].File.FilePath()
+
+	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
+	require.NoError(t, w.Add(rewriteTarget, []int64{0}, 0, nil))
+	require.NoError(t, w.Add(siblingTarget, []int64{0}, 0, nil))
+	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(rewriteTarget), "dv-shared.puffin"))
+	require.NoError(t, err)
+	require.Len(t, dvFiles, 2)
+	require.Equal(t, dvFiles[0].FilePath(), dvFiles[1].FilePath(),
+		"both deletion vectors must share one Puffin file for this regression")
+
+	rdtx := tbl.NewTransaction()
+	require.NoError(t, rdtx.NewRowDelta(nil).AddDeletes(dvFiles...).Commit(ctx))
+	tbl, err = rdtx.Commit(ctx)
+	require.NoError(t, err)
+
+	tasks, err = tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	tasks[1].FirstRowID = nil
+
+	group := table.CompactionTaskGroup{
+		PartitionKey:   "single",
+		Tasks:          tasks,
+		TotalSizeBytes: tasks[0].File.FileSizeBytes() + tasks[1].File.FileSizeBytes(),
+	}
+	gr, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(gr.OldDataFiles), "both source files should be rewritten")
+	require.Greater(t, len(gr.SafeDeletionVectors), 0, "mixed group should expose deletion vectors for rewrite")
+
+	rtx := tbl.NewTransaction()
+	rewrite := rtx.NewRewrite(nil)
+	rewrite.ApplyResult(gr)
+	require.NoError(t, rewrite.Commit(ctx))
+	tbl, err = rtx.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Empty(t, deleteEntriesReferencing(t, tbl, map[string]struct{}{
+		rewriteTarget: {},
+		siblingTarget: {},
+	}), "shared-path deletion vectors should be removed per referenced-data-file")
 }

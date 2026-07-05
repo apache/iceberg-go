@@ -329,7 +329,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 			}
 
 			safePosDeletes := mergeTaskFiles(preserve.SafePosDeletes, legacy.SafePosDeletes)
-			safeDeletionVectors := mergeTaskFiles(preserve.SafeDeletionVectors, legacy.SafeDeletionVectors)
+			safeDeletionVectors := mergeTaskFilesByReferencedDataFile(preserve.SafeDeletionVectors, legacy.SafeDeletionVectors)
 
 			return CompactionGroupResult{
 				PartitionKey:        group.PartitionKey,
@@ -343,7 +343,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		}
 	}
 
-	// Preserve row lineage only when every source file in the group carries
+	// Preserve row lineage only when every source file in the group carries row-lineage metadata.
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 
 	return executeCompactionTaskGroup(ctx, tbl, scanOpts, group, cfg.targetFileSize, preserveLineage)
@@ -458,6 +458,42 @@ func mergeTaskFiles(a, b []iceberg.DataFile) []iceberg.DataFile {
 	}
 
 	return out
+}
+
+func mergeTaskFilesByReferencedDataFile(a, b []iceberg.DataFile) []iceberg.DataFile {
+	if len(a) == 0 {
+		return slices.Clone(b)
+	}
+	if len(b) == 0 {
+		return slices.Clone(a)
+	}
+
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, df := range a {
+		ref := dvReferencedDataFile(df)
+		seen[ref] = struct{}{}
+	}
+
+	out := make([]iceberg.DataFile, 0, len(a)+len(b))
+	out = append(out, a...)
+	for _, df := range b {
+		ref := dvReferencedDataFile(df)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		out = append(out, df)
+	}
+
+	return out
+}
+
+func dvReferencedDataFile(df iceberg.DataFile) string {
+	if ref := df.ReferencedDataFile(); ref != nil && *ref != "" {
+		return *ref
+	}
+
+	return df.FilePath()
 }
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
