@@ -50,14 +50,15 @@ func runTag(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCmd
 }
 
 func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *BranchCreateCmd) {
-	tbl := loadTable(ctx, output, cat, cmd.TableID)
-	meta := tbl.Metadata()
 	if err := validateRefName(cmd.BranchName); err != nil {
 		output.Error(fmt.Errorf("invalid branch name: %w", err))
 		osExit(1)
 
 		return
 	}
+
+	tbl := loadTable(ctx, output, cat, cmd.TableID)
+	meta := tbl.Metadata()
 
 	if _, found := findSnapshotRef(meta, cmd.BranchName); found {
 		output.Error(fmt.Errorf("ref %q already exists", cmd.BranchName))
@@ -164,14 +165,15 @@ func runBranchCreate(ctx context.Context, output Output, cat catalog.Catalog, cm
 }
 
 func runTagCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *TagCreateCmd) {
-	tbl := loadTable(ctx, output, cat, cmd.TableID)
-	meta := tbl.Metadata()
 	if err := validateRefName(cmd.TagName); err != nil {
 		output.Error(fmt.Errorf("invalid tag name: %w", err))
 		osExit(1)
 
 		return
 	}
+
+	tbl := loadTable(ctx, output, cat, cmd.TableID)
+	meta := tbl.Metadata()
 
 	if _, found := findSnapshotRef(meta, cmd.TagName); found {
 		output.Error(fmt.Errorf("ref %q already exists", cmd.TagName))
@@ -248,11 +250,7 @@ func validateRefName(name string) error {
 		return errors.New("name may not be '.' or '..'")
 	}
 
-	if strings.ContainsAny(name, "/\\") {
-		return errors.New("name may not contain path separators")
-	}
-
-	if strings.IndexFunc(name, func(r rune) bool { return unicode.IsControl(r) }) >= 0 {
+	if strings.ContainsFunc(name, unicode.IsControl) {
 		return errors.New("name may not contain control characters")
 	}
 

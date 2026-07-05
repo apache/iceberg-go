@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -118,7 +119,7 @@ func TestRunBranchCreateRejectsNegativeRetentionValues(t *testing.T) {
 		runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
 			TableID:    "db.events",
 			BranchName: "new-feature",
-			MaxRefAge:  "-1d",
+			MaxRefAge:  "-1h",
 			Yes:        true,
 			MinSnapshotsToKeep: func() *int {
 				v := -1
@@ -171,7 +172,7 @@ func TestRunBranchCreateRejectsInvalidRefName(t *testing.T) {
 	tbl := branchTagTestTable(t)
 	cat := &branchTagCommitCatalog{tbl: tbl}
 
-	for _, name := range []string{"", "  spaced ", "..", ".", "bad/name", `bad\\name`} {
+	for _, name := range []string{"", "  spaced ", "..", "."} {
 		out := &refCreatedCapture{}
 
 		exitCode := captureBranchTagExit(func() {
@@ -187,6 +188,54 @@ func TestRunBranchCreateRejectsInvalidRefName(t *testing.T) {
 		assert.Contains(t, out.lastErr.Error(), "invalid branch name")
 		assert.Empty(t, cat.updates)
 	}
+
+	out := &refCreatedCapture{}
+	loadTrackingCat := &loadTrackingCatalog{}
+	exitCode := captureBranchTagExit(func() {
+		runBranchCreate(context.Background(), out, loadTrackingCat, &BranchCreateCmd{
+			TableID:    "db.events",
+			BranchName: "",
+			Yes:        true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid branch name")
+	assert.Zero(t, loadTrackingCat.loadCount)
+}
+
+func TestRunBranchCreateAllowsSlashStyleRefName(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+	out := &refCreatedCapture{}
+
+	exitCode := captureBranchTagExit(func() {
+		runBranchCreate(context.Background(), out, cat, &BranchCreateCmd{
+			TableID:    "db.events",
+			BranchName: "audit/foo",
+			Yes:        true,
+		})
+	})
+
+	assert.Equal(t, 0, exitCode)
+	require.NoError(t, out.lastErr)
+	require.NotNil(t, out.created)
+	assert.Equal(t, "audit/foo", out.created.RefName)
+	require.Len(t, cat.updates, 1)
+	require.Len(t, cat.requirements, 2)
+	actual, err := json.Marshal(cat.updates[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(actual), `"ref-name":"audit/foo"`)
+	var found bool
+	for name := range cat.committed.Refs() {
+		if name == "audit/foo" {
+			found = true
+
+			break
+		}
+	}
+	assert.True(t, found)
 }
 
 func TestRunTagCreateRejectsNegativeMaxRefAge(t *testing.T) {
@@ -213,7 +262,7 @@ func TestRunTagCreateRejectsInvalidRefName(t *testing.T) {
 	tbl := branchTagTestTable(t)
 	cat := &branchTagCommitCatalog{tbl: tbl}
 
-	for _, name := range []string{"", "  spaced ", "..", ".", "bad/name", `bad\\name`} {
+	for _, name := range []string{"", "  spaced ", "..", "."} {
 		out := &refCreatedCapture{}
 
 		exitCode := captureBranchTagExit(func() {
@@ -229,6 +278,54 @@ func TestRunTagCreateRejectsInvalidRefName(t *testing.T) {
 		assert.Contains(t, out.lastErr.Error(), "invalid tag name")
 		assert.Empty(t, cat.updates)
 	}
+
+	out := &refCreatedCapture{}
+	loadTrackingCat := &loadTrackingCatalog{}
+	exitCode := captureBranchTagExit(func() {
+		runTagCreate(context.Background(), out, loadTrackingCat, &TagCreateCmd{
+			TableID: "db.events",
+			TagName: "",
+			Yes:     true,
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid tag name")
+	assert.Zero(t, loadTrackingCat.loadCount)
+}
+
+func TestRunTagCreateAllowsSlashStyleRefName(t *testing.T) {
+	tbl := branchTagTestTable(t)
+	cat := &branchTagCommitCatalog{tbl: tbl}
+	out := &refCreatedCapture{}
+
+	exitCode := captureBranchTagExit(func() {
+		runTagCreate(context.Background(), out, cat, &TagCreateCmd{
+			TableID: "db.events",
+			TagName: "release/1.0",
+			Yes:     true,
+		})
+	})
+
+	assert.Equal(t, 0, exitCode)
+	require.NoError(t, out.lastErr)
+	require.NotNil(t, out.created)
+	assert.Equal(t, "release/1.0", out.created.RefName)
+	require.Len(t, cat.updates, 1)
+	require.Len(t, cat.requirements, 2)
+	actual, err := json.Marshal(cat.updates[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(actual), `"ref-name":"release/1.0"`)
+	var found bool
+	for name := range cat.committed.Refs() {
+		if name == "release/1.0" {
+			found = true
+
+			break
+		}
+	}
+	assert.True(t, found)
 }
 
 func TestTextOutputRefCreatedTag(t *testing.T) {
@@ -667,3 +764,23 @@ func captureBranchTagExit(f func()) (exitCode int) {
 }
 
 type branchTagExitSentinel struct{}
+
+type loadTrackingCatalog struct {
+	catalog.Catalog
+	loadCount int
+}
+
+func (l *loadTrackingCatalog) LoadTable(_ context.Context, _ table.Identifier) (*table.Table, error) {
+	l.loadCount++
+
+	return nil, errors.New("unexpected LoadTable call")
+}
+
+func (l *loadTrackingCatalog) CommitTable(
+	_ context.Context,
+	_ table.Identifier,
+	_ []table.Requirement,
+	_ []table.Update,
+) (table.Metadata, string, error) {
+	return nil, "", errors.New("unexpected CommitTable call")
+}
