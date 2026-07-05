@@ -225,12 +225,18 @@ func init() {
 
 var _ catalog.Catalog = (*Catalog)(nil)
 
+const namespaceExistsProperty = "exists"
+
 var (
-	minimalNamespaceProps = iceberg.Properties{"exists": "true"}
+	minimalNamespaceProps = iceberg.Properties{namespaceExistsProperty: "true"}
 
 	dialects  = map[SupportedDialect]schema.Dialect{}
 	dialectMx sync.Mutex
 )
+
+func isReservedNamespaceProperty(key string) bool {
+	return key == namespaceExistsProperty
+}
 
 func createDialect(d SupportedDialect) (schema.Dialect, error) {
 	switch d {
@@ -1151,6 +1157,12 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
+	for key := range props {
+		if isReservedNamespaceProperty(key) {
+			return fmt.Errorf("%w: cannot create namespace with reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
 	_, exists, err := c.resolveNamespaceKey(ctx, namespace)
 	if err != nil {
 		return err
@@ -1248,11 +1260,31 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 
 		result := make(iceberg.Properties)
 		for _, p := range props {
+			if isReservedNamespaceProperty(p.PropertyKey) {
+				continue
+			}
 			result[p.PropertyKey] = p.PropertyValue.String
 		}
 
 		return result, nil
 	})
+}
+
+func validateNamespacePropertyUpdates(removals []string, updates iceberg.Properties) error {
+	for key := range updates {
+		if isReservedNamespaceProperty(key) {
+			return fmt.Errorf("%w: cannot update reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
+	for _, key := range removals {
+		if isReservedNamespaceProperty(key) {
+			// Removing the marker would make a namespace without user properties disappear.
+			return fmt.Errorf("%w: cannot remove reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
+	return nil
 }
 
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -1374,6 +1406,9 @@ func getUpdatedPropsAndUpdateSummary(currentProps iceberg.Properties, removals [
 func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table.Identifier, removals []string, updates iceberg.Properties) (catalog.PropertiesUpdateSummary, error) {
 	var summary catalog.PropertiesUpdateSummary
 	if err := checkValidNamespace(namespace); err != nil {
+		return summary, err
+	}
+	if err := validateNamespacePropertyUpdates(removals, updates); err != nil {
 		return summary, err
 	}
 

@@ -1907,7 +1907,102 @@ func (s *SqliteCatalogTestSuite) TestLoadEmptyNamespaceProperties() {
 		s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, nil))
 		props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
 		s.Require().NoError(err)
-		s.Equal(iceberg.Properties{"exists": "true"}, props)
+		s.Empty(props)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
+	tests := []struct {
+		cat       *sqlcat.Catalog
+		namespace table.Identifier
+	}{
+		{s.getCatalogMemory(), table.Identifier{databaseName()}},
+		{s.getCatalogSqlite(), strings.Split(hiearchicalNamespaceName(), ".")},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		err := tt.cat.CreateNamespace(ctx, tt.namespace, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+		s.ErrorContains(err, "cannot create namespace with reserved namespace property")
+		s.ErrorContains(err, `"exists"`)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+		s.Require().NoError(err)
+		s.False(exists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNamespacePropertiesCannotUpdateSentinel() {
+	tests := []struct {
+		name          string
+		cat           *sqlcat.Catalog
+		namespace     table.Identifier
+		createProps   iceberg.Properties
+		expectedProps iceberg.Properties
+	}{
+		{
+			name:          "memory with user props",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "memory sentinel only",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   nil,
+			expectedProps: nil,
+		},
+		{
+			name:          "sqlite with user props",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "sqlite sentinel only",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   nil,
+			expectedProps: nil,
+		},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, tt.createProps))
+
+			_, err := tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot remove reserved namespace property")
+			s.ErrorContains(err, `"exists"`)
+
+			_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot update reserved namespace property")
+
+			props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
+			s.Require().NoError(err)
+			if len(tt.expectedProps) == 0 {
+				s.Empty(props)
+			} else {
+				s.Equal(tt.expectedProps, props)
+			}
+
+			exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+			s.Require().NoError(err)
+			s.True(exists)
+		})
 	}
 }
 
