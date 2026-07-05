@@ -224,11 +224,16 @@ func init() {
 var _ catalog.Catalog = (*Catalog)(nil)
 
 var (
-	minimalNamespaceProps = iceberg.Properties{"exists": "true"}
+	namespaceExistsProperty = "exists"
+	minimalNamespaceProps   = iceberg.Properties{namespaceExistsProperty: "true"}
 
 	dialects  = map[SupportedDialect]schema.Dialect{}
 	dialectMx sync.Mutex
 )
+
+func isReservedNamespaceProperty(key string) bool {
+	return key == namespaceExistsProperty
+}
 
 func createDialect(d SupportedDialect) (schema.Dialect, error) {
 	switch d {
@@ -1111,11 +1116,28 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 
 		result := make(iceberg.Properties)
 		for _, p := range props {
+			if isReservedNamespaceProperty(p.PropertyKey) {
+				continue
+			}
 			result[p.PropertyKey] = p.PropertyValue.String
 		}
 
 		return result, nil
 	})
+}
+
+func validateNamespacePropertyUpdates(removals []string, updates iceberg.Properties) error {
+	if _, ok := updates[namespaceExistsProperty]; ok {
+		return fmt.Errorf("%w: cannot update reserved namespace property %q", iceberg.ErrInvalidArgument, namespaceExistsProperty)
+	}
+
+	for _, key := range removals {
+		if isReservedNamespaceProperty(key) {
+			return fmt.Errorf("%w: cannot remove reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
+	return nil
 }
 
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -1238,6 +1260,10 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 	var summary catalog.PropertiesUpdateSummary
 	currentProps, err := c.LoadNamespaceProperties(ctx, namespace)
 	if err != nil {
+		return summary, err
+	}
+
+	if err := validateNamespacePropertyUpdates(removals, updates); err != nil {
 		return summary, err
 	}
 
