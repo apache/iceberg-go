@@ -101,7 +101,12 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("transaction has already been committed")
 	}
 
-	current, err := t.meta.Build()
+	stagedMeta := t.meta.clone()
+	if stagedMeta == nil {
+		return errors.New("cannot apply updates to nil metadata")
+	}
+
+	current, err := stagedMeta.Build()
 	if err != nil {
 		return err
 	}
@@ -113,6 +118,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	}
 
 	existing := map[string]struct{}{}
+	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
 	for _, r := range t.reqs {
 		key, err := requirementSemanticKey(r)
 		if err != nil {
@@ -120,6 +126,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		}
 
 		existing[key] = struct{}{}
+		stagedReqs = append(stagedReqs, r)
 	}
 
 	for _, r := range reqs {
@@ -129,14 +136,14 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		}
 
 		if _, ok := existing[key]; !ok {
-			t.reqs = append(t.reqs, r)
+			stagedReqs = append(stagedReqs, r)
 			existing[key] = struct{}{}
 		}
 	}
 
-	prevUpdates, prevLastUpdated := len(t.meta.updates), t.meta.lastUpdatedMS
+	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
 	for _, u := range updates {
-		if err := u.Apply(t.meta); err != nil {
+		if err := u.Apply(stagedMeta); err != nil {
 			return err
 		}
 	}
@@ -144,11 +151,14 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	// u.Apply will add updates to t.meta.updates if they are not no-ops
 	// and actually perform changes. So let's check if we actually had any
 	// changes added and thus need to update the lastupdated value.
-	if prevUpdates < len(t.meta.updates) {
-		if prevLastUpdated == t.meta.lastUpdatedMS {
-			t.meta.lastUpdatedMS = time.Now().UnixMilli()
+	if prevUpdates < len(stagedMeta.updates) {
+		if prevLastUpdated == stagedMeta.lastUpdatedMS {
+			stagedMeta.lastUpdatedMS = time.Now().UnixMilli()
 		}
 	}
+
+	t.reqs = stagedReqs
+	t.meta = stagedMeta
 
 	return nil
 }
