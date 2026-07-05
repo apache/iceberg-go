@@ -49,6 +49,9 @@ func TestDecodeFileScanTaskInnerErrorCarriesMarker(t *testing.T) {
 }
 
 func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
+	// Range checks are intentionally validated before attempting to decode nested
+	// data-file payloads, so malformed start/length are rejected at the
+	// envelope layer without decoding heavy blob fields.
 	spec := iceberg.NewPartitionSpecID(7,
 		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
 	)

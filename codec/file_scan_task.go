@@ -42,6 +42,12 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: unsupported format version %d", version)
 	}
+	if task.Start < 0 {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: start must be non-negative: %d", task.Start)
+	}
+	if task.Length < 0 {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: length must be non-negative: %d", task.Length)
+	}
 	// Validate the primary data file's spec, like encodeDataFileSlice does for
 	// every delete/equality/DV file.
 	if err := checkDataFileSpecID(task.File, spec); err != nil {
