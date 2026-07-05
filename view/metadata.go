@@ -522,16 +522,20 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 	formatVersion := DefaultViewFormatVersion
 	if props != nil {
 		inputProps = maps.Clone(props)
-		verStr, ok := inputProps["format-version"]
+		verStr, ok := inputProps[table.PropertyFormatVersion]
 		if ok {
 			var err error
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
 				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(inputProps, "format-version")
+			delete(inputProps, table.PropertyFormatVersion)
 		}
 	} else {
 		inputProps = props
+	}
+
+	if formatVersion != DefaultViewFormatVersion {
+		return nil, fmt.Errorf("%w: %d", iceberg.ErrInvalidFormatVersion, formatVersion)
 	}
 
 	// We assume that this constructor is used for building metadata for a new view.

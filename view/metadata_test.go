@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,21 +90,43 @@ func TestNewMetadata(t *testing.T) {
 }
 
 func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
-	version := newTestVersion(1, LastAddedID,
-		WithVersionSummary(VersionSummary{"summary-key": "summary-val"}),
-		WithTimestampMS(1000))
-	schema := newTestSchema(0)
-	props := iceberg.Properties{
-		"format-version": "banana",
-		"foo":            "bar",
+	tests := []struct {
+		name         string
+		formatVer    string
+		versionValue string
+	}{
+		{
+			name:         "non-numeric format-version",
+			formatVer:    "banana",
+			versionValue: "banana",
+		},
+		{
+			name:         "unsupported format-version",
+			formatVer:    "2",
+			versionValue: "2",
+		},
 	}
 
-	md, err := NewMetadata(version, schema, "location", props)
-	require.Error(t, err)
-	require.Nil(t, md)
-	assert.Equal(t, "banana", props["format-version"])
-	assert.Equal(t, "bar", props["foo"])
-	assert.Len(t, props, 2)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			version := newTestVersion(1, LastAddedID,
+				WithVersionSummary(VersionSummary{"summary-key": "summary-val"}),
+				WithTimestampMS(1000))
+			schema := newTestSchema(0)
+			props := iceberg.Properties{
+				table.PropertyFormatVersion: tc.formatVer,
+				"foo":                       "bar",
+			}
+
+			md, err := NewMetadata(version, schema, "location", props)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
+			require.Nil(t, md)
+			assert.Equal(t, tc.versionValue, props[table.PropertyFormatVersion])
+			assert.Equal(t, "bar", props["foo"])
+			assert.Len(t, props, 2)
+		})
+	}
 }
 
 func TestUnmarshalViewMetadata(t *testing.T) {
