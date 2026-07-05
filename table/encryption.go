@@ -18,7 +18,7 @@
 package table
 
 import (
-	"fmt"
+	"errors"
 	"maps"
 	"strings"
 )
@@ -33,11 +33,11 @@ type EncryptionKey struct {
 
 func (e EncryptionKey) Validate() error {
 	if strings.TrimSpace(e.KeyID) == "" {
-		return fmt.Errorf("encryption key-id must be non-empty")
+		return errors.New("encryption key-id must be non-empty")
 	}
 
 	if strings.TrimSpace(e.EncryptedKeyMetadata) == "" {
-		return fmt.Errorf("encrypted key metadata must be non-empty")
+		return errors.New("encrypted key metadata must be non-empty")
 	}
 
 	return nil
