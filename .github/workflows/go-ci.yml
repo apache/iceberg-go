@@ -65,7 +65,7 @@ jobs:
         cache: false
     # Restore is unconditional (PRs read main's caches); save is gated to main.
     - name: Restore Go module and build cache
-      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ github.workspace }}/.gocache/mod
@@ -74,7 +74,7 @@ jobs:
         restore-keys: |
           go-${{ matrix.os }}-go${{ matrix.go }}-
     - name: Restore golangci-lint cache
-      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ github.workspace }}/.gocache/golangci
         key: golangci-${{ matrix.os }}-go${{ matrix.go }}-${{ hashFiles('go.sum', '.golangci.yml') }}
@@ -129,7 +129,7 @@ jobs:
         go-version: '1.26.1'
         cache: false
     - name: Restore Go module and build cache
-      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ${{ github.workspace }}/.gocache/mod
