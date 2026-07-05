@@ -775,6 +775,7 @@ func (u *addEncryptionKeyUpdate) Apply(builder *MetadataBuilder) error {
 	if err := u.EncryptionKey.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", iceberg.ErrInvalidArgument, err)
 	}
+
 	return builder.AddEncryptionKey(u.EncryptionKey)
 }
 
