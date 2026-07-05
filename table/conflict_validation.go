@@ -50,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -108,9 +109,9 @@ func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLe
 		return defVal, nil
 	}
 
-	switch IsolationLevel(v) {
+	switch IsolationLevel(strings.ToLower(v)) {
 	case IsolationSerializable, IsolationSnapshot:
-		return IsolationLevel(v), nil
+		return IsolationLevel(strings.ToLower(v)), nil
 	default:
 		return defVal, fmt.Errorf("%w: %q for property %q", ErrInvalidIsolationLevel, v, key)
 	}

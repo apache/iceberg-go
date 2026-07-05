@@ -60,6 +60,14 @@ func TestReadIsolationLevel(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "explicit snapshot (mixed case)",
+			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: "Snapshot"},
+			key:     WriteDeleteIsolationLevelKey,
+			defVal:  IsolationSerializable,
+			want:    IsolationSnapshot,
+			wantErr: false,
+		},
+		{
 			name:    "unrecognized value returns error",
 			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: "repeatable-read"},
 			key:     WriteDeleteIsolationLevelKey,
