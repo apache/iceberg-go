@@ -641,6 +641,9 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
 			}
+			if _, invalid := invalidateCol[fieldID]; invalid {
+				continue
+			}
 
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
 			valueCounts[fieldID] += colChunk.NumValues()
@@ -702,7 +705,10 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				}
 			}
 
-			agg.Update(stats)
+			if err := safeUpdateAgg(agg, stats); err != nil {
+				invalidateCol[fieldID] = struct{}{}
+				delete(colAggs, fieldID)
+			}
 		}
 
 	}
@@ -728,6 +734,18 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		SplitOffsets:    splitOffsets,
 		ColAggs:         colAggs,
 	}
+}
+
+func safeUpdateAgg(agg StatsAgg, stats interface{ HasMinMax() bool }) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: failed to aggregate stats", iceberg.ErrInvalidArgument)
+		}
+	}()
+
+	agg.Update(stats)
+
+	return nil
 }
 
 type ParquetFileSource struct {
