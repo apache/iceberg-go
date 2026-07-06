@@ -711,6 +711,18 @@ func TestBlobFileIOStat(t *testing.T) {
 	assert.Equal(t, "data", dirInfo.Name())
 	assert.True(t, dirInfo.IsDir())
 
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/foo"))
+	markerInfoWithSlash, err := bfs.Stat("s3://test-bucket/foo/")
+	require.NoError(t, err)
+	assert.Equal(t, "foo", markerInfoWithSlash.Name())
+	markerInfoWithoutSlash, err := bfs.Stat("s3://test-bucket/foo")
+	require.NoError(t, err)
+	assert.Equal(t, "foo", markerInfoWithoutSlash.Name())
+	// The trailing slash in the path should not affect the
+	// isDir result
+	assert.True(t, markerInfoWithSlash.IsDir())
+	assert.True(t, markerInfoWithoutSlash.IsDir())
+
 	_, err = bfs.Stat("s3://test-bucket/missing")
 	require.ErrorIs(t, err, fs.ErrNotExist)
 }

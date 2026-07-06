@@ -475,6 +475,22 @@ func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
 		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
 	}
 
+	// If the path ends with a slash, we know by path semantics that we can
+	// check for a directory immediately and skip needing to check it as both an object
+	// or a directory marker.
+	if strings.HasSuffix(key, "/") {
+		if attrs, markerErr := bfs.Attributes(bfs.ctx, key); markerErr == nil {
+			return blobFileInfo{
+				name:    directoryName(key),
+				mode:    fs.ModeDir,
+				modTime: attrs.ModTime,
+				sys:     attrs,
+			}, nil
+		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
+			return nil, blobErrToFsErr("Stat", path, markerErr)
+		}
+	}
+
 	attrs, err := bfs.Attributes(bfs.ctx, key)
 	// if there is no error and we have attributes, we can return a FileInfo for object
 	if err == nil {
