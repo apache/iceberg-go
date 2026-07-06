@@ -619,7 +619,7 @@ func (s *HadoopCatalogTestSuite) TestIsTableDirIgnoresZstdMetadata() {
 	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(metaDir, "v1.zstd.metadata.json"), nil, 0o644))
 
-	s.False(isTableDir(s.cat.filesystem, s.cat.isLocal, tableDir))
+	s.False(s.requireIsTableDir(tableDir))
 }
 
 func (s *HadoopCatalogTestSuite) TestIsTableDirNonExistentPath() {
@@ -1628,7 +1628,6 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 		nil,
 		{table.MetadataCompressionKey: table.MetadataCompressionCodecGzip},
 	} {
-		props := props
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1680,7 +1679,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 		if _, err := os.Stat(path); err == nil {
 			existing++
 		} else {
-			s.True(os.IsNotExist(err))
+			s.ErrorIs(err, fs.ErrNotExist)
 		}
 	}
 
@@ -1743,6 +1742,36 @@ func (s *HadoopCatalogTestSuite) TestCommitTableRecoversFromStaleVersionClaim() 
 	loaded, err := s.cat.LoadTable(ctx, ident)
 	s.Require().NoError(err)
 	s.Equal(metaLoc, loaded.MetadataLocation())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitMetadataFileFailsClosedOnMetadataScanError() {
+	ident := []string{"ns", "tbl"}
+	metaDir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
+
+	tempPath := filepath.Join(metaDir, uuid.NewString()+".metadata.json")
+	s.Require().NoError(os.WriteFile(tempPath, []byte("{}"), 0o644))
+
+	metaPath, err := s.cat.metadataFilePathForCompression(ident, 1, table.MetadataCompressionCodecNone)
+	s.Require().NoError(err)
+
+	originalFS := s.cat.filesystem
+	s.cat.filesystem = selectiveFailingWalkFS{
+		HadoopCatalogFS: originalFS,
+		failPath:        metaDir,
+		err:             fs.ErrPermission,
+	}
+	defer func() {
+		s.cat.filesystem = originalFS
+	}()
+
+	err = s.cat.commitMetadataFile(ident, 1, tempPath, metaPath, table.ErrCommitFailed)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "failed to inspect metadata directory for version 1")
+	s.ErrorIs(err, fs.ErrPermission)
+	s.NotErrorIs(err, table.ErrCommitFailed)
+	s.NoFileExists(metaPath)
+	s.NoFileExists(s.cat.metadataVersionClaimPath(ident, 1))
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableWithPartitionSpec() {
@@ -2449,7 +2478,6 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 			table.MetadataCompressionKey: table.MetadataCompressionCodecGzip,
 		},
 	} {
-		props := props
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -2495,7 +2523,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 		if _, err := os.Stat(path); err == nil {
 			existing++
 		} else {
-			s.True(os.IsNotExist(err))
+			s.ErrorIs(err, fs.ErrNotExist)
 		}
 	}
 

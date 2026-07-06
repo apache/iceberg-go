@@ -64,6 +64,9 @@ var uuidMetadataPattern = regexp.MustCompile(
 	`^([0-9]{5})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
 )
 
+// Claims expire aggressively so crashed writers do not permanently block a
+// metadata version. Slow live writers may lose a claim and have to retry, but
+// the protocol still fails closed instead of publishing duplicate versions.
 const metadataClaimStaleAfter = time.Minute
 
 type metadataFile struct {
@@ -434,48 +437,15 @@ func (c *Catalog) scanMetadataFiles(ident table.Identifier) (map[int]metadataFil
 	return byVersion, latest, err
 }
 
-func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) (bool, error) {
-	dir := c.metadataDir(ident)
-	found := false
-
-	// This intentionally scans: UUID metadata filenames contain an
-	// unpredictable UUID, so Stat checks cannot cover every same-version race.
-	err := c.filesystem.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == dir {
-			return nil
-		}
-		if d.IsDir() {
-			return fs.SkipDir
-		}
-
-		file, ok := metadataFileFromName(path, d.Name())
-		if !ok || file.version != version {
-			return nil
-		}
-
-		found = true
-
-		return fs.SkipAll
-	})
-	if err != nil {
-		return false, err
-	}
-
-	return found, nil
-}
-
-func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (string, bool) {
+func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (string, bool, error) {
 	files, _, err := c.scanMetadataFiles(ident)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 
 	file, ok := files[version]
 
-	return file.location, ok
+	return file.location, ok, nil
 }
 
 func (c *Catalog) findMetadataLocation(ident table.Identifier) (string, int, error) {
@@ -721,7 +691,13 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 				return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
 			}
 
-			existingPath, exists := c.metadataVersionLocation(ident, version)
+			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			if err != nil {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+					version, err)
+			}
 			if exists {
 				_ = c.filesystem.Remove(tempPath)
 
@@ -731,6 +707,10 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 
 			claimInfo, err := c.filesystem.Stat(claimPath)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+
 				_ = c.filesystem.Remove(tempPath)
 
 				return fmt.Errorf("hadoop catalog: failed to inspect stale metadata claim %s: %w", claimPath, err)
@@ -761,7 +741,12 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 		}
 	}()
 
-	if existingPath, exists := c.metadataVersionLocation(ident, version); exists {
+	existingPath, exists, err := c.metadataVersionLocation(ident, version)
+	if err != nil {
+		return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+			version, err)
+	}
+	if exists {
 		return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 			conflictErr, strings.Join(ident, "."), existingPath)
 	}
@@ -772,7 +757,11 @@ func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPa
 				conflictErr, strings.Join(ident, "."), metaPath)
 		}
 		if errors.Is(err, fs.ErrNotExist) {
-			existingPath, exists := c.metadataVersionLocation(ident, version)
+			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			if err != nil {
+				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+					version, err)
+			}
 			if exists {
 				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 					conflictErr, strings.Join(ident, "."), existingPath)
