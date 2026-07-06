@@ -372,13 +372,13 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	// buildPartitionEvaluator) so there is one code path that pruning
 	// semantics flow through.
 	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
-		return buildPartitionProjection(specID, ctx.current, filter, ctx.caseSensitive)
+		return buildPartitionProjection(specID, ctx.current, ctx.current.CurrentSchema(), filter, ctx.caseSensitive)
 	})
 	manifestEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-		return buildManifestEvaluator(specID, ctx.current, partitionFilters, ctx.caseSensitive)
+		return buildManifestEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
-		return buildPartitionEvaluator(specID, ctx.current, partitionFilters, ctx.caseSensitive)
+		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
 
 	for _, snap := range ctx.concurrent {

@@ -24,6 +24,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"runtime"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -334,10 +335,19 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 func (of *overwriteFiles) needsValidation() bool { return true }
 
 type manifestMergeManager struct {
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
-	snap            *snapshotProducer
+	targetSizeBytes  int
+	minCountToMerge  int
+	mergeEnabled     bool
+	mergeConcurrency int
+	snap             *snapshotProducer
+}
+
+func manifestMergeConcurrencyLimit(configured int) int {
+	if configured <= 0 {
+		return runtime.GOMAXPROCS(0)
+	}
+
+	return configured
 }
 
 func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map[int][]iceberg.ManifestFile {
@@ -424,6 +434,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 
 	binResults := make([][]iceberg.ManifestFile, len(bins))
 	g := errgroup.Group{}
+	g.SetLimit(manifestMergeConcurrencyLimit(m.mergeConcurrency))
 	for i, bin := range bins {
 		i, bin := i, bin
 		g.Go(func() error {
@@ -465,9 +476,10 @@ func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) 
 type mergeAppendFiles struct {
 	fastAppendFiles
 
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
+	targetSizeBytes  int
+	minCountToMerge  int
+	mergeEnabled     bool
+	mergeConcurrency int
 }
 
 func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -477,6 +489,8 @@ func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteF
 		targetSizeBytes: txn.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault),
 		minCountToMerge: txn.meta.props.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
 		mergeEnabled:    txn.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
+		mergeConcurrency: manifestMergeConcurrencyLimit(
+			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault)),
 	}
 
 	return prod
@@ -493,10 +507,11 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	}
 
 	dataManifestMergeMgr := manifestMergeManager{
-		targetSizeBytes: m.targetSizeBytes,
-		minCountToMerge: m.minCountToMerge,
-		mergeEnabled:    m.mergeEnabled,
-		snap:            m.base,
+		targetSizeBytes:  m.targetSizeBytes,
+		minCountToMerge:  m.minCountToMerge,
+		mergeEnabled:     m.mergeEnabled,
+		mergeConcurrency: m.mergeConcurrency,
+		snap:             m.base,
 	}
 
 	result, err := dataManifestMergeMgr.mergeManifests(unmergedDataManifests)

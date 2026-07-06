@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -213,6 +214,13 @@ func TestPositionDeltaWriter_RequiresV3(t *testing.T) {
 	w, err := table.NewPositionDeltaWriter(tbl)
 	require.NoError(t, err)
 	require.NotNil(t, w)
+}
+
+func TestPositionDeltaWriter_NilTable(t *testing.T) {
+	w, err := table.NewPositionDeltaWriter(nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, iceberg.ErrInvalidArgument))
+	require.Nil(t, w)
 }
 
 func TestPositionDeltaWriter_ReinsertRejectsNullRowID(t *testing.T) {

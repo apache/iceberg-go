@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
@@ -171,12 +172,13 @@ func TestNewAdlsLocationUriParsing(t *testing.T) {
 }
 
 func TestAdlsKeyExtractor(t *testing.T) {
-	extractor := adlsKeyExtractor()
-
 	tests := []struct {
 		name        string
+		root        string
 		input       string
 		expectedKey string
+		expectedErr string
+		wantErrIs   error
 		shouldError bool
 	}{
 		{
@@ -191,39 +193,73 @@ func TestAdlsKeyExtractor(t *testing.T) {
 		},
 		{
 			name:        "wasb valid URI",
+			root:        "wasb://container@account.blob.core.windows.net/",
 			input:       "wasb://container@account.blob.core.windows.net/path/to/file.parquet",
 			expectedKey: "path/to/file.parquet",
 		},
 		{
 			name:        "wasbs valid URI",
+			root:        "wasbs://container@account.blob.core.windows.net/",
 			input:       "wasbs://container@account.blob.core.windows.net/path/to/file.parquet",
 			expectedKey: "path/to/file.parquet",
 		},
 		{
 			name:        "URI with no path",
 			input:       "abfs://container@account.dfs.core.windows.net",
+			expectedErr: "object key is empty",
+			wantErrIs:   ErrEmptyObjectKey,
 			shouldError: true,
 		},
 		{
 			name:        "URI with empty path",
 			input:       "abfs://container@account.dfs.core.windows.net/",
+			expectedErr: "object key is empty",
+			wantErrIs:   ErrEmptyObjectKey,
+			shouldError: true,
+		},
+		{
+			name:        "URI with query but no path",
+			input:       "abfs://container@account.dfs.core.windows.net?prefix=data",
+			expectedErr: "must be followed by an object path",
+			shouldError: true,
+		},
+		{
+			name:        "URI with different container",
+			input:       "abfs://other@account.dfs.core.windows.net/path/to/file.parquet",
+			expectedErr: "does not match configured authority",
+			wantErrIs:   ErrUnsupportedObjectAuthority,
 			shouldError: true,
 		},
 		{
 			name:        "invalid ADLS location - invalid scheme",
 			input:       "s3://bucket/path/to/file.parquet",
+			expectedErr: "invalid ADLS location",
 			shouldError: true,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			root := test.root
+			if root == "" {
+				root = "abfs://container@account.dfs.core.windows.net/"
+			}
+			parsed, err := url.Parse(root)
+			require.NoError(t, err)
+
+			extractor := keyExtractorFromObjectLocation(adlsObjectLocationExtractor(parsed))
 			key, err := extractor(test.input)
 
 			if test.shouldError {
-				assert.Error(t, err, "Expected error for input: %s", test.input)
+				require.Error(t, err, "Expected error for input: %s", test.input)
+				if test.expectedErr != "" {
+					assert.ErrorContains(t, err, test.expectedErr, "Expected specific error for input: %s", test.input)
+				}
+				if test.wantErrIs != nil {
+					assert.ErrorIs(t, err, test.wantErrIs)
+				}
 			} else {
-				assert.NoError(t, err, "Unexpected error for input: %s", test.input)
+				require.NoError(t, err, "Unexpected error for input: %s", test.input)
 				assert.Equal(t, test.expectedKey, key, "Key mismatch for input: %s", test.input)
 			}
 		})

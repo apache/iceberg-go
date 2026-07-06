@@ -340,12 +340,18 @@ func TestSetCreatedBy(t *testing.T) {
 func TestClearProperties(t *testing.T) {
 	w, buf := newWriter()
 	w.AddProperties(map[string]string{"key": "value"})
-	w.ClearProperties()
+	require.NoError(t, w.ClearProperties())
 	w.Finish()
 
 	r := newReader(t, buf)
 	_, exists := r.Properties()["key"]
 	assert.False(t, exists)
+
+	t.Run("after finish rejected", func(t *testing.T) {
+		w, _ := newWriter()
+		require.NoError(t, w.Finish())
+		assert.ErrorContains(t, w.ClearProperties(), "finalized")
+	})
 }
 
 // TestAddPropertiesAfterFinish verifies AddProperties rejects calls after finish.

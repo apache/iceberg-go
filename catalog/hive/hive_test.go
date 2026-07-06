@@ -756,6 +756,63 @@ func TestHiveCreateTableConflictsWithView(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestConstructHiveTablePreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://bucket/test_table/metadata/v2.metadata.json"
+	hiveTbl := constructHiveTable(
+		"test_database",
+		"test_table",
+		"s3://bucket/test_table",
+		metadataLocation,
+		testSchema,
+		map[string]string{
+			TableTypeKey:                 "HIVE",
+			MetadataLocationKey:          "s3://wrong-bucket/metadata.json",
+			PreviousMetadataLocationKey:  "s3://wrong-bucket/previous.metadata.json",
+			ExternalKey:                  "FALSE",
+			"storage_handler":            "wrong.StorageHandler",
+			"write.metadata.compression": "gzip",
+		},
+	)
+
+	assert.Equal(TableTypeExternalTable, hiveTbl.TableType)
+	assert.Equal(TableTypeIceberg, hiveTbl.Parameters[TableTypeKey])
+	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
+	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
+	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
+	assert.Equal("org.apache.iceberg.mr.hive.HiveIcebergStorageHandler", hiveTbl.Parameters["storage_handler"])
+	assert.Equal("gzip", hiveTbl.Parameters["write.metadata.compression"])
+}
+
+func TestConstructHiveViewTablePreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://bucket/test_view/metadata/v2.metadata.json"
+	hiveTbl := constructHiveViewTable(
+		"test_database",
+		"test_view",
+		"s3://bucket/test_view",
+		metadataLocation,
+		testSchema,
+		"SELECT 1 AS col",
+		map[string]string{
+			TableTypeKey:                TableTypeIceberg,
+			MetadataLocationKey:         "s3://wrong-bucket/metadata.json",
+			PreviousMetadataLocationKey: "s3://wrong-bucket/previous.metadata.json",
+			ExternalKey:                 "FALSE",
+			"owner":                     "alice",
+		},
+	)
+
+	assert.Equal(TableTypeVirtualView, hiveTbl.TableType)
+	assert.Equal(TableTypeIcebergView, hiveTbl.Parameters[TableTypeKey])
+	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
+	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
+	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
+	assert.Equal("alice", hiveTbl.Parameters["owner"])
+}
+
 func TestHiveRegisterTableNoSuchNamespace(t *testing.T) {
 	assert := require.New(t)
 

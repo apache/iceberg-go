@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -41,6 +42,19 @@ type RollingDataWriterTestSuite struct {
 
 	mem memory.Allocator
 	ctx context.Context
+}
+
+type unsupportedType struct{}
+
+func (unsupportedType) Type() string { return "unsupported" }
+func (unsupportedType) String() string {
+	return "unsupported"
+}
+
+func (unsupportedType) Equals(other iceberg.Type) bool {
+	_, ok := other.(unsupportedType)
+
+	return ok
 }
 
 func (s *RollingDataWriterTestSuite) SetupTest() {
@@ -185,6 +199,39 @@ func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 		actualRows += df.Count()
 	}
 	s.Equal(totalRows, actualRows)
+}
+
+func (s *RollingDataWriterTestSuite) TestNewWriterFactoryReturnsErrorForInvalidFileSchema() {
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec()
+	taskSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	meta, err := NewMetadata(taskSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+
+	args := recordWritingArgs{
+		fs:      iceio.LocalFS{},
+		counter: internal.Counter(0),
+	}
+
+	invalidSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "bad", Type: unsupportedType{}, Required: true,
+	})
+
+	factory, err := newWriterFactory(
+		loc,
+		args,
+		metaBuilder,
+		taskSchema,
+		1024*1024,
+		withFactoryFileSchema(invalidSchema),
+	)
+	s.Require().Error(err)
+	s.Nil(factory)
+	s.ErrorContains(err, "withFactoryFileSchema")
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroups() {

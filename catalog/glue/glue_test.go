@@ -213,6 +213,49 @@ func TestGlueGetTable(t *testing.T) {
 	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[tableParamMetadataLocation])
 }
 
+func TestGlueConstructParametersPreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://test-bucket/test_table/metadata/v2.metadata.json"
+	previousMetadataLocation := "s3://test-bucket/test_table/metadata/v1.metadata.json"
+
+	metadata, err := table.NewMetadata(testSchema, nil, table.UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{
+		tableParamTableType:                "HIVE",
+		tableParamMetadataLocation:         "s3://malicious-bucket/table/metadata.json",
+		tableParamPreviousMetadataLocation: "s3://malicious-bucket/table/previous.metadata.json",
+		"custom":                           "value",
+	})
+	assert.NoError(err)
+
+	staged := table.New(
+		TableIdentifier("test_database", "test_table"),
+		metadata,
+		metadataLocation,
+		nil,
+		nil,
+	)
+
+	params := constructParameters(staged, &types.Table{
+		Parameters: map[string]string{
+			tableParamTableType:                glueTypeIceberg,
+			tableParamMetadataLocation:         previousMetadataLocation,
+			tableParamPreviousMetadataLocation: "s3://test-bucket/test_table/metadata/v0.metadata.json",
+		},
+	})
+
+	assert.Equal(glueTypeIceberg, params[tableParamTableType])
+	assert.Equal(metadataLocation, params[tableParamMetadataLocation])
+	assert.Equal(previousMetadataLocation, params[tableParamPreviousMetadataLocation])
+	assert.Equal("value", params["custom"])
+
+	params = constructParameters(staged, nil)
+
+	assert.Equal(glueTypeIceberg, params[tableParamTableType])
+	assert.Equal(metadataLocation, params[tableParamMetadataLocation])
+	assert.NotContains(params, tableParamPreviousMetadataLocation)
+	assert.Equal("value", params["custom"])
+}
+
 func TestGlueGetTableCaseInsensitive(t *testing.T) {
 	assert := require.New(t)
 

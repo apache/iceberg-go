@@ -158,7 +158,7 @@ Tuning properties:
 | `gcs.keypath` (`io.GCSKeyPath`) | Path to a JSON service-account key file. |
 | `gcs.jsonkey` (`io.GCSJSONKey`) | JSON key as a string. |
 | `gcs.credtype` (`io.GCSCredType`) | Credential type override. |
-| `gcs.usejsonapi` (`io.GCSUseJSONAPI`) | Set to any value to enable the GCS JSON API for reads. |
+| `gcs.usejsonapi` (`io.GCSUseJSONAPI`) | Set to `"true"` to enable the GCS JSON API for reads. |
 
 ### Azure Data Lake Storage / Blob
 

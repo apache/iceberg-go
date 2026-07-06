@@ -93,7 +93,7 @@ func TestScanPruningWithDeletionVector(t *testing.T) {
 	dataPath := tasks[0].File.FilePath()
 
 	w := dv.NewDVWriter(iceio.LocalFS{}, unpartitionedSpecByID)
-	w.Add(dataPath, []int64{6}, 0, nil)
+	require.NoError(t, w.Add(dataPath, []int64{6}, 0, nil))
 	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(dataPath), "dv-0001.puffin"))
 	require.NoError(t, err)
 
@@ -160,7 +160,7 @@ func TestReadTaskDeletionVectorSupersedesPositionalDeletes(t *testing.T) {
 
 	// DV deletes pos 0 (id=1); the positional delete targets pos 4 (id=5).
 	w := dv.NewDVWriter(iceio.LocalFS{}, unpartitionedSpecByID)
-	w.Add(dataPath, []int64{0}, 0, nil)
+	require.NoError(t, w.Add(dataPath, []int64{0}, 0, nil))
 	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(dataPath), "dv-0001.puffin"))
 	require.NoError(t, err)
 

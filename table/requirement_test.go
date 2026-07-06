@@ -147,6 +147,30 @@ func TestParseRequirementList(t *testing.T) {
 	})
 }
 
+func TestParseRequirementListReplacesExistingSlice(t *testing.T) {
+	var requirements table.Requirements
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"type": "assert-create"}
+	]`), &requirements))
+
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"type": "assert-default-spec-id", "default-spec-id": 1}
+	]`), &requirements))
+	require.Len(t, requirements, 1)
+	assert.Equal(t, table.AssertDefaultSpecID(1), requirements[0])
+
+	previous := append(table.Requirements(nil), requirements...)
+	err := json.Unmarshal([]byte(`[
+		{"type": "assert-create"},
+		{"type": "assert-foo-bar"}
+	]`), &requirements)
+	require.Error(t, err)
+	assert.Equal(t, previous, requirements)
+
+	require.NoError(t, json.Unmarshal([]byte(`[]`), &requirements))
+	assert.Empty(t, requirements)
+}
+
 func TestAssertRefSnapshotIDValidate(t *testing.T) {
 	meta, err := table.ParseMetadataBytes([]byte(table.ExampleTableMetadataV2))
 	require.NoError(t, err)
