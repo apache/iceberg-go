@@ -268,12 +268,15 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
 		for _, field := range opts.Spec.Fields() {
-			// setting caller-supplied values
 			partitionVal := opts.PartitionValues[field.FieldID]
-			if partitionVal != nil {
+			switch {
+			case partitionVal != nil:
+				// prioritizing caller-supplied value.
 				fieldIDToPartitionData[field.FieldID] = partitionVal
-			} else {
+			case field.Transform.PreservesOrder():
 				fieldIDToPartitionData[field.FieldID] = d.PartitionValue(field, opts.Schema)
+			default:
+				fieldIDToPartitionData[field.FieldID] = nil
 			}
 
 			if sourceField, ok := opts.Schema.FindFieldByID(field.SourceID()); ok {

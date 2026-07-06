@@ -20,11 +20,15 @@ package table
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"runtime/debug"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
+
+const referencedDataFilePathFieldID = 2147483546
 
 // DataFileArgs collects everything needed to compute a fully populated
 // [iceberg.DataFile] (data, equality-delete, or positional-delete) from
@@ -70,19 +74,22 @@ type DataFileArgs struct {
 	// [iceberg.EntryContentPosDeletes].
 	Content iceberg.ManifestEntryContent
 
-	// PartitionValues maps spec field ID → partition value. Every spec field
-	// must be present; leave nil/empty for unpartitioned tables, where any
-	// supplied value is rejected.
+	// PartitionValues maps spec field ID → partition value. Leave the map
+	// nil/empty for unpartitioned tables, where any supplied value is rejected.
 	//
 	// Values must already be the transform results in the expected Go types.
-	// A nil value is treated as "not supplied" and is inferred from the file's
-	// column statistics; void-transform fields therefore should be nil (the
-	// void transform always yields null), though this is not enforced.
+	// A field is resolved as follows:
+	//   - key present with a non-nil value: that value is recorded verbatim;
+	//   - key present with a nil value, or key absent: treated as "not supplied"
+	//     and, for order-preserving transforms (identity, truncate, the date/time
+	//     transforms), inferred from the file's column statistics; for
+	//     non-order-preserving transforms (bucket, void) it stays nil.
 	//
-	// This helper validates only that the supplied field IDs match the spec
-	// (every field present, no stray IDs); it does not coerce or type-check
-	// the values themselves. Callers are responsible for supplying values of
-	// the correct type.
+	// Void-transform fields may be omitted (they always resolve to nil).
+	//
+	// This helper validates only that any supplied field IDs belong to the spec
+	// (no stray IDs); it does not coerce or type-check the values themselves.
+	// Callers are responsible for supplying values of the correct type.
 	PartitionValues map[int]any
 
 	// SortOrderID is the sort-order ID recorded on the manifest entry,
@@ -102,15 +109,33 @@ type DataFileArgs struct {
 	// for every other Content value. Every listed ID must be present in Schema.
 	EqualityFieldIDs []int
 
-	// FirstRowID sets the data file's first_row_id (row lineage, v3+).
+	// FormatVersion is the table's format version
+	FormatVersion int
+
+	// FirstRowID sets the data file's first_row_id (requires FormatVersion >= 3).
+	// It must always be nil for delete files, and for v1/v2 data files (the
+	// field is absent from those schemas).
 	//
-	// Leave it nil for newly-written files — row IDs are assigned by inheritance at commit;
-	// set only when re-registering an existing file whose first_row_id was previously assigned;
-	// always nil for delete files.
+	// For v3 data files, whether it is required depends on which consuming API
+	// the resulting DataFile is handed to:
+	//   - [Transaction.AddDataFiles]: REQUIRED. These are externally-written
+	//     files, so the library cannot fabricate row IDs for them; a nil
+	//     first_row_id is rejected at commit time.
+	//   - [Transaction.ReplaceDataFilesWithDataFiles]: REQUIRED for the added
+	//     files, except when the caller opts into rewrite/compaction semantics
+	//     (WithRewriteSemantics), where the manifest-list writer assigns it by
+	//     inheritance and it may be left nil.
+	//   - [Transaction.NewRowDelta] (via RowDelta.AddRows): NOT required — the
+	//     value is assigned by inheritance from the manifest at commit time, so
+	//     leaving it nil is correct.
+	//
+	// In short: set it explicitly whenever the file goes through AddDataFiles
+	// (or a non-rewrite replace); otherwise leave it nil and let inheritance
+	// assign it.
 	FirstRowID *int64
 
 	// ReferencedDataFile, when non-nil, records the single data file that a
-	// file-scoped position-delete file applies to (spec field referenced_data_file).
+	// file-scoped position-delete file applies to.
 	//
 	// It is only valid for position delete files. Leave it nil for data files, equality-delete files,
 	// and partition-scoped position deletes.
@@ -150,17 +175,23 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if args.Schema == nil {
 		return nil, errors.New("schema is required")
 	}
-	// Both nil checks are intentional:
-	//   - args.Metadata == nil catches an unset interface, while
-	//   - pqMeta == nil below catches a typed-nil (*metadata.FileMetaData)(nil)
 	if args.Metadata == nil {
 		return nil, errors.New("file metadata is required")
 	}
+
+	format := tblutils.GetFileFormat(args.Format)
+	if format == nil {
+		return nil, errors.New("unsupported file format: " + string(args.Format))
+	}
+
+	// Both nil checks are intentional:
+	//   - args.Metadata == nil (above) catches an unset interface, while
+	//   - pqMeta == nil below catches a typed-nil (*metadata.FileMetaData)(nil)
 	pqMeta, ok := args.Metadata.(*metadata.FileMetaData)
 	if !ok {
 		return nil, fmt.Errorf(
-			"unsupported metadata type: expected *metadata.FileMetaData, got %T",
-			args.Metadata)
+			"unsupported metadata type for format %s: expected *metadata.FileMetaData, got %T",
+			args.Format, args.Metadata)
 	}
 	if pqMeta == nil {
 		return nil, errors.New("metadata pointer is nil")
@@ -181,28 +212,29 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	}
 
 	if args.Content == iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) == 0 {
-		return nil, errors.New("EqualityFieldIDs is required for equality-delete files")
+		return nil, errors.New("equality_ids is required for equality-delete files")
 	}
 
 	if args.Content != iceberg.EntryContentEqDeletes && len(args.EqualityFieldIDs) > 0 {
-		return nil, fmt.Errorf("EqualityFieldIDs must be empty for content %v", args.Content)
-	}
-
-	if args.Content == iceberg.EntryContentPosDeletes && args.SortOrderID != UnsortedSortOrderID {
-		return nil, fmt.Errorf("position delete file claims sort order id %d; the spec requires unsorted order id (%d)",
-			args.SortOrderID, UnsortedSortOrderID)
+		return nil, fmt.Errorf("equality_ids must be empty for content %v", args.Content)
 	}
 
 	if args.Content != iceberg.EntryContentData && args.FirstRowID != nil {
-		return nil, fmt.Errorf("FirstRowID must be nil for delete files, got a non-nil value for content %v", args.Content)
+		return nil, fmt.Errorf("first_row_id must be nil for delete files, got a non-nil value for content %v", args.Content)
+	}
+
+	if args.FirstRowID != nil && args.FormatVersion < 3 {
+		return nil, fmt.Errorf(
+			"first_row_id requires table format version >= 3, got v%d",
+			args.FormatVersion)
 	}
 
 	if args.ReferencedDataFile != nil {
 		if args.Content != iceberg.EntryContentPosDeletes {
-			return nil, fmt.Errorf("ReferencedDataFile may only be set for position-delete files, got content %v", args.Content)
+			return nil, fmt.Errorf("referenced_data_file may only be set for position-delete files, got content %v", args.Content)
 		}
 		if *args.ReferencedDataFile == "" {
-			return nil, errors.New("ReferencedDataFile must be non-empty when set")
+			return nil, errors.New("referenced_data_file must be non-empty when set")
 		}
 	}
 
@@ -214,12 +246,19 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		return nil, err
 	}
 
-	format := tblutils.GetFileFormat(args.Format)
-	if format == nil {
-		return nil, fmt.Errorf("unsupported file format: %s", args.Format)
+	statsProps := args.Properties
+	if args.ReferencedDataFile != nil {
+		// A file-scoped position delete must carry exact (untruncated) file_path
+		// The default truncate(16) metrics mode would clip long paths, thus, forcing
+		// full metrics for that column.
+		statsProps = maps.Clone(args.Properties)
+		if statsProps == nil {
+			statsProps = iceberg.Properties{}
+		}
+		statsProps[MetricsModeColumnConfPrefix+".file_path"] = string(tblutils.MetricModeFull)
 	}
 
-	statsPlan, err := computeStatsPlan(args.Schema, args.Properties)
+	statsPlan, err := computeStatsPlan(args.Schema, statsProps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build stats plan: %w", err)
 	}
@@ -240,12 +279,9 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if err := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				switch e := r.(type) {
-				case error:
-					err = fmt.Errorf("error encountered during extracting stats and building the data file: %w", e)
-				default:
-					err = fmt.Errorf("error encountered during extracting stats and building the data file: %v", e)
-				}
+				err = fmt.Errorf(
+					"error encountered during extracting stats and building the data file: %v\n%s",
+					r, debug.Stack())
 			}
 		}()
 
@@ -281,7 +317,51 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		return nil, err
 	}
 
+	if args.ReferencedDataFile != nil {
+		if err := verifyReferencedDataFile(df, *args.ReferencedDataFile); err != nil {
+			return nil, err
+		}
+	}
+
 	return df, nil
+}
+
+func verifyReferencedDataFile(df iceberg.DataFile, ref string) error {
+	decode := func(bounds map[int][]byte, which string) (string, error) {
+		raw, ok := bounds[referencedDataFilePathFieldID]
+		if !ok {
+			return "", fmt.Errorf(
+				"referenced_data_file %q is set but the position-delete file_path column has no %s bound",
+				ref, which)
+		}
+		lit, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.String, raw)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode position-delete file_path %s bound: %w", which, err)
+		}
+		s, ok := lit.(iceberg.StringLiteral)
+		if !ok {
+			return "", fmt.Errorf("position-delete file_path %s bound decoded to unexpected type %T", which, lit)
+		}
+
+		return string(s), nil
+	}
+
+	lower, err := decode(df.LowerBoundValues(), "lower")
+	if err != nil {
+		return err
+	}
+	upper, err := decode(df.UpperBoundValues(), "upper")
+	if err != nil {
+		return err
+	}
+
+	if lower != ref || upper != ref {
+		return fmt.Errorf(
+			"referenced_data_file %q does not match the position-delete file_path bounds (lower=%q, upper=%q); a file-scoped position delete must reference exactly one data file",
+			ref, lower, upper)
+	}
+
+	return nil
 }
 
 func validateContentSchema(args DataFileArgs) error {
@@ -292,16 +372,8 @@ func validateContentSchema(args DataFileArgs) error {
 		// from the schema's field-id mapping and reports
 		// them as an error through the scoped recover.
 	case iceberg.EntryContentEqDeletes:
-		for _, id := range args.EqualityFieldIDs {
-			f, ok := args.Schema.FindFieldByID(id)
-			if !ok {
-				return fmt.Errorf(
-					"EqualityFieldIDs contains field id %d which is not present in the supplied schema", id)
-			}
-			if _, ok := f.Type.(iceberg.PrimitiveType); !ok {
-				return fmt.Errorf(
-					"EqualityFieldIDs field id %d (%s) must resolve to a primitive leaf, got %s", id, f.Name, f.Type)
-			}
+		if _, err := validateEqualityFieldIDs(args.Schema, args.EqualityFieldIDs); err != nil {
+			return err
 		}
 	case iceberg.EntryContentPosDeletes:
 		for _, want := range iceberg.PositionalDeleteSchema.Fields() {
@@ -332,10 +404,6 @@ func validatePartitionValues(spec iceberg.PartitionSpec, values map[int]any) err
 	expected := make(map[int]string, spec.NumFields())
 	for _, field := range spec.Fields() {
 		expected[field.FieldID] = field.Name
-		if _, ok := values[field.FieldID]; !ok {
-			return fmt.Errorf("missing partition value for field id %d (%s) in spec id %d",
-				field.FieldID, field.Name, spec.ID())
-		}
 	}
 
 	for id := range values {

@@ -319,18 +319,82 @@ func TestDataFileFromMetadata_FirstRowID(t *testing.T) {
 	firstRowID := int64(42)
 
 	df, err := table.DataFileFromMetadata(table.DataFileArgs{
-		Schema:     dataSchema,
-		Spec:       iceberg.NewPartitionSpec(),
-		Format:     iceberg.ParquetFile,
-		Metadata:   pqMeta,
-		FilePath:   "s3://bucket/data/v3-data.parquet",
-		FileSize:   int64(len(pqBytes)),
-		Content:    iceberg.EntryContentData,
-		FirstRowID: &firstRowID,
+		Schema:        dataSchema,
+		Spec:          iceberg.NewPartitionSpec(),
+		Format:        iceberg.ParquetFile,
+		Metadata:      pqMeta,
+		FilePath:      "s3://bucket/data/v3-data.parquet",
+		FileSize:      int64(len(pqBytes)),
+		Content:       iceberg.EntryContentData,
+		FormatVersion: 3,
+		FirstRowID:    &firstRowID,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, df.FirstRowID(), "FirstRowID must be plumbed through for v3 callers")
 	assert.Equal(t, firstRowID, *df.FirstRowID())
+}
+
+func TestDataFileFromMetadata_FirstRowIDBelowV3Errors(t *testing.T) {
+	pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, dataRows)
+	firstRowID := int64(42)
+
+	for _, version := range []int{0, 1, 2} {
+		t.Run("v"+formatVersionStr(version), func(t *testing.T) {
+			df, err := table.DataFileFromMetadata(table.DataFileArgs{
+				Schema:        dataSchema,
+				Spec:          iceberg.NewPartitionSpec(),
+				Format:        iceberg.ParquetFile,
+				Metadata:      pqMeta,
+				FilePath:      "s3://bucket/data/pre-v3-data.parquet",
+				FileSize:      int64(len(pqBytes)),
+				Content:       iceberg.EntryContentData,
+				FormatVersion: version,
+				FirstRowID:    &firstRowID,
+			})
+			require.Nil(t, df, "FirstRowID must not be silently dropped below v3")
+			require.ErrorContains(t, err, "requires table format version >= 3")
+		})
+	}
+}
+
+func TestDataFileFromMetadata_PosDeleteSortOrderAccepted(t *testing.T) {
+	_, posMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
+		`[{"file_path": "s3://b/d.parquet", "pos": 0}]`)
+
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:      iceberg.PositionalDeleteSchema,
+		Spec:        iceberg.NewPartitionSpec(),
+		Format:      iceberg.ParquetFile,
+		Metadata:    posMeta,
+		FilePath:    "s3://bucket/data/pos-del-sorted.parquet",
+		FileSize:    1024,
+		Content:     iceberg.EntryContentPosDeletes,
+		SortOrderID: 1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, df.SortOrderID())
+	assert.Equal(t, 1, *df.SortOrderID())
+}
+
+func TestDataFileFromMetadata_EqualityFieldFloatRejected(t *testing.T) {
+	sch := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "amount", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+	)
+	pqBytes, pqMeta := parquetMetaFromSchema(t, sch, `[{"id": 1, "amount": 1.5}]`)
+
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:           sch,
+		Spec:             iceberg.NewPartitionSpec(),
+		Format:           iceberg.ParquetFile,
+		Metadata:         pqMeta,
+		FilePath:         "s3://bucket/data/eq-del-float.parquet",
+		FileSize:         int64(len(pqBytes)),
+		Content:          iceberg.EntryContentEqDeletes,
+		EqualityFieldIDs: []int{2},
+	})
+	require.Nil(t, df, "floating-point equality field must be rejected, matching the writer path")
+	require.ErrorContains(t, err, "floating-point")
 }
 
 func TestDataFileFromMetadata_VoidPartitionAllowsNil(t *testing.T) {
@@ -359,6 +423,37 @@ func TestDataFileFromMetadata_VoidPartitionAllowsNil(t *testing.T) {
 	part := df.Partition()
 	require.Contains(t, part, 1000, "void partition field must be recorded on the DataFile")
 	assert.Nil(t, part[1000], "void transform partition value must be nil")
+}
+
+func TestDataFileFromMetadata_AbsentPartitionKeyEqualsNil(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1001, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 4}},
+	)
+
+	pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, `[
+		{"id": 7, "name": "alpha"},
+		{"id": 7, "name": "beta"}
+	]`)
+
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:          dataSchema,
+		Spec:            spec,
+		Format:          iceberg.ParquetFile,
+		Metadata:        pqMeta,
+		FilePath:        "s3://bucket/data/id=7/absent.parquet",
+		FileSize:        int64(len(pqBytes)),
+		Content:         iceberg.EntryContentData,
+		PartitionValues: map[int]any{1000: nil},
+	})
+	require.NoError(t, err, "a present-nil value and an absent key must both be accepted")
+	require.NotNil(t, df)
+
+	part := df.Partition()
+	assert.EqualValues(t, 7, part[1000],
+		"a present-with-nil order-preserving partition key must be inferred from stats")
+	assert.Nil(t, part[1001],
+		"an absent non-order-preserving (bucket) partition key must stay nil")
 }
 
 func TestDataFileFromMetadata_NilPartitionValueInferredFromStats(t *testing.T) {
@@ -454,6 +549,41 @@ func TestDataFileFromMetadata_ReferencedDataFile(t *testing.T) {
 		assert.Nil(t, df.ReferencedDataFile(),
 			"a partition-scoped position delete must not record a referenced data file")
 	})
+
+	t.Run("ReferencedDataFile that does not scope to a single file is rejected", func(t *testing.T) {
+		// partitionScopedMeta spans two data files, so its file_path bounds are
+		// not equal; claiming a single referenced data file must fail.
+		ref := dataPath
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               iceberg.NewPartitionSpec(),
+			Format:             iceberg.ParquetFile,
+			Metadata:           partitionScopedMeta,
+			FilePath:           "s3://bucket/data/pos-del-003.parquet",
+			FileSize:           1024,
+			Content:            iceberg.EntryContentPosDeletes,
+			ReferencedDataFile: &ref,
+		})
+		require.Nil(t, df, "a delete file spanning multiple data files must not be accepted as file-scoped")
+		require.ErrorContains(t, err, "does not match the position-delete file_path bounds")
+	})
+
+	t.Run("ReferencedDataFile pointing at the wrong data file is rejected", func(t *testing.T) {
+		// The delete file scopes to dataPath, but the caller claims a different file.
+		ref := "s3://bucket/data/some-other-file.parquet"
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               iceberg.NewPartitionSpec(),
+			Format:             iceberg.ParquetFile,
+			Metadata:           fileScopedMeta,
+			FilePath:           "s3://bucket/data/pos-del-004.parquet",
+			FileSize:           1024,
+			Content:            iceberg.EntryContentPosDeletes,
+			ReferencedDataFile: &ref,
+		})
+		require.Nil(t, df)
+		require.ErrorContains(t, err, "does not match the position-delete file_path bounds")
+	})
 }
 
 func TestDataFileFromMetadata_Errors(t *testing.T) {
@@ -508,26 +638,14 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				a.Content = iceberg.EntryContentEqDeletes
 				a.EqualityFieldIDs = nil
 			},
-			wantSub: "EqualityFieldIDs is required",
+			wantSub: "equality_ids is required",
 		},
 		{
 			name: "data file with non-empty EqualityFieldIDs",
 			mutate: func(a *table.DataFileArgs) {
 				a.EqualityFieldIDs = []int{1}
 			},
-			wantSub: "EqualityFieldIDs must be empty",
-		},
-		{
-			name: "positional-delete file with nonzero SortOrderID",
-			mutate: func(a *table.DataFileArgs) {
-				a.Schema = iceberg.PositionalDeleteSchema
-				a.Content = iceberg.EntryContentPosDeletes
-				a.SortOrderID = 1
-				_, posMeta := parquetMetaFromSchema(t, iceberg.PositionalDeleteSchema,
-					`[{"file_path": "s3://b/d.parquet", "pos": 0}]`)
-				a.Metadata = posMeta
-			},
-			wantSub: "position delete file claims sort order id 1",
+			wantSub: "equality_ids must be empty",
 		},
 		{
 			name: "equality-delete with unknown field id",
@@ -535,7 +653,7 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				a.Content = iceberg.EntryContentEqDeletes
 				a.EqualityFieldIDs = []int{999}
 			},
-			wantSub: "field id 999",
+			wantSub: "field ID 999 not found in table schema",
 		},
 		{
 			name: "positional-delete schema missing reserved field IDs",
@@ -543,18 +661,6 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				a.Content = iceberg.EntryContentPosDeletes
 			},
 			wantSub: "positional delete schema requires reserved field id",
-		},
-		{
-			name: "partitioned spec missing partition values",
-			mutate: func(a *table.DataFileArgs) {
-				a.Spec = iceberg.NewPartitionSpec(iceberg.PartitionField{
-					SourceIDs: []int{1},
-					FieldID:   1000,
-					Name:      "id_bucket",
-					Transform: iceberg.BucketTransform{NumBuckets: 4},
-				})
-			},
-			wantSub: "missing partition value",
 		},
 		{
 			name: "partition value for unknown field id",
@@ -584,7 +690,7 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				v := int64(7)
 				a.FirstRowID = &v
 			},
-			wantSub: "FirstRowID must be nil for delete files",
+			wantSub: "first_row_id must be nil for delete files",
 		},
 		{
 			name: "ReferencedDataFile set on a data file",
@@ -592,7 +698,7 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				ref := "s3://bucket/data/data-001.parquet"
 				a.ReferencedDataFile = &ref
 			},
-			wantSub: "ReferencedDataFile may only be set for position-delete files",
+			wantSub: "referenced_data_file may only be set for position-delete files",
 		},
 		{
 			name: "ReferencedDataFile empty on a positional-delete file",
@@ -605,22 +711,7 @@ func TestDataFileFromMetadata_Errors(t *testing.T) {
 				empty := ""
 				a.ReferencedDataFile = &empty
 			},
-			wantSub: "ReferencedDataFile must be non-empty when set",
-		},
-		{
-			name: "equality field id points to a non-primitive field",
-			mutate: func(a *table.DataFileArgs) {
-				a.Schema = iceberg.NewSchema(0,
-					iceberg.NestedField{ID: 3, Name: "nested", Type: &iceberg.StructType{
-						FieldList: []iceberg.NestedField{
-							{ID: 4, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-						},
-					}},
-				)
-				a.Content = iceberg.EntryContentEqDeletes
-				a.EqualityFieldIDs = []int{3}
-			},
-			wantSub: "must resolve to a primitive leaf",
+			wantSub: "referenced_data_file must be non-empty when set",
 		},
 		{
 			name: "positional-delete schema reserved field has wrong type",
@@ -848,13 +939,35 @@ func TestDataFileFromMetadata_SchemaMismatchYieldsError(t *testing.T) {
 	require.ErrorContains(t, err, "not found in column mapping")
 }
 
+func TestDataFileFromMetadata_RenamedColumnErrors(t *testing.T) {
+	pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, dataRows)
+
+	renamed := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "label", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	df, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:   renamed,
+		Spec:     iceberg.NewPartitionSpec(),
+		Format:   iceberg.ParquetFile,
+		Metadata: pqMeta,
+		FilePath: "s3://bucket/data/renamed.parquet",
+		FileSize: int64(len(pqBytes)),
+		Content:  iceberg.EntryContentData,
+	})
+	require.Nil(t, df, "a renamed column must not silently yield a DataFile with missing bounds")
+	require.ErrorContains(t, err, "not found in column mapping")
+}
+
 func TestDataFileFromMetadata_EndToEndAddDataFiles(t *testing.T) {
 	tbl := newRowDeltaCommitTestTable(t)
 	sch := tbl.Schema()
 
 	pqBytes, pqMeta := parquetMetaFromSchema(t, sch, `[
 		{"id": 1, "data": "a"},
-		{"id": 2, "data": "b"}
+		{"id": 2, "data": null},
+		{"id": 3, "data": "c"}
 	]`)
 
 	df, err := table.DataFileFromMetadata(table.DataFileArgs{
@@ -878,7 +991,189 @@ func TestDataFileFromMetadata_EndToEndAddDataFiles(t *testing.T) {
 	require.NotNil(t, snap)
 	assert.Equal(t, table.OpAppend, snap.Summary.Operation)
 	assert.Equal(t, "1", snap.Summary.Properties["added-data-files"])
-	assert.Equal(t, "2", snap.Summary.Properties["added-records"])
+	assert.Equal(t, "3", snap.Summary.Properties["added-records"])
+
+	manifests, err := snap.Manifests(iceio.LocalFS{})
+	require.NoError(t, err)
+
+	var checked bool
+	for _, m := range manifests {
+		if m.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		for e, err := range m.Entries(iceio.LocalFS{}, true) {
+			require.NoError(t, err)
+			committed := e.DataFile()
+
+			lower, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Int64, committed.LowerBoundValues()[1])
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, lower.(iceberg.Int64Literal).Value(),
+				"id lower bound must survive the manifest round-trip")
+			upper, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Int64, committed.UpperBoundValues()[1])
+			require.NoError(t, err)
+			assert.EqualValues(t, 3, upper.(iceberg.Int64Literal).Value(),
+				"id upper bound must survive the manifest round-trip")
+
+			assert.EqualValues(t, 1, committed.NullValueCounts()[2],
+				"data column null count must survive the manifest round-trip")
+
+			assert.Contains(t, committed.ColumnSizes(), 1,
+				"column sizes must survive the manifest round-trip")
+			checked = true
+		}
+	}
+	assert.True(t, checked, "expected a committed data-file manifest entry to inspect")
+}
+
+func TestDataFileFromMetadata_V3AddDataFilesRequiresFirstRowID(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	sch := tbl.Schema()
+
+	rows := `[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`
+
+	t.Run("missing first_row_id is rejected at commit time", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, sch, rows)
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:   sch,
+			Spec:     iceberg.NewPartitionSpec(),
+			Format:   iceberg.ParquetFile,
+			Metadata: pqMeta,
+			FilePath: "s3://bucket/test/data/v3-no-rowid.parquet",
+			FileSize: int64(len(pqBytes)),
+			Content:  iceberg.EntryContentData,
+			// FirstRowID intentionally unset.
+		})
+		require.NoError(t, err)
+		require.Nil(t, df.FirstRowID())
+
+		tx := tbl.NewTransaction()
+		err = tx.AddDataFiles(t.Context(), []iceberg.DataFile{df}, nil)
+		require.ErrorContains(t, err, "first_row_id")
+		require.ErrorContains(t, err, "required for v3")
+	})
+
+	t.Run("setting first_row_id lets v3 AddDataFiles commit", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, sch, rows)
+		firstRowID := int64(0)
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:        sch,
+			Spec:          iceberg.NewPartitionSpec(),
+			Format:        iceberg.ParquetFile,
+			Metadata:      pqMeta,
+			FilePath:      "s3://bucket/test/data/v3-with-rowid.parquet",
+			FileSize:      int64(len(pqBytes)),
+			Content:       iceberg.EntryContentData,
+			FormatVersion: 3,
+			FirstRowID:    &firstRowID,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, df.FirstRowID())
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{df}, nil))
+
+		result, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		snap := result.CurrentSnapshot()
+		require.NotNil(t, snap)
+		assert.Equal(t, "1", snap.Summary.Properties["added-data-files"])
+	})
+}
+
+func TestDataFileFromMetadata_V3ReplaceDataFilesRequiresFirstRowID(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	sch := tbl.Schema()
+	rows := `[{"id": 1, "data": "a"}]`
+
+	firstID := int64(0)
+	initBytes, initMeta := parquetMetaFromSchema(t, sch, rows)
+	initial, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:        sch,
+		Spec:          iceberg.NewPartitionSpec(),
+		Format:        iceberg.ParquetFile,
+		Metadata:      initMeta,
+		FilePath:      "s3://bucket/test/data/v3-replace-initial.parquet",
+		FileSize:      int64(len(initBytes)),
+		Content:       iceberg.EntryContentData,
+		FormatVersion: 3,
+		FirstRowID:    &firstID,
+	})
+	require.NoError(t, err)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{initial}, nil))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	addBytes, addMeta := parquetMetaFromSchema(t, sch, rows)
+	replacement, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:   sch,
+		Spec:     iceberg.NewPartitionSpec(),
+		Format:   iceberg.ParquetFile,
+		Metadata: addMeta,
+		FilePath: "s3://bucket/test/data/v3-replace-add.parquet",
+		FileSize: int64(len(addBytes)),
+		Content:  iceberg.EntryContentData,
+	})
+	require.NoError(t, err)
+	require.Nil(t, replacement.FirstRowID())
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(t.Context(),
+		[]iceberg.DataFile{initial}, []iceberg.DataFile{replacement}, nil)
+	require.ErrorContains(t, err, "first_row_id")
+	require.ErrorContains(t, err, "required for v3")
+}
+
+func TestDataFileFromMetadata_V3RewriteAcceptsNilFirstRowID(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 3)
+	sch := tbl.Schema()
+	rows := `[{"id": 1, "data": "a"}]`
+
+	firstID := int64(0)
+	initBytes, initMeta := parquetMetaFromSchema(t, sch, rows)
+	initial, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:        sch,
+		Spec:          iceberg.NewPartitionSpec(),
+		Format:        iceberg.ParquetFile,
+		Metadata:      initMeta,
+		FilePath:      "s3://bucket/test/data/v3-rewrite-initial.parquet",
+		FileSize:      int64(len(initBytes)),
+		Content:       iceberg.EntryContentData,
+		FormatVersion: 3,
+		FirstRowID:    &firstID,
+	})
+	require.NoError(t, err)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{initial}, nil))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	addBytes, addMeta := parquetMetaFromSchema(t, sch, rows)
+	replacement, err := table.DataFileFromMetadata(table.DataFileArgs{
+		Schema:   sch,
+		Spec:     iceberg.NewPartitionSpec(),
+		Format:   iceberg.ParquetFile,
+		Metadata: addMeta,
+		FilePath: "s3://bucket/test/data/v3-rewrite-add.parquet",
+		FileSize: int64(len(addBytes)),
+		Content:  iceberg.EntryContentData,
+	})
+	require.NoError(t, err)
+	require.Nil(t, replacement.FirstRowID(),
+		"rewrite semantics must accept a nil first_row_id; inheritance assigns it at commit")
+
+	tx = tbl.NewTransaction()
+	rw := tx.NewRewrite(nil)
+	rw.DeleteFile(initial)
+	rw.AddDataFile(replacement)
+	require.NoError(t, rw.Commit(t.Context()))
+
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, result.CurrentSnapshot())
 }
 
 func TestDataFileFromMetadata_EndToEndRowDelta(t *testing.T) {
