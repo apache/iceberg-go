@@ -592,11 +592,27 @@ func (s *SqliteCatalogTestSuite) createLegacyV0Catalog(sqldb *sql.DB) {
 
 func (s *SqliteCatalogTestSuite) loadCatalogV0NoOptIn() *sqlcat.Catalog {
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
-		"uri":             s.catalogUri(),
-		sqlcat.DriverKey:  sqliteshim.ShimName,
-		sqlcat.DialectKey: string(sqlcat.SQLite),
-		"type":            "sql",
-		"warehouse":       "file://" + s.warehouse,
+		"uri":                 s.catalogUri(),
+		sqlcat.DriverKey:      sqliteshim.ShimName,
+		sqlcat.DialectKey:     string(sqlcat.SQLite),
+		"type":                "sql",
+		"warehouse":           "file://" + s.warehouse,
+		"init_catalog_tables": "false",
+	})
+	s.Require().NoError(err)
+
+	return cat.(*sqlcat.Catalog)
+}
+
+func (s *SqliteCatalogTestSuite) loadCatalogV0NoInitWithV1Optin() *sqlcat.Catalog {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                   s.catalogUri(),
+		sqlcat.DriverKey:        sqliteshim.ShimName,
+		sqlcat.DialectKey:       string(sqlcat.SQLite),
+		"type":                  "sql",
+		"warehouse":             "file://" + s.warehouse,
+		"init_catalog_tables":   "false",
+		sqlcat.SchemaVersionKey: sqlcat.SchemaVersionV1,
 	})
 	s.Require().NoError(err)
 
@@ -680,22 +696,145 @@ func (s *SqliteCatalogTestSuite) TestV0SchemaViewOperationsUnsupported() {
 	err := cat.CreateView(ctx, viewID, schema, "SELECT 1", nil)
 	s.ErrorContains(err, "V0", "CreateView must be rejected on a V0 catalog")
 
-	_, err = cat.CheckViewExists(ctx, viewID)
-	s.ErrorContains(err, "V0", "CheckViewExists must be rejected on a V0 catalog")
-
 	_, err = cat.LoadView(ctx, viewID)
 	s.ErrorContains(err, "V0", "LoadView must be rejected on a V0 catalog")
 
 	err = cat.DropView(ctx, viewID)
 	s.ErrorContains(err, "V0", "DropView must be rejected on a V0 catalog")
 
-	for _, listErr := range cat.ListViews(ctx, []string{nsName}) {
-		s.ErrorContains(listErr, "V0", "ListViews must be rejected on a V0 catalog")
+	exists, err := cat.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err, "CheckViewExists must not error on a V0 catalog")
+	s.False(exists, "a V0 catalog can hold no views")
 
-		break
+	var listed []table.Identifier
+	for ident, listErr := range cat.ListViews(ctx, []string{nsName}) {
+		s.Require().NoError(listErr, "ListViews must return empty (not error) on a V0 catalog")
+		listed = append(listed, ident)
 	}
+	s.Empty(listed, "a V0 catalog must list no views")
 
 	s.icebergTypeColumnAbsent(sqldb)
+}
+
+func (s *SqliteCatalogTestSuite) TestV0InitDisabledDetectsV0AndMigratesWithOptIn() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+	s.createLegacyV0Catalog(sqldb)
+
+	_ = s.loadCatalogV0NoOptIn()
+	s.icebergTypeColumnAbsent(sqldb)
+
+	_ = s.loadCatalogV0NoInitWithV1Optin()
+
+	var present int
+	err := sqldb.QueryRow(
+		`SELECT 1 FROM pragma_table_info('iceberg_tables') WHERE name = 'iceberg_type'`,
+	).Scan(&present)
+	s.Require().NoError(err, "jdbc.schema-version=V1 must migrate even when init_catalog_tables=false")
+	s.Equal(1, present)
+}
+
+func (s *SqliteCatalogTestSuite) TestGenuineV0RowSurvivesMigrationForCommitAndRename() {
+	sqldb := s.getDB()
+	s.confirmNoTables(sqldb)
+	s.createLegacyV0Catalog(sqldb)
+	ctx := context.Background()
+
+	tblID := s.randomTableIdentifier()
+	ns := catalog.NamespaceFromIdent(tblID)
+
+	{
+		v0 := s.loadCatalogV0NoOptIn()
+		s.Require().NoError(v0.CreateNamespace(ctx, ns, nil))
+		_, err := v0.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err, "CreateTable must work on a column-less V0 schema")
+	}
+	s.icebergTypeColumnAbsent(sqldb)
+
+	nsStr := strings.Join(ns, ".")
+	rowType := func() sql.NullString {
+		var got sql.NullString
+		qErr := sqldb.QueryRow(
+			`SELECT iceberg_type FROM iceberg_tables WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+			"default", nsStr, catalog.TableNameFromIdent(tblID),
+		).Scan(&got)
+		s.Require().NoError(qErr)
+
+		return got
+	}
+
+	cat := s.loadCatalogWithV1Migration()
+	s.False(rowType().Valid, "the migrated legacy row must keep iceberg_type IS NULL")
+
+	loaded, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err, "LoadTable must accept the post-migration NULL row")
+
+	tx := loaded.NewTransaction()
+	s.Require().NoError(tx.SetProperties(iceberg.Properties{"v0.migrated.commit": "ok"}))
+	_, err = tx.Commit(ctx)
+	s.Require().NoError(err, "CommitTable must accept the post-migration NULL row")
+
+	healed := rowType()
+	s.True(healed.Valid, "commit must heal the migrated NULL row to TABLE")
+	s.Equal(sqlcat.TableType, healed.String)
+
+	_, err = sqldb.Exec(
+		`UPDATE iceberg_tables SET iceberg_type = NULL `+
+			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ?`,
+		"default", nsStr, catalog.TableNameFromIdent(tblID),
+	)
+	s.Require().NoError(err)
+
+	toID := s.randomTableIdentifier()
+	toNs := catalog.NamespaceFromIdent(toID)
+	s.Require().NoError(cat.CreateNamespace(ctx, toNs, nil))
+
+	renamed, err := cat.RenameTable(ctx, tblID, toID)
+	s.Require().NoError(err, "RenameTable must accept the post-migration NULL row")
+	s.Equal(toID, renamed.Identifier())
+}
+
+func (s *SqliteCatalogTestSuite) TestV1TableOpsIgnoreViewRows() {
+	sqldb := s.getDB()
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+
+	nsName := databaseName()
+	s.Require().NoError(cat.CreateNamespace(ctx, []string{nsName}, nil))
+
+	viewName := tableName()
+	_, err := sqldb.Exec(
+		`INSERT INTO iceberg_tables `+
+			`(catalog_name, table_namespace, table_name, iceberg_type, metadata_location) `+
+			`VALUES (?, ?, ?, ?, ?)`,
+		cat.Name(), nsName, viewName, sqlcat.ViewType, "file:///view/metadata.json",
+	)
+	s.Require().NoError(err)
+
+	viewID := table.Identifier{nsName, viewName}
+
+	_, err = cat.LoadTable(ctx, viewID)
+	s.ErrorIs(err, catalog.ErrNoSuchTable, "LoadTable must not return a VIEW row")
+
+	err = cat.DropTable(ctx, viewID)
+	s.ErrorIs(err, catalog.ErrNoSuchTable, "DropTable must not delete a VIEW row")
+
+	toID := table.Identifier{nsName, tableName()}
+	_, err = cat.RenameTable(ctx, viewID, toID)
+	s.ErrorIs(err, catalog.ErrNoSuchTable, "RenameTable must not rename a VIEW row")
+
+	var cnt int
+	s.Require().NoError(sqldb.QueryRow(
+		`SELECT COUNT(*) FROM iceberg_tables `+
+			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ? AND iceberg_type = ?`,
+		cat.Name(), nsName, viewName, sqlcat.ViewType,
+	).Scan(&cnt))
+	s.Equal(1, cnt, "table operations must leave the VIEW row intact")
+
+	for ident, listErr := range cat.ListTables(ctx, []string{nsName}) {
+		s.Require().NoError(listErr)
+		s.NotEqual(viewName, ident[len(ident)-1], "ListTables must exclude VIEW rows")
+	}
 }
 
 func (s *SqliteCatalogTestSuite) TestCatalogNameMatchesLoaderArg() {
