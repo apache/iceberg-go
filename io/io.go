@@ -178,8 +178,8 @@ type StatIO interface {
 }
 
 // RenameIO is an extension of IO interface that includes the Rename
-// method for renaming (moving) files or directories; this must be
-// atomic and can be used for committing metadata updates
+// method for renaming (moving) one file or object. This is atomic on
+// a local filesystem but is not atomic in other implementations like blob stores
 type RenameIO interface {
 	IO
 
@@ -187,9 +187,10 @@ type RenameIO interface {
 }
 
 // RenameNoReplaceIO is an extension of IO interface that includes the
-// RenameNoReplace method for atomically moving files only when the destination
+// RenameNoReplace method for moving files only when the destination
 // path does not already exist. Implementations may require oldpath and newpath
-// to live on the same filesystem.
+// to live on the same filesystem. This is atomic on a local filesystem but
+// is not atomic in other implementations like blob stores
 type RenameNoReplaceIO interface {
 	IO
 

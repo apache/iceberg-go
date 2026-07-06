@@ -198,7 +198,7 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 	allowUnsafeCommits := props.GetBool("allow-unsafe-commits", false)
 
 	if !isLocal && !allowUnsafeCommits {
-		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
+		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true; this implementation is not atomic and can lose data with concurrent commits", u.Scheme)
 	}
 
 	if isLocal {
