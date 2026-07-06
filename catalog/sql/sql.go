@@ -323,6 +323,8 @@ func (c *Catalog) initSchemaVersion(ctx context.Context) error {
 	}
 
 	// legacy V0 table: only migrate when explicitly opted in.
+	//
+	// The comparison is intentionally case-insensitive: matching Java's JdbcCatalog
 	if !strings.EqualFold(c.props.Get(SchemaVersionKey, ""), SchemaVersionV1) {
 		v0WarnOnce.Do(func() {
 			log.Printf("WARNING: iceberg_tables is on the legacy V0 schema (no iceberg_type column); "+
