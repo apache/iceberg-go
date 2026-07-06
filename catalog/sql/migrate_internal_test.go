@@ -181,7 +181,7 @@ func TestIcebergTypeColumnExistsQueryPerDialect(t *testing.T) {
 		{dialect.MySQL, []string{"information_schema.columns", "DATABASE()", "iceberg_type"}},
 		{dialect.MSSQL, []string{"information_schema.columns", "SCHEMA_NAME()", "iceberg_type"}},
 		{dialect.SQLite, []string{"pragma_table_info", "iceberg_tables", "iceberg_type"}},
-		{dialect.Oracle, []string{"user_tab_columns", "ICEBERG_TABLES", "ICEBERG_TYPE"}},
+		{dialect.Oracle, []string{"user_tab_columns", "ICEBERG_TABLES", "ICEBERG_TYPE", "ROWNUM = 1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name.String(), func(t *testing.T) {
@@ -241,10 +241,4 @@ func TestIcebergTablesExistsQueryPerDialect(t *testing.T) {
 func TestIcebergTablesExistsQueryUnsupported(t *testing.T) {
 	_, err := icebergTablesExistsQuery(dialect.Invalid)
 	assert.Error(t, err, "default case must surface as an error, not a silent no-op")
-}
-
-func TestOracleColumnProbeIsBounded(t *testing.T) {
-	got, err := icebergTypeColumnExistsQuery(dialect.Oracle)
-	require.NoError(t, err)
-	assert.Contains(t, got, "ROWNUM = 1", "Oracle column probe must be bounded like the other dialects")
 }
