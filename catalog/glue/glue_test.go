@@ -23,7 +23,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,6 +33,8 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,6 +46,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+var errGluePurgeRemove = errors.New("glue purge remove failed")
 
 type mockGlueClient struct {
 	mock.Mock
@@ -207,6 +213,49 @@ func TestGlueGetTable(t *testing.T) {
 	assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[tableParamMetadataLocation])
 }
 
+func TestGlueConstructParametersPreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://test-bucket/test_table/metadata/v2.metadata.json"
+	previousMetadataLocation := "s3://test-bucket/test_table/metadata/v1.metadata.json"
+
+	metadata, err := table.NewMetadata(testSchema, nil, table.UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{
+		tableParamTableType:                "HIVE",
+		tableParamMetadataLocation:         "s3://malicious-bucket/table/metadata.json",
+		tableParamPreviousMetadataLocation: "s3://malicious-bucket/table/previous.metadata.json",
+		"custom":                           "value",
+	})
+	assert.NoError(err)
+
+	staged := table.New(
+		TableIdentifier("test_database", "test_table"),
+		metadata,
+		metadataLocation,
+		nil,
+		nil,
+	)
+
+	params := constructParameters(staged, &types.Table{
+		Parameters: map[string]string{
+			tableParamTableType:                glueTypeIceberg,
+			tableParamMetadataLocation:         previousMetadataLocation,
+			tableParamPreviousMetadataLocation: "s3://test-bucket/test_table/metadata/v0.metadata.json",
+		},
+	})
+
+	assert.Equal(glueTypeIceberg, params[tableParamTableType])
+	assert.Equal(metadataLocation, params[tableParamMetadataLocation])
+	assert.Equal(previousMetadataLocation, params[tableParamPreviousMetadataLocation])
+	assert.Equal("value", params["custom"])
+
+	params = constructParameters(staged, nil)
+
+	assert.Equal(glueTypeIceberg, params[tableParamTableType])
+	assert.Equal(metadataLocation, params[tableParamMetadataLocation])
+	assert.NotContains(params, tableParamPreviousMetadataLocation)
+	assert.Equal("value", params["custom"])
+}
+
 func TestGlueGetTableCaseInsensitive(t *testing.T) {
 	assert := require.New(t)
 
@@ -250,6 +299,60 @@ func TestGlueGetTableCaseInsensitive(t *testing.T) {
 			} else {
 				assert.NoError(err)
 				assert.Equal("s3://test-bucket/test_table/metadata/abc123-123.metadata.json", tbl.Parameters[tableParamMetadataLocation])
+			}
+		})
+	}
+}
+
+func TestGlueConvertGlueToIcebergCaseInsensitive(t *testing.T) {
+	// Minimal valid v2 table metadata so NewFromLocation can succeed on the
+	// iceberg cases. Mirrors table/testdata/TableMetadataV2ValidMinimal.json.
+	const metadataJSON = `{"current-schema-id":0,"current-snapshot-id":-1,"default-sort-order-id":0,"default-spec-id":0,"format-version":2,"last-column-id":3,"last-partition-id":999,"last-sequence-number":0,"last-updated-ms":1602638573590,"location":"s3://bucket/test/location","metadata-log":[],"partition-specs":[{"fields":[],"spec-id":0}],"properties":{},"refs":{},"schemas":[{"fields":[{"id":1,"name":"x","required":true,"type":"long"},{"doc":"comment","id":2,"name":"y","required":true,"type":"long"},{"id":3,"name":"z","required":true,"type":"long"}],"schema-id":0,"type":"struct"}],"snapshot-log":[],"snapshots":[],"sort-orders":[{"fields":[],"order-id":0}],"statistics":[],"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1"}`
+
+	metaPath := filepath.Join(t.TempDir(), "metadata.json")
+	require.NoError(t, os.WriteFile(metaPath, []byte(metadataJSON), 0o644))
+	metadataLocation := "file://" + metaPath
+
+	testCases := []struct {
+		name      string
+		tableType string
+		omitType  bool
+		shouldErr bool
+	}{
+		{"uppercase", "ICEBERG", false, false},
+		{"lowercase", "iceberg", false, false},
+		{"mixed case", "IcEbErG", false, false},
+		{"non-iceberg", "HIVE", false, true},
+		{"empty", "", false, true},
+		{"absent", "", true, true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := require.New(t)
+
+			params := map[string]string{
+				tableParamMetadataLocation: metadataLocation,
+			}
+			if !tc.omitType {
+				params[tableParamTableType] = tc.tableType
+			}
+			glueTable := &types.Table{
+				Name:         aws.String("test_table"),
+				DatabaseName: aws.String("test_database"),
+				Parameters:   params,
+			}
+
+			glueCatalog := &Catalog{}
+
+			tbl, err := glueCatalog.convertGlueToIceberg(context.TODO(), glueTable)
+			if tc.shouldErr {
+				assert.Error(err)
+				assert.Contains(err.Error(), "is not an iceberg table")
+			} else {
+				assert.NoError(err)
+				assert.NotNil(tbl)
+				assert.Equal([]string{"test_database", "test_table"}, tbl.Identifier())
 			}
 		})
 	}
@@ -449,6 +552,173 @@ func TestGlueDropTable(t *testing.T) {
 
 	err := glueCatalog.DropTable(context.TODO(), TableIdentifier("test_database", "test_table"))
 	assert.NoError(err)
+}
+
+func TestGluePurgeTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeGluePurgeTableFiles(t, tableLocation)
+	glueTable := gluePurgeTable(metadataLocation)
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Twice()
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+
+	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.NoFileExists(metadataLocation)
+	assert.NoFileExists(dataFile)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	const scheme = "gluepurgefail"
+	dropCalled := false
+	removeBeforeDrop := false
+	removeCalls := 0
+	failingFS := failRemoveIO{
+		MemFS: iceio.NewMemFS(),
+		err:   errGluePurgeRemove,
+		onRemove: func() {
+			removeCalls++
+			if !dropCalled {
+				removeBeforeDrop = true
+			}
+		},
+	}
+	iceio.Unregister(scheme)
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return failingFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	tableLocation := scheme + "://bucket/test_database/test_table"
+	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
+	dataFile := tableLocation + "/data/file.parquet"
+	writeGluePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
+	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	glueTable := gluePurgeTable(metadataLocation)
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Twice()
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Run(func(mock.Arguments) {
+		dropCalled = true
+	}).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+
+	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.True(dropCalled)
+	assert.Positive(removeCalls)
+	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	file, err := failingFS.Open(dataFile)
+	assert.NoError(err, "data file should remain when FileIO remove fails")
+	assert.NotNil(file)
+	assert.NoError(file.Close())
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGluePurgeTableWithGCDisabled(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeGluePurgeTableFilesWithProperties(
+		t, tableLocation, iceberg.Properties{"gc.enabled": "false"})
+	glueTable := gluePurgeTable(metadataLocation)
+
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Twice()
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+
+	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.NoFileExists(metadataLocation)
+	assert.FileExists(dataFile)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+type failRemoveIO struct {
+	*iceio.MemFS
+	err      error
+	onRemove func()
+}
+
+func (f failRemoveIO) Remove(string) error {
+	if f.onRemove != nil {
+		f.onRemove()
+	}
+
+	return f.err
+}
+
+func gluePurgeTable(metadataLocation string) types.Table {
+	return types.Table{
+		Name:         aws.String("test_table"),
+		DatabaseName: aws.String("test_database"),
+		TableType:    aws.String("EXTERNAL_TABLE"),
+		Parameters: map[string]string{
+			tableParamTableType:        glueTypeIceberg,
+			tableParamMetadataLocation: metadataLocation,
+		},
+	}
+}
+
+func writeGluePurgeTableFiles(t *testing.T, tableLocation string) (metadataLocation, dataFile string) {
+	return writeGluePurgeTableFilesWithProperties(t, tableLocation, nil)
+}
+
+func writeGluePurgeTableFilesWithProperties(
+	t *testing.T,
+	tableLocation string,
+	props iceberg.Properties,
+) (metadataLocation, dataFile string) {
+	t.Helper()
+	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
+	writeGluePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, props)
+	require.NoError(t, os.MkdirAll(filepath.Dir(dataFile), 0o755))
+	require.NoError(t, os.WriteFile(dataFile, []byte("data"), 0o644))
+
+	return metadataLocation, dataFile
+}
+
+func writeGluePurgeTableMetadata(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	tableLocation,
+	metadataLocation string,
+	props iceberg.Properties,
+) {
+	t.Helper()
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
+	require.NoError(t, err)
+	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
 }
 
 func TestGlueCreateNamespace(t *testing.T) {
@@ -721,7 +991,7 @@ func TestGlueRenameTable(t *testing.T) {
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
-	}, nil).Once()
+	}, nil).Twice()
 
 	// Mock CreateTable response
 	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
@@ -824,7 +1094,7 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 			Description:       aws.String("description"),
 			StorageDescriptor: &types.StorageDescriptor{},
 		},
-	}, nil).Once()
+	}, nil).Twice()
 
 	// Mock CreateTable response
 	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
@@ -858,6 +1128,94 @@ func TestGlueRenameTable_DeleteTableFailureRollback(t *testing.T) {
 	renamedTable, err := glueCatalog.RenameTable(context.TODO(), TableIdentifier("test_database", "test_table"), TableIdentifier("test_database", "new_test_table"))
 	assert.Error(err)
 	assert.Nil(renamedTable)
+	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("new_test_table"),
+	}, mock.Anything)
+}
+
+func TestGlueRenameTable_SourceTableChangedRollback(t *testing.T) {
+	assert := require.New(t)
+
+	mockGlueSvc := &mockGlueClient{}
+
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_database"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{
+			Name: aws.String("test_database"),
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			VersionId: aws.String("v1"),
+			Parameters: map[string]string{
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v1.metadata.json",
+			},
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("CreateTable", mock.Anything, &glue.CreateTableInput{
+		DatabaseName: aws.String("test_database"),
+		TableInput: &types.TableInput{
+			Name:              aws.String("new_test_table"),
+			TableType:         aws.String("EXTERNAL_TABLE"),
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			Parameters:        map[string]string{tableParamTableType: glueTypeIceberg, tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v1.metadata.json"},
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, mock.Anything).Return(&glue.CreateTableOutput{}, nil).Once()
+
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything).Return(&glue.GetTableOutput{
+		Table: &types.Table{
+			Name:      aws.String("test_table"),
+			TableType: aws.String("EXTERNAL_TABLE"),
+			VersionId: aws.String("v2"),
+			Parameters: map[string]string{
+				tableParamTableType:        glueTypeIceberg,
+				tableParamMetadataLocation: "s3://test-bucket/test_table/metadata/v2.metadata.json",
+			},
+			Owner:             aws.String("owner"),
+			Description:       aws.String("description"),
+			StorageDescriptor: &types.StorageDescriptor{},
+		},
+	}, nil).Once()
+
+	mockGlueSvc.On("DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("new_test_table"),
+	}, mock.Anything).Return(&glue.DeleteTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{
+		glueSvc: mockGlueSvc,
+	}
+
+	renamedTable, err := glueCatalog.RenameTable(
+		context.TODO(),
+		TableIdentifier("test_database", "test_table"),
+		TableIdentifier("test_database", "new_test_table"),
+	)
+	assert.ErrorContains(err, "source table changed during rename")
+	assert.Nil(renamedTable)
+
+	mockGlueSvc.AssertNotCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String("test_table"),
+	}, mock.Anything)
 	mockGlueSvc.AssertCalled(t, "DeleteTable", mock.Anything, &glue.DeleteTableInput{
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("new_test_table"),

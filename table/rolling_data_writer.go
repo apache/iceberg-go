@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -34,6 +35,10 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
+
+// ErrWriterClosed is returned when records are added to a writer after its
+// streaming goroutine has already stopped.
+var ErrWriterClosed = errors.New("writer is closed")
 
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
@@ -68,28 +73,34 @@ type writerFactory struct {
 	mu                    sync.Mutex
 }
 
-type writerFactoryOption func(*writerFactory)
+type writerFactoryOption func(*writerFactory) error
 
 func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.content = content
+
+		return nil
 	}
 }
 
 func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.equalityFieldIDs = ids
+
+		return nil
 	}
 }
 
 func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.fileSchema = schema
 		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
 		if err != nil {
-			panic(fmt.Sprintf("withFactoryFileSchema: failed to convert schema: %v", err))
+			return fmt.Errorf("withFactoryFileSchema: failed to convert schema: %w", err)
 		}
 		w.arrowSchema = arrowSc
+
+		return nil
 	}
 }
 
@@ -166,7 +177,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount:      stopCount,
 	}
 	for _, apply := range opts {
-		apply(f)
+		if err := apply(f); err != nil {
+			stopCount()
+
+			return nil, err
+		}
 	}
 
 	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
@@ -306,8 +321,11 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 	select {
 	case r.recordCh <- record:
 		return nil
-	case err := <-r.errorCh:
+	case err, ok := <-r.errorCh:
 		record.Release()
+		if !ok {
+			return ErrWriterClosed
+		}
 
 		return err
 	case <-r.ctx.Done():
@@ -320,9 +338,26 @@ func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
 func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer r.wg.Done()
 	defer close(r.errorCh)
+	defer r.factory.writers.CompareAndDelete(r.partitionKey, r)
 
 	var currentWriter tblutils.FileWriter
+	// Cleanup defer: recover a panic in the write path and abort any
+	// in-progress file. stream runs in its own goroutine with no caller to
+	// recover it, and FileWriter.Close can panic (stats.ToDataFile panics when
+	// NewDataFileBuilder fails); convert that into an error on errorCh instead
+	// of crashing the process, mirroring the recover in
+	// equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so it
+	// runs first (LIFO) and can still send on the open channel before it is
+	// closed.
 	defer func() {
+		if rec := recover(); rec != nil {
+			switch e := rec.(type) {
+			case error:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %w", e))
+			default:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %v", e))
+			}
+		}
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}

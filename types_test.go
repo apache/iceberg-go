@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -264,7 +265,8 @@ func TestUnknownTypeInNestedStructs(t *testing.T) {
 		ValueRequired: false,
 	}
 
-	schema := iceberg.NewSchema(1,
+	schema := iceberg.NewSchema(
+		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
 		iceberg.NestedField{ID: 2, Name: "top", Type: iceberg.UnknownType{}, Required: false},
 		iceberg.NestedField{ID: 3, Name: "arr", Type: listType, Required: false},
@@ -419,7 +421,8 @@ func TestVariantTypeJSONRoundTrip(t *testing.T) {
 }
 
 func TestVariantInSchema(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
 	)
@@ -432,7 +435,8 @@ func TestVariantInSchema(t *testing.T) {
 }
 
 func TestVariantInNestedTypes(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
 			ElementID:       2,
 			Element:         iceberg.VariantType{},
@@ -465,7 +469,8 @@ func TestVariantInNestedTypes(t *testing.T) {
 }
 
 func TestVariantInStructField(t *testing.T) {
-	sc := iceberg.NewSchema(0,
+	sc := iceberg.NewSchema(
+		0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "nested", Type: &iceberg.StructType{
 			FieldList: []iceberg.NestedField{
@@ -571,6 +576,27 @@ func TestPropUInt(t *testing.T) {
 		"negative string must fall back, not wrap to a huge positive")
 	assert.Equal(t, uint(77), iceberg.PropUInt(props, "garbage", 77), "falls back on parse error")
 	assert.Equal(t, uint(5), iceberg.PropUInt(props, "missing", 5), "falls back on missing key")
+}
+
+func TestGetInt64(t *testing.T) {
+	props := iceberg.Properties{
+		"n":        "42",
+		"maxint64": "9223372036854775807",
+		"neg":      "-7",
+		"garbage":  "not-a-number",
+	}
+
+	assert.Equal(t, int64(42), props.GetInt64("n", 0))
+	assert.Equal(t, int64(math.MaxInt64), props.GetInt64("maxint64", 0),
+		"must preserve full int64 MaxInt64 value")
+	assert.Equal(t, int64(-7), props.GetInt64("neg", 0))
+	assert.Equal(t, int64(99), props.GetInt64("garbage", 99), "falls back on parse error")
+	assert.Equal(t, int64(5), props.GetInt64("missing", 5), "falls back on missing key")
+
+	// Verify the default itself survives round-trip without truncation on 32-bit.
+	def := int64(math.MaxInt64)
+	assert.Equal(t, def, props.GetInt64("missing", def),
+		"default int64(math.MaxInt64) must not be truncated")
 }
 
 func TestGeometryType(t *testing.T) {
@@ -816,4 +842,44 @@ func TestGeographyType(t *testing.T) {
 		err := json.Unmarshal([]byte(data), &n)
 		assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
 	})
+}
+
+func TestNestedFieldEqualsWithNonComparableDefaults(t *testing.T) {
+	nonComparableDefault := map[string]any{
+		"meta": []any{"a", "b"},
+		"cfg":  map[string]any{"enabled": true},
+	}
+
+	left := iceberg.NestedField{
+		ID:             1,
+		Name:           "payload",
+		Type:           iceberg.PrimitiveTypes.String,
+		Required:       true,
+		InitialDefault: nonComparableDefault,
+		WriteDefault:   []string{"a", "b"},
+	}
+	right := iceberg.NestedField{
+		ID:       1,
+		Name:     "payload",
+		Type:     iceberg.PrimitiveTypes.String,
+		Required: true,
+		InitialDefault: map[string]any{
+			"meta": []any{"a", "b"},
+			"cfg":  map[string]any{"enabled": true},
+		},
+		WriteDefault: []string{"a", "b"},
+	}
+
+	assert.NotPanics(t, func() {
+		assert.True(t, left.Equals(right))
+	})
+
+	right.WriteDefault = []string{"b", "a"}
+	assert.False(t, left.Equals(right))
+	assert.False(t, left.Equals(iceberg.NestedField{
+		ID:       1,
+		Name:     "payload",
+		Type:     iceberg.PrimitiveTypes.String,
+		Required: true,
+	}))
 }

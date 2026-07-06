@@ -893,6 +893,31 @@ func (t *TableWritingTestSuite) TestAddFilesWithLargeAndRegular() {
 	t.Truef(arrowSchemaLarge.Equal(result.Schema()), "expected schema: %s, got: %s", arrowSchemaLarge, result.Schema())
 }
 
+func (t *TableWritingTestSuite) TestScanWithOptionsAliasing() {
+	ident := table.Identifier{"default", "test_scan_with_options_alias_v" + strconv.Itoa(t.formatVersion)}
+	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchema)
+
+	filePath := fmt.Sprintf("%s/scan-with-options-alias-%d/test.parquet", t.location, t.formatVersion)
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, t.arrTbl)
+
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.AddFiles(t.ctx, []string{filePath}, nil, false))
+
+	opts := iceberg.Properties{
+		table.ScanOptionArrowUseLargeTypes: "false",
+	}
+	scan, err := tx.Scan(table.WithOptions(opts))
+	t.Require().NoError(err)
+
+	opts[table.ScanOptionArrowUseLargeTypes] = "true"
+
+	result, err := scan.ToArrowTable(context.Background())
+	t.Require().NoError(err)
+	defer result.Release()
+
+	t.True(t.arrSchema.Equal(result.Schema()))
+}
+
 func (t *TableWritingTestSuite) TestAddFilesValidUpcast() {
 	ident := table.Identifier{"default", "test_table_with_valid_upcast_v" + strconv.Itoa(t.formatVersion)}
 	tbl := t.createTable(ident, t.formatVersion, *iceberg.UnpartitionedSpec, t.tableSchemaPromotedTypes)

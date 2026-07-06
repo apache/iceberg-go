@@ -40,13 +40,216 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
+
+func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
+	cat := &Catalog{}
+
+	for _, ident := range []table.Identifier{
+		nil,
+		{"table"},
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+	} {
+		_, _, err := cat.splitIdentForPath(ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	}
+
+	_, _, err := cat.splitViewIdentForPath(table.Identifier{"view"})
+	require.ErrorIs(t, err, catalog.ErrNoSuchView)
+	require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
+
+	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "namespace", ns)
+	assert.Equal(t, "table", tbl)
+
+	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"parent", "namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "parent%1Fnamespace", ns)
+	assert.Equal(t, "table", tbl)
+}
+
+func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL",
+			authURL: "http://[::1",
+			wantErr: "invalid rest.authorization-url",
+		},
+		{
+			name:    "missing scheme",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme",
+		},
+		{
+			name:    "scheme and opaque value with no host",
+			authURL: "localhost:8080",
+			wantErr: "missing host",
+		},
+		{
+			name:    "scheme with empty host",
+			authURL: "http:///path",
+			wantErr: "missing host",
+		},
+		{
+			name:    "empty URL",
+			authURL: "",
+			wantErr: "missing scheme",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+				"uri":                    "http://example.com",
+				"rest.authorization-url": tt.authURL,
+			})
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var oauthCalled atomic.Bool
+	mux.HandleFunc("/auth-token-url", func(w http.ResponseWriter, req *http.Request) {
+		oauthCalled.Store(true)
+		assert.Equal(t, http.MethodPost, req.Method)
+
+		require.NoError(t, req.ParseForm())
+		assert.Equal(t, "client", req.PostForm.Get("client_id"))
+		assert.Equal(t, "secret", req.PostForm.Get("client_secret"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "some_jwt_token",
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+		})
+	})
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	authURL := srv.URL + "/auth-token-url"
+	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+		"uri":              srv.URL,
+		keyAuthUrl:         authURL,
+		keyOauthCredential: "client:secret",
+	})
+	require.NoError(t, err)
+	require.True(t, oauthCalled.Load())
+
+	restCat, ok := cat.(*Catalog)
+	require.True(t, ok)
+	assert.Equal(t, authURL, restCat.props[keyAuthUrl])
+}
+
+func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		section string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL in defaults",
+			section: "defaults",
+			authURL: "http://[::1",
+			wantErr: "invalid rest.authorization-url",
+		},
+		{
+			name:    "scheme-less URL in overrides",
+			section: "overrides",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			defaults := map[string]any{}
+			overrides := map[string]any{}
+			switch tt.section {
+			case "defaults":
+				defaults[keyAuthUrl] = tt.authURL
+			case "overrides":
+				overrides[keyAuthUrl] = tt.authURL
+			}
+
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"defaults":  defaults,
+					"overrides": overrides,
+				})
+			})
+
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	authURL := "https://auth.example.com/oauth/token"
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{keyAuthUrl: authURL},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, authURL, cat.props[keyAuthUrl])
+}
 
 func TestTokenAuthenticationPriority(t *testing.T) {
 	t.Parallel()
@@ -606,6 +809,103 @@ func TestSigv4ContentSha256Header(t *testing.T) {
 	})
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type closeTrackingReadCloser struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (r *closeTrackingReadCloser) Close() error {
+	r.closed = true
+
+	return r.closeErr
+}
+
+func newSigV4TestTransport(rt http.RoundTripper) *sessionTransport {
+	return &sessionTransport{
+		RoundTripper: rt,
+		signer:       v4.NewSigner(),
+		cfg: aws.Config{
+			Region: "us-east-1",
+			Credentials: credentials.StaticCredentialsProvider{
+				Value: aws.Credentials{
+					AccessKeyID:     "test-access-key",
+					SecretAccessKey: "test-secret-key",
+				},
+			},
+		},
+		service: "s3",
+		newHash: sha256.New,
+	}
+}
+
+func TestSigv4ClosesClonedRequestBody(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"test": "data"}`)
+	var clonedBody *closeTrackingReadCloser
+
+	transport := newSigV4TestTransport(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     make(http.Header),
+		}, nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://example.com/test", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.GetBody = func() (io.ReadCloser, error) {
+		clonedBody = &closeTrackingReadCloser{Reader: bytes.NewReader(body)}
+
+		return clonedBody, nil
+	}
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.NotNil(t, clonedBody)
+	assert.True(t, clonedBody.closed)
+}
+
+func TestSigv4ReturnsClonedRequestBodyCloseError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("close failed")
+	body := []byte(`{"test": "data"}`)
+	var clonedBody *closeTrackingReadCloser
+
+	transport := newSigV4TestTransport(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		t.Fatal("request should not be sent when the signing body clone fails to close")
+
+		return nil, nil
+	}))
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		"https://example.com/test", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.GetBody = func() (io.ReadCloser, error) {
+		clonedBody = &closeTrackingReadCloser{
+			Reader:   bytes.NewReader(body),
+			closeErr: closeErr,
+		}
+
+		return clonedBody, nil
+	}
+
+	_, err = transport.RoundTrip(req)
+	require.ErrorIs(t, err, closeErr)
+	require.NotNil(t, clonedBody)
+	assert.True(t, clonedBody.closed)
+}
+
 func TestSigv4ConcurrentSigners(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()
@@ -981,4 +1281,154 @@ func TestToPropsSigv4RegionFallback(t *testing.T) {
 		_, ok := props["client.region"]
 		assert.False(t, ok)
 	})
+}
+
+func TestToPropsPreservesOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{
+		oauthToken: "static-token",
+	}
+	props := toProps(opts)
+	assert.Equal(t, "static-token", props[keyOauthToken])
+}
+
+func TestFromPropsReadsOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	var opts options
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "static-token",
+		"custom":      "value",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "static-token", opts.oauthToken)
+	assert.Equal(t, iceberg.Properties{"custom": "value"}, opts.additionalProps)
+	assert.NotContains(t, opts.additionalProps, keyOauthToken)
+}
+
+func TestFromPropsKeepsExistingOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := options{
+		oauthToken: "caller-token",
+	}
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "server-token",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "caller-token", opts.oauthToken)
+}
+
+func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
+	t.Parallel()
+
+	var configAuthHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configAuthHeader = r.Header.Get(authorizationHeader)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				keyOauthToken: "server-token",
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := newCatalogFromProps(context.Background(), "rest", srv.URL, iceberg.Properties{
+		keyOauthToken: "caller-token",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer caller-token", configAuthHeader)
+	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
+}
+
+func TestEncodeNamespace(t *testing.T) {
+	tests := []struct {
+		name          string
+		separator     string
+		namespace     []string
+		wantPath      string
+		wantQueryPart string
+	}{
+		{"default empty separator", "", []string{"a", "b"}, "a%1Fb", "a\x1fb"},
+		{"explicit unit separator", "%1F", []string{"a", "b"}, "a%1Fb", "a\x1fb"},
+		{"dot separator", "%2E", []string{"analytics", "prod"}, "analytics%2Eprod", "analytics.prod"},
+		{"single level", "%2E", []string{"db1"}, "db1", "db1"},
+		{"level needing escaping", "%2E", []string{"a/b", "c d"}, "a%2Fb%2Ec%20d", "a/b.c d"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &Catalog{namespaceSeparator: tt.separator}
+			assert.Equal(t, tt.wantPath, r.encodeNamespace(tt.namespace))
+			assert.Equal(t, tt.wantQueryPart, r.namespaceToQueryParam(tt.namespace))
+		})
+	}
+}
+
+func TestNamespaceSeparatorFromConfig(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{"namespace-separator": "%2E"},
+		})
+	})
+
+	var gotPath string
+	mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		json.NewEncoder(w).Encode(map[string]any{
+			"namespace":  []string{"analytics", "prod"},
+			"properties": map[string]any{"owner": "data-team"},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "%2E", cat.namespaceSeparator)
+
+	props, err := cat.LoadNamespaceProperties(context.Background(), []string{"analytics", "prod"})
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/namespaces/analytics%2Eprod", gotPath)
+	assert.Equal(t, "data-team", props["owner"])
+}
+
+func TestNamespaceSeparatorDefaultsToUnitSeparator(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	var gotPath string
+	mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		json.NewEncoder(w).Encode(map[string]any{
+			"namespace": []string{"a", "b"}, "properties": map[string]any{},
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "%1F", cat.namespaceSeparator)
+
+	_, err = cat.LoadNamespaceProperties(context.Background(), []string{"a", "b"})
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/namespaces/a%1Fb", gotPath)
 }

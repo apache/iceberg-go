@@ -499,6 +499,8 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	require.NoError(t, err)
 	geogEPSG4267, err := iceberg.GeographyTypeOf("EPSG:4267", "spherical")
 	require.NoError(t, err)
+	geomCustomCRS, err := iceberg.GeometryTypeOf("my-custom-crs")
+	require.NoError(t, err)
 	defaultGeometry, err := iceberg.GeometryTypeOf("OGC:CRS84")
 	require.NoError(t, err)
 	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
@@ -529,6 +531,11 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			name:             "geometry_epsg_4267",
 			ice:              geomEPSG4267,
 			geoarrowMetaJSON: `{"crs":"EPSG:4267"}`,
+		},
+		{
+			name:             "geometry_custom_string_crs",
+			ice:              geomCustomCRS,
+			geoarrowMetaJSON: `{"crs":"my-custom-crs"}`,
 		},
 		// Geography with default CRS (default OGC:CRS84, spherical edges)
 		{
@@ -589,6 +596,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		geoarrowMetaJSON string
 	}{
 		{
+			// Pin that a present crs_type without CRS still follows the srid:0 default.
 			name:             "geometry_srid_0_with_crs_type",
 			ice:              geomSRID0,
 			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
@@ -609,9 +617,15 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			geoarrowMetaJSON: `{"crs":"epsg:4326"}`,
 		},
 		{
+			// EPSG:4326 is canonicalized before crs_type validation, so a mismatched type still maps to the default CRS.
 			name:             "geometry_epsg_4326_incorrect_type",
 			ice:              defaultGeometry,
-			geoarrowMetaJSON: `{"crs":"epsg:4326", "crs_type":"projjson"}`,
+			geoarrowMetaJSON: `{"crs":"EPSG:4326","crs_type":"projjson"}`,
+		},
+		{
+			name:             "geometry_epsg_4326_wkt2_type",
+			ice:              defaultGeometry,
+			geoarrowMetaJSON: `{"crs":"EPSG:4326","crs_type":"wkt2:2019"}`,
 		},
 
 		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
@@ -769,9 +783,9 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		assert.True(t, ok)
 
 		meta := geomWKB.Metadata()
-		assert.Equal(t, meta.CRS, jsonCRS("OGC:CRS84"))
-		assert.Equal(t, meta.Edges, geoarrow.EdgePlanar)
-		assert.Equal(t, meta.CRSType, geoarrow.CRSTypeAuthorityCode)
+		assert.Equal(t, jsonCRS("OGC:CRS84"), meta.CRS)
+		assert.Equal(t, geoarrow.EdgePlanar, meta.Edges)
+		assert.Equal(t, geoarrow.CRSTypeAuthorityCode, meta.CRSType)
 
 		roundTripGeom, err := table.ArrowTypeToIceberg(geomWKB, false)
 		require.NoError(t, err)
@@ -779,8 +793,20 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		g, ok := roundTripGeom.(iceberg.GeometryType)
 		require.True(t, ok)
 
-		assert.Equal(t, g.CRS(), "OGC:CRS84")
-		assert.Equal(t, g, defaultGeometry)
+		assert.Equal(t, "OGC:CRS84", g.CRS())
+		assert.Equal(t, defaultGeometry, g)
+	})
+
+	t.Run("geoarrow_wkb_without_edges_reads_as_geometry", func(t *testing.T) {
+		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary, `{"crs":"OGC:CRS84"}`)
+		require.NoError(t, err)
+
+		iceType, err := table.ArrowTypeToIceberg(arrowType, false)
+		require.NoError(t, err)
+
+		geom, ok := iceType.(iceberg.GeometryType)
+		require.True(t, ok, "expected geometry, got %T", iceType)
+		assert.Equal(t, "OGC:CRS84", geom.CRS())
 	})
 
 	t.Run("projjson_error_behavior", func(t *testing.T) {
@@ -801,6 +827,14 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 		require.ErrorContains(t, err, "projjson CRS not supported yet")
+
+		stringArrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
+			`{"crs_type":"projjson","crs":"EPSG:3857"}`)
+		require.NoError(t, err)
+
+		_, err = table.ArrowTypeToIceberg(stringArrowType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "CRS type projjson not supported for string CRS")
 
 		arrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
 			`{"crs_type":"projjson","crs":{"id":{"authority":"OGC", "code":"CRS84"}}}`)
@@ -826,13 +860,10 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 
 		_, err = table.ArrowTypeToIceberg(arrowTypeWithoutCRSType, false)
 		require.Error(t, err)
-		require.ErrorContains(t, err, "crs length too long")
+		require.ErrorContains(t, err, "CRS type wkt2:2019 not supported")
 	})
 
 	t.Run("schema", func(t *testing.T) {
-		geomList, err := iceberg.GeometryTypeOf("srid:4326")
-		require.NoError(t, err)
-
 		iceSchema := iceberg.NewSchema(0,
 			iceberg.NestedField{ID: 1, Name: "point", Type: iceberg.GeometryType{}, Required: false},
 			iceberg.NestedField{ID: 2, Name: "loc", Type: geomSRID, Required: true},
@@ -843,7 +874,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 				Name: "locations",
 				Type: &iceberg.ListType{
 					ElementID:       6,
-					Element:         geomList,
+					Element:         geomSRID,
 					ElementRequired: true,
 				},
 				Required: true,
@@ -1245,6 +1276,52 @@ func TestToRequestedSchema(t *testing.T) {
 	defer rec2.Release()
 
 	assert.True(t, array.RecordEqual(rec, rec2))
+}
+
+// TestToRequestedSchemaListLargeTypeCoercion guards against the writer
+// rejecting compacted batches: the projected list variant must follow
+// UseLargeTypes, not the offset width the reader happened to hand back.
+func TestToRequestedSchemaListLargeTypeCoercion(t *testing.T) {
+	elem := arrow.Field{
+		Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+		Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"2"}),
+	}
+
+	build := func(t *testing.T, listType arrow.DataType) (arrow.RecordBatch, *iceberg.Schema) {
+		t.Helper()
+		schema := arrow.NewSchema([]arrow.Field{{
+			Name: "nested", Type: listType,
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"}),
+		}}, nil)
+		bldr := array.NewRecordBuilder(memory.DefaultAllocator, schema)
+		defer bldr.Release()
+		require.NoError(t, bldr.UnmarshalJSON([]byte(`{"nested": [1, 2, 3]}`)))
+		rec := bldr.NewRecordBatch()
+		icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
+		require.NoError(t, err)
+
+		return rec, icesc
+	}
+
+	t.Run("large_list downcast to list", func(t *testing.T) {
+		rec, icesc := build(t, arrow.LargeListOfField(elem))
+		defer rec.Release()
+
+		out, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+		require.NoError(t, err)
+		defer out.Release()
+		assert.Equal(t, arrow.LIST, out.Column(0).DataType().ID())
+	})
+
+	t.Run("list upcast to large_list", func(t *testing.T) {
+		rec, icesc := build(t, arrow.ListOfField(elem))
+		defer rec.Release()
+
+		out, err := table.ToRequestedSchema(context.Background(), icesc, icesc, rec, table.SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: true})
+		require.NoError(t, err)
+		defer out.Release()
+		assert.Equal(t, arrow.LARGE_LIST, out.Column(0).DataType().ID())
+	})
 }
 
 func TestToRequestedSchemaWriteDefaults(t *testing.T) {

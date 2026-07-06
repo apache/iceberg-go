@@ -20,6 +20,7 @@ package gocloud
 import (
 	"context"
 	"net/url"
+	"strconv"
 
 	"cloud.google.com/go/storage"
 
@@ -55,8 +56,10 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	if path := props[io.GCSKeyPath]; path != "" {
 		o = append(o, option.WithAuthCredentialsFile(credType, path))
 	}
-	if _, ok := props[io.GCSUseJSONAPI]; ok {
-		o = append(o, storage.WithJSONReads())
+	if v, ok := props[io.GCSUseJSONAPI]; ok {
+		if parse, err := strconv.ParseBool(v); err == nil && parse {
+			o = append(o, storage.WithJSONReads())
+		}
 	}
 
 	return &gcsblob.Options{

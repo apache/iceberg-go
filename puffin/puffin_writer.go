@@ -97,9 +97,14 @@ func (w *Writer) AddProperties(props map[string]string) error {
 	return nil
 }
 
-// clear properties
-func (w *Writer) ClearProperties() {
+// ClearProperties removes all file-level properties.
+func (w *Writer) ClearProperties() error {
+	if w.done {
+		return errors.New("puffin: cannot clear properties: writer already finalized")
+	}
 	w.props = make(map[string]string)
+
+	return nil
 }
 
 // SetCreatedBy overrides the default "created-by" property written to the footer.

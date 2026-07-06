@@ -19,12 +19,25 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type nonComparableTransform struct {
+	iceberg.IdentityTransform
+	// values makes this transform non-comparable, which would have panicked with ==.
+	values []int
+}
+
+func (t nonComparableTransform) Equals(other iceberg.Transform) bool {
+	o, ok := other.(nonComparableTransform)
+
+	return ok && slices.Equal(t.values, o.values)
+}
 
 func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 999, iceberg.UnpartitionedSpec.LastAssignedFieldID())
@@ -59,6 +72,123 @@ func TestPartitionSpec(t *testing.T) {
 	spec3 := iceberg.NewPartitionSpec(idField1, idField2)
 	assert.False(t, spec1.CompatibleWith(&spec3))
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
+}
+
+func TestNewPartitionSpecIDCopiesFields(t *testing.T) {
+	sourceIDs := []int{1}
+	fields := make([]iceberg.PartitionField, 1)
+	fields[0] = iceberg.PartitionField{
+		SourceIDs: sourceIDs,
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	}
+
+	spec := iceberg.NewPartitionSpecID(7, fields...)
+
+	fields[0].FieldID = 2000
+	fields[0].Name = "updated"
+	fields[0].SourceIDs[0] = 2
+
+	restored := spec.Field(0)
+	assert.Equal(t, 1000, restored.FieldID)
+	assert.Equal(t, "id", restored.Name)
+	assert.Equal(t, []int{1}, restored.SourceIDs)
+}
+
+func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id",
+		Transform: nonComparableTransform{values: []int{1, 2}},
+	})
+	sameTransformSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1002, Name: "id",
+		Transform: nonComparableTransform{values: []int{1, 2}},
+	})
+	differentTransformSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1003, Name: "id",
+		Transform: nonComparableTransform{values: []int{2, 3}},
+	})
+
+	require.NotPanics(t, func() {
+		assert.True(t, spec.CompatibleWith(&sameTransformSpec))
+		assert.False(t, spec.CompatibleWith(&differentTransformSpec))
+	})
+
+	tests := []struct {
+		name       string
+		left       iceberg.Transform
+		right      iceberg.Transform
+		compatible bool
+	}{
+		{
+			name:       "identical bucket transforms are compatible",
+			left:       iceberg.BucketTransform{NumBuckets: 16},
+			right:      iceberg.BucketTransform{NumBuckets: 16},
+			compatible: true,
+		},
+		{
+			name:       "different bucket transforms are incompatible",
+			left:       iceberg.BucketTransform{NumBuckets: 16},
+			right:      iceberg.BucketTransform{NumBuckets: 32},
+			compatible: false,
+		},
+		{
+			name:       "identical truncate transforms are compatible",
+			left:       iceberg.TruncateTransform{Width: 4},
+			right:      iceberg.TruncateTransform{Width: 4},
+			compatible: true,
+		},
+		{
+			name:       "different truncate transforms are incompatible",
+			left:       iceberg.TruncateTransform{Width: 4},
+			right:      iceberg.TruncateTransform{Width: 8},
+			compatible: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			left := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1001, Name: "id", Transform: tt.left,
+			})
+			right := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1002, Name: "id", Transform: tt.right,
+			})
+
+			assert.Equal(t, tt.compatible, left.CompatibleWith(&right))
+		})
+	}
+}
+
+func TestPartitionSpecRejectsInvalidBucketTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_bucket", iceberg.BucketTransform{NumBuckets: 0}, schema, nil),
+	)
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
+func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "bad_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 0},
+		},
+	)
+
+	_, err := json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {
@@ -188,6 +318,31 @@ func TestPartitionSpecToPath(t *testing.T) {
 	// https://github.com/apache/iceberg/blob/ca3db931b0f024f0412084751ac85dd4ef2da7e7/api/src/main/java/org/apache/iceberg/PartitionSpec.java#L198-L204
 	assert.Equal(t, "my%23str%25bucket=my%2Bstr/other+str%2Bbucket=%28+%29/my%21int%3Abucket=10",
 		spec.PartitionToPath(record, schema))
+}
+
+func TestPartitionSpecToPathWithDroppedLeadingSourceColumn(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 3, Name: "baz", Type: iceberg.PrimitiveTypes.Bool},
+	)
+
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.IdentityTransform{}, Name: "foo",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2}, FieldID: 1001,
+			Transform: iceberg.IdentityTransform{}, Name: "bar",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{3}, FieldID: 1002,
+			Transform: iceberg.IdentityTransform{}, Name: "baz",
+		},
+	)
+
+	record := partitionRecord{int32(7), true}
+	assert.Equal(t, "bar=7/baz=true", spec.PartitionToPath(record, schema))
 }
 
 func TestGetPartitionFieldName(t *testing.T) {

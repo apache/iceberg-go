@@ -70,6 +70,9 @@ const (
 	ManifestMinMergeCountKey     = "commit.manifest.min-count-to-merge"
 	ManifestMinMergeCountDefault = 100
 
+	ManifestMergeMaxConcurrencyKey     = "commit.manifest-merge.max-concurrency"
+	ManifestMergeMaxConcurrencyDefault = 0
+
 	WritePartitionSummaryLimitKey     = "write.summary.partition-limit"
 	WritePartitionSummaryLimitDefault = 0
 
@@ -95,10 +98,10 @@ const (
 	MinSnapshotsToKeepDefault = math.MaxInt
 
 	MaxSnapshotAgeMsKey     = "max-snapshot-age-ms"
-	MaxSnapshotAgeMsDefault = math.MaxInt
+	MaxSnapshotAgeMsDefault = int64(math.MaxInt64)
 
 	MaxRefAgeMsKey     = "max-ref-age-ms"
-	MaxRefAgeMsDefault = math.MaxInt
+	MaxRefAgeMsDefault = int64(math.MaxInt64)
 
 	// CommitNumRetriesKey is the number of commit retry attempts before
 	// giving up on ErrCommitFailed from the catalog.

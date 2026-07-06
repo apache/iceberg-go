@@ -461,6 +461,21 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, fmt.Errorf("failed to create the table %s.%s: %w", fromDatabase, fromTable, err)
 	}
 
+	// Revalidate the source table immediately before delete to narrow the
+	// rename race window. Glue does not offer a conditional DeleteTable, so
+	// this cannot eliminate the race if a commit lands after this read.
+	currentFromGlueTable, err := c.getTable(ctx, fromDatabase, fromTable)
+	if err != nil {
+		c.rollbackRenamedTable(ctx, toDatabase, toTable)
+
+		return nil, fmt.Errorf("failed to revalidate the table %s.%s before delete: %w", fromDatabase, fromTable, err)
+	}
+	if glueTableChangedDuringRename(fromGlueTable, currentFromGlueTable) {
+		c.rollbackRenamedTable(ctx, toDatabase, toTable)
+
+		return nil, fmt.Errorf("failed to rename the table %s.%s: source table changed during rename", fromDatabase, fromTable)
+	}
+
 	// Drop the old table.
 	_, err = c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
 		CatalogId:    c.catalogId,
@@ -468,20 +483,23 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		Name:         aws.String(fromTable),
 	})
 	if err != nil {
-		// Best-effort rollback the table creation.
-		_, rollbackErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
-			CatalogId:    c.catalogId,
-			DatabaseName: aws.String(toDatabase),
-			Name:         aws.String(toTable),
-		})
-		if rollbackErr != nil {
-			fmt.Printf("failed to rollback the new table %s.%s: %v", toDatabase, toTable, rollbackErr)
-		}
+		c.rollbackRenamedTable(ctx, toDatabase, toTable)
 
 		return nil, fmt.Errorf("failed to rename the table %s.%s: %w", fromDatabase, fromTable, err)
 	}
 
 	return c.LoadTable(ctx, to)
+}
+
+func (c *Catalog) rollbackRenamedTable(ctx context.Context, database, tableName string) {
+	_, rollbackErr := c.glueSvc.DeleteTable(ctx, &glue.DeleteTableInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(database),
+		Name:         aws.String(tableName),
+	})
+	if rollbackErr != nil {
+		log.Printf("failed to rollback the new table %s.%s: %v", database, tableName, rollbackErr)
+	}
 }
 
 // CheckTableExists returns if an Iceberg table exists in the Glue catalog.
@@ -700,7 +718,8 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		return nil, fmt.Errorf("missing parameters for table %s", tableName)
 	}
 
-	if glueTable.Parameters[tableParamTableType] != glueTypeIceberg {
+	// Keep this case-insensitive check consistent with getTable and filterTableListByType.
+	if !strings.EqualFold(glueTable.Parameters[tableParamTableType], glueTypeIceberg) {
 		return nil, fmt.Errorf("table %s.%s is not an iceberg table", database, tableName)
 	}
 
@@ -780,15 +799,18 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 	parameters := make(map[string]string)
 	if previousGlueTable != nil {
 		maps.Copy(parameters, previousGlueTable.Parameters)
-		if previousMetadataLocation, ok := parameters[tableParamMetadataLocation]; ok {
+	}
+
+	maps.Copy(parameters, staged.Properties())
+	delete(parameters, tableParamPreviousMetadataLocation)
+
+	if previousGlueTable != nil {
+		if previousMetadataLocation, ok := previousGlueTable.Parameters[tableParamMetadataLocation]; ok {
 			parameters[tableParamPreviousMetadataLocation] = previousMetadataLocation
 		}
 	}
-
 	parameters[tableParamTableType] = glueTypeIceberg
 	parameters[tableParamMetadataLocation] = staged.MetadataLocation()
-
-	maps.Copy(parameters, staged.Properties())
 
 	return parameters
 }
@@ -841,4 +863,29 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 // add an Is method to a type from another package.
 func isConcurrentModificationException(err error) bool {
 	return errors.As(err, new(*types.ConcurrentModificationException))
+}
+
+func glueTableChangedDuringRename(original, current *types.Table) bool {
+	if original == nil || current == nil {
+		return true
+	}
+
+	originalVersionID := aws.ToString(original.VersionId)
+	currentVersionID := aws.ToString(current.VersionId)
+	if originalVersionID != "" || currentVersionID != "" {
+		// Glue returns the same VersionId across consecutive GetTable calls
+		// unless the table was updated, making this a stronger drift check
+		// than comparing metadata_location when both versions are present.
+		return originalVersionID != currentVersionID
+	}
+
+	return glueTableMetadataLocation(original) != glueTableMetadataLocation(current)
+}
+
+func glueTableMetadataLocation(tbl *types.Table) string {
+	if tbl == nil || tbl.Parameters == nil {
+		return ""
+	}
+
+	return tbl.Parameters[tableParamMetadataLocation]
 }

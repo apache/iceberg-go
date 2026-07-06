@@ -24,9 +24,11 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
@@ -35,51 +37,44 @@ import (
 	"github.com/twmb/murmur3"
 )
 
+var (
+	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
+	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
+)
+
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
 // object or an error if the string is not a valid transform string.
 func ParseTransform(s string) (Transform, error) {
 	s = strings.ToLower(s)
-	switch {
-	case strings.HasPrefix(s, "bucket"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
 
+	if matches := bucketTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return BucketTransform{NumBuckets: n}, nil
 		}
+	}
 
-		return BucketTransform{NumBuckets: n}, nil
-	case strings.HasPrefix(s, "truncate"):
-		matches := regexFromBrackets.FindStringSubmatch(s)
-		if len(matches) != 2 {
-			break
-		}
-
+	if matches := truncateTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err != nil || n <= 0 || n > math.MaxInt32 {
-			break
+		if err == nil && n > 0 && n <= math.MaxInt32 {
+			return TruncateTransform{Width: n}, nil
 		}
+	}
 
-		return TruncateTransform{Width: n}, nil
-	default:
-		switch s {
-		case "identity":
-			return IdentityTransform{}, nil
-		case "void":
-			return VoidTransform{}, nil
-		case "year":
-			return YearTransform{}, nil
-		case "month":
-			return MonthTransform{}, nil
-		case "day":
-			return DayTransform{}, nil
-		case "hour":
-			return HourTransform{}, nil
-		}
+	switch s {
+	case "identity":
+		return IdentityTransform{}, nil
+	case "void":
+		return VoidTransform{}, nil
+	case "year":
+		return YearTransform{}, nil
+	case "month":
+		return MonthTransform{}, nil
+	case "day":
+		return DayTransform{}, nil
+	case "hour":
+		return HourTransform{}, nil
 	}
 
 	return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
@@ -99,13 +94,9 @@ type Transform interface {
 	Apply(Optional[Literal]) Optional[Literal]
 	Project(name string, pred BoundPredicate) (UnboundPredicate, error)
 
-	ToHumanStr(any) string
-}
-
-// typedHumanStringer is an opt-in extension for transforms whose
-// human-string form depends on the source Iceberg Type
-type typedHumanStringer interface {
 	ToHumanStrType(typ Type, val any) string
+	// Deprecated: ToHumanStr cannot recover source-type information; use ToHumanStrType instead.
+	ToHumanStr(any) string
 }
 
 // IdentityTransform uses the identity function, performing no transformation
@@ -233,6 +224,8 @@ func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
 
 func (VoidTransform) ToHumanStr(any) string { return "null" }
 
+func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
+
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
 }
@@ -246,10 +239,22 @@ type BucketTransform struct {
 }
 
 func (t BucketTransform) MarshalText() ([]byte, error) {
+	if err := t.validateNumBuckets(); err != nil {
+		return nil, err
+	}
+
 	return []byte(t.String()), nil
 }
 
 func (t BucketTransform) String() string { return fmt.Sprintf("bucket[%d]", t.NumBuckets) }
+
+func (t BucketTransform) validateNumBuckets() error {
+	if t.NumBuckets <= 0 {
+		return fmt.Errorf("%w: bucket transform requires numBuckets > 0", ErrInvalidArgument)
+	}
+
+	return nil
+}
 
 func (BucketTransform) CanTransform(t Type) bool {
 	switch t.(type) {
@@ -299,6 +304,9 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	if !value.Valid {
 		return Optional[Literal]{}
 	}
+	if err := t.validateNumBuckets(); err != nil {
+		return Optional[Literal]{}
+	}
 
 	var hash uint32
 	switch v := value.Val.(type) {
@@ -334,6 +342,12 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 }
 
 func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
+	if err := t.validateNumBuckets(); err != nil {
+		return func(_ any) Optional[int32] {
+			return Optional[int32]{}
+		}
+	}
+
 	var h func(any) uint32
 
 	switch src.(type) {
@@ -380,7 +394,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	}
 
 	return func(v any) Optional[int32] {
-		if v == nil {
+		if v == nil || h == nil {
 			return Optional[int32]{}
 		}
 
@@ -399,7 +413,14 @@ func (BucketTransform) ToHumanStr(val any) string {
 	return fmt.Sprintf("%v", val)
 }
 
+func (t BucketTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
+	if err := t.validateNumBuckets(); err != nil {
+		return nil, err
+	}
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
 	}
@@ -574,6 +595,10 @@ func (TruncateTransform) ToHumanStr(val any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -775,6 +800,10 @@ func (YearTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t YearTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t YearTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -880,6 +909,10 @@ func (t MonthTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t MonthTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t MonthTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -972,6 +1005,10 @@ func (DayTransform) ToHumanStr(val any) string {
 	}
 }
 
+func (t DayTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
+}
+
 func (t DayTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
 	return projectTimeTransform(t, name, pred)
 }
@@ -1062,6 +1099,10 @@ func (HourTransform) ToHumanStr(val any) string {
 	default:
 		return "null"
 	}
+}
+
+func (t HourTransform) ToHumanStrType(_ Type, val any) string {
+	return t.ToHumanStr(val)
 }
 
 func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
@@ -1190,7 +1231,7 @@ func truncateArray[T LiteralType](name string, pred BoundLiteralPredicate, fn fu
 func literalLen(lit Literal) int {
 	switch l := lit.(type) {
 	case StringLiteral:
-		return len(l)
+		return utf8.RuneCountInString(string(l))
 	case BinaryLiteral:
 		return len(l)
 	case FixedLiteral:

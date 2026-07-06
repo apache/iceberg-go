@@ -89,6 +89,10 @@ func TestParseTransform(t *testing.T) {
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
+		{"bucket extra suffix", "bucketx[5]"},
+		{"bucket extra token", "bucket_extra[5]"},
+		{"truncate extra suffix", "truncatefoo[10]"},
+		{"truncate extra token", "truncate_garbage[4]"},
 	}
 
 	for _, tt := range errorTests {
@@ -149,6 +153,48 @@ func TestToHumanString(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.transform.ToHumanStr(tt.input))
+		})
+	}
+}
+
+func TestToHumanStrType(t *testing.T) {
+	decVal, _ := decimal.Decimal128FromString("14.21", 4, 2)
+	tsMicros := iceberg.Timestamp(1705314600000000)
+	tsNanos := iceberg.TimestampNano(1705314600000000001)
+
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+		typ       iceberg.Type
+		input     any
+		expected  string
+	}{
+		{"identity_tstz_micros", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, tsMicros, "2024-01-15T10:30:00+00:00"},
+		{"identity_ts_micros", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Timestamp, tsMicros, "2024-01-15T10:30:00"},
+		{"identity_tstz_nanos", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTzNs, tsNanos, "2024-01-15T10:30:00.000000001+00:00"},
+		{"identity_ts_nanos", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampNs, tsNanos, "2024-01-15T10:30:00.000000001"},
+		{"identity_date", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.Date, iceberg.Date(17501), "2017-12-01"},
+		{"identity_string", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.String, "a/b/c=d", "a/b/c=d"},
+		{"identity_nil", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, nil, "null"},
+		{"year", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(47), "2017"},
+		{"month", iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(575), "2017-12"},
+		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(17501), "2017-12-01"},
+		{"hour", iceberg.HourTransform{}, iceberg.PrimitiveTypes.TimestampTz, int32(420042), "2017-12-01-18"},
+		{"year_nil", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
+		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, int32(7), "7"},
+		{"bucket_nil", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{"truncate_int32", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Int32, int32(123), "123"},
+		{"truncate_string", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, "foo", "foo"},
+		{"truncate_bytes", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.Binary, []byte{0x00, 0x01, 0x02, 0x03}, "AAECAw=="},
+		{"truncate_decimal", iceberg.TruncateTransform{Width: 1}, iceberg.DecimalTypeOf(4, 2), iceberg.Decimal{Val: decVal, Scale: 2}, "14.21"},
+		{"truncate_nil", iceberg.TruncateTransform{Width: 1}, iceberg.PrimitiveTypes.String, nil, "null"},
+		{"void", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.TimestampTz, tsMicros, "null"},
+		{"void_nil", iceberg.VoidTransform{}, iceberg.PrimitiveTypes.String, nil, "null"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.transform.ToHumanStrType(tt.typ, tt.input))
 		})
 	}
 }
@@ -288,6 +334,64 @@ func TestManifestPartitionVals(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestBucketTransform_NumBucketsValidation(t *testing.T) {
+	transform := iceberg.BucketTransform{}
+	t.Run("ApplyRejectsInvalidBuckets", func(t *testing.T) {
+		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+			Valid: true,
+			Val:   iceberg.Int32Literal(123),
+		})
+		require.False(t, out.Valid)
+	})
+
+	t.Run("TransformerRejectsInvalidBuckets", func(t *testing.T) {
+		fn := transform.Transformer(iceberg.PrimitiveTypes.String)
+		out := fn("abc")
+		require.False(t, out.Valid)
+	})
+
+	t.Run("ProjectRejectsInvalidBuckets", func(t *testing.T) {
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID:   1,
+			Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64,
+		})
+		bound, err := iceberg.EqualTo(iceberg.Reference("id"), int64(42)).Bind(schema, true)
+		require.NoError(t, err)
+
+		_, err = transform.Project("id_bucket", bound.(iceberg.BoundPredicate))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+}
+
+func TestBucketTransform_MarshalTextRejectsInvalidBuckets(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: 0}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("negative", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: -1}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("valid", func(t *testing.T) {
+		txt, err := iceberg.BucketTransform{NumBuckets: 16}.MarshalText()
+		require.NoError(t, err)
+		assert.Equal(t, "bucket[16]", string(txt))
+	})
+}
+
+func TestBucketTransformUnsupportedSourceTypeDoesNotPanic(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
+	require.NotPanics(t, func() {
+		result := fn(true)
+		require.False(t, result.Valid)
+	})
 }
 
 func TestCanTransform(t *testing.T) {

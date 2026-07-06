@@ -221,9 +221,16 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
+	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
+	for _, field := range spec.Fields() {
+		specFieldsByID[field.FieldID] = field
+	}
 
-	for i := range partitionFields {
-		sourceField := spec.Field(i)
+	for i, partitionField := range partitionFields {
+		sourceField, ok := specFieldsByID[partitionField.ID]
+		if !ok {
+			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
+		}
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
 			return nil, fmt.Errorf("failed to find source field ID %d in schema", sourceField.SourceID())

@@ -69,12 +69,13 @@ func (p PartitionField) SourceID() int {
 }
 
 // EscapedName returns the URL-escaped version of the partition field name.
+// initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
-	if p.escapedName == "" {
-		p.escapedName = url.QueryEscape(p.Name)
+	if p.escapedName != "" {
+		return p.escapedName
 	}
 
-	return p.escapedName
+	return url.QueryEscape(p.Name)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
@@ -256,6 +257,9 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
 	}
+	if err := validateTransform(transform); err != nil {
+		return err
+	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
@@ -279,6 +283,17 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	p.fields = append(p.fields, unboundField)
 
 	return nil
+}
+
+func validateTransform(transform Transform) error {
+	switch t := transform.(type) {
+	case BucketTransform:
+		return t.validateNumBuckets()
+	case *BucketTransform:
+		return t.validateNumBuckets()
+	default:
+		return nil
+	}
 }
 
 func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
@@ -350,7 +365,14 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
-	ret := PartitionSpec{id: id, fields: fields}
+	fieldCopies := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = field
+		if field.SourceIDs != nil {
+			fieldCopies[i].SourceIDs = slices.Clone(field.SourceIDs)
+		}
+	}
+	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
 
 	return ret
@@ -370,7 +392,7 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 
 	return slices.EqualFunc(ps.fields, other.fields, func(left, right PartitionField) bool {
 		return slices.Equal(left.SourceIDs, right.SourceIDs) && left.Name == right.Name &&
-			left.Transform == right.Transform
+			left.Transform.Equals(right.Transform)
 	})
 }
 
@@ -418,6 +440,7 @@ func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
 
 	for i := range ps.fields {
+		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
 		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
 	}
 }
@@ -480,6 +503,28 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
+type activePartitionField struct {
+	field      PartitionField
+	resultType Type
+}
+
+func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartitionField {
+	fields := make([]activePartitionField, 0, len(ps.fields))
+	for _, field := range ps.fields {
+		sourceType, ok := schema.FindTypeByID(field.SourceID())
+		if !ok {
+			continue
+		}
+
+		fields = append(fields, activePartitionField{
+			field:      field,
+			resultType: field.Transform.ResultType(sourceType),
+		})
+	}
+
+	return fields
+}
+
 // PartitionType produces a struct of the partition spec.
 //
 // The partition fields should be optional:
@@ -501,17 +546,13 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 // placeholder for dropped sources) for that purpose — see manifestPartitionFields
 // in the table package.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	nestedFields := []NestedField{}
-	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID())
-		if !ok {
-			continue
-		}
-		resultType := field.Transform.ResultType(sourceType)
+	activeFields := ps.activePartitionFields(schema)
+	nestedFields := make([]NestedField, 0, len(activeFields))
+	for _, field := range activeFields {
 		nestedFields = append(nestedFields, NestedField{
-			ID:       field.FieldID,
-			Name:     field.Name,
-			Type:     resultType,
+			ID:       field.field.FieldID,
+			Name:     field.field.Name,
+			Type:     field.resultType,
 			Required: false,
 		})
 	}
@@ -527,9 +568,9 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
 func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
-	partType := ps.PartitionType(sc)
+	activeFields := ps.activePartitionFields(sc)
 
-	if len(partType.FieldList) == 0 {
+	if len(activeFields) == 0 {
 		return ""
 	}
 
@@ -537,27 +578,22 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
 	var sb strings.Builder
 	estimatedSize := 0
-	for i := range partType.Fields() {
-		estimatedSize += len(ps.fields[i].EscapedName()) + 20 // name + "=" + avg value + "/"
+	for i := range activeFields {
+		estimatedSize += len(activeFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
-	for i := range partType.Fields() {
+	for i := range activeFields {
 		if i > 0 {
 			sb.WriteByte('/')
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(ps.fields[i].EscapedName())
+		sb.WriteString(activeFields[i].field.EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		var valueStr string
-		if t, ok := ps.fields[i].Transform.(typedHumanStringer); ok {
-			valueStr = t.ToHumanStrType(partType.FieldList[i].Type, data.Get(i))
-		} else {
-			valueStr = ps.fields[i].Transform.ToHumanStr(data.Get(i))
-		}
+		valueStr := activeFields[i].field.Transform.ToHumanStrType(activeFields[i].resultType, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 

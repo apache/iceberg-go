@@ -20,6 +20,7 @@ package iceberg
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -70,6 +71,23 @@ func (p Properties) GetInt(key string, defVal int) int {
 		}
 
 		return int(i)
+	}
+
+	return defVal
+}
+
+// GetInt64 reads a 64-bit integer property by key. A missing key or an
+// unparseable value returns defVal. Unlike GetInt, this avoids truncating
+// large int64 sentinel values (such as math.MaxInt64) on 32-bit platforms
+// where int is only 32 bits wide.
+func (p Properties) GetInt64(key string, defVal int64) int64 {
+	if v, ok := p[key]; ok {
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return defVal
+		}
+
+		return i
 	}
 
 	return defVal
@@ -283,8 +301,8 @@ func (n *NestedField) Equals(other NestedField) bool {
 		n.Name == other.Name &&
 		n.Required == other.Required &&
 		n.Doc == other.Doc &&
-		n.InitialDefault == other.InitialDefault &&
-		n.WriteDefault == other.WriteDefault &&
+		reflect.DeepEqual(n.InitialDefault, other.InitialDefault) &&
+		reflect.DeepEqual(n.WriteDefault, other.WriteDefault) &&
 		n.Type.Equals(other.Type)
 }
 
@@ -427,7 +445,7 @@ func (l *ListType) String() string { return fmt.Sprintf("list<%s>", l.Element) }
 
 func (l *ListType) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID   int       `json:"element-id"`
+		ID   *int      `json:"element-id"`
 		Elem typeIFace `json:"element"`
 		Req  bool      `json:"element-required"`
 	}{}
@@ -435,7 +453,11 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	l.ElementID = aux.ID
+	if aux.ID == nil {
+		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
+	}
+
+	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
 	l.ElementRequired = aux.Req
 
@@ -507,9 +529,9 @@ func (m *MapType) String() string {
 
 func (m *MapType) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		KeyID    int       `json:"key-id"`
+		KeyID    *int      `json:"key-id"`
 		Key      typeIFace `json:"key"`
-		ValueID  int       `json:"value-id"`
+		ValueID  *int      `json:"value-id"`
 		Value    typeIFace `json:"value"`
 		ValueReq *bool     `json:"value-required"`
 	}{}
@@ -517,8 +539,16 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.KeyID, m.KeyType = aux.KeyID, aux.Key.Type
-	m.ValueID, m.ValueType = aux.ValueID, aux.Value.Type
+	if aux.KeyID == nil {
+		return fmt.Errorf("%w: field is missing required 'key-id' key in JSON", ErrInvalidSchema)
+	}
+
+	if aux.ValueID == nil {
+		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
+	}
+
+	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
+	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
 	if aux.ValueReq == nil {
 		m.ValueRequired = true
 	} else {

@@ -57,6 +57,27 @@ func newRowDeltaTestTable(t *testing.T, formatVersion int) *table.Table {
 	)
 }
 
+func newRowDeltaFloatingPointTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+	)
+
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, "s3://bucket/test",
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "floating_key_test"},
+		meta, "s3://bucket/test/metadata/v1.metadata.json",
+		nil, nil,
+	)
+}
+
 func formatVersionStr(v int) string {
 	return string(rune('0' + v))
 }
@@ -212,6 +233,33 @@ func TestRowDeltaRejectsEqDeleteWithInvalidFieldID(t *testing.T) {
 	err := rd.Commit(t.Context())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found in table schema")
+}
+
+func TestRowDeltaRejectsEqDeleteWithFloatAndDoubleFieldIDs(t *testing.T) {
+	tbl := newRowDeltaFloatingPointTestTable(t)
+
+	tests := []struct {
+		name      string
+		fieldID   int
+		fieldName string
+		fieldType string
+	}{
+		{name: "float", fieldID: 2, fieldName: "score", fieldType: "float"},
+		{name: "double", fieldID: 3, fieldName: "ratio", fieldType: "double"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rd := tbl.NewTransaction().NewRowDelta(nil)
+			rd.AddDeletes(buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{tt.fieldID}))
+
+			err := rd.Commit(t.Context())
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, "eq-del.parquet")
+			assert.ErrorContains(t, err, tt.fieldName)
+			assert.ErrorContains(t, err, tt.fieldType)
+		})
+	}
 }
 
 // rowDeltaCatalog simulates catalog behavior for RowDelta commit tests.
@@ -423,6 +471,19 @@ func TestRowDeltaMultipleCommitsOnSameTransaction(t *testing.T) {
 func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData string) {
 	t.Helper()
 
+	writeParquetFileWithProperties(t, path, sc, jsonData, 0, nil)
+}
+
+func writeParquetFileWithProperties(
+	t testing.TB,
+	path string,
+	sc *arrow.Schema,
+	jsonData string,
+	rowGroupSize int64,
+	writerProps *parquet.WriterProperties,
+) {
+	t.Helper()
+
 	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, sc, strings.NewReader(jsonData))
 	require.NoError(t, err)
 	defer rec.Release()
@@ -430,13 +491,19 @@ func writeParquetFile(t testing.TB, path string, sc *arrow.Schema, jsonData stri
 	fs := iceio.LocalFS{}
 	fw, err := fs.Create(path)
 	require.NoError(t, err)
+	defer fw.Close()
 
 	tbl := array.NewTableFromRecords(sc, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
-	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithStats(true)),
-		pqarrow.DefaultWriterProps()))
+	if rowGroupSize <= 0 {
+		rowGroupSize = rec.NumRows()
+	}
+	if writerProps == nil {
+		writerProps = parquet.NewWriterProperties(parquet.WithStats(true))
+	}
+
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rowGroupSize, writerProps, pqarrow.DefaultWriterProps()))
 }
 
 func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
@@ -490,10 +557,13 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	// (0-indexed: positions 1 and 3 → "beta" and "delta")
 	posDelArrowSc := table.PositionalDeleteArrowSchema
 	posDelPath := location + "/data/pos-del-001.parquet"
-	writeParquetFile(t, posDelPath, posDelArrowSc, `[
+	writeParquetFileWithProperties(t, posDelPath, posDelArrowSc, `[
 		{"file_path": "`+dataPath+`", "pos": 1},
 		{"file_path": "`+dataPath+`", "pos": 3}
-	]`)
+	]`, 1, parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithDictionaryDefault(false),
+	))
 
 	posDelBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
@@ -518,16 +588,20 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	var ids []int64
+	var data []string
 	for rec, err := range itr {
 		require.NoError(t, err)
-		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
-			ids = append(ids, col.Value(i))
+		idCol := rec.Column(0).(*array.Int64)
+		dataCol := rec.Column(1).(*array.String)
+		for i := 0; i < idCol.Len(); i++ {
+			ids = append(ids, idCol.Value(i))
+			data = append(data, dataCol.Value(i))
 		}
 		rec.Release()
 	}
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows at positions 0,2,4 (beta/delta deleted)")
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, data)
 }
 
 func assertRowCount(t *testing.T, tbl *table.Table, expected int64) {

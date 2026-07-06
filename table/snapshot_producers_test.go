@@ -24,6 +24,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -123,6 +125,60 @@ func (m *memIO) Remove(name string) error {
 	return nil
 }
 
+type blockingCreateIO struct {
+	*memIO
+
+	targetActive int
+	reached      chan struct{}
+	release      chan struct{}
+
+	mu          sync.Mutex
+	active      int
+	maxActive   int
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func newBlockingCreateIO(limit int, err error, targetActive int) *blockingCreateIO {
+	return &blockingCreateIO{
+		memIO:        newMemIO(limit, err),
+		targetActive: targetActive,
+		reached:      make(chan struct{}),
+		release:      make(chan struct{}),
+	}
+}
+
+func (b *blockingCreateIO) Create(name string) (iceio.FileWriter, error) {
+	b.mu.Lock()
+	b.active++
+	if b.active > b.maxActive {
+		b.maxActive = b.active
+	}
+	if b.active == b.targetActive {
+		b.once.Do(func() { close(b.reached) })
+	}
+	b.mu.Unlock()
+
+	<-b.release
+
+	b.mu.Lock()
+	b.active--
+	b.mu.Unlock()
+
+	return b.memIO.Create(name)
+}
+
+func (b *blockingCreateIO) MaxActive() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.maxActive
+}
+
+func (b *blockingCreateIO) Release() {
+	b.releaseOnce.Do(func() { close(b.release) })
+}
+
 // createTestTransactionWithMemIO creates a transaction using the io package's mem blob FS
 // so that Create() output is persisted and can be read back (e.g. for sequential commits).
 func createTestTransactionWithMemIO(t *testing.T, spec iceberg.PartitionSpec) (*Transaction, iceio.WriteFileIO) {
@@ -162,6 +218,55 @@ func manifestSize(t *testing.T, version int, spec iceberg.PartitionSpec, schema 
 
 func newTestDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
 	return newTestDataFileWithCount(t, spec, path, partition, 1)
+}
+
+func writeTestManifestFile(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	index int,
+) iceberg.ManifestFile {
+	t.Helper()
+
+	df := newTestDataFile(t, spec, "file://data-"+strconv.Itoa(index)+".parquet", nil)
+	entries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, df),
+	}
+
+	path := "table-location/metadata/source-" + strconv.Itoa(index) + ".avro"
+	var buf bytes.Buffer
+	manifestFile, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err, "write manifest")
+	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+
+	return manifestFile
+}
+
+func newTestPosDeleteFileForSpec(
+	t *testing.T,
+	spec iceberg.PartitionSpec,
+	path string,
+	partition map[int]any,
+	referencedDataFile string,
+) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentPosDeletes,
+		path,
+		iceberg.ParquetFile,
+		partition,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err, "new position delete file builder")
+
+	return builder.ReferencedDataFile(referencedDataFile).Build()
 }
 
 func newTestDataFileWithCount(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any, count int64) iceberg.DataFile {
@@ -634,6 +739,55 @@ func TestManifestWriterClosesUnderlyingFile(t *testing.T) {
 	require.Empty(t, unclosed, "all file writerFactory should be closed, but these are still open: %v", unclosed)
 }
 
+func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
+	oldSpec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, oldSpec)
+
+	newSpec := partitionedSpec()
+	require.NoError(t, txn.meta.AddPartitionSpec(&newSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	currentSpec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	require.NotNil(t, currentSpec)
+	require.Equal(t, 1, currentSpec.ID(), "test setup should evolve the current spec")
+
+	sp := newFastAppendFilesProducer(OpDelete, txn, wfs, nil, nil)
+	oldSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		oldSpec,
+		"mem://default/table-location/delete/old-spec-pos-delete.parquet",
+		nil,
+		"mem://default/table-location/data/old-spec-data.parquet",
+	)
+	currentSpecDelete := newTestPosDeleteFileForSpec(
+		t,
+		*currentSpec,
+		"mem://default/table-location/delete/current-spec-pos-delete.parquet",
+		map[int]any{1000: int32(7)},
+		"mem://default/table-location/data/current-spec-data.parquet",
+	)
+	sp.appendDeleteFile(oldSpecDelete)
+	sp.appendDeleteFile(currentSpecDelete)
+
+	manifests, err := sp.manifests(context.Background())
+	require.NoError(t, err)
+
+	deleteManifestSpecIDs := make([]int32, 0, len(manifests))
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+
+		deleteManifestSpecIDs = append(deleteManifestSpecIDs, manifest.PartitionSpecID())
+		for entry, err := range manifest.Entries(wfs, false) {
+			require.NoError(t, err)
+			require.Equal(t, manifest.PartitionSpecID(), entry.DataFile().SpecID())
+		}
+	}
+
+	require.ElementsMatch(t, []int32{0, 1}, deleteManifestSpecIDs)
+}
+
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
 // closes the underlying file writer. This is related to issue #644 and #681.
 func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
@@ -662,6 +816,81 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 
 	unclosed := trackIO.GetUnclosedWriters()
 	require.Empty(t, unclosed, "all file writerFactory should be closed after createManifest, but these are still open: %v", unclosed)
+}
+
+func TestManifestMergeMaxConcurrencyProperty(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	txn.meta.props[ManifestMergeMaxConcurrencyKey] = "3"
+
+	sp := newMergeAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	merge := sp.producerImpl.(*mergeAppendFiles)
+	require.Equal(t, 3, merge.mergeConcurrency)
+}
+
+func TestManifestMergeMaxConcurrencyDefaultsForNonPositiveValues(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	io := newMemIO(1<<20, nil)
+	txn := createTestTransaction(t, io, spec)
+	txn.meta.props[ManifestMergeMaxConcurrencyKey] = "0"
+
+	sp := newMergeAppendFilesProducer(OpAppend, txn, io, nil, nil)
+	merge := sp.producerImpl.(*mergeAppendFiles)
+	require.Equal(t, runtime.GOMAXPROCS(0), merge.mergeConcurrency)
+}
+
+func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
+	const mergeConcurrency = 2
+
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	blockingIO := newBlockingCreateIO(1<<20, nil, mergeConcurrency)
+	defer blockingIO.Release()
+	txn := createTestTransaction(t, blockingIO, spec)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, blockingIO, nil, nil)
+
+	manifests := make([]iceberg.ManifestFile, 0, 8)
+	for i := 0; i < cap(manifests); i++ {
+		manifests = append(manifests, writeTestManifestFile(t, blockingIO, spec, schema, sp.snapshotID, i))
+	}
+
+	mgr := manifestMergeManager{
+		targetSizeBytes:  int(manifests[0].Length() * 2),
+		minCountToMerge:  1,
+		mergeEnabled:     true,
+		mergeConcurrency: mergeConcurrency,
+		snap:             sp,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.mergeGroup(manifests[0], spec.ID(), manifests)
+		done <- err
+	}()
+
+	select {
+	case <-blockingIO.reached:
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for merge workers")
+	}
+
+	// Give any incorrectly-unbounded workers a chance to enter Create before
+	// releasing the blocked merge outputs.
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, mergeConcurrency, blockingIO.MaxActive())
+
+	blockingIO.Release()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		require.FailNow(t, "timed out waiting for manifest merge")
+	}
+
+	require.LessOrEqual(t, blockingIO.MaxActive(), mergeConcurrency)
 }
 
 // TestOverwriteExistingManifestsClosesUnderlyingFile tests that existingManifests

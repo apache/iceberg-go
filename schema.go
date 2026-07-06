@@ -278,6 +278,10 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
+	if err := checkDuplicateFieldIDs(nil, aux.Fields); err != nil {
+		return err
+	}
+
 	s.init()
 
 	s.fields = aux.Fields

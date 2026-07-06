@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -504,6 +505,19 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
 	}
 
+	// next-row-id is non-decreasing across snapshots, not strictly increasing:
+	// zero-added-rows snapshots (delete-only or metadata-only commits) are
+	// spec-legal and leave the cursor unchanged, so this accepts a sum equal to
+	// the current cursor rather than requiring it to advance. At this point
+	// AddedRows is non-nil and non-negative (guaranteed by the FirstRowID != nil
+	// check above plus Snapshot.ValidateRowLineage), and nextRowID is
+	// non-negative per spec, so the only thing left to guard is int64 overflow
+	// of the running cursor.
+	if *snapshot.AddedRows > math.MaxInt64-nextRowID {
+		return fmt.Errorf("%w: adding %d rows to next-row-id %d overflows int64",
+			ErrInvalidRowLineage, *snapshot.AddedRows, nextRowID)
+	}
+
 	newNextRowID := nextRowID + *snapshot.AddedRows
 	b.nextRowID = &newNextRowID
 
@@ -775,11 +789,12 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 		}
 	}
 
-	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
+	updates := maps.Clone(props)
+	b.updates = append(b.updates, NewSetPropertiesUpdate(updates))
 	if b.props == nil {
-		b.props = props
+		b.props = maps.Clone(updates)
 	} else {
-		maps.Copy(b.props, props)
+		maps.Copy(b.props, updates)
 	}
 
 	return nil
@@ -902,13 +917,17 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	return nil
 }
 
-func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) error {
-	if b.uuid == uuid {
+func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) error {
+	if newUUID == uuid.Nil {
+		return fmt.Errorf("%w: cannot set uuid to nil", iceberg.ErrInvalidArgument)
+	}
+
+	if b.uuid == newUUID {
 		return nil
 	}
 
-	b.updates = append(b.updates, NewAssignUUIDUpdate(uuid))
-	b.uuid = uuid
+	b.updates = append(b.updates, NewAssignUUIDUpdate(newUUID))
+	b.uuid = newUUID
 
 	return nil
 }
@@ -1190,12 +1209,16 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 }
 
 func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
+	if len(ints) == 0 {
+		return nil
+	}
+
 	if slices.Contains(ints, b.defaultSpecID) {
 		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}
 
-	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
-	removed := make([]int, len(ints))
+	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs))
+	removed := make([]int, 0, len(ints))
 	for _, spec := range b.specs {
 		if slices.Contains(ints, spec.ID()) {
 			removed = append(removed, spec.ID())
@@ -1208,7 +1231,7 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	b.specs = newSpecs
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSpecUpdate(removed))
 	}
 
 	return nil
@@ -1223,7 +1246,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 		return fmt.Errorf("%w: can't remove current schema with id %d", iceberg.ErrInvalidArgument, b.currentSchemaID)
 	}
 
-	removed := make([]int, len(ints))
+	removed := make([]int, 0, len(ints))
 	b.schemaList = slices.DeleteFunc(b.schemaList, func(s *iceberg.Schema) bool {
 		if slices.Contains(ints, s.ID) {
 			removed = append(removed, s.ID)
@@ -1235,7 +1258,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 	})
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSchemasUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSchemasUpdate(removed))
 	}
 
 	return nil

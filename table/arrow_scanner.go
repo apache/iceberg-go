@@ -30,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -108,12 +109,12 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 				if deletes == nil {
 					return nil
 				}
-				select {
-				case perFileChan <- deletes:
-					return nil
-				case <-gctx.Done():
-					return gctx.Err()
-				}
+				// Safe even after gctx cancellation: the channel buffer equals
+				// g's concurrency limit, so every in-flight worker can send
+				// without blocking while the for-range below drains to close.
+				perFileChan <- deletes
+
+				return nil
 			})
 		}
 		_ = g.Wait()
@@ -126,7 +127,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 	}
 
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return deletesPerFile, err
 	}
 
 	return deletesPerFile, nil
@@ -251,6 +252,179 @@ func sameDVBlob(a, b iceberg.DataFile) bool {
 	return *a.ContentOffset() == *b.ContentOffset()
 }
 
+func filePathValueType(dt arrow.DataType) arrow.DataType {
+	if dictType, ok := dt.(*arrow.DictionaryType); ok {
+		return dictType.ValueType
+	}
+
+	return dt
+}
+
+func filePathValues(values arrow.Array) (arrow.TypedArray[string], error) {
+	switch arr := values.(type) {
+	case *array.Dictionary:
+		wrapped, err := array.NewDictWrapper[string](arr)
+		if err != nil {
+			return nil, fmt.Errorf("%w: file_path column is not string: %w",
+				iceberg.ErrInvalidSchema, err)
+		}
+
+		return wrapped, nil
+	case arrow.TypedArray[string]:
+		return arr, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, values.DataType())
+	}
+}
+
+func validateFilePathValues(values arrow.TypedArray[string], arr arrow.Array) error {
+	var dict arrow.Array
+	var indices *array.Dictionary
+	if dictionary, ok := arr.(*array.Dictionary); ok {
+		indices = dictionary
+		dict = dictionary.Dictionary()
+	}
+
+	for i := 0; i < values.Len(); i++ {
+		if values.IsNull(i) {
+			return fmt.Errorf("%w: null file_path in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+		if dict != nil && dict.IsNull(indices.GetValueIndex(i)) {
+			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+	}
+
+	return nil
+}
+
+func distinctPosDeleteFilePaths(ctx context.Context, filePathCol *arrow.Chunked) (arrow.Array, error) {
+	if filePathCol.NullN() > 0 {
+		return nil, fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if filePathValueType(filePathCol.DataType()).ID() == arrow.STRING_VIEW {
+		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, filePathCol.DataType())
+	}
+
+	filePaths := compute.NewDatum(filePathCol)
+	unique, err := compute.Unique(ctx, filePaths)
+	filePaths.Release()
+	if err != nil {
+		return nil, err
+	}
+
+	result, ok := unique.(*compute.ArrayDatum)
+	if !ok {
+		unique.Release()
+
+		return nil, fmt.Errorf("%w: unique file_path result is %s",
+			iceberg.ErrInvalidSchema, unique.Kind())
+	}
+
+	arr := result.MakeArray()
+	unique.Release()
+
+	return arr, nil
+}
+
+func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (map[string]*arrow.Chunked, error) {
+	uniquePaths, err := distinctPosDeleteFilePaths(ctx, filePathCol)
+	if err != nil {
+		return nil, err
+	}
+	defer uniquePaths.Release()
+
+	paths, err := filePathValues(uniquePaths)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateFilePathValues(paths, uniquePaths); err != nil {
+		return nil, err
+	}
+
+	results := make(map[string]*arrow.Chunked, uniquePaths.Len())
+	for i := 0; i < uniquePaths.Len(); i++ {
+		sc, err := scalar.GetScalar(uniquePaths, i)
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+		scDatum := compute.NewDatum(sc)
+		if releasable, ok := sc.(scalar.Releasable); ok {
+			releasable.Release()
+		}
+		mask, err := compute.CallFunction(ctx, "equal", nil,
+			compute.NewDatumWithoutOwning(filePathCol), scDatum)
+		scDatum.Release()
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+
+		filtered, err := compute.Filter(ctx, compute.NewDatumWithoutOwning(posCol),
+			mask, *compute.DefaultFilterOptions())
+		mask.Release()
+		if err != nil {
+			releasePosDeletes(results)
+
+			return nil, err
+		}
+
+		filteredChunked, ok := filtered.(*compute.ChunkedDatum)
+		if !ok {
+			filtered.Release()
+			releasePosDeletes(results)
+
+			return nil, fmt.Errorf("%w: filtered position delete result is %s",
+				iceberg.ErrInvalidSchema, filtered.Kind())
+		}
+		filteredChunked.Value.Retain()
+		results[paths.Value(i)] = filteredChunked.Value
+		filtered.Release()
+	}
+
+	return results, nil
+}
+
+func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
+	deletes := set[int64]{}
+	for _, chunk := range positionalDeletes {
+		if chunk == nil {
+			return nil, fmt.Errorf("%w: nil pos column chunk in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+		if chunk.DataType().ID() != arrow.INT64 {
+			return nil, fmt.Errorf("%w: unsupported pos column type %s in position delete file",
+				iceberg.ErrInvalidSchema, chunk.DataType())
+		}
+		for _, arr := range chunk.Chunks() {
+			posArr, ok := arr.(*array.Int64)
+			if !ok {
+				return nil, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
+					iceberg.ErrInvalidSchema, arr)
+			}
+			for _, v := range posArr.Int64Values() {
+				deletes[v] = struct{}{}
+			}
+		}
+	}
+
+	return deletes, nil
+}
+
+func releasePosDeletes(deletes map[string]*arrow.Chunked) {
+	for _, chunk := range deletes {
+		if chunk != nil {
+			chunk.Release()
+		}
+	}
+}
+
 func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
@@ -277,47 +451,26 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 
 	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
 	posCol := tbl.Column(tbl.Schema().FieldIndices("pos")[0]).Data()
-	dict := filePathCol.Chunk(0).(*array.Dictionary).Dictionary().(*array.String)
 
-	results := make(map[string]*arrow.Chunked)
-	for i := 0; i < dict.Len(); i++ {
-		v := dict.Value(i)
-
-		mask, err := compute.CallFunction(ctx, "equal", nil,
-			compute.NewDatumWithoutOwning(filePathCol), compute.NewDatum(v))
-		if err != nil {
-			return nil, err
-		}
-		defer mask.Release()
-
-		filtered, err := compute.Filter(ctx, compute.NewDatumWithoutOwning(posCol),
-			mask, *compute.DefaultFilterOptions())
-		if err != nil {
-			return nil, err
-		}
-
-		results[v] = filtered.(*compute.ChunkedDatum).Value
-	}
-
-	return results, nil
+	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
 }
 
 type set[T comparable] map[T]struct{}
 
 // combinePositionalDeletes builds the surviving-row index list for a single record
-// batch. The deletes set holds file-relative (global) positions, and [start, end) is
-// the global position span the batch covers, so the indices are rebased to batch-local
-// coordinates (i-start): they index into the batch handed to compute.Take, not into the
-// whole file. Without the rebase, the second and later batches of a file would pass
-// indices >= the batch length and compute.Take would fail with "index error: N out of
-// bounds".
-func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, end int64) arrow.Array {
+// batch. The deletes set holds file-relative (global) positions; cursor maps each
+// batch row to its original file position (jumping across pruned row groups), and
+// the appended indices are batch-local (the loop counter): they index into the
+// batch handed to compute.Take, not into the whole file. Without batch-local
+// indices, the second and later batches of a file would pass indices >= the batch
+// length and compute.Take would fail with "index error: N out of bounds".
+func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], cursor *rowPositionCursor, nrows int64) arrow.Array {
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
 
-	for i := start; i < end; i++ {
-		if _, ok := deletes[i]; !ok {
-			bldr.Append(i - start)
+	for i := range nrows {
+		if _, ok := deletes[cursor.next()]; !ok {
+			bldr.Append(i)
 		}
 	}
 
@@ -326,16 +479,13 @@ func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], start, e
 
 type recProcessFn func(arrow.RecordBatch) (arrow.RecordBatch, error)
 
-func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProcessFn {
-	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *rowPositionCursor) recProcessFn {
+	mem := compute.GetAllocator(ctx)
 
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
-		currentIdx := nextIdx
-		nextIdx += r.NumRows()
-
-		indices := combinePositionalDeletes(mem, deletes, currentIdx, nextIdx)
+		indices := combinePositionalDeletes(mem, deletes, cursor, r.NumRows())
 		defer indices.Release()
 
 		out, err := compute.Take(ctx, *compute.DefaultTakeOptions(),
@@ -358,38 +508,67 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 // (GC-friendly) and shared across every per-batch Boolean array; each
 // array.NewBoolean / array.NewSlice pair is released after the batch.
 //
-// rowCount bounds the mask to the data file's row count. The closure-captured
-// nextIdx tracks absolute position across batches, mirroring
-// processPositionalDeletes.
-func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitmap, rowCount int64) recProcessFn {
+// rowCount bounds the mask to the data file's row count. cursor maps each batch
+// row to its original file position: when no row group was pruned the positions
+// are contiguous and the mask is sliced zero-copy; when pruning skipped groups
+// the emitted rows are non-contiguous, so the keep bits are gathered per row at
+// the cursor's positions.
+func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitmap, rowCount int64, cursor *rowPositionCursor) recProcessFn {
 	nextIdx := int64(0)
 	keepBits := bitmap.KeepMaskBytes(rowCount)
 	buf := memory.NewBufferBytes(keepBits)
+	mem := compute.GetAllocator(ctx)
 
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
-		currentIdx := nextIdx
-		nextIdx += r.NumRows()
+		nrows := r.NumRows()
 
-		// Wrap (and slice) the shared keep-mask buffer for this batch.
-		// array.NewSlice on a Boolean array tracks the bit-level offset,
-		// so we don't need byte-aligned slicing — currentIdx can land
-		// anywhere within a byte.
-		full := array.NewBoolean(int(rowCount), buf, nil, 0)
-		defer full.Release()
-		sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
-		defer sliced.Release()
+		if !cursor.src.pruned() {
+			currentIdx := nextIdx
+			nextIdx += nrows
 
-		return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+			// Wrap (and slice) the shared keep-mask buffer for this batch.
+			// array.NewSlice on a Boolean array tracks the bit-level offset,
+			// so we don't need byte-aligned slicing — currentIdx can land
+			// anywhere within a byte.
+			full := array.NewBoolean(int(rowCount), buf, nil, 0)
+			defer full.Release()
+			sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
+			defer sliced.Release()
+
+			return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+		}
+
+		bldr := array.NewBooleanBuilder(mem)
+		defer bldr.Release()
+		bldr.Reserve(int(nrows))
+		for range nrows {
+			pos := cursor.next()
+			// keepBits is sized for rowCount; a pos past it means row-group
+			// metadata and the manifest's File.Count() disagree. Keep the row
+			// rather than indexing out of bounds.
+			if pos >= rowCount {
+				bldr.Append(true)
+
+				continue
+			}
+			// Test keep bit at absolute position pos: byte pos/8, bit pos%8,
+			// LSB-first (the layout the fast path's array.NewBoolean reads).
+			bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
+		}
+		mask := bldr.NewBooleanArray()
+		defer mask.Release()
+
+		return compute.FilterRecordBatch(ctx, r, mask, compute.DefaultFilterOptions())
 	}
 }
 
 // enrichRecordsWithPosDeleteFields enriches a RecordBatch with the columns declared in the PositionalDeleteArrowSchema
 // so that during the pipeline filtering stages that sheds filtered out records, we still have a way to
 // preserve the original position of those records.
-func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile) recProcessFn {
-	nextIdx, mem := int64(0), compute.GetAllocator(ctx)
+func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.DataFile, cursor *rowPositionCursor) recProcessFn {
+	mem := compute.GetAllocator(ctx)
 
 	return func(inData arrow.RecordBatch) (outData arrow.RecordBatch, err error) {
 		defer inData.Release()
@@ -410,12 +589,9 @@ func enrichRecordsWithPosDeleteFields(ctx context.Context, filePath iceberg.Data
 
 		filePathBldr, posBldr := rb.Field(0).(*array.StringBuilder), rb.Field(1).(*array.Int64Builder)
 
-		startPos := nextIdx
-		nextIdx += inData.NumRows()
-
-		for i := startPos; i < nextIdx; i++ {
+		for range inData.NumRows() {
 			filePathBldr.Append(filePath.FilePath())
-			posBldr.Append(i)
+			posBldr.Append(cursor.next())
 		}
 
 		newCols := rb.NewRecordBatch()
@@ -594,18 +770,78 @@ func fieldIndexByID(schema *arrow.Schema, fieldID int) int {
 	return -1
 }
 
+// rowPositionSource holds the surviving row groups for a single file read.
+// processRecords populates spans (via the row-group tester) before any record is
+// read, then every position-keyed pipeline step takes its own cursor over the
+// shared, immutable spans. One source, many cursors: each step advances
+// independently but resolves the same original file positions.
+//
+// With no spans recorded (non-Parquet files, or a read with no pruning pass) the
+// cursors fall back to a contiguous counter from zero.
+type rowPositionSource struct {
+	spans []internal.RowGroupSpan
+}
+
+func (s *rowPositionSource) cursor() *rowPositionCursor {
+	return &rowPositionCursor{src: s}
+}
+
+// pruned reports whether any row group was skipped, i.e. whether emitted rows
+// are non-contiguous. Read only after spans are populated.
+func (s *rowPositionSource) pruned() bool {
+	return len(s.spans) > 0
+}
+
+// rowPositionCursor maps each emitted row back to its original position in the
+// data file. Surviving row groups are visited in file order, so positions jump
+// across the gaps left by pruned groups, keeping _row_id = first_row_id +
+// original position correct even while row-group pruning is active.
+type rowPositionCursor struct {
+	src      *rowPositionSource
+	spanIdx  int
+	consumed int64
+}
+
+// next returns the original file position of the next row. It is meant to be
+// called once per physical row read, in order. spanIdx is bounded to the last
+// span, so reading past the total row count degrades to positions beyond the
+// final span rather than panicking here. Callers that index a buffer sized to
+// the file's row count (e.g. filterByDeletionVector's keep-mask) must still
+// guard against the returned position exceeding that count.
+func (c *rowPositionCursor) next() int64 {
+	spans := c.src.spans
+	if len(spans) == 0 {
+		pos := c.consumed
+		c.consumed++
+
+		return pos
+	}
+
+	for c.spanIdx < len(spans)-1 && c.consumed >= spans[c.spanIdx].NumRows {
+		c.spanIdx++
+		c.consumed = 0
+	}
+
+	span := spans[c.spanIdx]
+	pos := span.FirstRowPos + c.consumed
+	c.consumed++
+
+	return pos
+}
+
 // synthesizeRowLineageColumns fills the requested row-lineage columns from task
 // constants: per the v3 spec a null value inherits first_row_id + position /
 // data_sequence_number, a non-null value is kept. A column absent from the batch
 // is appended. The caller sets synthesizeRowID/synthesizeSeq only when the
 // matching task constant is present.
 //
-// MUST run before any row-dropping step: _row_id is first_row_id + the row's ORIGINAL
-// position, so rowOffset (advanced by the full batch) is only correct before rows are
-// dropped. ToRequestedSchema then resolves the columns by reserved field id.
+// MUST run before any row-dropping step: _row_id is first_row_id + the row's
+// ORIGINAL position, drawn from cursor (advanced once per row in the full batch),
+// so it is only correct before rows are dropped. ToRequestedSchema then resolves
+// the columns by reserved field id.
 func synthesizeRowLineageColumns(
 	ctx context.Context,
-	rowOffset *int64,
+	cursor *rowPositionCursor,
 	task FileScanTask,
 	batch arrow.RecordBatch,
 	synthesizeRowID, synthesizeSeq bool,
@@ -623,7 +859,10 @@ func synthesizeRowLineageColumns(
 		}
 	}()
 
-	synth := func(name string, fieldID int, value func(k int64) int64) error {
+	// perRow, when set, runs once for every physical row in order — including
+	// rows whose explicit value wins — so a cursor stays in lockstep with the
+	// batch even when value is never called.
+	synth := func(name string, fieldID int, perRow func(k int64), value func(k int64) int64) error {
 		idx := fieldIndexByID(schema, fieldID)
 		var existing *array.Int64
 		if idx >= 0 {
@@ -637,6 +876,9 @@ func synthesizeRowLineageColumns(
 		defer bldr.Release()
 		bldr.Reserve(int(nrows))
 		for k := range nrows {
+			if perRow != nil {
+				perRow(k)
+			}
 			if existing != nil && !existing.IsNull(int(k)) {
 				bldr.Append(existing.Value(int(k)))
 			} else {
@@ -664,23 +906,23 @@ func synthesizeRowLineageColumns(
 
 	if synthesizeRowID {
 		first := *task.FirstRowID
-		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID, func(k int64) int64 {
-			return first + *rowOffset + k
-		}); err != nil {
+		var pos int64
+		if err := synth(iceberg.RowIDColumnName, iceberg.RowIDFieldID,
+			func(int64) { pos = cursor.next() },
+			func(int64) int64 { return first + pos },
+		); err != nil {
 			return nil, err
 		}
 	}
 	if synthesizeSeq {
 		seq := *task.DataSequenceNumber
-		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, func(int64) int64 {
-			return seq
-		}); err != nil {
+		if err := synth(iceberg.LastUpdatedSequenceNumberColumnName, iceberg.LastUpdatedSequenceNumberFieldID, nil,
+			func(int64) int64 {
+				return seq
+			}); err != nil {
 			return nil, err
 		}
 	}
-
-	// Advance so the next batch from this file uses the correct row position for _row_id.
-	*rowOffset += nrows
 
 	meta := schema.Metadata()
 
@@ -694,7 +936,7 @@ func (as *arrowScan) processRecords(
 	rdr internal.FileReader,
 	columns []int,
 	pipeline []recProcessFn,
-	skipRowGroupPruning bool,
+	posSource *rowPositionSource,
 	out chan<- enumeratedRecord,
 ) (err error) {
 	var (
@@ -702,11 +944,14 @@ func (as *arrowScan) processRecords(
 		recRdr        array.RecordReader
 	)
 
-	// Row-group pruning skips whole groups, so emitted positions stop being
-	// contiguous. Position-keyed steps (row-lineage _row_id) need every group
-	// read; the per-row filter still enforces the predicate.
+	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
+	// longer cover contiguous file positions. Steps that key on the original
+	// position (row-lineage _row_id, positional/DV deletes, generated position
+	// deletes) recover it from posSource, which the tester seeds with each
+	// surviving group's file position before any record is read, so pruning
+	// stays enabled.
 	switch {
-	case task.Value.File.FileFormat() == iceberg.ParquetFile && !skipRowGroupPruning:
+	case task.Value.File.FileFormat() == iceberg.ParquetFile:
 		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
 		if err != nil {
 			return err
@@ -717,10 +962,14 @@ func (as *arrowScan) processRecords(
 			return err
 		}
 
-		testRowGroups = &internal.ParquetRowGroupTester{
+		tester := &internal.ParquetRowGroupTester{
 			StatsFn:    statsFn,
 			BloomPreds: bloomPreds,
 		}
+		if posSource != nil {
+			tester.Survivors = &posSource.spans
+		}
+		testRowGroups = tester
 	}
 
 	recRdr, err = rdr.GetRecords(ctx, columns, testRowGroups)
@@ -801,40 +1050,52 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	_, wantSeqNum := as.projectedSchema.FindFieldByID(iceberg.LastUpdatedSequenceNumberFieldID)
 	synthesizeRowID := rowLineageEnabled && wantRowID && task.Value.FirstRowID != nil
 	synthesizeSeq := rowLineageEnabled && wantSeqNum && task.Value.DataSequenceNumber != nil
-	// Only _row_id depends on position, so only it forces contiguous reads.
-	needsOriginalPositions := synthesizeRowID
+
+	// Every position-keyed step (_row_id synthesis, positional/DV deletes) needs
+	// each row's original file position; under row-group pruning the emitted rows
+	// are non-contiguous. processRecords seeds one shared source with the
+	// surviving groups and each step takes its own cursor over it.
+	hasDV := dvBitmap != nil && !dvBitmap.IsEmpty()
+	// Per the v3 spec a DV supersedes positional delete files for a data file, so
+	// when both are attached (only possible on a hand-built task; PlanFiles never
+	// produces it) the DV wins and positional deletes are ignored. This mirrors
+	// the planner (scanner.go) and Java's DeleteFileIndex, and keeps at most one
+	// row-dropping position step in the pipeline so cursors never run over a
+	// sequence an earlier step already shortened.
+	applyPosDeletes := len(positionalDeletes) > 0 && !hasDV
+	var posSource *rowPositionSource
+	if synthesizeRowID || applyPosDeletes || hasDV {
+		posSource = &rowPositionSource{}
+	}
+
 	if synthesizeRowID || synthesizeSeq {
 		// Mirror the columns synthesize will append so ToRequestedSchema never
 		// resolves a lineage field missing from the batch.
 		readSchema = iceberg.SchemaWithRowLineageColumns(iceSchema, synthesizeRowID, synthesizeSeq)
-		var rowOffset int64
 		taskVal := task.Value
+		// Only _row_id depends on position, so a cursor is taken only then.
+		var cursor *rowPositionCursor
+		if synthesizeRowID {
+			cursor = posSource.cursor()
+		}
 		pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 			defer r.Release()
 
-			return synthesizeRowLineageColumns(ctx, &rowOffset, taskVal, r, synthesizeRowID, synthesizeSeq)
+			return synthesizeRowLineageColumns(ctx, cursor, taskVal, r, synthesizeRowID, synthesizeSeq)
 		})
 	}
 
-	if len(positionalDeletes) > 0 {
-		deletes := set[int64]{}
-		for _, chunk := range positionalDeletes {
-			for _, a := range chunk.Chunks() {
-				for _, v := range a.(*array.Int64).Int64Values() {
-					deletes[v] = struct{}{}
-				}
-			}
+	if applyPosDeletes {
+		deletes, err := collectPosDeletePositions(positionalDeletes)
+		if err != nil {
+			return err
 		}
 
-		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
-	// PlanFiles skips Parquet pos-delete matching for any data file that
-	// has a DV (per spec), so in practice the two are mutually exclusive
-	// per task. Append after the pos-delete step anyway so a manually-
-	// constructed task with both sources still gets both filters applied.
-	if dvBitmap != nil && !dvBitmap.IsEmpty() {
-		pipeline = append(pipeline, filterByDeletionVector(ctx, dvBitmap, task.Value.File.Count()))
+	if hasDV {
+		pipeline = append(pipeline, filterByDeletionVector(ctx, dvBitmap, task.Value.File.Count(), posSource.cursor()))
 	}
 
 	if len(eqDeleteSets) > 0 {
@@ -874,7 +1135,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, needsOriginalPositions, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, posSource, out)
 
 	return err
 }
@@ -903,19 +1164,21 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
 	enrichedIcebergSchema := iceberg.NewSchema(iceSchema.ID+1, fields...)
 
+	// Each row's original file position is stamped into the generated delete
+	// records and matched against any pre-existing positional deletes. Under the
+	// delete filter, pruned row groups hold no matching rows, so skipping them
+	// drops no generated deletes; cursors over the shared source keep the
+	// emitted positions correct across the gaps.
+	posSource := &rowPositionSource{}
 	pipeline := make([]recProcessFn, 0, 2)
-	pipeline = append(pipeline, enrichRecordsWithPosDeleteFields(ctx, task.Value.File))
+	pipeline = append(pipeline, enrichRecordsWithPosDeleteFields(ctx, task.Value.File, posSource.cursor()))
 	if len(positionalDeletes) > 0 {
-		deletes := set[int64]{}
-		for _, chunk := range positionalDeletes {
-			for _, a := range chunk.Chunks() {
-				for _, v := range a.(*array.Int64).Int64Values() {
-					deletes[v] = struct{}{}
-				}
-			}
+		deletes, err := collectPosDeletePositions(positionalDeletes)
+		if err != nil {
+			return err
 		}
 
-		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes))
+		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
 	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
@@ -946,7 +1209,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task interna
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, false, out)
+	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, posSource, out)
 
 	return err
 }
@@ -1032,6 +1295,8 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 
 				if rec.NumRows() == 0 {
 					// skip empty records
+					rec.Release()
+
 					continue
 				}
 
@@ -1136,6 +1401,8 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	// no intermediate position set.
 	dvBitmaps, err := readAllDeletionVectors(ctx, as.fs, tasks, as.concurrency)
 	if err != nil {
+		releasePerFilePosDeletes(deletesPerFile)
+
 		return nil, nil, err
 	}
 

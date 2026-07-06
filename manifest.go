@@ -710,8 +710,14 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	// Avro encoding used to write them.
 	applyDayTransformDates(metadata["partition-spec"], fieldIDToType)
 
-	inheritRowIDs := formatVersion >= 3 &&
-		content == ManifestContentData &&
+	// A non-nil manifest-list first_row_id is the spec's inheritance signal and
+	// is only assigned by a v3+ manifest-list writer, so it — not the manifest
+	// file's own internal format-version — gates inheritance. A v1- or v2-era
+	// manifest carried into an upgraded v3 table keeps its older format-version
+	// internally but is assigned a first_row_id when written into the v3 list; its
+	// data files must still inherit row IDs (spec: First Row ID Inheritance, "even
+	// if the data file is existing"), otherwise compaction drops their lineage.
+	inheritRowIDs := content == ManifestContentData &&
 		file.FirstRowID() != nil
 	var nextFirstRowID int64
 	if inheritRowIDs {
@@ -824,14 +830,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
 	tmp.inherit(c.file)
-	// Apply first_row_id inheritance for v3 data manifests (spec: First Row ID Inheritance).
-	if c.inheritRowIDs {
-		if df, ok := tmp.DataFile().(*dataFile); ok {
-			if df.FirstRowIDField == nil {
-				id := c.nextFirstRowID
-				df.FirstRowIDField = &id
-			}
-			// Advance for every data file, null or explicit, to match Java semantics.
+	// First Row ID Inheritance (spec): assign the manifest's first_row_id to data
+	// files that lack one, advancing by record_count only on the files actually
+	// assigned. Deleted entries consume no row IDs and are skipped — the
+	// manifest-list writer reserves a manifest's id range as added+existing rows
+	// (excludes deleted), so the read side must match or a live file following a
+	// deleted one over-advances into the next manifest's range. Mirrors Java
+	// ManifestReader.idAssigner (status != DELETED, increment inside the null check).
+	if c.inheritRowIDs && tmp.Status() != EntryStatusDELETED {
+		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
+			id := c.nextFirstRowID
+			df.FirstRowIDField = &id
 			c.nextFirstRowID += df.Count()
 		}
 	}
@@ -1297,6 +1306,10 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		apply(&mf)
 	}
 
+	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
+		return nil, errors.New("first_row_id must not be set on delete manifests")
+	}
+
 	return &mf, nil
 }
 
@@ -1332,54 +1345,52 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		return errors.New("cannot add entry to closed manifest writer")
 	}
 
-	switch entry.Status() {
+	status := entry.Status()
+	switch status {
+	case EntryStatusADDED, EntryStatusEXISTING, EntryStatusDELETED:
+	default:
+		return fmt.Errorf("unknown entry status: %v", status)
+	}
+	count := entry.DataFile().Count()
+	partition := entry.Data.Partition()
+
+	entryToEncode := *entry
+	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		encodeDataFile := cloneDataFileAvroFields(dataFile)
+		encodeDataFile.PartitionData = avroEncodePartitionData(partition, w.partFieldNameToID, w.partFieldIDToType)
+		entryToEncode.Data = encodeDataFile
+	}
+
+	toEncode, err := w.impl.prepareEntry(&entryToEncode, w.snapshotID)
+	if err != nil {
+		return err
+	}
+
+	if err := w.writer.Encode(toEncode); err != nil {
+		return err
+	}
+
+	switch status {
 	case EntryStatusADDED:
 		w.addedFiles++
-		w.addedRows += entry.DataFile().Count()
+		w.addedRows += count
 	case EntryStatusEXISTING:
 		w.existingFiles++
-		w.existingRows += entry.DataFile().Count()
+		w.existingRows += count
 	case EntryStatusDELETED:
 		w.deletedFiles++
-		w.deletedRows += entry.DataFile().Count()
-	default:
-		return fmt.Errorf("unknown entry status: %v", entry.Status())
+		w.deletedRows += count
 	}
 
-	if setter, ok := entry.DataFile().(hasFieldToIDMap); ok {
-		setter.setFieldNameToIDMap(w.partFieldNameToID)
-		setter.setFieldIDToLogicalTypeMap(w.partFieldIDToType)
-	}
+	w.partitions = append(w.partitions, partition)
 
-	w.partitions = append(w.partitions, entry.Data.Partition())
-	partitionData := avroPartitionData(entry.Data.Partition(), w.partFieldIDToType)
-
-	if dataFile, ok := entry.DataFile().(*dataFile); ok {
-		convertedPartitionData := make(map[string]any)
-		for fieldID, convertedValue := range partitionData {
-			for fieldName, id := range w.partFieldNameToID {
-				if id == fieldID {
-					convertedPartitionData[fieldName] = convertedValue
-
-					break
-				}
-			}
-		}
-		dataFile.PartitionData = convertedPartitionData
-	}
-
-	if entry.Status() == EntryStatusADDED || entry.Status() == EntryStatusEXISTING {
+	if status == EntryStatusADDED || status == EntryStatusEXISTING {
 		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
 			w.minSeqNum = seq
 		}
 	}
 
-	toEncode, err := w.impl.prepareEntry(entry, w.snapshotID)
-	if err != nil {
-		return err
-	}
-
-	return w.writer.Encode(toEncode)
+	return nil
 }
 
 func (w *ManifestWriter) Add(entry ManifestEntry) error {
@@ -1420,12 +1431,12 @@ func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *in
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1440,13 +1451,13 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotID))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotID, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1461,14 +1472,14 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 	}
 	parentSnapshotStr := "null"
 	if parentSnapshot != nil {
-		parentSnapshotStr = strconv.Itoa(int(*parentSnapshot))
+		parentSnapshotStr = strconv.FormatInt(*parentSnapshot, 10)
 	}
 
 	return m, m.init(map[string][]byte{
 		"format-version":     []byte(strconv.Itoa(m.version)),
-		"snapshot-id":        []byte(strconv.Itoa(int(snapshotId))),
-		"sequence-number":    []byte(strconv.Itoa(int(sequenceNumber))),
-		"first-row-id":       []byte(strconv.Itoa(int(firstRowID))),
+		"snapshot-id":        []byte(strconv.FormatInt(snapshotId, 10)),
+		"sequence-number":    []byte(strconv.FormatInt(sequenceNumber, 10)),
+		"first-row-id":       []byte(strconv.FormatInt(firstRowID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
 }
@@ -1544,11 +1555,13 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			wrapped := *(file.(*manifestFile))
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
-				if wrapped.Content == ManifestContentData && wrapped.FirstRowIDValue == nil {
-					if m.nextRowID != nil {
-						firstRowID := *m.nextRowID
-						wrapped.FirstRowIDValue = &firstRowID
-						*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+				if wrapped.Content == ManifestContentData {
+					if wrapped.FirstRowIDValue == nil {
+						if m.nextRowID != nil {
+							firstRowID := *m.nextRowID
+							wrapped.FirstRowIDValue = &firstRowID
+							*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+						}
 					}
 				}
 			}
@@ -1642,6 +1655,52 @@ func WriteManifest(
 	}
 
 	return w.ToManifestFile(filename, cnt.Count)
+}
+
+// WriteManifestV3 writes a v3 data manifest and assigns first_row_id.
+// The returned ManifestFile has FirstRowID() set to firstRowID.
+// nextFirstRowID is firstRowID + AddedRowsCount + ExistingRowsCount
+// for the caller to chain to the next manifest. Use this only for
+// reconstruction — manifests committed through a v3 list writer get
+// first_row_id from AddManifests; pre-setting collides with that allocation.
+func WriteManifestV3(
+	filename string,
+	out io.Writer,
+	firstRowID int64,
+	spec PartitionSpec,
+	schema *Schema,
+	snapshotID int64,
+	entries []ManifestEntry,
+) (mf ManifestFile, nextFirstRowID int64, err error) {
+	cnt := &internal.CountingWriter{W: out}
+
+	w, err := NewManifestWriter(3, cnt, spec, schema, snapshotID)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer internal.CheckedClose(w, &err)
+
+	for _, entry := range entries {
+		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
+			return nil, 0, err
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, 0, err
+	}
+
+	mf, err = w.ToManifestFile(filename, cnt.Count)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	raw := mf.(*manifestFile)
+	v := firstRowID
+	raw.FirstRowIDValue = &v
+	nextFirstRowID = firstRowID + raw.AddedRowsCount + raw.ExistingRowsCount
+
+	return raw, nextFirstRowID, nil
 }
 
 // ManifestEntryStatus defines constants for the entry status of

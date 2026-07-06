@@ -437,6 +437,23 @@ func TestDecimalLiteralConversions(t *testing.T) {
 	assert.Equal(t, iceberg.Int64BelowMinLiteral(), below)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, below.Type())
 
+	above, err = iceberg.DecimalLiteral(n4).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32AboveMaxLiteral(), above)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, above.Type())
+
+	below, err = iceberg.DecimalLiteral(n5).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
+
+	n6 := iceberg.Decimal{Val: decimal128.FromU64(uint64(math.MaxInt64) + 2).Negate(), Scale: 0}
+
+	below, err = iceberg.DecimalLiteral(n6).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
+
 	v, err := decimal128.FromFloat64(math.MaxFloat32+1e37, 38, -1)
 	require.NoError(t, err)
 	above, err = iceberg.DecimalLiteral(iceberg.Decimal{Val: v, Scale: -1}).
@@ -667,7 +684,13 @@ func TestFixedLiteral(t *testing.T) {
 
 	binlit, err := fixedLit012.To(iceberg.PrimitiveTypes.Binary)
 	require.NoError(t, err)
-	assert.EqualValues(t, fixedLit012, binlit)
+	binaryLit, ok := binlit.(iceberg.BinaryLiteral)
+	require.True(t, ok)
+	assert.EqualValues(t, fixedLit012, binaryLit)
+	assert.True(t, binaryLit.Type().Equals(iceberg.PrimitiveTypes.Binary))
+
+	binaryLit[0] = 0xFF
+	assert.Equal(t, byte(0x00), fixedLit012[0])
 }
 
 func TestBinaryLiteral(t *testing.T) {
@@ -734,6 +757,27 @@ func TestInvalidBoolLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Binary,
 		iceberg.FixedTypeOf(2),
 	})
+}
+
+func TestBoolLiteralComparator(t *testing.T) {
+	cmp := iceberg.BoolLiteral(false).Comparator()
+
+	tests := []struct {
+		name     string
+		v1, v2   bool
+		expected int
+	}{
+		{"false_equals_false", false, false, 0},
+		{"true_equals_true", true, true, 0},
+		{"false_less_than_true", false, true, -1},
+		{"true_greater_than_false", true, false, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, cmp(tt.v1, tt.v2))
+		})
+	}
 }
 
 func TestInvalidNumericConversions(t *testing.T) {

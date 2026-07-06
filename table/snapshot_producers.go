@@ -24,6 +24,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"runtime"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -334,10 +335,19 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 func (of *overwriteFiles) needsValidation() bool { return true }
 
 type manifestMergeManager struct {
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
-	snap            *snapshotProducer
+	targetSizeBytes  int
+	minCountToMerge  int
+	mergeEnabled     bool
+	mergeConcurrency int
+	snap             *snapshotProducer
+}
+
+func manifestMergeConcurrencyLimit(configured int) int {
+	if configured <= 0 {
+		return runtime.GOMAXPROCS(0)
+	}
+
+	return configured
 }
 
 func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map[int][]iceberg.ManifestFile {
@@ -424,6 +434,7 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 
 	binResults := make([][]iceberg.ManifestFile, len(bins))
 	g := errgroup.Group{}
+	g.SetLimit(manifestMergeConcurrencyLimit(m.mergeConcurrency))
 	for i, bin := range bins {
 		i, bin := i, bin
 		g.Go(func() error {
@@ -465,9 +476,10 @@ func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) 
 type mergeAppendFiles struct {
 	fastAppendFiles
 
-	targetSizeBytes int
-	minCountToMerge int
-	mergeEnabled    bool
+	targetSizeBytes  int
+	minCountToMerge  int
+	mergeEnabled     bool
+	mergeConcurrency int
 }
 
 func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -477,6 +489,8 @@ func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteF
 		targetSizeBytes: txn.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault),
 		minCountToMerge: txn.meta.props.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
 		mergeEnabled:    txn.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
+		mergeConcurrency: manifestMergeConcurrencyLimit(
+			txn.meta.props.GetInt(ManifestMergeMaxConcurrencyKey, ManifestMergeMaxConcurrencyDefault)),
 	}
 
 	return prod
@@ -493,10 +507,11 @@ func (m *mergeAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	}
 
 	dataManifestMergeMgr := manifestMergeManager{
-		targetSizeBytes: m.targetSizeBytes,
-		minCountToMerge: m.minCountToMerge,
-		mergeEnabled:    m.mergeEnabled,
-		snap:            m.base,
+		targetSizeBytes:  m.targetSizeBytes,
+		minCountToMerge:  m.minCountToMerge,
+		mergeEnabled:     m.mergeEnabled,
+		mergeConcurrency: m.mergeConcurrency,
+		snap:             m.base,
 	}
 
 	result, err := dataManifestMergeMgr.mergeManifests(unmergedDataManifests)
@@ -754,46 +769,46 @@ func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.Manifest
 
 func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, files []iceberg.DataFile, output *[]iceberg.ManifestFile) func() (err error) {
 	return func() (err error) {
-		out, path, err := sp.newManifestOutput()
-		if err != nil {
-			return err
-		}
-		defer internal.CheckedClose(out, &err)
-
-		counter := &internal.CountingWriter{W: out}
-		currentSpec, err := sp.txn.meta.CurrentSpec()
-		if err != nil || currentSpec == nil {
-			return fmt.Errorf("could not get current partition spec: %w", err)
-		}
-		wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-			*currentSpec, sp.txn.meta.CurrentSchema(),
-			sp.snapshotID, iceberg.WithManifestWriterContent(content))
-		if err != nil {
-			return err
-		}
-		defer internal.CheckedClose(wr, &err)
-
+		groups := make(map[int][]iceberg.DataFile)
 		for _, df := range files {
-			err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
-				nil, nil, df))
+			specID := int(df.SpecID())
+			groups[specID] = append(groups[specID], df)
+		}
+
+		for specID, files := range groups {
+			mf, err := sp.writeAddedManifest(content, specID, files)
 			if err != nil {
 				return err
 			}
+			*output = append(*output, mf)
 		}
-
-		// close the writer to force a flush and ensure counter.Count is accurate
-		if err := wr.Close(); err != nil {
-			return err
-		}
-
-		mf, err := wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
-		if err != nil {
-			return err
-		}
-		*output = []iceberg.ManifestFile{mf}
 
 		return nil
 	}
+}
+
+func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, specID int, files []iceberg.DataFile) (_ iceberg.ManifestFile, retErr error) {
+	wr, path, counter, out, err := sp.newManifestWriter(sp.spec(specID), iceberg.WithManifestWriterContent(content))
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CheckedClose(out, &retErr)
+	defer internal.CheckedClose(wr, &retErr)
+
+	for _, df := range files {
+		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
+			nil, nil, df))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// close the writer to force a flush and ensure counter.Count is accurate
+	if err := wr.Close(); err != nil {
+		return nil, err
+	}
+
+	return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
 }
 
 func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
@@ -802,18 +817,19 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 		GetInt(WritePartitionSummaryLimitKey, WritePartitionSummaryLimitDefault)
 	ssc.setPartitionSummaryLimit(partitionSummaryLimit)
 
+	var err error
 	currentSchema := sp.txn.meta.CurrentSchema()
 	partitionSpec, err := sp.txn.meta.CurrentSpec()
 	if err != nil || partitionSpec == nil {
 		return Summary{}, fmt.Errorf("could not get current partition spec: %w", err)
 	}
 	for _, df := range sp.addedFiles {
-		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return Summary{}, err
 		}
 	}
 	for _, df := range sp.addedDeleteFiles {
-		if err = ssc.addFile(df, currentSchema, *partitionSpec); err != nil {
+		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return Summary{}, err
 		}
 	}

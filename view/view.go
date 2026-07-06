@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 
 	"github.com/apache/iceberg-go"
@@ -142,7 +143,10 @@ func CreateView(
 		return nil, err
 	}
 
-	metadataLocation := loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
+	metadataLocation, err := url.JoinPath(loc, "metadata", "view-"+uuid.New().String()+".metadata.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to build view metadata location: %w", err)
+	}
 
 	viewMetadataBytes, err := json.Marshal(viewMD)
 	if err != nil {
