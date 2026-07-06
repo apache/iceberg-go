@@ -448,9 +448,13 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	return e
 }
 
-func fromProps(props iceberg.Properties, o *options) {
+func fromProps(props iceberg.Properties, o *options) error {
 	for k, v := range props {
 		switch k {
+		case keyOauthToken:
+			if o.oauthToken == "" {
+				o.oauthToken = v
+			}
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
 		case keyMetadataLocation:
@@ -462,9 +466,9 @@ func fromProps(props iceberg.Properties, o *options) {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := url.Parse(v)
+			u, err := parseAuthURL(v)
 			if err != nil {
-				continue
+				return err
 			}
 			o.authUri = u
 		case keyOauthCredential:
@@ -496,6 +500,23 @@ func fromProps(props iceberg.Properties, o *options) {
 			}
 		}
 	}
+
+	return nil
+}
+
+func parseAuthURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
+	}
+	if u.Scheme == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
+	}
+
+	return u, nil
 }
 
 func toProps(o *options) iceberg.Properties {
@@ -508,6 +529,7 @@ func toProps(o *options) iceberg.Properties {
 		}
 	}
 
+	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyOauthCredential, o.credential)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
@@ -542,7 +564,9 @@ type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
 
-	name      string
+	name string
+	// Retained catalog properties are reused for table/view IO and may carry
+	// authentication material such as credential or token.
 	props     iceberg.Properties
 	endpoints endpointSet
 
@@ -551,7 +575,9 @@ type Catalog struct {
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
 	var ops options
-	fromProps(p, &ops)
+	if err := fromProps(p, &ops); err != nil {
+		return nil, err
+	}
 
 	r := &Catalog{name: name}
 	if err := r.init(ctx, &ops, uri); err != nil {
@@ -765,7 +791,9 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	r.endpoints = resolveEndpoints(rsp.Endpoints, cfg.GetBool(keyViewEndpointsSupported, false))
 
 	o := *opts
-	fromProps(cfg, &o)
+	if err := fromProps(cfg, &o); err != nil {
+		return nil, nil, err
+	}
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)

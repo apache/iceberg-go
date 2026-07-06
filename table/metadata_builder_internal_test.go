@@ -306,15 +306,32 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	newBuilder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
 	// Remove the spec
-	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1}))
+	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1, 99}))
 	newBuild, err := newBuilder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, newBuild)
 	require.Len(t, newBuilder.updates, 1)
+	require.Equal(t, []int{1}, newBuilder.updates[0].(*removeSpecUpdate).SpecIds)
 	require.Len(t, newBuild.PartitionSpecs(), 1)
 	_, err = newBuilder.GetSpecByID(1)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	require.ErrorContains(t, err, "id 1")
+}
+
+func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
+}
+
+func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs(nil))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
 }
 
 func TestSetDefaultPartitionSpec(t *testing.T) {
@@ -1060,7 +1077,7 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, meta.Schemas(), 2, "expected 2 schemas in the metadata")
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
-	err = builder.RemoveSchemas([]int{0})
+	err = builder.RemoveSchemas([]int{0, 99})
 	require.NoError(t, err, "expected to remove schema with ID 1")
 	newMeta, err := builder.Build()
 	require.NoError(t, err)
@@ -1070,6 +1087,17 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, builder.updates, 1, "expected one update for schema removal")
 	require.Equal(t, builder.updates[0].Action(), UpdateRemoveSchemas)
 	require.Equal(t, builder.updates[0].(*removeSchemasUpdate).SchemaIDs, []int{0}, "expected schema ID 0 to be removed")
+}
+
+func TestRemoveSchemasNoMatchDoesNotUpdate(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSchemas([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.schemaList, 2)
 }
 
 // Java: TestTableMetadata.testUpdateSchema
@@ -1672,6 +1700,52 @@ func TestAddSnapshotV3AcceptsFirstRowIDEqualToNextRowID(t *testing.T) {
 	err := builder.AddSnapshot(&snapshot)
 	require.NoError(t, err)
 	require.Equal(t, int64(100), *builder.nextRowID)
+}
+
+func TestAddSnapshotV3AcceptsPositiveAddedRows(t *testing.T) {
+	// Positive added-rows should advance next-row-id.
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+	addedRows := int64(50)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Equal(t, int64(50), *builder.nextRowID)
+}
+
+func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
+	// Zero added-rows is valid and should leave next-row-id unchanged.
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID := int64(0)
+	addedRows := int64(0)
+
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Equal(t, int64(0), *builder.nextRowID)
 }
 
 func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
@@ -2287,6 +2361,30 @@ func TestSetFormatVersionPreservesExistingUUID(t *testing.T) {
 	meta, err := builder.Build()
 	require.NoError(t, err)
 	require.Equal(t, existingUUID, meta.TableUUID())
+}
+
+func TestSetUUIDRejectsNil(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	originalUUID := builder.uuid
+
+	err := builder.SetUUID(uuid.Nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.False(t, builder.HasChanges())
+	require.Equal(t, originalUUID, builder.uuid)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, originalUUID, meta.TableUUID())
+}
+
+func TestNewMetadataWithUUIDGeneratesUUIDForNil(t *testing.T) {
+	tableSchema := schema()
+	partSpec := partitionSpec()
+	order := sortOrder()
+
+	meta, err := NewMetadataWithUUID(&tableSchema, &partSpec, order, "s3://bucket/test/location", nil, uuid.Nil)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, meta.TableUUID())
 }
 
 func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {

@@ -569,6 +569,19 @@ func buildFromBase(t *testing.T) *MetadataBuilder {
 	return b
 }
 
+func TestAssignUUIDUpdate_ApplyRejectsNilUUID(t *testing.T) {
+	b := buildFromBase(t)
+	originalUUID := b.uuid
+
+	err := NewAssignUUIDUpdate(uuid.Nil).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.False(t, b.HasChanges())
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+	require.Equal(t, originalUUID, meta.TableUUID())
+}
+
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "set-statistics",

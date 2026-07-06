@@ -54,12 +54,25 @@ import (
 // issue #830).
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
-// ErrWriteIORequired is returned by doCommit when the table's file system
-// does not implement io.WriteFileIO. Manifest-list rebuild on retry requires
-// write access; failing fast here is preferable to silently skipping the
-// rebuild and reintroducing the stale-parent data-loss bug. Callers that
-// need to detect this condition should use errors.Is(err, ErrWriteIORequired).
-var ErrWriteIORequired = errors.New("commit: file system does not implement WriteFileIO")
+// ErrWriteIORequired is returned by write paths when the table's file system
+// does not implement io.WriteFileIO. Commit retries also fail fast on this
+// condition because manifest-list rebuilds need write access; skipping that
+// rebuild can reintroduce stale-parent data loss. Callers should use
+// errors.Is(err, ErrWriteIORequired) to detect the precise condition, or
+// errors.Is(err, iceberg.ErrNotImplemented) for compatibility with older
+// WriteRecords behavior.
+var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
+
+// requireWriteFileIO should run immediately after resolving the table FS and
+// before mutating transaction state such as automatic name mapping.
+func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
+	wfs, ok := fs.(icebergio.WriteFileIO)
+	if !ok {
+		return nil, ErrWriteIORequired
+	}
+
+	return wfs, nil
+}
 
 // ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
 // computeOwnManifests when a snapshot ID does not exist in the table's
@@ -401,9 +414,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// Every real commit-path FS implements WriteFileIO. Failing here is
 	// preferable to silently skipping the manifest-list rebuild inside the
 	// retry loop — a skip reintroduces the original stale-parent data loss.
-	wfs, ok := fs.(icebergio.WriteFileIO)
-	if !ok {
-		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", ErrWriteIORequired)
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", err)
 	}
 
 	var (

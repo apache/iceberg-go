@@ -376,11 +376,10 @@ type BoolLiteral bool
 
 func (BoolLiteral) Comparator() Comparator[bool] {
 	return func(v1, v2 bool) int {
+		if v1 == v2 {
+			return 0
+		}
 		if v1 {
-			if v2 {
-				return 0
-			}
-
 			return 1
 		}
 
@@ -1268,14 +1267,22 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: could not convert %v to %s",
 			ErrBadCast, d, t)
 	case Int32Type:
-		v := d.Val.BigInt().Int64()
-		if v > math.MaxInt32 {
+		v := d.Val.BigInt()
+		if !v.IsInt64() {
+			if v.Sign() > 0 {
+				return Int32AboveMaxLiteral(), nil
+			} else if v.Sign() < 0 {
+				return Int32BelowMinLiteral(), nil
+			}
+		}
+		i := v.Int64()
+		if i > math.MaxInt32 {
 			return Int32AboveMaxLiteral(), nil
-		} else if v < math.MinInt32 {
+		} else if i < math.MinInt32 {
 			return Int32BelowMinLiteral(), nil
 		}
 
-		return Int32Literal(int32(v)), nil
+		return Int32Literal(int32(i)), nil
 	case Int64Type:
 		v := d.Val.BigInt()
 		if !v.IsInt64() {

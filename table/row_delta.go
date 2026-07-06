@@ -23,7 +23,6 @@ import (
 	"fmt"
 
 	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
 )
 
 // RowDelta encodes a set of row-level changes to a table: new data files
@@ -135,11 +134,8 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 					f.FilePath())
 			}
 
-			for _, id := range eqIDs {
-				if _, ok := schema.FindFieldByID(id); !ok {
-					return fmt.Errorf("equality field ID %d not found in table schema: %s",
-						id, f.FilePath())
-				}
+			if _, err := validateEqualityFieldIDs(schema, eqIDs); err != nil {
+				return fmt.Errorf("invalid equality delete file %s: %w", f.FilePath(), err)
 			}
 		}
 	}
@@ -149,9 +145,9 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		return err
 	}
 
-	wfs, ok := fs.(iceio.WriteFileIO)
-	if !ok {
-		return errors.New("filesystem does not support writing")
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
 	}
 
 	op := rd.Operation()

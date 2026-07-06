@@ -102,6 +102,19 @@ catalog:
 			},
 		},
 	},
+	// glue catalog with aws-profile
+	{
+		[]byte(`
+catalog:
+  default:
+    type: glue
+    aws-profile: my-aws-profile
+`), "default",
+		&CatalogConfig{
+			CatalogType: "glue",
+			AwsProfile:  "my-aws-profile",
+		},
+	},
 }
 
 func TestParseConfig(t *testing.T) {

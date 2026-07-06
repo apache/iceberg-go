@@ -27,7 +27,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
@@ -178,9 +177,9 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		return internal.SingleErrorIter[iceberg.DataFile](err)
 	}
 
-	writeFS, ok := fs.(iceio.WriteFileIO)
-	if !ok {
-		return internal.SingleErrorIter[iceberg.DataFile](fmt.Errorf("%w: filesystem does not support writing", iceberg.ErrNotImplemented))
+	writeFS, err := requireWriteFileIO(fs)
+	if err != nil {
+		return internal.SingleErrorIter[iceberg.DataFile](err)
 	}
 
 	meta, err := MetadataBuilderFromBase(tbl.metadata, tbl.metadataLocation)

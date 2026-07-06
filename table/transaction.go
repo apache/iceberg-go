@@ -114,12 +114,23 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 
 	existing := map[string]struct{}{}
 	for _, r := range t.reqs {
-		existing[r.GetType()] = struct{}{}
+		key, err := requirementSemanticKey(r)
+		if err != nil {
+			return err
+		}
+
+		existing[key] = struct{}{}
 	}
 
 	for _, r := range reqs {
-		if _, ok := existing[r.GetType()]; !ok {
+		key, err := requirementSemanticKey(r)
+		if err != nil {
+			return err
+		}
+
+		if _, ok := existing[key]; !ok {
 			t.reqs = append(t.reqs, r)
+			existing[key] = struct{}{}
 		}
 	}
 
@@ -142,6 +153,17 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
+// requirementSemanticKey assumes Requirement JSON marshaling is canonical and
+// deterministic for every requirement type that participates in dedupe.
+func requirementSemanticKey(r Requirement) (string, error) {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return "", fmt.Errorf("marshal requirement %q: %w", r.GetType(), err)
+	}
+
+	return string(data), nil
+}
+
 // addValidator appends a conflict validator under t.mx. Producers
 // that register validators from outside doCommit (RowDelta, RewriteFiles)
 // must use this helper rather than mutating t.validators directly —
@@ -154,9 +176,9 @@ func (t *Transaction) addValidator(v conflictValidatorFunc) {
 	t.validators = append(t.validators, v)
 }
 
-func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties) *snapshotProducer {
+func (t *Transaction) appendSnapshotProducer(wfs io.WriteFileIO, props iceberg.Properties) *snapshotProducer {
 	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
-	updateSnapshot := t.updateSnapshot(afs, props, OpAppend)
+	updateSnapshot := t.updateSnapshot(wfs, props, OpAppend)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
 	}
@@ -164,10 +186,10 @@ func (t *Transaction) appendSnapshotProducer(afs io.IO, props iceberg.Properties
 	return updateSnapshot.fastAppend()
 }
 
-func (t *Transaction) updateSnapshot(fs io.IO, props iceberg.Properties, operation Operation) snapshotUpdate {
+func (t *Transaction) updateSnapshot(wfs io.WriteFileIO, props iceberg.Properties, operation Operation) snapshotUpdate {
 	return snapshotUpdate{
 		txn:           t,
-		io:            fs.(io.WriteFileIO),
+		io:            wfs,
 		snapshotProps: props,
 		operation:     operation,
 	}
@@ -411,11 +433,15 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 	if err != nil {
 		return err
 	}
-	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
+	appendFiles := t.appendSnapshotProducer(wfs, snapshotProps)
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
-		fs:        fs.(io.WriteFileIO),
+		fs:        wfs,
 		writeUUID: &appendFiles.commitUuid,
 	})
 
@@ -479,6 +505,11 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	if err != nil {
 		return err
 	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
+
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	for df, err := range s.dataFiles(fs, nil) {
 		if err != nil {
@@ -511,7 +542,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
+	updater := t.updateSnapshot(wfs, snapshotProps, OpOverwrite).mergeOverwrite(&commitUUID, nil)
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -715,15 +746,19 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		return err
 	}
 
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
+
 	if !cfg.skipAutoNameMapping {
 		if err := t.ensureNameMapping(); err != nil {
 			return err
 		}
-	}
-
-	fs, err := t.tbl.fsF(ctx)
-	if err != nil {
-		return err
 	}
 
 	if !cfg.skipDuplicateCheck {
@@ -745,7 +780,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		}
 	}
 
-	appendFiles := t.appendSnapshotProducer(fs, snapshotProps)
+	appendFiles := t.appendSnapshotProducer(wfs, snapshotProps)
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -825,6 +860,10 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	if err != nil {
 		return err
 	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
 
 	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	for df, err := range s.dataFiles(fs, nil) {
@@ -857,7 +896,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -951,6 +990,10 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if err != nil {
 		return err
 	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
 
 	// Scan all entries (data + delete files) in a single pass to validate
 	// that all files to delete/remove actually exist in the table.
@@ -1004,7 +1047,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	updater := t.updateSnapshot(wfs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -1063,13 +1106,18 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		set[filePath] = struct{}{}
 	}
 
+	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return err
+	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return err
+	}
+
 	if !ignoreDuplicates {
 		if s := t.meta.currentSnapshot(); s != nil {
 			referenced := make([]string, 0)
-			fs, err := t.tbl.fsF(ctx)
-			if err != nil {
-				return err
-			}
 			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
 					return err
@@ -1097,12 +1145,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		}
 	}
 
-	fs, err := t.tbl.fsF(ctx)
-	if err != nil {
-		return err
-	}
-
-	updater := t.appendSnapshotProducer(fs, snapshotProps)
+	updater := t.appendSnapshotProducer(wfs, snapshotProps)
 
 	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filePaths, addFilesOp.concurrency)
 	if err != nil {
@@ -1215,19 +1258,15 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		apply(&overwrite)
 	}
 
-	updater, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
+	updater, wfs, err := t.performCopyOnWriteDeletion(ctx, OpOverwrite, snapshotProps, overwrite.filter, overwrite.caseSensitive, overwrite.concurrency)
 	if err != nil {
 		return err
 	}
 
-	fs, err := t.tbl.fsF(ctx)
-	if err != nil {
-		return err
-	}
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
-		fs:        fs.(io.WriteFileIO),
+		fs:        wfs,
 		writeUUID: &updater.commitUuid,
 	})
 
@@ -1264,30 +1303,34 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 	return t.apply(updates, reqs)
 }
 
-func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, io.WriteFileIO, error) {
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	if t.meta.NameMapping() == nil {
 		nameMapping := t.meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		err = t.SetProperties(iceberg.Properties{DefaultNameMappingKey: string(mappingJson)})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
+	updater := t.updateSnapshot(wfs, snapshotProps, operation).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, filesToRewrite, fileSeqByPath, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	for _, df := range filesToDelete {
@@ -1296,15 +1339,19 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 
 	if len(filesToRewrite) > 0 {
 		if err := t.rewriteFilesWithFilter(ctx, fs, updater, filesToRewrite, fileSeqByPath, filter, caseSensitive, concurrency); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	return updater, nil
+	return updater, wfs, nil
 }
 
 func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
 	fs, err := t.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wfs, err := requireWriteFileIO(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,7 +1369,7 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	commitUUID := uuid.New()
-	updater := t.updateSnapshot(fs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
+	updater := t.updateSnapshot(wfs, snapshotProps, OpDelete).mergeOverwrite(&commitUUID, filter)
 
 	filesToDelete, withPartialDeletions, _, err := t.classifyFilesForDeletions(ctx, fs, filter, caseSensitive, concurrency)
 	if err != nil {
@@ -1334,8 +1381,22 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 	}
 
 	if len(withPartialDeletions) > 0 {
-		if err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID); err != nil {
+		referenced, err := t.writePositionDeletesForFiles(ctx, fs, updater, withPartialDeletions, filter, caseSensitive, concurrency, commitUUID)
+		if err != nil {
 			return nil, err
+		}
+
+		// Verify the data files these position deletes target still exist on
+		// the branch head at commit time. The overwriteFiles producer only
+		// validates partition-filter overlap; without this check a concurrent
+		// commit that removed a referenced data file would silently orphan the
+		// deletes (they would apply to rewritten data or dangle). Mirrors
+		// RowDelta.validate: collect referenced data-file paths and run
+		// validateDataFilesExist unconditionally (no isolation gating).
+		if len(referenced) > 0 {
+			t.addValidator(func(cc *conflictContext) error {
+				return validateDataFilesExist(cc, referenced)
+			})
 		}
 	}
 
@@ -1403,7 +1464,7 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	}
 	switch writeDeleteMode {
 	case WriteModeCopyOnWrite:
-		updater, err = t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
+		updater, _, err = t.performCopyOnWriteDeletion(ctx, OpDelete, snapshotProps, filter, deleteOp.caseSensitive, deleteOp.concurrency)
 		if err != nil {
 			return err
 		}
@@ -1452,7 +1513,7 @@ func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, f
 
 type fileClassificationTask struct {
 	meta             Metadata
-	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression]
 	caseSensitive    bool
 	rowFilter        iceberg.BooleanExpression
 }
@@ -1517,15 +1578,16 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	for _, manifest := range manifests {
 		manifest := manifest // capture loop variable
 		g.Go(func() error {
-			manifestEval := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
-			if manifestEval != nil {
-				match, err := manifestEval(manifest)
-				if err != nil {
-					return fmt.Errorf("failed to evaluate manifest %s: %w", manifest.FilePath(), err)
-				}
-				if !match {
-					return nil
-				}
+			manifestEval, err := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build manifest evaluator for spec %d: %w", manifest.PartitionSpecID(), err)
+			}
+			match, err := manifestEval(manifest)
+			if err != nil {
+				return fmt.Errorf("failed to evaluate manifest %s: %w", manifest.FilePath(), err)
+			}
+			if !match {
+				return nil
 			}
 
 			localDelete := make([]iceberg.DataFile, 0)
@@ -1785,11 +1847,16 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 		}
 	}
 
+	wfs, err := requireWriteFileIO(args.fs)
+	if err != nil {
+		return nil, err
+	}
+
 	var result []iceberg.DataFile
 	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
 		sc:          arrowSchema,
 		itr:         releaseIter,
-		fs:          args.fs.(io.WriteFileIO),
+		fs:          wfs,
 		writeUUID:   &args.commitUUID,
 		factoryOpts: factoryOpts,
 	})
@@ -1804,11 +1871,19 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	return result, nil
 }
 
-// writePositionDeletesForFiles rewrites data files by preserving only rows that do NOT match the filter
-func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) error {
+// writePositionDeletesForFiles writes position-delete files for the rows in
+// files that match filter, appends them to updater, and returns the distinct
+// data-file paths those deletes reference. A position-delete that does not
+// record its referenced data file is omitted from the returned paths (it
+// cannot be existence-checked), matching RowDelta.validate and Java.
+func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
 	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, err
 	}
 
 	partitionContextByFilePath := make(map[string]partitionContext, len(files))
@@ -1820,17 +1895,25 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		sc:        PositionalDeleteArrowSchema,
 		itr:       posDeleteRecIter,
 		writeUUID: &commitUUID,
-		fs:        fs.(io.WriteFileIO),
+		fs:        wfs,
 	})
 
+	var referenced []string
+	seen := make(map[string]struct{})
 	for f, err := range posDeleteFiles {
 		if err != nil {
-			return err
+			return nil, err
 		}
 		updater.appendDeleteFile(f)
+		if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+			if _, ok := seen[*ref]; !ok {
+				seen[*ref] = struct{}{}
+				referenced = append(referenced, *ref)
+			}
+		}
 	}
 
-	return nil
+	return referenced, nil
 }
 
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
