@@ -81,17 +81,6 @@ func TestInitSchemaVersionV1WhenColumnPresent(t *testing.T) {
 	assert.False(t, c.isV0(), "a schema with iceberg_type must be detected as V1")
 }
 
-func TestInitSchemaVersionV0WhenColumnAbsent(t *testing.T) {
-	c, sqldb := newInMemoryCatalog(t, nil)
-	defer sqldb.Close()
-
-	createLegacyV0Table(t, sqldb)
-	require.NoError(t, c.initSchemaVersion(context.Background()))
-
-	assert.Equal(t, schemaV0, c.schemaVersion)
-	assert.True(t, c.isV0(), "an existing schema without iceberg_type must be detected as V0")
-}
-
 func TestInitSchemaVersionTableAbsentIsV1(t *testing.T) {
 	c, sqldb := newInMemoryCatalog(t, nil)
 	defer sqldb.Close()
@@ -109,6 +98,7 @@ func TestInitSchemaVersionWithoutOptInStaysV0(t *testing.T) {
 	createLegacyV0Table(t, sqldb)
 	require.NoError(t, c.initSchemaVersion(context.Background()))
 
+	assert.Equal(t, schemaV0, c.schemaVersion)
 	assert.True(t, c.isV0(), "no opt-in must leave the catalog on V0")
 	assert.False(t, icebergTypeColumnPresent(t, sqldb),
 		"no opt-in must not run the one-way ALTER")
