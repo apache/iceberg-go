@@ -967,9 +967,16 @@ func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
 }
 
 func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
-	if len(ident) < 1 {
-		return "", "", fmt.Errorf("%w: missing namespace or invalid identifier %v",
-			catalog.ErrNoSuchTable, strings.Join(ident, "."))
+	if err := catalog.ValidateTableIdentifier(ident); err != nil {
+		return "", "", err
+	}
+
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+}
+
+func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
+	if err := catalog.ValidateViewIdentifier(ident); err != nil {
+		return "", "", err
 	}
 
 	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
@@ -1158,6 +1165,9 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 	for i, c := range commits {
 		if len(c.Identifier) == 0 {
 			return catalog.ErrMissingIdentifier
+		}
+		if err := catalog.ValidateTableIdentifier(c.Identifier); err != nil {
+			return err
 		}
 
 		reqs := c.Requirements
@@ -1366,6 +1376,12 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 
 func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	if err := r.endpoints.check(endpointRenameTable); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateTableIdentifier(from); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateTableIdentifier(to); err != nil {
 		return nil, err
 	}
 
@@ -1718,7 +1734,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1735,7 +1751,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 }
 
 func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -1805,7 +1821,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(identifier)
+	ns, viewName, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1866,7 +1882,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(ident)
+	ns, viewName, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1911,7 +1927,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1948,7 +1964,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}

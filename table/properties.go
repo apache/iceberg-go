@@ -70,6 +70,9 @@ const (
 	ManifestMinMergeCountKey     = "commit.manifest.min-count-to-merge"
 	ManifestMinMergeCountDefault = 100
 
+	ManifestMergeMaxConcurrencyKey     = "commit.manifest-merge.max-concurrency"
+	ManifestMergeMaxConcurrencyDefault = 0
+
 	WritePartitionSummaryLimitKey     = "write.summary.partition-limit"
 	WritePartitionSummaryLimitDefault = 0
 

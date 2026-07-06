@@ -20,6 +20,7 @@ package view
 import (
 	"bytes"
 	"context"
+	"net/url"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
@@ -83,6 +84,33 @@ func (t *ViewTestSuite) TestNewViewFromReadFile() {
 	t.Require().NotNil(vw2)
 
 	t.True(t.view.Equals(*vw2))
+}
+
+func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
+	createdView, err := CreateView(
+		t.T().Context(),
+		"test-catalog",
+		[]string{"ns", "test_view"},
+		newTestSchema(0),
+		"select 1",
+		[]string{"ns"},
+		"mem://view-create-location/test-view/",
+		nil,
+	)
+	t.Require().NoError(err)
+	t.Require().NotNil(createdView)
+
+	metadataLocation := createdView.MetadataLocation()
+	parsedLocation, err := url.Parse(metadataLocation)
+	t.Require().NoError(err)
+	t.NotContains(parsedLocation.Path, "//metadata/")
+	t.Contains(parsedLocation.Path, "/test-view/metadata/view-")
+
+	fs, err := iceio.LoadFS(t.T().Context(), nil, metadataLocation)
+	t.Require().NoError(err)
+	metadataFile, err := fs.Open(metadataLocation)
+	t.Require().NoError(err)
+	t.Require().NoError(metadataFile.Close())
 }
 
 func (t *ViewTestSuite) TestLocation() {

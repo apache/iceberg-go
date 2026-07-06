@@ -471,6 +471,306 @@ func TestUnmarshalSchema(t *testing.T) {
 	assert.True(t, tableSchemaSimple.Equals(&schema))
 }
 
+func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		contains string
+	}{
+		{
+			name: "top level",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "foo", "type": "string", "required": false},
+					{"id": 1, "name": "bar", "type": "int", "required": true}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: foo and bar",
+		},
+		{
+			name: "nested struct",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "payload",
+						"type": {
+							"type": "struct",
+							"fields": [
+								{"id": 3, "name": "inner", "type": "string", "required": false},
+								{"id": 3, "name": "inner_dup", "type": "int", "required": false}
+							]
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 3: inner and inner_dup",
+		},
+		{
+			name: "list element",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 1,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: id and element",
+		},
+		{
+			name: "map key",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 1,
+							"key": "string",
+							"value-id": 3,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: id and key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			err := json.Unmarshal([]byte(tt.schema), &schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.contains)
+		})
+	}
+}
+
+func TestUnmarshalSchemaRejectsMissingCollectionFieldIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		contains string
+	}{
+		{
+			name: "missing list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'element-id' key in JSON",
+		},
+		{
+			name: "missing map key id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key": "string",
+							"value-id": 2,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'key-id' key in JSON",
+		},
+		{
+			name: "missing map value id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'value-id' key in JSON",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			err := json.Unmarshal([]byte(tt.schema), &schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.contains)
+		})
+	}
+}
+
+func TestUnmarshalSchemaAllowsZeroCollectionFieldIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		check  func(*testing.T, iceberg.NestedField)
+	}{
+		{
+			name: "zero list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 0,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				listType, ok := field.Type.(*iceberg.ListType)
+				require.True(t, ok)
+				assert.Equal(t, 0, listType.ElementID)
+			},
+		},
+		{
+			name: "zero map key id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 0,
+							"key": "string",
+							"value-id": 2,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				mapType, ok := field.Type.(*iceberg.MapType)
+				require.True(t, ok)
+				assert.Equal(t, 0, mapType.KeyID)
+			},
+		},
+		{
+			name: "zero map value id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value-id": 0,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				mapType, ok := field.Type.(*iceberg.MapType)
+				require.True(t, ok)
+				assert.Equal(t, 0, mapType.ValueID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			require.NoError(t, json.Unmarshal([]byte(tt.schema), &schema))
+			require.Equal(t, 1, schema.NumFields())
+			tt.check(t, schema.Field(0))
+		})
+	}
+}
+
+func TestUnmarshalSchemaRoundTripsCollectionFieldIDs(t *testing.T) {
+	data, err := json.Marshal(tableSchemaNested)
+	require.NoError(t, err)
+
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &schema))
+	assert.True(t, tableSchemaNested.Equals(&schema))
+}
+
 func TestPruneColumnsString(t *testing.T) {
 	sc, err := iceberg.PruneColumns(tableSchemaNested, map[int]iceberg.Void{1: {}}, false)
 	require.NoError(t, err)

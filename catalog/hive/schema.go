@@ -97,14 +97,16 @@ const (
 // are set to viewSQL.
 func constructHiveViewTable(dbName, viewName, location, metadataLocation string, schema *iceberg.Schema, viewSQL string, props map[string]string) *hive_metastore.Table {
 	parameters := make(map[string]string)
-	parameters[TableTypeKey] = TableTypeIcebergView
-	parameters[MetadataLocationKey] = metadataLocation
-	parameters[ExternalKey] = "TRUE"
 	for k, v := range props {
 		if v != "" {
 			parameters[k] = v
 		}
 	}
+	delete(parameters, PreviousMetadataLocationKey)
+
+	parameters[TableTypeKey] = TableTypeIcebergView
+	parameters[MetadataLocationKey] = metadataLocation
+	parameters[ExternalKey] = "TRUE"
 
 	// Ref: https://github.com/apache/iceberg/blob/11dbe2f091edd4ac492f210c878d22386ec9d605/hive-metastore/src/main/java/org/apache/iceberg/hive/HiveOperationsBase.java#L174-L178
 	tbl := &hive_metastore.Table{
@@ -131,18 +133,15 @@ func constructHiveViewTable(dbName, viewName, location, metadataLocation string,
 func constructHiveTable(dbName, tableName, location, metadataLocation string, schema *iceberg.Schema, props map[string]string) *hive_metastore.Table {
 	parameters := make(map[string]string)
 
-	// Set Iceberg-specific parameters
-	parameters[TableTypeKey] = TableTypeIceberg
-	parameters[MetadataLocationKey] = metadataLocation
-	parameters[ExternalKey] = "TRUE"
-
-	// Set storage handler - required for Hive to query Iceberg tables
-	parameters["storage_handler"] = "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler"
-
-	// Copy additional properties
 	for k, v := range props {
 		parameters[k] = v
 	}
+	delete(parameters, PreviousMetadataLocationKey)
+
+	parameters[TableTypeKey] = TableTypeIceberg
+	parameters[MetadataLocationKey] = metadataLocation
+	parameters[ExternalKey] = "TRUE"
+	parameters["storage_handler"] = "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler"
 
 	return &hive_metastore.Table{
 		TableName: tableName,

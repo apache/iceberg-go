@@ -107,3 +107,27 @@ func TestUpdatesUnmarshalJSONInvalidJSON(t *testing.T) {
 	err := json.Unmarshal([]byte(jsonData), &updates)
 	require.Error(t, err)
 }
+
+func TestUpdatesUnmarshalJSONReplacesExistingSlice(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/old-location"}
+	]`), &updates))
+
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-properties", "updates": {"key": "value"}}
+	]`), &updates))
+	require.Len(t, updates, 1)
+	assert.Equal(t, UpdateSetProperties, updates[0].Action())
+
+	previous := append(Updates(nil), updates...)
+	err := json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/new-location"},
+		{"action": "unknown-action"}
+	]`), &updates)
+	require.Error(t, err)
+	assert.Equal(t, previous, updates)
+
+	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
+	assert.Empty(t, updates)
+}

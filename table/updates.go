@@ -79,6 +79,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	var updates Updates
+	if len(rawUpdates) > 0 {
+		updates = make(Updates, 0, len(rawUpdates))
+	}
 	for _, raw := range rawUpdates {
 		var base baseUpdate
 		if err := json.Unmarshal(raw, &base); err != nil {
@@ -140,8 +144,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(raw, upd); err != nil {
 			return err
 		}
-		*u = append(*u, upd)
+		updates = append(updates, upd)
 	}
+
+	*u = updates
 
 	return nil
 }

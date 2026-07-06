@@ -85,7 +85,21 @@ func NewDVWriter(fs iceio.WriteFileIO, specByID SpecResolver) *DVWriter {
 // Callers must not pass conflicting partition values across Adds for the
 // same data file — the writer trusts the first-Add values for the rest of
 // the writer's life.
-func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, partitionData map[int]any) {
+// Add validates that every position is non-negative; negative positions are
+// rejected and returned as errors to avoid silently writing malformed
+// deletion-vector metadata.
+func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, partitionData map[int]any) error {
+	if len(positions) == 0 {
+		return nil
+	}
+
+	for _, pos := range positions {
+		if pos < 0 {
+			return fmt.Errorf("%w: invalid deletion position %d for %q: positions must be >= 0",
+				iceberg.ErrInvalidArgument, pos, dataFilePath)
+		}
+	}
+
 	entry, ok := w.entries[dataFilePath]
 	if !ok {
 		// Defensive copy of partitionData on capture so a caller that
@@ -106,6 +120,8 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, par
 	for _, pos := range positions {
 		entry.bitmap.Set(uint64(pos))
 	}
+
+	return nil
 }
 
 // Flush writes one Puffin file containing one blob per data file, and returns
