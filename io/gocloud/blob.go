@@ -371,6 +371,25 @@ func walkedURIPath(location objectLocation, walked string) string {
 	return location.uriPrefix + walked
 }
 
+// isDirectoryMarker reports whether dirEntry is the marker object for
+// the path passed to WalkDir
+func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
+	// Directory entries and nil entries are never the marker object itself.
+	if dirEntry == nil || dirEntry.IsDir() {
+		return false
+	}
+
+	info, err := dirEntry.Info()
+	if err != nil {
+		return false
+	}
+
+	// blob fs is the only implementation that uses directory markers
+	// so we can use a type assertion to check
+	obj, ok := info.Sys().(*blob.ListObject)
+	return ok && obj.Key == directoryMarker(walkRootKey)
+}
+
 func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	location, err := bfs.objectLocation(root)
 	var walkPath string
@@ -385,6 +404,12 @@ func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	}
 
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
+		// Skip the marker for the path passed to WalkDir. Otherwise walking
+		// "warehouse/ns" reports "warehouse/ns/" as a child file.
+		if err == nil && isDirectoryMarker(walkPath, d) {
+			return nil
+		}
+
 		if location.hasAuthority {
 			path = walkedURIPath(location, path)
 		}

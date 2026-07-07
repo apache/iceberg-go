@@ -743,6 +743,28 @@ func TestBlobFileIOMkdirAll(t *testing.T) {
 	}
 }
 
+func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+
+	// MkdirAll leaves only a "warehouse/ns/" marker for an empty namespace.
+	// Walking "warehouse/ns" should not report that marker as a child file.
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/warehouse/ns"))
+
+	var paths []string
+	require.NoError(t, bfs.WalkDir("s3://test-bucket/warehouse/ns", func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		paths = append(paths, path)
+
+		return nil
+	}))
+	// There should be exactly one path reported and no dummy directory markers
+	assert.Equal(t, []string{"s3://test-bucket/warehouse/ns"}, paths)
+}
+
 func TestBlobFileIORemoveAll(t *testing.T) {
 	ctx := context.Background()
 	bucket := memblob.OpenBucket(nil)

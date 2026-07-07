@@ -176,6 +176,22 @@ func (s *HadoopMinIOIntegrationSuite) TestDropTableRemovesTableFromListingAndLoa
 	s.Empty(tables)
 }
 
+func (s *HadoopMinIOIntegrationSuite) TestDropNamespaceAfterDropTable() {
+	ns := table.Identifier{"drop_table_then_ns"}
+	ident := table.Identifier{"drop_table_then_ns", "tbl"}
+
+	s.Require().NoError(s.cat.CreateNamespace(s.ctx, ns, nil))
+	_, err := s.cat.CreateTable(s.ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.cat.DropTable(s.ctx, ident))
+
+	// Ensure that the namespace can be dropped after dropping the table
+	// and that driectory marker logic is handled properly, not preventing
+	// the drop from occurring.
+	s.Require().NoError(s.cat.DropNamespace(s.ctx, ns))
+}
+
 func TestHadoopIntegrationMinIO(t *testing.T) {
 	suite.Run(t, new(HadoopMinIOIntegrationSuite))
 }
