@@ -233,7 +233,22 @@ func TestMetadataEquals(t *testing.T) {
 	assert.True(t, meta.Equals(meta))
 	assert.True(t, meta.Equals(other))
 	assert.False(t, meta.Equals(nil))
+	assert.False(t, meta.Equals((*metadata)(nil)), "a typed-nil Metadata must not panic")
 	assert.False(t, meta.Equals(parseFixture(t, "udf-metadata-table.json")))
+}
+
+// TestScalarMayReturnEmptyStruct pins that the udtf non-empty-struct rule is
+// scoped to table functions: a scalar function may still declare an empty
+// struct return type.
+func TestScalarMayReturnEmptyStruct(t *testing.T) {
+	m := minimalMetadata(t)
+	definition(t, m, 0)["return-type"] = map[string]any{"type": "struct", "fields": []any{}}
+
+	data, err := json.Marshal(m)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.NoError(t, err)
 }
 
 type failingReader struct{}
@@ -449,6 +464,27 @@ func TestMetadataValidation(t *testing.T) {
 			"udtf with non-struct return type",
 			func(t *testing.T, m map[string]any) { definition(t, m, 0)["function-type"] = "udtf" },
 			ErrInvalidUDFMetadata, "return-type is not a struct",
+		},
+		{
+			"udtf with empty struct return type",
+			func(t *testing.T, m map[string]any) {
+				definition(t, m, 0)["function-type"] = "udtf"
+				definition(t, m, 0)["return-type"] = map[string]any{"type": "struct", "fields": []any{}}
+			},
+			ErrInvalidUDFMetadata, "return-type struct has no fields",
+		},
+		{
+			"parameter struct with duplicate field names",
+			func(t *testing.T, m map[string]any) {
+				definition(t, m, 0)["parameters"] = []any{map[string]any{
+					"name": "x",
+					"type": map[string]any{"type": "struct", "fields": []any{
+						map[string]any{"name": "a", "type": "int"},
+						map[string]any{"name": "a", "type": "string"},
+					}},
+				}}
+			},
+			ErrInvalidUDFType, `duplicate field name "a"`,
 		},
 		{
 			"missing function-type",

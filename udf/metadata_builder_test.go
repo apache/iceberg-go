@@ -487,6 +487,35 @@ func TestBuilderOnNullInput(t *testing.T) {
 	assert.Equal(t, OnNullInputReturnNull, def.CurrentVersion().NullInputBehavior())
 }
 
+// TestBuilderLogTimestampZero pins that epoch-0 is a settable log timestamp:
+// the builder's "unset" sentinel is -1, matching DefinitionVersion.TimestampMS.
+func TestBuilderLogTimestampZero(t *testing.T) {
+	builder, err := NewMetadataBuilder()
+	require.NoError(t, err)
+
+	meta, err := builder.
+		AddDefinition(newTestDefinition(t)).
+		AddDefinitionVersion("int", newTestVersion(t, "x + 1", 1000)).
+		SetLogTimestampMS(0).
+		Build()
+	require.NoError(t, err)
+
+	log := meta.DefinitionLog()
+	require.Len(t, log, 1)
+	assert.Equal(t, int64(0), log[0].TimestampMS)
+
+	// a negative log timestamp is rejected by validation at Build
+	builder, err = NewMetadataBuilder()
+	require.NoError(t, err)
+	_, err = builder.
+		AddDefinition(newTestDefinition(t)).
+		AddDefinitionVersion("int", newTestVersion(t, "x + 1", 1000)).
+		SetLogTimestampMS(-5).
+		Build()
+	require.ErrorIs(t, err, ErrInvalidUDFMetadata)
+	assert.ErrorContains(t, err, "invalid negative timestamp-ms -5")
+}
+
 func TestBuilderRemoveProperties(t *testing.T) {
 	builder, err := NewMetadataBuilder()
 	require.NoError(t, err)

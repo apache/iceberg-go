@@ -520,8 +520,15 @@ func (d *Definition) validate() error {
 	switch d.FunctionType {
 	case FunctionTypeUDF:
 	case FunctionTypeUDTF:
-		if _, ok := d.ReturnType.(StructType); !ok {
+		st, ok := d.ReturnType.(StructType)
+		if !ok {
 			return fmt.Errorf("%w: definition %q is a udtf but its return-type is not a struct",
+				ErrInvalidUDFMetadata, d.DefinitionID)
+		}
+		// The struct describes the output schema; a table without columns
+		// is meaningless.
+		if len(st.Fields) == 0 {
+			return fmt.Errorf("%w: definition %q is a udtf but its return-type struct has no fields",
 				ErrInvalidUDFMetadata, d.DefinitionID)
 		}
 	case "":
@@ -743,6 +750,9 @@ func (m *metadata) DefinitionByID(definitionID string) (*Definition, bool) {
 
 func (m *metadata) Equals(other Metadata) bool {
 	if other == nil {
+		return false
+	}
+	if o, ok := other.(*metadata); ok && o == nil {
 		return false
 	}
 

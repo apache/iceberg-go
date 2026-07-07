@@ -172,6 +172,7 @@ func NewMetadataBuilder() (*MetadataBuilder, error) {
 		definitions:     make([]*Definition, 0),
 		definitionLog:   make([]DefinitionLogEntry, 0),
 		definitionsByID: make(map[string]*Definition),
+		logTimestampMS:  -1,
 	}, nil
 }
 
@@ -183,14 +184,15 @@ func MetadataBuilderFromBase(base Metadata) (*MetadataBuilder, error) {
 	}
 
 	b := &MetadataBuilder{
-		base:          base,
-		uuid:          base.FunctionUUID(),
-		loc:           base.Location(),
-		props:         maps.Clone(base.Properties()),
-		secure:        base.Secure(),
-		doc:           base.Doc(),
-		definitions:   cloneSlice(base.Definitions()),
-		definitionLog: cloneDefinitionLog(base.DefinitionLog()),
+		base:           base,
+		uuid:           base.FunctionUUID(),
+		loc:            base.Location(),
+		props:          maps.Clone(base.Properties()),
+		secure:         base.Secure(),
+		doc:            base.Doc(),
+		definitions:    cloneSlice(base.Definitions()),
+		definitionLog:  cloneDefinitionLog(base.DefinitionLog()),
+		logTimestampMS: -1,
 	}
 	if b.props == nil {
 		b.props = iceberg.Properties{}
@@ -301,8 +303,8 @@ func (b *MetadataBuilder) SetDoc(doc string) *MetadataBuilder {
 
 // SetLogTimestampMS overrides the timestamp used for the definition-log
 // entry appended by Build. Writers that need deterministic metadata (or a
-// timestamp consistent with an external commit) should set this; it
-// defaults to time.Now().UnixMilli().
+// timestamp consistent with an external commit) should set this; when
+// unset it defaults to time.Now().UnixMilli().
 func (b *MetadataBuilder) SetLogTimestampMS(timestampMS int64) *MetadataBuilder {
 	if b.err != nil {
 		return b
@@ -488,7 +490,7 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	definitionLog := cloneDefinitionLog(b.definitionLog)
 	if b.selectionChanged {
 		timestampMS := b.logTimestampMS
-		if timestampMS == 0 {
+		if timestampMS == -1 {
 			timestampMS = time.Now().UnixMilli()
 		}
 

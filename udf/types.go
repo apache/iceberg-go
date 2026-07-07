@@ -237,10 +237,15 @@ func validateType(t Type) error {
 
 		return validateType(v.Value)
 	case StructType:
+		seen := make(map[string]bool)
 		for _, f := range v.Fields {
 			if f.Name == "" {
 				return fmt.Errorf("%w: struct field name must not be empty", ErrInvalidUDFType)
 			}
+			if seen[f.Name] {
+				return fmt.Errorf("%w: struct has duplicate field name %q", ErrInvalidUDFType, f.Name)
+			}
+			seen[f.Name] = true
 			if err := validateType(f.Type); err != nil {
 				return err
 			}

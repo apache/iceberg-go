@@ -252,4 +252,12 @@ func TestValidateType(t *testing.T) {
 	assert.ErrorIs(t, validateType(StructType{Fields: []StructField{{Name: "", Type: intType}}}), ErrInvalidUDFType)
 	assert.ErrorIs(t, validateType(StructType{Fields: []StructField{{Name: "id", Type: nil}}}), ErrInvalidUDFType)
 	assert.ErrorIs(t, validateType(sealedFakeType{}), ErrInvalidUDFType)
+
+	duplicated := StructType{Fields: []StructField{
+		{Name: "a", Type: intType},
+		{Name: "a", Type: mustPrimitive(t, "string")},
+	}}
+	err := validateType(duplicated)
+	require.ErrorIs(t, err, ErrInvalidUDFType)
+	assert.ErrorContains(t, err, `duplicate field name "a"`)
 }
