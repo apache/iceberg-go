@@ -593,11 +593,12 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		// Advertise the endpoint under the portable oauth2-server-uri key while
-		// also retaining the legacy rest.authorization-url alias, so existing
-		// consumers that read the properties back keep working.
+		// Advertise the endpoint only under the portable oauth2-server-uri key.
+		// We canonicalize to this key everywhere else (fromProps precedence,
+		// resolveAuthURLAlias), so emitting the legacy rest.authorization-url
+		// alias too would leave the endpoint under two names in r.props and any
+		// table config cloned from it - two sources of truth that can drift.
 		setIf(keyOAuth2ServerURI, o.authUri.String())
-		setIf(keyAuthUrl, o.authUri.String())
 	}
 
 	return props

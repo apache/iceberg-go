@@ -173,7 +173,7 @@ func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
 
 	restCat, ok := cat.(*Catalog)
 	require.True(t, ok)
-	assert.Equal(t, authURL, restCat.props[keyAuthUrl])
+	assert.Equal(t, authURL, restCat.props[keyOAuth2ServerURI])
 }
 
 func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
@@ -248,7 +248,7 @@ func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
 
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
 	require.NoError(t, err)
-	assert.Equal(t, authURL, cat.props[keyAuthUrl])
+	assert.Equal(t, authURL, cat.props[keyOAuth2ServerURI])
 }
 
 func TestOAuthServerURIProps(t *testing.T) {
@@ -342,9 +342,10 @@ func TestOAuthServerURIProps(t *testing.T) {
 
 		props := toProps(&options{authUri: u})
 		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
-		// The legacy rest.authorization-url alias is retained for backward
-		// compatibility with consumers that read the properties back.
-		assert.Equal(t, serverURI, props[keyAuthUrl])
+		// Only the portable key is emitted; the legacy rest.authorization-url
+		// alias is not, to avoid carrying the endpoint under two names.
+		_, hasLegacy := props[keyAuthUrl]
+		assert.False(t, hasLegacy)
 	})
 }
 
@@ -1473,7 +1474,8 @@ func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, overrideAuthURL, cat.props[keyOAuth2ServerURI])
-	assert.Equal(t, overrideAuthURL, cat.props[keyAuthUrl])
+	_, hasLegacy := cat.props[keyAuthUrl]
+	assert.False(t, hasLegacy)
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {
