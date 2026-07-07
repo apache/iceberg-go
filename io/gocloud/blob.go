@@ -387,6 +387,7 @@ func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 	// blob fs is the only implementation that uses directory markers
 	// so we can use a type assertion to check
 	obj, ok := info.Sys().(*blob.ListObject)
+
 	return ok && obj.Key == directoryMarker(walkRootKey)
 }
 
