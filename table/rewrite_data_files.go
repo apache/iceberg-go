@@ -301,17 +301,21 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	// Preserve row lineage only when every source file in the group carries
-	// it. A mixed group (some files with FirstRowID, some without) would
-	// otherwise produce one output where some rows keep explicit _row_id
-	// values and others do not, which violates the per-file uniqueness and
-	// coverage invariants the v3 spec requires. Spec-compliant v3 planning
-	// should already inherit first_row_id for every task, including files
-	// carried forward across a v2->v3 upgrade, so a mixed group here is
-	// treated conservatively as invalid metadata or caller-constructed input.
+	// it. A mixed group (some files with FirstRowID, some without — e.g.
+	// legacy files on a v3 table) would otherwise produce one output where
+	// post-lineage rows have explicit _row_id values and pre-lineage rows
+	// have nulls, which violates the per-file uniqueness/coverage
+	// invariant the v3 spec requires. Row IDs are assigned lazily during
+	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
+	// groups are expected during migration; for now we degrade gracefully
+	// and do not preserve lineage for the surviving rows.
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
 	} else if tbl.metadata.Version() >= 3 {
+		// Drop lineage for the whole mixed group. Warn only when at least one
+		// source file already carried lineage; all-legacy groups fall through
+		// silently because there is no lineage to lose.
 		var lineageFiles, legacyFiles int
 		for _, t := range group.Tasks {
 			if t.FirstRowID != nil {
@@ -321,7 +325,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 			}
 		}
 		if lineageFiles > 0 {
-			slog.Warn("compaction group has unexpected mixed row lineage on v3 table; dropping _row_id on output",
+			slog.Warn("compaction group has mixed row lineage; dropping _row_id on output",
 				"partition_key", group.PartitionKey,
 				"lineage_files", lineageFiles,
 				"legacy_files", legacyFiles)
@@ -384,9 +388,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
 // non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
-// Used to gate the preservation path on compaction: mixed groups are treated
-// conservatively because spec-compliant v3 planning should already surface an
-// effective first_row_id for every task.
+// It returns false for an empty task slice.
 func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	if len(tasks) == 0 {
 		return false
