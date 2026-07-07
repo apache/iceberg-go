@@ -24,7 +24,7 @@ test:
 
 # Race detector is opt-in per package/test.
 test-race:
-	go test -race -v ./codec/...
+	go test -race -v ./codec/... ./metrics/...
 
 docs-gen:
 	go run ./website/gen
