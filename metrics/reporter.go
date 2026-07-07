@@ -29,9 +29,9 @@
 // they observe — see [Reporter] for the contract.
 //
 // This package provides the contract and the built-in reporters
-// ([NopReporter], [LoggingReporter], [InMemoryReporter], and [Combine]). The
-// concrete report types and the scan/commit instrumentation are layered on top
-// in later work.
+// ([NopReporter], [LoggingReporter], [InMemoryReporter], [Combine], and
+// [CombineWithLogger]). The concrete report types and the scan/commit
+// instrumentation are layered on top in later work.
 package metrics
 
 import "context"
@@ -42,9 +42,16 @@ import "context"
 // so downstream operators can implement it for their own report wrappers.
 //
 // The set of report types is controlled by this package for now, but that is a
-// convention documented here rather than a structural guarantee — the interface
-// is deliberately not sealed, leaving room for third-party reports without a
-// future breaking change.
+// convention rather than a structural guarantee: the interface is deliberately
+// not sealed. That openness is the irreversible choice — sealing it later would
+// be the breaking change — so it is worth being precise about what it does and
+// does not buy. Custom report types are honored only by the in-process reporters
+// ([LoggingReporter], [InMemoryReporter], and the [Combine] fan-out). The REST
+// reporter (once it lands) can serialize only the discriminators it knows
+// (scan-report and commit-report), so a third-party MetricsReport carries no
+// discriminator and is silently dropped by that reporter — a spec-compliant
+// catalog would reject it outright. Do not build a custom report expecting it to
+// reach a catalog endpoint.
 //
 // The name mirrors the MetricsReport type in the Java and Python Iceberg
 // implementations, easing ports across the ecosystem and disambiguating the

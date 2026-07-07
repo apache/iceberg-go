@@ -88,6 +88,33 @@ func TestInMemoryReporter(t *testing.T) {
 	require.Empty(t, r.Reports())
 }
 
+// TestReportersIgnoreTypedNil guards the isNilReport helper: once the concrete
+// report types land as pointers, a typed nil (e.g. (*testReport)(nil)) is a
+// non-nil interface that a plain report == nil check would miss. Both reporters
+// must still treat it as "no report".
+func TestReportersIgnoreTypedNil(t *testing.T) {
+	// A typed nil pointer is a non-nil interface at the language level (report
+	// == nil is false), so it slips past a plain nil check; isNilReport must
+	// still classify it as "no report".
+	var typedNil MetricsReport = (*testReport)(nil)
+	t.Run("InMemoryReporter drops it", func(t *testing.T) {
+		var r InMemoryReporter
+		assert.NotPanics(t, func() {
+			r.Report(context.Background(), typedNil)
+		})
+		assert.Empty(t, r.Reports(), "a typed-nil report must not be retained")
+	})
+
+	t.Run("LoggingReporter drops it", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := NewLoggingReporter(slog.New(slog.NewTextHandler(&buf, nil)))
+		assert.NotPanics(t, func() {
+			r.Report(context.Background(), typedNil)
+		})
+		assert.Empty(t, buf.String(), "a typed-nil report must produce no output")
+	})
+}
+
 func TestLoggingReporterNilLoggerAndReport(t *testing.T) {
 	t.Run("nil logger falls back to default", func(t *testing.T) {
 		r := NewLoggingReporter(nil) // must fall back to slog.Default
@@ -164,6 +191,7 @@ func TestCombine(t *testing.T) {
 		assert.Contains(t, out, "panicked", "the warn path must fire")
 		assert.Contains(t, out, "panickingReporter", "the offending reporter type is logged")
 		assert.Contains(t, out, "boom", "the panic value is logged")
+		assert.Contains(t, out, "stack=", "the stack at the panic is logged for locatability")
 	})
 }
 

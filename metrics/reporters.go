@@ -21,8 +21,26 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"runtime/debug"
 	"sync"
 )
+
+// isNilReport reports whether report carries no value. A plain report == nil
+// catches only an untyped nil interface; once the concrete report types land, a
+// typed nil pointer (e.g. (*ScanReport)(nil)) is a non-nil interface value that
+// would slip past that check, so the reporters below would log or store a nil
+// report — and nil-deref if the concrete type grows an [slog.LogValuer] on a nil
+// receiver. This also treats such typed nils as "no report" so the guards honor
+// the documented "nil reports are ignored" behavior.
+func isNilReport(report MetricsReport) bool {
+	if report == nil {
+		return true
+	}
+	v := reflect.ValueOf(report)
+
+	return v.Kind() == reflect.Ptr && v.IsNil()
+}
 
 // NopReporter is a [Reporter] that discards every report. It is the default
 // when no reporter is configured, so that instrumentation is free unless a user
@@ -51,7 +69,7 @@ func NewLoggingReporter(logger *slog.Logger) *LoggingReporter {
 
 // Report logs report at info level.
 func (r *LoggingReporter) Report(ctx context.Context, report MetricsReport) {
-	if report == nil {
+	if isNilReport(report) {
 		return
 	}
 	logger := r.logger
@@ -72,7 +90,7 @@ var _ Reporter = (*InMemoryReporter)(nil)
 
 // Report appends report to the retained set.
 func (r *InMemoryReporter) Report(_ context.Context, report MetricsReport) {
-	if report == nil {
+	if isNilReport(report) {
 		return
 	}
 	r.mu.Lock()
@@ -149,15 +167,16 @@ func (c *compositeReporter) Report(ctx context.Context, report MetricsReport) {
 			defer func() {
 				if v := recover(); v != nil {
 					// Swallow per the Reporter contract, but surface the
-					// failure (with the offending reporter type) so a broken
-					// reporter is traceable rather than showing up only as
-					// mysteriously-missing metrics.
+					// failure (with the offending reporter type and the stack
+					// at the panic) so a broken reporter is traceable rather
+					// than showing up only as mysteriously-missing metrics.
 					logger := c.logger
 					if logger == nil {
 						logger = slog.Default()
 					}
 					logger.WarnContext(ctx, "iceberg metrics reporter panicked; recovered",
-						"reporter", fmt.Sprintf("%T", r), "panic", v)
+						"reporter", fmt.Sprintf("%T", r), "panic", v,
+						slog.String("stack", string(debug.Stack())))
 				}
 			}()
 			r.Report(ctx, report)
