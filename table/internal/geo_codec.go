@@ -53,6 +53,17 @@ type geoBoundsAccumulator struct {
 	max [geoNumDims]float64
 	has [geoNumDims]bool
 
+	// geoms counts the leaf geometries that contributed coordinates; zGeoms and
+	// mGeoms count how many of those carried a Z / M dimension. The has[] flags
+	// are sticky across rows, so a column mixing e.g. XYZ and XYM geometries
+	// would set both has[geoDimZ] and has[geoDimM] without any single row having
+	// both. An optional dimension is only safe to emit when every geometry
+	// carried it (count == geoms); otherwise the bound would imply rows that lack
+	// the dimension have a value in range. See layout.
+	geoms  int
+	zGeoms int
+	mGeoms int
+
 	// isGeography marks a column whose edges are geodesics on a sphere, for
 	// which raw vertex min/max is not a safe bounding box (see Bounds).
 	isGeography bool
@@ -94,6 +105,13 @@ func (a *geoBoundsAccumulator) extend(g geom.T) {
 
 	layout := g.Layout()
 	zIdx, mIdx := layout.ZIndex(), layout.MIndex()
+	a.geoms++
+	if zIdx >= 0 {
+		a.zGeoms++
+	}
+	if mIdx >= 0 {
+		a.mGeoms++
+	}
 	for base := 0; base+stride <= len(flat); base += stride {
 		a.update(geoDimX, flat[base])
 		a.update(geoDimY, flat[base+1])
@@ -134,12 +152,20 @@ func (a *geoBoundsAccumulator) layout() (geom.Layout, bool) {
 		return geom.NoLayout, false
 	}
 
+	// An optional dimension is only emitted when every geometry carried it and it
+	// saw a finite value. If Z or M is present in only some geometries (e.g. a
+	// mix of XYZ and XYM rows, or XYZM and XYZ rows), emitting it would imply the
+	// geometries that lack it have a value in range, driving wrong-answer pruning
+	// once a reader wires up geo pruning; drop it to the largest safe layout.
+	hasZ := a.has[geoDimZ] && a.zGeoms == a.geoms
+	hasM := a.has[geoDimM] && a.mGeoms == a.geoms
+
 	switch {
-	case a.has[geoDimZ] && a.has[geoDimM]:
+	case hasZ && hasM:
 		return geom.XYZM, true
-	case a.has[geoDimZ]:
+	case hasZ:
 		return geom.XYZ, true
-	case a.has[geoDimM]:
+	case hasM:
 		return geom.XYM, true
 	default:
 		return geom.XY, true
@@ -229,6 +255,13 @@ func (g *geoStatsAgg) Max() iceberg.Literal {
 	return iceberg.BinaryLiteral(g.upper)
 }
 
+// Update is a no-op. geoStatsAgg carries bounds precomputed from raw WKB during
+// the write (see geoBoundsAccumulator), not min/max folded from Parquet column
+// statistics. It satisfies the StatsAgg interface only so its precomputed bytes
+// can flow through ToDataFile's ColAggs draining (via MinAsBytes/MaxAsBytes).
+// Geo aggregators are injected into ColAggs after DataFileStatsFromMeta has
+// finished folding Parquet stats, so nothing ever calls Update on one; any
+// caller that does would be discarding precomputed bounds, so keep it a no-op.
 func (g *geoStatsAgg) Update(interface{ HasMinMax() bool }) {}
 
 func (g *geoStatsAgg) MinAsBytes() ([]byte, error) { return g.lower, nil }

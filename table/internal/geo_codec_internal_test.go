@@ -115,6 +115,42 @@ func TestGeoBoundsAccumulatorXYZM(t *testing.T) {
 	assert.Equal(t, []float64{4, 2, 3, 100}, decodeBound(t, upper))
 }
 
+// TestGeoBoundsAccumulatorMixedZMOmitsToXY verifies the omit-on-ambiguity rule:
+// a column mixing XYZ and XYM geometries (Z and M never co-occur in one row)
+// must not be promoted to XYZM, since no row carries both. Emitting XYZM would
+// imply every row has a valid Z and M in range and drive wrong-answer pruning,
+// so the bounds collapse to a safe XY box.
+func TestGeoBoundsAccumulatorMixedZMOmitsToXY(t *testing.T) {
+	acc := newGeoBoundsAccumulator(false)
+	require.NoError(t, acc.AddWKB(wkbOf(t, "POINT Z (1 2 3)")))
+	require.NoError(t, acc.AddWKB(wkbOf(t, "POINT M (4 0 100)")))
+
+	lower, upper := acc.Bounds()
+	require.Len(t, lower, 16, "mixed XYZ/XYM must collapse to an XY box")
+	require.Len(t, upper, 16)
+
+	assert.Equal(t, []float64{1, 0}, decodeBound(t, lower))
+	assert.Equal(t, []float64{4, 2}, decodeBound(t, upper))
+}
+
+// TestGeoBoundsAccumulatorMixedXYZMAndXYZDropsM verifies that an optional
+// dimension present in only some geometries is dropped even when the two dims
+// do co-occur somewhere: an XYZM row followed by an XYZ row keeps Z (carried by
+// every geometry) but drops M (carried by only one), yielding XYZ bounds rather
+// than an XYZM box that would claim the XYZ row has an M in range.
+func TestGeoBoundsAccumulatorMixedXYZMAndXYZDropsM(t *testing.T) {
+	acc := newGeoBoundsAccumulator(false)
+	require.NoError(t, acc.AddWKB(wkbOf(t, "POINT ZM (1 2 3 100)")))
+	require.NoError(t, acc.AddWKB(wkbOf(t, "POINT Z (4 0 -1)")))
+
+	lower, upper := acc.Bounds()
+	require.Len(t, lower, 24, "M carried by only one row must be dropped, leaving XYZ")
+	require.Len(t, upper, 24)
+
+	assert.Equal(t, []float64{1, 0, -1}, decodeBound(t, lower))
+	assert.Equal(t, []float64{4, 2, 3}, decodeBound(t, upper))
+}
+
 func TestGeoBoundsAccumulatorGeometryCollection(t *testing.T) {
 	acc := newGeoBoundsAccumulator(false)
 	require.NoError(t, acc.AddWKB(wkbOf(t, "GEOMETRYCOLLECTION (POINT (4 6), LINESTRING (4 6, 7 10))")))

@@ -180,9 +180,11 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		// serialization (spec Appendix D): little-endian float64 coordinates in
 		// X, Y[, Z][, M] order, i.e. 16, 24, or 32 bytes — not WKB. iceberg-go
 		// has no geo literal for predicate evaluation, so the validated
-		// coordinate bytes are returned as an opaque BinaryLiteral.
+		// coordinate bytes are returned as an opaque BinaryLiteral. Callers doing
+		// geo pruning must not treat this as a plain binary bound: check the
+		// original type first, as the bytes are coordinates, not comparable binary.
 		switch len(data) {
-		case 16, 24, 32:
+		case 16, 24, 32: // valid coordinate lengths (XY / XYZ|XYM / XYZM), fall through
 		default:
 			return nil, fmt.Errorf("%w: geometry/geography bound must be 16, 24, or 32 bytes, got %d",
 				ErrInvalidBinSerialization, len(data))

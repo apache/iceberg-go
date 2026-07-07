@@ -357,7 +357,8 @@ type geoColumn struct {
 
 // collectGeoColumns finds top-level WKB-encoded geo columns in the Arrow schema
 // and pairs each with its Iceberg field ID. Geo bounds for columns nested inside
-// structs/lists/maps are not yet computed.
+// structs/lists/maps are not yet computed, which diverges from Java/PyIceberg.
+// TODO(#992): compute geo bounds for geo columns nested in structs/lists/maps.
 func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn {
 	var result []geoColumn
 	for i, f := range sc.Fields() {
@@ -462,7 +463,10 @@ func (w *ParquetFileWriter) accumulateGeoBounds(batch arrow.RecordBatch) error {
 			continue
 		}
 
-		acc := w.geoAccs[gc.fieldID]
+		acc, ok := w.geoAccs[gc.fieldID]
+		if !ok {
+			continue
+		}
 		for i := range storage.Len() {
 			if storage.IsNull(i) {
 				continue
@@ -529,9 +533,12 @@ func (w *ParquetFileWriter) Abort() error {
 // manifest entry like any other typed bound.
 func (w *ParquetFileWriter) applyGeoBounds(stats *DataFileStatistics) error {
 	for fieldID, acc := range w.geoAccs {
-		// Honor the column's metrics mode: counts/none modes do not record bounds.
-		switch w.info.StatsCols[fieldID].Mode.Typ {
-		case MetricModeNone, MetricModeCounts:
+		// Honor the column's metrics mode: a column the caller never registered
+		// (missing key) or one set to counts/none does not record bounds. Check
+		// presence first — a missing key yields a zero-value mode of "" that would
+		// otherwise fall through and write bounds the caller asked to skip.
+		sc, ok := w.info.StatsCols[fieldID]
+		if !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
 			continue
 		}
 
