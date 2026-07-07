@@ -2217,8 +2217,6 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 			}
 			delete(inputProps, PropertyFormatVersion)
 		}
-	} else {
-		inputProps = props
 	}
 
 	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)

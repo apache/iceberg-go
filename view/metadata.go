@@ -530,11 +530,9 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 			}
 			delete(inputProps, table.PropertyFormatVersion)
 		}
-	} else {
-		inputProps = props
 	}
 
-	if formatVersion != DefaultViewFormatVersion {
+	if formatVersion > SupportedViewFormatVersion {
 		return nil, fmt.Errorf("%w: %d", iceberg.ErrInvalidFormatVersion, formatVersion)
 	}
 

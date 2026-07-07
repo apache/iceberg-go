@@ -91,19 +91,16 @@ func TestNewMetadata(t *testing.T) {
 
 func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
 	tests := []struct {
-		name         string
-		formatVer    string
-		versionValue string
+		name      string
+		formatVer string
 	}{
 		{
-			name:         "non-numeric format-version",
-			formatVer:    "banana",
-			versionValue: "banana",
+			name:      "non-numeric format-version",
+			formatVer: "banana",
 		},
 		{
-			name:         "unsupported format-version",
-			formatVer:    "2",
-			versionValue: "2",
+			name:      "unsupported format-version",
+			formatVer: "2",
 		},
 	}
 
@@ -122,7 +119,7 @@ func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
 			require.Nil(t, md)
-			assert.Equal(t, tc.versionValue, props[table.PropertyFormatVersion])
+			assert.Equal(t, tc.formatVer, props[table.PropertyFormatVersion])
 			assert.Equal(t, "bar", props["foo"])
 			assert.Len(t, props, 2)
 		})
