@@ -193,6 +193,25 @@ func TestOverwriteFiles_ValidateInvalidIsolationLevel(t *testing.T) {
 	assert.ErrorIs(t, of.validate(cc), ErrInvalidIsolationLevel)
 }
 
+func TestOverwriteFiles_ValidateInvalidDeleteIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn, op: OpDelete}}
+
+	assert.ErrorIs(t, of.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestOverwriteFiles_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteUpdateIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn}}
+
+	assert.ErrorIs(t, of.validate(nil), ErrInvalidIsolationLevel)
+}
+
 // TestOverwriteFiles_ValidateNilContext hardens validate against a
 // nil conflictContext — callers that cannot construct cc (branch
 // missing on both sides) should still see nil rather than a crash.
@@ -250,6 +269,26 @@ func TestRowDelta_ValidateInvalidIsolationLevel(t *testing.T) {
 	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
 
 	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestRowDelta_ValidateInvalidIsolationLevelWithPosDeletesOnly(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	posDelete := newTestPosDeleteFile(t, "pos-1.parquet", nil)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{posDelete}}
+
+	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestRowDelta_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn}
+
+	assert.ErrorIs(t, rd.validate(nil), ErrInvalidIsolationLevel)
 }
 
 func TestRewriteValidator_Smokes(t *testing.T) {

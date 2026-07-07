@@ -98,20 +98,22 @@ const (
 )
 
 // ErrInvalidIsolationLevel is returned when a configured isolation level
-// value is invalid.
+// value is invalid. It is terminal for the current commit attempt and does
+// not wrap ErrCommitFailed, so config errors are not retried as conflicts.
 var ErrInvalidIsolationLevel = errors.New("invalid isolation level")
 
 // readIsolationLevel returns the isolation level for the given
 // property key, falling back to defVal when the key is absent.
 func readIsolationLevel(props iceberg.Properties, key string, defVal IsolationLevel) (IsolationLevel, error) {
 	v, ok := props[key]
-	if !ok {
+	if !ok || v == "" {
 		return defVal, nil
 	}
 
-	switch IsolationLevel(strings.ToLower(v)) {
+	lower := IsolationLevel(strings.ToLower(v))
+	switch lower {
 	case IsolationSerializable, IsolationSnapshot:
-		return IsolationLevel(strings.ToLower(v)), nil
+		return lower, nil
 	default:
 		return defVal, fmt.Errorf("%w: %q for property %q", ErrInvalidIsolationLevel, v, key)
 	}

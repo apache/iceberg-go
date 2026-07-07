@@ -76,12 +76,12 @@ func TestReadIsolationLevel(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "empty string returns error",
+			name:    "empty string falls back to default",
 			props:   iceberg.Properties{WriteDeleteIsolationLevelKey: ""},
 			key:     WriteDeleteIsolationLevelKey,
 			defVal:  IsolationSnapshot,
 			want:    IsolationSnapshot,
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 
@@ -90,6 +90,7 @@ func TestReadIsolationLevel(t *testing.T) {
 			got, err := readIsolationLevel(tt.props, tt.key, tt.defVal)
 			if tt.wantErr {
 				assert.ErrorIs(t, err, ErrInvalidIsolationLevel)
+				assert.Equal(t, tt.want, got)
 
 				return
 			}

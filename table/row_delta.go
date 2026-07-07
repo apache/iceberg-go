@@ -199,8 +199,10 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
 func (rd *RowDelta) validate(cc *conflictContext) error {
-	if cc == nil {
-		return nil
+	level, err := readIsolationLevel(rd.txn.meta.props,
+		WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+	if err != nil {
+		return err
 	}
 
 	// Collect every data-file path the pos-deletes in this delta
@@ -223,6 +225,10 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		}
 	}
 
+	if cc == nil {
+		return nil
+	}
+
 	if len(referenced) > 0 {
 		if err := validateDataFilesExist(cc, referenced); err != nil {
 			return err
@@ -230,11 +236,6 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	if len(eqDeleteFiles) > 0 {
-		level, err := readIsolationLevel(rd.txn.meta.props,
-			WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
-		if err != nil {
-			return err
-		}
 		// Route through the existing validateNoConflictingDataFiles path,
 		// which calls validateAddedDataFilesMatchingFilter internally.
 		// For unpartitioned tables, use AlwaysTrue conservatively — an

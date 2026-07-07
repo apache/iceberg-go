@@ -246,10 +246,6 @@ func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
 // are allowed. SERIALIZABLE runs validateAddedDataFilesMatchingFilter
 // against the committer's filter (AlwaysTrue when no filter is set).
 func (of *overwriteFiles) validate(cc *conflictContext) error {
-	if cc == nil || of.skipDefaultValidator {
-		return nil
-	}
-
 	// Delete operations (copy-on-write / merge-on-read deletes that
 	// run through overwriteFiles) must read write.delete.isolation-
 	// level, not write.update.isolation-level. Java's BaseDeleteFiles
@@ -262,6 +258,9 @@ func (of *overwriteFiles) validate(cc *conflictContext) error {
 	level, err := readIsolationLevel(of.base.txn.meta.props, key, defVal)
 	if err != nil {
 		return err
+	}
+	if cc == nil || of.skipDefaultValidator {
+		return nil
 	}
 	if level != IsolationSerializable {
 		// SNAPSHOT isolation allows concurrent appends into the
