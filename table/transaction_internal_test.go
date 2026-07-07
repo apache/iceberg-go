@@ -60,6 +60,116 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
 
+// TestTransactionApplyDedupesSameRefAssertionsNewTable covers two appends in a
+// single new-table transaction: the first asserts main must not exist, and the
+// second (after the builder has created main) asserts main == the new snapshot.
+// Only the first main == nil assertion, which reflects the pre-transaction base
+// state, must be retained.
+func TestTransactionApplyDedupesSameRefAssertionsNewTable(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	// First append: main does not exist yet in the pre-transaction metadata.
+	err := txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, nil)})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, nil)
+
+	// Simulate the first append creating main -> 10 in the transaction builder.
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:     10,
+		SequenceNumber: 1,
+		ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		TimestampMs:    time.Now().UnixMilli(),
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 10, BranchRef))
+
+	// Second append asserts main == 10; it must dedupe against the first
+	// assertion for main rather than adding a contradictory base-state check.
+	newHead := int64(10)
+	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &newHead)})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, nil)
+}
+
+// TestTransactionApplyDedupesSameRefAssertionsExistingTable covers two appends
+// on an existing table: the first asserts the original base head, and the second
+// (after the builder has advanced main) asserts the new head. Only the original
+// base-head assertion must be retained.
+func TestTransactionApplyDedupesSameRefAssertionsExistingTable(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t) // main -> 10, feature -> 20
+
+	base := int64(10)
+	err := txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &base)})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
+
+	// Simulate the first append advancing main -> 30.
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: transactionTestPtr(base),
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      time.Now().UnixMilli(),
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+
+	// Second append asserts main == 30; it must dedupe against the original
+	// base-head assertion, which is the only one kept.
+	newHead := int64(30)
+	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &newHead)})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
+}
+
+// TestTransactionApplyKeepsRefAssertionsForDistinctRefs confirms that dedupe by
+// ref name still lets assertions for different refs both survive, even when they
+// assert the same snapshot id.
+func TestTransactionApplyKeepsRefAssertionsForDistinctRefs(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t) // main -> 10, feature -> 20
+
+	base := int64(10)
+	err := txn.apply(nil, []Requirement{
+		AssertRefSnapshotID(MainBranch, &base),
+		AssertRefSnapshotID("feature", transactionTestPtr(int64(20))),
+	})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 2)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
+	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", transactionTestPtr(int64(20)))
+}
+
+// TestTransactionApplyDedupesIdenticalNonRefRequirements confirms that non-ref
+// requirements keep the canonical JSON dedupe key: identical requirements
+// collapse while distinct ones survive.
+func TestTransactionApplyDedupesIdenticalNonRefRequirements(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	err := txn.apply(nil, []Requirement{
+		AssertCurrentSchemaID(0),
+		AssertCurrentSchemaID(0),
+		AssertDefaultSpecID(0),
+	})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 2)
+
+	var schemaAsserts, specAsserts int
+	for _, r := range txn.reqs {
+		switch r.GetType() {
+		case reqAssertCurrentSchemaID:
+			schemaAsserts++
+		case reqAssertDefaultSpecID:
+			specAsserts++
+		}
+	}
+	require.Equal(t, 1, schemaAsserts)
+	require.Equal(t, 1, specAsserts)
+}
+
 func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
 	t.Helper()
 
