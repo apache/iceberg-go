@@ -1851,16 +1851,20 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 		// Seed the writer with any deletion vector the referenced data file
 		// already carries so its previously deleted positions survive into the
-		// merged DV. The read path that produced args.itr already applied these
-		// existing deletes, so the incoming batches hold only the new positions;
-		// without the seed the replacement DV would silently resurrect rows. The
-		// spec allows at most one DV per data file, so the caller supersedes the
-		// old DV once this merged one is written.
+		// merged DV. The scan that produced args.itr does NOT apply the existing
+		// DVs (makePositionDeleteRecordsForFilter builds its FileScanTasks
+		// without DeleteFiles), so the incoming batches may re-report positions
+		// already in the old DV; re-Setting them on top of the seed is a no-op
+		// because the bitmap is idempotent. The seed is what guarantees the old
+		// positions survive — do not remove it, or a second delete would drop
+		// the earlier deletes and resurrect those rows. The spec allows at most
+		// one DV per data file, so the caller supersedes the old DV once this
+		// merged one is written.
 		hasEntries := false
 		for filePath, bitmap := range args.existingDVs {
 			pCtx, ok := partitionContextByFilePath[filePath]
 			if !ok {
-				yield(nil, fmt.Errorf("unexpected missing partition context for path %s", filePath))
+				yield(nil, fmt.Errorf("unexpected missing partition context for existing deletion vector path %s", filePath))
 
 				return
 			}

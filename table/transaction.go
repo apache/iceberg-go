@@ -1895,25 +1895,27 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 	// V3 tables store deletes as deletion vectors, and the spec allows at most
 	// one DV per data file. A data file being partially deleted may already
 	// carry a DV from an earlier delete; those existing positions are folded
-	// into the new DV (the scan that produced the records already applied them,
-	// so the new records hold only the incremental deletes) and the superseded
-	// DVs are removed. Without this a second delete on the same file would
-	// write a second live DV, corrupting the table (buildDVIndex rejects it).
-	var existingDVs map[string]iceberg.DataFile
+	// into the new DV (the incremental deletes) and the superseded DVs are
+	// removed. Without this a second delete on the same file would write a
+	// second live DV, corrupting the table (buildDVIndex rejects it).
+	var (
+		existingDVs       map[string]iceberg.DataFile
+		existingDVBitmaps map[string]*dv.RoaringPositionBitmap
+	)
 	if t.meta.formatVersion >= 3 {
 		existingDVs, err = t.collectExistingDVs(fs, files)
 		if err != nil {
 			return nil, err
 		}
-	}
 
-	existingDVBitmaps := make(map[string]*dv.RoaringPositionBitmap, len(existingDVs))
-	for ref, dvFile := range existingDVs {
-		bitmap, err := dv.ReadDV(fs, dvFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", ref, err)
+		existingDVBitmaps = make(map[string]*dv.RoaringPositionBitmap, len(existingDVs))
+		for ref, dvFile := range existingDVs {
+			bitmap, err := dv.ReadDV(fs, dvFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", ref, err)
+			}
+			existingDVBitmaps[ref] = bitmap
 		}
-		existingDVBitmaps[ref] = bitmap
 	}
 
 	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionContextByFilePath, recordWritingArgs{
@@ -1964,10 +1966,20 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 	}
 
 	result := make(map[string]iceberg.DataFile)
-	for df, err := range s.dataFiles(fs, nil) {
+	// Iterate delete manifests only and skip DELETED-status entries: a
+	// superseded DV lingers as a DELETED entry in the deleted-files manifest
+	// against the same referenced data file. Including it here would let the
+	// stale ghost win the last-write into result (manifest concat order places
+	// deleted entries last), seeding the new DV from an outdated bitmap and
+	// resurrecting rows removed by the prior delete. See issue #1372.
+	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes) {
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scanning existing deletion vectors: %w", err)
 		}
+		if entry.Status() == iceberg.EntryStatusDELETED {
+			continue
+		}
+		df := entry.DataFile()
 		if !isDeletionVector(df) {
 			continue
 		}

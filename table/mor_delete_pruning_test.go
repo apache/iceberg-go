@@ -144,6 +144,123 @@ func TestV3MergeOnReadDoubleDeleteMergesDeletionVector(t *testing.T) {
 		"both id=2 and id=4 must be deleted and no previously deleted row may resurrect")
 }
 
+// TestV3MergeOnReadTripleDeleteMergesDeletionVector extends the double-delete
+// guard to a third delete. The second delete supersedes DV #1, leaving it as a
+// DELETED-status entry in the deleted-files manifest against the same data file.
+// The third delete's collectExistingDVs must skip that ghost entry; otherwise it
+// seeds the merged DV from the stale first bitmap (resurrecting id=4, removed by
+// the second delete) and tries to remove a DV that no longer exists. See #1372.
+func TestV3MergeOnReadTripleDeleteMergesDeletionVector(t *testing.T) {
+	ctx := context.Background()
+	tbl := newMergeOnReadTestTableVersion(t, "3")
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, tbl), "first delete must write exactly one DV")
+
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(4)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, liveDVCount(t, tbl), "second delete must merge into the single DV")
+
+	// Third delete: DV #1 is now a superseded DELETED entry. collectExistingDVs
+	// must ignore it and seed only from the live merged DV.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(1)), nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, liveDVCount(t, tbl),
+		"the three deletes must collapse into a single merged deletion vector")
+	assert.Equal(t, []int64{3, 5}, idsInTable(t, tbl),
+		"id=1, id=2 and id=4 must all be deleted and none may resurrect")
+}
+
+// TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors runs the merge
+// on a partitioned table where a single delete touches two data files that each
+// already carry a DV. It exercises the per-file partition-context capture in the
+// DV seed loop, which the single unpartitioned data file does not.
+func TestV3MergeOnReadDoubleDeletePartitionedMergesDeletionVectors(t *testing.T) {
+	ctx := context.Background()
+	tbl := newPartitionedMergeOnReadTestTable(t)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "category", Type: arrow.BinaryTypes.String, Nullable: false},
+	}, nil)
+	// Two partitions ("x", "y") produce two data files.
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSchema, []string{
+		`[{"id":1,"category":"x"},{"id":2,"category":"x"},{"id":3,"category":"x"},` +
+			`{"id":4,"category":"y"},{"id":5,"category":"y"},{"id":6,"category":"y"}]`,
+	})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2, 3, 4, 5, 6}, idsInTable(t, tbl))
+
+	// Seed a DV on each partition's data file.
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(2)), nil)
+	require.NoError(t, err)
+	tbl, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("id"), int64(5)), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, liveDVCount(t, tbl), "one live DV per partition data file")
+
+	// A single delete touching both partitions must merge into each existing DV
+	// rather than add parallel ones — seeding both from their own partition ctx.
+	tbl, err = tbl.Delete(ctx, iceberg.NewOr(
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+		iceberg.EqualTo(iceberg.Reference("id"), int64(4)),
+	), nil)
+	require.NoError(t, err)
+
+	require.Equal(t, 2, liveDVCount(t, tbl),
+		"each partition data file must keep exactly one merged DV")
+	assert.Equal(t, []int64{3, 6}, idsInTable(t, tbl),
+		"ids 1,2 (x) and 4,5 (y) must be deleted and none may resurrect")
+}
+
+// newPartitionedMergeOnReadTestTable builds a v3 merge-on-read table partitioned
+// by identity(category) so distinct category values land in distinct data files.
+func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Transform: iceberg.IdentityTransform{},
+		Name:      "category",
+	})
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+			table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+		})
+	require.NoError(t, err)
+
+	metaLoc := location + "/metadata/v1.metadata.json"
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+
+	return table.New(table.Identifier{"db", "mor_delete_partitioned_test"}, meta, metaLoc, fsF, cat)
+}
+
 // liveDVCount returns the number of live deletion-vector entries in the table's
 // current snapshot.
 func liveDVCount(t *testing.T, tbl *table.Table) int {
