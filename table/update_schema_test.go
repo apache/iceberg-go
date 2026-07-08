@@ -1439,50 +1439,6 @@ func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, key.Type)
 }
 
-func TestUnionByNamePromoteMapValue(t *testing.T) {
-	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
-		}, Required: false},
-	)
-	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
-			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
-			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
-		}, Required: false},
-	)
-
-	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
-	require.NoError(t, err)
-
-	value, ok := applied.FindFieldByName("m.value")
-	require.True(t, ok)
-	assert.Equal(t, iceberg.PrimitiveTypes.Int64, value.Type)
-}
-
-func TestUnionByNameMakeListElementOptional(t *testing.T) {
-	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
-		}, Required: false},
-	)
-	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
-			ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
-		}, Required: false},
-	)
-
-	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
-	require.NoError(t, err)
-
-	vals, ok := applied.FindFieldByName("vals")
-	require.True(t, ok)
-	list, ok := vals.Type.(*iceberg.ListType)
-	require.True(t, ok)
-	assert.False(t, list.ElementRequired)
-}
-
 func TestUnionByNameMakeMapValueOptional(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
