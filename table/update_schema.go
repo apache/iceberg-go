@@ -1016,15 +1016,10 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 		panic(fmt.Sprintf("cannot delete element type from list: %s", elementResult))
 	}
 
-	elementRequired := listType.ElementRequired
-	if update, ok := a.updates[listType.ElementID]; ok {
-		elementRequired = update.Required
-	}
-
 	return &iceberg.ListType{
 		ElementID:       listType.ElementID,
 		Element:         elementType,
-		ElementRequired: elementRequired,
+		ElementRequired: listType.ElementRequired,
 	}
 }
 
@@ -1053,17 +1048,13 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
-	valueRequired := mapType.ValueRequired
-	if update, ok := a.updates[mapType.ValueID]; ok {
-		valueRequired = update.Required
-	}
 
 	return &iceberg.MapType{
 		KeyID:         mapType.KeyID,
 		KeyType:       mapType.KeyType,
 		ValueID:       mapType.ValueID,
 		ValueType:     valueType,
-		ValueRequired: valueRequired,
+		ValueRequired: mapType.ValueRequired,
 	}
 }
 
