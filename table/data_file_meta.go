@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"runtime/debug"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
@@ -255,7 +254,9 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 		if statsProps == nil {
 			statsProps = iceberg.Properties{}
 		}
-		statsProps[MetricsModeColumnConfPrefix+".file_path"] = string(tblutils.MetricModeFull)
+		if colName, ok := args.Schema.FindColumnName(referencedDataFilePathFieldID); ok {
+			statsProps[MetricsModeColumnConfPrefix+"."+colName] = string(tblutils.MetricModeFull)
+		}
 	}
 
 	statsPlan, err := computeStatsPlan(args.Schema, statsProps)
@@ -279,9 +280,12 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if err := func() (err error) {
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf(
-					"error encountered during extracting stats and building the data file: %v\n%s",
-					r, debug.Stack())
+				switch e := r.(type) {
+				case error:
+					err = fmt.Errorf("error encountered during extracting stats and building the data file: %w", e)
+				default:
+					err = fmt.Errorf("error encountered during extracting stats and building the data file: %v", e)
+				}
 			}
 		}()
 

@@ -506,6 +506,57 @@ func TestDataFileFromMetadata_NilPartitionValueInferredFromStats(t *testing.T) {
 	})
 }
 
+func TestDataFileFromMetadata_TruncatePartitionInferred(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2},
+		FieldID:   1000,
+		Name:      "name_trunc",
+		Transform: iceberg.TruncateTransform{Width: 3},
+	})
+
+	t.Run("shared prefix infers the truncated partition value", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, `[
+			{"id": 1, "name": "alphabet"},
+			{"id": 2, "name": "alpine"}
+		]`)
+
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:          dataSchema,
+			Spec:            spec,
+			Format:          iceberg.ParquetFile,
+			Metadata:        pqMeta,
+			FilePath:        "s3://bucket/data/name_trunc=alp/inferred.parquet",
+			FileSize:        int64(len(pqBytes)),
+			Content:         iceberg.EntryContentData,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "alp", df.Partition()[1000],
+			"a truncate-partitioned column whose rows share the truncated prefix must infer to that prefix")
+	})
+
+	t.Run("mixed prefix errors cleanly instead of panicking", func(t *testing.T) {
+		pqBytes, pqMeta := parquetMetaFromSchema(t, dataSchema, `[
+			{"id": 1, "name": "alpha"},
+			{"id": 2, "name": "beta"}
+		]`)
+
+		df, err := table.DataFileFromMetadata(table.DataFileArgs{
+			Schema:          dataSchema,
+			Spec:            spec,
+			Format:          iceberg.ParquetFile,
+			Metadata:        pqMeta,
+			FilePath:        "s3://bucket/data/mixed.parquet",
+			FileSize:        int64(len(pqBytes)),
+			Content:         iceberg.EntryContentData,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.Nil(t, df,
+			"a truncate-partitioned column with divergent truncated prefixes must not silently synthesize a partition value")
+		require.ErrorContains(t, err, "cannot infer partition value")
+	})
+}
+
 func TestDataFileFromMetadata_ReferencedDataFile(t *testing.T) {
 	const dataPath = "s3://bucket/data/data-001.parquet"
 
