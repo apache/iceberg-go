@@ -1506,3 +1506,140 @@ func TestUnionByNameMakeMapValueOptional(t *testing.T) {
 	require.True(t, ok)
 	assert.False(t, mapType.ValueRequired)
 }
+
+func TestUnionByNameAddNewNestedStructWithChildren(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "address", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+				{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	address, ok := applied.FindFieldByName("address")
+	require.True(t, ok)
+	assert.False(t, address.Required, "added struct must be optional")
+
+	city, ok := applied.FindFieldByName("address.city")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, city.Type)
+
+	zip, ok := applied.FindFieldByName("address.zip")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, zip.Type)
+}
+
+func TestUnionByNameAddFieldToListOfStruct(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2, ElementRequired: false,
+			Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			},
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "events", Type: &iceberg.ListType{
+			ElementID: 2, ElementRequired: false,
+			Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	name, ok := applied.FindFieldByName("events.element.name")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, name.Type)
+
+	_, ok = applied.FindFieldByName("events.element.id")
+	assert.True(t, ok)
+}
+
+func TestUnionByNameAddFieldToMapValueStruct(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueRequired: false,
+			ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			},
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueRequired: false,
+			ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+					{ID: 5, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	b, ok := applied.FindFieldByName("m.value.b")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.String, b.Type)
+
+	_, ok = applied.FindFieldByName("m.value.a")
+	assert.True(t, ok)
+}
+
+func TestUnionByNameEmptyDocDoesNotClearExisting(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: "original"},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true, Doc: ""},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	id, ok := applied.FindFieldByName("id")
+	require.True(t, ok)
+	assert.Equal(t, "original", id.Doc)
+}
+
+func TestUnionByNameAddedColumnPreservesInitialDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32,
+			Required: false, InitialDefault: int32(42), WriteDefault: int32(42),
+		},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	count, ok := applied.FindFieldByName("count")
+	require.True(t, ok)
+	assert.Equal(t, int32(42), count.InitialDefault)
+	assert.Equal(t, int32(42), count.WriteDefault)
+}
