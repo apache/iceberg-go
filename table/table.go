@@ -75,9 +75,9 @@ func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
 	return wfs, nil
 }
 
-// ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
-// computeOwnManifests when a snapshot ID does not exist in the table's
-// snapshot list. Tests pin meaning via errors.Is(err, ErrSnapshotNotFound).
+// ErrSnapshotNotFound is returned (wrapped) by metadata lookups when a
+// snapshot ID does not exist in the table's snapshot list. Tests pin meaning
+// via errors.Is(err, ErrSnapshotNotFound).
 var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 type FSysF func(ctx context.Context) (icebergio.IO, error)

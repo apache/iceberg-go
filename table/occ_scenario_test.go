@@ -451,6 +451,129 @@ func (s *OCCScenarioTestSuite) TestV3MergeAppendRowLineageAfterOCCRetry() {
 	}
 }
 
+// TestReplaceFilesNoResurrectionAfterConflict is a regression test for the OCC
+// retry-replay resurrection bug. When a replace/overwrite commit retries after
+// a conflict, the rebuild must re-apply the file removal against the FRESH
+// parent — not graft attempt-0's stale "own" manifests onto a fresh parent
+// that still lists the removed files. Otherwise the removed files come back
+// alive next to their replacement and their rows are duplicated.
+//
+// Scenario:
+//   - Base: file0 = rows [1,2,3] committed.
+//   - Concurrent peer: appends filePeer = row [4]; catalog head is file0+peer.
+//   - Writer A (stale base = only file0) replaces file0 with a compacted file
+//     holding the same rows [1,2,3]. First attempt conflicts; the retry rebases
+//     onto the fresh head.
+//
+// Correct: live rows = {1,2,3,4} (compacted + peer), file0 dropped → 4 rows.
+// Buggy:   file0 resurrected → rows [1,2,3] duplicated → 7 rows, 3 live files.
+func (s *OCCScenarioTestSuite) TestReplaceFilesNoResurrectionAfterConflict() {
+	props := iceberg.Properties{
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "2",
+		// Snapshot isolation lets the replace commit past the concurrent
+		// append the same way compaction's rewrite semantics do; the bug we
+		// are guarding lives in the retry rebuild, not the validator.
+		table.WriteUpdateIsolationLevelKey: string(table.IsolationSnapshot),
+	}
+
+	localFS := func(_ context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+
+	// Step 1: base table with file0 = rows [1,2,3].
+	baseTbl, cat := s.makeTable(0, props)
+	arrowSc, err := table.SchemaToArrowSchema(baseTbl.Schema(), nil, false, false)
+	s.Require().NoError(err)
+
+	file0Path := s.location + "/data/file0.parquet"
+	writeParquetFile(s.T(), file0Path, arrowSc,
+		`[{"id":1,"val":"a"},{"id":2,"val":"b"},{"id":3,"val":"c"}]`)
+
+	tx := baseTbl.NewTransaction()
+	s.Require().NoError(tx.AddFiles(s.ctx, []string{file0Path}, nil, false))
+	_, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+	metaBase := cat.current
+
+	// Step 2: a concurrent peer appends filePeer = row [4] onto metaBase.
+	peerCat := &occScenarioCatalog{current: metaBase, location: s.location}
+	peerTbl := table.New(baseTbl.Identifier(), metaBase,
+		s.location+"/metadata/base.metadata.json", localFS, peerCat)
+
+	peerPath := s.location + "/data/file_peer.parquet"
+	writeParquetFile(s.T(), peerPath, arrowSc, `[{"id":4,"val":"d"}]`)
+
+	ptx := peerTbl.NewTransaction()
+	s.Require().NoError(ptx.AddFiles(s.ctx, []string{peerPath}, nil, false))
+	_, err = ptx.Commit(s.ctx)
+	s.Require().NoError(err)
+	metaPeer := peerCat.current
+
+	// Step 3: Writer A replaces file0 -> compacted, starting from the stale
+	// metaBase; its catalog is at metaPeer and returns one 409 before success.
+	catA := &occScenarioCatalog{current: metaPeer, conflictsLeft: 1, location: s.location}
+	writerA := table.New(baseTbl.Identifier(), metaBase,
+		s.location+"/metadata/base.metadata.json", localFS, catA)
+
+	tasks, err := writerA.Scan().PlanFiles(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(tasks, 1, "Writer A's stale base must see exactly file0")
+	oldFile := tasks[0].File
+
+	compactedPath := s.location + "/data/compacted.parquet"
+	writeParquetFile(s.T(), compactedPath, arrowSc,
+		`[{"id":1,"val":"a"},{"id":2,"val":"b"},{"id":3,"val":"c"}]`)
+	newBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		compactedPath, iceberg.ParquetFile, nil, nil, nil, 3, 512)
+	s.Require().NoError(err)
+	newFile := newBuilder.Build()
+
+	txA := writerA.NewTransaction()
+	s.Require().NoError(txA.ReplaceFiles(s.ctx,
+		[]iceberg.DataFile{oldFile}, []iceberg.DataFile{newFile}, nil, nil))
+	committedA, err := txA.Commit(s.ctx)
+	s.Require().NoError(err, "Writer A replace must succeed after one conflict retry")
+	s.Equal(int32(2), catA.commitTableCalls.Load(),
+		"expected 2 commit attempts: 1 conflict + 1 success")
+
+	// The replaced file0 must NOT be resurrected: exactly the compacted file
+	// and the peer's file are live.
+	finalSnap := catA.current.CurrentSnapshot()
+	s.Require().NotNil(finalSnap)
+	live := s.liveDataFilePaths(finalSnap)
+	s.NotContains(live, oldFile.FilePath(), "replaced file0 must not be resurrected on retry")
+	s.Len(live, 2, "exactly {compacted, peer} must be live after retry")
+
+	// A full scan must return 4 rows, not 7.
+	assertRowCount(s.T(), committedA, 4)
+}
+
+// liveDataFilePaths returns the paths of all non-deleted data-file entries
+// referenced by snap's manifest list.
+func (s *OCCScenarioTestSuite) liveDataFilePaths(snap *table.Snapshot) []string {
+	fio := iceio.LocalFS{}
+	manifests, err := snap.Manifests(fio)
+	s.Require().NoError(err)
+
+	var paths []string
+	for _, mf := range manifests {
+		if mf.ManifestContent() != iceberg.ManifestContentData {
+			continue
+		}
+		for e, err := range mf.Entries(fio, false) {
+			s.Require().NoError(err)
+			if e.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			paths = append(paths, e.DataFile().FilePath())
+		}
+	}
+
+	return paths
+}
+
 func (s *OCCScenarioTestSuite) makeArrowTableN(n int) arrow.Table {
 	mem := memory.DefaultAllocator
 	sc := arrow.NewSchema([]arrow.Field{
