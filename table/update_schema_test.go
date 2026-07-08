@@ -1422,7 +1422,7 @@ func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
 			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
 		}, Required: false},
 	)
-	
+
 	// A narrowing key change (long -> int) should be ignored;
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
