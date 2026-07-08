@@ -1048,7 +1048,6 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
-
 	return &iceberg.MapType{
 		KeyID:         mapType.KeyID,
 		KeyType:       mapType.KeyType,
