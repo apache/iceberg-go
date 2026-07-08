@@ -1143,3 +1143,123 @@ func TestAddColumnAfterDropHighestID(t *testing.T) {
 		"new column id must be last-column-id+1 (13), not HighestFieldID+1 (12) — "+
 			"reusing 12 would collide with the dropped column still in historical schemas")
 }
+
+func TestApplyChangesNestedOptionalityUpdates(t *testing.T) {
+	baseSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "tags", Type: &iceberg.ListType{
+			ElementID:       3,
+			Element:         iceberg.PrimitiveTypes.String,
+			ElementRequired: true,
+		}, Required: false},
+		iceberg.NestedField{ID: 4, Name: "properties", Type: &iceberg.MapType{
+			KeyID:         5,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       6,
+			ValueType:     iceberg.PrimitiveTypes.String,
+			ValueRequired: true,
+		}, Required: false},
+	)
+	baseMeta, err := NewMetadata(baseSchema, nil, UnsortedSortOrder, "", nil)
+	assert.NoError(t, err)
+
+	t.Run("list element required -> optional is applied", func(t *testing.T) {
+		table := New([]string{"id"}, baseMeta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, false).
+			UpdateColumn([]string{"tags", "element"}, ColumnUpdate{
+				Required: iceberg.Optional[bool]{Val: false, Valid: true},
+			}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		tags, ok := newSchema.FindFieldByName("tags")
+		assert.True(t, ok)
+		listType, ok := tags.Type.(*iceberg.ListType)
+		assert.True(t, ok)
+		assert.False(t, listType.ElementRequired,
+			"list element optionality update must be reflected in the applied schema")
+	})
+
+	t.Run("map value required -> optional is applied", func(t *testing.T) {
+		table := New([]string{"id"}, baseMeta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, false).
+			UpdateColumn([]string{"properties", "value"}, ColumnUpdate{
+				Required: iceberg.Optional[bool]{Val: false, Valid: true},
+			}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		props, ok := newSchema.FindFieldByName("properties")
+		assert.True(t, ok)
+		mapType, ok := props.Type.(*iceberg.MapType)
+		assert.True(t, ok)
+		assert.False(t, mapType.ValueRequired,
+			"map value optionality update must be reflected in the applied schema")
+	})
+
+	t.Run("list element optional -> required is applied with allowIncompatibleChanges", func(t *testing.T) {
+		optionalSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "tags", Type: &iceberg.ListType{
+				ElementID:       3,
+				Element:         iceberg.PrimitiveTypes.String,
+				ElementRequired: false,
+			}, Required: false},
+		)
+		meta, err := NewMetadata(optionalSchema, nil, UnsortedSortOrder, "", nil)
+		assert.NoError(t, err)
+
+		table := New([]string{"id"}, meta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			UpdateColumn([]string{"tags", "element"}, ColumnUpdate{
+				Required: iceberg.Optional[bool]{Val: true, Valid: true},
+			}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		tags, ok := newSchema.FindFieldByName("tags")
+		assert.True(t, ok)
+		listType, ok := tags.Type.(*iceberg.ListType)
+		assert.True(t, ok)
+		assert.True(t, listType.ElementRequired)
+	})
+
+	t.Run("combined type promotion and optionality update on list element", func(t *testing.T) {
+		intListSchema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+			iceberg.NestedField{ID: 2, Name: "vals", Type: &iceberg.ListType{
+				ElementID:       3,
+				Element:         iceberg.PrimitiveTypes.Int32,
+				ElementRequired: true,
+			}, Required: false},
+		)
+		meta, err := NewMetadata(intListSchema, nil, UnsortedSortOrder, "", nil)
+		assert.NoError(t, err)
+
+		table := New([]string{"id"}, meta, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, false).
+			UpdateColumn([]string{"vals", "element"}, ColumnUpdate{
+				FieldType: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
+				Required:  iceberg.Optional[bool]{Val: false, Valid: true},
+			}).Apply()
+		assert.NoError(t, err)
+		assert.NotNil(t, newSchema)
+
+		vals, ok := newSchema.FindFieldByName("vals")
+		assert.True(t, ok)
+		listType, ok := vals.Type.(*iceberg.ListType)
+		assert.True(t, ok)
+		assert.True(t, iceberg.PrimitiveTypes.Int64.Equals(listType.Element),
+			"type promotion should still be applied alongside optionality change")
+		assert.False(t, listType.ElementRequired,
+			"optionality change should be applied alongside type promotion")
+	})
+}
