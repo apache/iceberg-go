@@ -1643,3 +1643,48 @@ func TestUnionByNameAddedColumnPreservesInitialDefault(t *testing.T) {
 	assert.Equal(t, int32(42), count.InitialDefault)
 	assert.Equal(t, int32(42), count.WriteDefault)
 }
+
+func TestUnionByNameMirroredSchemas(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 9, Name: "s", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 8, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}, Required: false},
+		iceberg.NestedField{ID: 5, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 4, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	mirrored := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "s", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "inner", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}, Required: false},
+		iceberg.NestedField{ID: 3, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: 4, Name: "b", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	txn := unionTxn(t, current)
+	baseline := txn.meta.CurrentSchema().AsStruct()
+
+	applied, err := NewUpdateSchema(txn, true, false).UnionByNameWith(mirrored).Apply()
+	require.NoError(t, err)
+	assert.Equal(t, baseline, applied.AsStruct(),
+		"union operates by name; differing incoming field IDs must not cause changes")
+}
+
+func TestUnionByNameInvalidListElementTypeChange(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
+			ElementID: 2, Element: iceberg.PrimitiveTypes.String, ElementRequired: false,
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
+			ElementID: 2, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
+		}, Required: false},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	assert.Error(t, err, "list<string> -> list<long> is not a valid promotion")
+}
