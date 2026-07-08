@@ -461,11 +461,11 @@ func TestStatsTypes(t *testing.T) {
 func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	// Calling the converter directly (outside the schema visitor) must not panic:
 	// an unsupported CRS comes back as an error, symmetric with the read path.
-	t.Run("projjson returns an error instead of panicking", func(t *testing.T) {
-		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs")
+	t.Run("projjson returns an error instead of panicking if no definition is found", func(t *testing.T) {
+		_, err := icebergCRSToGeoArrowMetadata(context.Background(), "projjson:my-custom-crs")
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "projjson CRS not supported yet")
+		require.ErrorContains(t, err, "could not be resolved from table properties")
 	})
 
 	t.Run("supported CRS values map to the expected CRSType", func(t *testing.T) {
@@ -480,7 +480,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.crs, func(t *testing.T) {
-				meta, err := icebergCRSToGeoArrowMetadata(tc.crs)
+				meta, err := icebergCRSToGeoArrowMetadata(context.Background(), tc.crs)
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantCRSType, meta.CRSType)
 			})
@@ -488,7 +488,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	})
 
 	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
-		meta, err := icebergCRSToGeoArrowMetadata("srid:0")
+		meta, err := icebergCRSToGeoArrowMetadata(context.Background(), "srid:0")
 		require.NoError(t, err)
 		assert.Empty(t, meta.CRS)
 		assert.Empty(t, meta.CRSType)
@@ -514,6 +514,7 @@ func TestTypeToArrowTypeWithContextResolvesProjJSONCRS(t *testing.T) {
 		meta := wkb.Metadata()
 		assert.Equal(t, geoarrow.CRSTypePROJJSON, meta.CRSType)
 		assert.JSONEq(t, projjson, string(meta.CRS))
+		// when edge is omitted, it should default to planar
 		assert.Equal(t, geoarrow.EdgePlanar, meta.Edges)
 	})
 

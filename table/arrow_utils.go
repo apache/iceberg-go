@@ -528,6 +528,9 @@ func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
 }
 
 type convertToArrow struct {
+	// the ctx stores table property metadata,
+	// for instance, projjson definitions that can be
+	// used when writing
 	ctx             context.Context
 	metadata        map[string]string
 	includeFieldIDs bool
@@ -674,7 +677,7 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 }
 
 func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadataWithContext(c.ctx, g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(c.ctx, g.CRS())
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -689,7 +692,7 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 }
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadataWithContext(c.ctx, g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(c.ctx, g.CRS())
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -2085,40 +2088,39 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 
 var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
 
-func icebergCRSToGeoArrowMetadataWithContext(ctx context.Context, crs string) (geoarrow.Metadata, error) {
+// icebergCRSToGeoArrowMetadata converts an Iceberg type's CRS to GeoArrow
+// metadata. It uses the ctx variable to pass through the projjson definitions
+// from the table properties.
+func icebergCRSToGeoArrowMetadata(ctx context.Context, crs string) (geoarrow.Metadata, error) {
 	lowerCRS := strings.ToLower(crs)
-	if !strings.HasPrefix(lowerCRS, "projjson:") {
-		return icebergCRSToGeoArrowMetadata(crs)
+
+	if strings.HasPrefix(lowerCRS, "projjson:") {
+		propKey := strings.TrimSpace(crs[len("projjson:"):])
+		if propKey == "" {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS missing table property key", iceberg.ErrInvalidSchema)
+		}
+
+		props := tblutils.TablePropertiesFromContext(ctx)
+		if props == nil {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q could not be resolved from table properties", iceberg.ErrInvalidSchema, crs)
+		}
+
+		projjson, ok := props[propKey]
+		if !ok || strings.TrimSpace(projjson) == "" {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q references missing table property %q", iceberg.ErrInvalidSchema, crs, propKey)
+		}
+
+		raw := json.RawMessage(projjson)
+		if !json.Valid(raw) {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS table property %q is not valid JSON", iceberg.ErrInvalidSchema, propKey)
+		}
+
+		return geoarrow.Metadata{
+			CRS:     raw,
+			CRSType: geoarrow.CRSTypePROJJSON,
+		}, nil
 	}
 
-	propKey := strings.TrimSpace(crs[len("projjson:"):])
-	if propKey == "" {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS missing table property key", iceberg.ErrInvalidSchema)
-	}
-
-	props := tblutils.TablePropertiesFromContext(ctx)
-	if props == nil {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q could not be resolved from table properties", iceberg.ErrInvalidSchema, crs)
-	}
-
-	projjson, ok := props[propKey]
-	if !ok || strings.TrimSpace(projjson) == "" {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q references missing table property %q", iceberg.ErrInvalidSchema, crs, propKey)
-	}
-
-	raw := json.RawMessage(projjson)
-	if !json.Valid(raw) {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS table property %q is not valid JSON", iceberg.ErrInvalidSchema, propKey)
-	}
-
-	return geoarrow.Metadata{
-		CRS:     raw,
-		CRSType: geoarrow.CRSTypePROJJSON,
-	}, nil
-}
-
-func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
-	lowerCRS := strings.ToLower(crs)
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
@@ -2132,10 +2134,6 @@ func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 			CRS:     raw,
 			CRSType: geoarrow.CRSTypeSRID,
 		}, nil
-	}
-
-	if strings.HasPrefix(lowerCRS, "projjson:") {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema)
 	}
 
 	var raw []byte
