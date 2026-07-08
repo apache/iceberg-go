@@ -1683,7 +1683,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 	}
 
-	factory, err := newWriterFactory(ctx, rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
+	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
 	if err != nil {
 		panic(err)
 	}
@@ -1831,7 +1831,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
 	}
-	factory, err := newWriterFactory(ctx, rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
+	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),
 		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 	if err != nil {

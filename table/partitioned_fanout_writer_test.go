@@ -146,7 +146,7 @@ func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCanc
 	}
 
 	writeUUID := uuid.New()
-	factory, err := newWriterFactory(context.Background(), loc, recordWritingArgs{
+	factory, err := newWriterFactory(loc, recordWritingArgs{
 		sc:        arrSchema,
 		itr:       itr,
 		fs:        iceio.LocalFS{},
@@ -233,7 +233,7 @@ func (s *FanoutWriterTestSuite) testTransformPartition(transform iceberg.Transfo
 		},
 	}
 
-	rollingDataWriters, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 1024*1024)
+	rollingDataWriters, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	s.Require().NoError(err)
 
 	partitionWriter := newPartitionedFanoutWriter(spec, icebergSchema, args.itr, rollingDataWriters)

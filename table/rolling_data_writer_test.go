@@ -91,7 +91,7 @@ func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *
 		},
 	}
 
-	factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, targetFileSize)
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, targetFileSize)
 	s.Require().NoError(err)
 
 	return factory, icebergSchema
@@ -222,7 +222,6 @@ func (s *RollingDataWriterTestSuite) TestNewWriterFactoryReturnsErrorForInvalidF
 	})
 
 	factory, err := newWriterFactory(
-		context.Background(),
 		loc,
 		args,
 		metaBuilder,
@@ -401,7 +400,7 @@ func (s *RollingDataWriterTestSuite) TestWriterFactoryDoesNotStampSortOrderID() 
 		},
 	}
 
-	factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 1024*1024)
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	s.Require().NoError(err)
 	defer factory.closeAll()
 
@@ -620,7 +619,7 @@ func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStor
 			}
 		},
 	}
-	factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 1024*1024)
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	s.Require().NoError(err)
 	defer factory.closeAll()
 
@@ -681,7 +680,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 		},
 	}
 
-	factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 1024*1024)
+	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	s.Require().NoError(err)
 	defer factory.closeAll()
 

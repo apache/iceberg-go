@@ -204,7 +204,7 @@ func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 			return nil, err
 		}
 
-		factory, err := newWriterFactory(ctx, rootLocation, args, meta, writeSchema, targetFileSize,
+		factory, err := newWriterFactory(rootLocation, args, meta, writeSchema, targetFileSize,
 			withContentType(iceberg.EntryContentEqDeletes),
 			withFactoryFileSchema(deleteSchema),
 			withFactoryEqualityFieldIDs(equalityFieldIDs))

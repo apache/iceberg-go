@@ -106,8 +106,9 @@ func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
 
 // newWriterFactory creates a writerFactory with precomputed, invariant write
 // configuration derived from the table metadata.
-func newWriterFactory(ctx context.Context, rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
+func newWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
 	nextCount, stopCount := iter.Pull(args.counter)
+	propCtx := tblutils.WithTableProperties(context.Background(), meta.props)
 
 	rootURL, err := url.Parse(rootLocation)
 	if err != nil {
@@ -144,7 +145,7 @@ func newWriterFactory(ctx context.Context, rootLocation string, args recordWriti
 
 	format := tblutils.GetFileFormat(fileFormat)
 
-	arrowSchema, err := schemaToArrowSchemaWithContext(ctx, fileSchema, nil, true, false)
+	arrowSchema, err := schemaToArrowSchemaWithContext(propCtx, fileSchema, nil, true, false)
 	if err != nil {
 		stopCount()
 
@@ -177,7 +178,7 @@ func newWriterFactory(ctx context.Context, rootLocation string, args recordWriti
 		stopCount:      stopCount,
 	}
 	for _, apply := range opts {
-		if err := apply(ctx, f); err != nil {
+		if err := apply(propCtx, f); err != nil {
 			stopCount()
 
 			return nil, err
