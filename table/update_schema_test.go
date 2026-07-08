@@ -1194,8 +1194,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 	})
 
 	t.Run("optionality change composes with type promotion", func(t *testing.T) {
-		// Ensures the fix in applyChanges.Map does not clobber the type
-		// promotion already handled by applyChanges.Field.
 		meta, err := NewMetadata(newMapSchema(true, iceberg.PrimitiveTypes.Int32), nil, UnsortedSortOrder, "", nil)
 		assert.NoError(t, err)
 
@@ -1219,8 +1217,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 	})
 
 	t.Run("type promotion alone preserves original ValueRequired", func(t *testing.T) {
-		// Guards against the fix over-applying: when no Required update is
-		// registered, ValueRequired must match the original schema.
 		meta, err := NewMetadata(newMapSchema(true, iceberg.PrimitiveTypes.Int32), nil, UnsortedSortOrder, "", nil)
 		assert.NoError(t, err)
 
