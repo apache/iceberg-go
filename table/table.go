@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"log"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -768,7 +769,7 @@ func WithSelectedFields(fields ...string) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.selectedFields = fields
+		scan.selectedFields = slices.Clone(fields)
 	}
 }
 
@@ -834,7 +835,7 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.options = opts
+		scan.options = maps.Clone(opts)
 	}
 }
 
@@ -868,8 +869,6 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	for _, opt := range opts {
 		opt(s)
 	}
-
-	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
 
 	return s
 }

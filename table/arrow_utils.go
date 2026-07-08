@@ -1706,23 +1706,19 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			if err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
 		}
-		close(writer.recordCh)
-		writer.wg.Wait()
-		if err := <-writer.errorCh; err != nil {
+		if err := writer.closeAndWait(); err != nil {
 			errCh <- err
 		}
 		close(errCh)
@@ -1867,7 +1863,11 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData)
+				if err := writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData); err != nil {
+					yield(nil, err)
+
+					return
+				}
 				hasEntries = true
 			}
 		}

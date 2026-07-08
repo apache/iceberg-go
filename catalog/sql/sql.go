@@ -86,15 +86,16 @@ func init() {
 			return nil, err
 		}
 
-		defer func() {
-			if r := recover(); r != nil {
-				err = fmt.Errorf("failed to create SQL catalog: %v", r)
-			}
-		}()
-
 		// Here, name is the loader-supplied catalog name and is persisted as the
 		// catalog_name partition key on every row in the iceberg_tables and iceberg_namespace_properties.
-		return NewCatalog(name, sqldb, SupportedDialect(dialect), p)
+		cat, err := NewCatalog(name, sqldb, SupportedDialect(dialect), p)
+		if err != nil {
+			_ = sqldb.Close()
+
+			return nil, err
+		}
+
+		return cat, nil
 	}))
 }
 
@@ -107,33 +108,37 @@ var (
 	dialectMx sync.Mutex
 )
 
-func createDialect(d SupportedDialect) schema.Dialect {
+func createDialect(d SupportedDialect) (schema.Dialect, error) {
 	switch d {
 	case Postgres:
-		return pgdialect.New()
+		return pgdialect.New(), nil
 	case MySQL:
-		return mysqldialect.New()
+		return mysqldialect.New(), nil
 	case SQLite:
-		return sqlitedialect.New()
+		return sqlitedialect.New(), nil
 	case MSSQL:
-		return mssqldialect.New()
+		return mssqldialect.New(), nil
 	case Oracle:
-		return oracledialect.New()
+		return oracledialect.New(), nil
 	default:
-		panic("unsupported sql dialect")
+		return nil, fmt.Errorf("unsupported sql dialect: %q", d)
 	}
 }
 
-func getDialect(d SupportedDialect) schema.Dialect {
+func getDialect(d SupportedDialect) (schema.Dialect, error) {
 	dialectMx.Lock()
 	defer dialectMx.Unlock()
 	ret, ok := dialects[d]
 	if !ok {
-		ret = createDialect(d)
+		var err error
+		ret, err = createDialect(d)
+		if err != nil {
+			return nil, err
+		}
 		dialects[d] = ret
 	}
 
-	return ret
+	return ret, nil
 }
 
 type sqlIcebergTable struct {
@@ -199,7 +204,12 @@ type Catalog struct {
 // All interactions with the db are performed within transactions to ensure atomicity and transactional isolation
 // of catalog changes.
 func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg.Properties) (*Catalog, error) {
-	cat := &Catalog{db: bun.NewDB(db, getDialect(dialect)), name: name, props: props}
+	d, err := getDialect(dialect)
+	if err != nil {
+		return nil, err
+	}
+
+	cat := &Catalog{db: bun.NewDB(db, d), name: name, props: props}
 
 	cat.db.AddQueryHook(bundebug.NewQueryHook(
 		bundebug.WithEnabled(false),

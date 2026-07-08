@@ -257,6 +257,9 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
 	}
+	if err := validateTransform(transform); err != nil {
+		return err
+	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
@@ -280,6 +283,17 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	p.fields = append(p.fields, unboundField)
 
 	return nil
+}
+
+func validateTransform(transform Transform) error {
+	switch t := transform.(type) {
+	case BucketTransform:
+		return t.validateNumBuckets()
+	case *BucketTransform:
+		return t.validateNumBuckets()
+	default:
+		return nil
+	}
 }
 
 func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
@@ -351,7 +365,14 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
-	ret := PartitionSpec{id: id, fields: fields}
+	fieldCopies := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = field
+		if field.SourceIDs != nil {
+			fieldCopies[i].SourceIDs = slices.Clone(field.SourceIDs)
+		}
+	}
+	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
 
 	return ret

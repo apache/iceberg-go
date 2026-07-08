@@ -74,6 +74,28 @@ func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
 }
 
+func TestNewPartitionSpecIDCopiesFields(t *testing.T) {
+	sourceIDs := []int{1}
+	fields := make([]iceberg.PartitionField, 1)
+	fields[0] = iceberg.PartitionField{
+		SourceIDs: sourceIDs,
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	}
+
+	spec := iceberg.NewPartitionSpecID(7, fields...)
+
+	fields[0].FieldID = 2000
+	fields[0].Name = "updated"
+	fields[0].SourceIDs[0] = 2
+
+	restored := spec.Field(0)
+	assert.Equal(t, 1000, restored.FieldID)
+	assert.Equal(t, "id", restored.Name)
+	assert.Equal(t, []int{1}, restored.SourceIDs)
+}
+
 func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1001, Name: "id",
@@ -137,6 +159,36 @@ func TestPartitionSpecCompatibleWithUsesTransformEquals(t *testing.T) {
 			assert.Equal(t, tt.compatible, left.CompatibleWith(&right))
 		})
 	}
+}
+
+func TestPartitionSpecRejectsInvalidBucketTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_bucket", iceberg.BucketTransform{NumBuckets: 0}, schema, nil),
+	)
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
+func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "bad_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 0},
+		},
+	)
+
+	_, err := json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "numBuckets > 0")
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {

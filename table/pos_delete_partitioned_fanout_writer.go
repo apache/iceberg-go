@@ -56,19 +56,20 @@ func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context, worke
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, ctx := errgroup.WithContext(ctx)
-	startRecordFeeder(ctx, p.itr, fanoutWorkers, inputRecordsCh)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(ctx)
+	writerCtx, writerCancel := context.WithCancel(ctx)
+	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
 		fanoutWorkers.Go(func() error {
-			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
+			return p.fanout(fanoutCtx, writerCtx, inputRecordsCh, outputDataFilesCh)
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
+	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh, writerCancel)
 }
 
-func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, writerCtx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -79,7 +80,7 @@ func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, inpu
 				return nil
 			}
 
-			err := p.processBatch(ctx, record, dataFilesChannel)
+			err := p.processBatch(ctx, writerCtx, record, dataFilesChannel)
 			if err != nil {
 				return err
 			}
@@ -87,7 +88,7 @@ func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, inpu
 	}
 }
 
-func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context, batch arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) (err error) {
+func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context, writerCtx context.Context, batch arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) (err error) {
 	defer batch.Release()
 
 	select {
@@ -112,7 +113,7 @@ func (p *positionDeletePartitionedFanoutWriter) processBatch(ctx context.Context
 	if err != nil {
 		return err
 	}
-	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, partitionContext.partitionData, dataFilesChannel)
+	rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, partitionContext.partitionData, dataFilesChannel)
 	if err != nil {
 		return err
 	}
@@ -142,6 +143,13 @@ func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext p
 	return spec.PartitionToPath(data, schema), nil
 }
 
-func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
-	return yieldDataFiles(p.writerFactory, fanoutWorkers, outputDataFilesCh)
+func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+	return yieldDataFiles(
+		p.writerFactory,
+		fanoutWorkers,
+		outputDataFilesCh,
+		p.writerFactory.closeAll,
+		p.writerFactory.abortAll,
+		writerCancel,
+	)
 }

@@ -59,6 +59,14 @@ type Output interface {
 
 type textOutput struct{}
 
+func snapshotSchemaText(schemaID *int) string {
+	if schemaID == nil {
+		return "unknown"
+	}
+
+	return strconv.Itoa(*schemaID)
+}
+
 func (textOutput) Identifiers(idlist []table.Identifier) {
 	data := pterm.TableData{[]string{"IDs"}}
 	for _, ids := range idlist {
@@ -90,8 +98,8 @@ func (t textOutput) DescribeTable(tbl *table.Table) {
 		}
 
 		snapshotList = append(snapshotList, pterm.LeveledListItem{
-			Level: 0, Text: fmt.Sprintf("Snapshot %d, schema %d%s",
-				s.SnapshotID, *s.SchemaID, manifest),
+			Level: 0, Text: fmt.Sprintf("Snapshot %d, schema %s%s",
+				s.SnapshotID, snapshotSchemaText(s.SchemaID), manifest),
 		})
 	}
 
@@ -142,8 +150,8 @@ func (t textOutput) Files(tbl *table.Table, history bool) {
 
 		snapshotTree = append(snapshotTree, pterm.LeveledListItem{
 			Level: 0,
-			Text: fmt.Sprintf("Snapshot %d, schema %d%s",
-				snap.SnapshotID, *snap.SchemaID, manifest),
+			Text: fmt.Sprintf("Snapshot %d, schema %s%s",
+				snap.SnapshotID, snapshotSchemaText(snap.SchemaID), manifest),
 		})
 
 		afs, err := tbl.FS(context.TODO())

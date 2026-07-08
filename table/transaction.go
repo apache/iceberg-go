@@ -153,9 +153,25 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	return nil
 }
 
-// requirementSemanticKey assumes Requirement JSON marshaling is canonical and
-// deterministic for every requirement type that participates in dedupe.
+// requirementSemanticKey computes the dedupe key for a requirement.
+//
+// For most requirement types the key is the canonical JSON marshaling, which
+// keeps semantically distinct requirements (e.g. assertions on different refs)
+// from collapsing into one another.
+//
+// assert-ref-snapshot-id is special-cased to key by requirement type + ref name
+// only, deliberately ignoring the asserted snapshot id. Within a single
+// transaction the builder mutates its own ref state across operations (e.g. the
+// first append asserts main == nil, a later append asserts main == snapshot-1),
+// which would otherwise produce multiple, mutually contradictory base-state
+// assertions for the same ref against the pre-transaction metadata. Keying by
+// ref name keeps only the first assertion for each ref while still letting
+// assertions for different refs survive dedupe.
 func requirementSemanticKey(r Requirement) (string, error) {
+	if ref, ok := r.(*assertRefSnapshotID); ok {
+		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
+	}
+
 	data, err := json.Marshal(r)
 	if err != nil {
 		return "", fmt.Errorf("marshal requirement %q: %w", r.GetType(), err)
@@ -1530,11 +1546,11 @@ func newFileClassificationTask(meta Metadata, rowFilter iceberg.BooleanExpressio
 }
 
 func (t *fileClassificationTask) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	return buildManifestEvaluator(specID, t.meta, t.partitionFilters, t.caseSensitive)
+	return buildManifestEvaluator(specID, t.meta, t.meta.CurrentSchema(), t.partitionFilters, t.caseSensitive)
 }
 
 func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	return buildPartitionProjection(specID, t.meta, t.rowFilter, t.caseSensitive)
+	return buildPartitionProjection(specID, t.meta, t.meta.CurrentSchema(), t.rowFilter, t.caseSensitive)
 }
 
 // classifyFilesForFilteredDeletions classifies files for filtered overwrite operations.
@@ -2026,8 +2042,6 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
-
-	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
 
 	return s, nil
 }
