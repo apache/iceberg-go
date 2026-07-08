@@ -1392,3 +1392,117 @@ func TestUnionByNameNilSchema(t *testing.T) {
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(nil).Apply()
 	assert.Error(t, err)
 }
+
+func TestUnionByNameRejectsMapKeyChange(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int32,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
+		}, Required: false},
+	)
+
+	// A promotable key change (int -> long) must not be applied; forbid evolving map keys.
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int64,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
+		}, Required: false},
+	)
+
+	assert.NotPanics(t, func() {
+		_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+		assert.Error(t, err)
+	})
+}
+
+func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int64,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
+		}, Required: false},
+	)
+	
+	// A narrowing key change (long -> int) should be ignored;
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int32,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.String, ValueRequired: false,
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	key, ok := applied.FindFieldByName("m.key")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int64, key.Type)
+}
+
+func TestUnionByNamePromoteMapValue(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	value, ok := applied.FindFieldByName("m.value")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int64, value.Type)
+}
+
+func TestUnionByNameMakeListElementOptional(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
+			ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "vals", Type: &iceberg.ListType{
+			ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	vals, ok := applied.FindFieldByName("vals")
+	require.True(t, ok)
+	list, ok := vals.Type.(*iceberg.ListType)
+	require.True(t, ok)
+	assert.False(t, list.ElementRequired)
+}
+
+func TestUnionByNameMakeMapValueOptional(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
+		}, Required: false},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
+		}, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	m, ok := applied.FindFieldByName("m")
+	require.True(t, ok)
+	mapType, ok := m.Type.(*iceberg.MapType)
+	require.True(t, ok)
+	assert.False(t, mapType.ValueRequired)
+}

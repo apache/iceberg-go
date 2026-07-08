@@ -661,8 +661,11 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 			return err
 		}
 	case *iceberg.MapType:
-		if err := u.unionField(childPath(path, "key"), t.KeyField()); err != nil {
-			return err
+		// Map keys are immutable; reject any key change up front
+		if existingMap, ok := existing.Type.(*iceberg.MapType); ok {
+			if !existingMap.KeyType.Equals(t.KeyType) {
+				return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
+			}
 		}
 		if err := u.unionField(childPath(path, "value"), t.ValueField()); err != nil {
 			return err
@@ -1013,10 +1016,15 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 		panic(fmt.Sprintf("cannot delete element type from list: %s", elementResult))
 	}
 
+	elementRequired := listType.ElementRequired
+	if update, ok := a.updates[listType.ElementID]; ok {
+		elementRequired = update.Required
+	}
+
 	return &iceberg.ListType{
 		ElementID:       listType.ElementID,
 		Element:         elementType,
-		ElementRequired: listType.ElementRequired,
+		ElementRequired: elementRequired,
 	}
 }
 
@@ -1045,12 +1053,17 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		panic(fmt.Errorf("cannot delete value type from map: %s", mapType.String()))
 	}
 
+	valueRequired := mapType.ValueRequired
+	if update, ok := a.updates[mapType.ValueID]; ok {
+		valueRequired = update.Required
+	}
+
 	return &iceberg.MapType{
 		KeyID:         mapType.KeyID,
 		KeyType:       mapType.KeyType,
 		ValueID:       mapType.ValueID,
 		ValueType:     valueType,
-		ValueRequired: mapType.ValueRequired,
+		ValueRequired: valueRequired,
 	}
 }
 
