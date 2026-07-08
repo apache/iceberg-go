@@ -1065,7 +1065,6 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 				Required: iceberg.Optional[bool]{Val: false, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		tags, ok := newSchema.FindFieldByName("tags")
 		assert.True(t, ok)
@@ -1085,7 +1084,6 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 				Required: iceberg.Optional[bool]{Val: true, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		tags, ok := newSchema.FindFieldByName("tags")
 		assert.True(t, ok)
@@ -1106,7 +1104,6 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 				Required:  iceberg.Optional[bool]{Val: false, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		tags, ok := newSchema.FindFieldByName("tags")
 		assert.True(t, ok)
@@ -1128,7 +1125,6 @@ func TestApplyChangesListElementOptionalityUpdates(t *testing.T) {
 				FieldType: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		tags, ok := newSchema.FindFieldByName("tags")
 		assert.True(t, ok)
@@ -1163,7 +1159,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 				Required: iceberg.Optional[bool]{Val: false, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		props, ok := newSchema.FindFieldByName("properties")
 		assert.True(t, ok)
@@ -1183,7 +1178,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 				Required: iceberg.Optional[bool]{Val: true, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		props, ok := newSchema.FindFieldByName("properties")
 		assert.True(t, ok)
@@ -1204,7 +1198,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 				Required:  iceberg.Optional[bool]{Val: false, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		props, ok := newSchema.FindFieldByName("properties")
 		assert.True(t, ok)
@@ -1226,7 +1219,6 @@ func TestApplyChangesMapValueOptionalityUpdates(t *testing.T) {
 				FieldType: iceberg.Optional[iceberg.Type]{Val: iceberg.PrimitiveTypes.Int64, Valid: true},
 			}).Apply()
 		assert.NoError(t, err)
-		assert.NotNil(t, newSchema)
 
 		props, ok := newSchema.FindFieldByName("properties")
 		assert.True(t, ok)
