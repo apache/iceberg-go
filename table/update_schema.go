@@ -663,7 +663,7 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 	case *iceberg.MapType:
 		// Map keys are immutable; reject any key change up front
 		if existingMap, ok := existing.Type.(*iceberg.MapType); ok {
-			if !existingMap.KeyType.Equals(t.KeyType) {
+			if !isIgnorableTypeUpdate(existingMap.KeyType, t.KeyType) {
 				return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
 			}
 		}
