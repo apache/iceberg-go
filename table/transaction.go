@@ -1823,7 +1823,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// recordsToDataFiles can resolve _row_id via field ID rather than the name
 	// mapping (which doesn't include metadata columns).
 	if preserveRowLineage {
-		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		writeCtx := internal.WithTableProperties(ctx, t.meta.props)
+		arrowSchema, err = schemaToArrowSchemaWithContext(writeCtx, projectedSchema, nil, true, false)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
 		}

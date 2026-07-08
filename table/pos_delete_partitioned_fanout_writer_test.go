@@ -128,7 +128,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			require.NoError(t, err)
 
 			writeUUID := uuid.New()
-			factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+			factory, err := newWriterFactory(context.Background(), t.TempDir(), recordWritingArgs{
 				fs:        &io.LocalFS{},
 				sc:        PositionalDeleteArrowSchema,
 				writeUUID: &writeUUID,
@@ -361,7 +361,7 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	}
 
 	writeUUID := uuid.New()
-	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+	factory, err := newWriterFactory(context.Background(), t.TempDir(), recordWritingArgs{
 		fs:        &io.LocalFS{},
 		sc:        PositionalDeleteArrowSchema,
 		writeUUID: &writeUUID,

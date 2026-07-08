@@ -73,10 +73,10 @@ type writerFactory struct {
 	mu                    sync.Mutex
 }
 
-type writerFactoryOption func(*writerFactory) error
+type writerFactoryOption func(context.Context, *writerFactory) error
 
 func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
-	return func(w *writerFactory) error {
+	return func(_ context.Context, w *writerFactory) error {
 		w.content = content
 
 		return nil
@@ -84,7 +84,7 @@ func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
 }
 
 func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
-	return func(w *writerFactory) error {
+	return func(_ context.Context, w *writerFactory) error {
 		w.equalityFieldIDs = ids
 
 		return nil
@@ -92,9 +92,9 @@ func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
 }
 
 func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
-	return func(w *writerFactory) error {
+	return func(ctx context.Context, w *writerFactory) error {
 		w.fileSchema = schema
-		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
+		arrowSc, err := schemaToArrowSchemaWithContext(ctx, schema, nil, true, false)
 		if err != nil {
 			return fmt.Errorf("withFactoryFileSchema: failed to convert schema: %w", err)
 		}
@@ -106,7 +106,7 @@ func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
 
 // newWriterFactory creates a writerFactory with precomputed, invariant write
 // configuration derived from the table metadata.
-func newWriterFactory(rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
+func newWriterFactory(ctx context.Context, rootLocation string, args recordWritingArgs, meta *MetadataBuilder, taskSchema *iceberg.Schema, targetFileSize int64, opts ...writerFactoryOption) (*writerFactory, error) {
 	nextCount, stopCount := iter.Pull(args.counter)
 
 	rootURL, err := url.Parse(rootLocation)
@@ -144,7 +144,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 	format := tblutils.GetFileFormat(fileFormat)
 
-	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	arrowSchema, err := schemaToArrowSchemaWithContext(ctx, fileSchema, nil, true, false)
 	if err != nil {
 		stopCount()
 
@@ -177,7 +177,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount:      stopCount,
 	}
 	for _, apply := range opts {
-		if err := apply(f); err != nil {
+		if err := apply(ctx, f); err != nil {
 			stopCount()
 
 			return nil, err

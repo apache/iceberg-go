@@ -528,6 +528,7 @@ func ensureSmallArrowTypes(dt arrow.DataType) (arrow.DataType, error) {
 }
 
 type convertToArrow struct {
+	ctx             context.Context
 	metadata        map[string]string
 	includeFieldIDs bool
 	useLargeTypes   bool
@@ -673,7 +674,7 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 }
 
 func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadataWithContext(c.ctx, g.CRS())
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -688,7 +689,7 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 }
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadataWithContext(c.ctx, g.CRS())
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -714,7 +715,12 @@ var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
 // is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
 // the field id from the iceberg schema.
 func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs, useLargeTypes bool) (*arrow.Schema, error) {
+	return schemaToArrowSchemaWithContext(context.Background(), sc, metadata, includeFieldIDs, useLargeTypes)
+}
+
+func schemaToArrowSchemaWithContext(ctx context.Context, sc *iceberg.Schema, metadata map[string]string, includeFieldIDs, useLargeTypes bool) (*arrow.Schema, error) {
 	top, err := iceberg.Visit(sc, convertToArrow{
+		ctx:             ctx,
 		metadata:        metadata,
 		includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes,
 	})
@@ -729,8 +735,12 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 // For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
 // the child fields will contain a metadata key PARQUET:field_id set to the field id.
 func TypeToArrowType(t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (arrow.DataType, error) {
+	return typeToArrowTypeWithContext(context.Background(), t, includeFieldIDs, useLargeTypes)
+}
+
+func typeToArrowTypeWithContext(ctx context.Context, t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (arrow.DataType, error) {
 	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
-		convertToArrow{includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
+		convertToArrow{ctx: ctx, includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +959,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	if !field.Type.Equals(typ) {
 		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
 			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-			targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs, a.useLargeTypes))
+			targetType := retOrPanic(typeToArrowTypeWithContext(a.ctx, promoted, a.includeFieldIDs, a.useLargeTypes))
 			if !a.useLargeTypes {
 				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 			}
@@ -959,7 +969,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 		}
 	}
 
-	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
+	targetType := retOrPanic(typeToArrowTypeWithContext(a.ctx, field.Type, a.includeFieldIDs, a.useLargeTypes))
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
@@ -1084,7 +1094,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
 		} else {
-			dt := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
+			dt := retOrPanic(typeToArrowTypeWithContext(a.ctx, field.Type, a.includeFieldIDs, a.useLargeTypes))
 			alloc := compute.GetAllocator(a.ctx)
 
 			switch {
@@ -1636,6 +1646,8 @@ type recordWritingArgs struct {
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1671,7 +1683,7 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		}
 	}
 
-	factory, err := newWriterFactory(rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
+	factory, err := newWriterFactory(ctx, rootLocation, args, meta, taskSchema, targetFileSize, args.factoryOpts...)
 	if err != nil {
 		panic(err)
 	}
@@ -1746,6 +1758,8 @@ type partitionContext struct {
 }
 
 func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, partitionContextByFilePath map[string]partitionContext, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	ctx = tblutils.WithTableProperties(ctx, meta.props)
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1817,7 +1831,7 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 		return cw.writeFiles(ctx, rootLocation, args.fs, meta, meta.props, nil, tasks)
 	}
-	factory, err := newWriterFactory(rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
+	factory, err := newWriterFactory(ctx, rootLocation, args, meta, iceberg.PositionalDeleteSchema, targetFileSize,
 		withContentType(iceberg.EntryContentPosDeletes),
 		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
 	if err != nil {
@@ -2070,6 +2084,38 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 }
 
 var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
+
+func icebergCRSToGeoArrowMetadataWithContext(ctx context.Context, crs string) (geoarrow.Metadata, error) {
+	lowerCRS := strings.ToLower(crs)
+	if !strings.HasPrefix(lowerCRS, "projjson:") {
+		return icebergCRSToGeoArrowMetadata(crs)
+	}
+
+	propKey := strings.TrimSpace(crs[len("projjson:"):])
+	if propKey == "" {
+		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS missing table property key", iceberg.ErrInvalidSchema)
+	}
+
+	props := tblutils.TablePropertiesFromContext(ctx)
+	if props == nil {
+		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q could not be resolved from table properties", iceberg.ErrInvalidSchema, crs)
+	}
+
+	projjson, ok := props[propKey]
+	if !ok || strings.TrimSpace(projjson) == "" {
+		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q references missing table property %q", iceberg.ErrInvalidSchema, crs, propKey)
+	}
+
+	raw := json.RawMessage(projjson)
+	if !json.Valid(raw) {
+		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS table property %q is not valid JSON", iceberg.ErrInvalidSchema, propKey)
+	}
+
+	return geoarrow.Metadata{
+		CRS:     raw,
+		CRSType: geoarrow.CRSTypePROJJSON,
+	}, nil
+}
 
 func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 	lowerCRS := strings.ToLower(crs)

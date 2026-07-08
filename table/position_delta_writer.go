@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -165,6 +166,7 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 		return nil, fmt.Errorf("%w: writer is already closed", ErrInvalidOperation)
 	}
 	w.closed = true
+	ctx = tblutils.WithTableProperties(ctx, w.tbl.Properties())
 
 	defer func() {
 		for _, b := range w.reinsertBatches {
@@ -180,7 +182,7 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 	}
 
 	fileSchema := iceberg.SchemaWithRowID(w.tbl.Schema())
-	arrowSc, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	arrowSc, err := schemaToArrowSchemaWithContext(ctx, fileSchema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("PositionDeltaWriter: build arrow schema: %w", err)
 	}

@@ -143,7 +143,7 @@ func (s *ClusteredWriterTestSuite) setupFactory(loc string, arrSchema *arrow.Sch
 		},
 	}
 
-	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, targetFileSize)
+	factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, targetFileSize)
 	s.Require().NoError(err)
 
 	return factory, spec, icebergSchema
@@ -591,7 +591,7 @@ func writeWithMeasurement(t testing.TB, name string, numPartitions, rowsPerParti
 
 	switch name {
 	case "fanout":
-		factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 512*1024*1024)
+		factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 512*1024*1024)
 		require.NoError(t, err)
 		writer := newPartitionedFanoutWriter(spec, icebergSchema, args.itr, factory)
 		captureBaseline()
@@ -601,7 +601,7 @@ func writeWithMeasurement(t testing.TB, name string, numPartitions, rowsPerParti
 		}
 
 	case "clustered":
-		factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 512*1024*1024)
+		factory, err := newWriterFactory(context.Background(), loc, args, metaBuilder, icebergSchema, 512*1024*1024)
 		require.NoError(t, err)
 		captureBaseline()
 		for df, err := range clusteredPartitionedWrite(context.Background(), spec, icebergSchema, factory, args.itr) {
