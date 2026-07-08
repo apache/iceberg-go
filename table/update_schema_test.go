@@ -1180,7 +1180,6 @@ func TestUnionByNameAddedColumnsAreOptional(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	)
-	// The incoming field is required, but union always adds columns as optional.
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -1220,7 +1219,6 @@ func TestUnionByNameAddNestedStructField(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, iceberg.PrimitiveTypes.String, zip.Type)
 
-	// existing nested field is retained
 	_, ok = applied.FindFieldByName("address.city")
 	assert.True(t, ok)
 }
@@ -1325,7 +1323,6 @@ func TestUnionByNameUpdateWriteDefaultOnly(t *testing.T) {
 
 	id, ok := applied.FindFieldByName("id")
 	require.True(t, ok)
-	// write default is applied but the initial default of an existing column is not modified
 	assert.Equal(t, int32(35), id.WriteDefault)
 	assert.Nil(t, id.InitialDefault)
 }
@@ -1401,7 +1398,6 @@ func TestUnionByNameRejectsMapKeyChange(t *testing.T) {
 		}, Required: false},
 	)
 
-	// A promotable key change (int -> long) must not be applied; forbid evolving map keys.
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
 			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int64,
@@ -1423,7 +1419,6 @@ func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
 		}, Required: false},
 	)
 
-	// A narrowing key change (long -> int) should be ignored;
 	incoming := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
 			KeyID: 2, KeyType: iceberg.PrimitiveTypes.Int32,
