@@ -19,6 +19,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -53,7 +54,7 @@ func (r ReportMetricsRequest) MarshalJSON() ([]byte, error) {
 	// report with no required fields instead of an error. Mirrors isNilReport
 	// used by the built-in reporters.
 	if isNilReport(r.Report) {
-		return nil, fmt.Errorf("metrics: cannot marshal nil report")
+		return nil, errors.New("metrics: cannot marshal nil report")
 	}
 
 	var reportType string
