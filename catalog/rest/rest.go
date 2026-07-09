@@ -81,7 +81,12 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
-	keyTlsSkipVerify    = "rest.tls.skip-verify"
+	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
+	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
+	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
+	// are set, oauth2-server-uri takes precedence.
+	keyOAuth2ServerURI = "oauth2-server-uri"
+	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
 )
@@ -113,9 +118,10 @@ func init() {
 }
 
 type errorResponse struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    int    `json:"code"`
+	Message string   `json:"message"`
+	Type    string   `json:"type"`
+	Code    int      `json:"code"`
+	Stack   []string `json:"stack,omitempty"`
 
 	wrapping error
 }
@@ -160,7 +166,9 @@ func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
-type storageCredential struct {
+// StorageCredential carries REST-vended storage credentials scoped to matching
+// object-location prefixes.
+type StorageCredential struct {
 	Prefix string             `json:"prefix"`
 	Config iceberg.Properties `json:"config"`
 }
@@ -169,12 +177,12 @@ type loadTableResponse struct {
 	MetadataLoc        string              `json:"metadata-location"`
 	RawMetadata        json.RawMessage     `json:"metadata"`
 	Config             iceberg.Properties  `json:"config"`
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 	Metadata           table.Metadata      `json:"-"`
 }
 
 type loadCredentialsResponse struct {
-	StorageCredentials []storageCredential `json:"storage-credentials"`
+	StorageCredentials []StorageCredential `json:"storage-credentials"`
 }
 
 func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
@@ -445,9 +453,18 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 	return e
 }
 
-func fromProps(props iceberg.Properties, o *options) {
+func fromProps(props iceberg.Properties, o *options) error {
+	// The OAuth token endpoint may be configured via either the portable
+	// oauth2-server-uri key or the legacy rest.authorization-url alias. Capture
+	// both and resolve precedence after the loop, since map iteration order is
+	// non-deterministic.
+	var authURL, oauth2ServerURI *url.URL
 	for k, v := range props {
 		switch k {
+		case keyOauthToken:
+			if o.oauthToken == "" {
+				o.oauthToken = v
+			}
 		case keyWarehouseLocation:
 			o.warehouseLocation = v
 		case keyMetadataLocation:
@@ -459,11 +476,17 @@ func fromProps(props iceberg.Properties, o *options) {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := url.Parse(v)
+			u, err := parseAuthURL(keyAuthUrl, v)
 			if err != nil {
-				continue
+				return err
 			}
-			o.authUri = u
+			authURL = u
+		case keyOAuth2ServerURI:
+			u, err := parseAuthURL(keyOAuth2ServerURI, v)
+			if err != nil {
+				return err
+			}
+			oauth2ServerURI = u
 		case keyOauthCredential:
 			o.credential = v
 		case keyScope:
@@ -493,6 +516,48 @@ func fromProps(props iceberg.Properties, o *options) {
 			}
 		}
 	}
+
+	// oauth2-server-uri is the portable, preferred key and takes precedence over
+	// the rest.authorization-url alias when both are set.
+	switch {
+	case oauth2ServerURI != nil:
+		o.authUri = oauth2ServerURI
+	case authURL != nil:
+		o.authUri = authURL
+	}
+
+	return nil
+}
+
+// resolveAuthURLAlias collapses the oauth2-server-uri / rest.authorization-url
+// alias within a single configuration layer into the canonical
+// oauth2-server-uri key. oauth2-server-uri wins over the rest.authorization-url
+// alias within the same layer. Collapsing per layer before merging keeps
+// defaults -> client -> overrides precedence intact.
+func resolveAuthURLAlias(props iceberg.Properties) {
+	v, ok := props[keyOAuth2ServerURI]
+	if !ok {
+		v, ok = props[keyAuthUrl]
+	}
+	delete(props, keyAuthUrl)
+	if ok {
+		props[keyOAuth2ServerURI] = v
+	}
+}
+
+func parseAuthURL(key, raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", key, raw, err)
+	}
+	if u.Scheme == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", key, raw)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing host", key, raw)
+	}
+
+	return u, nil
 }
 
 func toProps(o *options) iceberg.Properties {
@@ -505,6 +570,7 @@ func toProps(o *options) iceberg.Properties {
 		}
 	}
 
+	setIf(keyOauthToken, o.oauthToken)
 	setIf(keyOauthCredential, o.credential)
 	setIf(keyWarehouseLocation, o.warehouseLocation)
 	setIf(keyMetadataLocation, o.metadataLocation)
@@ -527,7 +593,12 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		setIf(keyAuthUrl, o.authUri.String())
+		// Advertise the endpoint only under the portable oauth2-server-uri key.
+		// We canonicalize to this key everywhere else (fromProps precedence,
+		// resolveAuthURLAlias), so emitting the legacy rest.authorization-url
+		// alias too would leave the endpoint under two names in r.props and any
+		// table config cloned from it - two sources of truth that can drift.
+		setIf(keyOAuth2ServerURI, o.authUri.String())
 	}
 
 	return props
@@ -539,7 +610,9 @@ type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
 
-	name      string
+	name string
+	// Retained catalog properties are reused for table/view IO and may carry
+	// authentication material such as credential or token.
 	props     iceberg.Properties
 	endpoints endpointSet
 
@@ -548,7 +621,9 @@ type Catalog struct {
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
 	var ops options
-	fromProps(p, &ops)
+	if err := fromProps(p, &ops); err != nil {
+		return nil, err
+	}
 
 	r := &Catalog{name: name}
 	if err := r.init(ctx, &ops, uri); err != nil {
@@ -752,7 +827,17 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	if cfg == nil {
 		cfg = iceberg.Properties{}
 	}
-	maps.Copy(cfg, toProps(opts))
+
+	// Collapse the oauth2-server-uri / rest.authorization-url alias within each
+	// layer before merging so the defaults -> client -> overrides precedence is
+	// preserved. Merging first would leave both keys in the map, letting a
+	// client oauth2-server-uri shadow a server rest.authorization-url override.
+	clientProps := toProps(opts)
+	resolveAuthURLAlias(cfg)
+	resolveAuthURLAlias(clientProps)
+	resolveAuthURLAlias(rsp.Overrides)
+
+	maps.Copy(cfg, clientProps)
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
@@ -762,7 +847,9 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	r.endpoints = resolveEndpoints(rsp.Endpoints, cfg.GetBool(keyViewEndpointsSupported, false))
 
 	o := *opts
-	fromProps(cfg, &o)
+	if err := fromProps(cfg, &o); err != nil {
+		return nil, nil, err
+	}
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
@@ -936,9 +1023,16 @@ func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
 }
 
 func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
-	if len(ident) < 1 {
-		return "", "", fmt.Errorf("%w: missing namespace or invalid identifier %v",
-			catalog.ErrNoSuchTable, strings.Join(ident, "."))
+	if err := catalog.ValidateTableIdentifier(ident); err != nil {
+		return "", "", err
+	}
+
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+}
+
+func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
+	if err := catalog.ValidateViewIdentifier(ident); err != nil {
+		return "", "", err
 	}
 
 	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
@@ -1127,6 +1221,9 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 	for i, c := range commits {
 		if len(c.Identifier) == 0 {
 			return catalog.ErrMissingIdentifier
+		}
+		if err := catalog.ValidateTableIdentifier(c.Identifier); err != nil {
+			return err
 		}
 
 		reqs := c.Requirements
@@ -1335,6 +1432,12 @@ func (r *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 
 func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
 	if err := r.endpoints.check(endpointRenameTable); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateTableIdentifier(from); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateTableIdentifier(to); err != nil {
 		return nil, err
 	}
 
@@ -1687,7 +1790,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return err
 	}
 
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return err
 	}
@@ -1704,7 +1807,7 @@ func (r *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 }
 
 func (r *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns, view, err := r.splitIdentForPath(identifier)
+	ns, view, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -1774,7 +1877,7 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(identifier)
+	ns, viewName, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1835,7 +1938,7 @@ func (r *Catalog) UpdateView(ctx context.Context, ident table.Identifier, requir
 		return nil, err
 	}
 
-	ns, viewName, err := r.splitIdentForPath(ident)
+	ns, viewName, err := r.splitViewIdentForPath(ident)
 	if err != nil {
 		return nil, err
 	}
@@ -1880,7 +1983,7 @@ func (r *Catalog) RegisterView(ctx context.Context, identifier table.Identifier,
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -1917,7 +2020,7 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 		return nil, err
 	}
 
-	ns, v, err := r.splitIdentForPath(identifier)
+	ns, v, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
 		return nil, err
 	}

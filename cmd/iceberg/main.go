@@ -202,6 +202,7 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
+	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -236,9 +237,14 @@ func main() {
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(args.Config), args.CatalogName)
-	if fileCfg != nil {
+	configData := config.LoadConfig(args.Config)
+	fileCfg, err := config.ParseConfig(configData, resolveCatalogName(explicitFlags, args.CatalogName))
+	if err != nil {
+		log.Printf("warning: failed to parse config file: %v", err)
+	} else if fileCfg != nil {
 		mergeConf(fileCfg, &args, explicitFlags)
+	} else if len(configData) > 0 {
+		log.Printf("warning: catalog %q not found in config file", args.CatalogName)
 	}
 
 	// Validate nested subcommands before catalog init.
@@ -379,7 +385,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
-		awscfg, err := awsconfig.LoadDefaultConfig(ctx)
+		var awsLoadOpts []func(*awsconfig.LoadOptions) error
+		if args.AwsProfile != "" {
+			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AwsProfile))
+		}
+
+		awscfg, err := awsconfig.LoadDefaultConfig(ctx, awsLoadOpts...)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -785,6 +796,17 @@ func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id strin
 	return tbl
 }
 
+// resolveCatalogName returns the catalog name to pass to ParseConfig.
+// When --catalog-name was given explicitly it wins; otherwise "" is returned
+// so ParseConfig can fall back through default-catalog -> "default".
+func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string {
+	if explicitFlags["catalog-name"] {
+		return flagValue
+	}
+
+	return ""
+}
+
 // mergeConf applies values from the file config into args for any option
 // that was not explicitly provided on the command line. explicitFlags is a set
 // of flag names (without the "--" prefix) that appeared in os.Args so that
@@ -808,6 +830,10 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		args.Warehouse = fileConf.Warehouse
+	}
+
+	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
+		args.AwsProfile = fileConf.AwsProfile
 	}
 
 	if fileConf.RestOptions != nil {

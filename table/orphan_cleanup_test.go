@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	stdfs "io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,41 @@ func TestNormalizeNonURLPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := normalizeNonURLPath(tt.input)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestVersionHintLocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		expected string
+	}{
+		{
+			name:     "s3_uri",
+			location: "s3://bucket/table",
+			expected: "s3://bucket/table/metadata/version-hint.text",
+		},
+		{
+			name:     "file_uri",
+			location: "file:///tmp/table",
+			expected: "file:///tmp/table/metadata/version-hint.text",
+		},
+		{
+			name:     "file_uri_opaque",
+			location: "file:/tmp/table",
+			expected: "file:/tmp/table/metadata/version-hint.text",
+		},
+		{
+			name:     "local_path",
+			location: filepath.Join("local", "table"),
+			expected: filepath.Join("local", "table", "metadata", "version-hint.text"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, versionHintLocation(tt.location))
 		})
 	}
 }
@@ -531,6 +568,8 @@ func TestGetReferencedFiles_IncludesStatisticsFiles(t *testing.T) {
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/table-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath("s3://bucket/stats/part-stats.puffin"))
 	assert.Contains(t, refs, normalizeFilePath(tbl.metadataLocation))
+	assert.Contains(t, refs, normalizeFilePath("s3://bucket/test/location/metadata/version-hint.text"))
+	assert.NotContains(t, refs, normalizeFilePath("s3:/bucket/test/location/metadata/version-hint.text"))
 	assert.NotContains(t, refs, normalizeFilePath("s3://bucket/stats/not-referenced.puffin"))
 	assert.NotContains(t, refs, "")
 }
@@ -595,7 +634,7 @@ func TestDeleteFilesEmpty(t *testing.T) {
 	assert.Nil(t, deleted)
 }
 
-// mockPlainIO implements only IO (no BulkRemovableIO) to verify fallback behavior.
+// mockPlainIO implements only IO, without optional delete or listing capabilities.
 type mockPlainIO struct {
 	removed []string
 }
@@ -610,6 +649,41 @@ func (m *mockPlainIO) Remove(name string) error {
 	return nil
 }
 
+type mockListableIO struct {
+	mockPlainIO
+	root    string
+	entries []mockWalkEntry
+}
+
+type mockWalkEntry struct {
+	path string
+	info mockFileInfo
+}
+
+func (m *mockListableIO) WalkDir(root string, fn stdfs.WalkDirFunc) error {
+	m.root = root
+	for _, entry := range m.entries {
+		if err := fn(entry.path, stdfs.FileInfoToDirEntry(entry.info), nil); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type mockFileInfo struct {
+	name string
+	size int64
+	mode stdfs.FileMode
+}
+
+func (m mockFileInfo) Name() string         { return m.name }
+func (m mockFileInfo) Size() int64          { return m.size }
+func (m mockFileInfo) Mode() stdfs.FileMode { return m.mode }
+func (m mockFileInfo) ModTime() time.Time   { return time.Time{} }
+func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
+func (m mockFileInfo) Sys() any             { return nil }
+
 func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	mock := &mockPlainIO{}
 	orphans := []string{"s3://bucket/data/orphan1.parquet", "s3://bucket/data/orphan2.parquet"}
@@ -619,6 +693,47 @@ func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, orphans, mock.removed)
 	assert.ElementsMatch(t, orphans, deleted)
+}
+
+func TestWalkDirectoryUsesListableIO(t *testing.T) {
+	mock := &mockListableIO{
+		entries: []mockWalkEntry{
+			{path: "s3://bucket/data", info: mockFileInfo{name: "data", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/data/a.parquet", info: mockFileInfo{name: "a.parquet", size: 3}},
+			{path: "s3://bucket/data/nested", info: mockFileInfo{name: "nested", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/data/nested/b.parquet", info: mockFileInfo{name: "b.parquet", size: 4}},
+		},
+	}
+	var walked []string
+	sizes := make(map[string]int64)
+
+	err := walkDirectory(mock, "s3://bucket/data", func(path string, info stdfs.FileInfo) error {
+		walked = append(walked, path)
+		sizes[path] = info.Size()
+
+		return nil
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "s3://bucket/data", mock.root)
+	assert.Equal(t, []string{
+		"s3://bucket/data/a.parquet",
+		"s3://bucket/data/nested/b.parquet",
+	}, walked)
+	assert.Equal(t, map[string]int64{
+		"s3://bucket/data/a.parquet":        3,
+		"s3://bucket/data/nested/b.parquet": 4,
+	}, sizes)
+}
+
+func TestWalkDirectoryRequiresListableIO(t *testing.T) {
+	err := walkDirectory(&mockPlainIO{}, "s3://bucket/data", func(string, stdfs.FileInfo) error {
+		require.Fail(t, "walk callback should not run for non-listable IO")
+
+		return nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not implement iceio.ListableIO")
 }
 
 type inMemoryCatalog struct {

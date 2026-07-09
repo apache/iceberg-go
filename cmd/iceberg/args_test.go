@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/alexflint/go-arg"
+	"github.com/apache/iceberg-go/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -228,6 +229,13 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "aws-profile flag",
+			args: []string{"--catalog", "glue", "--aws-profile", "my-profile", "list"},
+			check: func(t *testing.T, a Args) {
+				assert.Equal(t, "my-profile", a.AwsProfile)
+			},
+		},
+		{
 			name: "rollback with snapshot id",
 			args: []string{"rollback", "prod.db.events", "--snapshot-id", "123", "--yes"},
 			check: func(t *testing.T, a Args) {
@@ -278,4 +286,41 @@ func TestArgsParsing(t *testing.T) {
 			tt.check(t, a)
 		})
 	}
+}
+
+func TestResolveCatalogName(t *testing.T) {
+	tests := []struct {
+		name          string
+		explicitFlags map[string]bool
+		flagValue     string
+		want          string
+	}{
+		// explicit --catalog-name wins and is passed through
+		{"explicit flag wins", map[string]bool{"catalog-name": true}, "prod", "prod"},
+		// no flag: return "" so ParseConfig falls back to default-catalog / "default"
+		{"no flag returns empty string", map[string]bool{}, "default", ""},
+		// other flags set but not catalog-name: still falls back
+		{"other flags set only", map[string]bool{"uri": true}, "default", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, resolveCatalogName(tt.explicitFlags, tt.flagValue))
+		})
+	}
+}
+
+func TestMergeConfAwsProfile(t *testing.T) {
+	fileCfg := &config.CatalogConfig{AwsProfile: "file-profile"}
+
+	t.Run("file value applied when flag absent", func(t *testing.T) {
+		var a Args
+		mergeConf(fileCfg, &a, map[string]bool{})
+		assert.Equal(t, "file-profile", a.AwsProfile)
+	})
+
+	t.Run("cli value preserved when flag explicit", func(t *testing.T) {
+		a := Args{AwsProfile: "cli-profile"}
+		mergeConf(fileCfg, &a, map[string]bool{"aws-profile": true})
+		assert.Equal(t, "cli-profile", a.AwsProfile)
+	})
 }

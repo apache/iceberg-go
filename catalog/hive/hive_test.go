@@ -20,18 +20,23 @@ package hive
 import (
 	"context"
 	"errors"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
+
+var errHivePurgeRemove = errors.New("hive purge remove failed")
 
 type mockHiveClient struct {
 	mock.Mock
@@ -523,6 +528,169 @@ func TestHiveDropTable(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHivePurgeTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeHivePurgeTableFiles(t, tableLocation)
+	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hiveTable, nil).Twice()
+	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
+		Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.NoFileExists(metadataLocation)
+	assert.NoFileExists(dataFile)
+	mockClient.AssertExpectations(t)
+}
+
+func TestHivePurgeTableSwallowsPurgeFilesError(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	const scheme = "hivepurgefail"
+	dropCalled := false
+	removeBeforeDrop := false
+	removeCalls := 0
+	failingFS := failRemoveIO{
+		MemFS: iceio.NewMemFS(),
+		err:   errHivePurgeRemove,
+		onRemove: func() {
+			removeCalls++
+			if !dropCalled {
+				removeBeforeDrop = true
+			}
+		},
+	}
+	iceio.Unregister(scheme)
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return failingFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	tableLocation := scheme + "://bucket/test_database/test_table"
+	metadataLocation := tableLocation + "/metadata/v1.metadata.json"
+	dataFile := tableLocation + "/data/file.parquet"
+	writeHivePurgeTableMetadata(t, failingFS, tableLocation, metadataLocation, nil)
+	assert.NoError(failingFS.WriteFile(dataFile, []byte("data")))
+	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hiveTable, nil).Twice()
+	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
+		Run(func(mock.Arguments) {
+			dropCalled = true
+		}).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.True(dropCalled)
+	assert.Positive(removeCalls)
+	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	file, err := failingFS.Open(dataFile)
+	assert.NoError(err, "data file should remain when FileIO remove fails")
+	assert.NotNil(file)
+	assert.NoError(file.Close())
+	mockClient.AssertExpectations(t)
+}
+
+func TestHivePurgeTableWithGCDisabled(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
+	metadataLocation, dataFile := writeHivePurgeTableFilesWithProperties(
+		t, tableLocation, iceberg.Properties{"gc.enabled": "false"})
+	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(hiveTable, nil).Twice()
+	mockClient.On("DropTable", mock.Anything, "test_database", "test_table", false).
+		Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	assert.NoError(hiveCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
+	assert.NoFileExists(metadataLocation)
+	assert.FileExists(dataFile)
+	mockClient.AssertExpectations(t)
+}
+
+type failRemoveIO struct {
+	*iceio.MemFS
+	err      error
+	onRemove func()
+}
+
+func (f failRemoveIO) Remove(string) error {
+	if f.onRemove != nil {
+		f.onRemove()
+	}
+
+	return f.err
+}
+
+func hivePurgeTable(metadataLocation, tableLocation string) *hive_metastore.Table {
+	return &hive_metastore.Table{
+		TableName: "test_table",
+		DbName:    "test_database",
+		TableType: TableTypeExternalTable,
+		Parameters: map[string]string{
+			TableTypeKey:        TableTypeIceberg,
+			MetadataLocationKey: metadataLocation,
+			ExternalKey:         "TRUE",
+			"storage_handler":   "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler",
+		},
+		Sd: &hive_metastore.StorageDescriptor{
+			Location: tableLocation,
+		},
+	}
+}
+
+func writeHivePurgeTableFiles(t *testing.T, tableLocation string) (metadataLocation, dataFile string) {
+	return writeHivePurgeTableFilesWithProperties(t, tableLocation, nil)
+}
+
+func writeHivePurgeTableFilesWithProperties(
+	t *testing.T,
+	tableLocation string,
+	props iceberg.Properties,
+) (metadataLocation, dataFile string) {
+	t.Helper()
+	metadataLocation = filepath.Join(tableLocation, "metadata", "v1.metadata.json")
+	dataFile = filepath.Join(tableLocation, "data", "file.parquet")
+	writeHivePurgeTableMetadata(t, iceio.LocalFS{}, tableLocation, metadataLocation, props)
+	writer, err := iceio.LocalFS{}.Create(dataFile)
+	require.NoError(t, err)
+	_, err = writer.Write([]byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	return metadataLocation, dataFile
+}
+
+func writeHivePurgeTableMetadata(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	tableLocation,
+	metadataLocation string,
+	props iceberg.Properties,
+) {
+	t.Helper()
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true,
+	})
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, tableLocation, props)
+	require.NoError(t, err)
+	require.NoError(t, cataloginternal.WriteTableMetadata(meta, fs, metadataLocation, table.MetadataCompressionCodecNone))
+}
+
 func TestHiveDropTableNotExists(t *testing.T) {
 	assert := require.New(t)
 
@@ -586,6 +754,63 @@ func TestHiveCreateTableConflictsWithView(t *testing.T) {
 	assert.True(errors.Is(err, catalog.ErrViewAlreadyExists))
 
 	mockClient.AssertExpectations(t)
+}
+
+func TestConstructHiveTablePreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://bucket/test_table/metadata/v2.metadata.json"
+	hiveTbl := constructHiveTable(
+		"test_database",
+		"test_table",
+		"s3://bucket/test_table",
+		metadataLocation,
+		testSchema,
+		map[string]string{
+			TableTypeKey:                 "HIVE",
+			MetadataLocationKey:          "s3://wrong-bucket/metadata.json",
+			PreviousMetadataLocationKey:  "s3://wrong-bucket/previous.metadata.json",
+			ExternalKey:                  "FALSE",
+			"storage_handler":            "wrong.StorageHandler",
+			"write.metadata.compression": "gzip",
+		},
+	)
+
+	assert.Equal(TableTypeExternalTable, hiveTbl.TableType)
+	assert.Equal(TableTypeIceberg, hiveTbl.Parameters[TableTypeKey])
+	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
+	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
+	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
+	assert.Equal("org.apache.iceberg.mr.hive.HiveIcebergStorageHandler", hiveTbl.Parameters["storage_handler"])
+	assert.Equal("gzip", hiveTbl.Parameters["write.metadata.compression"])
+}
+
+func TestConstructHiveViewTablePreservesReservedParameters(t *testing.T) {
+	assert := require.New(t)
+
+	metadataLocation := "s3://bucket/test_view/metadata/v2.metadata.json"
+	hiveTbl := constructHiveViewTable(
+		"test_database",
+		"test_view",
+		"s3://bucket/test_view",
+		metadataLocation,
+		testSchema,
+		"SELECT 1 AS col",
+		map[string]string{
+			TableTypeKey:                TableTypeIceberg,
+			MetadataLocationKey:         "s3://wrong-bucket/metadata.json",
+			PreviousMetadataLocationKey: "s3://wrong-bucket/previous.metadata.json",
+			ExternalKey:                 "FALSE",
+			"owner":                     "alice",
+		},
+	)
+
+	assert.Equal(TableTypeVirtualView, hiveTbl.TableType)
+	assert.Equal(TableTypeIcebergView, hiveTbl.Parameters[TableTypeKey])
+	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
+	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
+	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
+	assert.Equal("alice", hiveTbl.Parameters["owner"])
 }
 
 func TestHiveRegisterTableNoSuchNamespace(t *testing.T) {

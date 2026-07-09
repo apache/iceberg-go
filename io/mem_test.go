@@ -132,6 +132,14 @@ func TestMemIO_MultipleFiles(t *testing.T) {
 	file3.Close()
 }
 
+func TestMemIO_RemoveMissingReturnsNotExist(t *testing.T) {
+	ctx := context.Background()
+
+	memIO, err := icebergio.LoadFS(ctx, map[string]string{}, "mem://bucket/")
+	require.NoError(t, err)
+	require.ErrorIs(t, memIO.Remove("does-not-exist.txt"), fs.ErrNotExist)
+}
+
 func TestMemIO_WalkDir(t *testing.T) {
 	ctx := context.Background()
 

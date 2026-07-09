@@ -47,6 +47,7 @@ type CatalogConfig struct {
 	Output      string       `yaml:"output"`
 	Credential  string       `yaml:"credential"`
 	Warehouse   string       `yaml:"warehouse"`
+	AwsProfile  string       `yaml:"aws-profile"`
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
@@ -69,18 +70,33 @@ func LoadConfig(configPath string) []byte {
 	return file
 }
 
-func ParseConfig(file []byte, catalogName string) *CatalogConfig {
-	var config Config
-	err := yaml.Unmarshal(file, &config)
-	if err != nil {
-		return nil
+// ParseConfig unmarshals the config file once and resolves the catalog to use.
+// When catalogName is empty, it falls back to the file's default-catalog field and
+// then to the built-in "default" name. It returns the matching CatalogConfig, or
+// nil/nil if no such catalog is defined in the file. A non-nil error means the
+// file could not be parsed and should be surfaced to the user.
+func ParseConfig(file []byte, catalogName string) (*CatalogConfig, error) {
+	if len(file) == 0 {
+		return nil, nil
 	}
-	res, ok := config.Catalogs[catalogName]
-	if !ok {
-		return nil
+	var config Config
+	if err := yaml.Unmarshal(file, &config); err != nil {
+		return nil, err
 	}
 
-	return &res
+	if catalogName == "" {
+		catalogName = config.DefaultCatalog
+	}
+	if catalogName == "" {
+		catalogName = "default"
+	}
+
+	res, ok := config.Catalogs[catalogName]
+	if !ok {
+		return nil, nil
+	}
+
+	return &res, nil
 }
 
 func fromConfigFiles() Config {

@@ -34,6 +34,7 @@ import (
 	"iter"
 	"maps"
 	"strings"
+	"unicode"
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
@@ -55,6 +56,7 @@ var (
 	// ErrNoSuchTable is returned when a table does not exist in the catalog.
 	ErrNoSuchTable            = errors.New("table does not exist")
 	ErrNoSuchNamespace        = errors.New("namespace does not exist")
+	ErrInvalidIdentifier      = errors.New("identifier is invalid")
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
 	ErrTableAlreadyExists     = errors.New("table already exists")
 	ErrCatalogNotFound        = errors.New("catalog type not registered")
@@ -212,6 +214,39 @@ func TableNameFromIdent(ident table.Identifier) string {
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
+}
+
+func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) error {
+	if len(ident) < 2 {
+		return fmt.Errorf("%w: missing namespace or invalid identifier %v",
+			notFoundErr, strings.Join(ident, "."))
+	}
+
+	for _, part := range ident {
+		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
+			return fmt.Errorf("%w: invalid identifier component %q in %v",
+				notFoundErr, part, strings.Join(ident, "."))
+		}
+
+		for _, r := range part {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("%w: invalid control character in identifier component %q in %v",
+					notFoundErr, part, strings.Join(ident, "."))
+			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
+func ValidateTableIdentifier(ident table.Identifier) error {
+	return validateTableOrViewIdentifier(ident, ErrNoSuchTable)
+}
+
+// ValidateViewIdentifier checks that an identifier contains at least one valid namespace level and a view name.
+func ValidateViewIdentifier(ident table.Identifier) error {
+	return validateTableOrViewIdentifier(ident, ErrNoSuchView)
 }
 
 type CreateTableOpt func(*CreateTableCfg)

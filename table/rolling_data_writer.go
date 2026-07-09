@@ -73,28 +73,34 @@ type writerFactory struct {
 	mu                    sync.Mutex
 }
 
-type writerFactoryOption func(*writerFactory)
+type writerFactoryOption func(*writerFactory) error
 
 func withContentType(content iceberg.ManifestEntryContent) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.content = content
+
+		return nil
 	}
 }
 
 func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.equalityFieldIDs = ids
+
+		return nil
 	}
 }
 
 func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
-	return func(w *writerFactory) {
+	return func(w *writerFactory) error {
 		w.fileSchema = schema
 		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
 		if err != nil {
-			panic(fmt.Sprintf("withFactoryFileSchema: failed to convert schema: %v", err))
+			return fmt.Errorf("withFactoryFileSchema: failed to convert schema: %w", err)
 		}
 		w.arrowSchema = arrowSc
+
+		return nil
 	}
 }
 
@@ -171,7 +177,11 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		stopCount:      stopCount,
 	}
 	for _, apply := range opts {
-		apply(f)
+		if err := apply(f); err != nil {
+			stopCount()
+
+			return nil, err
+		}
 	}
 
 	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
@@ -265,6 +275,7 @@ type RollingDataWriter struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	closeRecordCh   sync.Once
 }
 
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
@@ -331,7 +342,23 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	defer r.factory.writers.CompareAndDelete(r.partitionKey, r)
 
 	var currentWriter tblutils.FileWriter
+	// Cleanup defer: recover a panic in the write path and abort any
+	// in-progress file. stream runs in its own goroutine with no caller to
+	// recover it, and FileWriter.Close can panic (stats.ToDataFile panics when
+	// NewDataFileBuilder fails); convert that into an error on errorCh instead
+	// of crashing the process, mirroring the recover in
+	// equalityDeleteRecordsToDataFiles. Registered after close(r.errorCh) so it
+	// runs first (LIFO) and can still send on the open channel before it is
+	// closed.
 	defer func() {
+		if rec := recover(); rec != nil {
+			switch e := rec.(type) {
+			case error:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %w", e))
+			default:
+				r.sendError(fmt.Errorf("panic during rolling data file writing: %v", e))
+			}
+		}
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}
@@ -424,26 +451,64 @@ func (r *RollingDataWriter) sendError(err error) {
 	}
 }
 
-func (r *RollingDataWriter) close() {
+// closeInput gracefully closes the record channel so any queued writes can still be
+// processed while honoring context cancellation checks in the stream.
+func (r *RollingDataWriter) closeInput() {
+	r.closeRecordCh.Do(func() {
+		close(r.recordCh)
+	})
+}
+
+// abort cancels in-flight work and then closes input so the stream can exit.
+func (r *RollingDataWriter) abort() {
 	r.cancel()
-	close(r.recordCh)
+	r.closeInput()
 }
 
 func (r *RollingDataWriter) closeAndWait() error {
-	r.close()
+	r.closeInput()
 	r.factory.writers.Delete(r.partitionKey)
 	r.wg.Wait()
 
 	if err := <-r.errorCh; err != nil {
+		r.cancel()
+
 		return fmt.Errorf("error in rolling data writer: %w", err)
 	}
+
+	r.cancel()
 
 	return nil
 }
 
+func (r *RollingDataWriter) abortAndWait() {
+	r.abort()
+	r.factory.writers.Delete(r.partitionKey)
+	r.wg.Wait()
+}
+
 func (w *writerFactory) closeAll() error {
 	defer w.stopCount()
-	var writers []*RollingDataWriter
+	writers := w.writerList()
+	var err error
+	for _, writer := range writers {
+		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+
+	return err
+}
+
+func (w *writerFactory) abortAll() {
+	defer w.stopCount()
+	writers := w.writerList()
+	for _, writer := range writers {
+		writer.abortAndWait()
+	}
+}
+
+func (w *writerFactory) writerList() (writers []*RollingDataWriter) {
 	w.writers.Range(func(key, value any) bool {
 		writer, ok := value.(*RollingDataWriter)
 		if ok {
@@ -453,12 +518,5 @@ func (w *writerFactory) closeAll() error {
 		return true
 	})
 
-	var err error
-	for _, writer := range writers {
-		if closeErr := writer.closeAndWait(); closeErr != nil && err == nil {
-			err = closeErr
-		}
-	}
-
-	return err
+	return
 }

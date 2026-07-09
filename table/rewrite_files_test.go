@@ -31,7 +31,10 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -633,4 +636,238 @@ func TestRewriteFiles_RejectsConcurrentEqDelete(t *testing.T) {
 	// pre-flight; a delta of ≥2 means the retry reached the catalog.
 	assert.Equal(t, int32(1), cat.attempts.Load()-beforeLeader,
 		"only the stale-assertion attempt landed; the retry never reached CommitTable")
+}
+
+// TestRewriteFiles_RejectsConcurrentPartitionScopedPosDelete covers the
+// gap fixed by validateNoNewDeletesForRewrittenFiles' partition
+// fallback: a concurrent pos-delete with neither ReferencedDataFile nor
+// resolvable file_path bounds set (the shape a v2 MoR writer commonly
+// produces) must still be caught by matching the delete's
+// (specID, partition) against the rewritten files, rather than passing
+// validation and silently losing the delete. Before the fix, this
+// pos-delete had no path to check and the rewrite-specific validator
+// let it through unconditionally.
+func TestRewriteFiles_RejectsConcurrentPartitionScopedPosDelete(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 3 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/file-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "row-%d"}]`, i+1, i+1))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+
+	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.Groups)
+
+	groups := toTaskGroups(plan.Groups)
+
+	results := make([]table.CompactionGroupResult, 0, len(groups))
+	for _, g := range groups {
+		gr, err := table.ExecuteCompactionGroup(t.Context(), tbl, g)
+		require.NoError(t, err)
+		require.NotEmpty(t, gr.OldDataFiles)
+		results = append(results, gr)
+	}
+
+	leaderTxn := tbl.NewTransaction()
+	rewrite := leaderTxn.NewRewrite(nil)
+	for _, gr := range results {
+		rewrite.ApplyResult(gr)
+	}
+	require.NoError(t, rewrite.Commit(t.Context()),
+		"staging the rewrite must succeed; the conflict surfaces at Commit time")
+
+	// A pos-delete with no ReferencedDataFile and no bounds: unresolvable
+	// to a single path, so the validator must fall back to matching this
+	// delete's (specID, partition) — the table is unpartitioned, so any
+	// rewritten file of the same spec conflicts.
+	posDelPath := tbl.Location() + "/data/concurrent-partition-scoped-pos-del.parquet"
+	posDelBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	peerTxn := tbl.NewTransaction()
+	rd := peerTxn.NewRowDelta(nil)
+	rd.AddDeletes(posDelBuilder.Build())
+	require.NoError(t, rd.Commit(t.Context()))
+	_, err = peerTxn.Commit(t.Context())
+	require.NoError(t, err, "peer commit advances the catalog so the leader's first attempt fails")
+
+	beforeLeader := cat.attempts.Load()
+	_, err = leaderTxn.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles,
+		"refresh-and-replay must detect the concurrent partition-scoped pos-delete during a rewrite")
+	assert.Equal(t, int32(1), cat.attempts.Load()-beforeLeader,
+		"only the stale-assertion attempt landed; the retry never reached CommitTable")
+}
+
+func newConcurrentPartitionedRewriteTestTable(t *testing.T, schema *iceberg.Schema, spec *iceberg.PartitionSpec) (*table.Table, *concurrentTestCatalog) {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	meta, err := table.NewMetadata(schema, spec, table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion:        "2",
+			table.CommitNumRetriesKey:          "2",
+			table.CommitMinRetryWaitMsKey:      "1",
+			table.CommitMaxRetryWaitMsKey:      "2",
+			table.CommitTotalRetryTimeoutMsKey: "1000",
+		})
+	require.NoError(t, err)
+
+	metaLoc := location + "/metadata/v1.metadata.json"
+	fsF := func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	cat := &concurrentTestCatalog{metadata: meta, location: metaLoc, fsF: fsF}
+
+	return table.New(table.Identifier{"db", "concurrent_partitioned_rewrite"}, meta, metaLoc, fsF, cat), cat
+}
+
+// runConcurrentPartitionScopedPosDeleteRewrite drives the shared
+// partitioned scenario: append rowsJSON (spanning two partitions via
+// the real fanout writer), rewrite the data file whose Avro-decoded
+// partition value equals rewritePartValue, then have a concurrent peer
+// commit a partition-scoped pos-delete (no ReferencedDataFile, no
+// bounds) carrying deletePartValue in its tuple. Both sides of the
+// validator's partition matching therefore come from real Avro
+// manifest decode. Returns the leader's Commit error.
+func runConcurrentPartitionScopedPosDeleteRewrite(
+	t *testing.T,
+	schema *iceberg.Schema,
+	spec *iceberg.PartitionSpec,
+	rowsJSON string,
+	rewritePartValue any,
+	deletePartValue any,
+) error {
+	t.Helper()
+
+	tbl, _ := newConcurrentPartitionedRewriteTestTable(t, schema, spec)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	data, err := array.TableFromJSON(memory.DefaultAllocator, arrowSc, []string{rowsJSON})
+	require.NoError(t, err)
+	defer data.Release()
+
+	tbl, err = tbl.Append(t.Context(), array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+
+	currentSpec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 1, currentSpec.NumFields(), "scenario assumes a single partition field")
+	var partFieldID int
+	for _, pf := range currentSpec.Fields() {
+		partFieldID = pf.FieldID
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2, "the fanout writer must have split the append into one file per partition")
+
+	var rewriteFile iceberg.DataFile
+	for _, task := range tasks {
+		got := task.File.Partition()[partFieldID]
+		require.IsTypef(t, rewritePartValue, got,
+			"Avro-decoded partition value representation drifted from the expected one")
+		if got == rewritePartValue {
+			rewriteFile = task.File
+		}
+	}
+	require.NotNilf(t, rewriteFile,
+		"no data file decoded with partition value %#v", rewritePartValue)
+
+	leaderTxn := tbl.NewTransaction()
+	require.NoError(t, leaderTxn.NewRewrite(nil).DeleteFile(rewriteFile).Commit(t.Context()),
+		"staging the rewrite must succeed; the conflict surfaces at Commit time")
+
+	posDelPath := tbl.Location() + "/data/concurrent-partition-scoped-pos-del.parquet"
+	posDelBuilder, err := iceberg.NewDataFileBuilder(
+		currentSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile,
+		map[int]any{partFieldID: deletePartValue}, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	peerTxn := tbl.NewTransaction()
+	rd := peerTxn.NewRowDelta(nil)
+	rd.AddDeletes(posDelBuilder.Build())
+	require.NoError(t, rd.Commit(t.Context()))
+	_, err = peerTxn.Commit(t.Context())
+	require.NoError(t, err, "peer commit advances the catalog so the leader's first attempt fails")
+
+	_, err = leaderTxn.Commit(t.Context())
+
+	return err
+}
+
+// TestRewriteFiles_PartitionScopedPosDelete_IdentityIntPartition proves
+// the partition fallback on a genuinely partitioned table where both
+// the rewritten file's tuple and the concurrent delete's tuple flow
+// through real Avro manifest encode/decode: a same-partition
+// partition-scoped pos-delete must conflict, a different-partition one
+// must not (no false positive).
+func TestRewriteFiles_PartitionScopedPosDelete_IdentityIntPartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "part", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+	rowsJSON := `[{"id":1,"part":1},{"id":2,"part":1},{"id":3,"part":2},{"id":4,"part":2}]`
+
+	t.Run("same partition conflicts", func(t *testing.T) {
+		err := runConcurrentPartitionScopedPosDeleteRewrite(t, schema, &spec, rowsJSON, int64(1), int64(1))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	})
+
+	t.Run("different partition does not conflict", func(t *testing.T) {
+		err := runConcurrentPartitionScopedPosDeleteRewrite(t, schema, &spec, rowsJSON, int64(1), int64(2))
+		require.NoError(t, err,
+			"a partition-scoped pos-delete in a different partition must not be rejected")
+	})
+}
+
+// TestRewriteFiles_PartitionScopedPosDelete_IdentityDatePartition is
+// the representation-drift canary for the validator's partition
+// matching: date partition values pass through the Avro date logical
+// type (encoded as int32, decoded via time.Time into iceberg.Date), so
+// if either side ever decoded into a different Go representation for
+// the same logical day, the same-partition case would silently stop
+// conflicting.
+func TestRewriteFiles_PartitionScopedPosDelete_IdentityDatePartition(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date, Required: true},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "dt", Transform: iceberg.IdentityTransform{},
+	})
+	rowsJSON := `[{"id":1,"dt":"2024-03-01"},{"id":2,"dt":"2024-03-01"},` +
+		`{"id":3,"dt":"2024-03-02"},{"id":4,"dt":"2024-03-02"}]`
+	dayA := iceberg.Date(time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC).Unix() / 86400)
+	dayB := dayA + 1
+
+	t.Run("same partition conflicts", func(t *testing.T) {
+		err := runConcurrentPartitionScopedPosDeleteRewrite(t, schema, &spec, rowsJSON, dayA, dayA)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, table.ErrConflictingDeleteFiles)
+	})
+
+	t.Run("different partition does not conflict", func(t *testing.T) {
+		err := runConcurrentPartitionScopedPosDeleteRewrite(t, schema, &spec, rowsJSON, dayA, dayB)
+		require.NoError(t, err,
+			"a partition-scoped pos-delete on a different day must not be rejected")
+	})
 }

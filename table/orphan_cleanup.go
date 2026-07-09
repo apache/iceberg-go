@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -167,6 +166,11 @@ type OrphanCleanupResult struct {
 	TotalSizeBytes int64
 }
 
+// DeleteOrphanFiles identifies files under a table location that are no longer
+// referenced by table metadata and deletes them unless dry-run is enabled.
+//
+// The table filesystem must implement iceio.ListableIO so orphan cleanup can
+// fully enumerate candidate files before deciding what is safe to delete.
 func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOption) (OrphanCleanupResult, error) {
 	cfg := &orphanCleanupConfig{
 		location:           "",             // empty means use table's data location
@@ -300,7 +304,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
-	versionHintPath := filepath.Join(metadata.Location(), "metadata", "version-hint.text")
+	versionHintPath := versionHintLocation(metadata.Location())
 	referenced[normalizeFilePath(versionHintPath)] = false
 
 	for sf := range metadata.Statistics() {
@@ -404,7 +408,6 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 }
 
 func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.FileInfo) error) error {
-	// Prefer ListableIO when available.
 	if listable, ok := fsys.(iceio.ListableIO); ok {
 		return listable.WalkDir(root, func(path string, d stdfs.DirEntry, err error) error {
 			if err != nil {
@@ -424,64 +427,7 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 		})
 	}
 
-	// Fallback to original implementation for IO types that don't
-	// implement ListableIO yet.
-	switch v := fsys.(type) {
-	case iceio.LocalFS:
-		cleanRoot := strings.TrimPrefix(root, "file://")
-		if cleanRoot == "" {
-			cleanRoot = "."
-		}
-
-		return filepath.WalkDir(cleanRoot, makeFileWalkFunc(fn, func(path string) string {
-			return path
-		}))
-
-	default:
-		// For blob storage: direct field access since we know the structure.
-		bucket := getBucketName(v)
-
-		parsed, err := url.Parse(root)
-		if err != nil {
-			return fmt.Errorf("invalid URL %s: %w", root, err)
-		}
-
-		walkPath := strings.TrimPrefix(parsed.Path, "/")
-		if walkPath == "" {
-			walkPath = "."
-		}
-
-		return stdfs.WalkDir(bucket, walkPath, makeFileWalkFunc(fn, func(path string) string {
-			return parsed.Scheme + "://" + parsed.Host + "/" + path
-		}))
-	}
-}
-
-// getBucketName gets the Bucket field from blob storage - absolute minimal approach.
-func getBucketName(fsys iceio.IO) stdfs.FS {
-	v := reflect.ValueOf(fsys).Elem()
-
-	return v.FieldByName("Bucket").Interface().(stdfs.FS)
-}
-
-// makeFileWalkFunc creates a WalkDirFunc that processes only files with path transformation.
-func makeFileWalkFunc(fn func(path string, info stdfs.FileInfo) error, pathTransform func(string) string) stdfs.WalkDirFunc {
-	return func(path string, d stdfs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if d.IsDir() {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-
-		return fn(pathTransform(path), info)
-	}
+	return fmt.Errorf("filesystem %T does not implement iceio.ListableIO", fsys)
 }
 
 func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
@@ -649,6 +595,16 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 	}
 
 	return normalizeNonURLPath(path)
+}
+
+func versionHintLocation(tableLocation string) string {
+	if strings.Contains(tableLocation, "://") || strings.HasPrefix(tableLocation, "file:") {
+		if joined, err := url.JoinPath(tableLocation, "metadata", "version-hint.text"); err == nil {
+			return joined
+		}
+	}
+
+	return filepath.Join(tableLocation, "metadata", "version-hint.text")
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.

@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"log"
+	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -54,12 +55,25 @@ import (
 // issue #830).
 var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 
-// ErrWriteIORequired is returned by doCommit when the table's file system
-// does not implement io.WriteFileIO. Manifest-list rebuild on retry requires
-// write access; failing fast here is preferable to silently skipping the
-// rebuild and reintroducing the stale-parent data-loss bug. Callers that
-// need to detect this condition should use errors.Is(err, ErrWriteIORequired).
-var ErrWriteIORequired = errors.New("commit: file system does not implement WriteFileIO")
+// ErrWriteIORequired is returned by write paths when the table's file system
+// does not implement io.WriteFileIO. Commit retries also fail fast on this
+// condition because manifest-list rebuilds need write access; skipping that
+// rebuild can reintroduce stale-parent data loss. Callers should use
+// errors.Is(err, ErrWriteIORequired) to detect the precise condition, or
+// errors.Is(err, iceberg.ErrNotImplemented) for compatibility with older
+// WriteRecords behavior.
+var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
+
+// requireWriteFileIO should run immediately after resolving the table FS and
+// before mutating transaction state such as automatic name mapping.
+func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
+	wfs, ok := fs.(icebergio.WriteFileIO)
+	if !ok {
+		return nil, ErrWriteIORequired
+	}
+
+	return wfs, nil
+}
 
 // ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
 // computeOwnManifests when a snapshot ID does not exist in the table's
@@ -81,6 +95,7 @@ type Table struct {
 	metadataLocation string
 	cat              CatalogIO
 	fsF              FSysF
+	planner          ScanPlanner
 }
 
 func (t Table) Equals(other Table) bool {
@@ -141,6 +156,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
+	t.planner = fresh.planner
 
 	return nil
 }
@@ -399,9 +415,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	// Every real commit-path FS implements WriteFileIO. Failing here is
 	// preferable to silently skipping the manifest-list rebuild inside the
 	// retry loop — a skip reintroduces the original stale-parent data loss.
-	wfs, ok := fs.(icebergio.WriteFileIO)
-	if !ok {
-		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", ErrWriteIORequired)
+	wfs, err := requireWriteFileIO(fs)
+	if err != nil {
+		return nil, fmt.Errorf("%w: manifest list rebuild requires write access", err)
 	}
 
 	var (
@@ -753,7 +769,7 @@ func WithSelectedFields(fields ...string) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.selectedFields = fields
+		scan.selectedFields = slices.Clone(fields)
 	}
 }
 
@@ -819,7 +835,7 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.options = opts
+		scan.options = maps.Clone(opts)
 	}
 }
 
@@ -836,8 +852,13 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		metadata:       t.metadata,
-		ioF:            t.fsF,
+		identifier:       t.identifier,
+		metadata:         t.metadata,
+		metadataLocation: t.metadataLocation,
+		ioF:              t.fsF,
+		planner:          t.planner,
+		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
+		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
 		selectedFields: []string{"*"},
 		caseSensitive:  true,
@@ -849,18 +870,30 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		opt(s)
 	}
 
-	s.partitionFilters = newKeyDefaultMapWrapErr(s.buildPartitionProjection)
-
 	return s
 }
 
+// New constructs a Table. If cat implements ScanPlanner — as rest.Catalog does
+// for servers that support remote scan planning — it is wired as the table's
+// planner so (*Scan).PlanFiles can delegate to it; catalogs that do not
+// implement ScanPlanner leave planner nil and planning stays local. This is the
+// concrete Catalog -> Table -> Scan wiring for #1178: no New signature change
+// and no catalog accessor are needed, because the catalog already satisfies
+// ScanPlanner.
 func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
+	// A catalog that supports server-side scan planning implements ScanPlanner.
+	var planner ScanPlanner
+	if p, ok := cat.(ScanPlanner); ok {
+		planner = p
+	}
+
 	return &Table{
 		identifier:       ident,
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
 		cat:              cat,
+		planner:          planner,
 	}
 }
 

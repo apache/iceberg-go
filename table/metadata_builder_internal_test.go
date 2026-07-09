@@ -20,6 +20,7 @@ package table
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -306,15 +307,32 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 	newBuilder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
 	// Remove the spec
-	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1}))
+	require.NoError(t, newBuilder.RemovePartitionSpecs([]int{1, 99}))
 	newBuild, err := newBuilder.Build()
 	require.NoError(t, err)
 	require.NotNil(t, newBuild)
 	require.Len(t, newBuilder.updates, 1)
+	require.Equal(t, []int{1}, newBuilder.updates[0].(*removeSpecUpdate).SpecIds)
 	require.Len(t, newBuild.PartitionSpecs(), 1)
 	_, err = newBuilder.GetSpecByID(1)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	require.ErrorContains(t, err, "id 1")
+}
+
+func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
+}
+
+func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	require.NoError(t, builder.RemovePartitionSpecs(nil))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.specs, 1)
 }
 
 func TestSetDefaultPartitionSpec(t *testing.T) {
@@ -1060,7 +1078,7 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, meta.Schemas(), 2, "expected 2 schemas in the metadata")
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
-	err = builder.RemoveSchemas([]int{0})
+	err = builder.RemoveSchemas([]int{0, 99})
 	require.NoError(t, err, "expected to remove schema with ID 1")
 	newMeta, err := builder.Build()
 	require.NoError(t, err)
@@ -1070,6 +1088,17 @@ func TestRemoveSchemas(t *testing.T) {
 	require.Len(t, builder.updates, 1, "expected one update for schema removal")
 	require.Equal(t, builder.updates[0].Action(), UpdateRemoveSchemas)
 	require.Equal(t, builder.updates[0].(*removeSchemasUpdate).SchemaIDs, []int{0}, "expected schema ID 0 to be removed")
+}
+
+func TestRemoveSchemasNoMatchDoesNotUpdate(t *testing.T) {
+	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSchemas([]int{99, 100}))
+	require.Empty(t, builder.updates)
+	require.Len(t, builder.schemaList, 2)
 }
 
 // Java: TestTableMetadata.testUpdateSchema
@@ -1152,6 +1181,31 @@ func TestSetReservedPropertiesFails(t *testing.T) {
 		"another-custom-property": "also-allowed",
 	})
 	require.ErrorContains(t, err, "can't set reserved property "+PropertyCurrentSnapshotId)
+}
+
+func TestSetPropertiesClonesProperties(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	props := iceberg.Properties{"property": "value"}
+	require.NoError(t, builder.SetProperties(props))
+
+	props["property"] = "mutated"
+	props["added"] = "mutated"
+
+	require.Equal(t, "value", builder.props["property"])
+	require.NotContains(t, builder.props, "added")
+
+	require.Len(t, builder.updates, 1)
+	firstUpdate := builder.updates[0].(*setPropertiesUpdate)
+	require.Equal(t, iceberg.Properties{"property": "value"}, firstUpdate.Updates)
+
+	moreProps := iceberg.Properties{"another-property": "another-value"}
+	require.NoError(t, builder.SetProperties(moreProps))
+	moreProps["another-property"] = "mutated"
+
+	require.Equal(t, iceberg.Properties{"property": "value"}, firstUpdate.Updates)
+	require.Equal(t, "another-value", builder.props["another-property"])
+	require.Equal(t, iceberg.Properties{"another-property": "another-value"}, builder.updates[1].(*setPropertiesUpdate).Updates)
 }
 
 func TestRemoveReservedPropertiesFails(t *testing.T) {
@@ -1672,6 +1726,105 @@ func TestAddSnapshotV3AcceptsFirstRowIDEqualToNextRowID(t *testing.T) {
 	err := builder.AddSnapshot(&snapshot)
 	require.NoError(t, err)
 	require.Equal(t, int64(100), *builder.nextRowID)
+}
+
+func TestAddSnapshotV3AcceptsZeroAddedRows(t *testing.T) {
+	// Asserts spec-permitted no-op behavior: a zero-added-rows snapshot
+	// (delete-only or metadata-only commit) leaves next-row-id unchanged. The
+	// cursor is first advanced to a non-zero value so the assertion is
+	// falsifiable — a regression that advanced the cursor on every commit would
+	// be caught. This is NOT coverage of the overflow guard — see
+	// TestAddSnapshotV3RejectsNextRowIDOverflow.
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+
+	appendFirstRowID := int64(0)
+	appendAddedRows := int64(50)
+	appendSnapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &appendFirstRowID,
+		AddedRows:        &appendAddedRows,
+	}
+	require.NoError(t, builder.AddSnapshot(&appendSnapshot))
+	require.Equal(t, int64(50), *builder.nextRowID)
+
+	deleteFirstRowID := int64(50)
+	deleteAddedRows := int64(0)
+	deleteSnapshot := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &appendSnapshot.SnapshotID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpDelete},
+		SchemaID:         &schemaID,
+		FirstRowID:       &deleteFirstRowID,
+		AddedRows:        &deleteAddedRows,
+	}
+	require.NoError(t, builder.AddSnapshot(&deleteSnapshot))
+	require.Equal(t, int64(50), *builder.nextRowID)
+}
+
+func TestAddSnapshotV3RejectsNextRowIDOverflow(t *testing.T) {
+	// next-row-id + added-rows must not overflow int64. Seed the cursor near
+	// the maximum so a positive added-rows tips it over. This is the only input
+	// that reaches the guard: negative added-rows is rejected earlier by
+	// Snapshot.ValidateRowLineage.
+	builder := builderWithoutChanges(3)
+	nearMax := int64(math.MaxInt64 - 10)
+	builder.nextRowID = &nearMax
+
+	schemaID := 0
+	firstRowID := nearMax
+	addedRows := int64(20)
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "overflows int64")
+}
+
+func TestAddSnapshotV3AcceptsMaxInt64NextRowID(t *testing.T) {
+	// Boundary: added-rows that fills the cursor to exactly math.MaxInt64 (sum
+	// == MaxInt64) must be accepted; the guard rejects only a strictly larger
+	// sum. This pins the `>` boundary against an off-by-one to `>=`.
+	builder := builderWithoutChanges(3)
+	nearMax := int64(math.MaxInt64 - 10)
+	builder.nextRowID = &nearMax
+
+	schemaID := 0
+	firstRowID := nearMax
+	addedRows := int64(10)
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Equal(t, int64(math.MaxInt64), *builder.nextRowID)
 }
 
 func generateTypeSchema(typ iceberg.Type) *iceberg.Schema {
@@ -2287,6 +2440,30 @@ func TestSetFormatVersionPreservesExistingUUID(t *testing.T) {
 	meta, err := builder.Build()
 	require.NoError(t, err)
 	require.Equal(t, existingUUID, meta.TableUUID())
+}
+
+func TestSetUUIDRejectsNil(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	originalUUID := builder.uuid
+
+	err := builder.SetUUID(uuid.Nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.False(t, builder.HasChanges())
+	require.Equal(t, originalUUID, builder.uuid)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, originalUUID, meta.TableUUID())
+}
+
+func TestNewMetadataWithUUIDGeneratesUUIDForNil(t *testing.T) {
+	tableSchema := schema()
+	partSpec := partitionSpec()
+	order := sortOrder()
+
+	meta, err := NewMetadataWithUUID(&tableSchema, &partSpec, order, "s3://bucket/test/location", nil, uuid.Nil)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, meta.TableUUID())
 }
 
 func TestSetFormatVersionDowngradeNotAllowed(t *testing.T) {

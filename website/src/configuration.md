@@ -37,6 +37,7 @@ catalog:
     warehouse: s3://my-bucket/warehouse
     credential: <client-id>:<client-secret>
     output: text
+    aws-profile: ""
     rest:
       sigv4-enabled: false
       signing-name: ""
@@ -52,6 +53,7 @@ catalog:
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
+| `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. |
 | `catalog.<name>.rest.signing-name` | SigV4 service name. |
 | `catalog.<name>.rest.signing-region` | SigV4 region. |
@@ -156,7 +158,7 @@ Tuning properties:
 | `gcs.keypath` (`io.GCSKeyPath`) | Path to a JSON service-account key file. |
 | `gcs.jsonkey` (`io.GCSJSONKey`) | JSON key as a string. |
 | `gcs.credtype` (`io.GCSCredType`) | Credential type override. |
-| `gcs.usejsonapi` (`io.GCSUseJSONAPI`) | Set to any value to enable the GCS JSON API for reads. |
+| `gcs.usejsonapi` (`io.GCSUseJSONAPI`) | Set to `"true"` to enable the GCS JSON API for reads. |
 
 ### Azure Data Lake Storage / Blob
 

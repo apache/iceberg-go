@@ -19,6 +19,8 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +29,33 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// geoSchemaJavaFixtureName is a schema JSON fixture emitted by Apache Iceberg
+// Java SchemaParser.toJson. Geometry and geography support was added in
+// apache/iceberg commit e1e0a740 (#12346) and the geo type-string format was
+// last touched in 8de302bf when this fixture was captured.
+//
+// Source schema:
+//
+//	new Schema(17, ImmutableList.of(
+//	    Types.NestedField.required(1, "id", Types.LongType.get()),
+//	    Types.NestedField.optional(2, "geom", Types.GeometryType.of("srid:3857")),
+//	    Types.NestedField.optional(3, "geog",
+//	        Types.GeographyType.of("srid:4269", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(4, "geog_default_algo",
+//	        Types.GeographyType.of("srid:4269")),
+//	    Types.NestedField.optional(5, "geog_default_crs",
+//	        Types.GeographyType.of("OGC:CRS84", EdgeAlgorithm.KARNEY)),
+//	    Types.NestedField.optional(6, "geom_default",
+//	        Types.GeometryType.crs84()),
+//	    Types.NestedField.optional(7, "geog_default",
+//	        Types.GeographyType.crs84())))
+//
+// Java and Go write object keys in different orders, so the fixture test pins
+// the raw JSON string literals for field types instead of whole-object bytes.
+// PyIceberg currently emits quoted CRS values like geometry('srid:3857'), so
+// this fixture is scoped specifically to Java's type-string form.
+const geoSchemaJavaFixtureName = "geo-schema-java-main.json"
 
 var (
 	tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
@@ -440,6 +469,306 @@ func TestUnmarshalSchema(t *testing.T) {
 	}`), &schema))
 
 	assert.True(t, tableSchemaSimple.Equals(&schema))
+}
+
+func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		contains string
+	}{
+		{
+			name: "top level",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "foo", "type": "string", "required": false},
+					{"id": 1, "name": "bar", "type": "int", "required": true}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: foo and bar",
+		},
+		{
+			name: "nested struct",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "payload",
+						"type": {
+							"type": "struct",
+							"fields": [
+								{"id": 3, "name": "inner", "type": "string", "required": false},
+								{"id": 3, "name": "inner_dup", "type": "int", "required": false}
+							]
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 3: inner and inner_dup",
+		},
+		{
+			name: "list element",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 1,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: id and element",
+		},
+		{
+			name: "map key",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{"id": 1, "name": "id", "type": "long", "required": true},
+					{
+						"id": 2,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 1,
+							"key": "string",
+							"value-id": 3,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "multiple fields for id 1: id and key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			err := json.Unmarshal([]byte(tt.schema), &schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.contains)
+		})
+	}
+}
+
+func TestUnmarshalSchemaRejectsMissingCollectionFieldIDs(t *testing.T) {
+	tests := []struct {
+		name     string
+		schema   string
+		contains string
+	}{
+		{
+			name: "missing list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'element-id' key in JSON",
+		},
+		{
+			name: "missing map key id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key": "string",
+							"value-id": 2,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'key-id' key in JSON",
+		},
+		{
+			name: "missing map value id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			contains: "field is missing required 'value-id' key in JSON",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			err := json.Unmarshal([]byte(tt.schema), &schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, tt.contains)
+		})
+	}
+}
+
+func TestUnmarshalSchemaAllowsZeroCollectionFieldIDs(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		check  func(*testing.T, iceberg.NestedField)
+	}{
+		{
+			name: "zero list element id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "items",
+						"type": {
+							"type": "list",
+							"element-id": 0,
+							"element": "int",
+							"element-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				listType, ok := field.Type.(*iceberg.ListType)
+				require.True(t, ok)
+				assert.Equal(t, 0, listType.ElementID)
+			},
+		},
+		{
+			name: "zero map key id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 0,
+							"key": "string",
+							"value-id": 2,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				mapType, ok := field.Type.(*iceberg.MapType)
+				require.True(t, ok)
+				assert.Equal(t, 0, mapType.KeyID)
+			},
+		},
+		{
+			name: "zero map value id",
+			schema: `{
+				"type": "struct",
+				"fields": [
+					{
+						"id": 1,
+						"name": "props",
+						"type": {
+							"type": "map",
+							"key-id": 2,
+							"key": "string",
+							"value-id": 0,
+							"value": "int",
+							"value-required": false
+						},
+						"required": false
+					}
+				],
+				"schema-id": 1,
+				"identifier-field-ids": []
+			}`,
+			check: func(t *testing.T, field iceberg.NestedField) {
+				t.Helper()
+				mapType, ok := field.Type.(*iceberg.MapType)
+				require.True(t, ok)
+				assert.Equal(t, 0, mapType.ValueID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var schema iceberg.Schema
+			require.NoError(t, json.Unmarshal([]byte(tt.schema), &schema))
+			require.Equal(t, 1, schema.NumFields())
+			tt.check(t, schema.Field(0))
+		})
+	}
+}
+
+func TestUnmarshalSchemaRoundTripsCollectionFieldIDs(t *testing.T) {
+	data, err := json.Marshal(tableSchemaNested)
+	require.NoError(t, err)
+
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal(data, &schema))
+	assert.True(t, tableSchemaNested.Equals(&schema))
 }
 
 func TestPruneColumnsString(t *testing.T) {
@@ -1175,6 +1504,58 @@ func TestSchemaWithGeometryGeographyTypes(t *testing.T) {
 	var unmarshaledSchema iceberg.Schema
 	require.NoError(t, json.Unmarshal(data, &unmarshaledSchema))
 	assert.True(t, schema.Equals(&unmarshaledSchema))
+}
+
+func TestSchemaGeoTypeStringWireFormatFixture(t *testing.T) {
+	fixtureBytes, err := os.ReadFile(filepath.Join("testdata", geoSchemaJavaFixtureName))
+	require.NoError(t, err, "fixture missing")
+
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal(fixtureBytes, &schema))
+
+	freshBytes, err := json.Marshal(&schema)
+	require.NoError(t, err)
+
+	fixtureTypes := rawTopLevelFieldTypes(t, fixtureBytes)
+	freshTypes := rawTopLevelFieldTypes(t, freshBytes)
+	expectedTypes := map[string]string{
+		"id":                `"long"`,
+		"geom":              `"geometry(srid:3857)"`,
+		"geog":              `"geography(srid:4269, karney)"`,
+		"geog_default_algo": `"geography(srid:4269)"`,
+		"geog_default_crs":  `"geography(OGC:CRS84, karney)"`,
+		"geom_default":      `"geometry"`,
+		"geog_default":      `"geography"`,
+	}
+	require.Len(t, fixtureTypes, len(expectedTypes))
+	require.Len(t, freshTypes, len(expectedTypes))
+	for fieldName, expected := range expectedTypes {
+		require.Equalf(t, expected, fixtureTypes[fieldName], "fixture field %q type", fieldName)
+		assert.Equalf(t, expected, freshTypes[fieldName], "fresh field %q type", fieldName)
+	}
+}
+
+func rawTopLevelFieldTypes(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+
+	var schema struct {
+		Fields []struct {
+			Name string          `json:"name"`
+			Type json.RawMessage `json:"type"`
+		} `json:"fields"`
+	}
+	require.NoError(t, json.Unmarshal(data, &schema))
+	require.NotEmpty(t, schema.Fields)
+
+	types := make(map[string]string, len(schema.Fields))
+	for _, field := range schema.Fields {
+		require.NotEmpty(t, field.Name)
+		require.NotEmptyf(t, field.Type, "field %q is missing type", field.Name)
+		require.NotEqualf(t, "null", string(field.Type), "field %q is missing type", field.Name)
+		types[field.Name] = string(field.Type)
+	}
+
+	return types
 }
 
 func TestNestedFieldToStringGeographyGeometry(t *testing.T) {

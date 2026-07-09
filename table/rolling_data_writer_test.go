@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -40,6 +42,19 @@ type RollingDataWriterTestSuite struct {
 
 	mem memory.Allocator
 	ctx context.Context
+}
+
+type unsupportedType struct{}
+
+func (unsupportedType) Type() string { return "unsupported" }
+func (unsupportedType) String() string {
+	return "unsupported"
+}
+
+func (unsupportedType) Equals(other iceberg.Type) bool {
+	_, ok := other.(unsupportedType)
+
+	return ok
 }
 
 func (s *RollingDataWriterTestSuite) SetupTest() {
@@ -184,6 +199,100 @@ func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 		actualRows += df.Count()
 	}
 	s.Equal(totalRows, actualRows)
+}
+
+func (s *RollingDataWriterTestSuite) TestNewWriterFactoryReturnsErrorForInvalidFileSchema() {
+	loc := filepath.ToSlash(s.T().TempDir())
+	spec := iceberg.NewPartitionSpec()
+	taskSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	meta, err := NewMetadata(taskSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	metaBuilder, err := MetadataBuilderFromBase(meta, "")
+	s.Require().NoError(err)
+
+	args := recordWritingArgs{
+		fs:      iceio.LocalFS{},
+		counter: internal.Counter(0),
+	}
+
+	invalidSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "bad", Type: unsupportedType{}, Required: true,
+	})
+
+	factory, err := newWriterFactory(
+		loc,
+		args,
+		metaBuilder,
+		taskSchema,
+		1024*1024,
+		withFactoryFileSchema(invalidSchema),
+	)
+	s.Require().Error(err)
+	s.Nil(factory)
+	s.ErrorContains(err, "withFactoryFileSchema")
+}
+
+func (s *RollingDataWriterTestSuite) TestCloseAllFinishesQueuedRecordsWithoutCancellingContext() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writerCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	s.Require().NoError(err)
+	const totalBatches = 4
+	const rowsPerBatch = 25
+	var expectedRows int64
+	for range totalBatches {
+		record := s.buildRecord(arrSchema, rowsPerBatch)
+		expectedRows += record.NumRows()
+		s.Require().NoError(writer.Add(record))
+		record.Release()
+	}
+
+	s.Require().NoError(factory.closeAll())
+	s.Require().Nil(writerCtx.Err(), "normal close should finish queued writes without aborting context")
+
+	close(outputCh)
+	var actualRows int64
+	for df := range outputCh {
+		actualRows += df.Count()
+	}
+
+	s.Equal(expectedRows, actualRows, "all queued records should be flushed when closeAll is used")
+}
+
+func (s *RollingDataWriterTestSuite) TestAbortAndWaitCancelsContext() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writerCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	s.Require().NoError(err)
+	record := s.buildRecord(arrSchema, 5)
+	s.Require().NoError(writer.Add(record))
+	record.Release()
+
+	writer.abortAndWait()
+	s.Require().ErrorIs(writer.ctx.Err(), context.Canceled)
 }
 
 func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroups() {
@@ -721,4 +830,78 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 		}
 	}
 	s.Equal([]int32{3, 1, 2}, ids, "unsorted order must preserve arrival order")
+}
+
+// panicOnCloseFormat wraps a real FileFormat but hands out writers whose Close
+// panics, mimicking stats.ToDataFile panicking when NewDataFileBuilder fails.
+// bytesWritten is reported by every writer it creates: a value >= the target
+// file size makes stream roll (and Close) mid-loop, 0 defers Close to the end
+// of the stream.
+type panicOnCloseFormat struct {
+	tblutils.FileFormat
+	bytesWritten int64
+}
+
+func (f panicOnCloseFormat) NewFileWriter(_ context.Context, _ iceio.WriteFileIO, _ map[int]any, _ tblutils.WriteFileInfo, _ *arrow.Schema) (tblutils.FileWriter, error) {
+	return panicOnCloseWriter{bytesWritten: f.bytesWritten}, nil
+}
+
+// panicOnCloseWriter is a FileWriter whose Close panics with an error, like the
+// real stats.ToDataFile -> NewDataFileBuilder failure path.
+type panicOnCloseWriter struct {
+	bytesWritten int64
+}
+
+func (panicOnCloseWriter) Write(arrow.RecordBatch) error { return nil }
+func (w panicOnCloseWriter) BytesWritten() int64         { return w.bytesWritten }
+func (panicOnCloseWriter) Close() (iceberg.DataFile, error) {
+	panic(errors.New("simulated NewDataFileBuilder failure"))
+}
+func (panicOnCloseWriter) Abort() error { return nil }
+
+// TestStreamRecoversWriterClosePanic drives the rolling writer so the file
+// writer's Close panics inside the stream goroutine, and asserts the panic is
+// recovered and surfaced as an error on errorCh rather than crashing the
+// process. Both Close call sites are covered: the mid-loop roll (the common
+// production path) and the end-of-stream close.
+func (s *RollingDataWriterTestSuite) TestStreamRecoversWriterClosePanic() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	const targetFileSize = 1024 * 1024
+	tests := []struct {
+		name         string
+		bytesWritten int64
+	}{
+		{"end-of-stream close", 0},
+		{"mid-stream file roll", targetFileSize}, // >= target rolls (and closes) mid-loop
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			loc := filepath.ToSlash(s.T().TempDir())
+			factory, _ := s.createWriterFactory(loc, arrSchema, targetFileSize)
+			defer factory.closeAll()
+
+			// Hand out a writer whose Close panics. Assigned before
+			// newRollingDataWriter so it happens-before the stream goroutine
+			// reads factory.format. Before the recover in stream, this panic
+			// escaped the goroutine and crashed the process.
+			factory.format = panicOnCloseFormat{FileFormat: factory.format, bytesWritten: tt.bytesWritten}
+
+			outputCh := make(chan iceberg.DataFile, 1)
+			writer := factory.newRollingDataWriter(s.ctx, "", nil, outputCh)
+
+			record := s.buildRecord(arrSchema, 5)
+			defer record.Release()
+			s.Require().NoError(writer.Add(record))
+
+			err := writer.closeAndWait()
+			s.Require().Error(err)
+			s.Contains(err.Error(), "panic during rolling data file writing")
+			s.Contains(err.Error(), "simulated NewDataFileBuilder failure")
+		})
+	}
 }

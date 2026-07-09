@@ -86,6 +86,10 @@ type PositionDeltaWriter struct {
 // those two options; everything else (target file size, worker count,
 // clustered write) flows through.
 func NewPositionDeltaWriter(tbl *Table, opts ...WriteRecordOption) (*PositionDeltaWriter, error) {
+	if tbl == nil {
+		return nil, fmt.Errorf("%w: table is nil", iceberg.ErrInvalidArgument)
+	}
+
 	if tbl.metadata.Version() < 3 {
 		return nil, fmt.Errorf("%w: PositionDeltaWriter requires format version >= 3, got %d",
 			iceberg.ErrInvalidArgument, tbl.metadata.Version())

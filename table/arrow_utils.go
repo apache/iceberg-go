@@ -1633,6 +1633,11 @@ type recordWritingArgs struct {
 	maxWriteWorkers int
 	clustered       bool
 	factoryOpts     []writerFactoryOption
+	// existingDVs maps a data file path to the positions already recorded in
+	// its current deletion vector. On the v3 DV write path these are folded
+	// into the newly written DV so a data file that already had a DV ends up
+	// with a single merged vector (the caller removes the superseded one).
+	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
@@ -1706,23 +1711,19 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			if err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
-				writer.close()
-				writer.wg.Wait()
+				writer.abortAndWait()
 
 				return
 			}
 		}
-		close(writer.recordCh)
-		writer.wg.Wait()
-		if err := <-writer.errorCh; err != nil {
+		if err := writer.closeAndWait(); err != nil {
 			errCh <- err
 		}
 		close(errCh)
@@ -1848,7 +1849,29 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 			return metadata.PartitionSpecByID(int(id))
 		})
 
+		// Seed the writer with any deletion vector the referenced data file
+		// already carries so its previously deleted positions survive into the
+		// merged DV. The scan that produced args.itr does NOT apply the existing
+		// DVs (makePositionDeleteRecordsForFilter builds its FileScanTasks
+		// without DeleteFiles), so the incoming batches may re-report positions
+		// already in the old DV; re-Setting them on top of the seed is a no-op
+		// because the bitmap is idempotent. The seed is what guarantees the old
+		// positions survive — do not remove it, or a second delete would drop
+		// the earlier deletes and resurrect those rows. The spec allows at most
+		// one DV per data file, so the caller supersedes the old DV once this
+		// merged one is written.
 		hasEntries := false
+		for filePath, bitmap := range args.existingDVs {
+			pCtx, ok := partitionContextByFilePath[filePath]
+			if !ok {
+				yield(nil, fmt.Errorf("unexpected missing partition context for existing deletion vector path %s", filePath))
+
+				return
+			}
+			writer.Load(filePath, bitmap, pCtx.specID, pCtx.partitionData)
+			hasEntries = true
+		}
+
 		for batch, err := range args.itr {
 			if err != nil {
 				yield(nil, err)
@@ -1867,7 +1890,11 @@ func positionDeleteRecordsToDataFilesDV(ctx context.Context, rootLocation string
 
 					return
 				}
-				writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData)
+				if err := writer.Add(filePath, []int64{positions.Value(int(i))}, pCtx.specID, pCtx.partitionData); err != nil {
+					yield(nil, err)
+
+					return
+				}
 				hasEntries = true
 			}
 		}
@@ -1909,6 +1936,49 @@ func checkCRSJSON(rawCrs json.RawMessage) bool {
 	return len(b) > 0 && b[0] == '{'
 }
 
+// errWKT2CRSNotSupported is returned for WKT2:2019 CRS definitions, which this
+// package does not support yet.
+var errWKT2CRSNotSupported = errors.New("CRS type wkt2:2019 not supported")
+
+// errPROJJSONStringCRSNotSupported is returned for projjson-typed string CRS
+// values, which this package does not support yet.
+var errPROJJSONStringCRSNotSupported = errors.New("CRS type projjson not supported for string CRS")
+
+// isWKT2CRSString reports whether crs looks like a WKT2 (ISO 19162) CRS
+// definition. It is a best-effort heuristic used only to surface the clearer
+// errWKT2CRSNotSupported message. The list covers the WKT2:2019 CRS keywords
+// and their long forms.
+func isWKT2CRSString(crs string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(crs))
+
+	for _, prefix := range []string{
+		"BOUNDCRS[",
+		"COMPOUNDCRS[",
+		"COORDINATEMETADATA[",
+		"COORDINATEOPERATION[",
+		"CRS[",
+		"DERIVEDPROJCRS[",
+		"ENGCRS[",
+		"ENGINEERINGCRS[",
+		"GEODCRS[",
+		"GEODETICCRS[",
+		"GEOGCRS[",
+		"GEOGRAPHICCRS[",
+		"PARAMETRICCRS[",
+		"PROJCRS[",
+		"PROJECTEDCRS[",
+		"TIMECRS[",
+		"VERTCRS[",
+		"VERTICALCRS[",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
 		return "srid:0", nil
@@ -1921,23 +1991,34 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
 			return "", fmt.Errorf("invalid geoarrow CRS metadata: %w", err)
 		}
+		if crs == "" {
+			return "", errors.New("unsupported CRS: empty string CRS")
+		}
 
 		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
 			return "OGC:CRS84", nil
 		}
 
 		switch meta.CRSType {
-		case geoarrow.CRSTypeSRID:
-			return "srid:" + crs, nil
+		case geoarrow.CRSTypePROJJSON:
+			return "", errPROJJSONStringCRSNotSupported
 		case geoarrow.CRSTypeWKT22019:
-			return "", errors.New("CRS type wkt2:2019 not supported")
+			return "", errWKT2CRSNotSupported
 		default:
-			if len(crs) <= 32 {
-				return crs, nil
-			}
-
-			return "", errors.New("crs length too long")
+			// Unset, AuthorityCode, SRID, and future CRSType values continue to
+			// the string-shape checks below.
 		}
+
+		if isWKT2CRSString(crs) {
+			return "", errWKT2CRSNotSupported
+		}
+		if meta.CRSType == geoarrow.CRSTypeSRID {
+			return "srid:" + crs, nil
+		}
+
+		// Bare or unrecognized string CRS values are opaque identifiers per the
+		// Iceberg type contract; preserve them for read/write compatibility.
+		return crs, nil
 	case checkCRSJSON(meta.CRS):
 		var crs map[string]json.RawMessage
 
@@ -1947,34 +2028,41 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 
 		idRaw, ok := crs["id"]
 		if !ok || len(idRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id")
 		}
 
 		var id map[string]json.RawMessage
 		if err := json.Unmarshal(idRaw, &id); err != nil {
-			return "", errors.New("unsupported CRS")
+			return "", fmt.Errorf("unsupported CRS: invalid id: %w", err)
 		}
 
 		var authority string
-		if err := json.Unmarshal(id["authority"], &authority); err != nil || authority == "" {
-			return "", errors.New("unsupported CRS")
+		authorityRaw, ok := id["authority"]
+		if !ok || len(authorityRaw) == 0 {
+			return "", errors.New("unsupported CRS: missing id.authority")
+		}
+		if err := json.Unmarshal(authorityRaw, &authority); err != nil {
+			return "", fmt.Errorf("unsupported CRS: invalid id.authority: %w", err)
+		}
+		if authority == "" {
+			return "", errors.New("unsupported CRS: empty id.authority")
 		}
 
 		codeRaw := id["code"]
 		if len(codeRaw) == 0 {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: missing id.code")
 		}
 
 		var code string
 		if err := json.Unmarshal(codeRaw, &code); err != nil {
 			var codeNum json.Number
 			if err := json.Unmarshal(codeRaw, &codeNum); err != nil {
-				return "", errors.New("unsupported CRS")
+				return "", fmt.Errorf("unsupported CRS: invalid id.code: %w", err)
 			}
 			code = codeNum.String()
 		}
 		if code == "" {
-			return "", errors.New("unsupported CRS")
+			return "", errors.New("unsupported CRS: empty id.code")
 		}
 
 		authorityCode := authority + ":" + code

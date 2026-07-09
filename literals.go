@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"time"
 	"unsafe"
@@ -175,6 +176,22 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		err := v.UnmarshalBinary(data)
 
 		return v, err
+	case GeometryType, GeographyType:
+		// Geometry/Geography single-value bounds use the Iceberg geospatial
+		// serialization (spec Appendix D): little-endian float64 coordinates in
+		// X, Y[, Z][, M] order, i.e. 16, 24, or 32 bytes — not WKB. The
+		// coordinates have no total order, so they are returned as a GeoLiteral
+		// (not a plain BinaryLiteral): it reports the real geo type and is not
+		// comparable, so any attempt to order it errors instead of silently
+		// running bytes.Compare over the coordinate bytes.
+		switch len(data) {
+		case 16, 24, 32: // valid coordinate lengths (XY / XYZ|XYM / XYZM)
+		default:
+			return nil, fmt.Errorf("%w: geometry/geography bound must be 16, 24, or 32 bytes, got %d",
+				ErrInvalidBinSerialization, len(data))
+		}
+
+		return GeoLiteral{val: data, typ: typ}, nil
 	case FixedType:
 		if len(data) != t.Len() {
 			// looks like some writers will write a prefix of the fixed length
@@ -376,11 +393,10 @@ type BoolLiteral bool
 
 func (BoolLiteral) Comparator() Comparator[bool] {
 	return func(v1, v2 bool) int {
+		if v1 == v2 {
+			return 0
+		}
 		if v1 {
-			if v2 {
-				return 0
-			}
-
 			return 1
 		}
 
@@ -1116,6 +1132,51 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// GeoLiteral is a non-null geometry or geography single-value bound. Iceberg
+// serializes geospatial bounds as the concatenation of little-endian float64
+// coordinates in X, Y[, Z][, M] order (spec Appendix D), not as WKB. Those
+// coordinates have no total order, so - unlike every other literal - GeoLiteral
+// is deliberately not a TypedLiteral: it exposes no Comparator and refuses to be
+// cast to an orderable type. That keeps ordering-based pruning from silently
+// running bytes.Compare over coordinate bytes (which would yield wrong answers)
+// and makes it error instead. Type() reports the concrete GeometryType or
+// GeographyType, so callers that key off the literal's own type - pruning, To,
+// logging - see the truth rather than plain binary.
+type GeoLiteral struct {
+	val []byte
+	typ Type
+}
+
+func (g GeoLiteral) Type() Type    { return g.typ }
+func (g GeoLiteral) Value() []byte { return g.val }
+func (g GeoLiteral) Any() any      { return g.val }
+func (g GeoLiteral) String() string {
+	return fmt.Sprintf("%s(%x)", g.typ, g.val)
+}
+
+func (g GeoLiteral) To(typ Type) (Literal, error) {
+	// Only an identity cast is meaningful. Casting to any orderable type is
+	// rejected so a geo bound can never be smuggled into a comparison.
+	if g.typ.Equals(typ) {
+		return g, nil
+	}
+
+	return nil, fmt.Errorf("%w: GeoLiteral to %s", ErrBadCast, typ)
+}
+
+func (g GeoLiteral) Equals(other Literal) bool {
+	rhs, ok := other.(GeoLiteral)
+	if !ok {
+		return false
+	}
+
+	return g.typ.Equals(rhs.typ) && bytes.Equal(g.val, rhs.val)
+}
+
+func (g GeoLiteral) MarshalBinary() ([]byte, error) {
+	return g.val, nil
+}
+
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
@@ -1144,7 +1205,7 @@ func (f FixedLiteral) To(typ Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: cannot convert FixedLiteral to %s, different length - %d <> %d",
 			ErrBadCast, typ, len(f), t.len)
 	case BinaryType:
-		return f, nil
+		return BinaryLiteral(slices.Clone(f)), nil
 	}
 
 	return nil, fmt.Errorf("%w: FixedLiteral[%d] to %s",
@@ -1278,14 +1339,22 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: could not convert %v to %s",
 			ErrBadCast, d, t)
 	case Int32Type:
-		v := d.Val.BigInt().Int64()
-		if v > math.MaxInt32 {
+		v := d.Val.BigInt()
+		if !v.IsInt64() {
+			if v.Sign() > 0 {
+				return Int32AboveMaxLiteral(), nil
+			} else if v.Sign() < 0 {
+				return Int32BelowMinLiteral(), nil
+			}
+		}
+		i := v.Int64()
+		if i > math.MaxInt32 {
 			return Int32AboveMaxLiteral(), nil
-		} else if v < math.MinInt32 {
+		} else if i < math.MinInt32 {
 			return Int32BelowMinLiteral(), nil
 		}
 
-		return Int32Literal(int32(v)), nil
+		return Int32Literal(int32(i)), nil
 	case Int64Type:
 		v := d.Val.BigInt()
 		if !v.IsInt64() {

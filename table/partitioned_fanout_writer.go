@@ -80,16 +80,17 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, ctx := errgroup.WithContext(ctx)
-	startRecordFeeder(ctx, p.itr, fanoutWorkers, inputRecordsCh)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(ctx)
+	writerCtx, writerCancel := context.WithCancel(ctx)
+	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
 		fanoutWorkers.Go(func() error {
-			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
+			return p.fanout(fanoutCtx, writerCtx, inputRecordsCh, outputDataFilesCh)
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
+	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh, writerCancel)
 }
 
 func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, error], fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
@@ -115,7 +116,7 @@ func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, err
 	})
 }
 
-func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) fanout(ctx context.Context, writerCtx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,7 +127,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				return nil
 			}
 
-			if err := p.processRecord(ctx, record, dataFilesChannel); err != nil {
+			if err := p.processRecord(ctx, writerCtx, record, dataFilesChannel); err != nil {
 				return err
 			}
 		}
@@ -136,7 +137,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 // processRecord partitions a single record batch and writes sub-batches to
 // the appropriate rolling data writers. The record is released when this
 // function returns, bounding Arrow memory to one batch per fanout worker.
-func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx context.Context, record arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	defer record.Release()
 
 	partitions, err := p.getPartitions(record)
@@ -157,7 +158,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 		}
 
 		partitionPath := p.partitionPath(val.partitionRec)
-		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
+		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, val.partitionValues, dataFilesChannel)
 		if err != nil {
 			partitionRecord.Release()
 
@@ -174,18 +175,37 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
-	return yieldDataFiles(p.writerFactory, fanoutWorkers, outputDataFilesCh)
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+	return yieldDataFiles(
+		p.writerFactory,
+		fanoutWorkers,
+		outputDataFilesCh,
+		p.writerFactory.closeAll,
+		p.writerFactory.abortAll,
+		writerCancel,
+	)
 }
 
-func yieldDataFiles(writerFactory *writerFactory, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+func yieldDataFiles(
+	writerFactory *writerFactory,
+	fanoutWorkers *errgroup.Group,
+	outputDataFilesCh chan iceberg.DataFile,
+	closeAll func() error,
+	abortAll func(),
+	writerCancel context.CancelFunc,
+) iter.Seq2[iceberg.DataFile, error] {
 	// Use a channel to safely communicate the error from the goroutine
 	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
+		defer writerCancel()
 		err := fanoutWorkers.Wait()
-		err = errors.Join(err, writerFactory.closeAll())
+		if err != nil {
+			abortAll()
+		} else {
+			err = errors.Join(err, closeAll())
+		}
 		errCh <- err
 		close(errCh)
 	}()
@@ -221,9 +241,16 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
+	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
+	for _, field := range spec.Fields() {
+		specFieldsByID[field.FieldID] = field
+	}
 
-	for i := range partitionFields {
-		sourceField := spec.Field(i)
+	for i, partitionField := range partitionFields {
+		sourceField, ok := specFieldsByID[partitionField.ID]
+		if !ok {
+			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
+		}
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
 			return nil, fmt.Errorf("failed to find source field ID %d in schema", sourceField.SourceID())

@@ -195,8 +195,8 @@ func TestRewriteDataFilesPreservesSiblingDeletionVector(t *testing.T) {
 	// One Flush writes a single Puffin holding a DV blob for each data file,
 	// so both manifest entries share the Puffin path. Each deletes id=1 / id=3.
 	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
-	w.Add(rewriteTarget, []int64{0}, 0, nil)
-	w.Add(sibling, []int64{0}, 0, nil)
+	require.NoError(t, w.Add(rewriteTarget, []int64{0}, 0, nil))
+	require.NoError(t, w.Add(sibling, []int64{0}, 0, nil))
 	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(rewriteTarget), "dv-shared.puffin"))
 	require.NoError(t, err)
 	require.Len(t, dvFiles, 2)
@@ -265,7 +265,7 @@ func seedV3TableWithDV(t *testing.T) (*table.Table, string) {
 	dvTarget := target.File.FilePath()
 
 	w := dv.NewDVWriter(fs, unpartitionedSpecByID)
-	w.Add(dvTarget, []int64{0}, 0, nil)
+	require.NoError(t, w.Add(dvTarget, []int64{0}, 0, nil))
 	dvFiles, err := w.Flush(ctx, filepath.Join(filepath.Dir(dvTarget), "dv-0001.puffin"))
 	require.NoError(t, err)
 	require.Len(t, dvFiles, 1)
