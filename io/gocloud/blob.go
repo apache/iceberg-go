@@ -590,7 +590,7 @@ func (bfs *BlobFileIO) Rename(oldpath, newpath string) error {
 	return nil
 }
 
-// RenameNoReplace renames a file or directory from oldpath to newpath, returning an error if newpath already exists.
+// RenameNoReplace renames one file/object (non-recursive) from oldpath to newpath, returning an error if newpath already exists.
 func (bfs *BlobFileIO) RenameNoReplace(oldpath, newpath string) error {
 	if _, err := bfs.Stat(newpath); err == nil {
 		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: fs.ErrExist}
@@ -604,7 +604,7 @@ func (bfs *BlobFileIO) RenameNoReplace(oldpath, newpath string) error {
 }
 
 // RemoveAll removes either a single file or interprets the path as and removes both
-// it and and all its children..
+// it and and all its children.
 func (bfs *BlobFileIO) RemoveAll(name string) error {
 	key, err := bfs.preprocess(name)
 	if err != nil {

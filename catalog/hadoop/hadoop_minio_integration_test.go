@@ -187,7 +187,7 @@ func (s *HadoopMinIOIntegrationSuite) TestDropNamespaceAfterDropTable() {
 	s.Require().NoError(s.cat.DropTable(s.ctx, ident))
 
 	// Ensure that the namespace can be dropped after dropping the table
-	// and that driectory marker logic is handled properly, not preventing
+	// and that directory marker logic is handled properly, not preventing
 	// the drop from occurring.
 	s.Require().NoError(s.cat.DropNamespace(s.ctx, ns))
 }
