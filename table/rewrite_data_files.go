@@ -417,7 +417,7 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	result := &RewriteResult{}
 	props := maps.Clone(opts.SnapshotProps)
-	var allRewritten []string
+	var allRewritten []iceberg.DataFile
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -443,9 +443,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 		}
 
-		for _, f := range gr.OldDataFiles {
-			allRewritten = append(allRewritten, f.FilePath())
-		}
+		allRewritten = append(allRewritten, gr.OldDataFiles...)
 		accumulateGroupMetrics(result, gr)
 	}
 
@@ -467,17 +465,19 @@ func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 }
 
 // rewriteValidator builds a conflictValidatorFunc that rejects the
-// commit if a concurrent snapshot added delete files pointing at any
-// of the rewritten data-file paths (or eq-deletes during the rewrite,
-// conservatively). Always runs — no isolation gating, because rewrite
-// is a structural operation, not a user-facing isolation choice.
-func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
+// commit if a concurrent snapshot added delete files targeting any of
+// the rewritten data files — by referenced-data-file path, by
+// file_path bounds, by partition overlap for partition-scoped
+// pos-deletes, or (conservatively) any eq-delete during the rewrite.
+// Always runs — no isolation gating, because rewrite is a structural
+// operation, not a user-facing isolation choice.
+func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
 	return func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
 		}
 
-		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenPaths)
+		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
 	}
 }
 
