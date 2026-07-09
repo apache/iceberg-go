@@ -34,7 +34,7 @@ import (
 
 var (
 	regexFromBrackets = regexp.MustCompile(`^\w+\[(\d+)\]$`)
-	decimalRegex      = regexp.MustCompile(`decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)`)
+	decimalRegex      = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
 	geometryRegex     = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
 	geographyRegex    = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
 )
@@ -200,8 +200,18 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
-				prec, _ := strconv.Atoi(matches[1])
-				scale, _ := strconv.Atoi(matches[2])
+				prec, err := strconv.Atoi(matches[1])
+				if err != nil {
+					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
+				}
+				scale, err := strconv.Atoi(matches[2])
+				if err != nil {
+					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
+				}
+				if err := validateDecimalPrecisionScale(prec, scale); err != nil {
+					return fmt.Errorf("%w: %w", ErrInvalidTypeString, err)
+				}
+
 				t.Type = DecimalType{precision: prec, scale: scale}
 			// note that geo type names are case insensitive but other type names are case sensitive.
 			// matches java behavior - this behavior is intentional
@@ -595,7 +605,25 @@ func (f FixedType) String() string { return fmt.Sprintf("fixed[%d]", f.len) }
 func (f FixedType) primitive()     {}
 
 func DecimalTypeOf(prec, scale int) DecimalType {
+	if err := validateDecimalPrecisionScale(prec, scale); err != nil {
+		panic(fmt.Errorf("%w: %w", ErrInvalidArgument, err))
+	}
+
 	return DecimalType{precision: prec, scale: scale}
+}
+
+func validateDecimalPrecisionScale(precision, scale int) error {
+	if precision <= 0 {
+		return fmt.Errorf("invalid precision %d: must be greater than 0", precision)
+	}
+	if precision > 38 {
+		return fmt.Errorf("invalid precision %d: must be less than or equal to 38", precision)
+	}
+	if scale < 0 {
+		return fmt.Errorf("invalid scale %d: must be greater than or equal to 0", scale)
+	}
+
+	return nil
 }
 
 type DecimalType struct {
