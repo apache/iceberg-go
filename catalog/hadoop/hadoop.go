@@ -133,33 +133,33 @@ func shouldSuppressPermissionError(err error) bool {
 // Note: this is POSIX-best-effort validation — it does not catch NUL bytes
 // or Windows reserved names (NUL, CON, COM1, etc.).
 func validateIdentifier(ident table.Identifier) error {
-	return validateIdentifierParts(ident, catalog.ErrNoSuchNamespace, "namespace identifier", "identifier component")
+	return validateIdentifierParts(ident, "namespace identifier", "identifier component")
 }
 
 func validateTableIdentifier(ident table.Identifier) error {
 	if len(ident) < 2 {
-		return fmt.Errorf("%w: table identifier must have at least a namespace and table name", catalog.ErrNoSuchTable)
+		return fmt.Errorf("%w: table identifier must have at least a namespace and table name", catalog.ErrInvalidIdentifier)
 	}
 
-	return validateIdentifierParts(ident, catalog.ErrNoSuchTable, "table identifier", "table identifier component")
+	return validateIdentifierParts(ident, "table identifier", "table identifier component")
 }
 
-func validateIdentifierParts(ident table.Identifier, errType error, identifierName, componentName string) error {
+func validateIdentifierParts(ident table.Identifier, identifierName, componentName string) error {
 	if len(ident) == 0 {
-		return fmt.Errorf("%w: %s must not be empty", errType, identifierName)
+		return fmt.Errorf("%w: %s must not be empty", catalog.ErrInvalidIdentifier, identifierName)
 	}
 
 	for _, part := range ident {
 		if part == "" {
-			return fmt.Errorf("%w: %s must not be empty", errType, componentName)
+			return fmt.Errorf("%w: %s must not be empty", catalog.ErrInvalidIdentifier, componentName)
 		}
 
 		if part == "." || part == ".." {
-			return fmt.Errorf("%w: invalid %s %q", errType, componentName, part)
+			return fmt.Errorf("%w: invalid %s %q", catalog.ErrInvalidIdentifier, componentName, part)
 		}
 
 		if strings.ContainsAny(part, "/\\") {
-			return fmt.Errorf("%w: %s must not contain path separators: %q", errType, componentName, part)
+			return fmt.Errorf("%w: %s must not contain path separators: %q", catalog.ErrInvalidIdentifier, componentName, part)
 		}
 	}
 
@@ -584,7 +584,7 @@ func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table
 
 func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (bool, error) {
 	if err := validateTableIdentifier(ident); err != nil {
-		return false, nil
+		return false, err
 	}
 
 	// Direct existence checks surface metadata directory read errors; listing
