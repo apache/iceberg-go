@@ -56,6 +56,7 @@ var (
 	// ErrNoSuchTable is returned when a table does not exist in the catalog.
 	ErrNoSuchTable            = errors.New("table does not exist")
 	ErrNoSuchNamespace        = errors.New("namespace does not exist")
+	ErrInvalidIdentifier      = errors.New("identifier is invalid")
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
 	ErrTableAlreadyExists     = errors.New("table already exists")
 	ErrCatalogNotFound        = errors.New("catalog type not registered")

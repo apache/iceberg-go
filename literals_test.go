@@ -389,6 +389,14 @@ func TestDecimalToDecimalConversion(t *testing.T) {
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 3)")
 }
 
+func TestDecimalLiteralTypeDoesNotPanicForLargeScale(t *testing.T) {
+	lit := iceberg.DecimalLiteral{Scale: 10, Val: decimal128.FromI64(1234)}
+
+	assert.NotPanics(t, func() {
+		assert.NotNil(t, lit.Type())
+	})
+}
+
 func TestDecimalLiteralConversions(t *testing.T) {
 	n1 := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	n2 := iceberg.Decimal{Val: decimal128.FromI64(math.MaxInt32 + 1), Scale: 0}
@@ -656,6 +664,11 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 }
 
 func TestFixedLiteral(t *testing.T) {
+	emptyFixed := iceberg.FixedLiteral(nil)
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "fixed[0]", emptyFixed.Type().String())
+	})
+
 	fixedLit012 := iceberg.FixedLiteral{0x00, 0x01, 0x02}
 	fixedLit013 := iceberg.FixedLiteral{0x00, 0x01, 0x03}
 	assert.True(t, fixedLit012.Equals(fixedLit012))

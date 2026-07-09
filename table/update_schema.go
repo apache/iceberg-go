@@ -1010,6 +1010,21 @@ func (a *applyChanges) Field(field iceberg.NestedField, fieldResult iceberg.Type
 	return fieldResult
 }
 
+// updateColumn seeds each pending update from a copy of the original
+// NestedField. As a result, updates that only modify other properties
+// still preserve the original Required value here.
+//
+// Note: If updateColumn is refactored to lazily populate only the
+// touched fields, this helper must gain an explicit "Required was set"
+// signal or it will silently return the zero-value false.
+func (a *applyChanges) updatedRequired(fieldID int, fallback bool) bool {
+	if update, ok := a.updates[fieldID]; ok {
+		return update.Required
+	}
+
+	return fallback
+}
+
 func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Type) iceberg.Type {
 	elementType := a.Field(listType.ElementField(), elementResult)
 	if elementType == nil {
@@ -1019,7 +1034,7 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 	return &iceberg.ListType{
 		ElementID:       listType.ElementID,
 		Element:         elementType,
-		ElementRequired: listType.ElementRequired,
+		ElementRequired: a.updatedRequired(listType.ElementID, listType.ElementRequired),
 	}
 }
 
@@ -1053,7 +1068,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		KeyType:       mapType.KeyType,
 		ValueID:       mapType.ValueID,
 		ValueType:     valueType,
-		ValueRequired: mapType.ValueRequired,
+		ValueRequired: a.updatedRequired(mapType.ValueID, mapType.ValueRequired),
 	}
 }
 

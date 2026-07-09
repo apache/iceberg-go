@@ -47,13 +47,18 @@ package table
 // outputs are public.
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 )
 
 // IsolationLevel controls how strictly a commit rejects concurrent
@@ -595,40 +600,65 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 
 // validateNoNewDeletesForRewrittenFiles rejects the commit if any
 // concurrent snapshot added delete files that would be lost when the
-// committer's rewrite replaces a data file.
+// committer's rewrite replaces one of rewrittenFiles.
 //
 // Two cases are flagged:
 //
-//   - A position-delete whose referenced-data-file path is one of
-//     rewrittenPaths — the delete applies to a file the rewrite is
-//     removing, so the delete would be orphaned and its semantics
-//     lost.
+//   - A position-delete that resolves to one of the rewritten paths,
+//     via referencedDataFilePath (explicit referenced_data_file, then
+//     equal file_path lower/upper bounds), or, when no single path can
+//     be resolved, whose (specID, partition) matches a rewritten file
+//     — the delete applies to a file the rewrite is removing, so it
+//     would be orphaned and its semantics lost. This mirrors Java's
+//     DeleteFileIndex, which indexes path-scoped deletes by path and
+//     falls back to indexing partition-scoped deletes by (specId,
+//     partition).
 //
 //   - An equality-delete added by a concurrent snapshot — these apply
-//     by predicate, not by path, so we cannot precisely check
-//     overlap without the rewritten files' partition tuples. The
-//     conservative behavior is to reject any concurrent eq-delete,
-//     which matches Java's approach for RewriteFiles and avoids
-//     silently losing deletes. A follow-up PR will accept optional
-//     partition-overlap hints and narrow this check.
-func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenPaths []string) error {
-	if len(rewrittenPaths) == 0 || len(ctx.concurrent) == 0 {
+//     by predicate, not by path, so we cannot precisely check overlap
+//     without the rewritten files' partition tuples. The conservative
+//     behavior is to reject any concurrent eq-delete, which matches
+//     Java's approach for RewriteFiles and avoids silently losing
+//     deletes. A follow-up PR will accept optional partition-overlap
+//     hints to narrow this check.
+func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles []iceberg.DataFile) error {
+	if len(rewrittenFiles) == 0 || len(ctx.concurrent) == 0 {
 		return nil
 	}
-	rewritten := make(map[string]struct{}, len(rewrittenPaths))
-	for _, p := range rewrittenPaths {
-		rewritten[p] = struct{}{}
+
+	rewrittenPaths := make(map[string]struct{}, len(rewrittenFiles))
+	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
+	for _, df := range rewrittenFiles {
+		rewrittenPaths[df.FilePath()] = struct{}{}
+		key, err := partitionConflictKey(df.SpecID(), df.Partition())
+		if err != nil {
+			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
+				df.FilePath(), df.SpecID(), err)
+		}
+		rewrittenPartitions[key] = struct{}{}
 	}
 
 	return ctx.forEachAddedEntry(iceberg.ManifestContentDeletes, func(snap Snapshot, e iceberg.ManifestEntry) error {
 		df := e.DataFile()
 		switch df.ContentType() {
 		case iceberg.EntryContentPosDeletes:
-			if ref := df.ReferencedDataFile(); ref != nil {
-				if _, overlap := rewritten[*ref]; overlap {
+			if path := referencedDataFilePath(df); path != "" {
+				if _, overlap := rewrittenPaths[path]; overlap {
 					return fmt.Errorf("%w: snapshot %d added pos-delete %s referencing rewritten file %s",
-						ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), *ref)
+						ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), path)
 				}
+
+				return nil
+			}
+
+			key, err := partitionConflictKey(df.SpecID(), df.Partition())
+			if err != nil {
+				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
+					df.FilePath(), df.SpecID(), err)
+			}
+			if _, overlap := rewrittenPartitions[key]; overlap {
+				return fmt.Errorf("%w: snapshot %d added partition-scoped pos-delete %s overlapping rewritten partition (spec %d)",
+					ErrConflictingDeleteFiles, snap.SnapshotID, df.FilePath(), df.SpecID())
 			}
 
 			return nil
@@ -644,4 +674,138 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenPaths 
 
 		return nil
 	})
+}
+
+// referencedDataFilePath resolves the single data file a pos-delete
+// targets, mirroring Java ContentFileUtil.referencedDataFile: explicit
+// referenced_data_file first, then equal file_path lower/upper bounds.
+// Returns "" when the delete is partition-scoped (no single data file
+// can be determined), which callers must treat conservatively via a
+// partition-tuple match rather than skipping the delete.
+func referencedDataFilePath(df iceberg.DataFile) string {
+	if ref := df.ReferencedDataFile(); ref != nil {
+		return *ref
+	}
+
+	lower := df.LowerBoundValues()[filePathFieldID]
+	upper := df.UpperBoundValues()[filePathFieldID]
+	if len(lower) == 0 || !bytes.Equal(lower, upper) {
+		return ""
+	}
+
+	lit, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.String, lower)
+	if err != nil {
+		return ""
+	}
+
+	return lit.(iceberg.TypedLiteral[string]).Value()
+}
+
+// filePathFieldID is the reserved field ID of the file_path column in a
+// positional delete file, sourced from the canonical delete schema.
+var filePathFieldID = func() int {
+	f, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+
+	return f.ID
+}()
+
+// partitionConflictKey returns a deterministic, injective string key
+// for a (specID, partition) tuple, used to detect overlap between a
+// partition-scoped delete and a rewritten data file. Partition values
+// are compared post-transform (direct equality), matching Java's
+// DeleteFileIndex — no transform-aware logic is needed because both
+// sides store the same post-transform representation.
+//
+// Values are encoded type-normalized across the known Avro-decode and
+// write-side representations (see appendPartitionConflictValue):
+// integer-backed types are unified per field, so e.g. an int32 and an
+// iceberg.Date carrying the same day match. An unknown value type
+// fails the key build — and thereby the validation — rather than
+// falling back to a lossy formatting that could silently mismatch.
+//
+// Different spec IDs never match, even with identical-looking tuples:
+// Java's DeleteFileIndex keys its PartitionMap by specId, and field IDs
+// are only meaningful within a single spec.
+func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
+	ids := make([]int, 0, len(partition))
+	for id := range partition {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+
+	buf := strconv.AppendInt(nil, int64(specID), 10)
+	buf = append(buf, '|')
+	for _, id := range ids {
+		buf = strconv.AppendInt(buf, int64(id), 10)
+		buf = append(buf, ':')
+		var err error
+		buf, err = appendPartitionConflictValue(buf, partition[id])
+		if err != nil {
+			return "", fmt.Errorf("partition field %d: %w", id, err)
+		}
+		buf = append(buf, ';')
+	}
+
+	return string(buf), nil
+}
+
+// appendPartitionConflictValue encodes one partition value into dst by
+// semantic class, so different Go representations of the same logical
+// value produce the same bytes:
+//
+//   - integer-backed types (int/int32/int64, Date, Time, Timestamp,
+//     TimestampNano) collapse into one class — within a single
+//     (specID, fieldID) the logical type is fixed, so this only
+//     tolerates decoder representation drift, never conflates two
+//     logical values of one field;
+//   - uuid.UUID and []byte collapse into raw-bytes hex;
+//   - Decimal and DecimalLiteral collapse into (scale, unscaled).
+//
+// String values are length-prefixed so keys stay injective for inputs
+// containing the field separators. Unknown types return an error.
+func appendPartitionConflictValue(dst []byte, v any) ([]byte, error) {
+	switch v := v.(type) {
+	case nil:
+		return append(dst, 'z'), nil
+	case bool:
+		return strconv.AppendBool(append(dst, 'b', ':'), v), nil
+	case int:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case int32:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case int64:
+		return strconv.AppendInt(append(dst, 'i', ':'), v, 10), nil
+	case iceberg.Date:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case iceberg.Time:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case iceberg.Timestamp:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case iceberg.TimestampNano:
+		return strconv.AppendInt(append(dst, 'i', ':'), int64(v), 10), nil
+	case float32:
+		return strconv.AppendFloat(append(dst, 'f', ':'), float64(v), 'x', -1, 64), nil
+	case float64:
+		return strconv.AppendFloat(append(dst, 'f', ':'), v, 'x', -1, 64), nil
+	case string:
+		dst = strconv.AppendInt(append(dst, 's', ':'), int64(len(v)), 10)
+
+		return append(append(dst, ':'), v...), nil
+	case []byte:
+		return hex.AppendEncode(append(dst, 'B', ':'), v), nil
+	case uuid.UUID:
+		return hex.AppendEncode(append(dst, 'B', ':'), v[:]), nil
+	case iceberg.Decimal:
+		return appendDecimalConflictValue(dst, v), nil
+	case iceberg.DecimalLiteral:
+		return appendDecimalConflictValue(dst, iceberg.Decimal(v)), nil
+	default:
+		return nil, fmt.Errorf("unsupported partition value type %T in conflict key", v)
+	}
+}
+
+func appendDecimalConflictValue(dst []byte, v iceberg.Decimal) []byte {
+	dst = strconv.AppendInt(append(dst, 'd', ':'), int64(v.Scale), 10)
+
+	return append(append(dst, ':'), v.Val.BigInt().String()...)
 }
