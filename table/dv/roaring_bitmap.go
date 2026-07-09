@@ -64,6 +64,25 @@ func (b *RoaringPositionBitmap) Set(pos uint64) {
 	bm.Add(low)
 }
 
+// Or merges every position set in other into b. Buckets present only in
+// other are cloned so the two bitmaps stay independent after the merge;
+// shared buckets are unioned in place. A nil other is a no-op. Used to fold a
+// previously written deletion vector into a new one when a data file that
+// already has a DV receives more deletes.
+func (b *RoaringPositionBitmap) Or(other *RoaringPositionBitmap) {
+	if other == nil {
+		return
+	}
+	for key, obm := range other.bitmaps {
+		if bm, ok := b.bitmaps[key]; ok {
+			bm.Or(obm)
+
+			continue
+		}
+		b.bitmaps[key] = obm.Clone()
+	}
+}
+
 // Contains checks if a position is set.
 func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 	key := uint32(pos >> 32)

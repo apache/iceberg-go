@@ -173,7 +173,7 @@ func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
 
 	restCat, ok := cat.(*Catalog)
 	require.True(t, ok)
-	assert.Equal(t, authURL, restCat.props[keyAuthUrl])
+	assert.Equal(t, authURL, restCat.props[keyOAuth2ServerURI])
 }
 
 func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
@@ -189,7 +189,7 @@ func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 			name:    "malformed URL in defaults",
 			section: "defaults",
 			authURL: "http://[::1",
-			wantErr: "invalid rest.authorization-url",
+			wantErr: "invalid oauth2-server-uri",
 		},
 		{
 			name:    "scheme-less URL in overrides",
@@ -248,7 +248,105 @@ func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
 
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
 	require.NoError(t, err)
-	assert.Equal(t, authURL, cat.props[keyAuthUrl])
+	assert.Equal(t, authURL, cat.props[keyOAuth2ServerURI])
+}
+
+func TestOAuthServerURIProps(t *testing.T) {
+	t.Parallel()
+
+	const (
+		serverURI = "https://auth.example.com/oauth/tokens"
+		authURL   = "https://legacy.example.com/v1/oauth/tokens"
+	)
+
+	t.Run("oauth2-server-uri configures the token endpoint", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyOAuth2ServerURI: serverURI}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("rest.authorization-url still works as an alias", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyAuthUrl: authURL}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, authURL, opts.authUri.String())
+	})
+
+	t.Run("oauth2-server-uri takes precedence when both are set", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("neither key leaves the endpoint unset for fallback", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{}, &opts))
+		assert.Nil(t, opts.authUri)
+	})
+
+	t.Run("neither key is retained as an additional prop", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		_, hasAuthURL := opts.additionalProps[keyAuthUrl]
+		_, hasServerURI := opts.additionalProps[keyOAuth2ServerURI]
+		assert.False(t, hasAuthURL)
+		assert.False(t, hasServerURI)
+	})
+
+	t.Run("invalid oauth2-server-uri is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tt := range []struct {
+			name    string
+			uri     string
+			wantErr string
+		}{
+			{"malformed URL", "http://[::1", "invalid oauth2-server-uri"},
+			{"missing scheme", "auth.example.com/token", "missing scheme"},
+			{"missing host", "https://", "missing host"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				var opts options
+				err := fromProps(iceberg.Properties{keyOAuth2ServerURI: tt.uri}, &opts)
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+			})
+		}
+	})
+
+	t.Run("toProps serializes under the portable oauth2-server-uri key", func(t *testing.T) {
+		t.Parallel()
+
+		u, err := url.Parse(serverURI)
+		require.NoError(t, err)
+
+		props := toProps(&options{authUri: u})
+		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
+		// Only the portable key is emitted; the legacy rest.authorization-url
+		// alias is not, to avoid carrying the endpoint under two names.
+		_, hasLegacy := props[keyAuthUrl]
+		assert.False(t, hasLegacy)
+	})
 }
 
 func TestTokenAuthenticationPriority(t *testing.T) {
@@ -1348,6 +1446,44 @@ func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
 
 	assert.Equal(t, "Bearer caller-token", configAuthHeader)
 	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
+}
+
+func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
+	t.Parallel()
+
+	const overrideAuthURL = "https://override.example.com/token"
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// The server overrides the token endpoint via the legacy alias while
+			// the client supplied oauth2-server-uri; the override must win.
+			"overrides": map[string]any{
+				keyAuthUrl: overrideAuthURL,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithAuthURI(mustParseURL(t, "https://client.example.com/token")))
+	require.NoError(t, err)
+
+	assert.Equal(t, overrideAuthURL, cat.props[keyOAuth2ServerURI])
+	_, hasLegacy := cat.props[keyAuthUrl]
+	assert.False(t, hasLegacy)
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+
+	return u
 }
 
 func TestEncodeNamespace(t *testing.T) {

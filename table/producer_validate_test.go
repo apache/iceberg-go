@@ -294,10 +294,11 @@ func TestRowDelta_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
 func TestRewriteValidator_Smokes(t *testing.T) {
 	cc := newEmptyConflictContext(t)
 
-	// Empty rewrittenPaths short-circuits regardless of cc.
+	// Empty rewrittenFiles short-circuits regardless of cc.
 	require.NoError(t, rewriteValidator(nil)(cc))
 	require.NoError(t, rewriteValidator(nil)(nil))
 
-	// Non-empty paths but zero concurrent snapshots is also nil.
-	require.NoError(t, rewriteValidator([]string{"a.parquet"})(cc))
+	// Non-empty files but zero concurrent snapshots is also nil.
+	rewritten := newTestDataFile(t, *iceberg.UnpartitionedSpec, "a.parquet", nil)
+	require.NoError(t, rewriteValidator([]iceberg.DataFile{rewritten})(cc))
 }

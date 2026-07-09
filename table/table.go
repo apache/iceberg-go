@@ -769,7 +769,7 @@ func WithSelectedFields(fields ...string) ScanOption {
 	}
 
 	return func(scan *Scan) {
-		scan.selectedFields = fields
+		scan.selectedFields = slices.Clone(fields)
 	}
 }
 

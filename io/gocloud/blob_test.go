@@ -162,20 +162,20 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	}
 }
 
-func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *blobFileIO {
+func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *BlobFileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = s3Schemes
 	}
 	extractor := defaultObjectLocationExtractor(bucketName, allowedSchemes...)
 
-	return &blobFileIO{
+	return &BlobFileIO{
 		Bucket:        bucket,
 		extractObject: extractor,
 		ctx:           ctx,
 	}
 }
 
-func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *blobFileIO {
+func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *blob.Bucket) *BlobFileIO {
 	t.Helper()
 
 	parsed, err := url.Parse(root)
@@ -183,7 +183,7 @@ func testADLSBlobFileIO(t *testing.T, ctx context.Context, root string, bucket *
 
 	extractor := adlsObjectLocationExtractor(parsed)
 
-	return &blobFileIO{
+	return &BlobFileIO{
 		Bucket:        bucket,
 		extractObject: extractor,
 		ctx:           ctx,
@@ -261,7 +261,7 @@ func TestNewWriterExistsError(t *testing.T) {
 
 	bucket := memblob.OpenBucket(nil)
 
-	bfs := &blobFileIO{
+	bfs := &BlobFileIO{
 		Bucket:        bucket,
 		extractObject: identityObjectLocation,
 		ctx:           ctx,
@@ -329,7 +329,7 @@ func TestReadAtResourceCleanup(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var lastReaderClosed bool
-			bfs := &blobFileIO{
+			bfs := &BlobFileIO{
 				Bucket:        bucket,
 				extractObject: identityObjectLocation,
 				ctx:           ctx,
@@ -689,4 +689,114 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	deleted, err := bulk.DeleteFiles(ctx, nil)
 	require.NoError(t, err)
 	assert.Nil(t, deleted)
+}
+
+func TestBlobFileIOStat(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("content"), nil))
+
+	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+
+	fileInfo, err := bfs.Stat("s3://test-bucket/data/file.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, "file.parquet", fileInfo.Name())
+	assert.Equal(t, int64(len("content")), fileInfo.Size())
+	assert.False(t, fileInfo.IsDir())
+
+	dirInfo, err := bfs.Stat("s3://test-bucket/data")
+	require.NoError(t, err)
+	assert.Equal(t, "data", dirInfo.Name())
+	assert.True(t, dirInfo.IsDir())
+
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/foo"))
+	markerInfoWithSlash, err := bfs.Stat("s3://test-bucket/foo/")
+	require.NoError(t, err)
+	assert.Equal(t, "foo", markerInfoWithSlash.Name())
+	markerInfoWithoutSlash, err := bfs.Stat("s3://test-bucket/foo")
+	require.NoError(t, err)
+	assert.Equal(t, "foo", markerInfoWithoutSlash.Name())
+	// The trailing slash in the path should not affect the
+	// isDir result
+	assert.True(t, markerInfoWithSlash.IsDir())
+	assert.True(t, markerInfoWithoutSlash.IsDir())
+
+	_, err = bfs.Stat("s3://test-bucket/missing")
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestBlobFileIOMkdirAll(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/a/b/c"))
+
+	for _, key := range []string{"a/", "a/b/", "a/b/c/"} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.True(t, exists, "%s should exist", key)
+	}
+}
+
+func TestBlobFileIOWalkDirSkipsDirectoryMarker(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+
+	// MkdirAll leaves only a "warehouse/ns/" marker for an empty namespace.
+	// Walking "warehouse/ns" should not report that marker as a child file.
+	require.NoError(t, bfs.MkdirAll("s3://test-bucket/warehouse/ns"))
+
+	var paths []string
+	require.NoError(t, bfs.WalkDir("s3://test-bucket/warehouse/ns", func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		paths = append(paths, path)
+
+		return nil
+	}))
+	// There should be exactly one path reported and no dummy directory markers
+	assert.Equal(t, []string{"s3://test-bucket/warehouse/ns"}, paths)
+}
+
+func TestBlobFileIORemoveAll(t *testing.T) {
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	defer bucket.Close()
+
+	require.NoError(t, bucket.WriteAll(ctx, "data/file.parquet", []byte("file"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/", nil, nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/metadata/v1.metadata.json", []byte("metadata"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/ns/tbl/data/00001.parquet", []byte("data"), nil))
+	require.NoError(t, bucket.WriteAll(ctx, "warehouse/other/keep.parquet", []byte("keep"), nil))
+
+	bfs := createBlobFS(ctx, bucket, defaultObjectLocationExtractor("test-bucket")).(*BlobFileIO)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/data/file.parquet"))
+	exists, err := bucket.Exists(ctx, "data/file.parquet")
+	require.NoError(t, err)
+	assert.False(t, exists)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/warehouse/ns"))
+	for _, key := range []string{
+		"warehouse/ns/",
+		"warehouse/ns/tbl/metadata/v1.metadata.json",
+		"warehouse/ns/tbl/data/00001.parquet",
+	} {
+		exists, err := bucket.Exists(ctx, key)
+		require.NoError(t, err)
+		assert.False(t, exists, "%s should be removed", key)
+	}
+
+	exists, err = bucket.Exists(ctx, "warehouse/other/keep.parquet")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	require.NoError(t, bfs.RemoveAll("s3://test-bucket/missing"))
 }
