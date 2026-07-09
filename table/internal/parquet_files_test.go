@@ -1429,10 +1429,12 @@ func TestWriteDataFileGeoBounds(t *testing.T) {
 		assert.NotContains(t, lower, 3, "geography lower bound must be omitted")
 		assert.NotContains(t, upper, 3, "geography upper bound must be omitted")
 
-		// Bounds round-trip back to literals through LiteralFromBytes.
+		// Bounds round-trip back to a GeoLiteral (not a comparable binary
+		// literal) through LiteralFromBytes.
 		lit, err := iceberg.LiteralFromBytes(geomType, lower[2])
 		require.NoError(t, err)
-		assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.TypedLiteral[[]byte]).Value())
+		assert.True(t, geomType.Equals(lit.Type()), "want geo type, got %s", lit.Type())
+		assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.GeoLiteral).Value())
 
 		// Null counts are still recorded for geo columns.
 		assert.Equal(t, int64(1), df.NullValueCounts()[3])

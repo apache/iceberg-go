@@ -306,6 +306,13 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 		return getCmp(l)
 	case iceberg.TypedLiteral[iceberg.Decimal]:
 		return getCmp(l)
+	case iceberg.GeoLiteral:
+		// Geometry/Geography bounds are coordinate tuples with no total order,
+		// so they must never reach an ordering comparison. Reject explicitly
+		// instead of falling through to the generic type panic, so the failure
+		// names the real cause if a geo term is ever routed here.
+		panic(fmt.Errorf("%w: geometry/geography has no ordering, cannot compare %s bounds",
+			iceberg.ErrType, boundary.Type()))
 	}
 	panic(iceberg.ErrType)
 }
