@@ -189,7 +189,7 @@ func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 			name:    "malformed URL in defaults",
 			section: "defaults",
 			authURL: "http://[::1",
-			wantErr: "invalid rest.authorization-url",
+			wantErr: "invalid oauth2-server-uri",
 		},
 		{
 			name:    "scheme-less URL in overrides",
