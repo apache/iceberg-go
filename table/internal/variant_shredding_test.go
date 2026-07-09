@@ -322,3 +322,40 @@ func TestAnalyzeFieldCap(t *testing.T) {
 	assert.True(t, hasFirst, "alphabetically-smallest kept")
 	assert.False(t, hasLast, "alphabetically-largest evicted on the count tie")
 }
+
+// TestAnalyzeNestedHighCardinality proves the caps are per-object-node: a top and a
+// nested object each over maxShreddedFields are capped independently.
+func TestAnalyzeNestedHighCardinality(t *testing.T) {
+	inner := make(map[string]any, maxShreddedFields+1)
+	for i := 0; i <= maxShreddedFields; i++ {
+		inner[fmt.Sprintf("g%04d", i)] = bigI64
+	}
+	row := make(map[string]any, maxShreddedFields+2)
+	row["aaa"] = inner // sorts first, so it survives the top-level cap
+	for i := 0; i <= maxShreddedFields; i++ {
+		row[fmt.Sprintf("f%04d", i)] = bigI64
+	}
+
+	dt, ok := AnalyzeVariantShredding(mkVars(t, row, row))
+	require.True(t, ok)
+	st := dt.(*arrow.StructType)
+	assert.Equal(t, maxShreddedFields, st.NumFields(), "top object capped per-node")
+
+	f, found := st.FieldsByName("aaa")
+	require.True(t, found)
+	require.Len(t, f, 1)
+	innerSt, isStruct := f[0].Type.(*arrow.StructType)
+	require.True(t, isStruct)
+	assert.Equal(t, maxShreddedFields, innerSt.NumFields(), "nested object capped independently (per-node)")
+}
+
+// TestAnalyzeDepthCap: nesting past maxShreddingDepth leaves the leaf out of range, so
+// nothing shreds. Fails (ok=true) if the recursion depth guard is removed or raised.
+func TestAnalyzeDepthCap(t *testing.T) {
+	var nested any = bigI64
+	for i := 0; i < maxShreddingDepth+50; i++ {
+		nested = map[string]any{"n": nested}
+	}
+	_, ok := AnalyzeVariantShredding(mkVars(t, nested, nested))
+	assert.False(t, ok, "leaf nested beyond maxShreddingDepth is not shreddable")
+}

@@ -47,7 +47,7 @@ func TestCanShredVariant(t *testing.T) {
 		arrow.ListOf(arrow.BinaryTypes.String),
 	}
 	for _, dt := range good {
-		assert.Truef(t, CanShredVariant(dt), "%s should be shreddable", dt)
+		assert.Truef(t, canShredVariant(dt), "%s should be shreddable", dt)
 	}
 
 	bad := []arrow.DataType{
@@ -64,7 +64,7 @@ func TestCanShredVariant(t *testing.T) {
 		arrow.StructOf(), // empty struct
 	}
 	for _, dt := range bad {
-		assert.Falsef(t, CanShredVariant(dt), "%s should NOT be shreddable", dt)
+		assert.Falsef(t, canShredVariant(dt), "%s should NOT be shreddable", dt)
 	}
 }
 

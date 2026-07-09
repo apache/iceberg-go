@@ -18,8 +18,10 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -392,6 +394,80 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 	}
 }
 
+// TestShreddedVariantPartitionedDecimalRace runs a partitioned shredded-decimal write
+// with many small batches so partition writers open files concurrently. Under -race it
+// fails if NewFileWriter appends StoreDecimalAsInteger into the shared write-props slice.
+func TestShreddedVariantPartitionedDecimalRace(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "p", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	const nPart = 16
+	mkBatch := func() arrow.RecordBatch {
+		pb := array.NewInt64Builder(mem)
+		defer pb.Release()
+		vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+		defer vb.Release()
+		for i := 0; i < nPart*4; i++ {
+			pb.Append(int64(i % nPart))
+			var b variant.Builder
+			require.NoError(t, b.AppendDecimal4(2, decimal.Decimal32(12345))) // shreds to Decimal128
+			v, err := b.Build()
+			require.NoError(t, err)
+			vb.Append(v)
+		}
+		pArr := pb.NewInt64Array()
+		defer pArr.Release()
+		payloadArr := vb.NewArray()
+		defer payloadArr.Release()
+
+		return array.NewRecordBatch(arrSchema, []arrow.Array{pArr, payloadArr}, int64(nPart*4))
+	}
+	batches := make([]arrow.RecordBatch, 40)
+	for i := range batches {
+		batches[i] = mkBatch()
+		defer batches[i].Release()
+	}
+	itr := func(yield func(arrow.RecordBatch, error) bool) {
+		for _, b := range batches {
+			if !yield(b, nil) {
+				return
+			}
+		}
+	}
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "p",
+	})
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, &spec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:       "3",
+		ParquetShredVariantsKey:     "true",
+		ParquetVariantBufferSizeKey: "3", // tiny buffer -> partitions flush mid-stream, concurrently
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	writer := newPartitionedFanoutWriter(spec, iceSchema, args.itr, factory)
+	files := 0
+	for df, err := range writer.Write(context.Background(), 8) {
+		require.NoError(t, err)
+		assert.True(t, payloadHasTypedValue(t, df.FilePath()), "each partition file must be shredded")
+		files++
+	}
+	require.Equal(t, nPart, files, "one file per partition")
+}
+
 func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n int) ([]iceberg.DataFile, string) {
 	t.Helper()
 	mem := memory.DefaultAllocator
@@ -461,6 +537,7 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 		physical parquet.Type
 	}{
 		{"decimal", func(b *variant.Builder) error { return b.AppendDecimal4(2, decimal.Decimal32(12345)) }, parquet.Types.Int32},
+		{"decimal-int64", func(b *variant.Builder) error { return b.AppendDecimal8(0, decimal.Decimal64(123456789012)) }, parquet.Types.Int64},
 		{"timestamp", func(b *variant.Builder) error {
 			return b.AppendTimestamp(arrow.Timestamp(1700000000000000), true, true)
 		}, parquet.Types.Int64},
@@ -470,7 +547,7 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 			files, want := writeScalarVariantTable(t, c.build, 6)
 			require.Len(t, files, 1)
 			assert.Truef(t, payloadHasTypedValue(t, files[0].FilePath()), "%s column must be shredded", c.name)
-			// Spec (VariantShredding.md): decimal4->INT32, timestamp(micros)->INT64.
+			// Spec (VariantShredding.md): decimal4->INT32, decimal8->INT64, timestamp(micros)->INT64.
 			assert.Equalf(t, c.physical, payloadTypedValuePhysicalType(t, files[0].FilePath()),
 				"%s typed_value must use the spec physical type", c.name)
 
@@ -492,6 +569,86 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 				assert.JSONEqf(t, want, string(got), "%s row %d round-trip", c.name, i)
 			}
 		})
+	}
+}
+
+// TestShreddedVariantWriteMixedTypeField writes an object field that is int64 in most
+// rows and string in a few. Inference shreds it as int64 (the majority); the minority
+// string rows must round-trip through the unshredded residual, not be dropped.
+func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	const nRows, nStr = 10, 2 // rows [nRows-nStr, nRows) carry a string f; the rest int64
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 0; i < nRows; i++ {
+		idb.Append(int64(i))
+		var b variant.Builder
+		if i < nRows-nStr {
+			require.NoError(t, b.Append(map[string]any{"f": int64(1000 + i)}))
+		} else {
+			require.NoError(t, b.Append(map[string]any{"f": "s" + strconv.Itoa(i)}))
+		}
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, nRows)
+	defer rec.Release()
+
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+	assert.True(t, payloadHasTypedValue(t, files[0].FilePath()), "f shreds as int64 (majority)")
+
+	p := strings.TrimPrefix(files[0].FilePath(), "file://")
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
+	require.Equal(t, nRows, col.Len())
+	for i := 0; i < col.Len(); i++ {
+		v, err := col.Value(i)
+		require.NoError(t, err)
+		got, err := v.MarshalJSON()
+		require.NoError(t, err)
+		want := `{"f":` + strconv.Itoa(1000+i) + `}`
+		if i >= nRows-nStr {
+			want = `{"f":"s` + strconv.Itoa(i) + `"}`
+		}
+		assert.JSONEqf(t, want, string(got), "row %d (mixed-type minority must round-trip)", i)
 	}
 }
 
@@ -632,8 +789,8 @@ func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
 	return parquet.Types.Undefined
 }
 
-// TestShreddedVariantWriteRegularDecimalStats verifies the file-global
-// StoreDecimalAsInteger (on with shredding) keeps a regular decimal column's bounds correct.
+// TestShreddedVariantWriteRegularDecimalStats checks that with shredding on but no
+// shredded decimal, a regular decimal column keeps FLBA and its bounds stay correct.
 func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -689,9 +846,85 @@ func TestShreddedVariantWriteRegularDecimalStats(t *testing.T) {
 	}
 	require.Len(t, files, 1)
 
-	// precision 9 is written INT32 because shredding enables StoreDecimalAsInteger.
+	// The variant shreds no decimal, so per-file gating leaves StoreDecimalAsInteger
+	// off and the regular decimal column keeps its default FIXED_LEN_BYTE_ARRAY.
+	assert.Equal(t, parquet.Types.FixedLenByteArray, columnPhysicalType(t, files[0].FilePath(), "price"))
+
+	decTyp := iceberg.DecimalTypeOf(9, 2)
+	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
+	require.NoError(t, err)
+	ub, err := iceberg.LiteralFromBytes(decTyp, files[0].UpperBoundValues()[2])
+	require.NoError(t, err)
+	assert.Equal(t, decimal128.FromI64(100), lb.(iceberg.DecimalLiteral).Value().Val, "min bound 1.00")
+	assert.Equal(t, decimal128.FromI64(600), ub.(iceberg.DecimalLiteral).Value().Val, "max bound 6.00")
+}
+
+// TestShreddedVariantWriteRegularDecimalWithShreddedDecimal is the co-occurrence case:
+// a file that shreds a variant decimal (so StoreDecimalAsInteger is on file-global) AND
+// carries a regular decimal column. The regular column is then INT-encoded, and this
+// pins that its manifest bounds stay correct under that encoding.
+func TestShreddedVariantWriteRegularDecimalWithShreddedDecimal(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "price", Type: iceberg.DecimalTypeOf(9, 2)},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	decb := array.NewDecimal128Builder(mem, &arrow.Decimal128Type{Precision: 9, Scale: 2})
+	defer decb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 1; i <= 6; i++ {
+		idb.Append(int64(i))
+		decb.Append(decimal128.FromI64(int64(i * 100))) // 1.00 .. 6.00
+		var b variant.Builder
+		require.NoError(t, b.AppendDecimal4(2, decimal.Decimal32(12345))) // variant shreds a decimal
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	decArr := decb.NewArray()
+	defer decArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, decArr, pArr}, 6)
+	defer rec.Release()
+
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+
+	// The variant shreds a decimal, so per-file gating turns StoreDecimalAsInteger on
+	// file-global and the regular decimal column is INT-encoded.
+	assert.True(t, payloadHasTypedValue(t, files[0].FilePath()), "payload decimal must be shredded")
 	assert.Equal(t, parquet.Types.Int32, columnPhysicalType(t, files[0].FilePath(), "price"))
 
+	// Bounds are derived from the Arrow values, so they must be correct regardless of
+	// the INT physical encoding.
 	decTyp := iceberg.DecimalTypeOf(9, 2)
 	lb, err := iceberg.LiteralFromBytes(decTyp, files[0].LowerBoundValues()[2])
 	require.NoError(t, err)
@@ -765,4 +998,119 @@ func TestShreddedVariantClusteredWrite(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
+}
+
+// TestShreddedVariantWriteLargeBootstrapBatch feeds one batch far bigger than the
+// buffer (3000 rows, buffer 100) with a 1-byte target file size. The bounded buffer
+// flushes every shredBufferRows and rolls, so the batch splits across many files;
+// whole-batch buffering would replay all 3000 rows into a single file. Also checks
+// row conservation and no leak (checked allocator).
+func TestShreddedVariantWriteLargeBootstrapBatch(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(context.Background(), mem)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	const nRows = 3000
+	rec := buildVariantBatch(t, mem, arrSchema, 0, nRows) // one batch, far bigger than the buffer
+	defer rec.Release()
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:       "3",
+		ParquetShredVariantsKey:     "true",
+		ParquetVariantBufferSizeKey: "100",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 1) // 1-byte target: bounded buffer forces a split
+	require.NoError(t, err)
+
+	seen := map[int64]int{}
+	files := 0
+	for df, err := range unpartitionedWrite(ctx, factory, args.itr) {
+		require.NoError(t, err)
+		files++
+		assert.True(t, payloadHasTypedValue(t, df.FilePath()), "file must be shredded")
+		p := strings.TrimPrefix(df.FilePath(), "file://")
+		f, err := os.Open(p)
+		require.NoError(t, err)
+		tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+		require.NoError(t, err)
+		idCol := tbl.Column(tbl.Schema().FieldIndices("id")[0]).Data()
+		for _, ch := range idCol.Chunks() {
+			chunk := ch.(*array.Int64)
+			for r := 0; r < chunk.Len(); r++ {
+				seen[chunk.Value(r)]++
+			}
+		}
+		tbl.Release()
+		f.Close()
+	}
+	// Bounded buffer -> many files; whole-batch buffering would yield exactly one.
+	assert.Greater(t, files, 1, "large batch must split across files, not buffer whole")
+	require.Len(t, seen, nRows, "all rows present across files")
+	for i := int64(0); i < nRows; i++ {
+		assert.Equalf(t, 1, seen[i], "row id %d present exactly once", i)
+	}
+}
+
+// TestInferShreddingSkipsUndecodable pins C4: a present-but-undecodable variant value
+// is skipped and logged, not fatal - inference still succeeds from the good rows.
+func TestInferShreddingSkipsUndecodable(t *testing.T) {
+	mem := memory.DefaultAllocator
+	vt := extensions.NewDefaultVariantType()
+
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000)}))
+	good, err := b.Build()
+	require.NoError(t, err)
+	metaBytes, valBytes := good.Metadata().Bytes(), good.Bytes()
+
+	// storage struct<metadata,value>: 3 good rows + 1 undecodable (1-byte metadata
+	// fails variant.NewMetadata "too short"). All rows non-null.
+	sb := array.NewStructBuilder(mem, vt.StorageType().(*arrow.StructType))
+	defer sb.Release()
+	metaB := sb.FieldBuilder(0).(*array.BinaryBuilder)
+	valB := sb.FieldBuilder(1).(*array.BinaryBuilder)
+	for i := 0; i < 3; i++ {
+		sb.Append(true)
+		metaB.Append(metaBytes)
+		valB.Append(valBytes)
+	}
+	sb.Append(true)
+	metaB.Append([]byte{0x01})
+	valB.Append(valBytes)
+	storage := sb.NewStructArray()
+	defer storage.Release()
+
+	varr := array.NewExtensionArrayWithStorage(vt, storage).(*extensions.VariantArray)
+	defer varr.Release()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "payload", Type: vt, Nullable: true}}, nil)
+	rec := array.NewRecordBatch(schema, []arrow.Array{varr}, 4)
+	defer rec.Release()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	inferred := inferShreddingFromBatches([]arrow.RecordBatch{rec}, 100)
+
+	require.Contains(t, inferred, 0, "inference must succeed despite one undecodable row")
+	st, ok := inferred[0].(*arrow.StructType)
+	require.True(t, ok)
+	_, found := st.FieldsByName("a")
+	assert.True(t, found, "schema inferred from the good rows")
+	assert.Contains(t, buf.String(), "skipped", "the skip is logged, not silent")
 }

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"log/slog"
 	"maps"
 	"net/url"
 	"strings"
@@ -509,14 +510,62 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		}
 
 		if bootstrapping {
-			buf = append(buf, converted)
-			bufRows += converted.NumRows()
-			if bufRows >= int64(r.factory.shredBufferRows) {
+			// Bound the buffer to shredBufferRows so a large batch can't spike memory.
+			// Loop and re-check state: flushBootstrap can roll and re-arm bootstrapping.
+			remaining := converted
+			for remaining != nil {
+				if !bootstrapping {
+					// Bootstrap finished (file open): write the rest steady-state.
+					if currentWriter == nil {
+						if err := openCurrent(); err != nil {
+							remaining.Release()
+							r.sendError(err)
+
+							return
+						}
+					}
+					if err := writeConverted(remaining, true); err != nil {
+						r.sendError(err)
+
+						return
+					}
+					remaining = nil
+
+					break
+				}
+
+				// shredBufferRows is floored at 1 and bufRows < the limit here, so
+				// rowsNeeded >= 1.
+				rowsNeeded := int64(r.factory.shredBufferRows) - bufRows
+				if int64(remaining.NumRows()) <= rowsNeeded {
+					buf = append(buf, remaining)
+					bufRows += remaining.NumRows()
+					remaining = nil
+					if bufRows >= int64(r.factory.shredBufferRows) {
+						if err := flushBootstrap(); err != nil {
+							r.sendError(err)
+
+							return
+						}
+					}
+
+					break
+				}
+
+				// Buffer only the head, flush, loop with the tail. NewSlice returns
+				// owned batches, so release the original.
+				head := remaining.NewSlice(0, rowsNeeded)
+				tail := remaining.NewSlice(rowsNeeded, int64(remaining.NumRows()))
+				remaining.Release()
+				buf = append(buf, head)
+				bufRows += head.NumRows()
 				if err := flushBootstrap(); err != nil {
+					tail.Release()
 					r.sendError(err)
 
 					return
 				}
+				remaining = tail
 			}
 
 			continue
@@ -550,8 +599,8 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	}
 }
 
-// inferShreddingFromBatches infers the inner type per top-level variant column,
-// sampling up to limit non-null values from the buffer. Keyed by column index.
+// inferShreddingFromBatches infers the inner type per top-level variant column, keyed
+// by Arrow column index (ShreddedArrowSchema applies each to fields[idx] by position).
 func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow.DataType {
 	if len(buf) == 0 {
 		return nil
@@ -563,6 +612,7 @@ func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow
 			continue
 		}
 		var sample []variant.Value
+		var skipped int
 		for _, b := range buf {
 			if len(sample) >= limit {
 				break
@@ -577,10 +627,18 @@ func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow
 				}
 				v, err := va.Value(i)
 				if err != nil {
+					// Don't silently bias inference; a malformed value is hard-errored
+					// at shred time, so count-and-skip here rather than abort the write.
+					skipped++
+
 					continue
 				}
 				sample = append(sample, v)
 			}
+		}
+		if skipped > 0 {
+			slog.Warn("variant shredding: skipped undecodable values while sampling; inference may use a subset",
+				"column", col, "skipped", skipped)
 		}
 		if dt, ok := tblutils.AnalyzeVariantShredding(sample); ok {
 			inferred[col] = dt

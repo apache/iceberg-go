@@ -28,6 +28,8 @@ import (
 
 // Variant shredding inference: most-common-type selection with explicit
 // tie-break, integer/decimal widening, and frequency/depth/field-count bounds.
+// Field caps are per-object-node (matching Java); no global budget - total is
+// bounded by the sample, maxShreddingDepth, and the per-node caps.
 const (
 	minFieldFrequency     = 0.10
 	maxShreddedFields     = 300

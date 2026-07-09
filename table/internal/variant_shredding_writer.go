@@ -26,20 +26,20 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
-// CanShredVariant reports whether an inner type is accepted by arrow-go's shredded
+// canShredVariant reports whether an inner type is accepted by arrow-go's shredded
 // builder; NewVariantBuilder panics on an unsupported leaf, so callers fall back.
-func CanShredVariant(dt arrow.DataType) bool {
+func canShredVariant(dt arrow.DataType) bool {
 	switch t := dt.(type) {
 	case *arrow.StructType:
 		for _, f := range t.Fields() {
-			if !CanShredVariant(f.Type) {
+			if !canShredVariant(f.Type) {
 				return false
 			}
 		}
 
 		return t.NumFields() > 0
 	case *arrow.ListType:
-		return CanShredVariant(t.Elem())
+		return canShredVariant(t.Elem())
 	case *arrow.TimestampType:
 		if t.Unit != arrow.Microsecond && t.Unit != arrow.Nanosecond {
 			return false
@@ -63,7 +63,7 @@ func CanShredVariant(dt arrow.DataType) bool {
 }
 
 // ShreddedArrowSchema swaps each top-level variant field in inferred (that passes
-// CanShredVariant) for a shredded type, preserving name/nullability/field-id.
+// canShredVariant) for a shredded type, preserving name/nullability/field-id.
 func ShreddedArrowSchema(base *arrow.Schema, inferred map[int]arrow.DataType) *arrow.Schema {
 	if len(inferred) == 0 {
 		return base
@@ -74,7 +74,7 @@ func ShreddedArrowSchema(base *arrow.Schema, inferred map[int]arrow.DataType) *a
 	copy(out, fields)
 	changed := false
 	for idx, inner := range inferred {
-		if idx < 0 || idx >= len(out) || inner == nil || !CanShredVariant(inner) {
+		if idx < 0 || idx >= len(out) || inner == nil || !canShredVariant(inner) {
 			continue
 		}
 		out[idx].Type = extensions.NewShreddedVariantType(inner)
@@ -158,7 +158,7 @@ func shredVariantColumn(src *extensions.VariantArray, vt *extensions.VariantType
 	defer bldr.Release()
 	bldr.Reserve(src.Len())
 
-	// The shredded object builder can panic (duplicate keys); make it an error.
+	// Convert an arrow-go builder panic on malformed input into an error, not a crash.
 	defer func() {
 		if r := recover(); r != nil {
 			arr, err = nil, fmt.Errorf("variant shredding: %v", r)
