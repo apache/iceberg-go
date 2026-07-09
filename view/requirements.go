@@ -61,6 +61,10 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	var requirements Requirements
+	if len(rawRequirements) > 0 {
+		requirements = make(Requirements, 0, len(rawRequirements))
+	}
 	for _, raw := range rawRequirements {
 		var base baseRequirement
 		if err := json.Unmarshal(raw, &base); err != nil {
@@ -75,8 +79,10 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(raw, req); err != nil {
 			return err
 		}
-		*r = append(*r, req)
+		requirements = append(requirements, req)
 	}
+
+	*r = requirements
 
 	return nil
 }

@@ -57,6 +57,27 @@ func newRowDeltaTestTable(t *testing.T, formatVersion int) *table.Table {
 	)
 }
 
+func newRowDeltaFloatingPointTestTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "score", Type: iceberg.PrimitiveTypes.Float32, Required: false},
+		iceberg.NestedField{ID: 3, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+	)
+
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, "s3://bucket/test",
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "floating_key_test"},
+		meta, "s3://bucket/test/metadata/v1.metadata.json",
+		nil, nil,
+	)
+}
+
 func formatVersionStr(v int) string {
 	return string(rune('0' + v))
 }
@@ -214,6 +235,33 @@ func TestRowDeltaRejectsEqDeleteWithInvalidFieldID(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found in table schema")
 }
 
+func TestRowDeltaRejectsEqDeleteWithFloatAndDoubleFieldIDs(t *testing.T) {
+	tbl := newRowDeltaFloatingPointTestTable(t)
+
+	tests := []struct {
+		name      string
+		fieldID   int
+		fieldName string
+		fieldType string
+	}{
+		{name: "float", fieldID: 2, fieldName: "score", fieldType: "float"},
+		{name: "double", fieldID: 3, fieldName: "ratio", fieldType: "double"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rd := tbl.NewTransaction().NewRowDelta(nil)
+			rd.AddDeletes(buildEqDeleteFile(t, "s3://bucket/data/eq-del.parquet", []int{tt.fieldID}))
+
+			err := rd.Commit(t.Context())
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, "eq-del.parquet")
+			assert.ErrorContains(t, err, tt.fieldName)
+			assert.ErrorContains(t, err, tt.fieldType)
+		})
+	}
+}
+
 // rowDeltaCatalog simulates catalog behavior for RowDelta commit tests.
 type rowDeltaCatalog struct {
 	metadata table.Metadata
@@ -237,6 +285,12 @@ func (m *rowDeltaCatalog) CommitTable(ctx context.Context, ident table.Identifie
 func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
+	return newRowDeltaCommitTestTableVersion(t, 2)
+}
+
+func newRowDeltaCommitTestTableVersion(t *testing.T, formatVersion int) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 
 	schema := iceberg.NewSchema(0,
@@ -246,7 +300,7 @@ func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: "2"})
+		iceberg.Properties{table.PropertyFormatVersion: formatVersionStr(formatVersion)})
 	require.NoError(t, err)
 
 	return table.New(
@@ -279,6 +333,27 @@ func TestRowDeltaCommitDataAndDeletes(t *testing.T) {
 	assert.Equal(t, "1", snap.Summary.Properties["added-data-files"])
 	assert.Equal(t, "1", snap.Summary.Properties["added-delete-files"])
 	assert.Equal(t, "10", snap.Summary.Properties["added-records"])
+}
+
+func TestNewRowDeltaCopiesSnapshotProperties(t *testing.T) {
+	tbl := newRowDeltaCommitTestTable(t)
+
+	snapshotProps := iceberg.Properties{"custom-prop": "initial"}
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(snapshotProps)
+	snapshotProps["custom-prop"] = "changed"
+	snapshotProps["new-prop"] = "added"
+
+	rd.AddRows(buildDataFile(t, "s3://bucket/data/insert.parquet"))
+	require.NoError(t, rd.Commit(t.Context()))
+
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	snap := result.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	assert.Equal(t, "initial", snap.Summary.Properties["custom-prop"])
+	assert.NotContains(t, snap.Summary.Properties, "new-prop")
 }
 
 func TestRowDeltaCommitDataOnly(t *testing.T) {

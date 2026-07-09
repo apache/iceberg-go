@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	iofs "io/fs"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -1347,4 +1348,124 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 		require.True(t, ok, "row %d: expected ObjectValue, got %T", i, val.Value())
 		assert.EqualValues(t, 2, obj.NumElements(), "row %d should have a + city", i)
 	}
+}
+
+// TestWriteDataFileGeoBounds writes geometry and geography columns through the
+// full ParquetFileWriter path and asserts that the resulting DataFile carries
+// geometry single-point bounds (Iceberg geospatial single-value serialization)
+// in the manifest entry, while geography bounds are omitted as unsafe.
+//
+// Running MetricModeFull end-to-end also guards a regression: geometry/geography
+// have no generic Parquet stats aggregator, so before the isGeoType guard in
+// DataFileStatsFromMeta a full-mode geo column panicked in createStatsAgg
+// ("unsupported iceberg type"). This test fails if that guard is removed.
+func TestWriteDataFileGeoBounds(t *testing.T) {
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geogType, err := iceberg.GeographyTypeOf("srid:4326", "vincenty")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: geomType, Required: false},
+		iceberg.NestedField{ID: 3, Name: "geog", Type: geogType, Required: false},
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	wkbStr := func(s string) string {
+		b, err := wktToWKB(s)
+		require.NoError(t, err)
+
+		return b.String()
+	}
+
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 1, "geom": "`+wkbStr("POINT (30 10)")+`", "geog": "`+wkbStr("POINT (20 5)")+`"},
+		{"id": 2, "geom": "`+wkbStr("POINT (5 40)")+`", "geog": null}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+
+	// writeWithGeomMode runs the full writer path with the geometry column set to
+	// the given metrics mode and returns the resulting DataFile.
+	writeWithGeomMode := func(t *testing.T, geomMode internal.MetricsMode) iceberg.DataFile {
+		t.Helper()
+
+		statsCols := map[int]internal.StatisticsCollector{
+			1: {FieldID: 1, IcebergTyp: iceberg.PrimitiveTypes.Int32, ColName: "id", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+			2: {FieldID: 2, IcebergTyp: geomType, ColName: "geom", Mode: geomMode},
+			3: {FieldID: 3, IcebergTyp: geogType, ColName: "geog", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		}
+
+		df, err := fm.WriteDataFile(context.Background(), iceio.NewMemFS(), nil, internal.WriteFileInfo{
+			FileSchema: iceSchema,
+			Spec:       *iceberg.UnpartitionedSpec,
+			FileName:   "geo.parquet",
+			StatsCols:  statsCols,
+			WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+			Content:    iceberg.EntryContentData,
+		}, []arrow.RecordBatch{rec})
+		require.NoError(t, err)
+
+		return df
+	}
+
+	t.Run("full mode emits geometry bounds, omits geography", func(t *testing.T) {
+		df := writeWithGeomMode(t, internal.MetricsMode{Typ: internal.MetricModeFull})
+		lower, upper := df.LowerBoundValues(), df.UpperBoundValues()
+
+		// Geometry bounds span both rows: lower (5, 10), upper (30, 40), encoded as
+		// two little-endian float64 coordinates (16 bytes), not WKB.
+		require.Len(t, lower[2], 16)
+		require.Len(t, upper[2], 16)
+		assert.Equal(t, geoBoundBytes(5, 10), lower[2])
+		assert.Equal(t, geoBoundBytes(30, 40), upper[2])
+
+		// Geography bounds are unsafe to compute from vertices, so they are omitted.
+		assert.NotContains(t, lower, 3, "geography lower bound must be omitted")
+		assert.NotContains(t, upper, 3, "geography upper bound must be omitted")
+
+		// Bounds round-trip back to a GeoLiteral (not a comparable binary
+		// literal) through LiteralFromBytes.
+		lit, err := iceberg.LiteralFromBytes(geomType, lower[2])
+		require.NoError(t, err)
+		assert.True(t, geomType.Equals(lit.Type()), "want geo type, got %s", lit.Type())
+		assert.Equal(t, geoBoundBytes(5, 10), lit.(iceberg.GeoLiteral).Value())
+
+		// Null counts are still recorded for geo columns.
+		assert.Equal(t, int64(1), df.NullValueCounts()[3])
+	})
+
+	// The counts/none modes must gate geo bounds exactly like any other column:
+	// the geo field ID must not appear in lower/upper. This pins the presence +
+	// mode check in applyGeoBounds (a missing/zero-value mode must not fall
+	// through and write bounds the caller asked to skip).
+	for _, tt := range []struct {
+		name string
+		mode internal.MetricsMode
+	}{
+		{"none mode omits geometry bounds", internal.MetricsMode{Typ: internal.MetricModeNone}},
+		{"counts mode omits geometry bounds", internal.MetricsMode{Typ: internal.MetricModeCounts}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			df := writeWithGeomMode(t, tt.mode)
+			assert.NotContains(t, df.LowerBoundValues(), 2, "geometry lower bound must be omitted for %s", tt.mode.Typ)
+			assert.NotContains(t, df.UpperBoundValues(), 2, "geometry upper bound must be omitted for %s", tt.mode.Typ)
+		})
+	}
+}
+
+// geoBoundBytes builds the Iceberg geospatial single-value serialization of a
+// bound point: little-endian float64 coordinates in X, Y[, Z][, M] order.
+func geoBoundBytes(coords ...float64) []byte {
+	buf := make([]byte, len(coords)*8)
+	for i, c := range coords {
+		binary.LittleEndian.PutUint64(buf[i*8:], math.Float64bits(c))
+	}
+
+	return buf
 }

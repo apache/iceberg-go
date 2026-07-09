@@ -26,6 +26,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -504,6 +505,19 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
 	}
 
+	// next-row-id is non-decreasing across snapshots, not strictly increasing:
+	// zero-added-rows snapshots (delete-only or metadata-only commits) are
+	// spec-legal and leave the cursor unchanged, so this accepts a sum equal to
+	// the current cursor rather than requiring it to advance. At this point
+	// AddedRows is non-nil and non-negative (guaranteed by the FirstRowID != nil
+	// check above plus Snapshot.ValidateRowLineage), and nextRowID is
+	// non-negative per spec, so the only thing left to guard is int64 overflow
+	// of the running cursor.
+	if *snapshot.AddedRows > math.MaxInt64-nextRowID {
+		return fmt.Errorf("%w: adding %d rows to next-row-id %d overflows int64",
+			ErrInvalidRowLineage, *snapshot.AddedRows, nextRowID)
+	}
+
 	newNextRowID := nextRowID + *snapshot.AddedRows
 	b.nextRowID = &newNextRowID
 
@@ -775,11 +789,12 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 		}
 	}
 
-	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
+	updates := maps.Clone(props)
+	b.updates = append(b.updates, NewSetPropertiesUpdate(updates))
 	if b.props == nil {
-		b.props = props
+		b.props = maps.Clone(updates)
 	} else {
-		maps.Copy(b.props, props)
+		maps.Copy(b.props, updates)
 	}
 
 	return nil
@@ -902,13 +917,17 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	return nil
 }
 
-func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) error {
-	if b.uuid == uuid {
+func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) error {
+	if newUUID == uuid.Nil {
+		return fmt.Errorf("%w: cannot set uuid to nil", iceberg.ErrInvalidArgument)
+	}
+
+	if b.uuid == newUUID {
 		return nil
 	}
 
-	b.updates = append(b.updates, NewAssignUUIDUpdate(uuid))
-	b.uuid = uuid
+	b.updates = append(b.updates, NewAssignUUIDUpdate(newUUID))
+	b.uuid = newUUID
 
 	return nil
 }
@@ -2186,15 +2205,17 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	if tableUuid == uuid.Nil {
 		tableUuid = uuid.New()
 	}
+	var inputProps iceberg.Properties
 	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
-		verStr, ok := props[PropertyFormatVersion]
+		inputProps = maps.Clone(props)
+		verStr, ok := inputProps[PropertyFormatVersion]
 		if ok {
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
-				formatVersion = DefaultFormatVersion
+				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(props, PropertyFormatVersion)
+			delete(inputProps, PropertyFormatVersion)
 		}
 	}
 
@@ -2240,7 +2261,7 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	if err = builder.SetProperties(props); err != nil {
+	if err = builder.SetProperties(inputProps); err != nil {
 		return nil, err
 	}
 

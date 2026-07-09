@@ -42,6 +42,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/table"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -51,38 +52,301 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func TestSplitIdentForPathRequiresNamespaceAndName(t *testing.T) {
+	cat := &Catalog{}
+
+	for _, ident := range []table.Identifier{
+		nil,
+		{"table"},
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+	} {
+		_, _, err := cat.splitIdentForPath(ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	}
+
+	_, _, err := cat.splitViewIdentForPath(table.Identifier{"view"})
+	require.ErrorIs(t, err, catalog.ErrNoSuchView)
+	require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
+
+	ns, tbl, err := cat.splitIdentForPath(table.Identifier{"namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "namespace", ns)
+	assert.Equal(t, "table", tbl)
+
+	ns, tbl, err = cat.splitIdentForPath(table.Identifier{"parent", "namespace", "table"})
+	require.NoError(t, err)
+	assert.Equal(t, "parent%1Fnamespace", ns)
+	assert.Equal(t, "table", tbl)
+}
+
 func TestLoadRegisteredCatalogRejectsInvalidAuthURL(t *testing.T) {
 	t.Parallel()
 
-	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
-		"uri":                    "http://example.com",
-		"rest.authorization-url": "http://[::1",
-	})
-	require.Error(t, err)
-	assert.Nil(t, cat)
-	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+	tests := []struct {
+		name    string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL",
+			authURL: "http://[::1",
+			wantErr: "invalid rest.authorization-url",
+		},
+		{
+			name:    "missing scheme",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme",
+		},
+		{
+			name:    "scheme and opaque value with no host",
+			authURL: "localhost:8080",
+			wantErr: "missing host",
+		},
+		{
+			name:    "scheme with empty host",
+			authURL: "http:///path",
+			wantErr: "missing host",
+		},
+		{
+			name:    "empty URL",
+			authURL: "",
+			wantErr: "missing scheme",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+				"uri":                    "http://example.com",
+				"rest.authorization-url": tt.authURL,
+			})
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
 }
 
-func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
+func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
 	t.Parallel()
 
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
+	var oauthCalled atomic.Bool
+	mux.HandleFunc("/auth-token-url", func(w http.ResponseWriter, req *http.Request) {
+		oauthCalled.Store(true)
+		assert.Equal(t, http.MethodPost, req.Method)
+
+		require.NoError(t, req.ParseForm())
+		assert.Equal(t, "client", req.PostForm.Get("client_id"))
+		assert.Equal(t, "secret", req.PostForm.Get("client_secret"))
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "some_jwt_token",
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+		})
+	})
 	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
-			"defaults": map[string]any{
-				"rest.authorization-url": "http://[::1",
-			},
-			"overrides": map[string]any{},
+			"defaults": map[string]any{}, "overrides": map[string]any{},
+		})
+	})
+
+	authURL := srv.URL + "/auth-token-url"
+	cat, err := catalog.Load(context.Background(), "rest", iceberg.Properties{
+		"uri":              srv.URL,
+		keyAuthUrl:         authURL,
+		keyOauthCredential: "client:secret",
+	})
+	require.NoError(t, err)
+	require.True(t, oauthCalled.Load())
+
+	restCat, ok := cat.(*Catalog)
+	require.True(t, ok)
+	assert.Equal(t, authURL, restCat.props[keyOAuth2ServerURI])
+}
+
+func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		section string
+		authURL string
+		wantErr string
+	}{
+		{
+			name:    "malformed URL in defaults",
+			section: "defaults",
+			authURL: "http://[::1",
+			wantErr: "invalid oauth2-server-uri",
+		},
+		{
+			name:    "scheme-less URL in overrides",
+			section: "overrides",
+			authURL: "example.com/auth",
+			wantErr: "missing scheme",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mux := http.NewServeMux()
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			defaults := map[string]any{}
+			overrides := map[string]any{}
+			switch tt.section {
+			case "defaults":
+				defaults[keyAuthUrl] = tt.authURL
+			case "overrides":
+				overrides[keyAuthUrl] = tt.authURL
+			}
+
+			mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(map[string]any{
+					"defaults":  defaults,
+					"overrides": overrides,
+				})
+			})
+
+			cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+			require.Error(t, err)
+			assert.Nil(t, cat)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	authURL := "https://auth.example.com/oauth/token"
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{keyAuthUrl: authURL},
 		})
 	})
 
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
-	require.Error(t, err)
-	assert.Nil(t, cat)
-	assert.ErrorContains(t, err, "invalid rest.authorization-url")
+	require.NoError(t, err)
+	assert.Equal(t, authURL, cat.props[keyOAuth2ServerURI])
+}
+
+func TestOAuthServerURIProps(t *testing.T) {
+	t.Parallel()
+
+	const (
+		serverURI = "https://auth.example.com/oauth/tokens"
+		authURL   = "https://legacy.example.com/v1/oauth/tokens"
+	)
+
+	t.Run("oauth2-server-uri configures the token endpoint", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyOAuth2ServerURI: serverURI}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("rest.authorization-url still works as an alias", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyAuthUrl: authURL}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, authURL, opts.authUri.String())
+	})
+
+	t.Run("oauth2-server-uri takes precedence when both are set", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("neither key leaves the endpoint unset for fallback", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{}, &opts))
+		assert.Nil(t, opts.authUri)
+	})
+
+	t.Run("neither key is retained as an additional prop", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		_, hasAuthURL := opts.additionalProps[keyAuthUrl]
+		_, hasServerURI := opts.additionalProps[keyOAuth2ServerURI]
+		assert.False(t, hasAuthURL)
+		assert.False(t, hasServerURI)
+	})
+
+	t.Run("invalid oauth2-server-uri is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tt := range []struct {
+			name    string
+			uri     string
+			wantErr string
+		}{
+			{"malformed URL", "http://[::1", "invalid oauth2-server-uri"},
+			{"missing scheme", "auth.example.com/token", "missing scheme"},
+			{"missing host", "https://", "missing host"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				var opts options
+				err := fromProps(iceberg.Properties{keyOAuth2ServerURI: tt.uri}, &opts)
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+			})
+		}
+	})
+
+	t.Run("toProps serializes under the portable oauth2-server-uri key", func(t *testing.T) {
+		t.Parallel()
+
+		u, err := url.Parse(serverURI)
+		require.NoError(t, err)
+
+		props := toProps(&options{authUri: u})
+		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
+		// Only the portable key is emitted; the legacy rest.authorization-url
+		// alias is not, to avoid carrying the endpoint under two names.
+		_, hasLegacy := props[keyAuthUrl]
+		assert.False(t, hasLegacy)
+	})
 }
 
 func TestTokenAuthenticationPriority(t *testing.T) {
@@ -1115,6 +1379,111 @@ func TestToPropsSigv4RegionFallback(t *testing.T) {
 		_, ok := props["client.region"]
 		assert.False(t, ok)
 	})
+}
+
+func TestToPropsPreservesOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{
+		oauthToken: "static-token",
+	}
+	props := toProps(opts)
+	assert.Equal(t, "static-token", props[keyOauthToken])
+}
+
+func TestFromPropsReadsOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	var opts options
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "static-token",
+		"custom":      "value",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "static-token", opts.oauthToken)
+	assert.Equal(t, iceberg.Properties{"custom": "value"}, opts.additionalProps)
+	assert.NotContains(t, opts.additionalProps, keyOauthToken)
+}
+
+func TestFromPropsKeepsExistingOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	opts := options{
+		oauthToken: "caller-token",
+	}
+	err := fromProps(iceberg.Properties{
+		keyOauthToken: "server-token",
+	}, &opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, "caller-token", opts.oauthToken)
+}
+
+func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
+	t.Parallel()
+
+	var configAuthHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configAuthHeader = r.Header.Get(authorizationHeader)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				keyOauthToken: "server-token",
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := newCatalogFromProps(context.Background(), "rest", srv.URL, iceberg.Properties{
+		keyOauthToken: "caller-token",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer caller-token", configAuthHeader)
+	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
+}
+
+func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
+	t.Parallel()
+
+	const overrideAuthURL = "https://override.example.com/token"
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// The server overrides the token endpoint via the legacy alias while
+			// the client supplied oauth2-server-uri; the override must win.
+			"overrides": map[string]any{
+				keyAuthUrl: overrideAuthURL,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithAuthURI(mustParseURL(t, "https://client.example.com/token")))
+	require.NoError(t, err)
+
+	assert.Equal(t, overrideAuthURL, cat.props[keyOAuth2ServerURI])
+	_, hasLegacy := cat.props[keyAuthUrl]
+	assert.False(t, hasLegacy)
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+
+	return u
 }
 
 func TestEncodeNamespace(t *testing.T) {

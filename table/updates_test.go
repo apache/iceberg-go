@@ -540,6 +540,30 @@ func TestUnmarshalUpdates(t *testing.T) {
 	}
 }
 
+func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/old-location"}
+	]`), &updates))
+
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-properties", "updates": {"key": "value"}}
+	]`), &updates))
+	require.Len(t, updates, 1)
+	assert.Equal(t, UpdateSetProperties, updates[0].Action())
+
+	previous := append(Updates(nil), updates...)
+	err := json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/new-location"},
+		{"action": "unknown-action"}
+	]`), &updates)
+	require.Error(t, err)
+	assert.Equal(t, previous, updates)
+
+	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
+	assert.Empty(t, updates)
+}
+
 // baseMetaJSON is a minimal valid V2 metadata document used by the Apply tests below.
 const baseMetaJSON = `{
   "format-version": 2,
@@ -567,6 +591,19 @@ func buildFromBase(t *testing.T) *MetadataBuilder {
 	require.NoError(t, err)
 
 	return b
+}
+
+func TestAssignUUIDUpdate_ApplyRejectsNilUUID(t *testing.T) {
+	b := buildFromBase(t)
+	originalUUID := b.uuid
+
+	err := NewAssignUUIDUpdate(uuid.Nil).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.False(t, b.HasChanges())
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+	require.Equal(t, originalUUID, meta.TableUUID())
 }
 
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {

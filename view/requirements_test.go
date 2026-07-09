@@ -24,6 +24,7 @@ import (
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseRequirementList(t *testing.T) {
@@ -69,4 +70,28 @@ func TestParseRequirementList(t *testing.T) {
 		err := json.Unmarshal(jsonData, &actual)
 		assert.Error(t, err)
 	})
+}
+
+func TestParseRequirementListReplacesExistingSlice(t *testing.T) {
+	var requirements view.Requirements
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"type": "assert-view-uuid", "uuid": "550e8400-e29b-41d4-a716-446655440000"}
+	]`), &requirements))
+
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"type": "assert-view-uuid", "uuid": "123e4567-e89b-12d3-a456-426614174000"}
+	]`), &requirements))
+	require.Len(t, requirements, 1)
+	assert.Equal(t, view.AssertViewUUID(uuid.MustParse("123e4567-e89b-12d3-a456-426614174000")), requirements[0])
+
+	previous := append(view.Requirements(nil), requirements...)
+	err := json.Unmarshal([]byte(`[
+		{"type": "assert-view-uuid", "uuid": "550e8400-e29b-41d4-a716-446655440000"},
+		{"type": "assert-foo-bar"}
+	]`), &requirements)
+	assert.Error(t, err)
+	assert.Equal(t, previous, requirements)
+
+	require.NoError(t, json.Unmarshal([]byte(`[]`), &requirements))
+	assert.Empty(t, requirements)
 }

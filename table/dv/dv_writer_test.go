@@ -127,7 +127,7 @@ func TestDVWriterSingleDataFile(t *testing.T) {
 	w := NewDVWriter(fs, unpartitionedResolver())
 
 	dataPath := "s3://bucket/data/file-001.parquet"
-	w.Add(dataPath, []int64{1, 3, 5, 7, 9}, 0, nil)
+	require.NoError(t, w.Add(dataPath, []int64{1, 3, 5, 7, 9}, 0, nil))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/dv.puffin")
 	require.NoError(t, err)
@@ -156,8 +156,8 @@ func TestDVWriterMultipleDataFiles(t *testing.T) {
 
 	path1 := "s3://bucket/data/file-001.parquet"
 	path2 := "s3://bucket/data/file-002.parquet"
-	w.Add(path1, []int64{0, 10, 20}, 0, nil)
-	w.Add(path2, []int64{5, 15, 25, 35}, 0, nil)
+	require.NoError(t, w.Add(path1, []int64{0, 10, 20}, 0, nil))
+	require.NoError(t, w.Add(path2, []int64{5, 15, 25, 35}, 0, nil))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/multi-dv.puffin")
 	require.NoError(t, err)
@@ -180,8 +180,8 @@ func TestDVWriterDeduplicatesPositions(t *testing.T) {
 	w := NewDVWriter(fs, unpartitionedResolver())
 
 	dataPath := "s3://bucket/data/file-001.parquet"
-	w.Add(dataPath, []int64{1, 3, 5}, 0, nil)
-	w.Add(dataPath, []int64{3, 5, 7}, 0, nil)
+	require.NoError(t, w.Add(dataPath, []int64{1, 3, 5}, 0, nil))
+	require.NoError(t, w.Add(dataPath, []int64{3, 5, 7}, 0, nil))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/dedup.puffin")
 	require.NoError(t, err)
@@ -192,11 +192,49 @@ func TestDVWriterDeduplicatesPositions(t *testing.T) {
 	verifyDVReadBack(t, fs, dataFiles[0])
 }
 
+func TestDVWriterAddRejectsNegativePositions(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+
+	dataPath := "s3://bucket/data/file-001.parquet"
+	require.NoError(t, w.Add(dataPath, []int64{1, 3}, 0, nil))
+
+	err := w.Add(dataPath, []int64{5, -1, 7}, 0, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-pos.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, int64(2), dataFiles[0].Count(), "negative Add should be rejected without mutating prior valid state")
+
+	bm, err := ReadDV(fs, dataFiles[0])
+	require.NoError(t, err)
+	assert.True(t, bm.Contains(1))
+	assert.True(t, bm.Contains(3))
+	assert.False(t, bm.Contains(5))
+	assert.False(t, bm.Contains(7))
+
+	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
+}
+
+func TestDVWriterAddNegativeFirstCreatesNoEntry(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+
+	dataPath := "s3://bucket/data/file-001.parquet"
+	require.ErrorIs(t, w.Add(dataPath, []int64{-1}, 0, nil), iceberg.ErrInvalidArgument)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-first.puffin")
+	require.NoError(t, err)
+	assert.Nil(t, dataFiles)
+}
+
 func TestDVWriterResetsAfterFlush(t *testing.T) {
 	fs := newTestFS()
 	w := NewDVWriter(fs, unpartitionedResolver())
 
-	w.Add("s3://bucket/data/file-001.parquet", []int64{1, 2, 3}, 0, nil)
+	require.NoError(t, w.Add("s3://bucket/data/file-001.parquet", []int64{1, 2, 3}, 0, nil))
 	_, err := w.Flush(context.Background(), "mem://test/first.puffin")
 	require.NoError(t, err)
 
@@ -221,7 +259,7 @@ func TestDVWriterPartitionedSingleFile(t *testing.T) {
 	w := NewDVWriter(fs, specMapResolver(spec))
 
 	dataPath := "s3://bucket/tenant=42/file-001.parquet"
-	w.Add(dataPath, []int64{1, 2, 3}, 7, map[int]any{1000: int32(42)})
+	require.NoError(t, w.Add(dataPath, []int64{1, 2, 3}, 7, map[int]any{1000: int32(42)}))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/partitioned.puffin")
 	require.NoError(t, err)
@@ -257,8 +295,8 @@ func TestDVWriterPartitionedMultipleFiles(t *testing.T) {
 	pathEU := "s3://bucket/region=EU/file-eu.parquet"
 	pathUS := "s3://bucket/region=US/file-us.parquet"
 
-	w.Add(pathEU, []int64{1, 2}, 3, map[int]any{1000: "EU"})
-	w.Add(pathUS, []int64{3, 4, 5}, 3, map[int]any{1000: "US"})
+	require.NoError(t, w.Add(pathEU, []int64{1, 2}, 3, map[int]any{1000: "EU"}))
+	require.NoError(t, w.Add(pathUS, []int64{3, 4, 5}, 3, map[int]any{1000: "US"}))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/multi-partition.puffin")
 	require.NoError(t, err)
@@ -312,9 +350,9 @@ func TestDVWriterPartitionCapturedOnFirstAdd(t *testing.T) {
 		fs := newTestFS()
 		w := NewDVWriter(fs, specMapResolver(spec0))
 
-		w.Add(dataPath, []int64{1}, 0, map[int]any{1000: "EU"})
+		require.NoError(t, w.Add(dataPath, []int64{1}, 0, map[int]any{1000: "EU"}))
 		// Second Add carries a different partition value; capture is unaffected.
-		w.Add(dataPath, []int64{2}, 0, map[int]any{1000: "US"})
+		require.NoError(t, w.Add(dataPath, []int64{2}, 0, map[int]any{1000: "US"}))
 
 		dataFiles, err := w.Flush(context.Background(), "mem://test/capture-partition.puffin")
 		require.NoError(t, err)
@@ -326,9 +364,9 @@ func TestDVWriterPartitionCapturedOnFirstAdd(t *testing.T) {
 		fs := newTestFS()
 		w := NewDVWriter(fs, specMapResolver(spec0, spec5))
 
-		w.Add(dataPath, []int64{1}, 0, map[int]any{1000: "EU"})
+		require.NoError(t, w.Add(dataPath, []int64{1}, 0, map[int]any{1000: "EU"}))
 		// Second Add carries a different spec id; capture is unaffected.
-		w.Add(dataPath, []int64{2}, 5, map[int]any{1000: "EU"})
+		require.NoError(t, w.Add(dataPath, []int64{2}, 5, map[int]any{1000: "EU"}))
 
 		dataFiles, err := w.Flush(context.Background(), "mem://test/capture-spec.puffin")
 		require.NoError(t, err)
@@ -354,7 +392,7 @@ func TestDVWriterAddDefensiveCopies(t *testing.T) {
 	w := NewDVWriter(fs, specMapResolver(spec))
 	partition := map[int]any{1000: "EU"}
 
-	w.Add("s3://bucket/region=EU/file.parquet", []int64{1}, 0, partition)
+	require.NoError(t, w.Add("s3://bucket/region=EU/file.parquet", []int64{1}, 0, partition))
 	// Mutate the caller's map after Add. A reference-storing writer would
 	// produce a DataFile carrying "MUTATED" on Flush; a defensive-copy
 	// implementation keeps the original captured value.
@@ -389,8 +427,8 @@ func TestDVWriterFlushMixedSpecIDs(t *testing.T) {
 	pathOld := "s3://bucket/region=EU/file.parquet"
 	pathNew := "s3://bucket/region_bucket=0/file.parquet"
 
-	w.Add(pathOld, []int64{1}, 0, map[int]any{1000: "EU"})
-	w.Add(pathNew, []int64{2}, 1, map[int]any{1001: int32(0)})
+	require.NoError(t, w.Add(pathOld, []int64{1}, 0, map[int]any{1000: "EU"}))
+	require.NoError(t, w.Add(pathNew, []int64{2}, 1, map[int]any{1001: int32(0)}))
 
 	dataFiles, err := w.Flush(context.Background(), "mem://test/mixed-spec.puffin")
 	require.NoError(t, err)
@@ -416,7 +454,7 @@ func TestDVWriterFlushUnknownSpecID(t *testing.T) {
 	w := NewDVWriter(fs, unpartitionedResolver())
 
 	// specID 99 is not registered with the resolver.
-	w.Add("s3://bucket/file.parquet", []int64{1}, 99, nil)
+	require.NoError(t, w.Add("s3://bucket/file.parquet", []int64{1}, 99, nil))
 
 	_, err := w.Flush(context.Background(), "mem://test/unknown-spec.puffin")
 	require.Error(t, err)

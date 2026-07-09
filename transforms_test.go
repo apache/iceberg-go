@@ -336,6 +336,64 @@ func TestManifestPartitionVals(t *testing.T) {
 	}
 }
 
+func TestBucketTransform_NumBucketsValidation(t *testing.T) {
+	transform := iceberg.BucketTransform{}
+	t.Run("ApplyRejectsInvalidBuckets", func(t *testing.T) {
+		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+			Valid: true,
+			Val:   iceberg.Int32Literal(123),
+		})
+		require.False(t, out.Valid)
+	})
+
+	t.Run("TransformerRejectsInvalidBuckets", func(t *testing.T) {
+		fn := transform.Transformer(iceberg.PrimitiveTypes.String)
+		out := fn("abc")
+		require.False(t, out.Valid)
+	})
+
+	t.Run("ProjectRejectsInvalidBuckets", func(t *testing.T) {
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID:   1,
+			Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64,
+		})
+		bound, err := iceberg.EqualTo(iceberg.Reference("id"), int64(42)).Bind(schema, true)
+		require.NoError(t, err)
+
+		_, err = transform.Project("id_bucket", bound.(iceberg.BoundPredicate))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+}
+
+func TestBucketTransform_MarshalTextRejectsInvalidBuckets(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: 0}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("negative", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: -1}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("valid", func(t *testing.T) {
+		txt, err := iceberg.BucketTransform{NumBuckets: 16}.MarshalText()
+		require.NoError(t, err)
+		assert.Equal(t, "bucket[16]", string(txt))
+	})
+}
+
+func TestBucketTransformUnsupportedSourceTypeDoesNotPanic(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
+	require.NotPanics(t, func() {
+		result := fn(true)
+		require.False(t, result.Valid)
+	})
+}
+
 func TestCanTransform(t *testing.T) {
 	tests := []struct {
 		transform  iceberg.Transform
@@ -615,6 +673,43 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBucketTransformUnsupportedTypeReturnsInvalidOptional(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	fn := transform.Transformer(iceberg.PrimitiveTypes.Bool)
+
+	assert.NotPanics(t, func() {
+		result := fn(true)
+		assert.False(t, result.Valid)
+	})
+}
+
+func TestBucketProjectUnsupportedTypeReturnsNoProjection(t *testing.T) {
+	transform := iceberg.BucketTransform{NumBuckets: 16}
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "flag",
+		Type: iceberg.PrimitiveTypes.Bool,
+	})
+
+	t.Run("EqualTo", func(t *testing.T) {
+		bound, err := iceberg.EqualTo(iceberg.Reference("flag"), true).Bind(schema, true)
+		require.NoError(t, err)
+
+		projected, err := transform.Project("flag_bucket", bound.(iceberg.BoundPredicate))
+		require.NoError(t, err)
+		assert.Nil(t, projected)
+	})
+
+	t.Run("In", func(t *testing.T) {
+		bound, err := iceberg.IsIn(iceberg.Reference("flag"), true, false).(iceberg.UnboundPredicate).Bind(schema, true)
+		require.NoError(t, err)
+
+		projected, err := transform.Project("flag_bucket", bound.(iceberg.BoundPredicate))
+		require.NoError(t, err)
+		assert.Nil(t, projected)
+	})
 }
 
 func TestHourTransformPreEpoch(t *testing.T) {

@@ -117,6 +117,11 @@ services:
       - CATALOG_MANAGEMENT=dynamic
     ports:
       - 8088:8080
+    healthcheck:
+      # Trino can take ~30s to finish booting in GitHub Actions; without a
+      # startup grace period, docker compose up --wait can mark it unhealthy
+      # just before the server reaches READY.
+      start_period: 45s
 
   fake-gcs-server:
     image: fsouza/fake-gcs-server
