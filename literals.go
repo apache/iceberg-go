@@ -1119,7 +1119,7 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
-func (f FixedLiteral) Type() Type                   { return FixedTypeOf(len(f)) }
+func (f FixedLiteral) Type() Type                   { return FixedType{len: len(f)} }
 func (f FixedLiteral) Value() []byte                { return []byte(f) }
 func (f FixedLiteral) Any() any                     { return f.Value() }
 func (f FixedLiteral) String() string               { return string(f) }

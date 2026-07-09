@@ -189,7 +189,10 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
-				n, _ := strconv.Atoi(matches[1])
+				n, err := strconv.Atoi(matches[1])
+				if err != nil {
+					return fmt.Errorf("%w: invalid fixed length %q: %v", ErrInvalidTypeString, matches[1], err)
+				}
 				t.Type = FixedType{len: n}
 			case strings.HasPrefix(typename, "decimal"):
 				matches := decimalRegex.FindStringSubmatch(typename)
@@ -558,7 +561,21 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func FixedTypeOf(n int) FixedType { return FixedType{len: n} }
+func validateFixedLength(length int) error {
+	if length < 0 {
+		return fmt.Errorf("fixed length must be non-negative, got %d", length)
+	}
+
+	return nil
+}
+
+func FixedTypeOf(n int) FixedType {
+	if err := validateFixedLength(n); err != nil {
+		panic(fmt.Errorf("%w: %s", ErrInvalidArgument, err))
+	}
+
+	return FixedType{len: n}
+}
 
 type FixedType struct {
 	len int
