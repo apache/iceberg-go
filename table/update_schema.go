@@ -833,7 +833,7 @@ func (a *applyChanges) Field(field iceberg.NestedField, fieldResult iceberg.Type
 // updateColumn seeds each pending update from a copy of the original
 // NestedField. As a result, updates that only modify other properties
 // still preserve the original Required value here.
-// 
+//
 // Note: If updateColumn is refactored to lazily populate only the
 // touched fields, this helper must gain an explicit "Required was set"
 // signal or it will silently return the zero-value false.
