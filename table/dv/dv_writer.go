@@ -124,6 +124,39 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, par
 	return nil
 }
 
+// Load seeds the writer with an already-written deletion vector for a data
+// file so subsequent Add calls merge new positions into it. The spec permits
+// at most one DV per data file per snapshot, so when a data file that already
+// has a DV receives more deletes the old positions must be carried into the
+// replacement DV (and the old DV superseded) rather than dropped.
+//
+// Load is intended to be called before any Add for the same path: on the first
+// call for a path it captures specID and partitionData exactly as Add would and
+// unions the supplied bitmap into a fresh entry. If an entry already exists
+// (because Add or Load ran first for this path), Load only unions the bitmap in
+// and the earlier specID/partitionData are kept — the later values are ignored,
+// mirroring Add's first-write-wins behavior. Callers must not pass conflicting
+// partition values across calls for the same path.
+//
+// bitmap must be non-nil; its set positions are copied and the caller retains
+// ownership. (A nil bitmap would register a cardinality-0 entry, which is never
+// useful — collectExistingDVs always supplies a non-nil bitmap read from the
+// existing DV.)
+func (w *DVWriter) Load(dataFilePath string, bitmap *RoaringPositionBitmap, specID int32, partitionData map[int]any) {
+	entry, ok := w.entries[dataFilePath]
+	if !ok {
+		entry = &dvEntry{
+			bitmap:        NewRoaringPositionBitmap(),
+			specID:        specID,
+			partitionData: maps.Clone(partitionData),
+		}
+		w.entries[dataFilePath] = entry
+		w.order = append(w.order, dataFilePath)
+	}
+
+	entry.bitmap.Or(bitmap)
+}
+
 // Flush writes one Puffin file containing one blob per data file, and returns
 // manifest entries ready for RowDelta.AddDeletes(). Each output DataFile
 // carries the partition spec and partition record of the data file it

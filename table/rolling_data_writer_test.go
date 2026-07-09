@@ -234,6 +234,67 @@ func (s *RollingDataWriterTestSuite) TestNewWriterFactoryReturnsErrorForInvalidF
 	s.ErrorContains(err, "withFactoryFileSchema")
 }
 
+func (s *RollingDataWriterTestSuite) TestCloseAllFinishesQueuedRecordsWithoutCancellingContext() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writerCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	s.Require().NoError(err)
+	const totalBatches = 4
+	const rowsPerBatch = 25
+	var expectedRows int64
+	for range totalBatches {
+		record := s.buildRecord(arrSchema, rowsPerBatch)
+		expectedRows += record.NumRows()
+		s.Require().NoError(writer.Add(record))
+		record.Release()
+	}
+
+	s.Require().NoError(factory.closeAll())
+	s.Require().Nil(writerCtx.Err(), "normal close should finish queued writes without aborting context")
+
+	close(outputCh)
+	var actualRows int64
+	for df := range outputCh {
+		actualRows += df.Count()
+	}
+
+	s.Equal(expectedRows, actualRows, "all queued records should be flushed when closeAll is used")
+}
+
+func (s *RollingDataWriterTestSuite) TestAbortAndWaitCancelsContext() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	writerCtx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+
+	writer, err := factory.getOrCreateRollingDataWriter(writerCtx, "", nil, outputCh)
+	s.Require().NoError(err)
+	record := s.buildRecord(arrSchema, 5)
+	s.Require().NoError(writer.Add(record))
+	record.Release()
+
+	writer.abortAndWait()
+	s.Require().ErrorIs(writer.ctx.Err(), context.Canceled)
+}
+
 func (s *RollingDataWriterTestSuite) TestBytesWrittenNoDoubleCountAcrossRowGroups() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},

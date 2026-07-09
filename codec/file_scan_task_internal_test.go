@@ -47,3 +47,41 @@ func TestDecodeFileScanTaskInnerErrorCarriesMarker(t *testing.T) {
 	require.Contains(t, err.Error(), "codec: DecodeFileScanTask: file:",
 		"an inner (primary-file) decode error must carry the function + sub-path marker")
 }
+
+func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
+	// Range checks are intentionally validated before attempting to decode nested
+	// data-file payloads, so malformed start/length are rejected at the
+	// envelope layer without decoding heavy blob fields.
+	spec := iceberg.NewPartitionSpecID(7,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: iceberg.IdentityTransform{}},
+	)
+	schema := iceberg.NewSchema(123,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+
+	t.Run("start", func(t *testing.T) {
+		data, err := fileScanTaskSchema.Encode(&fileScanTaskEnvelope{
+			Start:  -1,
+			Length: 1,
+		})
+		require.NoError(t, err)
+
+		_, err = DecodeFileScanTask(data, spec, schema, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "codec: DecodeFileScanTask:")
+		require.Contains(t, err.Error(), "start must be non-negative")
+	})
+
+	t.Run("length", func(t *testing.T) {
+		data, err := fileScanTaskSchema.Encode(&fileScanTaskEnvelope{
+			Start:  0,
+			Length: -1,
+		})
+		require.NoError(t, err)
+
+		_, err = DecodeFileScanTask(data, spec, schema, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "codec: DecodeFileScanTask:")
+		require.Contains(t, err.Error(), "length must be non-negative")
+	})
+}

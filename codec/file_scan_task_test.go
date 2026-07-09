@@ -165,6 +165,27 @@ func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
 	require.Empty(t, decoded.DeletionVectorFiles)
 }
 
+func TestEncodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
+	spec, _, task := fullyPopulatedFileScanTask(t, 2)
+
+	t.Run("start", func(t *testing.T) {
+		task.Start = -1
+		_, err := codec.EncodeFileScanTask(task, spec, nil, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "codec: EncodeFileScanTask:")
+		require.Contains(t, err.Error(), "start must be non-negative")
+	})
+
+	t.Run("length", func(t *testing.T) {
+		task.Length = -1
+		task.Start = 0
+		_, err := codec.EncodeFileScanTask(task, spec, nil, 2)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "codec: EncodeFileScanTask:")
+		require.Contains(t, err.Error(), "length must be non-negative")
+	})
+}
+
 func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpec, *iceberg.Schema, table.FileScanTask) {
 	t.Helper()
 	schema := iceberg.NewSchema(123,

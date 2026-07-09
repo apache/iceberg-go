@@ -313,7 +313,7 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		currentSchemaID:      b.currentSchemaID,
 		specs:                slices.Clone(b.specs),
 		defaultSpecID:        b.defaultSpecID,
-		lastPartitionID:      b.lastPartitionID,
+		lastPartitionID:      cloneMetadataBuilderInt(b.lastPartitionID),
 		props:                maps.Clone(b.props),
 		snapshotList:         slices.Clone(b.snapshotList),
 		currentSnapshotID:    cloneMetadataBuilderInt(b.currentSnapshotID),
@@ -2258,15 +2258,17 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	if tableUuid == uuid.Nil {
 		tableUuid = uuid.New()
 	}
+	var inputProps iceberg.Properties
 	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
-		verStr, ok := props[PropertyFormatVersion]
+		inputProps = maps.Clone(props)
+		verStr, ok := inputProps[PropertyFormatVersion]
 		if ok {
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
-				formatVersion = DefaultFormatVersion
+				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(props, PropertyFormatVersion)
+			delete(inputProps, PropertyFormatVersion)
 		}
 	}
 
@@ -2312,7 +2314,7 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	if err = builder.SetProperties(props); err != nil {
+	if err = builder.SetProperties(inputProps); err != nil {
 		return nil, err
 	}
 

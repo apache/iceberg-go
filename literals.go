@@ -1119,7 +1119,7 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
-func (f FixedLiteral) Type() Type                   { return FixedTypeOf(len(f)) }
+func (f FixedLiteral) Type() Type                   { return FixedType{len: len(f)} }
 func (f FixedLiteral) Value() []byte                { return []byte(f) }
 func (f FixedLiteral) Any() any                     { return f.Value() }
 func (f FixedLiteral) String() string               { return string(f) }
@@ -1251,7 +1251,9 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 // precision; DecimalLiteral does not carry precision. Callers that need the
 // real column precision must consult the bound field's type rather than
 // lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
-func (d DecimalLiteral) Type() Type     { return DecimalTypeOf(9, d.Scale) }
+func (d DecimalLiteral) Type() Type {
+	return DecimalType{precision: 9, scale: d.Scale}
+}
 func (d DecimalLiteral) Value() Decimal { return Decimal(d) }
 func (d DecimalLiteral) Any() any       { return d.Value() }
 func (d DecimalLiteral) String() string {
