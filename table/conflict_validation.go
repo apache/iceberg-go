@@ -93,6 +93,8 @@ const (
 	// Older Java releases and some pyiceberg codepaths used
 	// "snapshot"; set this property explicitly to snapshot if you are
 	// migrating from a pipeline that relied on that behavior.
+	// write.merge.isolation-level is not modeled separately here yet;
+	// merge-style producers continue to use write.update.isolation-level.
 	WriteUpdateIsolationLevelKey     = "write.update.isolation-level"
 	WriteUpdateIsolationLevelDefault = IsolationSerializable
 )
