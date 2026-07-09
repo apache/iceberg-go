@@ -167,6 +167,55 @@ type ReadDirFile interface {
 	ReadDir(n int) ([]fs.DirEntry, error)
 }
 
+// StatIO is an extension of IO interface that includes the Stat
+// method for retrieving file or directory information
+type StatIO interface {
+	IO
+
+	// The Stat method returns a FileInfo describing the named file or directory,
+	// or an error satisfying errors.Is(err, fs.ErrNotExist) if the file does not exist
+	Stat(path string) (fs.FileInfo, error)
+}
+
+// RenameIO is an extension of IO interface that includes the Rename
+// method for renaming (moving) one file or object. This is atomic on
+// a local filesystem but is not atomic in other implementations like blob stores
+type RenameIO interface {
+	IO
+
+	Rename(oldpath, newpath string) error
+}
+
+// RenameNoReplaceIO is an extension of IO interface that includes the
+// RenameNoReplace method for moving files only when the destination
+// path does not already exist. Implementations may require oldpath and newpath
+// to live on the same filesystem. This is atomic on a local filesystem but
+// is not atomic in other implementations like blob stores
+type RenameNoReplaceIO interface {
+	IO
+
+	RenameNoReplace(oldpath, newpath string) error
+}
+
+// RemoveAllIO is an extension of IO interface that includes the RemoveAll
+// method for removing a file path and any children recursively
+type RemoveAllIO interface {
+	IO
+
+	RemoveAll(name string) error
+}
+
+// MkdirAllIO is an extension of IO interface that includes the MkdirAll
+// method for creating a directory path recursively
+type MkdirAllIO interface {
+	IO
+
+	// MkdirAll should not raise an error if the directory already exists,
+	// and should create any parent directories in the path if they
+	// do not already exist.
+	MkdirAll(path string) error
+}
+
 // FS wraps an io/fs.FS as an IO interface.
 func FS(fsys fs.FS) IO {
 	if _, ok := fsys.(fs.ReadFileFS); ok {
