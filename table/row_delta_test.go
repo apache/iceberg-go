@@ -285,6 +285,12 @@ func (m *rowDeltaCatalog) CommitTable(ctx context.Context, ident table.Identifie
 func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
+	return newRowDeltaCommitTestTableVersion(t, 2)
+}
+
+func newRowDeltaCommitTestTableVersion(t *testing.T, formatVersion int) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 
 	schema := iceberg.NewSchema(0,
@@ -294,7 +300,7 @@ func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: "2"})
+		iceberg.Properties{table.PropertyFormatVersion: formatVersionStr(formatVersion)})
 	require.NoError(t, err)
 
 	return table.New(
