@@ -190,7 +190,7 @@ func DataFileFromMetadata(args DataFileArgs) (iceberg.DataFile, error) {
 	if !ok {
 		return nil, fmt.Errorf(
 			"unsupported metadata type for format %s: expected *metadata.FileMetaData, got %T",
-			args.Format, args.Metadata)
+			string(args.Format), args.Metadata)
 	}
 	if pqMeta == nil {
 		return nil, errors.New("metadata pointer is nil")
