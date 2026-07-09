@@ -305,19 +305,17 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// legacy files on a v3 table) would otherwise produce one output where
 	// post-lineage rows have explicit _row_id values and pre-lineage rows
 	// have nulls, which violates the per-file uniqueness/coverage
-	// invariant the v3 spec requires. Splitting mixed groups into separate
-	// outputs is a larger refactor and is left as a follow-up; for now we
-	// degrade gracefully (the rewrite still succeeds, but lineage is not
-	// preserved for the surviving rows).
+	// invariant the v3 spec requires. Row IDs are assigned lazily during
+	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
+	// groups are expected during migration; for now we degrade gracefully
+	// and do not preserve lineage for the surviving rows.
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
 	} else if tbl.metadata.Version() >= 3 {
-		// Mixed group on a v3 table — at least one source file lacks
-		// FirstRowID so we drop lineage on the surviving rows. This is the
-		// common case during a v1/v2→v3 migration; surface it so operators
-		// can detect silent lineage loss instead of having to diff
-		// metadata before/after.
+		// Drop lineage for the whole mixed group. Warn only when at least one
+		// source file already carried lineage; all-legacy groups fall through
+		// silently because there is no lineage to lose.
 		var lineageFiles, legacyFiles int
 		for _, t := range group.Tasks {
 			if t.FirstRowID != nil {
@@ -390,9 +388,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
 // non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
-// Used to gate the preservation path on compaction: mixed groups (some
-// lineage, some legacy) would otherwise produce per-file invariant
-// violations, so the gate is conservative.
+// It returns false for an empty task slice.
 func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	if len(tasks) == 0 {
 		return false
