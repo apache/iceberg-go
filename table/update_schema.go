@@ -830,11 +830,13 @@ func (a *applyChanges) Field(field iceberg.NestedField, fieldResult iceberg.Type
 	return fieldResult
 }
 
-// updatedRequired returns the effective Required flag for fieldID.
-//
-// Note: updateColumn seeds each pending update from a copy of the original
+// updateColumn seeds each pending update from a copy of the original
 // NestedField. As a result, updates that only modify other properties
 // still preserve the original Required value here.
+// 
+// Note: If updateColumn is refactored to lazily populate only the
+// touched fields, this helper must gain an explicit "Required was set"
+// signal or it will silently return the zero-value false.
 func (a *applyChanges) updatedRequired(fieldID int, fallback bool) bool {
 	if update, ok := a.updates[fieldID]; ok {
 		return update.Required
