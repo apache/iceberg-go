@@ -81,7 +81,12 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
-	keyTlsSkipVerify    = "rest.tls.skip-verify"
+	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
+	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
+	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
+	// are set, oauth2-server-uri takes precedence.
+	keyOAuth2ServerURI = "oauth2-server-uri"
+	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
 )
@@ -449,6 +454,11 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 }
 
 func fromProps(props iceberg.Properties, o *options) error {
+	// The OAuth token endpoint may be configured via either the portable
+	// oauth2-server-uri key or the legacy rest.authorization-url alias. Capture
+	// both and resolve precedence after the loop, since map iteration order is
+	// non-deterministic.
+	var authURL, oauth2ServerURI *url.URL
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -466,11 +476,17 @@ func fromProps(props iceberg.Properties, o *options) error {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := parseAuthURL(v)
+			u, err := parseAuthURL(keyAuthUrl, v)
 			if err != nil {
 				return err
 			}
-			o.authUri = u
+			authURL = u
+		case keyOAuth2ServerURI:
+			u, err := parseAuthURL(keyOAuth2ServerURI, v)
+			if err != nil {
+				return err
+			}
+			oauth2ServerURI = u
 		case keyOauthCredential:
 			o.credential = v
 		case keyScope:
@@ -501,19 +517,44 @@ func fromProps(props iceberg.Properties, o *options) error {
 		}
 	}
 
+	// oauth2-server-uri is the portable, preferred key and takes precedence over
+	// the rest.authorization-url alias when both are set.
+	switch {
+	case oauth2ServerURI != nil:
+		o.authUri = oauth2ServerURI
+	case authURL != nil:
+		o.authUri = authURL
+	}
+
 	return nil
 }
 
-func parseAuthURL(raw string) (*url.URL, error) {
+// resolveAuthURLAlias collapses the oauth2-server-uri / rest.authorization-url
+// alias within a single configuration layer into the canonical
+// oauth2-server-uri key. oauth2-server-uri wins over the rest.authorization-url
+// alias within the same layer. Collapsing per layer before merging keeps
+// defaults -> client -> overrides precedence intact.
+func resolveAuthURLAlias(props iceberg.Properties) {
+	v, ok := props[keyOAuth2ServerURI]
+	if !ok {
+		v, ok = props[keyAuthUrl]
+	}
+	delete(props, keyAuthUrl)
+	if ok {
+		props[keyOAuth2ServerURI] = v
+	}
+}
+
+func parseAuthURL(key, raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", key, raw, err)
 	}
 	if u.Scheme == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", key, raw)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing host", key, raw)
 	}
 
 	return u, nil
@@ -552,7 +593,12 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		setIf(keyAuthUrl, o.authUri.String())
+		// Advertise the endpoint only under the portable oauth2-server-uri key.
+		// We canonicalize to this key everywhere else (fromProps precedence,
+		// resolveAuthURLAlias), so emitting the legacy rest.authorization-url
+		// alias too would leave the endpoint under two names in r.props and any
+		// table config cloned from it - two sources of truth that can drift.
+		setIf(keyOAuth2ServerURI, o.authUri.String())
 	}
 
 	return props
@@ -781,7 +827,17 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	if cfg == nil {
 		cfg = iceberg.Properties{}
 	}
-	maps.Copy(cfg, toProps(opts))
+
+	// Collapse the oauth2-server-uri / rest.authorization-url alias within each
+	// layer before merging so the defaults -> client -> overrides precedence is
+	// preserved. Merging first would leave both keys in the map, letting a
+	// client oauth2-server-uri shadow a server rest.authorization-url override.
+	clientProps := toProps(opts)
+	resolveAuthURLAlias(cfg)
+	resolveAuthURLAlias(clientProps)
+	resolveAuthURLAlias(rsp.Overrides)
+
+	maps.Copy(cfg, clientProps)
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
