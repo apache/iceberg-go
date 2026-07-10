@@ -53,7 +53,8 @@ var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", ni
 
 func TestNewUpdateSchemaWithNilTransactionReturnsError(t *testing.T) {
 	err := NewUpdateSchema(nil, true, false).Commit()
-	assert.EqualError(t, err, "transaction is nil")
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "transaction is nil")
 }
 
 func TestAddColumn(t *testing.T) {

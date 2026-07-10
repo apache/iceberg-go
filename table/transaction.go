@@ -96,6 +96,9 @@ type Transaction struct {
 }
 
 func (t *Transaction) ensureInitialized() error {
+	if t == nil {
+		return fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
+	}
 	if t.initErr != nil {
 		return t.initErr
 	}

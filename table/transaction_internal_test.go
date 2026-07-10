@@ -117,6 +117,12 @@ func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
 		require.ErrorContains(t, err, "current schema is missing")
 	})
 
+	t.Run("commit returns init error", func(t *testing.T) {
+		_, err := txn.Commit(context.Background())
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
 	t.Run("row delta commit returns init error", func(t *testing.T) {
 		rowFile, dataErr := iceberg.NewDataFileBuilder(
 			*iceberg.UnpartitionedSpec,
@@ -135,6 +141,14 @@ func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
 		err := rd.Commit(context.Background())
 		require.ErrorContains(t, err, "current schema is missing")
 	})
+}
+
+func TestTransactionEnsureInitializedNilReceiver(t *testing.T) {
+	var txn *Transaction
+
+	err := txn.ensureInitialized()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "transaction is nil")
 }
 
 type brokenMetadata struct {

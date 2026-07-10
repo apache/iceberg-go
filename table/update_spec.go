@@ -69,7 +69,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	}
 
 	if t == nil {
-		us.err = errors.New("transaction is nil")
+		us.err = fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
 
 		return us
 	}

@@ -23,6 +23,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var testSchema = iceberg.NewSchema(1,
@@ -62,7 +63,8 @@ var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartit
 
 func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	err := table.NewUpdateSpec(nil, false).Commit()
-	assert.EqualError(t, err, "transaction is nil")
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "transaction is nil")
 }
 
 func TestUpdateSpecAddField(t *testing.T) {

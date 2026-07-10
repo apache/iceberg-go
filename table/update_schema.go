@@ -154,7 +154,7 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 	}
 
 	if txn == nil {
-		u.err = errors.New("transaction is nil")
+		u.err = fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
 
 		return u
 	}
