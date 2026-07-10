@@ -344,23 +344,38 @@ func fileScopedDeletedRows(t table.FileScanTask) int64 {
 }
 
 // isFileScoped reports whether a delete file applies to exactly one data file.
-// Mirrors Java ContentFileUtil.isFileScoped/referencedDataFile: a deletion
-// vector or path-scoped positional delete carries a referenced data file
-// either explicitly or, when referenced_data_file is absent (it is optional in
-// V2 and our own scan planning never sets it — see matchDeletesToData), through
-// equal file_path lower/upper bounds. Equality deletes and partition-scoped
-// positional deletes are not file-scoped.
+// Equality deletes and partition-scoped positional deletes are not file-scoped.
 func isFileScoped(d iceberg.DataFile) bool {
 	if d.ContentType() == iceberg.EntryContentEqDeletes {
 		return false
 	}
-	if d.ReferencedDataFile() != nil {
-		return true
+
+	return referencedDataFilePath(d) != ""
+}
+
+// referencedDataFilePath resolves the single data file a delete targets, or ""
+// when it is partition-scoped (no single target). Mirrors Java
+// ContentFileUtil.referencedDataFile: explicit referenced_data_file first, then
+// equal file_path lower/upper bounds — the bounds fallback matters because
+// referenced_data_file is optional in V2 and our own scan planning never sets
+// it (see matchDeletesToData).
+func referencedDataFilePath(d iceberg.DataFile) string {
+	if ref := d.ReferencedDataFile(); ref != nil && *ref != "" {
+		return *ref
 	}
+
 	lower := d.LowerBoundValues()[filePathFieldID]
 	upper := d.UpperBoundValues()[filePathFieldID]
+	if len(lower) == 0 || !bytes.Equal(lower, upper) {
+		return ""
+	}
 
-	return len(lower) > 0 && bytes.Equal(lower, upper)
+	lit, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.String, lower)
+	if err != nil {
+		return ""
+	}
+
+	return lit.(iceberg.TypedLiteral[string]).Value()
 }
 
 // filePathFieldID is the reserved field ID of the file_path column in a
