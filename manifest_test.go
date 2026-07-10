@@ -2111,6 +2111,18 @@ func TestFitDecimalBytesAllowsOnlyRedundantSignExtension(t *testing.T) {
 		wantErr bool
 	}{
 		{
+			name:  "pads positive value",
+			bytes: []byte{0x01},
+			size:  3,
+			want:  []byte{0x00, 0x00, 0x01},
+		},
+		{
+			name:  "pads negative value",
+			bytes: []byte{0xff},
+			size:  3,
+			want:  []byte{0xff, 0xff, 0xff},
+		},
+		{
 			name:  "trims redundant positive sign extension",
 			bytes: []byte{0x00, 0x00, 0x01},
 			size:  2,
@@ -2121,6 +2133,12 @@ func TestFitDecimalBytesAllowsOnlyRedundantSignExtension(t *testing.T) {
 			bytes: []byte{0xff, 0xff, 0x80},
 			size:  2,
 			want:  []byte{0xff, 0x80},
+		},
+		{
+			name:    "rejects non-positive size",
+			bytes:   []byte{0x01},
+			size:    0,
+			wantErr: true,
 		},
 		{
 			name:    "rejects positive sign change",
@@ -2168,6 +2186,24 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 		wantErr   bool
 	}{
 		{
+			name:      "encodes precision 1 boundary",
+			value:     Decimal{Val: decimal128.FromI64(5), Scale: 0},
+			precision: 1,
+			want:      []byte{0x05},
+		},
+		{
+			name:      "encodes precision 9 boundary",
+			value:     Decimal{Val: decimal128.FromI64(123456789), Scale: 0},
+			precision: 9,
+			want:      []byte{0x07, 0x5b, 0xcd, 0x15},
+		},
+		{
+			name:      "encodes negative precision 18 boundary",
+			value:     Decimal{Val: decimal128.FromI64(-1), Scale: 0},
+			precision: 18,
+			want:      []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		},
+		{
 			name:      "pads positive decimal",
 			value:     Decimal{Val: decimal128.FromI64(1), Scale: 2},
 			precision: 10,
@@ -2189,6 +2225,7 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 			name:      "keeps max precision decimal",
 			value:     DecimalLiteral{Val: decimal128.FromBigInt(maxPrecision38), Scale: 0},
 			precision: 38,
+			// Two's-complement big-endian representation of 10^38 - 1.
 			want: []byte{
 				0x4b, 0x3b, 0x4c, 0xa8, 0x5a, 0x86, 0xc4, 0x7a,
 				0x09, 0x8a, 0x22, 0x3f, 0xff, 0xff, 0xff, 0xff,

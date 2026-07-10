@@ -143,7 +143,6 @@ func unmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema,
 	df.specID = int32(spec.ID())
 	df.fieldNameToID = maps.nameToID
 	df.fieldIDToLogicalType = maps.idToType
-	df.fieldIDToFixedSize = maps.idToFixedSize
 	df.fieldIDToDecimalScale = maps.idToDecimalScale
 
 	return df, nil
@@ -295,15 +294,10 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
 	}
-	n2i, i2t, i2s, i2sc := getFieldIDMap(fullSchema)
+	fieldMaps := getFieldIDMap(fullSchema)
 	entry := &dataFileSchemaEntry{
 		schema: fullSchema,
-		maps: dataFileFieldMaps{
-			nameToID:         n2i,
-			idToType:         i2t,
-			idToFixedSize:    i2s,
-			idToDecimalScale: i2sc,
-		},
+		maps:   fieldMaps,
 	}
 	dataFileSchemaCache.Add(key, entry)
 
