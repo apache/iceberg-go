@@ -612,16 +612,18 @@ func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotP
 
 // deleteFileRemoved reports whether a delete-file entry is being expunged in
 // this snapshot: position/equality deletes match by path, deletion vectors by
-// referenced data file (one Puffin holds blobs for several data files, so a
-// shared path would over-remove live siblings).
+// (referenced data file, path) pair. Path alone would over-remove live
+// siblings (one Puffin holds blobs for several data files); ref alone would
+// expunge a peer's replacement DV for the same data file on an OCC retry,
+// silently discarding the peer's newer deletes.
 func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
 	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
 		return true
 	}
 	if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
-		_, ok := sp.deletedDVsByRef[*ref]
+		want, ok := sp.deletedDVsByRef[*ref]
 
-		return ok
+		return ok && want.FilePath() == df.FilePath()
 	}
 
 	return false
@@ -994,7 +996,7 @@ func (sp *snapshotProducer) rebaseSummary(delta, previousSummary, props iceberg.
 // removals the parent still counts.
 type removedFilePresence struct {
 	deleteFiles map[string]struct{} // pos/eq delete FilePath()
-	dvRefs      map[string]struct{} // deletion-vector ReferencedDataFile()
+	dvRefs      map[string]struct{} // ReferencedDataFile() of DVs whose exact captured path is still on parent
 }
 
 func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
@@ -1017,7 +1019,9 @@ func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 // already removed it, so proceeding would leave our replacement beside the
 // concurrent result and duplicate rows (Java's failMissingDeletePaths) — and
 // (2) returns which removed delete files / deletion vectors are still present so
-// the retry summary does not double-subtract a peer's prior removal.
+// the retry summary does not double-subtract a peer's prior removal. A DV
+// superseded by a peer (same referenced data file, new path) counts as absent:
+// the replacement is inherited untouched and our removal is a no-op.
 func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePresence, error) {
 	present := &removedFilePresence{
 		deleteFiles: map[string]struct{}{},
@@ -1058,8 +1062,11 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 			if isDeletionVector(df) {
 				// A DV without a referenced data file cannot be matched by ref;
 				// skip it rather than misclassifying it as a path-keyed delete file.
+				// The path must match too: a peer may have superseded our DV with
+				// a replacement for the same data file (same ref, new path), and
+				// that replacement must not read as "our DV is still present".
 				if ref := df.ReferencedDataFile(); ref != nil {
-					if _, want := sp.deletedDVsByRef[*ref]; want {
+					if want, ok := sp.deletedDVsByRef[*ref]; ok && want.FilePath() == df.FilePath() {
 						present.dvRefs[*ref] = struct{}{}
 					}
 				}

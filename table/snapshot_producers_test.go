@@ -1427,6 +1427,189 @@ func TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove(t *testing.T) {
 	require.Empty(t, present.dvRefs)
 }
 
+// TestDeleteFileRemoved_DVMatchesByRefAndPath pins the DV expunge identity:
+// a deletion vector matches a captured removal only when both its referenced
+// data file and its path match. Ref-only matching would drop a peer's
+// replacement DV on an OCC retry; path-only matching would drop Puffin
+// siblings sharing the file.
+func TestDeleteFileRemoved_DVMatchesByRefAndPath(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	dv := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(dv)
+
+	require.True(t, sp.deleteFileRemoved(dv), "exact (ref, path) pair matches")
+
+	replacement := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	require.False(t, sp.deleteFileRemoved(replacement),
+		"a peer's replacement DV (same ref, new path) must survive")
+
+	sibling := newTestDeletionVectorForRef(t, spec, dv.FilePath(), "mem://default/table-location/data/other.parquet")
+	require.False(t, sp.deleteFileRemoved(sibling),
+		"a Puffin sibling (same path, other ref) must survive")
+}
+
+// TestCheckRemovedFiles_SupersededDVReadsAsAbsent covers the concurrent DV
+// replacement race: a peer removed the DV this producer intends to expunge and
+// added a new one for the same data file. The replacement must not read as
+// "our DV is still present" — otherwise the retry summary subtracts a removal
+// the fresh parent no longer counts.
+func TestCheckRemovedFiles_SupersededDVReadsAsAbsent(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 91, "superseded", peerDV)
+
+	present, err := sp.checkRemovedFiles(parent)
+	require.NoError(t, err)
+	require.Empty(t, present.dvRefs,
+		"a superseded DV (same ref, different path) must not read as present")
+
+	s, err := sp.summaryOnRetry(nil, parent, present)
+	require.NoError(t, err)
+	require.Equal(t, "1", s.Properties["total-delete-files"],
+		"the peer's replacement DV stays counted on the retry summary")
+	require.Equal(t, "1", s.Properties["total-position-deletes"],
+		"the peer's position deletes stay counted on the retry summary")
+}
+
+// TestCheckRemovedFiles_ExactDVPresentAndSubtracted is the companion guard:
+// when the exact DV this producer removes is still live on the fresh parent,
+// it must be marked present and the retry summary must subtract it.
+func TestCheckRemovedFiles_ExactDVPresentAndSubtracted(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 92, "exact", staleDV)
+
+	present, err := sp.checkRemovedFiles(parent)
+	require.NoError(t, err)
+	require.Contains(t, present.dvRefs, dataPath, "the exact DV is still live on parent")
+
+	s, err := sp.summaryOnRetry(nil, parent, present)
+	require.NoError(t, err)
+	require.Equal(t, "0", s.Properties["total-delete-files"],
+		"a DV still present on the fresh parent must be subtracted (1→0)")
+}
+
+// TestExistingManifests_SupersededDVSurvivesRetry pins the manifest-filter half
+// of the pair-matching rule: on an OCC retry the fresh parent may carry a
+// peer's replacement DV for the data file whose DV this producer removes. The
+// replacement must be inherited untouched and not tombstoned — ref-only
+// matching would expunge it and resurrect the rows the peer deleted.
+func TestExistingManifests_SupersededDVSurvivesRetry(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 93, "survives", peerDV)
+
+	parentManifests, err := parent.Manifests(wfs)
+	require.NoError(t, err)
+	require.Len(t, parentManifests, 1)
+
+	got, err := sp.existingManifests(parent)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "the peer's deletes manifest must be inherited")
+	require.Equal(t, parentManifests[0].FilePath(), got[0].FilePath(),
+		"nothing matched, so the manifest is passed through untouched")
+
+	tombstones, err := sp.deletedEntries(context.Background(), parent)
+	require.NoError(t, err)
+	require.Empty(t, tombstones, "no DELETE tombstone for the peer's replacement DV")
+}
+
+// TestExistingManifests_ExactDVStillExpunged is the companion guard: the exact
+// captured DV is still filtered from the inherited manifests and tombstoned.
+func TestExistingManifests_ExactDVStillExpunged(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 94, "expunged", staleDV)
+
+	got, err := sp.existingManifests(parent)
+	require.NoError(t, err)
+	require.Empty(t, got, "a manifest whose only entry is the removed DV is dropped")
+
+	tombstones, err := sp.deletedEntries(context.Background(), parent)
+	require.NoError(t, err)
+	require.Len(t, tombstones, 1)
+	require.Equal(t, staleDV.FilePath(), tombstones[0].DataFile().FilePath())
+}
+
+// writeParentSnapshotWithDeletesManifest writes a v3 deletes manifest holding
+// the given delete files plus its manifest list into fs and returns a parent
+// snapshot pointing at it. v3 because referenced_data_file only serializes in
+// the v3 data_file schema. The summary counts one delete file so retry-summary
+// assertions can observe whether a removal was subtracted.
+func writeParentSnapshotWithDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) *Snapshot {
+	t.Helper()
+
+	manifestPath := "mem://default/table-location/metadata/deletes-" + tag + ".avro"
+	var buf bytes.Buffer
+	wr, err := iceberg.NewManifestWriter(3, &buf, spec, simpleSchema(), snapshotID,
+		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	for _, df := range deleteFiles {
+		require.NoError(t, wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, df)))
+	}
+	require.NoError(t, wr.Close())
+	mf, err := wr.ToManifestFile(manifestPath, int64(buf.Len()),
+		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+
+	out, err := fs.Create(manifestPath)
+	require.NoError(t, err)
+	_, err = out.Write(buf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	listPath := "mem://default/table-location/metadata/snap-" + tag + ".avro"
+	lout, err := fs.Create(listPath)
+	require.NoError(t, err)
+	seq := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, []iceberg.ManifestFile{mf}))
+	require.NoError(t, lout.Close())
+
+	return &Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: seq,
+		ManifestList:   listPath,
+		Summary: &Summary{Operation: OpAppend, Properties: iceberg.Properties{
+			"total-delete-files":     "1",
+			"total-position-deletes": "1",
+			"total-equality-deletes": "0",
+			"total-data-files":       "1",
+			"total-records":          "1",
+			"total-files-size":       "1",
+		}},
+	}
+}
+
 func TestAddDataFilesV3RejectsWithoutFirstRowID(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn, _ := createTestTransactionWithMemIO(t, spec)
