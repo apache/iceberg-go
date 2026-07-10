@@ -22,6 +22,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var originalSchema = iceberg.NewSchema(1,
@@ -578,6 +579,20 @@ func TestUpdateColumn(t *testing.T) {
 		ageField, ok := newSchema.FindFieldByName("age")
 		assert.True(t, ok)
 		assert.Equal(t, "User's age in years", ageField.Doc)
+	})
+
+	t.Run("test write default on v2 table returns compatibility error", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			WriteDefault: iceberg.Optional[iceberg.Literal]{
+				Valid: true,
+				Val:   iceberg.NewLiteral(int32(7)),
+			},
+		}).Commit()
+		require.ErrorContains(t, err, "invalid write default")
+		require.ErrorContains(t, err, "non-null default (7)")
 	})
 
 	t.Run("test update non-existent column", func(t *testing.T) {

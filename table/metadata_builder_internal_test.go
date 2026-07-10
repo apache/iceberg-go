@@ -2259,6 +2259,7 @@ func TestNonSpecialDefaultsRequireV3(t *testing.T) {
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, "invalid initial default")
 			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
 			require.ErrorContains(t, err, "is not supported until v3")
 		})
 
@@ -2279,6 +2280,7 @@ func TestNonSpecialDefaultsRequireV3(t *testing.T) {
 			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 			require.ErrorContains(t, err, "invalid write default")
 			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
 			require.ErrorContains(t, err, "is not supported until v3")
 		})
 
