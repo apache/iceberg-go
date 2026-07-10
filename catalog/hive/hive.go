@@ -897,8 +897,11 @@ func (c *Catalog) getIcebergTable(ctx context.Context, database, tableName strin
 }
 
 func identifierToTableName(identifier table.Identifier) (string, string, error) {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return "", "", err
+	}
 	if len(identifier) != 2 {
-		return "", "", fmt.Errorf("invalid identifier, expected [database, table]: %v", identifier)
+		return "", "", fmt.Errorf("%w: expected [database, table], got %v", catalog.ErrNoSuchTable, identifier)
 	}
 
 	return identifier[0], identifier[1], nil

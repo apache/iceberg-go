@@ -220,6 +220,10 @@ func TableNameFromIdent(ident table.Identifier) string {
 }
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
+	if len(ident) == 0 {
+		return nil
+	}
+
 	return ident[:len(ident)-1]
 }
 

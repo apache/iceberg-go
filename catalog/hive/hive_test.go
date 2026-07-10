@@ -1577,3 +1577,26 @@ func TestCreateView_VersionNoSQLRepresentation(t *testing.T) {
 
 	mockClient.AssertExpectations(t)
 }
+
+func TestTableOperationsRejectEmptyIdentifiers(t *testing.T) {
+	ctx := context.Background()
+	cat := NewCatalogWithClient(&mockHiveClient{}, iceberg.Properties{})
+	valid := table.Identifier{"db", "table"}
+
+	for _, ident := range []table.Identifier{nil, {}, {"table"}} {
+		_, err := cat.CreateTable(ctx, ident, testSchema)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+		_, err = cat.LoadTable(ctx, ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+		_, _, err = cat.CommitTable(ctx, ident, nil, nil)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+		require.ErrorIs(t, cat.DropTable(ctx, ident), catalog.ErrNoSuchTable)
+		require.ErrorIs(t, cat.PurgeTable(ctx, ident), catalog.ErrNoSuchTable)
+		_, err = cat.RenameTable(ctx, ident, valid)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+		_, err = cat.RenameTable(ctx, valid, ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+		_, err = cat.CheckTableExists(ctx, ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	}
+}
