@@ -800,7 +800,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 
 	reporter, err := metrics.FromProperties(c.props)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	return table.NewFromLocation(

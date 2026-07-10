@@ -18,8 +18,10 @@
 package table
 
 import (
+	"context"
 	"testing"
 
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,4 +68,56 @@ func TestWithReporterOverridesScan(t *testing.T) {
 	// A nil WithReporter is ignored; the inherited reporter is kept.
 	scanNil := tbl.Scan(WithReporter(nil))
 	assert.Same(t, tableRep, scanNil.Reporter())
+}
+
+// reporterStubCatalog is a minimal catalog whose LoadTable returns a table
+// carrying the configured reporter (or the default nop reporter when nil). It
+// lets the Refresh tests control exactly which reporter the "fresh" table
+// arrives with.
+type reporterStubCatalog struct {
+	reporter metrics.Reporter
+}
+
+func (c *reporterStubCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	opts := []Option{}
+	if c.reporter != nil {
+		opts = append(opts, WithMetricsReporter(c.reporter))
+	}
+
+	return New(ident, nil, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c, opts...), nil
+}
+
+func (c *reporterStubCatalog) CommitTable(context.Context, Identifier, []Requirement, []Update) (Metadata, string, error) {
+	return nil, "", nil
+}
+
+// TestRefreshKeepsCallerReporter is the invariant the commit retry loop depends
+// on: a reporter injected via WithMetricsReporter must survive a Refresh even
+// though the catalog's LoadTable hands back the default nop reporter.
+func TestRefreshKeepsCallerReporter(t *testing.T) {
+	rep := &metrics.InMemoryReporter{}
+	cat := &reporterStubCatalog{} // LoadTable yields a nop-reporter table
+	tbl := New(Identifier{"db", "reporter-refresh"}, nil, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat,
+		WithMetricsReporter(rep))
+
+	require.Same(t, rep, tbl.MetricsReporter())
+	require.NoError(t, tbl.Refresh(context.Background()))
+	assert.Same(t, rep, tbl.MetricsReporter(),
+		"caller-set reporter must not be reverted to the catalog default on refresh")
+}
+
+// TestRefreshInheritsCatalogReporterWhenUnset covers the other direction: when
+// the caller never overrode the reporter, Refresh adopts the fresh table's.
+func TestRefreshInheritsCatalogReporterWhenUnset(t *testing.T) {
+	fresh := &metrics.InMemoryReporter{}
+	cat := &reporterStubCatalog{reporter: fresh}
+	tbl := New(Identifier{"db", "reporter-refresh"}, nil, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	require.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
+	require.NoError(t, tbl.Refresh(context.Background()))
+	assert.Same(t, fresh, tbl.MetricsReporter(),
+		"an unset reporter must inherit the catalog-derived one on refresh")
 }

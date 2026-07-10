@@ -152,7 +152,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 
 	reporter, err := metrics.FromProperties(c.opts.props)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	return table.NewFromLocation(
@@ -235,7 +235,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 
 	reporter, err := metrics.FromProperties(c.opts.props)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	tbl, err := table.NewFromLocation(

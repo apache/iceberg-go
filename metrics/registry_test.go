@@ -60,6 +60,7 @@ func TestRegister(t *testing.T) {
 		Register("test-custom", func(props map[string]string) (Reporter, error) {
 			return &InMemoryReporter{}, nil
 		})
+		t.Cleanup(func() { Deregister("test-custom") })
 		r, err := FromProperties(map[string]string{ReporterImplKey: "test-custom"})
 		require.NoError(t, err)
 		assert.IsType(t, &InMemoryReporter{}, r)

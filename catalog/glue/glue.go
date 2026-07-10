@@ -284,18 +284,15 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
-	reporter, err := metrics.FromProperties(c.props)
-	if err != nil {
-		return nil, err
-	}
-	// Read the metadata file
+	// Read the metadata file. The reporter is intentionally not wired here: the
+	// tail c.LoadTable(...) re-resolves it through convertGlueToIceberg, and the
+	// table built below is discarded after constructTableInput.
 	tbl, err := table.NewFromLocation(
 		ctx,
 		[]string{tableName},
 		metadataLocation,
 		io.LoadFSFunc(nil, metadataLocation),
 		c,
-		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
@@ -841,7 +838,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 
 	reporter, err := metrics.FromProperties(c.props)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	icebergTable, err := table.NewFromLocation(

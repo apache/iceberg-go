@@ -30,8 +30,8 @@ const ReporterImplKey = "metrics-reporter-impl"
 
 // Built-in reporter names usable as the value of [ReporterImplKey].
 const (
-	reporterNameNop     = "nop"
-	reporterNameLogging = "logging"
+	ReporterNameNop     = "nop"
+	ReporterNameLogging = "logging"
 )
 
 // Factory builds a Reporter from configuration properties. The same property
@@ -45,8 +45,8 @@ var (
 )
 
 func init() {
-	Register(reporterNameNop, func(map[string]string) (Reporter, error) { return NopReporter{}, nil })
-	Register(reporterNameLogging, func(map[string]string) (Reporter, error) {
+	Register(ReporterNameNop, func(map[string]string) (Reporter, error) { return NopReporter{}, nil })
+	Register(ReporterNameLogging, func(map[string]string) (Reporter, error) {
 		return NewLoggingReporter(nil), nil
 	})
 }
@@ -67,6 +67,16 @@ func Register(name string, factory Factory) {
 		panic("metrics: Register called twice for " + name)
 	}
 	registry[name] = factory
+}
+
+// Deregister removes a previously registered reporter factory. It is a no-op if
+// name is not registered. This exists primarily so tests can register a factory
+// and undo it via t.Cleanup, keeping the process-global registry re-runnable
+// under go test -count=N.
+func Deregister(name string) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	delete(registry, name)
 }
 
 // FromProperties builds the reporter named by props[ReporterImplKey]. An absent

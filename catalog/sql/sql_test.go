@@ -914,23 +914,37 @@ func (s *SqliteCatalogTestSuite) TestMetricsReporterWiring() {
 	})
 
 	s.Run("unknown reporter name fails table load", func() {
-		// Create with a well-configured catalog, then reopen the same
-		// on-disk DB with a bad reporter name so the failure is isolated to
-		// LoadTable rather than the create path.
-		good := s.getCatalogSqlite()
-		tblID := s.randomTableIdentifier()
-		s.Require().NoError(good.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
-		_, err := good.CreateTable(ctx, tblID, tableSchemaNested)
+		// Fully self-contained: provision a dedicated on-disk DB, create a
+		// table with a well-configured catalog, then reopen the same DB with a
+		// bad reporter name so the failure is isolated to LoadTable rather than
+		// leaning on shared suite fixtures.
+		dir, err := os.MkdirTemp(os.TempDir(), "test_sql_reporter_*")
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(os.RemoveAll(dir)) })
+
+		uri := "file://" + filepath.Join(dir, "sql-catalog.db")
+		warehouse := "file://" + dir
+		baseProps := iceberg.Properties{
+			"uri":             uri,
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+			"type":            "sql",
+			"warehouse":       warehouse,
+		}
+
+		goodProps := maps.Clone(baseProps)
+		goodProps["init_catalog_tables"] = "true"
+		good, err := catalog.Load(ctx, "default", goodProps)
 		s.Require().NoError(err)
 
-		bad, err := catalog.Load(ctx, "default", iceberg.Properties{
-			"uri":                   s.catalogUri(),
-			sqlcat.DriverKey:        sqliteshim.ShimName,
-			sqlcat.DialectKey:       string(sqlcat.SQLite),
-			"type":                  "sql",
-			"warehouse":             "file://" + s.warehouse,
-			metrics.ReporterImplKey: "does-not-exist",
-		})
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(good.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+		_, err = good.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		badProps := maps.Clone(baseProps)
+		badProps[metrics.ReporterImplKey] = "does-not-exist"
+		bad, err := catalog.Load(ctx, "default", badProps)
 		s.Require().NoError(err)
 
 		_, err = bad.LoadTable(ctx, tblID)

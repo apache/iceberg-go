@@ -1075,9 +1075,15 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF = iceio.LoadFSFunc(config, loc)
 	}
 
-	reporter, err := metrics.FromProperties(config)
+	// Resolve the reporter from the catalog's own properties, not the merged
+	// config. The merged config folds in table metadata, server-vended
+	// ret.Config, and creds, any of which could otherwise shadow the client's
+	// reporter choice or turn an unknown server-side name into a hard load
+	// error. Server-vended reporter selection, if ever wanted, should be an
+	// explicit decision rather than a side effect of merge order.
+	reporter, err := metrics.FromProperties(r.props)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	return table.New(

@@ -201,7 +201,13 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.planner = fresh.planner
-	t.reporter = fresh.reporter
+	// Only inherit the catalog-derived reporter when the caller hasn't set one
+	// of their own. Refresh runs inside commit retry loops, so unconditionally
+	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
+	// reporter to the catalog default mid-operation.
+	if _, isNop := t.reporter.(metrics.NopReporter); isNop {
+		t.reporter = fresh.reporter
+	}
 
 	return nil
 }
