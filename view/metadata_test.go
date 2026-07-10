@@ -347,7 +347,7 @@ func TestDuplicateDialects(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrInvalidViewMetadata))
 	assert.Contains(t, err.Error(), "duplicate dialect")
 	assert.Contains(t, err.Error(), "version 1")
-	assert.Contains(t, err.Error(), "spark")
+	assert.Contains(t, err.Error(), " SPARK ")
 }
 
 func TestInvalidRepresentationInJSON(t *testing.T) {
@@ -355,18 +355,6 @@ func TestInvalidRepresentationInJSON(t *testing.T) {
 		name string
 		json string
 	}{
-		{
-			name: "invalid-type",
-			json: `{
-				"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
-				"format-version": 1,
-				"location": "s3://bucket/warehouse/default.db/event_agg",
-				"current-version-id": 1,
-				"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [{"type": "hive", "sql": "SELECT 1", "dialect": "spark"}]}],
-				"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
-				"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
-			}`,
-		},
 		{
 			name: "missing-sql",
 			json: `{
@@ -402,6 +390,27 @@ func TestInvalidRepresentationInJSON(t *testing.T) {
 			assert.Contains(t, err.Error(), "invalid view representation")
 		})
 	}
+}
+
+func TestUnknownRepresentationTypeInJSON(t *testing.T) {
+	validJSON := `{
+		"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+		"format-version": 1,
+		"location": "s3://bucket/warehouse/default.db/event_agg",
+		"current-version-id": 1,
+		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [
+			{"type": "hive", "sql": "SELECT 1", "dialect": "spark"},
+			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
+		]}],
+		"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
+		"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+	}`
+
+	var meta metadata
+	require.NoError(t, json.Unmarshal([]byte(validJSON), &meta))
+	require.Len(t, meta.VersionList, 1)
+	require.Len(t, meta.VersionList[0].Representations, 2)
+	assert.Equal(t, "hive", meta.VersionList[0].Representations[0].Type)
 }
 
 func TestNilFieldsInJSON(t *testing.T) {

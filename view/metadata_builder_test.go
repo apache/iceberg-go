@@ -98,42 +98,70 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 }
 
 func TestNewVersion_RepresentationValidation(t *testing.T) {
-	_, err := NewVersion(1, 0,
-		Representations{{Type: "sql", Sql: "SELECT 1", Dialect: "spark"}},
-		table.Identifier{"ns"},
-	)
-	assert.NoError(t, err)
-
-	_, err = NewVersion(1, 0,
-		Representations{{Type: "hive", Sql: "SELECT 1", Dialect: "spark"}},
-		table.Identifier{"ns"},
-	)
-	assert.ErrorContains(t, err, "type should be \"sql\"")
-	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
-
-	_, err = NewVersion(1, 0,
-		Representations{{Type: "sql", Sql: "", Dialect: "spark"}},
-		table.Identifier{"ns"},
-	)
-	assert.ErrorContains(t, err, "sql is required")
-	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
-
-	_, err = NewVersion(1, 0,
-		Representations{{Type: "sql", Sql: "SELECT 1", Dialect: ""}},
-		table.Identifier{"ns"},
-	)
-	assert.ErrorContains(t, err, "dialect is required")
-	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
-
-	_, err = NewVersion(1, 0,
-		Representations{
-			{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
-			{Type: "sql", Sql: "SELECT 2", Dialect: "spark"},
+	tests := []struct {
+		name            string
+		representations Representations
+		wantErr         string
+	}{
+		{
+			name: "valid",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+			},
 		},
-		table.Identifier{"ns"},
-	)
-	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark")
-	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+		{
+			name: "invalid type",
+			representations: Representations{
+				{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+			},
+			wantErr: "type should be \"sql\"",
+		},
+		{
+			name: "missing sql",
+			representations: Representations{
+				{Type: "sql", Sql: "", Dialect: "spark"},
+			},
+			wantErr: "sql is required",
+		},
+		{
+			name: "missing dialect",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: ""},
+			},
+			wantErr: "dialect is required",
+		},
+		{
+			name: "duplicate dialect",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
+				{Type: "sql", Sql: "SELECT 2", Dialect: " spark "},
+			},
+			wantErr: "Cannot add multiple queries for dialect  spark ",
+		},
+		{
+			name: "valid then invalid type",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", Sql: "SELECT 2", Dialect: "hive"},
+			},
+			wantErr: "type should be \"sql\"",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewVersion(1, 0, tc.representations, table.Identifier{"ns"})
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
 func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
@@ -172,7 +200,7 @@ func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
 		Build()
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
-	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark")
+	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark ")
 }
 
 func TestSetFormatVersion_Invalid(t *testing.T) {
@@ -553,7 +581,7 @@ func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
 		AddVersion(version).
 		SetCurrentVersionID(1).
 		Build()
-	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect spark")
+	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect SpArK")
 }
 
 func TestSetCurrentVersionID_NoLastAddedSchema(t *testing.T) {

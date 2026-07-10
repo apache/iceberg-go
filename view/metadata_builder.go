@@ -186,7 +186,7 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 		}
 
 		if _, ok := dialects[normalizedDialect]; ok {
-			return 0, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, normalizedDialect)
+			return 0, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, repr.Dialect)
 		}
 		dialects[normalizedDialect] = struct{}{}
 	}

@@ -180,7 +180,7 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 			return nil, fmt.Errorf("%w: %s", ErrInvalidViewMetadata, err)
 		}
 		if _, ok := seenDialects[normalizedDialect]; ok {
-			return nil, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, normalizedDialect)
+			return nil, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, repr.Dialect)
 		}
 		seenDialects[normalizedDialect] = struct{}{}
 	}
@@ -201,6 +201,8 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	return version, nil
 }
 
+// validateRepresentation validates a SQL representation and returns its
+// normalized dialect for duplicate detection.
 func validateRepresentation(repr Representation) (string, error) {
 	if repr.Type != "sql" {
 		return "", errors.New("invalid view representation: type should be \"sql\"")
@@ -248,11 +250,11 @@ func (v *Version) Clone() *Version {
 }
 
 // sqlDialects returns a set of strings representing the SQL dialects supported in this version.
-// Dialects are deduplicated by lowercase comparison
+// Dialects are deduplicated by trimmed, lowercase comparison.
 func (v *Version) sqlDialects() internal.Set[string] {
 	return internal.ToSet(internal.MapSlice(
 		v.Representations,
-		func(r Representation) string { return strings.ToLower(r.Dialect) },
+		func(r Representation) string { return strings.ToLower(strings.TrimSpace(r.Dialect)) },
 	))
 }
 
@@ -475,6 +477,10 @@ func (m *metadata) checkDialectsUnique() error {
 	for _, version := range m.VersionList {
 		seenDialects := make(map[string]bool)
 		for _, repr := range version.Representations {
+			if repr.Type != "sql" {
+				continue
+			}
+
 			dialect, err := validateRepresentation(repr)
 			if err != nil {
 				return fmt.Errorf("%w: version %d: %s", ErrInvalidViewMetadata, version.VersionID, err)
@@ -482,7 +488,7 @@ func (m *metadata) checkDialectsUnique() error {
 
 			if seenDialects[dialect] {
 				return fmt.Errorf("%w: version %d has duplicate dialect %s",
-					ErrInvalidViewMetadata, version.VersionID, dialect)
+					ErrInvalidViewMetadata, version.VersionID, repr.Dialect)
 			}
 			seenDialects[dialect] = true
 		}
