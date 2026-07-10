@@ -1550,8 +1550,19 @@ func initCommonMetadataForDeserialization() commonMetadata {
 	}
 }
 
-func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
-func (c *commonMetadata) Refs() iter.Seq2[string, SnapshotRef] { return maps.All(c.SnapshotRefs) }
+func (c *commonMetadata) Ref() SnapshotRef {
+	return cloneSnapshotRef(c.SnapshotRefs[MainBranch])
+}
+
+func (c *commonMetadata) Refs() iter.Seq2[string, SnapshotRef] {
+	return func(yield func(string, SnapshotRef) bool) {
+		for name, ref := range c.SnapshotRefs {
+			if !yield(name, cloneSnapshotRef(ref)) {
+				return
+			}
+		}
+	}
+}
 func (c *commonMetadata) SnapshotLogs() iter.Seq[SnapshotLogEntry] {
 	return slices.Values(c.SnapshotLog)
 }
@@ -1646,7 +1657,7 @@ func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
 func (c *commonMetadata) Location() string           { return c.Loc }
 func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
 func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
-func (c *commonMetadata) Schemas() []*iceberg.Schema { return c.SchemaList }
+func (c *commonMetadata) Schemas() []*iceberg.Schema { return slices.Clone(c.SchemaList) }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 	for _, s := range c.SchemaList {
 		if s.ID == c.CurrentSchemaID {
@@ -1657,7 +1668,7 @@ func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 }
 
 func (c *commonMetadata) PartitionSpecs() []iceberg.PartitionSpec {
-	return c.Specs
+	return slices.Clone(c.Specs)
 }
 
 func (c *commonMetadata) DefaultPartitionSpec() int {
@@ -1684,12 +1695,22 @@ func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
 	return nil
 }
 
-func (c *commonMetadata) LastPartitionSpecID() *int { return c.LastPartitionID }
-func (c *commonMetadata) Snapshots() []Snapshot     { return c.SnapshotList }
+func (c *commonMetadata) LastPartitionSpecID() *int {
+	if c.LastPartitionID == nil {
+		return nil
+	}
+
+	id := *c.LastPartitionID
+	return &id
+}
+
+func (c *commonMetadata) Snapshots() []Snapshot {
+	return cloneSnapshots(c.SnapshotList)
+}
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	for i := range c.SnapshotList {
 		if c.SnapshotList[i].SnapshotID == id {
-			return &c.SnapshotList[i]
+			return cloneSnapshotPtr(&c.SnapshotList[i])
 		}
 	}
 
@@ -1712,15 +1733,17 @@ func (c *commonMetadata) CurrentSnapshot() *Snapshot {
 	return c.SnapshotByID(*c.CurrentSnapshotID)
 }
 
-func (c *commonMetadata) SortOrders() []SortOrder { return c.SortOrderList }
+func (c *commonMetadata) SortOrders() []SortOrder {
+	return cloneSortOrders(c.SortOrderList)
+}
 func (c *commonMetadata) SortOrder() SortOrder {
 	for _, s := range c.SortOrderList {
 		if s.OrderID() == c.DefaultSortOrderID {
-			return s
+			return cloneSortOrder(s)
 		}
 	}
 
-	return UnsortedSortOrder
+	return cloneSortOrder(UnsortedSortOrder)
 }
 
 func (c *commonMetadata) DefaultSortOrder() int {
@@ -1728,7 +1751,7 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
-	return c.Props
+	return maps.Clone(c.Props)
 }
 
 func (c *commonMetadata) Statistics() iter.Seq[StatisticsFile] {
@@ -1741,6 +1764,90 @@ func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile]
 
 func (c *commonMetadata) EncryptionKeys() iter.Seq[EncryptionKey] {
 	return slices.Values(c.EncryptionKeyList)
+}
+
+func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
+	clone := ref
+	if ref.MinSnapshotsToKeep != nil {
+		value := *ref.MinSnapshotsToKeep
+		clone.MinSnapshotsToKeep = &value
+	}
+	if ref.MaxSnapshotAgeMs != nil {
+		value := *ref.MaxSnapshotAgeMs
+		clone.MaxSnapshotAgeMs = &value
+	}
+	if ref.MaxRefAgeMs != nil {
+		value := *ref.MaxRefAgeMs
+		clone.MaxRefAgeMs = &value
+	}
+
+	return clone
+}
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	clone := snapshot
+	if snapshot.ParentSnapshotID != nil {
+		value := *snapshot.ParentSnapshotID
+		clone.ParentSnapshotID = &value
+	}
+	if snapshot.SchemaID != nil {
+		value := *snapshot.SchemaID
+		clone.SchemaID = &value
+	}
+	if snapshot.FirstRowID != nil {
+		value := *snapshot.FirstRowID
+		clone.FirstRowID = &value
+	}
+	if snapshot.AddedRows != nil {
+		value := *snapshot.AddedRows
+		clone.AddedRows = &value
+	}
+	if snapshot.Summary != nil {
+		clone.Summary = &Summary{
+			Operation:  snapshot.Summary.Operation,
+			Properties: maps.Clone(snapshot.Summary.Properties),
+		}
+	}
+
+	return clone
+}
+
+func cloneSnapshotPtr(snapshot *Snapshot) *Snapshot {
+	if snapshot == nil {
+		return nil
+	}
+
+	clone := cloneSnapshot(*snapshot)
+	return &clone
+}
+
+func cloneSnapshots(snapshots []Snapshot) []Snapshot {
+	clones := make([]Snapshot, len(snapshots))
+	for i, snapshot := range snapshots {
+		clones[i] = cloneSnapshot(snapshot)
+	}
+
+	return clones
+}
+
+func cloneSortOrder(order SortOrder) SortOrder {
+	clone := order
+	clone.fields = make([]SortField, len(order.fields))
+	for i, field := range order.fields {
+		clone.fields[i] = field
+		clone.fields[i].SourceIDs = slices.Clone(field.SourceIDs)
+	}
+
+	return clone
+}
+
+func cloneSortOrders(orders []SortOrder) []SortOrder {
+	clones := make([]SortOrder, len(orders))
+	for i, order := range orders {
+		clones[i] = cloneSortOrder(order)
+	}
+
+	return clones
 }
 
 // preValidate updates values in the metadata struct with defaults based on
