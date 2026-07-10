@@ -51,6 +51,12 @@ var originalSchema = iceberg.NewSchema(1,
 
 var testMetadata, _ = NewMetadata(originalSchema, nil, UnsortedSortOrder, "", nil)
 
+func TestNewUpdateSchemaWithNilTransactionReturnsError(t *testing.T) {
+	err := NewUpdateSchema(nil, true, false).Commit()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "transaction is nil")
+}
+
 func TestAddColumn(t *testing.T) {
 	t.Run("test update schema with add primitive type on top level", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)

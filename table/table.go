@@ -131,20 +131,53 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	return t.NewTransactionOnBranch(MainBranch)
+	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	if err != nil {
+		return t.newBrokenTransaction(MainBranch, err)
+	}
+
+	return txn
 }
 
 // NewTransactionOnBranch creates a new transaction that commits to the named
 // branch. Use [NewTransaction] to commit to the default "main" branch.
 func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	meta, _ := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	txn, err := t.NewTransactionOnBranchWithError(branch)
+	if err != nil {
+		return t.newBrokenTransaction(branch, err)
+	}
+
+	return txn
+}
+
+func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
+	return &Transaction{
+		tbl:     &t,
+		initErr: err,
+		branch:  branch,
+		reqs:    []Requirement{},
+	}
+}
+
+// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
+// initialization error that prevents builder construction.
+//
+// This preserves the old non-failing constructor contract while allowing
+// callers to receive the precise initialization error instead of hitting
+// panic/undefined behavior later.
+func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Transaction{
-		tbl:    &t,
-		meta:   meta,
-		branch: branch,
-		reqs:   []Requirement{},
-	}
+		tbl:     &t,
+		meta:    meta,
+		branch:  branch,
+		reqs:    []Requirement{},
+		initErr: nil,
+	}, nil
 }
 
 func (t *Table) Refresh(ctx context.Context) error {

@@ -101,6 +101,10 @@ func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 // commit, if any file has an unexpected content type, or if the table
 // format version does not support delete files.
 func (rd *RowDelta) Commit(ctx context.Context) error {
+	if err := rd.txn.ensureInitialized(); err != nil {
+		return err
+	}
+
 	if len(rd.dataFiles) == 0 && len(rd.delFiles) == 0 {
 		return errors.New("row delta must have at least one data file or delete file")
 	}
