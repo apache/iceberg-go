@@ -1563,6 +1563,7 @@ func (c *commonMetadata) Refs() iter.Seq2[string, SnapshotRef] {
 		}
 	}
 }
+
 func (c *commonMetadata) SnapshotLogs() iter.Seq[SnapshotLogEntry] {
 	return slices.Values(c.SnapshotLog)
 }
@@ -1701,12 +1702,14 @@ func (c *commonMetadata) LastPartitionSpecID() *int {
 	}
 
 	id := *c.LastPartitionID
+
 	return &id
 }
 
 func (c *commonMetadata) Snapshots() []Snapshot {
 	return cloneSnapshots(c.SnapshotList)
 }
+
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	for i := range c.SnapshotList {
 		if c.SnapshotList[i].SnapshotID == id {
@@ -1736,6 +1739,7 @@ func (c *commonMetadata) CurrentSnapshot() *Snapshot {
 func (c *commonMetadata) SortOrders() []SortOrder {
 	return cloneSortOrders(c.SortOrderList)
 }
+
 func (c *commonMetadata) SortOrder() SortOrder {
 	for _, s := range c.SortOrderList {
 		if s.OrderID() == c.DefaultSortOrderID {
@@ -1818,6 +1822,7 @@ func cloneSnapshotPtr(snapshot *Snapshot) *Snapshot {
 	}
 
 	clone := cloneSnapshot(*snapshot)
+
 	return &clone
 }
 
