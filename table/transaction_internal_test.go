@@ -79,6 +79,38 @@ func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {
 	require.Len(t, txn.reqs, 0)
 }
 
+func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	baseMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	// Stage a requirement with a successful apply so txn.reqs is non-empty
+	// going into the failing call; this distinguishes a genuine rollback from
+	// an implementation that simply never accumulates requirements.
+	err = txn.apply(nil, []Requirement{AssertTableUUID(baseMeta.TableUUID())})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+
+	// The requirement passed to the failing call must itself validate, so the
+	// rollback is driven by the update failure (not by requirement validation
+	// bailing out early). Assert that here so a future fixture change surfaces
+	// as a loud failure in the right place.
+	require.NoError(t, AssertCurrentSchemaID(0).Validate(baseMeta))
+
+	// A batch whose second update fails must leave both the staged metadata and
+	// the requirement list at their pre-call state — not the one extra req this
+	// call would add, and not an empty list.
+	updates := []Update{
+		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewSetCurrentSchemaUpdate(9999),
+	}
+	err = txn.apply(updates, []Requirement{AssertCurrentSchemaID(0)})
+	require.Error(t, err)
+
+	require.Len(t, txn.reqs, 1)
+	require.Equal(t, AssertTableUUID(baseMeta.TableUUID()), txn.reqs[0])
+}
+
 // TestTransactionApplyDedupesSameRefAssertionsNewTable covers two appends in a
 // single new-table transaction: the first asserts main must not exist, and the
 // second (after the builder has created main) asserts main == the new snapshot.

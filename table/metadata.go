@@ -283,7 +283,8 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	return b, nil
 }
 
-func cloneMetadataBuilderInt[T any](value *T) *T {
+// clonePtr returns a pointer to a shallow copy of *value, or nil if value is nil.
+func clonePtr[T any](value *T) *T {
 	if value == nil {
 		return nil
 	}
@@ -313,10 +314,10 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		currentSchemaID:      b.currentSchemaID,
 		specs:                slices.Clone(b.specs),
 		defaultSpecID:        b.defaultSpecID,
-		lastPartitionID:      cloneMetadataBuilderInt(b.lastPartitionID),
+		lastPartitionID:      clonePtr(b.lastPartitionID),
 		props:                maps.Clone(b.props),
 		snapshotList:         slices.Clone(b.snapshotList),
-		currentSnapshotID:    cloneMetadataBuilderInt(b.currentSnapshotID),
+		currentSnapshotID:    clonePtr(b.currentSnapshotID),
 		snapshotLog:          slices.Clone(b.snapshotLog),
 		metadataLog:          slices.Clone(b.metadataLog),
 		sortOrderList:        slices.Clone(b.sortOrderList),
@@ -325,12 +326,12 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		statisticsList:       slices.Clone(b.statisticsList),
 		partitionStatsList:   slices.Clone(b.partitionStatsList),
 		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
-		previousFileEntry:    cloneMetadataBuilderInt(b.previousFileEntry),
-		lastSequenceNumber:   cloneMetadataBuilderInt(b.lastSequenceNumber),
-		nextRowID:            cloneMetadataBuilderInt(b.nextRowID),
-		lastAddedSchemaID:    cloneMetadataBuilderInt(b.lastAddedSchemaID),
-		lastAddedPartitionID: cloneMetadataBuilderInt(b.lastAddedPartitionID),
-		lastAddedSortOrderID: cloneMetadataBuilderInt(b.lastAddedSortOrderID),
+		previousFileEntry:    clonePtr(b.previousFileEntry),
+		lastSequenceNumber:   clonePtr(b.lastSequenceNumber),
+		nextRowID:            clonePtr(b.nextRowID),
+		lastAddedSchemaID:    clonePtr(b.lastAddedSchemaID),
+		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
+		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
 	}
 
 	return cloned

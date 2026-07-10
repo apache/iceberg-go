@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
@@ -2561,4 +2563,115 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 	require.Equal(t, 3, meta3.Version())
 	require.Equal(t, int64(34), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
+}
+
+// sharedCloneFields names the MetadataBuilder fields that clone() intentionally
+// shares with the original instead of copying. Keep this in sync with clone();
+// both the drift guard and its filler consult it.
+var sharedCloneFields = map[string]struct{}{
+	"base": {}, // immutable snapshot, shared by design.
+}
+
+// TestMetadataBuilderCloneCoversAllFields guards clone() against field drift:
+// it fills every field of MetadataBuilder with non-zero data and asserts the
+// clone is value-equal yet backed by independent storage. A field added to the
+// struct but omitted from clone() fails the value-equal check; a field copied
+// by reference instead of cloned fails the aliasing check. The filler fails the
+// test on any kind it cannot populate, so a new field of an unhandled type
+// cannot slip through as a vacuous pass.
+//
+// The aliasing check is one level deep: it verifies each slice/map/pointer
+// field has its own backing storage, not that reference types nested inside
+// elements are independent (clone() shares those by design). A future field
+// nesting references inside an element would need its own dedicated coverage.
+func TestMetadataBuilderCloneCoversAllFields(t *testing.T) {
+	orig := &MetadataBuilder{}
+	fillReferenceFields(t, reflect.ValueOf(orig).Elem())
+
+	cloned := orig.clone()
+
+	ov := reflect.ValueOf(orig).Elem()
+	cv := reflect.ValueOf(cloned).Elem()
+	typ := ov.Type()
+	for i := range ov.NumField() {
+		name := typ.Field(i).Name
+		if _, shared := sharedCloneFields[name]; shared {
+			continue
+		}
+
+		of := fieldValue(ov.Field(i))
+		cf := fieldValue(cv.Field(i))
+
+		require.Truef(t, reflect.DeepEqual(of.Interface(), cf.Interface()),
+			"field %q not copied by clone()", name)
+
+		switch of.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Ptr:
+			require.NotEqualf(t, of.Pointer(), cf.Pointer(),
+				"field %q shares backing storage with the original", name)
+		}
+	}
+}
+
+// fillReferenceFields populates every field of an addressable struct value with
+// non-zero data so clone() has something observable to copy for each field. It
+// fails the test on any kind it does not know how to fill, forcing the helper
+// to grow alongside the struct rather than silently skipping a new field and
+// turning the drift guard into a vacuous pass.
+func fillReferenceFields(t *testing.T, sv reflect.Value) {
+	t.Helper()
+	typ := sv.Type()
+	for i := range sv.NumField() {
+		name := typ.Field(i).Name
+		if _, shared := sharedCloneFields[name]; shared {
+			continue
+		}
+
+		f := fieldValue(sv.Field(i))
+		switch f.Kind() {
+		case reflect.Ptr:
+			f.Set(reflect.New(f.Type().Elem()))
+		case reflect.Slice:
+			f.Set(reflect.MakeSlice(f.Type(), 1, 1))
+		case reflect.Map:
+			// A populated map gives the aliasing check real bite: a shallow
+			// clone yields a distinct backing map, a direct assignment does not.
+			m := reflect.MakeMap(f.Type())
+			m.SetMapIndex(reflect.New(f.Type().Key()).Elem(), reflect.New(f.Type().Elem()).Elem())
+			f.Set(m)
+		case reflect.Array:
+			if f.Len() > 0 {
+				setNonZeroScalar(t, f.Index(0), name)
+			}
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.String:
+			f.SetString("x")
+		default:
+			setNonZeroScalar(t, f, name)
+		}
+	}
+}
+
+// setNonZeroScalar sets a numeric reflect.Value to a non-zero value, failing the
+// test if the kind is not one the drift guard knows how to populate.
+func setNonZeroScalar(t *testing.T, f reflect.Value, name string) {
+	t.Helper()
+	switch {
+	case f.CanInt():
+		f.SetInt(7)
+	case f.CanUint():
+		f.SetUint(7)
+	case f.CanFloat():
+		f.SetFloat(1)
+	default:
+		t.Fatalf("fillReferenceFields: unhandled kind %v for field %q; extend the filler", f.Kind(), name)
+	}
+}
+
+// fieldValue returns an addressable, settable view of an unexported struct
+// field. The field must belong to an addressable struct (e.g. obtained via
+// reflect.ValueOf(ptr).Elem()); UnsafeAddr panics otherwise.
+func fieldValue(f reflect.Value) reflect.Value {
+	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
 }
