@@ -54,6 +54,10 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	if err := t.ensureInitialized(); err != nil {
+		return TableCommit{}, err
+	}
+
 	if t.committed {
 		return TableCommit{}, errors.New("transaction has already been committed")
 	}

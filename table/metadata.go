@@ -243,7 +243,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.lastUpdatedMS = 0
 	b.lastColumnId = metadata.LastColumnID()
 	b.schemaList = slices.Clone(metadata.Schemas())
-	b.currentSchemaID = metadata.CurrentSchema().ID
+	currentSchema := metadata.CurrentSchema()
+	if currentSchema == nil {
+		return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+	}
+	b.currentSchemaID = currentSchema.ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
 	defaultSpecID := metadata.DefaultPartitionSpec()
 	b.defaultSpecID = defaultSpecID

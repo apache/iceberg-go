@@ -18,10 +18,12 @@
 package table
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
 
@@ -58,6 +60,89 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
+}
+
+func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T) {
+	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
+	require.NoError(t, err, "new metadata")
+
+	txn, err := New(Identifier{"db", "broken"}, brokenMetadata{
+		Metadata: baseMeta,
+	}, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return nil, nil
+	}, nil).NewTransactionOnBranchWithError(MainBranch)
+	require.Error(t, err, "expected metadata builder initialization to fail")
+	require.ErrorContains(t, err, "current schema is missing")
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.Nil(t, txn)
+}
+
+func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
+	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
+	require.NoError(t, err, "new metadata")
+
+	txn := New(Identifier{"db", "broken"}, brokenMetadata{
+		Metadata: baseMeta,
+	}, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return nil, nil
+	}, nil).NewTransaction()
+
+	t.Run("set properties returns init error", func(t *testing.T) {
+		err := txn.SetProperties(iceberg.Properties{"k": "v"})
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("update schema no longer panics", func(t *testing.T) {
+		var err error
+		require.NotPanics(t, func() {
+			err = txn.UpdateSchema(true, false).
+				AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit()
+		})
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("update spec returns init error", func(t *testing.T) {
+		err := txn.UpdateSpec(true).AddIdentity("id").Commit()
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("table commit returns init error", func(t *testing.T) {
+		_, err := txn.TableCommit()
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("write equality deletes returns init error", func(t *testing.T) {
+		_, err := txn.WriteEqualityDeletes(context.Background(), []int{1}, nil)
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("row delta commit returns init error", func(t *testing.T) {
+		rowFile, dataErr := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentData,
+			"file://data.parquet",
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			10,
+			10,
+		)
+		require.NoError(t, dataErr, "new data file builder")
+
+		rd := txn.NewRowDelta(nil).AddRows(rowFile.Build())
+		err := rd.Commit(context.Background())
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+}
+
+type brokenMetadata struct {
+	Metadata
+}
+
+func (m brokenMetadata) CurrentSchema() *iceberg.Schema {
+	return nil
 }
 
 func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {

@@ -60,6 +60,11 @@ var testNonPartitionedTable = table.New([]string{"non_partitioned"}, testMetadat
 
 var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartitioned, "", nil, nil)
 
+func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
+	err := table.NewUpdateSpec(nil, false).Commit()
+	assert.EqualError(t, err, "transaction is nil")
+}
+
 func TestUpdateSpecAddField(t *testing.T) {
 	var txn *table.Transaction
 

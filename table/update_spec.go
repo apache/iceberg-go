@@ -35,6 +35,7 @@ type UpdateSpec struct {
 	operations []updateSpecOp
 
 	txn                   *Transaction
+	err                   error
 	nameToField           map[string]iceberg.PartitionField
 	nameToAddedField      map[string]iceberg.PartitionField
 	transformToField      map[transformKey]iceberg.PartitionField
@@ -54,6 +55,29 @@ type transformKey struct {
 }
 
 func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
+	us := &UpdateSpec{
+		txn:                   t,
+		nameToField:           make(map[string]iceberg.PartitionField),
+		nameToAddedField:      make(map[string]iceberg.PartitionField),
+		transformToField:      make(map[transformKey]iceberg.PartitionField),
+		transformToAddedField: make(map[transformKey]iceberg.PartitionField),
+		renames:               make(map[string]string),
+		addedTimeFields:       make(map[int]iceberg.PartitionField),
+		caseSensitive:         caseSensitive,
+		adds:                  make([]iceberg.PartitionField, 0),
+		deletes:               make(map[int]bool),
+	}
+
+	if t == nil {
+		us.err = errors.New("transaction is nil")
+
+		return us
+	}
+	us.err = t.ensureInitialized()
+	if us.err != nil {
+		return us
+	}
+
 	transformToField := make(map[transformKey]iceberg.PartitionField)
 	nameToField := make(map[string]iceberg.PartitionField)
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
@@ -70,19 +94,11 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		lastAssignedFieldId = &v
 	}
 
-	return &UpdateSpec{
-		txn:                   t,
-		nameToField:           nameToField,
-		nameToAddedField:      make(map[string]iceberg.PartitionField),
-		transformToField:      transformToField,
-		transformToAddedField: make(map[transformKey]iceberg.PartitionField),
-		renames:               make(map[string]string),
-		addedTimeFields:       make(map[int]iceberg.PartitionField),
-		caseSensitive:         caseSensitive,
-		adds:                  make([]iceberg.PartitionField, 0),
-		deletes:               make(map[int]bool),
-		lastAssignedFieldId:   *lastAssignedFieldId,
-	}
+	us.nameToField = nameToField
+	us.transformToField = transformToField
+	us.lastAssignedFieldId = *lastAssignedFieldId
+
+	return us
 }
 
 func (us *UpdateSpec) AddField(sourceColName string, transform iceberg.Transform, partitionFieldName string) *UpdateSpec {
@@ -108,6 +124,10 @@ func (us *UpdateSpec) RenameField(name string, newName string) *UpdateSpec {
 }
 
 func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
+	if us.err != nil {
+		return nil, nil, us.err
+	}
+
 	for _, op := range us.operations {
 		if err := op(); err != nil {
 			return nil, nil, err
@@ -136,6 +156,10 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 }
 
 func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
+	if us.err != nil {
+		return iceberg.PartitionSpec{}, us.err
+	}
+
 	partitionFields := make([]iceberg.PartitionField, 0)
 	partitionNames := make(map[string]bool)
 	spec := us.txn.tbl.Metadata().PartitionSpec()
@@ -190,6 +214,10 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 }
 
 func (us *UpdateSpec) Commit() error {
+	if us.err != nil {
+		return us.err
+	}
+
 	updates, requirements, err := us.BuildUpdates()
 	if err != nil {
 		return err
