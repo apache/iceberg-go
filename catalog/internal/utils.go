@@ -202,15 +202,17 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 	)
 
 	if current != nil {
-		for _, r := range reqs {
-			if err := r.Validate(current.Metadata()); err != nil {
-				return nil, err
-			}
-		}
-
 		baseMeta = current.Metadata()
 		metadataLoc = current.MetadataLocation()
-	} else {
+	}
+
+	for _, r := range reqs {
+		if err := r.Validate(baseMeta); err != nil {
+			return nil, err
+		}
+	}
+
+	if current == nil {
 		var err error
 		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
