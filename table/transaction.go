@@ -382,9 +382,6 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 //
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
-	if err := t.ensureInitialized(); err != nil {
-		return err
-	}
 	var (
 		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
@@ -398,6 +395,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 	if cfg.validationErr != nil {
 		return cfg.validationErr
+	}
+	if err := t.ensureInitialized(); err != nil {
+		return err
 	}
 
 	// Read table-level retention properties as the last-resort defaults,
