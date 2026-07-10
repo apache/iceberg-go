@@ -881,8 +881,10 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
 	}
 
-	// Delete the table directory root from the local storage
-	return c.DropTable(ctx, identifier)
+	// PurgeFiles removes the metadata files that DropTable uses to recognize a
+	// table. The table was already validated by LoadTable above, so remove its
+	// directory directly instead of checking it again after the purge.
+	return c.filesystem.RemoveAll(c.tableToPath(identifier))
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {

@@ -1437,6 +1437,47 @@ func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
 	s.True(os.IsNotExist(statErr))
 }
 
+func (s *HadoopCatalogTestSuite) TestPurgeTable() {
+	ctx := context.Background()
+	ident := table.Identifier{"ns", "tbl"}
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	externalDataPath := filepath.Join(s.warehouse, "external", "data.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(externalDataPath), 0o755))
+	s.Require().NoError(os.WriteFile(externalDataPath, []byte("data"), 0o644))
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		externalDataPath,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		4,
+	)
+	s.Require().NoError(err)
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AddDataFiles(ctx, []iceberg.DataFile{dataFileBuilder.Build()}, nil))
+	_, err = tx.Commit(ctx)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.cat.PurgeTable(ctx, ident))
+
+	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
+	s.True(os.IsNotExist(statErr))
+	_, statErr = os.Stat(externalDataPath)
+	s.True(os.IsNotExist(statErr))
+	exists, err := s.cat.CheckTableExists(ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
 func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
 	err := s.cat.DropTable(context.Background(), []string{"tbl"})
 	s.Require().Error(err)
