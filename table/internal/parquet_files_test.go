@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	iofs "io/fs"
 	"math"
 	"math/big"
@@ -60,6 +61,69 @@ type abortTestFile struct {
 
 func (f *abortTestFile) Close() error {
 	return f.closeErr
+}
+
+type trackingOpenFile struct {
+	*bytes.Reader
+	closeErr error
+	closed   bool
+}
+
+func (f *trackingOpenFile) Close() error {
+	f.closed = true
+
+	return f.closeErr
+}
+
+func (f *trackingOpenFile) Stat() (iofs.FileInfo, error) {
+	return nil, nil
+}
+
+func (f *trackingOpenFile) ReadFrom(r io.Reader) (n int64, err error) {
+	return 0, nil
+}
+
+func (f *trackingOpenFile) Write(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+type trackingFileSystem struct {
+	file *trackingOpenFile
+}
+
+func (f *trackingFileSystem) Open(name string) (iceio.File, error) {
+	return f.file, nil
+}
+
+func (f *trackingFileSystem) Remove(name string) error {
+	return nil
+}
+
+func mustParquetBytesWithInvalidArrowSchema(t *testing.T) []byte {
+	t.Helper()
+
+	fields := schema.FieldList{
+		schema.NewInt32Node("id", parquet.Repetitions.Required, 1),
+	}
+	sc, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, fields, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	w := file.NewParquetWriter(&buf, sc)
+	require.NoError(t, w.AppendKeyValueMetadata("ARROW:schema", "not-base64"))
+
+	rowGroup := w.AppendRowGroup()
+	column, err := rowGroup.NextColumn()
+	require.NoError(t, err)
+
+	cw := column.(*file.Int32ColumnChunkWriter)
+	_, err = cw.WriteBatch([]int32{1}, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, cw.Close())
+	require.NoError(t, rowGroup.Close())
+	require.NoError(t, w.Close())
+
+	return buf.Bytes()
 }
 
 func newAbortTestWriter(t *testing.T, fs iceio.WriteFileIO, fileName string) internal.FileWriter {
@@ -178,6 +242,88 @@ func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, tab
 	defer rdr.Close()
 
 	return rdr.MetaData(), tableMeta
+}
+
+func TestParquetOpenClosesFileOnNewParquetReaderFailure(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader([]byte("not-a-parquet-file")),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	_, err := format.Open(context.Background(), mockIO, "bad.parquet")
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
+}
+
+func TestParquetOpenClosesFileOnNewFileReaderFailure(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader(mustParquetBytesWithInvalidArrowSchema(t)),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	_, err := format.Open(context.Background(), mockIO, "bad.parquet")
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
+}
+
+func TestParquetGetReaderClosesFileOnNewParquetReaderFailure(t *testing.T) {
+	data := []byte("not-a-parquet-file")
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader(data),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"bad.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	_, err = fileSource.GetReader(context.Background())
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
+}
+
+func TestParquetGetReaderClosesFileOnNewFileReaderFailure(t *testing.T) {
+	data := mustParquetBytesWithInvalidArrowSchema(t)
+	mockFile := &trackingOpenFile{
+		Reader: bytes.NewReader(data),
+	}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"bad.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	_, err = fileSource.GetReader(context.Background())
+	require.Error(t, err)
+	assert.True(t, mockFile.closed)
 }
 
 func assertBounds[T iceberg.LiteralType](t *testing.T, bound []byte, typ iceberg.Type, expected T) {
@@ -844,6 +990,52 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 		WriteProps: []parquet.WriterProperty{},
 	}, []arrow.RecordBatch{rec})
 	require.ErrorContains(t, err, "error on close")
+}
+
+func TestNewFileWriterRejectsInvalidWriteProps(t *testing.T) {
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+
+	icebergSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID:       1,
+		Name:     "id",
+		Type:     iceberg.PrimitiveTypes.Int32,
+		Required: false,
+	})
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		writeProps any
+		expected   string
+	}{
+		{
+			name:       "nil write props",
+			writeProps: nil,
+			expected:   "write properties are required",
+		},
+		{
+			name:       "wrong write props type",
+			writeProps: "bad",
+			expected:   "invalid write properties type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			memfs := iceio.NewMemFS()
+
+			_, err = fm.NewFileWriter(context.Background(), memfs, nil, internal.WriteFileInfo{
+				FileSchema: icebergSchema,
+				FileName:   "f",
+				WriteProps: tt.writeProps,
+				Content:    iceberg.EntryContentData,
+				Spec:       *iceberg.UnpartitionedSpec,
+			}, arrowSchema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, tt.expected)
+		})
+	}
 }
 
 func TestParquetFileWriterAbortRemovesFile(t *testing.T) {

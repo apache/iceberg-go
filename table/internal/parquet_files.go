@@ -82,11 +82,19 @@ const (
 
 type parquetFormat struct{}
 
-func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (FileReader, error) {
+func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ FileReader, err error) {
 	inputfile, err := fs.Open(path)
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if err != nil {
+			if closeErr := inputfile.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+	}()
 
 	rdr, err := file.NewParquetReader(inputfile)
 	if err != nil {
@@ -402,14 +410,12 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 
 	counter := &internal.CountingWriter{W: fw}
 	mem := compute.GetAllocator(ctx)
-	// Clone: WriteProps is shared across concurrent partition writers; appending in place races.
-	wp := slices.Clone(info.WriteProps.([]parquet.WriterProperty))
-	// Shredded decimals need the spec's INT32/INT64/FLBA-by-precision types; arrow-go
-	// emits those only with StoreDecimalAsInteger, so gate it per file on one being present.
-	if arrowSchemaHasShreddedDecimal(arrowSchema) {
-		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
+	writerProps, err := getWriteProperties(info.WriteProps, arrowSchema)
+	if err != nil {
+		fw.Close()
+
+		return nil, err
 	}
-	writerProps := parquet.NewWriterProperties(wp...)
 	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
 
 	writer, err := pqarrow.NewFileWriter(arrowSchema, counter, writerProps, arrProps)
@@ -474,6 +480,29 @@ func typeHasDecimal128(dt arrow.DataType) bool {
 	}
 
 	return false
+}
+
+// getWriteProperties requires explicit write properties so misconfigured writer
+// plumbing fails fast instead of silently defaulting Parquet settings.
+func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.WriterProperties, error) {
+	if writeProps == nil {
+		return nil, fmt.Errorf("%w: write properties are required", iceberg.ErrInvalidArgument)
+	}
+
+	writerProperties, ok := writeProps.([]parquet.WriterProperty)
+	if !ok {
+		return nil, fmt.Errorf("%w: invalid write properties type %T", iceberg.ErrInvalidArgument, writeProps)
+	}
+
+	// Clone: WriteProps is shared across concurrent partition writers; appending in place races.
+	wp := slices.Clone(writerProperties)
+	// Shredded decimals need the spec's INT32/INT64/FLBA-by-precision types; arrow-go
+	// emits those only with StoreDecimalAsInteger, so gate it per file on one being present.
+	if arrowSchemaHasShreddedDecimal(arrowSchema) {
+		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
+	}
+
+	return parquet.NewWriterProperties(wp...), nil
 }
 
 // Write appends a record batch to the Parquet file.
@@ -1108,11 +1137,19 @@ func checkRowGroupBloomFilters(
 	return true, nil
 }
 
-func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error) {
+func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader, err error) {
 	pf, err := pfs.fs.Open(pfs.file.FilePath())
 	if err != nil {
 		return nil, err
 	}
+
+	defer func() {
+		if err != nil {
+			if closeErr := pf.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+	}()
 
 	rdr, err := file.NewParquetReader(pf,
 		file.WithReadProps(parquet.NewReaderProperties(pfs.mem)))
@@ -1136,7 +1173,9 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 		return nil, err
 	}
 
-	return wrapPqArrowReader{fr}, nil
+	result = wrapPqArrowReader{fr}
+
+	return result, nil
 }
 
 type manifestVisitor[T any] interface {

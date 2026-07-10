@@ -923,6 +923,47 @@ func TestV2SequenceNumberCannotDecrease(t *testing.T) {
 	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 1")
 }
 
+func TestV3SequenceNumberCannotDecrease(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID1 := int64(0)
+	addedRows := int64(10)
+
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID1,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+
+	firstRowID2 := int64(10)
+	parentSnapshotID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentSnapshotID,
+		SequenceNumber:   0,
+		TimestampMs:      builder.lastUpdatedMS + 1,
+		ManifestList:     "/snap-0.avro",
+		Summary: &Summary{
+			Operation:  OpAppend,
+			Properties: map[string]string{},
+		},
+		SchemaID:   &schemaID,
+		FirstRowID: &firstRowID2,
+		AddedRows:  &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot2)
+	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 0")
+}
+
 func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
@@ -2228,6 +2269,83 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 			writeCount := strings.Count(errStr, "invalid write default")
 			assert.Equal(t, 1, initialCount, "expected exactly one 'invalid initial default' line, got %d in: %s", initialCount, errStr)
 			assert.Equal(t, 1, writeCount, "expected exactly one 'invalid write default' line, got %d in: %s", writeCount, errStr)
+		})
+	}
+}
+
+func TestNonSpecialDefaultsRequireV3(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"int", iceberg.Int32Type{}},
+		{"string", iceberg.StringType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" v2 with initial default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with write default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "col",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid write default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with initial and write defaults", func(t *testing.T) {
+			initialValue := 7
+			writeValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &initialValue,
+					WriteDefault:   &writeValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			assert.Equal(t, 1, strings.Count(errStr, "invalid initial default"), "expected exactly one initial-default line in: %s", errStr)
+			assert.Equal(t, 1, strings.Count(errStr, "invalid write default"), "expected exactly one write-default line in: %s", errStr)
 		})
 	}
 }

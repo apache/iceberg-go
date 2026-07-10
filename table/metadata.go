@@ -243,7 +243,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.lastUpdatedMS = 0
 	b.lastColumnId = metadata.LastColumnID()
 	b.schemaList = slices.Clone(metadata.Schemas())
-	b.currentSchemaID = metadata.CurrentSchema().ID
+	currentSchema := metadata.CurrentSchema()
+	if currentSchema == nil {
+		return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+	}
+	b.currentSchemaID = currentSchema.ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
 	defaultSpecID := metadata.DefaultPartitionSpec()
 	b.defaultSpecID = defaultSpecID
@@ -281,6 +285,59 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	}
 
 	return b, nil
+}
+
+func cloneMetadataBuilderInt[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
+}
+
+// clone returns a metadata-builder copy suitable for staging updates.
+// The copy shares only immutable data with the original builder and keeps
+// value types separated so partial update attempts remain atomic.
+func (b *MetadataBuilder) clone() *MetadataBuilder {
+	if b == nil {
+		return nil
+	}
+
+	cloned := &MetadataBuilder{
+		base:                 b.base,
+		updates:              append([]Update(nil), b.updates...),
+		formatVersion:        b.formatVersion,
+		uuid:                 b.uuid,
+		loc:                  b.loc,
+		lastUpdatedMS:        b.lastUpdatedMS,
+		lastColumnId:         b.lastColumnId,
+		schemaList:           slices.Clone(b.schemaList),
+		currentSchemaID:      b.currentSchemaID,
+		specs:                slices.Clone(b.specs),
+		defaultSpecID:        b.defaultSpecID,
+		lastPartitionID:      cloneMetadataBuilderInt(b.lastPartitionID),
+		props:                maps.Clone(b.props),
+		snapshotList:         slices.Clone(b.snapshotList),
+		currentSnapshotID:    cloneMetadataBuilderInt(b.currentSnapshotID),
+		snapshotLog:          slices.Clone(b.snapshotLog),
+		metadataLog:          slices.Clone(b.metadataLog),
+		sortOrderList:        slices.Clone(b.sortOrderList),
+		defaultSortOrderID:   b.defaultSortOrderID,
+		refs:                 maps.Clone(b.refs),
+		statisticsList:       slices.Clone(b.statisticsList),
+		partitionStatsList:   slices.Clone(b.partitionStatsList),
+		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
+		previousFileEntry:    cloneMetadataBuilderInt(b.previousFileEntry),
+		lastSequenceNumber:   cloneMetadataBuilderInt(b.lastSequenceNumber),
+		nextRowID:            cloneMetadataBuilderInt(b.nextRowID),
+		lastAddedSchemaID:    cloneMetadataBuilderInt(b.lastAddedSchemaID),
+		lastAddedPartitionID: cloneMetadataBuilderInt(b.lastAddedPartitionID),
+		lastAddedSortOrderID: cloneMetadataBuilderInt(b.lastAddedSortOrderID),
+	}
+
+	return cloned
 }
 
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
@@ -450,7 +507,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return errors.New("can't add snapshot with no added partition specs")
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
-	} else if b.formatVersion == 2 &&
+	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
