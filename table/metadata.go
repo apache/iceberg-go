@@ -507,7 +507,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return errors.New("can't add snapshot with no added partition specs")
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
-	} else if b.formatVersion == 2 &&
+	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",

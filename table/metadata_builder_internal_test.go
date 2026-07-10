@@ -923,6 +923,47 @@ func TestV2SequenceNumberCannotDecrease(t *testing.T) {
 	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 1")
 }
 
+func TestV3SequenceNumberCannotDecrease(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID1 := int64(0)
+	addedRows := int64(10)
+
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID1,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+
+	firstRowID2 := int64(10)
+	parentSnapshotID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentSnapshotID,
+		SequenceNumber:   0,
+		TimestampMs:      builder.lastUpdatedMS + 1,
+		ManifestList:     "/snap-0.avro",
+		Summary: &Summary{
+			Operation:  OpAppend,
+			Properties: map[string]string{},
+		},
+		SchemaID:   &schemaID,
+		FirstRowID: &firstRowID2,
+		AddedRows:  &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot2)
+	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 0")
+}
+
 func TestCannotAddDuplicateSnapshotID(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
