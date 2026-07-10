@@ -345,7 +345,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			testCfg := *cfg
 			testCfg.prefixMismatchMode = tt.mode
 
-			err := checkPrefixMismatch(tt.referencedPath, tt.filesystemPath, &testCfg)
+			decision, err := checkPrefixMismatch(tt.referencedPath, tt.filesystemPath, &testCfg)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -354,6 +354,11 @@ func TestCheckPrefixMismatch(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
+				if tt.mode == PrefixMismatchDelete && tt.referencedPath != tt.filesystemPath {
+					assert.Equal(t, prefixMismatchDeleteCandidate, decision)
+				} else {
+					assert.Equal(t, prefixMismatchKeep, decision)
+				}
 			}
 		})
 	}
@@ -423,16 +428,16 @@ func TestIsFileOrphan(t *testing.T) {
 			expectOrphan: false,
 		},
 	}
-	normalizedReferencedFiles := make(map[string]string)
-	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
-		normalizedReferencedFiles[normalizedPath] = refPath
-		normalizedReferencedFiles[refPath] = refPath
-	}
+	referencedIndex := newReferencedFileIndex(referencedFiles, cfg)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isOrphan, err := isFileOrphan(tt.file, referencedFiles, normalizedReferencedFiles, cfg)
+			isOrphan, err := isFileOrphan(
+				tt.file,
+				referencedFiles,
+				referencedIndex,
+				cfg,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectOrphan, isOrphan)
 		})
@@ -494,7 +499,7 @@ func TestOrphanCleanup_EdgeCases(t *testing.T) {
 			prefixMismatchMode: PrefixMismatchMode(999), // Invalid mode
 		}
 
-		err := checkPrefixMismatch("s3://bucket/file", "gs://bucket/file", cfg)
+		_, err := checkPrefixMismatch("s3://bucket/file", "gs://bucket/file", cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown prefix mismatch mode")
 	})
@@ -683,6 +688,100 @@ func (m mockFileInfo) Mode() stdfs.FileMode { return m.mode }
 func (m mockFileInfo) ModTime() time.Time   { return time.Time{} }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
+
+func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
+	tests := []struct {
+		name           string
+		referencedPath string
+		listedPath     string
+	}{
+		{
+			name:           "scheme mismatch",
+			referencedPath: "s3://bucket/path/file.parquet",
+			listedPath:     "s3a://bucket/path/file.parquet",
+		},
+		{
+			name:           "authority mismatch",
+			referencedPath: "s3://bucket-a/path/file.parquet",
+			listedPath:     "s3://bucket-b/path/file.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+			})
+			meta, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://bucket/table",
+				iceberg.Properties{PropertyFormatVersion: "2"},
+			)
+			require.NoError(t, err)
+			builder, err := MetadataBuilderFromBase(meta, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.SetStatistics(StatisticsFile{
+				SnapshotID:      1,
+				StatisticsPath:  tt.referencedPath,
+				BlobMetadata:    []BlobMetadata{},
+				FileSizeInBytes: 4,
+			}))
+			meta, err = builder.Build()
+			require.NoError(t, err)
+
+			fsys := &mockListableIO{
+				entries: []mockWalkEntry{{
+					path: tt.listedPath,
+					info: mockFileInfo{name: "file.parquet", size: 4},
+				}},
+			}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				"s3://bucket/table/metadata/v1.metadata.json",
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
+
+			for _, mode := range []PrefixMismatchMode{
+				PrefixMismatchError,
+				PrefixMismatchIgnore,
+				PrefixMismatchDelete,
+			} {
+				t.Run(mode.String(), func(t *testing.T) {
+					var deleted []string
+					result, err := tbl.DeleteOrphanFiles(
+						context.Background(),
+						WithLocation("s3://bucket/path"),
+						WithFilesOlderThan(-time.Hour),
+						WithPrefixMismatchMode(mode),
+						WithDeleteFunc(func(path string) error {
+							deleted = append(deleted, path)
+
+							return nil
+						}),
+					)
+
+					switch mode {
+					case PrefixMismatchError:
+						require.ErrorContains(t, err, "prefix mismatch detected")
+						assert.Empty(t, deleted)
+					case PrefixMismatchIgnore:
+						require.NoError(t, err)
+						assert.Empty(t, result.OrphanFileLocations)
+						assert.Empty(t, deleted)
+					case PrefixMismatchDelete:
+						require.NoError(t, err)
+						assert.Equal(t, []string{tt.listedPath}, result.OrphanFileLocations)
+						assert.Equal(t, []string{tt.listedPath}, deleted)
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	mock := &mockPlainIO{}
