@@ -2232,6 +2232,83 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 	}
 }
 
+func TestNonSpecialDefaultsRequireV3(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"int", iceberg.Int32Type{}},
+		{"string", iceberg.StringType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" v2 with initial default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with write default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "col",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid write default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with initial and write defaults", func(t *testing.T) {
+			initialValue := 7
+			writeValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &initialValue,
+					WriteDefault:   &writeValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			assert.Equal(t, 1, strings.Count(errStr, "invalid initial default"), "expected exactly one initial-default line in: %s", errStr)
+			assert.Equal(t, 1, strings.Count(errStr, "invalid write default"), "expected exactly one write-default line in: %s", errStr)
+		})
+	}
+}
+
 func TestComplexTypeDefaultValidation(t *testing.T) {
 	t.Run("InvalidStructInitialDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
