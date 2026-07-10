@@ -40,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -1032,6 +1033,14 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
 	if err := catalog.ValidateViewIdentifier(ident); err != nil {
+		return "", "", err
+	}
+
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+}
+
+func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
+	if err := catalog.ValidateFunctionIdentifier(ident); err != nil {
 		return "", "", err
 	}
 
@@ -2044,4 +2053,146 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 	}
 
 	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+}
+
+// Catalog implements the optional function (SQL UDF) read support defined
+// by the REST spec: list and load. The function endpoints are not part of
+// the spec's assumed default endpoint set, so they are only used when the
+// server advertises them.
+var _ catalog.FunctionCatalog = (*Catalog)(nil)
+
+// ListFunctions returns the function (SQL UDF) identifiers under a
+// namespace, with the returned identifiers containing the information
+// required to load the function via this catalog.
+func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		pageSize := r.getPageSize(ctx)
+		var pageToken string
+
+		for {
+			functions, nextPageToken, err := r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
+			if err != nil {
+				yield(table.Identifier{}, err)
+
+				return
+			}
+			for _, function := range functions {
+				if !yield(function, nil) {
+					return
+				}
+			}
+			if nextPageToken == "" {
+				return
+			}
+			pageToken = nextPageToken
+		}
+	}
+}
+
+func (r *Catalog) listFunctionsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+	if err := checkValidNamespace(namespace); err != nil {
+		return nil, "", err
+	}
+	// Unsupported listing yields an empty result rather than an error.
+	if !r.endpoints.allowed(endpointListFunctions) {
+		return nil, "", nil
+	}
+	ns := r.encodeNamespace(namespace)
+	path, err := endpointListFunctions.reqPath(ns)
+	if err != nil {
+		return nil, "", err
+	}
+	uri := r.baseURI.JoinPath(path...)
+
+	v := url.Values{}
+	if pageSize > 0 {
+		v.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("pageToken", pageToken)
+	}
+
+	uri.RawQuery = v.Encode()
+	// Function identifiers are CatalogObjectIdentifier values: ordered
+	// hierarchy levels (the namespace levels followed by the function
+	// name), not the {namespace, name} object tables and views use.
+	type resp struct {
+		Identifiers   [][]string `json:"identifiers"`
+		NextPageToken string     `json:"next-page-token,omitempty"`
+	}
+
+	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	if err != nil {
+		return nil, "", err
+	}
+
+	out := make([]table.Identifier, len(rsp.Identifiers))
+	for i, levels := range rsp.Identifiers {
+		out[i] = table.Identifier(levels)
+	}
+
+	return out, rsp.NextPageToken, nil
+}
+
+// loadFunctionResponse contains the response from loading a function.
+type loadFunctionResponse struct {
+	MetadataLoc string          `json:"metadata-location"`
+	RawMetadata json.RawMessage `json:"metadata"`
+}
+
+// LoadFunction loads a function (SQL UDF) from the catalog. All overloaded
+// definitions are included in the single metadata response.
+func (r *Catalog) LoadFunction(ctx context.Context, identifier table.Identifier) (*udf.UDF, error) {
+	if err := r.endpoints.check(endpointLoadFunction); err != nil {
+		return nil, err
+	}
+
+	ns, fn, err := r.splitFunctionIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := endpointLoadFunction.reqPath(ns, fn)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[loadFunctionResponse](ctx, r.baseURI, path,
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchFunction,
+		})
+	if err != nil {
+		return nil, err
+	}
+
+	metadata, err := udf.ParseMetadataBytes(rsp.RawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse function metadata: %w", err)
+	}
+
+	return udf.New(identifier, metadata, rsp.MetadataLoc), nil
+}
+
+// CheckFunctionExists returns if the function exists. The REST spec defines
+// no HEAD endpoint for functions, so existence is checked by loading the
+// function; if loading is unsupported, its ErrEndpointNotSupported surfaces
+// rather than a bogus "not found".
+func (r *Catalog) CheckFunctionExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	// Validate first, as the table and view existence checks do: an invalid
+	// identifier surfaces as an error, so ErrNoSuchFunction below can only
+	// mean a server-reported "not found".
+	if err := catalog.ValidateFunctionIdentifier(identifier); err != nil {
+		return false, err
+	}
+
+	_, err := r.LoadFunction(ctx, identifier)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchFunction) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
 }

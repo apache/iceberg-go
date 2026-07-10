@@ -52,3 +52,11 @@ func TestValidateViewIdentifier(t *testing.T) {
 	require.ErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchView)
 	require.NotErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchTable)
 }
+
+func TestValidateFunctionIdentifier(t *testing.T) {
+	require.NoError(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function"}))
+
+	require.ErrorIs(t, catalog.ValidateFunctionIdentifier(table.Identifier{"function"}), catalog.ErrNoSuchFunction)
+	require.ErrorIs(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function/name"}), catalog.ErrNoSuchFunction)
+	require.NotErrorIs(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function/name"}), catalog.ErrNoSuchTable)
+}

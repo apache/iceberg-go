@@ -211,6 +211,24 @@ func TestBuilderFromBase(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidUDFMetadata)
 }
 
+// nilPropertiesMetadata simulates a third-party Metadata implementation that
+// returns nil Properties, driving the builder's defensive nil-props guard.
+type nilPropertiesMetadata struct{ Metadata }
+
+func (nilPropertiesMetadata) Properties() iceberg.Properties { return nil }
+
+func TestBuilderFromBaseNilProperties(t *testing.T) {
+	base := nilPropertiesMetadata{parseFixture(t, "udf-metadata-scalar.json")}
+
+	builder, err := MetadataBuilderFromBase(base)
+	require.NoError(t, err)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	assert.NotNil(t, meta.Properties())
+	assert.Empty(t, meta.Properties())
+}
+
 func TestBuilderNoChanges(t *testing.T) {
 	base := parseFixture(t, "udf-metadata-scalar.json")
 

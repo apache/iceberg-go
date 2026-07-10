@@ -39,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/udf"
 )
 
 type Type string
@@ -63,6 +64,7 @@ var (
 	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
 	ErrNoSuchView             = errors.New("view does not exist")
 	ErrViewAlreadyExists      = errors.New("view already exists")
+	ErrNoSuchFunction         = errors.New("function does not exist")
 	ErrEmptyCommitList        = errors.New("commit list must not be empty")
 	ErrMissingIdentifier      = errors.New("every table commit must have a valid identifier")
 )
@@ -192,6 +194,30 @@ type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }
 
+// FunctionCatalog is an optional interface implemented by catalogs that
+// support the Iceberg REST function (SQL UDF) endpoints. The function
+// endpoints are not part of the spec's assumed default endpoint set, so
+// servers must advertise them: unsupported loads report an
+// endpoint-not-supported error and unsupported listings yield no results.
+// Callers should check for this capability via a type assertion:
+//
+//	if fc, ok := cat.(catalog.FunctionCatalog); ok {
+//	    fn, err := fc.LoadFunction(ctx, ident)
+//	}
+type FunctionCatalog interface {
+	// ListFunctions returns the function identifiers under a namespace,
+	// with the returned identifiers containing the information required
+	// to load the function via this catalog.
+	ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
+	// LoadFunction loads a function from the catalog. All overloaded
+	// definitions are included in the single metadata response.
+	LoadFunction(ctx context.Context, identifier table.Identifier) (*udf.UDF, error)
+	// CheckFunctionExists returns if the function exists. The REST spec
+	// defines no HEAD endpoint for functions, so existence is checked by
+	// loading the function.
+	CheckFunctionExists(ctx context.Context, identifier table.Identifier) (bool, error)
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {
@@ -216,7 +242,7 @@ func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
-func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) error {
+func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 	if len(ident) < 2 {
 		return fmt.Errorf("%w: missing namespace or invalid identifier %v",
 			notFoundErr, strings.Join(ident, "."))
@@ -241,12 +267,17 @@ func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) er
 
 // ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
 func ValidateTableIdentifier(ident table.Identifier) error {
-	return validateTableOrViewIdentifier(ident, ErrNoSuchTable)
+	return validateIdentifier(ident, ErrNoSuchTable)
 }
 
 // ValidateViewIdentifier checks that an identifier contains at least one valid namespace level and a view name.
 func ValidateViewIdentifier(ident table.Identifier) error {
-	return validateTableOrViewIdentifier(ident, ErrNoSuchView)
+	return validateIdentifier(ident, ErrNoSuchView)
+}
+
+// ValidateFunctionIdentifier checks that an identifier contains at least one valid namespace level and a function name.
+func ValidateFunctionIdentifier(ident table.Identifier) error {
+	return validateIdentifier(ident, ErrNoSuchFunction)
 }
 
 type CreateTableOpt func(*CreateTableCfg)
