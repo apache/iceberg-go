@@ -1925,6 +1925,24 @@ func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	m.Assert().Equal(0, *data.SortOrderID())
 }
 
+func (m *ManifestTestSuite) TestManifestEntryFileSequenceNumReturnsCopy() {
+	entryFileSeqNum := int64(10)
+	entry := &manifestEntry{
+		EntryStatus: EntryStatusADDED,
+		FileSeqNum:  &entryFileSeqNum,
+		Data:        &dataFile{Path: "/data/sample.parquet"},
+	}
+
+	got := entry.FileSequenceNum()
+	m.Require().NotNil(got)
+	m.Assert().Equal(entryFileSeqNum, *got)
+	*got = 20
+
+	current := entry.FileSequenceNum()
+	m.Require().NotNil(current)
+	m.Assert().Equal(int64(10), *current)
+}
+
 // equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
 func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc *avro.Schema) {
 	m.T().Helper()

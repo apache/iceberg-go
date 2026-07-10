@@ -2180,7 +2180,13 @@ func (m *manifestEntry) SequenceNum() int64 {
 }
 
 func (m *manifestEntry) FileSequenceNum() *int64 {
-	return m.FileSeqNum
+	if m.FileSeqNum == nil {
+		return nil
+	}
+
+	fileSeqNum := *m.FileSeqNum
+
+	return &fileSeqNum
 }
 
 func (m *manifestEntry) DataFile() DataFile { return m.Data }
