@@ -511,7 +511,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// the new branch head so re-submission is not rejected
 			// just because a peer advanced the head with a
 			// non-conflicting commit.
-			fresh, refreshErr := t.cat.LoadTable(retryCtx, t.identifier)
+			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}

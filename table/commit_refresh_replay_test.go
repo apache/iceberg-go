@@ -57,6 +57,7 @@ type identifierCapturingCatalog struct {
 	metadata         Metadata
 	loadIdentifier   Identifier
 	commitIdentifier Identifier
+	failNextCommit   bool
 }
 
 func (c *headTrackingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
@@ -89,6 +90,11 @@ func (c *identifierCapturingCatalog) LoadTable(_ context.Context, ident Identifi
 
 func (c *identifierCapturingCatalog) CommitTable(_ context.Context, ident Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
 	c.commitIdentifier = ident
+	if c.failNextCommit {
+		c.failNextCommit = false
+
+		return nil, "", ErrCommitFailed
+	}
 
 	updated, err := UpdateTableMetadata(c.metadata, updates, "")
 	if err != nil {
@@ -246,6 +252,27 @@ func TestDoCommitPassesIdentifierCopy(t *testing.T) {
 	cat.commitIdentifier[0] = "corrupt"
 	assert.Equal(t, identifier, tbl.Identifier())
 	assert.Equal(t, identifier, updated.Identifier())
+}
+
+func TestDoCommitRetryPassesIdentifierCopy(t *testing.T) {
+	branchHead := int64(1)
+	meta := newConflictTestMetadataWithProps(t, &branchHead, iceberg.Properties{
+		CommitNumRetriesKey:     "1",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	cat := &identifierCapturingCatalog{metadata: meta, failNextCommit: true}
+	identifier := Identifier{"db", "do-commit-retry-copy-test"}
+
+	tbl := New(identifier, meta, "file:///tmp/test-do-commit-retry-copy/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	_, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
+	require.NoError(t, err)
+	require.NotNil(t, cat.loadIdentifier)
+
+	cat.loadIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
 }
 
 // TestRewriteRefSnapshotRequirements covers the helper directly:

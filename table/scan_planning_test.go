@@ -116,6 +116,22 @@ func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	assert.Equal(t, Identifier{"db", "scan-copy-test"}, scan.identifier)
 }
 
+func TestTransactionScanCopiesIdentifier(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	txn.tbl.planner = &fakeScanPlanner{
+		result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
+		supports: true,
+	}
+
+	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningAuto))
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	scan.identifier[0] = "corrupt"
+	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+}
+
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -136,8 +152,7 @@ type fakeScanPlanner struct {
 func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports }
 
 func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
-	// Capture a defensive copy to verify call-site identifiers are not shared.
-	f.receivedIdentifier = append([]string(nil), req.Identifier...)
+	f.receivedIdentifier = req.Identifier
 
 	return f.result, f.err
 }
