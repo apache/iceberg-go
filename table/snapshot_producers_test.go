@@ -1384,6 +1384,49 @@ func TestRemovedFilePresenceCounts(t *testing.T) {
 	require.False(t, present.counts(absentDV), "DV absent by referenced data file")
 }
 
+// TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing pins the terminal abort:
+// when a data file this producer intends to rewrite is no longer on the fresh
+// parent (a peer already removed it), checkRemovedFiles must fail with
+// ErrCommitDiverged rather than resurrecting our replacement beside the peer's
+// result.
+func TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	target := newTestDataFile(t, spec, "mem://default/table-location/data/gone.parquet", nil)
+	sp.deleteDataFile(target)
+
+	// Fresh parent no longer contains the data file (empty manifest list).
+	parentManifestList := "mem://default/table-location/metadata/fresh-parent-diverged.avro"
+	out, err := wfs.Create(parentManifestList)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(2, out, 99, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, out.Close())
+
+	freshParent := &Snapshot{SnapshotID: 99, ManifestList: parentManifestList}
+
+	present, err := sp.checkRemovedFiles(freshParent)
+	require.ErrorIs(t, err, ErrCommitDiverged)
+	require.ErrorContains(t, err, target.FilePath())
+	require.Nil(t, present, "no presence set is returned on a diverged abort")
+}
+
+// TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove guards the append
+// fast-path: a producer that removes nothing must not scan the parent's
+// manifests at all, so a nil parent is fine and an empty presence set is
+// returned.
+func TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	present, err := sp.checkRemovedFiles(nil)
+	require.NoError(t, err)
+	require.Empty(t, present.deleteFiles)
+	require.Empty(t, present.dvRefs)
+}
+
 func TestAddDataFilesV3RejectsWithoutFirstRowID(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	txn, _ := createTestTransactionWithMemIO(t, spec)

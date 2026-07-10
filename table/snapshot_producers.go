@@ -26,7 +26,6 @@ import (
 	"maps"
 	"runtime"
 	"slices"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -913,7 +912,7 @@ func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
 // because a peer may have already dropped it — replaying the captured removal
 // delta on top of a fresh parent that no longer counts the file undercounts
 // total-delete-files. Removed data files are always counted: a successful retry
-// has already asserted they are present (assertRemovedFilesPresent).
+// has already asserted they are present (checkRemovedFiles).
 func (sp *snapshotProducer) summaryOnRetry(props iceberg.Properties, parent *Snapshot, present *removedFilePresence) (Summary, error) {
 	delta, err := sp.accumulateSummaryDelta(present.counts)
 	if err != nil {
@@ -1025,6 +1024,13 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 		dvRefs:      map[string]struct{}{},
 	}
 
+	// Producers that remove nothing (fast/merge append) skip the parent scan
+	// entirely — otherwise every retry re-reads the full manifest list only to
+	// find there is nothing to check.
+	if len(sp.deletedFiles) == 0 && len(sp.deletedDeleteFiles) == 0 && len(sp.deletedDVsByRef) == 0 {
+		return present, nil
+	}
+
 	missingData := make(map[string]struct{}, len(sp.deletedFiles))
 	for path := range sp.deletedFiles {
 		missingData[path] = struct{}{}
@@ -1049,11 +1055,18 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 
 				continue
 			}
-			if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
-				if _, want := sp.deletedDVsByRef[*ref]; want {
-					present.dvRefs[*ref] = struct{}{}
+			if isDeletionVector(df) {
+				// A DV without a referenced data file cannot be matched by ref;
+				// skip it rather than misclassifying it as a path-keyed delete file.
+				if ref := df.ReferencedDataFile(); ref != nil {
+					if _, want := sp.deletedDVsByRef[*ref]; want {
+						present.dvRefs[*ref] = struct{}{}
+					}
 				}
-			} else if _, want := sp.deletedDeleteFiles[df.FilePath()]; want {
+
+				continue
+			}
+			if _, want := sp.deletedDeleteFiles[df.FilePath()]; want {
 				present.deleteFiles[df.FilePath()] = struct{}{}
 			}
 		}
@@ -1071,9 +1084,9 @@ func (sp *snapshotProducer) missingDataError(present *removedFilePresence, missi
 	for path := range missingData {
 		missing = append(missing, path)
 	}
-	sort.Strings(missing)
+	slices.Sort(missing)
 
-	return nil, fmt.Errorf("%w: %d data file(s) to rewrite are no longer on the branch head, e.g. %v",
+	return nil, fmt.Errorf("%w: %d data file(s) to rewrite are no longer on the branch head, e.g. %q",
 		ErrCommitDiverged, len(missing), missing[:min(len(missing), 5)])
 }
 
@@ -1277,9 +1290,11 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		// removal is not subtracted twice, which would undercount
 		// total-delete-files.
 		if freshParent != nil && freshParent.Summary != nil && capturedSnapshot.Summary != nil {
-			if s, sumErr := sp.summaryOnRetry(sp.snapshotProps, freshParent, present); sumErr == nil {
-				rebuilt.Summary = &s
+			s, sumErr := sp.summaryOnRetry(sp.snapshotProps, freshParent, present)
+			if sumErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: recompute summary: %w", sumErr)
 			}
+			rebuilt.Summary = &s
 		}
 
 		return &rebuilt, nil
