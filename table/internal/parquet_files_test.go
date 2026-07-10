@@ -992,6 +992,52 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 	require.ErrorContains(t, err, "error on close")
 }
 
+func TestNewFileWriterRejectsInvalidWriteProps(t *testing.T) {
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+
+	icebergSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID:       1,
+		Name:     "id",
+		Type:     iceberg.PrimitiveTypes.Int32,
+		Required: false,
+	})
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		writeProps any
+		expected   string
+	}{
+		{
+			name:       "nil write props",
+			writeProps: nil,
+			expected:   "write properties are required",
+		},
+		{
+			name:       "wrong write props type",
+			writeProps: "bad",
+			expected:   "invalid write properties type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			memfs := iceio.NewMemFS()
+
+			_, err = fm.NewFileWriter(context.Background(), memfs, nil, internal.WriteFileInfo{
+				FileSchema: icebergSchema,
+				FileName:   "f",
+				WriteProps: tt.writeProps,
+				Content:    iceberg.EntryContentData,
+				Spec:       *iceberg.UnpartitionedSpec,
+			}, arrowSchema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, tt.expected)
+		})
+	}
+}
+
 func TestParquetFileWriterAbortRemovesFile(t *testing.T) {
 	memFS := iceio.NewMemFS()
 	fileName := "mem://abort-test/data.parquet"

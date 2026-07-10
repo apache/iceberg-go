@@ -403,7 +403,12 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 
 	counter := &internal.CountingWriter{W: fw}
 	mem := compute.GetAllocator(ctx)
-	writerProps := parquet.NewWriterProperties(info.WriteProps.([]parquet.WriterProperty)...)
+	writerProps, err := getWriteProperties(info.WriteProps)
+	if err != nil {
+		fw.Close()
+
+		return nil, err
+	}
 	arrProps := pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema())
 
 	writer, err := pqarrow.NewFileWriter(arrowSchema, counter, writerProps, arrProps)
@@ -437,6 +442,21 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		geoCols:    geoCols,
 		geoAccs:    geoAccs,
 	}, nil
+}
+
+// getWriteProperties requires explicit write properties so misconfigured writer
+// plumbing fails fast instead of silently defaulting Parquet settings.
+func getWriteProperties(writeProps any) (*parquet.WriterProperties, error) {
+	if writeProps == nil {
+		return nil, fmt.Errorf("%w: write properties are required", iceberg.ErrInvalidArgument)
+	}
+
+	writerProperties, ok := writeProps.([]parquet.WriterProperty)
+	if !ok {
+		return nil, fmt.Errorf("%w: invalid write properties type %T", iceberg.ErrInvalidArgument, writeProps)
+	}
+
+	return parquet.NewWriterProperties(writerProperties...), nil
 }
 
 // Write appends a record batch to the Parquet file.
