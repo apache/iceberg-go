@@ -219,6 +219,25 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "rewrite-manifests with flags",
+			args: []string{"rewrite-manifests", "prod.db.events", "--target-manifest-size", "8388608", "--spec-id", "2"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.RewriteManifests)
+				assert.Equal(t, "prod.db.events", a.RewriteManifests.TableID)
+				assert.Equal(t, int64(8388608), a.RewriteManifests.TargetManifestSize)
+				assert.Equal(t, 2, a.RewriteManifests.SpecID)
+			},
+		},
+		{
+			name: "rewrite-manifests defaults",
+			args: []string{"rewrite-manifests", "prod.db.events"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.RewriteManifests)
+				assert.Equal(t, int64(0), a.RewriteManifests.TargetManifestSize)
+				assert.Equal(t, -1, a.RewriteManifests.SpecID)
+			},
+		},
+		{
 			name: "global flags",
 			args: []string{"--catalog", "glue", "--output", "json", "--warehouse", "s3://wh", "list"},
 			check: func(t *testing.T, a Args) {

@@ -167,31 +167,38 @@ type CompactCmd struct {
 	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack compaction"`
 }
 
+type RewriteManifestsCmd struct {
+	TableID            string `arg:"positional,required" help:"full path to a table"`
+	TargetManifestSize int64  `arg:"--target-manifest-size" default:"0" help:"target manifest size in bytes (default: table property)"`
+	SpecID             int    `arg:"--spec-id" default:"-1" help:"only rewrite manifests of this partition spec id"`
+}
+
 // Top-level args
 
 type Args struct {
-	List         *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
-	Describe     *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
-	Schema       *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
-	Spec         *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
-	Uuid         *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
-	Location     *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
-	Create       *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
-	Drop         *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
-	Files        *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
-	Rename       *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
-	Properties   *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
-	Compact      *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
-	Info         *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
-	Snapshots    *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
-	Refs         *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
-	PartStats    *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
-	Branch       *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
-	Tag          *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
-	ExpireSnaps  *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
-	CleanOrphans *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
-	Upgrade      *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
-	Rollback     *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
+	List             *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
+	Describe         *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
+	Schema           *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
+	Spec             *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
+	Uuid             *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
+	Location         *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
+	Create           *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
+	Drop             *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
+	Files            *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
+	Rename           *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
+	Properties       *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
+	Compact          *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	RewriteManifests *RewriteManifestsCmd `arg:"subcommand:rewrite-manifests" help:"rewrite (compact) table manifests"`
+	Info             *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
+	Snapshots        *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
+	Refs             *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
+	PartStats        *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
+	Branch           *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
+	Tag              *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
+	ExpireSnaps      *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
+	CleanOrphans     *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
+	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
+	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
 	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
@@ -324,6 +331,8 @@ func main() {
 		runProperties(ctx, output, cat, args.Properties)
 	case args.Compact != nil:
 		runCompact(ctx, output, cat, args.Compact)
+	case args.RewriteManifests != nil:
+		runRewriteManifests(ctx, output, cat, args.RewriteManifests)
 	case args.Info != nil:
 		tbl := loadTable(ctx, output, cat, args.Info.TableID)
 		output.Info(tbl)

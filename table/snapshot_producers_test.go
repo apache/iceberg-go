@@ -857,7 +857,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	}
 
 	mgr := manifestMergeManager{
-		targetSizeBytes:  int(manifests[0].Length() * 2),
+		targetSizeBytes:  manifests[0].Length() * 2,
 		minCountToMerge:  1,
 		mergeEnabled:     true,
 		mergeConcurrency: mergeConcurrency,
