@@ -60,6 +60,25 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 }
 
+func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	baseMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	updates := []Update{
+		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewSetCurrentSchemaUpdate(9999),
+	}
+
+	err = txn.apply(updates, nil)
+	require.Error(t, err)
+
+	postMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.True(t, baseMeta.Equals(postMeta))
+	require.Len(t, txn.reqs, 0)
+}
+
 // TestTransactionApplyDedupesSameRefAssertionsNewTable covers two appends in a
 // single new-table transaction: the first asserts main must not exist, and the
 // second (after the builder has created main) asserts main == the new snapshot.

@@ -283,6 +283,59 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	return b, nil
 }
 
+func cloneMetadataBuilderInt[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
+}
+
+// clone returns a metadata-builder copy suitable for staging updates.
+// The copy shares only immutable data with the original builder and keeps
+// value types separated so partial update attempts remain atomic.
+func (b *MetadataBuilder) clone() *MetadataBuilder {
+	if b == nil {
+		return nil
+	}
+
+	cloned := &MetadataBuilder{
+		base:                 b.base,
+		updates:              append([]Update(nil), b.updates...),
+		formatVersion:        b.formatVersion,
+		uuid:                 b.uuid,
+		loc:                  b.loc,
+		lastUpdatedMS:        b.lastUpdatedMS,
+		lastColumnId:         b.lastColumnId,
+		schemaList:           slices.Clone(b.schemaList),
+		currentSchemaID:      b.currentSchemaID,
+		specs:                slices.Clone(b.specs),
+		defaultSpecID:        b.defaultSpecID,
+		lastPartitionID:      cloneMetadataBuilderInt(b.lastPartitionID),
+		props:                maps.Clone(b.props),
+		snapshotList:         slices.Clone(b.snapshotList),
+		currentSnapshotID:    cloneMetadataBuilderInt(b.currentSnapshotID),
+		snapshotLog:          slices.Clone(b.snapshotLog),
+		metadataLog:          slices.Clone(b.metadataLog),
+		sortOrderList:        slices.Clone(b.sortOrderList),
+		defaultSortOrderID:   b.defaultSortOrderID,
+		refs:                 maps.Clone(b.refs),
+		statisticsList:       slices.Clone(b.statisticsList),
+		partitionStatsList:   slices.Clone(b.partitionStatsList),
+		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
+		previousFileEntry:    cloneMetadataBuilderInt(b.previousFileEntry),
+		lastSequenceNumber:   cloneMetadataBuilderInt(b.lastSequenceNumber),
+		nextRowID:            cloneMetadataBuilderInt(b.nextRowID),
+		lastAddedSchemaID:    cloneMetadataBuilderInt(b.lastAddedSchemaID),
+		lastAddedPartitionID: cloneMetadataBuilderInt(b.lastAddedPartitionID),
+		lastAddedSortOrderID: cloneMetadataBuilderInt(b.lastAddedSortOrderID),
+	}
+
+	return cloned
+}
+
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
 
 func (b *MetadataBuilder) CurrentSpec() (*iceberg.PartitionSpec, error) {
