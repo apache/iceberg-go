@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"log"
 	"maps"
 	"runtime"
 	"slices"
@@ -67,6 +68,15 @@ type producerImpl interface {
 	// unconditionally a no-op; commit() skips validator registration
 	// entirely when this returns false, so validate will never run.
 	needsValidation() bool
+}
+
+// supersededAccumulator marks a producer that writes merged manifests OCC
+// retries orphan. Only rewrite implements it.
+type supersededAccumulator interface {
+	// supersededManifests returns paths of merged manifests to delete once the
+	// commit resolves. When committed is false the commit never landed, so the
+	// final attempt's manifests are orphaned too and are included.
+	supersededManifests(committed bool) []string
 }
 
 func newManifestFileName(num int, commit uuid.UUID) string {
@@ -333,7 +343,7 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context, parent *Snapshot) 
 func (of *overwriteFiles) needsValidation() bool { return true }
 
 type manifestMergeManager struct {
-	targetSizeBytes  int
+	targetSizeBytes  int64
 	minCountToMerge  int
 	mergeEnabled     bool
 	mergeConcurrency int
@@ -401,7 +411,7 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 
 func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, specID int, manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	packer := internal.SlicePacker[iceberg.ManifestFile]{
-		TargetWeight:    int64(m.targetSizeBytes),
+		TargetWeight:    m.targetSizeBytes,
 		Lookback:        1,
 		LargestBinFirst: false,
 	}
@@ -444,10 +454,30 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 	}
 
 	if err := g.Wait(); err != nil {
+		// Delete bins that finished before this one failed.
+		m.removeOrphans(manifests, slices.Concat(binResults...))
+
 		return nil, err
 	}
 
 	return slices.Concat(binResults...), nil
+}
+
+// removeOrphans deletes merged manifests a failed merge left behind. Pass-through
+// bins reuse an input path and are kept; only outputs not in input are removed.
+func (m *manifestMergeManager) removeOrphans(input, output []iceberg.ManifestFile) {
+	inPaths := make(map[string]struct{}, len(input))
+	for _, mf := range input {
+		inPaths[mf.FilePath()] = struct{}{}
+	}
+	for _, mf := range output {
+		if _, ok := inPaths[mf.FilePath()]; ok {
+			continue
+		}
+		if err := m.snap.io.Remove(mf.FilePath()); err != nil {
+			log.Printf("Warning: failed to delete orphaned merged manifest %s: %v", mf.FilePath(), err)
+		}
+	}
 }
 
 func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
@@ -460,12 +490,15 @@ func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) 
 
 	merged := make([]iceberg.ManifestFile, 0, len(groups))
 	for _, specID := range slices.Backward(slices.Sorted(maps.Keys(groups))) {
-		manifests, err := m.mergeGroup(first, specID, groups[specID])
+		groupMerged, err := m.mergeGroup(first, specID, groups[specID])
 		if err != nil {
+			// This group cleaned up its own writes; drop earlier groups' too.
+			m.removeOrphans(manifests, merged)
+
 			return nil, err
 		}
 
-		merged = append(merged, manifests...)
+		merged = append(merged, groupMerged...)
 	}
 
 	return merged, nil
@@ -474,7 +507,7 @@ func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) 
 type mergeAppendFiles struct {
 	fastAppendFiles
 
-	targetSizeBytes  int
+	targetSizeBytes  int64
 	minCountToMerge  int
 	mergeEnabled     bool
 	mergeConcurrency int
@@ -484,7 +517,7 @@ func newMergeAppendFilesProducer(op Operation, txn *Transaction, fs iceio.WriteF
 	prod := createSnapshotProducer(op, txn, fs, commitUUID, snapshotProps)
 	prod.producerImpl = &mergeAppendFiles{
 		fastAppendFiles: fastAppendFiles{base: prod},
-		targetSizeBytes: txn.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault),
+		targetSizeBytes: int64(txn.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault)),
 		minCountToMerge: txn.meta.props.GetInt(ManifestMinMergeCountKey, ManifestMinMergeCountDefault),
 		mergeEnabled:    txn.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault),
 		mergeConcurrency: manifestMergeConcurrencyLimit(
@@ -940,6 +973,9 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 	var ssc SnapshotSummaryCollector
 	partitionSummaryLimit := sp.txn.meta.props.
 		GetInt(WritePartitionSummaryLimitKey, WritePartitionSummaryLimitDefault)
+	if _, ok := sp.producerImpl.(*rewriteManifests); ok {
+		partitionSummaryLimit = 0
+	}
 	ssc.setPartitionSummaryLimit(partitionSummaryLimit)
 
 	currentSchema := sp.txn.meta.CurrentSchema()
@@ -1114,6 +1150,14 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 		return nil, nil, err
 	}
 
+	return sp.commitManifests(newManifests, addedContent)
+}
+
+// commitManifests stages the snapshot for an already-built manifest set.
+// It is split out of commit so callers that must inspect the planned manifests
+// before anything is written (RewriteManifests detecting a no-op) can build the
+// manifests themselves and only then decide to write the manifest list.
+func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg.ManifestFile) (_ []Update, _ []Requirement, err error) {
 	nextSequence := sp.txn.meta.nextSequenceNumber()
 	summary, err := sp.summary(sp.snapshotProps)
 	if err != nil {
@@ -1313,6 +1357,11 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	addSnap := NewAddSnapshotUpdate(&snapshot)
 	addSnap.ownManifests = addedContent
 	addSnap.rebuildManifestList = rebuildFn
+	// Hold the producer so doCommit can read the manifests orphaned by OCC
+	// retries and clean them up. Only rewrite producers implement this.
+	if acc, ok := sp.producerImpl.(supersededAccumulator); ok {
+		addSnap.supersededSource = acc
+	}
 
 	return []Update{
 			addSnap,

@@ -582,6 +582,21 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
+	// Inner data manifests written by superseded retry attempts (a rewrite
+	// re-merges everything on each retry) are orphaned objects. On a safe
+	// exhausted-ErrCommitFailed failure (err != nil here) nothing committed, so
+	// the accumulator also folds in the final attempt's manifests. On success
+	// the committed snapshot references those, so they are excluded. The defer
+	// skips cleanup only on the unsafe non-ErrCommitFailed path, which returned
+	// above with cleanupOrphans = false.
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.supersededSource == nil {
+			continue
+		}
+		orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(err == nil)...)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -680,6 +695,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			Snapshot:            newSnap,
 			ownManifests:        su.ownManifests,
 			rebuildManifestList: su.rebuildManifestList,
+			supersededSource:    su.supersededSource,
 		}
 
 		// The old manifest list is now an orphaned object in object storage.
