@@ -1448,6 +1448,42 @@ func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
 	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
 }
 
+func TestConfigOverrideHeadersApplyToCatalogRequests(t *testing.T) {
+	t.Parallel()
+
+	const (
+		headerName  = "X-Config-Override"
+		headerValue = "required"
+	)
+	var configHeader, catalogHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				"header." + headerName: headerValue,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		catalogHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, configHeader)
+	assert.Equal(t, headerValue, catalogHeader)
+}
+
 func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
 	t.Parallel()
 

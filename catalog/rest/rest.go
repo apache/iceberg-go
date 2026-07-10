@@ -733,10 +733,14 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
+	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
 
+	r.cl, err = r.createSession(ctx, ops)
+	if err != nil {
+		return err
+	}
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
@@ -759,9 +763,12 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
-	if opts.authManager == nil {
-		opts.authManager = setupOAuthManager(r, cl, opts)
+	// If the user does not set an AuthManager, construct one for this session
+	// without storing it in opts. Bootstrap authentication must not leak into
+	// the final session after server configuration has been applied.
+	authManager := opts.authManager
+	if authManager == nil {
+		authManager = setupOAuthManager(r, cl, opts)
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
@@ -779,8 +786,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	if opts.authManager != nil {
-		session.authManager = opts.authManager
+	if authManager != nil {
+		session.authManager = authManager
 	}
 
 	if opts.enableSigv4 {
@@ -804,7 +811,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	return cl, nil
 }
 
-func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client, *options, error) {
+func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -815,12 +822,12 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 
 	sess, err := r.createSession(ctx, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	cfg := rsp.Defaults
@@ -848,18 +855,18 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 
 	o := *opts
 	if err := fromProps(cfg, &o); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return sess, &o, nil
+	return &o, nil
 }
 
 func (r *Catalog) Name() string              { return r.name }
