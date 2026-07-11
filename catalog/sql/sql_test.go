@@ -1714,6 +1714,37 @@ func (s *SqliteCatalogTestSuite) TestCommitTable() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestCommitTableWithStatisticsUpdate() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	tblID := s.randomTableIdentifier()
+
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+	s.Require().NoError(err)
+
+	_, metadataLocation, err := cat.CommitTable(ctx, tblID, nil, []table.Update{
+		table.NewSetStatisticsUpdate(table.StatisticsFile{
+			SnapshotID:     1,
+			StatisticsPath: "file:///tmp/stats.puffin",
+			BlobMetadata:   []table.BlobMetadata{},
+		}),
+		table.NewSetPartitionStatisticsUpdate(table.PartitionStatisticsFile{
+			SnapshotID:     1,
+			StatisticsPath: "file:///tmp/partition-stats.parquet",
+		}),
+	})
+	s.Require().NoError(err)
+
+	s.NotEqual(tbl.MetadataLocation(), metadataLocation)
+	s.FileExists(strings.TrimPrefix(metadataLocation, "file://"))
+
+	loaded, err := cat.LoadTable(ctx, tblID)
+	s.Require().NoError(err)
+	s.Len(slices.Collect(loaded.Metadata().Statistics()), 1)
+	s.Len(slices.Collect(loaded.Metadata().PartitionStatistics()), 1)
+}
+
 func (s *SqliteCatalogTestSuite) TestCreateView() {
 	db := s.getCatalogSqlite()
 	s.Require().NoError(db.CreateSQLTables(context.Background()))
