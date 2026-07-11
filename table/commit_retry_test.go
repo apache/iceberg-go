@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -298,16 +299,87 @@ func TestBackoffDuration_HandlesZeroInputs(t *testing.T) {
 
 func TestReadRetryConfig_ClampsNegativeProperties(t *testing.T) {
 	// Negative values in properties should be replaced with defaults.
-	cfg := readRetryConfig(iceberg.Properties{
+	cfg, err := readRetryConfig(iceberg.Properties{
 		CommitNumRetriesKey:          "-1",
 		CommitMinRetryWaitMsKey:      "-100",
 		CommitMaxRetryWaitMsKey:      "-1000",
 		CommitTotalRetryTimeoutMsKey: "-5",
 	})
+	require.NoError(t, err)
 	assert.Equal(t, uint(CommitNumRetriesDefault), cfg.numRetries)
-	assert.Equal(t, uint(CommitMinRetryWaitMsDefault), cfg.minWaitMs)
-	assert.Equal(t, uint(CommitMaxRetryWaitMsDefault), cfg.maxWaitMs)
-	assert.Equal(t, uint(CommitTotalRetryTimeoutMsDefault), cfg.totalTimeoutMs)
+	assert.Equal(t, uint64(CommitMinRetryWaitMsDefault), cfg.minWaitMs)
+	assert.Equal(t, uint64(CommitMaxRetryWaitMsDefault), cfg.maxWaitMs)
+	assert.Equal(t, uint64(CommitTotalRetryTimeoutMsDefault), cfg.totalTimeoutMs)
+}
+
+func TestReadRetryConfigRejectsUnsafeProperties(t *testing.T) {
+	maxUint := strconv.FormatUint(math.MaxUint64, 10)
+	maxIntPlusOne := strconv.FormatUint(uint64(math.MaxInt64)+1, 10)
+
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "minimum wait max uint64", key: CommitMinRetryWaitMsKey, value: maxUint},
+		{name: "maximum wait above max int64", key: CommitMaxRetryWaitMsKey, value: maxIntPlusOne},
+		{name: "total timeout above max int64", key: CommitTotalRetryTimeoutMsKey, value: maxIntPlusOne},
+		{name: "retry count max uint64", key: CommitNumRetriesKey, value: maxUint},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := readRetryConfig(iceberg.Properties{tt.key: tt.value})
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.key)
+		})
+	}
+
+	_, err := readRetryConfig(iceberg.Properties{
+		CommitMinRetryWaitMsKey: "200",
+		CommitMaxRetryWaitMsKey: "100",
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, CommitMinRetryWaitMsKey)
+	assert.ErrorContains(t, err, CommitMaxRetryWaitMsKey)
+}
+
+func TestReadRetryConfigAcceptsLargestSafeDuration(t *testing.T) {
+	maxDurationMs := uint64(math.MaxInt64 / int64(time.Millisecond))
+	value := strconv.FormatUint(maxDurationMs, 10)
+
+	cfg, err := readRetryConfig(iceberg.Properties{
+		CommitMinRetryWaitMsKey:      value,
+		CommitMaxRetryWaitMsKey:      value,
+		CommitTotalRetryTimeoutMsKey: value,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, maxDurationMs, cfg.minWaitMs)
+	assert.Equal(t, maxDurationMs, cfg.maxWaitMs)
+	assert.Equal(t, maxDurationMs, cfg.totalTimeoutMs)
+	assert.Equal(t, time.Duration(maxDurationMs)*time.Millisecond,
+		backoffDuration(0, cfg.minWaitMs, cfg.maxWaitMs))
+}
+
+func TestBackoffDurationClampsUnsafeDirectInputs(t *testing.T) {
+	var got time.Duration
+	assert.NotPanics(t, func() {
+		got = backoffDuration(0, math.MaxUint64, math.MaxUint64)
+	})
+	assert.Equal(t, time.Duration(maxRetryDurationMs)*time.Millisecond, got)
+}
+
+func TestDoCommitRejectsUnsafeRetryProperty(t *testing.T) {
+	cat := &flakyCatalog{}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{
+		CommitMinRetryWaitMsKey: strconv.FormatUint(math.MaxUint64, 10),
+	})
+	cat.metadata = tbl.Metadata()
+
+	_, err := tbl.doCommit(t.Context(), nil, nil)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, CommitMinRetryWaitMsKey)
+	assert.Zero(t, cat.attempts.Load())
 }
 
 // ---------------------------------------------------------------------------

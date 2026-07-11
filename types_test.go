@@ -659,6 +659,7 @@ func TestPropUInt(t *testing.T) {
 		"n":       "42",
 		"neg":     "-7",
 		"garbage": "not-a-number",
+		"maxuint": "18446744073709551615",
 	}
 
 	assert.Equal(t, uint(42), iceberg.PropUInt(props, "n", 0))
@@ -666,6 +667,8 @@ func TestPropUInt(t *testing.T) {
 		"negative string must fall back, not wrap to a huge positive")
 	assert.Equal(t, uint(77), iceberg.PropUInt(props, "garbage", 77), "falls back on parse error")
 	assert.Equal(t, uint(5), iceberg.PropUInt(props, "missing", 5), "falls back on missing key")
+	assert.Equal(t, uint64(math.MaxUint64), iceberg.PropUInt64(props, "maxuint", 0),
+		"PropUInt64 must preserve the full uint64 range")
 }
 
 func TestGetInt64(t *testing.T) {
