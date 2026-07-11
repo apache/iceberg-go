@@ -44,6 +44,26 @@ func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", &featureSnapshotID)
 }
 
+func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	now := time.Now().UnixMilli()
+	oldTimestamp := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+	txn.meta.snapshotList[0].TimestampMs = oldTimestamp
+	txn.meta.snapshotList[1].TimestampMs = now
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 10, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("old-tag", 10, TagRef))
+	txn.meta.lastUpdatedMS = now
+
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(7*24*time.Hour)))
+
+	_, branchExists := txn.meta.refs["old-branch"]
+	_, tagExists := txn.meta.refs["old-tag"]
+	require.True(t, branchExists, "WithOlderThan must not expire a branch without max-ref-age-ms")
+	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 
