@@ -1839,6 +1839,58 @@ func (s *HadoopCatalogTestSuite) TestCreateTableWithProperties() {
 	s.Equal("custom.value", tbl.Properties()["custom.key"])
 }
 
+func (s *HadoopCatalogTestSuite) TestPurgeTableRemovesTableRoot() {
+	ctx := context.Background()
+	ident := table.Identifier{"ns", "tbl"}
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	tablePath := s.cat.tableToPath(ident)
+	dataPath := filepath.Join(tablePath, "data", "file.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(dataPath), 0o755))
+	s.Require().NoError(os.WriteFile(dataPath, []byte("data"), 0o644))
+
+	s.Require().NoError(s.cat.PurgeTable(ctx, ident))
+
+	_, err = os.Stat(tbl.MetadataLocation())
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = os.Stat(dataPath)
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = os.Stat(tablePath)
+	s.ErrorIs(err, fs.ErrNotExist)
+
+	exists, err := s.cat.CheckTableExists(ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestPurgeTableGCDisabledPreservesData() {
+	ctx := context.Background()
+	ident := table.Identifier{"ns", "tbl"}
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema(),
+		catalog.WithProperties(iceberg.Properties{"gc.enabled": "false"}))
+	s.Require().NoError(err)
+
+	tablePath := s.cat.tableToPath(ident)
+	dataPath := filepath.Join(tablePath, "data", "file.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(dataPath), 0o755))
+	s.Require().NoError(os.WriteFile(dataPath, []byte("data"), 0o644))
+
+	s.Require().NoError(s.cat.PurgeTable(ctx, ident))
+
+	_, err = os.Stat(tbl.MetadataLocation())
+	s.ErrorIs(err, fs.ErrNotExist)
+	s.FileExists(dataPath)
+
+	exists, err := s.cat.CheckTableExists(ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
 	ctx := context.Background()
 
