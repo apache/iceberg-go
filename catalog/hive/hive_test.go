@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1402,6 +1403,53 @@ func TestCreateView_Success(t *testing.T) {
 	assert.NoError(err)
 	assert.NotNil(v)
 	assert.Equal(table.Identifier{"test_database", "new_view"}, v.Identifier())
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
+	assert := require.New(t)
+
+	dir := t.TempDir()
+	loc := "file://" + filepath.ToSlash(filepath.Join(dir, "view_loc"))
+	catalogProps := iceberg.Properties{
+		"uri":                  "thrift://hive.example:9083",
+		"s3.secret-access-key": "catalog-secret",
+		"s3.session-token":     "catalog-session-token",
+		"s3.endpoint":          "https://storage.example",
+	}
+	viewProps := iceberg.Properties{"custom.view.property": "visible"}
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "safe_view").Return(nil, errNoSuchObject).Twice()
+	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
+
+	cat := NewCatalogWithClient(mockClient, catalogProps)
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	assert.NoError(err)
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	created, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "safe_view"), ver, schema,
+		catalog.WithViewLocation(loc), catalog.WithViewProperties(viewProps))
+	assert.NoError(err)
+
+	metadata, err := os.ReadFile(strings.TrimPrefix(created.MetadataLocation(), "file://"))
+	assert.NoError(err)
+	metadataJSON := string(metadata)
+	assert.Contains(metadataJSON, "custom.view.property")
+	assert.Contains(metadataJSON, "visible")
+	for _, value := range []string{
+		catalogProps["uri"],
+		catalogProps["s3.secret-access-key"],
+		catalogProps["s3.session-token"],
+		catalogProps["s3.endpoint"],
+	} {
+		assert.NotContains(metadataJSON, value)
+	}
+	for _, key := range []string{"uri", "s3.secret-access-key", "s3.session-token", "s3.endpoint"} {
+		assert.NotContains(metadataJSON, key)
+	}
 
 	mockClient.AssertExpectations(t)
 }

@@ -310,16 +310,16 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	defaultNS := catalog.NamespaceFromIdent(identifier)
 	catalogName := "hive"
 
-	// Merge catalog props with view props so io.LoadFS can resolve and view metadata gets user properties.
-	props := make(iceberg.Properties)
+	ioProps := make(iceberg.Properties)
 	if c.opts.props != nil {
-		maps.Copy(props, c.opts.props)
+		maps.Copy(ioProps, c.opts.props)
 	}
 	if cfg.Properties != nil {
-		maps.Copy(props, cfg.Properties)
+		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateView(ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, props)
+	createdView, err := view.CreateViewWithIOProperties(
+		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties)
 	if err != nil {
 		return nil, err
 	}
