@@ -611,11 +611,13 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	// Step 2: Validate requirements against current metadata.
+	var currentMetadata table.Metadata
 	if current != nil {
-		for _, r := range reqs {
-			if err := r.Validate(current.Metadata()); err != nil {
-				return nil, "", err
-			}
+		currentMetadata = current.Metadata()
+	}
+	for _, r := range reqs {
+		if err := r.Validate(currentMetadata); err != nil {
+			return nil, "", err
 		}
 	}
 
