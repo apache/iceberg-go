@@ -2321,6 +2321,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.tbl.MetricsReporter(),
 	}
 
 	for _, opt := range opts {

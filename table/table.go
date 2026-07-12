@@ -621,7 +621,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, WithMetricsReporter(t.MetricsReporter())), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
