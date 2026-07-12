@@ -187,10 +187,23 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 		scan := table.Scan(WithSnapshotAsOf(timestamp))
 		require.NotNil(t, scan)
 
+		assert.Nil(t, scan.Snapshot())
+		_, resolveErr := scan.ResolveSnapshot()
+		require.Error(t, resolveErr)
+		assert.Contains(t, resolveErr.Error(), "no snapshot found for timestamp")
+
+		_, projectionErr := scan.Projection()
+		require.Error(t, projectionErr)
+		assert.Contains(t, projectionErr.Error(), "no snapshot found for timestamp")
+
 		// Error should occur during scan planning, not creation
 		_, err := scan.PlanFiles(context.Background())
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no snapshot found for timestamp")
+
+		_, _, recordsErr := scan.ToArrowRecords(context.Background())
+		require.Error(t, recordsErr)
+		assert.Contains(t, recordsErr.Error(), "no snapshot found for timestamp")
 	})
 
 	t.Run("WithSnapshotID clears conflicting WithSnapshotAsOf option", func(t *testing.T) {
