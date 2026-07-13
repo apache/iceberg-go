@@ -321,6 +321,8 @@ func validateTransform(transform Transform) error {
 		return t.validateWidth()
 	case *TruncateTransform:
 		return t.validateWidth()
+	case UnknownTransform:
+		return fmt.Errorf("%w: cannot write partition spec with unknown transform: %s", ErrInvalidTransform, t.String())
 	default:
 		return nil
 	}

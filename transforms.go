@@ -44,25 +44,32 @@ var (
 
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
-// object or an error if the string is not a valid transform string.
+// object. Strings that don't name a known transform yield an
+// UnknownTransform rather than an error, so that v3 tables using transforms
+// this implementation doesn't recognize can still be read. A malformed known
+// transform (e.g. a bucket/truncate with a non-positive width) still errors.
 func ParseTransform(s string) (Transform, error) {
-	s = strings.ToLower(s)
+	lower := strings.ToLower(s)
 
-	if matches := bucketTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
+	if matches := bucketTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err == nil && n > 0 && n <= math.MaxInt32 {
-			return BucketTransform{NumBuckets: n}, nil
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 		}
+
+		return BucketTransform{NumBuckets: n}, nil
 	}
 
-	if matches := truncateTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
+	if matches := truncateTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err == nil && n > 0 && n <= math.MaxInt32 {
-			return TruncateTransform{Width: n}, nil
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 		}
+
+		return TruncateTransform{Width: n}, nil
 	}
 
-	switch s {
+	switch lower {
 	case "identity":
 		return IdentityTransform{}, nil
 	case "void":
@@ -77,7 +84,9 @@ func ParseTransform(s string) (Transform, error) {
 		return HourTransform{}, nil
 	}
 
-	return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
+	// Unknown transform: v3 readers must load these and ignore them when
+	// filtering instead of failing. Keep the original string so it round-trips.
+	return UnknownTransform{name: s}, nil
 }
 
 // Transform is an interface for the various Transformation types
@@ -227,6 +236,49 @@ func (VoidTransform) ToHumanStr(any) string { return "null" }
 func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
+	return nil, nil
+}
+
+// UnknownTransform is a placeholder for a partition or sort transform that
+// this implementation doesn't recognize. The v3 spec requires readers to load
+// tables that use unknown transforms and to ignore those fields when
+// filtering; writers must not commit a partition spec that uses one.
+type UnknownTransform struct {
+	name string
+}
+
+func (t UnknownTransform) MarshalText() ([]byte, error) {
+	return []byte(t.name), nil
+}
+
+func (t UnknownTransform) String() string { return t.name }
+
+// CanTransform assumes an unknown transform could apply to any type -- the
+// real applicability isn't known.
+func (UnknownTransform) CanTransform(Type) bool { return true }
+
+// ResultType is unknown, so report string, matching the Java reference.
+func (UnknownTransform) ResultType(Type) Type { return StringType{} }
+
+func (UnknownTransform) PreservesOrder() bool { return false }
+
+func (t UnknownTransform) Equals(other Transform) bool {
+	o, ok := other.(UnknownTransform)
+
+	return ok && t.name == o.name
+}
+
+// Apply can't be evaluated for an unknown transform.
+func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
+	return Optional[Literal]{}
+}
+
+func (UnknownTransform) ToHumanStr(any) string { return "null" }
+
+func (UnknownTransform) ToHumanStrType(Type, any) string { return "null" }
+
+// Project returns nil so scans don't prune on an unknown partition field.
+func (UnknownTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
 }
 
