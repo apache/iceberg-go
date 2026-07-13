@@ -734,7 +734,10 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	return result, orphanedPaths, nil
 }
 
-const maxRetryDurationMs = uint64(math.MaxInt64 / int64(time.Millisecond))
+const (
+	maxRetryDurationMs = uint64(math.MaxInt64 / int64(time.Millisecond))
+	maxRetryCount      = uint64(math.MaxUint32)
+)
 
 type retryConfig struct {
 	numRetries     uint
@@ -744,18 +747,18 @@ type retryConfig struct {
 }
 
 func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
-	numRetries := iceberg.PropUInt64(props, CommitNumRetriesKey, CommitNumRetriesDefault)
-	if numRetries >= uint64(^uint(0)) {
+	numRetries := props.GetUInt64(CommitNumRetriesKey, CommitNumRetriesDefault)
+	if numRetries >= uint64(^uint(0)) || numRetries > maxRetryCount {
 		return retryConfig{}, fmt.Errorf(
-			"invalid retry property %q=%d: retry count overflows the attempt count",
-			CommitNumRetriesKey, numRetries)
+			"invalid retry property %q=%d: retry count exceeds the maximum of %d",
+			CommitNumRetriesKey, numRetries, maxRetryCount)
 	}
 
 	cfg := retryConfig{
 		numRetries:     uint(numRetries),
-		minWaitMs:      iceberg.PropUInt64(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      iceberg.PropUInt64(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: iceberg.PropUInt64(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+		minWaitMs:      props.GetUInt64(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      props.GetUInt64(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: props.GetUInt64(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
 	}
 
 	if cfg.minWaitMs == 0 {
@@ -763,6 +766,9 @@ func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
 	}
 	if cfg.maxWaitMs == 0 {
 		cfg.maxWaitMs = CommitMaxRetryWaitMsDefault
+	}
+	if cfg.totalTimeoutMs == 0 {
+		cfg.totalTimeoutMs = CommitTotalRetryTimeoutMsDefault
 	}
 
 	for _, property := range []struct {
@@ -786,13 +792,6 @@ func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
 			"invalid retry properties %q=%d and %q=%d: minimum wait exceeds maximum wait",
 			CommitMinRetryWaitMsKey, cfg.minWaitMs,
 			CommitMaxRetryWaitMsKey, cfg.maxWaitMs)
-	}
-
-	jitterSpan := cfg.maxWaitMs - cfg.minWaitMs + 1
-	if jitterSpan == 0 || jitterSpan > uint64(math.MaxInt64) {
-		return retryConfig{}, fmt.Errorf(
-			"invalid retry properties %q and %q: jitter span overflows int64",
-			CommitMinRetryWaitMsKey, CommitMaxRetryWaitMsKey)
 	}
 
 	return cfg, nil
@@ -842,7 +841,9 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
 	// writers don't all sample 0 and retry in lockstep.
-	//nolint:gosec // non-security randomness, jitter for retry spread
+	// Both conversions are safe because minMs and ceiling-minMs+1 are bounded
+	// by maxRetryDurationMs, which fits in int64.
+	//nolint:gosec // non-security randomness; bounded int64 conversions are safe
 	wait := int64(minMs) + rand.Int64N(int64(ceiling-minMs+1))
 
 	return time.Duration(wait) * time.Millisecond

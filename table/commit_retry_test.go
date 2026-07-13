@@ -314,7 +314,9 @@ func TestReadRetryConfig_ClampsNegativeProperties(t *testing.T) {
 
 func TestReadRetryConfigRejectsUnsafeProperties(t *testing.T) {
 	maxUint := strconv.FormatUint(math.MaxUint64, 10)
+	maxUintMinusOne := strconv.FormatUint(math.MaxUint64-1, 10)
 	maxIntPlusOne := strconv.FormatUint(uint64(math.MaxInt64)+1, 10)
+	maxDurationPlusOne := strconv.FormatUint(maxRetryDurationMs+1, 10)
 
 	tests := []struct {
 		name  string
@@ -325,6 +327,11 @@ func TestReadRetryConfigRejectsUnsafeProperties(t *testing.T) {
 		{name: "maximum wait above max int64", key: CommitMaxRetryWaitMsKey, value: maxIntPlusOne},
 		{name: "total timeout above max int64", key: CommitTotalRetryTimeoutMsKey, value: maxIntPlusOne},
 		{name: "retry count max uint64", key: CommitNumRetriesKey, value: maxUint},
+		{name: "retry count max uint64 minus one", key: CommitNumRetriesKey, value: maxUintMinusOne},
+		{name: "minimum wait above maximum duration", key: CommitMinRetryWaitMsKey, value: maxDurationPlusOne},
+		{name: "maximum wait above maximum duration", key: CommitMaxRetryWaitMsKey, value: maxDurationPlusOne},
+		{name: "total timeout above maximum duration", key: CommitTotalRetryTimeoutMsKey, value: maxDurationPlusOne},
+		{name: "retry count above practical maximum", key: CommitNumRetriesKey, value: strconv.FormatUint(maxRetryCount+1, 10)},
 	}
 
 	for _, tt := range tests {
@@ -342,6 +349,14 @@ func TestReadRetryConfigRejectsUnsafeProperties(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, CommitMinRetryWaitMsKey)
 	assert.ErrorContains(t, err, CommitMaxRetryWaitMsKey)
+}
+
+func TestReadRetryConfigUsesDefaultForZeroTotalTimeout(t *testing.T) {
+	cfg, err := readRetryConfig(iceberg.Properties{
+		CommitTotalRetryTimeoutMsKey: "0",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(CommitTotalRetryTimeoutMsDefault), cfg.totalTimeoutMs)
 }
 
 func TestReadRetryConfigAcceptsLargestSafeDuration(t *testing.T) {

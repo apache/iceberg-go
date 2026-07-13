@@ -93,11 +93,11 @@ func (p Properties) GetInt64(key string, defVal int64) int64 {
 	return defVal
 }
 
-// PropUInt64 reads an unsigned-integer property by key. A missing key,
-// an unparseable value, or a negative value returns defVal — PropUInt64
+// GetUInt64 reads an unsigned-integer property by key. A missing key,
+// an unparseable value, or a negative value returns defVal. GetUInt64
 // uses strconv.ParseUint, which rejects negatives rather than silently
 // wrapping them to a large positive number.
-func PropUInt64(p Properties, key string, defVal uint64) uint64 {
+func (p Properties) GetUInt64(key string, defVal uint64) uint64 {
 	v, ok := p[key]
 	if !ok {
 		return defVal
@@ -114,7 +114,7 @@ func PropUInt64(p Properties, key string, defVal uint64) uint64 {
 // fallback behavior while avoiding truncation on platforms where uint is
 // narrower than uint64.
 func PropUInt(p Properties, key string, defVal uint) uint {
-	n := PropUInt64(p, key, uint64(defVal))
+	n := p.GetUInt64(key, uint64(defVal))
 	if uint64(uint(n)) != n {
 		return defVal
 	}
