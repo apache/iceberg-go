@@ -126,6 +126,10 @@ func TestParseTransform(t *testing.T) {
 			txt, err := tr.MarshalText()
 			require.NoError(t, err)
 			assert.Equal(t, tt.toparse, string(txt))
+
+			u := tr.(iceberg.UnknownTransform)
+			assert.Equal(t, tt.toparse, u.ToHumanStr(nil))
+			assert.Equal(t, tt.toparse, u.ToHumanStrType(iceberg.StringType{}, nil))
 		})
 	}
 }

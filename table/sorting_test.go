@@ -132,6 +132,22 @@ func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
 	assert.Equal(t, 1, sortOrder.Len())
 }
 
+// Writers must not commit an un-evaluatable sort order; reads still load them
+// (TestUnmarshalUnknownSortTransform).
+func TestNewSortOrderRejectsUnknownTransform(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	_, err = table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		Transform: unknown,
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.ErrorIs(t, err, table.ErrInvalidTransform)
+	require.ErrorContains(t, err, "custom_transform[42]")
+}
+
 func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
