@@ -252,10 +252,14 @@ func (v *Version) Clone() *Version {
 // sqlDialects returns a set of strings representing the SQL dialects supported in this version.
 // Dialects are deduplicated by trimmed, lowercase comparison.
 func (v *Version) sqlDialects() internal.Set[string] {
-	return internal.ToSet(internal.MapSlice(
-		v.Representations,
-		func(r Representation) string { return strings.ToLower(strings.TrimSpace(r.Dialect)) },
-	))
+	dialects := make([]string, 0, len(v.Representations))
+	for _, repr := range v.Representations {
+		if repr.Type == "sql" {
+			dialects = append(dialects, strings.ToLower(strings.TrimSpace(repr.Dialect)))
+		}
+	}
+
+	return internal.ToSet(dialects)
 }
 
 type VersionLogEntry struct {

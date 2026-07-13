@@ -669,6 +669,40 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
+	metadataJSON := `{
+		"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+		"format-version": 1,
+		"location": "s3://bucket/warehouse/default.db/event_agg",
+		"current-version-id": 1,
+		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "representations": [
+			{"type": "hive", "sql": "SELECT 1", "dialect": "hive"},
+			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
+		]}],
+		"schemas": [{"schema-id": 0, "type": "struct", "fields": []}],
+		"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+	}`
+
+	metadata, err := ParseMetadataString(metadataJSON)
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(metadata)
+	require.NoError(t, err)
+	nextVersion, err := NewVersion(
+		2,
+		metadata.CurrentSchemaID(),
+		Representations{NewRepresentation("SELECT 2", "spark")},
+		metadata.CurrentVersion().DefaultNamespace,
+	)
+	require.NoError(t, err)
+
+	result, err := builder.SetCurrentVersion(nextVersion, metadata.CurrentSchema()).Build()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Metadata.Versions(), 2)
+	assert.Equal(t, "hive", result.Metadata.Versions()[0].Representations[0].Type)
+}
+
 func TestCurrentViewVersionIsNeverExpired(t *testing.T) {
 	props := iceberg.Properties{VersionHistorySizeKey: "1"}
 	schema := newTestSchema(0)
