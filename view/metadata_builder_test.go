@@ -699,8 +699,8 @@ func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
 	result, err := builder.SetCurrentVersion(nextVersion, metadata.CurrentSchema()).Build()
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	require.Len(t, result.Metadata.Versions(), 2)
-	assert.Equal(t, "hive", result.Metadata.Versions()[0].Representations[0].Type)
+	require.Len(t, result.Versions(), 2)
+	assert.Equal(t, "hive", result.Versions()[0].Representations[0].Type)
 }
 
 func TestCurrentViewVersionIsNeverExpired(t *testing.T) {
