@@ -40,6 +40,7 @@ import (
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
@@ -1743,6 +1744,42 @@ func (s *SqliteCatalogTestSuite) TestCommitTableWithStatisticsUpdate() {
 	s.Require().NoError(err)
 	s.Len(slices.Collect(loaded.Metadata().Statistics()), 1)
 	s.Len(slices.Collect(loaded.Metadata().PartitionStatistics()), 1)
+}
+
+func (s *SqliteCatalogTestSuite) TestCommitTableValidatesRequirementsForMissingTable() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+
+	snapshotID := int64(1)
+	tests := []struct {
+		name string
+		req  table.Requirement
+	}{
+		{"table UUID", table.AssertTableUUID(uuid.New())},
+		{"current schema ID", table.AssertCurrentSchemaID(0)},
+		{"ref snapshot ID", table.AssertRefSnapshotID(table.MainBranch, &snapshotID)},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			tblID := s.randomTableIdentifier()
+			s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+			location := "file://" + filepath.Join(s.warehouse, "requirement-check", tblID[1])
+
+			_, _, err := cat.CommitTable(ctx, tblID, []table.Requirement{tt.req}, []table.Update{
+				table.NewSetLocationUpdate(location),
+			})
+			s.Require().Error(err)
+			s.Contains(err.Error(), "current table metadata does not exist")
+		})
+	}
+
+	tblID := s.randomTableIdentifier()
+	s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+	_, _, err := cat.CommitTable(ctx, tblID, []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate("file://" + filepath.Join(s.warehouse, "create-via-commit", tblID[1])),
+	})
+	s.Require().NoError(err)
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateView() {

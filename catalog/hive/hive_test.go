@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -526,6 +527,50 @@ func TestHiveDropTable(t *testing.T) {
 	err := hiveCatalog.DropTable(context.TODO(), TableIdentifier("test_database", "test_table"))
 	assert.NoError(err)
 
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCommitTableValidatesRequirementsForMissingTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	snapshotID := int64(1)
+	tests := []struct {
+		name string
+		req  table.Requirement
+	}{
+		{"table_uuid", table.AssertTableUUID(uuid.New())},
+		{"current_schema_id", table.AssertCurrentSchemaID(0)},
+		{"ref_snapshot_id", table.AssertRefSnapshotID(table.MainBranch, &snapshotID)},
+	}
+
+	newCatalog := func(tableName string) (*Catalog, *mockHiveClient) {
+		mockClient := &mockHiveClient{}
+		mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).
+			Return(&hive_metastore.LockResponse{Lockid: 1, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+		mockClient.On("Unlock", mock.Anything, int64(1)).Return(nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", tableName).
+			Return(nil, errNoSuchObject).Once()
+
+		return NewCatalogWithClient(mockClient, iceberg.Properties{}), mockClient
+	}
+
+	for _, tt := range tests {
+		tableName := "requirement_" + tt.name
+		cat, mockClient := newCatalog(tableName)
+		_, _, err := cat.CommitTable(ctx, TableIdentifier("test_database", tableName), []table.Requirement{tt.req}, []table.Update{
+			table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), tableName)),
+		})
+		assert.Error(err)
+		assert.Contains(err.Error(), "current table metadata does not exist")
+		mockClient.AssertExpectations(t)
+	}
+
+	cat, mockClient := newCatalog("requirement_assert_create")
+	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
+	_, _, err := cat.CommitTable(ctx, TableIdentifier("test_database", "requirement_assert_create"), []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), "requirement_assert_create")),
+	})
+	assert.NoError(err)
 	mockClient.AssertExpectations(t)
 }
 
