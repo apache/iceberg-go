@@ -273,6 +273,8 @@ func TestDoCommitRetryPassesIdentifierCopy(t *testing.T) {
 
 	cat.loadIdentifier[0] = "corrupt"
 	assert.Equal(t, identifier, tbl.Identifier())
+	cat.commitIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
 }
 
 // TestRewriteRefSnapshotRequirements covers the helper directly:

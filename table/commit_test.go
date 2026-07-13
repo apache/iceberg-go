@@ -49,11 +49,14 @@ func newCommitTestTable(t *testing.T) *table.Table {
 func TestTableCommitFromEmptyTransaction(t *testing.T) {
 	tbl := newCommitTestTable(t)
 	tx := tbl.NewTransaction()
+	original := tbl.Identifier()
 
 	tc, err := tx.TableCommit()
 	require.NoError(t, err)
 
 	assert.Equal(t, table.Identifier{"db", "test_table"}, tc.Identifier)
+	tc.Identifier[0] = "different_db"
+	assert.Equal(t, original, tbl.Identifier())
 	assert.NotNil(t, tc.Requirements, "Requirements must be non-nil empty slice for JSON serialization")
 	assert.NotNil(t, tc.Updates, "Updates must be non-nil empty slice for JSON serialization")
 	assert.Empty(t, tc.Requirements)
