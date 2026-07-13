@@ -374,8 +374,12 @@ func referencedDataFilePath(d iceberg.DataFile) string {
 	if err != nil {
 		return ""
 	}
+	s, ok := lit.(iceberg.TypedLiteral[string])
+	if !ok {
+		return ""
+	}
 
-	return lit.(iceberg.TypedLiteral[string]).Value()
+	return s.Value()
 }
 
 // filePathFieldID is the reserved field ID of the file_path column in a

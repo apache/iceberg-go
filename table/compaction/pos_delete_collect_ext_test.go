@@ -18,7 +18,9 @@
 package compaction_test
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -80,6 +82,86 @@ func TestCollectDeadPositionDeletes(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, dead, "a surviving covered data file must keep the partition-scoped delete alive")
 	})
+}
+
+// TestCollectDeadPositionDeletesPartitioned guards the (specID, partition)
+// keying of the survivor check: a partition-scoped delete stays alive only
+// through a same-partition survivor that predates it — survivors in other
+// partitions or with newer sequence numbers must not retain it.
+func TestCollectDeadPositionDeletesPartitioned(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.LocalFS{}
+	tbl := newPartitionedTable(t)
+	spec := tbl.Spec()
+
+	addDataFile := func(path, part string) {
+		df, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+			path, iceberg.ParquetFile, map[int]any{1000: part}, nil, nil, 1, 128)
+		require.NoError(t, err)
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddRows(df.Build()).Commit(ctx))
+		tbl, err = tx.Commit(ctx)
+		require.NoError(t, err)
+	}
+
+	aOld := tbl.Location() + "/data/data=a/old.parquet"
+	bOld := tbl.Location() + "/data/data=b/old.parquet"
+	aNew := tbl.Location() + "/data/data=a/new.parquet"
+
+	addDataFile(aOld, "a")
+	addDataFile(bOld, "b")
+
+	// Partition-scoped delete in partition "a": applies to aOld only.
+	delDF, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/data=a/pos-del.parquet", iceberg.ParquetFile,
+		map[int]any{1000: "a"}, nil, nil, 1, 128)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(delDF.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Same partition, but sequenced after the delete — must not retain it.
+	addDataFile(aNew, "a")
+
+	t.Run("same-partition predating survivor retains", func(t *testing.T) {
+		dead, err := compaction.CollectDeadPositionDeletes(ctx, fs, tbl.CurrentSnapshot(), pathSet(bOld))
+		require.NoError(t, err)
+		require.Empty(t, dead, "a same-partition survivor with seq <= the delete's must keep it alive")
+	})
+
+	t.Run("cross-partition and newer survivors do not retain", func(t *testing.T) {
+		dead, err := compaction.CollectDeadPositionDeletes(ctx, fs, tbl.CurrentSnapshot(), pathSet(aOld))
+		require.NoError(t, err)
+		require.Len(t, dead, 1, "a survivor in another partition or sequenced after the delete must not retain it")
+	})
+}
+
+func newPartitionedTable(t *testing.T) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "data",
+	})
+
+	meta, err := table.NewMetadata(schema, &spec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	return table.New(
+		table.Identifier{"db", "pos_delete_collect_test"},
+		meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&stubCatalog{metadata: meta},
+	)
 }
 
 func dataFilePaths(t *testing.T, tbl *table.Table) []string {

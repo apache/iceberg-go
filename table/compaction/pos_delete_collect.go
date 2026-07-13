@@ -47,8 +47,12 @@ import (
 // [table.CompactionGroupResult.SafeDeletionVectors].
 //
 // rewrittenPaths is the union of every old data file path being replaced across
-// all rewrite groups. Like [CollectDeadEqualityDeletes], the returned files are
-// safe to remove in the same commit that stages the rewrite: a concurrent
+// all rewrite groups. This is the whole-rewrite re-check that
+// [table.CollectSafePositionDeletes]'s caller contract requires whenever
+// multiple groups land in one rewrite snapshot; the result feeds
+// [table.RewriteDataFilesOptions].ExtraDeleteFilesToRemove. Like
+// [CollectDeadEqualityDeletes], the returned files are safe to remove in the
+// same commit that stages the rewrite: a concurrent
 // commit cannot resurrect them, because any concurrent delete touching a
 // rewritten file is rejected by the rewrite validator and any concurrent data
 // file gets a sequence number strictly greater than every preexisting delete.
