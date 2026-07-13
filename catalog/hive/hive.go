@@ -247,7 +247,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read table metadata from %s: %s", metadataLocation, err)
+		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
 	}
 
 	hiveTbl := constructHiveTable(database, tableName, tbl.Location(), metadataLocation, tbl.Metadata().CurrentSchema(), maps.Clone(tbl.Metadata().Properties()))

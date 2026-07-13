@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
@@ -92,7 +93,28 @@ func (c *reporterStubCatalog) CommitTable(context.Context, Identifier, []Require
 	return nil, "", nil
 }
 
-// TestRefreshKeepsCallerReporter is the invariant the commit retry loop depends
+// TestStagedTableInheritsReporter pins that Transaction.StagedTable() forwards
+// the transaction table's reporter. StagedTable rebuilds the table via New(...),
+// which would otherwise reset the reporter to the construction-time nop default.
+func TestStagedTableInheritsReporter(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://default/staged", iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	rep := &metrics.InMemoryReporter{}
+	tbl := New(Identifier{"default", "staged"}, meta, "",
+		func(context.Context) (iceio.IO, error) { return iceio.NewMemFS(), nil }, nil,
+		WithMetricsReporter(rep))
+
+	staged, err := tbl.NewTransaction().StagedTable()
+	require.NoError(t, err)
+	assert.Same(t, rep, staged.MetricsReporter(),
+		"StagedTable must forward the transaction table's reporter")
+}
+
 // on: a reporter injected via WithMetricsReporter must survive a Refresh even
 // though the catalog's LoadTable hands back the default nop reporter.
 func TestRefreshKeepsCallerReporter(t *testing.T) {
@@ -108,7 +130,23 @@ func TestRefreshKeepsCallerReporter(t *testing.T) {
 		"caller-set reporter must not be reverted to the catalog default on refresh")
 }
 
-// TestRefreshInheritsCatalogReporterWhenUnset covers the other direction: when
+// TestRefreshKeepsExplicitNopOptOut pins the flag-based guard: a caller who
+// explicitly opts out with WithMetricsReporter(NopReporter{}) has still "set" a
+// reporter, so Refresh must not revert it to a catalog-provided logging reporter.
+// A type-based "is it a nop?" guard would silently fail this case.
+func TestRefreshKeepsExplicitNopOptOut(t *testing.T) {
+	fresh := &metrics.InMemoryReporter{}
+	cat := &reporterStubCatalog{reporter: fresh} // LoadTable yields a logging-style reporter
+	tbl := New(Identifier{"db", "reporter-refresh"}, nil, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat,
+		WithMetricsReporter(metrics.NopReporter{}))
+
+	require.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
+	require.NoError(t, tbl.Refresh(context.Background()))
+	assert.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter(),
+		"explicit NopReporter opt-out must not be reverted to the catalog reporter on refresh")
+}
+
 // the caller never overrode the reporter, Refresh adopts the fresh table's.
 func TestRefreshInheritsCatalogReporterWhenUnset(t *testing.T) {
 	fresh := &metrics.InMemoryReporter{}

@@ -98,6 +98,11 @@ type Table struct {
 	fsF              FSysF
 	planner          ScanPlanner
 	reporter         metrics.Reporter
+	// reporterSet records whether a caller injected a reporter via
+	// WithMetricsReporter. It distinguishes an explicit reporter (including an
+	// explicit NopReporter opt-out) from the construction-time default, so
+	// Refresh knows whether it may overwrite reporter with the catalog default.
+	reporterSet bool
 }
 
 func (t Table) Equals(other Table) bool {
@@ -204,8 +209,10 @@ func (t *Table) Refresh(ctx context.Context) error {
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
-	// reporter to the catalog default mid-operation.
-	if _, isNop := t.reporter.(metrics.NopReporter); isNop {
+	// reporter to the catalog default mid-operation. reporterSet distinguishes an
+	// explicit reporter — including an explicit NopReporter opt-out — from the
+	// construction-time default.
+	if !t.reporterSet {
 		t.reporter = fresh.reporter
 	}
 
@@ -966,14 +973,22 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 // after the core fields are set.
 type Option func(*Table)
 
+// noopTableOption is the shared no-op [Option], returned when an option has
+// nothing to apply (e.g. WithMetricsReporter(nil)). It mirrors noopOption on
+// the ScanOption side.
+func noopTableOption(*Table) {}
+
 // WithMetricsReporter sets the metrics reporter for the table; scans created
 // from the table inherit it. A nil reporter is ignored (the table keeps its
 // default no-op reporter).
 func WithMetricsReporter(r metrics.Reporter) Option {
+	if r == nil {
+		return noopTableOption
+	}
+
 	return func(t *Table) {
-		if r != nil {
-			t.reporter = r
-		}
+		t.reporter = r
+		t.reporterSet = true
 	}
 }
 

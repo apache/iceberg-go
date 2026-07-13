@@ -82,6 +82,11 @@ func Deregister(name string) {
 // FromProperties builds the reporter named by props[ReporterImplKey]. An absent
 // or empty name yields [NopReporter] (reporting is opt-in), and an unrecognized name is
 // an error so misconfiguration surfaces rather than silently disabling metrics.
+//
+// This nop default is an intentional divergence from Java, where an absent
+// metrics-reporter-impl defaults to LoggingMetricsReporter. Callers migrating
+// from Java that want scan/commit reports by default must set ReporterImplKey to
+// [ReporterNameLogging] explicitly.
 func FromProperties(props map[string]string) (Reporter, error) {
 	name := props[ReporterImplKey]
 	if name == "" {

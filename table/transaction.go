@@ -2348,6 +2348,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			updatedMeta.Location(),
 			t.tbl.fsF,
 			t.tbl.cat,
+			WithMetricsReporter(t.tbl.MetricsReporter()),
 		),
 	}, nil
 }
