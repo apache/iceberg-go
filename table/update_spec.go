@@ -371,7 +371,10 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		}
 	}
 	newFieldId := us.newFieldId()
-	transform, _ := iceberg.ParseTransform(key.Transform)
+	transform, err := iceberg.ParseTransform(key.Transform)
+	if err != nil {
+		return iceberg.PartitionField{}, err
+	}
 	if name == "" {
 		tmpField := iceberg.PartitionField{
 			SourceIDs: []int{key.SourceId},
@@ -379,7 +382,6 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			Name:      "",
 			Transform: transform,
 		}
-		var err error
 		name, err = iceberg.GeneratePartitionFieldName(us.txn.tbl.Schema(), tmpField)
 		if err != nil {
 			return iceberg.PartitionField{}, err
