@@ -2660,6 +2660,103 @@ func (r *RestCatalogSuite) TestRegisterView409() {
 	r.ErrorContains(err, "The given view already exists")
 }
 
+func (r *RestCatalogSuite) TestRenameView204() {
+	const metadataLoc = "s3://bucket/warehouse/example.db/destination/metadata/00001.metadata.json"
+
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Source struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"source"`
+			Destination struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"destination"`
+		}
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal([]string{"example"}, payload.Source.Namespace)
+		r.Equal("source", payload.Source.Name)
+		r.Equal([]string{"example"}, payload.Destination.Namespace)
+		r.Equal("destination", payload.Destination.Name)
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Mock the load view endpoint for loading the renamed view.
+	r.mux.HandleFunc("/v1/namespaces/example/views/destination", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}}`,
+			metadataLoc, exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	fromIdent := catalog.ToIdentifier("example", "source")
+	toIdent := catalog.ToIdentifier("example", "destination")
+
+	renamed, err := cat.RenameView(context.Background(), fromIdent, toIdent)
+	r.Require().NoError(err)
+
+	r.Equal(toIdent, renamed.Identifier())
+	r.Equal(metadataLoc, renamed.MetadataLocation())
+	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), renamed.Metadata().ViewUUID())
+	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].Sql)
+}
+
+func (r *RestCatalogSuite) TestRenameView404() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view does not exist",
+			Type:    "NoSuchViewException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "The given view does not exist")
+}
+
+func (r *RestCatalogSuite) TestRenameView409() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view already exists",
+			Type:    "AlreadyExistsException",
+			Code:    409,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrViewAlreadyExists)
+	r.ErrorContains(err, "The given view already exists")
+}
+
 type mockTransport struct {
 	calls []struct {
 		method, path string
