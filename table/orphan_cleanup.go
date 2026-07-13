@@ -723,9 +723,13 @@ func normalizeNonURLPath(path string) string {
 // filePathKey returns the path component used to compare listed files with
 // references before applying scheme and authority mismatch policy.
 func filePathKey(file string) string {
-	parsedURL, err := url.Parse(file)
-	if err == nil && (parsedURL.Scheme != "" || parsedURL.Host != "") {
-		return normalizeNonURLPath(parsedURL.Path)
+	// A bare Windows path such as C:/data/file.parquet is parsed as a URL
+	// with scheme "c". Only parse URL-shaped values here so drive letters
+	// remain part of the comparison key.
+	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
+		if parsedURL, err := url.Parse(file); err == nil {
+			return normalizeNonURLPath(parsedURL.Path)
+		}
 	}
 
 	return normalizeNonURLPath(file)

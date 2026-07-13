@@ -158,6 +158,16 @@ func TestNormalizeNonURLPath(t *testing.T) {
 	}
 }
 
+func TestIsFileOrphanDoesNotAliasWindowsDrivePaths(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"C:/data/file.parquet": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("D:/data/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.True(t, isOrphan, "different Windows drives must not share a path key")
+}
+
 func TestVersionHintLocation(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -755,7 +765,7 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 					result, err := tbl.DeleteOrphanFiles(
 						context.Background(),
 						WithLocation("s3://bucket/path"),
-						WithFilesOlderThan(-time.Hour),
+						WithFilesOlderThan(0),
 						WithPrefixMismatchMode(mode),
 						WithDeleteFunc(func(path string) error {
 							deleted = append(deleted, path)
