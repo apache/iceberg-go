@@ -866,9 +866,9 @@ func WithLimit(n int64) ScanOption {
 	}
 }
 
-// WitMaxConcurrency sets the maximum concurrency for table scan and plan
+// WithScanMaxConcurrency sets the maximum concurrency for table scan and plan
 // operations. When unset it defaults to runtime.GOMAXPROCS.
-func WitMaxConcurrency(n int) ScanOption {
+func WithScanMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
 	}
@@ -876,6 +876,14 @@ func WitMaxConcurrency(n int) ScanOption {
 	return func(scan *Scan) {
 		scan.concurrency = n
 	}
+}
+
+// WitMaxConcurrency is a deprecated alias for [WithScanMaxConcurrency], kept for
+// backwards compatibility with the pre-existing typo'd name.
+//
+// Deprecated: use [WithScanMaxConcurrency].
+func WitMaxConcurrency(n int) ScanOption {
+	return WithScanMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {

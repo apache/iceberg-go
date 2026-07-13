@@ -189,10 +189,7 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 
 // WithCompactionScanConcurrency sets the scan concurrency used when
 // reading the group's tasks. Forwarded to [Table.Scan] as
-// [WitMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
-//
-// TODO: the [WitMaxConcurrency] link enshrines a pre-existing typo
-// (missing `h`). Update this reference when that symbol is renamed.
+// [WithScanMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
@@ -297,7 +294,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 	var scanOpts []ScanOption
 	if cfg.scanConcurrency > 0 {
-		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
+		scanOpts = append(scanOpts, WithScanMaxConcurrency(cfg.scanConcurrency))
 	}
 
 	// Preserve row lineage only when every source file in the group carries
