@@ -205,12 +205,18 @@ func ToIdentifier(ident ...string) table.Identifier {
 	return table.Identifier(ident)
 }
 
-func TableNameFromIdent(ident table.Identifier) string {
+// ObjectNameFromIdent returns the name of a catalog object (a table, view,
+// or function), which is the last element of its identifier.
+func ObjectNameFromIdent(ident table.Identifier) string {
 	if len(ident) == 0 {
 		return ""
 	}
 
 	return ident[len(ident)-1]
+}
+
+func TableNameFromIdent(ident table.Identifier) string {
+	return ObjectNameFromIdent(ident)
 }
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {

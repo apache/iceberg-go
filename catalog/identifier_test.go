@@ -60,3 +60,13 @@ func TestValidateFunctionIdentifier(t *testing.T) {
 	require.ErrorIs(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function/name"}), catalog.ErrNoSuchFunction)
 	require.NotErrorIs(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function/name"}), catalog.ErrNoSuchTable)
 }
+
+func TestObjectNameFromIdent(t *testing.T) {
+	require.Equal(t, "object", catalog.ObjectNameFromIdent(table.Identifier{"namespace", "object"}))
+	require.Equal(t, "object", catalog.ObjectNameFromIdent(table.Identifier{"parent", "namespace", "object"}))
+	require.Equal(t, "object", catalog.ObjectNameFromIdent(table.Identifier{"object"}))
+	require.Equal(t, "", catalog.ObjectNameFromIdent(table.Identifier{}))
+
+	// TableNameFromIdent stays as the table-flavored alias of the same rule.
+	require.Equal(t, "object", catalog.TableNameFromIdent(table.Identifier{"namespace", "object"}))
+}
