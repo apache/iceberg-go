@@ -890,7 +890,7 @@ func TestAddEncryptionKeyUpdate_Apply_RejectsMissingKeyID(t *testing.T) {
 
 	err := NewAddEncryptionKeyUpdate(key).Apply(b)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.Contains(t, err.Error(), "key-id")
 }
 
@@ -900,8 +900,33 @@ func TestAddEncryptionKeyUpdate_Apply_RejectsMissingEncryptedKeyMetadata(t *test
 
 	err := NewAddEncryptionKeyUpdate(key).Apply(b)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.Contains(t, err.Error(), "metadata")
+}
+
+func TestMetadataBuilderAddEncryptionKeyRejectsMissingKeyID(t *testing.T) {
+	b := buildFromBaseV3(t)
+	err := b.AddEncryptionKey(EncryptionKey{EncryptedKeyMetadata: "dGVzdA=="})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "key-id")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsInvalidEncryptedKeyMetadata(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "not-base64"}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "base64")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsPaddedKeyID(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: " my-key ", EncryptedKeyMetadata: "dGVzdA=="}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "key-id")
 }
 
 func TestAddEncryptionKeyUpdate_UnmarshalMissingFields_ApplyRejects(t *testing.T) {
@@ -913,6 +938,7 @@ func TestAddEncryptionKeyUpdate_UnmarshalMissingFields_ApplyRejects(t *testing.T
 
 	err := updates[0].Apply(buildFromBaseV3(t))
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "metadata")
 }
 
 func TestRemoveEncryptionKeyUpdate_Unmarshal(t *testing.T) {

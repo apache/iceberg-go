@@ -1338,8 +1338,8 @@ func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {
 		return fmt.Errorf("%w: encryption keys are only supported for format version 3 or higher, current version: %d",
 			iceberg.ErrInvalidArgument, b.formatVersion)
 	}
-	if err := key.Validate(); err != nil {
-		return fmt.Errorf("%w: %w", iceberg.ErrInvalidArgument, err)
+	if err := key.validate(); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidArgument, err)
 	}
 
 	replaced := false

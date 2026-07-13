@@ -18,7 +18,9 @@
 package table
 
 import (
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 )
@@ -31,13 +33,20 @@ type EncryptionKey struct {
 	Properties           map[string]string `json:"properties,omitempty"`
 }
 
-func (e EncryptionKey) Validate() error {
-	if strings.TrimSpace(e.KeyID) == "" {
+func (e EncryptionKey) validate() error {
+	trimmedKeyID := strings.TrimSpace(e.KeyID)
+	if trimmedKeyID == "" {
 		return errors.New("encryption key-id must be non-empty")
 	}
+	if trimmedKeyID != e.KeyID {
+		return errors.New("encryption key-id must not have leading or trailing whitespace")
+	}
 
-	if strings.TrimSpace(e.EncryptedKeyMetadata) == "" {
+	if e.EncryptedKeyMetadata == "" {
 		return errors.New("encrypted key metadata must be non-empty")
+	}
+	if _, err := base64.StdEncoding.DecodeString(e.EncryptedKeyMetadata); err != nil {
+		return fmt.Errorf("encrypted key metadata must be valid base64: %w", err)
 	}
 
 	return nil
