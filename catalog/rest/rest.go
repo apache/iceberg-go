@@ -292,6 +292,15 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.RoundTripper.RoundTrip(r)
 }
 
+// CloseIdleConnections forwards cleanup to transports that own idle
+// connections, allowing http.Client.CloseIdleConnections to work through the
+// session wrapper.
+func (s *sessionTransport) CloseIdleConnections() {
+	if transport, ok := s.RoundTripper.(interface{ CloseIdleConnections() }); ok {
+		transport.CloseIdleConnections()
+	}
+}
+
 func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
 	var (
 		req *http.Request
@@ -823,6 +832,9 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 	sess, err := r.createSession(ctx, opts)
 	if err != nil {
 		return nil, err
+	}
+	if opts.transport == nil {
+		defer sess.CloseIdleConnections()
 	}
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)

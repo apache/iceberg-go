@@ -1484,6 +1484,27 @@ func TestConfigOverrideHeadersApplyToCatalogRequests(t *testing.T) {
 	assert.Equal(t, headerValue, catalogHeader)
 }
 
+type closeTrackingTransport struct {
+	closed atomic.Bool
+}
+
+func (t *closeTrackingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closed.Store(true)
+}
+
+func TestSessionTransportClosesWrappedIdleConnections(t *testing.T) {
+	base := &closeTrackingTransport{}
+	client := &http.Client{Transport: &sessionTransport{RoundTripper: base}}
+
+	client.CloseIdleConnections()
+
+	assert.True(t, base.closed.Load())
+}
+
 func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
 	t.Parallel()
 
