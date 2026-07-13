@@ -273,9 +273,9 @@ func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-func (UnknownTransform) ToHumanStr(any) string { return "null" }
+func (t UnknownTransform) ToHumanStr(any) string { return t.name }
 
-func (UnknownTransform) ToHumanStrType(Type, any) string { return "null" }
+func (t UnknownTransform) ToHumanStrType(Type, any) string { return t.name }
 
 // Project returns nil so scans don't prune on an unknown partition field.
 func (UnknownTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {

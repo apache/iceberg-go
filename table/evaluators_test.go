@@ -822,6 +822,18 @@ func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 	)
 }
 
+func (p *ProjectionTestSuite) unknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
@@ -1154,6 +1166,15 @@ func (p *ProjectionTestSuite) TestProjectionCaseInsensitive() {
 	expr, err := project(iceberg.NotNull(iceberg.Reference("ID")))
 	p.Require().NoError(err)
 	p.True(expr.Equals(iceberg.NotNull(iceberg.Reference("id_part"))))
+}
+
+// Unknown partition transforms must not prune: Project returns nil, which
+// projects to AlwaysTrue.
+func (p *ProjectionTestSuite) TestUnknownTransformProjection() {
+	project := newInclusiveProjection(p.schema(), p.unknownSpec(), true)
+	expr, err := project(iceberg.LessThan(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.Equal(iceberg.AlwaysTrue{}, expr)
 }
 
 func (p *ProjectionTestSuite) TestProjectEmptySpec() {
