@@ -2576,9 +2576,11 @@ var sharedCloneFields = map[string]struct{}{
 // it fills every field of MetadataBuilder with non-zero data and asserts the
 // clone is value-equal yet backed by independent storage. A field added to the
 // struct but omitted from clone() fails the value-equal check; a field copied
-// by reference instead of cloned fails the aliasing check. The filler fails the
-// test on any kind it cannot populate, so a new field of an unhandled type
-// cannot slip through as a vacuous pass.
+// by reference instead of cloned fails the aliasing check. The filler recurses
+// into pointers, slices, and maps to give their targets non-zero contents, so a
+// clone() that allocates fresh storage but forgets to copy the underlying
+// values is caught too; a field the filler leaves entirely zero fails the test,
+// so a new field of an unhandled type cannot slip through as a vacuous pass.
 //
 // The aliasing check is one level deep: it verifies each slice/map/pointer
 // field has its own backing storage, not that reference types nested inside
@@ -2615,9 +2617,11 @@ func TestMetadataBuilderCloneCoversAllFields(t *testing.T) {
 
 // fillReferenceFields populates every field of an addressable struct value with
 // non-zero data so clone() has something observable to copy for each field. It
-// fails the test on any kind it does not know how to fill, forcing the helper
-// to grow alongside the struct rather than silently skipping a new field and
-// turning the drift guard into a vacuous pass.
+// recurses into pointer targets, slice/array elements, map keys+values, and
+// nested structs so a clone() that allocates fresh storage but drops the
+// underlying values is caught too. A top-level field of a kind it cannot fill
+// fails the test, forcing the helper to grow alongside the struct rather than
+// silently skipping a new field and turning the drift guard into a vacuous pass.
 func fillReferenceFields(t *testing.T, sv reflect.Value) {
 	t.Helper()
 	typ := sv.Type()
@@ -2627,46 +2631,86 @@ func fillReferenceFields(t *testing.T, sv reflect.Value) {
 			continue
 		}
 
-		f := fieldValue(sv.Field(i))
-		switch f.Kind() {
-		case reflect.Ptr:
-			f.Set(reflect.New(f.Type().Elem()))
-		case reflect.Slice:
-			f.Set(reflect.MakeSlice(f.Type(), 1, 1))
-		case reflect.Map:
-			// A populated map gives the aliasing check real bite: a shallow
-			// clone yields a distinct backing map, a direct assignment does not.
-			m := reflect.MakeMap(f.Type())
-			m.SetMapIndex(reflect.New(f.Type().Key()).Elem(), reflect.New(f.Type().Elem()).Elem())
-			f.Set(m)
-		case reflect.Array:
-			if f.Len() > 0 {
-				setNonZeroScalar(t, f.Index(0), name)
-			}
-		case reflect.Bool:
-			f.SetBool(true)
-		case reflect.String:
-			f.SetString("x")
-		default:
-			setNonZeroScalar(t, f, name)
+		if !fillNonZero(fieldValue(sv.Field(i)), map[reflect.Type]bool{}) {
+			t.Fatalf("fillReferenceFields: unhandled kind %v for field %q; extend the filler", sv.Field(i).Kind(), name)
 		}
 	}
 }
 
-// setNonZeroScalar sets a numeric reflect.Value to a non-zero value, failing the
-// test if the kind is not one the drift guard knows how to populate.
-func setNonZeroScalar(t *testing.T, f reflect.Value, name string) {
-	t.Helper()
-	switch {
-	case f.CanInt():
-		f.SetInt(7)
-	case f.CanUint():
-		f.SetUint(7)
-	case f.CanFloat():
-		f.SetFloat(1)
-	default:
-		t.Fatalf("fillReferenceFields: unhandled kind %v for field %q; extend the filler", f.Kind(), name)
+// fillNonZero sets v to a non-zero value, recursing into the target of pointers,
+// the first element of slices/arrays, and the key and value of maps so their
+// contents are observable rather than left zero — a shallow clone that rebuilds
+// the container but drops the underlying values then fails the value-equal
+// check. seen guards against infinite recursion on self-referential pointer
+// types. It reports whether it populated v: the top-level caller treats false as
+// a drift failure, while nested callers tolerate it for kinds that cannot carry
+// non-zero data (interfaces, funcs), which clone() shares by reference anyway.
+func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
+	switch v.Kind() {
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+		if !seen[v.Type()] {
+			seen[v.Type()] = true
+			fillNonZero(v.Elem(), seen)
+		}
+
+		return true
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+		fillNonZero(v.Index(0), seen)
+
+		return true
+	case reflect.Array:
+		if v.Len() > 0 {
+			fillNonZero(v.Index(0), seen)
+		}
+
+		return true
+	case reflect.Map:
+		// A populated map gives the aliasing check real bite (a shallow clone
+		// yields a distinct backing map, a direct assignment does not) and,
+		// with a non-zero key and value, also catches a clone that rebuilds the
+		// map but drops its entries.
+		m := reflect.MakeMap(v.Type())
+		key := reflect.New(v.Type().Key()).Elem()
+		val := reflect.New(v.Type().Elem()).Elem()
+		fillNonZero(key, seen)
+		fillNonZero(val, seen)
+		m.SetMapIndex(key, val)
+		v.Set(m)
+
+		return true
+	case reflect.Struct:
+		filled := false
+		for i := range v.NumField() {
+			if fillNonZero(fieldValue(v.Field(i)), seen) {
+				filled = true
+			}
+		}
+
+		return filled
+	case reflect.Bool:
+		v.SetBool(true)
+
+		return true
+	case reflect.String:
+		v.SetString("x")
+
+		return true
 	}
+
+	switch {
+	case v.CanInt():
+		v.SetInt(7)
+	case v.CanUint():
+		v.SetUint(7)
+	case v.CanFloat():
+		v.SetFloat(1)
+	default:
+		return false
+	}
+
+	return true
 }
 
 // fieldValue returns an addressable, settable view of an unexported struct
