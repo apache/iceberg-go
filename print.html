@@ -770,6 +770,8 @@ func init() {
 <tr><td><code>write.parquet.compression-level</code></td><td><code>-1</code> (codec default)</td></tr>
 <tr><td><code>write.parquet.bloom-filter-max-bytes</code></td><td>1 MB</td></tr>
 <tr><td><code>write.parquet.bloom-filter-enabled.column.&lt;name&gt;</code></td><td>(per-column toggle, prefix-matched)</td></tr>
+<tr><td><code>write.parquet.shred-variants</code></td><td><code>false</code> (opt-in shredding of top-level variant columns)</td></tr>
+<tr><td><code>write.parquet.variant-inference-buffer-size</code></td><td>100 rows (buffered per file to infer the shredding schema)</td></tr>
 </tbody></table>
 </div>
 <h3 id="parquet-reader"><a class="header" href="#parquet-reader">Parquet reader</a></h3>
