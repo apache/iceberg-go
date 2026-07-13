@@ -246,6 +246,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// Ordering is load-bearing: authManager runs after the default-header loop
+	// and Set-overwrites, so the managed auth header always wins even though the
+	// loop above lets an arbitrary per-request header (withHeaders) override a
+	// session default of the same key. A caller cannot suppress or spoof the
+	// Authorization header by supplying its own. Do not reorder this before the
+	// default-header loop.
 	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
 		k, v, err := s.authManager.AuthHeader()
 		if err != nil {
@@ -306,12 +312,14 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 type suppressHeadersKey struct{}
 
 // reqConfig holds the optional per-request knobs shared by do and doPost:
-// headers to set, session-default headers to suppress, and whether an HTTP 204
-// is a valid empty result.
+// headers to set, session-default headers to suppress, a body error.type ->
+// error override, and whether an HTTP 204 is a valid empty result.
 type reqConfig struct {
-	headers         map[string]string
-	suppressHeaders []string
-	allowNoContent  bool
+	headers           map[string]string
+	suppressHeaders   []string
+	errorTypeOverride map[string]error
+	allowNoContent    bool
+	requireBody       bool
 }
 
 type reqOption func(*reqConfig)
@@ -336,10 +344,33 @@ func withSuppressedHeaders(names ...string) reqOption {
 	return func(c *reqConfig) { c.suppressHeaders = append(c.suppressHeaders, names...) }
 }
 
+// withErrorTypeOverride maps a non-200 response to a specific error by the REST
+// error.type in the response body. It takes precedence over the status-code
+// override so a shared status (e.g. a 404 that can be a missing plan, table, or
+// namespace) can split into distinct sentinels. Entries accumulate so options
+// compose; an unset or unmatched error.type falls through to the status-code
+// override.
+func withErrorTypeOverride(byType map[string]error) reqOption {
+	return func(c *reqConfig) {
+		if c.errorTypeOverride == nil {
+			c.errorTypeOverride = make(map[string]error, len(byType))
+		}
+		maps.Copy(c.errorTypeOverride, byType)
+	}
+}
+
 // allowNoContent treats an HTTP 204 No Content response as a valid empty result
 // rather than trying to decode a body.
 func allowNoContent() reqOption {
 	return func(c *reqConfig) { c.allowNoContent = true }
+}
+
+// requireBody rejects an HTTP 200 with an empty body rather than decoding it to
+// the zero result. Use it when a 200 must carry a payload, so a truncated or
+// proxy-stripped response cannot masquerade as a successful empty result (e.g.
+// fetchScanTasks returning "zero tasks" and silently dropping work).
+func requireBody() reqOption {
+	return func(c *reqConfig) { c.requireBody = true }
 }
 
 func newReqConfig(opts []reqOption) reqConfig {
@@ -400,7 +431,7 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if method == http.MethodHead || method == http.MethodDelete {
@@ -464,10 +495,14 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if rsp.ContentLength == 0 {
+		if cfg.requireBody {
+			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+		}
+
 		return ret, err
 	}
 
@@ -484,7 +519,7 @@ func setRequestHeaders(req *http.Request, headers map[string]string) {
 	}
 }
 
-func handleNon200(rsp *http.Response, override map[int]error) error {
+func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
 	var e errorResponse
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
@@ -509,9 +544,23 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 		}
 	}
 
+	// The status-code override maps a status to a sentinel; a body error.type
+	// override refines it further (e.g. splitting a 404 into missing-plan vs.
+	// table vs. namespace). The type refinement only applies to a status the
+	// caller already mapped, because these error.type values are defined for
+	// specific statuses (404) in the REST spec: a 503 body carrying, say,
+	// NoSuchPlanIdException must still resolve to ErrServiceUnavailable rather
+	// than a 404 sentinel.
 	if override != nil {
-		if err, ok := override[rsp.StatusCode]; ok {
-			e.wrapping = err
+		if statusErr, ok := override[rsp.StatusCode]; ok {
+			if typeOverride != nil && e.Type != "" {
+				if typeErr, ok := typeOverride[e.Type]; ok {
+					e.wrapping = typeErr
+
+					return e
+				}
+			}
+			e.wrapping = statusErr
 
 			return e
 		}

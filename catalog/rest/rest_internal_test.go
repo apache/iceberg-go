@@ -666,6 +666,41 @@ func TestRoundTripDefaultHeaderHandling(t *testing.T) {
 	})
 }
 
+// staticAuthManager is a test AuthManager returning a fixed authorization header.
+type staticAuthManager struct {
+	key, value string
+}
+
+func (s staticAuthManager) AuthHeader() (string, string, error) { return s.key, s.value, nil }
+
+func TestRoundTripAuthManagerWinsOverPerRequestHeader(t *testing.T) {
+	t.Parallel()
+
+	// The generalized per-request override lets withHeaders replace a session
+	// default of the same key, but the managed Authorization header must still
+	// win: authManager runs after the default-header loop and Set-overwrites, so
+	// a caller cannot suppress or spoof it via withHeaders. This pins that
+	// ordering, which is load-bearing but otherwise implicit.
+	var got http.Header
+	s := &sessionTransport{
+		RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = r.Header.Clone()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+		defaultHeaders: http.Header{},
+		authManager:    staticAuthManager{key: "Authorization", value: "Bearer managed-token"},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer caller-supplied")
+
+	_, err = s.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer managed-token"}, got.Values("Authorization"))
+}
+
 func TestReqOptionsCompose(t *testing.T) {
 	t.Parallel()
 
@@ -1014,7 +1049,7 @@ func TestHandleNon200_DecodeFlatMessagePreservesSentinel(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"message":"flat error"}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "flat error", err.Error())
 	require.True(t, errors.Is(err, ErrBadRequest))
@@ -1027,7 +1062,7 @@ func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"error":{"message":"nested error","type":"ValidationException"}}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "ValidationException: nested error", err.Error())
 	require.True(t, errors.Is(err, ErrForbidden))
@@ -1040,11 +1075,64 @@ func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
 		Body:          http.NoBody,
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrBadRequest))
 	require.Equal(t, ErrBadRequest.Error(), err.Error())
 	require.NotEqual(t, ": ", err.Error())
+}
+
+func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
+	t.Parallel()
+
+	sentinelByType := errors.New("mapped by type")
+	sentinelByStatus := errors.New("mapped by status")
+	typeOverride := map[string]error{"NoSuchThingException": sentinelByType}
+	statusOverride := map[int]error{http.StatusNotFound: sentinelByStatus}
+
+	newRsp := func(status int, body string) *http.Response {
+		return &http.Response{
+			StatusCode:    status,
+			ContentLength: int64(len(body)),
+			Body:          io.NopCloser(bytes.NewBufferString(body)),
+		}
+	}
+
+	t.Run("error.type override wins over status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"NoSuchThingException","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
+
+	t.Run("unmatched error.type falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"SomethingElse","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("empty body falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		rsp := &http.Response{StatusCode: http.StatusNotFound, ContentLength: 0, Body: http.NoBody}
+		err := handleNon200(rsp, statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("type override ignored on an unmapped status", func(t *testing.T) {
+		t.Parallel()
+
+		// The error.type values are defined for 404 in the spec; a 503 carrying
+		// one must resolve on status (ErrServiceUnavailable), not a 404 sentinel.
+		err := handleNon200(newRsp(http.StatusServiceUnavailable, `{"error":{"type":"NoSuchThingException","message":"down"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		assert.NotErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
 }
 
 func TestErrorResponse_ErrorFormattingTypeAndMessage(t *testing.T) {
