@@ -87,21 +87,16 @@ func (r *RestCatalogSuite) TestListFunctions200() {
 	// Passing in a custom page size through context
 	ctx := cat.SetPageSize(context.Background(), customPageSize)
 
-	var lastErr error
 	functions := make([]table.Identifier, 0)
 	for function, err := range cat.ListFunctions(ctx, catalog.ToIdentifier(namespace)) {
+		r.Require().NoError(err)
 		functions = append(functions, function)
-		if err != nil {
-			lastErr = err
-			r.FailNow("unexpected error:", err)
-		}
 	}
 
 	r.Equal([]table.Identifier{
 		{"accounting", "tax", "paid"},
 		{"accounting", "tax", "owed"},
 	}, functions)
-	r.Require().NoError(lastErr)
 }
 
 func (r *RestCatalogSuite) TestListFunctionsPagination() {
@@ -256,6 +251,8 @@ func (r *RestCatalogSuite) TestListFunctions404() {
 	for _, err := range cat.ListFunctions(context.Background(), catalog.ToIdentifier(namespace)) {
 		if err != nil {
 			lastErr = err
+
+			break
 		}
 	}
 	r.ErrorIs(lastErr, catalog.ErrNoSuchNamespace)
@@ -312,6 +309,50 @@ func (r *RestCatalogSuite) TestLoadFunction404() {
 	_, err = cat.LoadFunction(context.Background(), catalog.ToIdentifier("accounting", "missing_fn"))
 	r.ErrorIs(err, catalog.ErrNoSuchFunction)
 	r.ErrorContains(err, "The requested function does not exist")
+}
+
+func (r *RestCatalogSuite) TestLoadFunction404Namespace() {
+	r.mux.HandleFunc("/v1/namespaces/ghost_ns/functions/some_fn", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "The given namespace does not exist",
+				"type":    "NoSuchNamespaceException",
+				"code":    404,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	// The load 404 discriminates on the error type: a missing namespace is
+	// not reported as a missing function.
+	_, err = cat.LoadFunction(context.Background(), catalog.ToIdentifier("ghost_ns", "some_fn"))
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	r.NotErrorIs(err, catalog.ErrNoSuchFunction)
+	r.ErrorContains(err, "The given namespace does not exist")
+
+	// The existence check consequently surfaces the namespace error instead
+	// of a bogus (false, nil).
+	exists, err := cat.CheckFunctionExists(context.Background(), catalog.ToIdentifier("ghost_ns", "some_fn"))
+	r.False(exists)
+	r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+}
+
+func (r *RestCatalogSuite) TestLoadFunctionMissingMetadata() {
+	r.mux.HandleFunc("/v1/namespaces/accounting/functions/hollow_fn", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(`{"metadata-location": "s3://bucket/functions/hollow_fn/metadata/00000-x.metadata.json"}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.LoadFunction(context.Background(), catalog.ToIdentifier("accounting", "hollow_fn"))
+	r.ErrorIs(err, rest.ErrRESTError)
+	r.ErrorContains(err, "missing metadata")
 }
 
 func (r *RestCatalogSuite) TestLoadFunctionMalformedMetadata() {
@@ -380,9 +421,11 @@ func (r *RestCatalogSuite) TestListFunctionsInvalidNamespace() {
 	for _, err := range cat.ListFunctions(context.Background(), table.Identifier{}) {
 		if err != nil {
 			lastErr = err
+
+			break
 		}
 	}
-	r.Error(lastErr)
+	r.ErrorIs(lastErr, catalog.ErrNoSuchNamespace)
 }
 
 // TestFunctionEndpointNegotiation drives the catalog against a server that
@@ -410,6 +453,9 @@ func TestFunctionEndpointNegotiation(t *testing.T) {
 
 	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
 	require.NoError(t, err)
+
+	// The catalog satisfies the optional capability interface.
+	var _ rest.FunctionCatalog = cat
 
 	// An unsupported load fails with the capability sentinel, not a transport error.
 	_, err = cat.LoadFunction(context.Background(), table.Identifier{"ns", "fn"})

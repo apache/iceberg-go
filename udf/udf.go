@@ -43,7 +43,9 @@ func New(ident table.Identifier, meta Metadata, metadataLocation string) *UDF {
 }
 
 // Equals reports whether two UDFs have the same identifier, metadata
-// location and metadata.
+// location and metadata. The value receiver and argument are intentional,
+// matching view.View: a UDF is a cheap value of references, so callers
+// holding the *UDF from New compare with fn.Equals(*other).
 func (u UDF) Equals(other UDF) bool {
 	return slices.Equal(u.identifier, other.identifier) &&
 		u.metadataLocation == other.metadataLocation &&

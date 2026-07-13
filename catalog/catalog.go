@@ -39,7 +39,6 @@ import (
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/udf"
 )
 
 type Type string
@@ -192,30 +191,6 @@ type TransactionalCatalog interface {
 // remains the single source of truth.
 type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
-}
-
-// FunctionCatalog is an optional interface implemented by catalogs that
-// support the Iceberg REST function (SQL UDF) endpoints. The function
-// endpoints are not part of the spec's assumed default endpoint set, so
-// servers must advertise them: unsupported loads report an
-// endpoint-not-supported error and unsupported listings yield no results.
-// Callers should check for this capability via a type assertion:
-//
-//	if fc, ok := cat.(catalog.FunctionCatalog); ok {
-//	    fn, err := fc.LoadFunction(ctx, ident)
-//	}
-type FunctionCatalog interface {
-	// ListFunctions returns the function identifiers under a namespace,
-	// with the returned identifiers containing the information required
-	// to load the function via this catalog.
-	ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
-	// LoadFunction loads a function from the catalog. All overloaded
-	// definitions are included in the single metadata response.
-	LoadFunction(ctx context.Context, identifier table.Identifier) (*udf.UDF, error)
-	// CheckFunctionExists returns if the function exists. The REST spec
-	// defines no HEAD endpoint for functions, so existence is checked by
-	// loading the function.
-	CheckFunctionExists(ctx context.Context, identifier table.Identifier) (bool, error)
 }
 
 func ToIdentifier(ident ...string) table.Identifier {
