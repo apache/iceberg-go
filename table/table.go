@@ -628,7 +628,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, WithMetricsReporter(t.MetricsReporter())), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -989,6 +989,20 @@ func WithMetricsReporter(r metrics.Reporter) Option {
 	return func(t *Table) {
 		t.reporter = r
 		t.reporterSet = true
+	}
+}
+
+// withReporterState copies both the reporter and the reporterSet flag verbatim.
+// Unlike WithMetricsReporter it does not force reporterSet true, so a table
+// riding the catalog default (reporterSet == false) stays defaulted across a
+// New(...) rebuild instead of being frozen to its current reporter. Used by
+// doCommit and StagedTable to carry reporter state without breaking the Refresh
+// inheritance invariant — WithMetricsReporter cannot be used there because
+// MetricsReporter() is never nil, so it would always mark the table caller-set.
+func withReporterState(r metrics.Reporter, set bool) Option {
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = set
 	}
 }
 

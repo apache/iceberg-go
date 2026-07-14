@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -115,8 +116,9 @@ func TestStagedTableInheritsReporter(t *testing.T) {
 		"StagedTable must forward the transaction table's reporter")
 }
 
-// on: a reporter injected via WithMetricsReporter must survive a Refresh even
-// though the catalog's LoadTable hands back the default nop reporter.
+// TestRefreshKeepsCallerReporter pins that a reporter injected via
+// WithMetricsReporter must survive a Refresh even though the catalog's LoadTable
+// hands back the default nop reporter.
 func TestRefreshKeepsCallerReporter(t *testing.T) {
 	rep := &metrics.InMemoryReporter{}
 	cat := &reporterStubCatalog{} // LoadTable yields a nop-reporter table
@@ -147,7 +149,8 @@ func TestRefreshKeepsExplicitNopOptOut(t *testing.T) {
 		"explicit NopReporter opt-out must not be reverted to the catalog reporter on refresh")
 }
 
-// the caller never overrode the reporter, Refresh adopts the fresh table's.
+// TestRefreshInheritsCatalogReporterWhenUnset pins that when the caller never
+// overrode the reporter, Refresh adopts the fresh table's.
 func TestRefreshInheritsCatalogReporterWhenUnset(t *testing.T) {
 	fresh := &metrics.InMemoryReporter{}
 	cat := &reporterStubCatalog{reporter: fresh}
@@ -158,4 +161,68 @@ func TestRefreshInheritsCatalogReporterWhenUnset(t *testing.T) {
 	require.NoError(t, tbl.Refresh(context.Background()))
 	assert.Same(t, fresh, tbl.MetricsReporter(),
 		"an unset reporter must inherit the catalog-derived one on refresh")
+}
+
+// committingReporterCatalog applies updates on CommitTable and hands every
+// LoadTable a table carrying the configured reporter, so a create+Commit+Refresh
+// sequence can be exercised end to end.
+type committingReporterCatalog struct {
+	metadata Metadata
+	reporter metrics.Reporter
+}
+
+func (c *committingReporterCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	opts := []Option{}
+	if c.reporter != nil {
+		opts = append(opts, WithMetricsReporter(c.reporter))
+	}
+
+	return New(ident, c.metadata, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c, opts...), nil
+}
+
+func (c *committingReporterCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
+	meta, err := UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+
+	return meta, "", nil
+}
+
+// TestCommitPreservesDefaultedReporterInheritance pins that a table riding the
+// catalog default (reporterSet == false) keeps inheriting the catalog reporter
+// on a Refresh that follows a Commit. doCommit rebuilds the table via New(...);
+// carrying the reporter through WithMetricsReporter(MetricsReporter()) would
+// force reporterSet true (that accessor is never nil), freezing the post-commit
+// table to its current reporter — this is the create+Commit+Refresh path the
+// Refresh-only tests do not cover.
+func TestCommitPreservesDefaultedReporterInheritance(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	loc := filepath.ToSlash(t.TempDir())
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc,
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	fresh := &metrics.InMemoryReporter{}
+	cat := &committingReporterCatalog{metadata: meta, reporter: fresh}
+
+	// Created without an explicit reporter: reporterSet == false.
+	tbl := New(Identifier{"db", "commit_reporter"}, meta, loc+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	require.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"k": "v"}))
+	committed, err := txn.Commit(context.Background())
+	require.NoError(t, err)
+
+	// No caller ever set a reporter, so the committed table must still inherit
+	// the catalog-derived one on refresh.
+	require.NoError(t, committed.Refresh(context.Background()))
+	assert.Same(t, fresh, committed.MetricsReporter(),
+		"a defaulted table must keep inheriting the catalog reporter after a commit")
 }

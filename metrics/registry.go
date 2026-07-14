@@ -73,7 +73,15 @@ func Register(name string, factory Factory) {
 // name is not registered. This exists primarily so tests can register a factory
 // and undo it via t.Cleanup, keeping the process-global registry re-runnable
 // under go test -count=N.
+//
+// The built-in "nop" and "logging" factories cannot be removed: since Register
+// panics on a duplicate name, nothing could put them back for the rest of the
+// process, and a stray Deregister("nop") would permanently break
+// metrics-reporter-impl=nop everywhere. Deregister silently ignores those names.
 func Deregister(name string) {
+	if name == ReporterNameNop || name == ReporterNameLogging {
+		return
+	}
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	delete(registry, name)

@@ -78,3 +78,19 @@ func TestRegister(t *testing.T) {
 		assert.Panics(t, func() { Register("logging", func(map[string]string) (Reporter, error) { return NopReporter{}, nil }) })
 	})
 }
+
+func TestDeregisterProtectsBuiltins(t *testing.T) {
+	// Deregister must not remove the built-in factories: Register panics on a
+	// duplicate, so a removed built-in could never be restored, permanently
+	// breaking metrics-reporter-impl=nop/logging for the rest of the process.
+	Deregister(ReporterNameNop)
+	Deregister(ReporterNameLogging)
+
+	nop, err := FromProperties(map[string]string{ReporterImplKey: ReporterNameNop})
+	require.NoError(t, err)
+	assert.IsType(t, NopReporter{}, nop)
+
+	logging, err := FromProperties(map[string]string{ReporterImplKey: ReporterNameLogging})
+	require.NoError(t, err)
+	assert.IsType(t, &LoggingReporter{}, logging)
+}
