@@ -913,6 +913,111 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func TestRoundTripDefaultHeaderHandling(t *testing.T) {
+	t.Parallel()
+
+	newSession := func(captured *http.Header) *sessionTransport {
+		s := &sessionTransport{
+			RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				*captured = r.Header.Clone()
+
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}),
+			defaultHeaders: http.Header{},
+		}
+		s.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+
+		return s
+	}
+
+	t.Run("applies default when absent", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{defaultAccessDelegation}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("per-request value overrides default without duplicating", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		req.Header.Set(headerIcebergAccessDelegation, "remote-signing")
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"remote-signing"}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("context suppression drops the default", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		ctx := withSuppressedHeadersCtx(context.Background(), []string{headerIcebergAccessDelegation})
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Empty(t, got.Values(headerIcebergAccessDelegation))
+	})
+}
+
+// staticAuthManager is a test AuthManager returning a fixed authorization header.
+type staticAuthManager struct {
+	key, value string
+}
+
+func (s staticAuthManager) AuthHeader() (string, string, error) { return s.key, s.value, nil }
+
+func TestRoundTripAuthManagerWinsOverPerRequestHeader(t *testing.T) {
+	t.Parallel()
+
+	// The generalized per-request override lets withHeaders replace a session
+	// default of the same key, but the managed Authorization header must still
+	// win: authManager runs after the default-header loop and Set-overwrites, so
+	// a caller cannot suppress or spoof it via withHeaders. This pins that
+	// ordering, which is load-bearing but otherwise implicit.
+	var got http.Header
+	s := &sessionTransport{
+		RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = r.Header.Clone()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+		defaultHeaders: http.Header{},
+		authManager:    staticAuthManager{key: "Authorization", value: "Bearer managed-token"},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer caller-supplied")
+
+	_, err = s.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer managed-token"}, got.Values("Authorization"))
+}
+
+func TestReqOptionsCompose(t *testing.T) {
+	t.Parallel()
+
+	cfg := newReqConfig([]reqOption{
+		withHeaders(map[string]string{"X-First": "one"}),
+		withHeaders(map[string]string{"X-Second": "two"}),
+		withSuppressedHeaders("X-First"),
+		withSuppressedHeaders("X-Second", "X-Third"),
+	})
+
+	assert.Equal(t, map[string]string{
+		"X-First":  "one",
+		"X-Second": "two",
+	}, cfg.headers)
+	assert.Equal(t, []string{"X-First", "X-Second", "X-Third"}, cfg.suppressHeaders)
+}
+
 type closeTrackingReadCloser struct {
 	*bytes.Reader
 	closeErr error
@@ -1214,22 +1319,22 @@ func TestResponseBodyLeak(t *testing.T) {
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil, false)
+		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil)
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,
 			"response body should be closed on non-200 status")
 	})
 
-	t.Run("doPostAllowNoContent", func(t *testing.T) {
+	t.Run("doPost", func(t *testing.T) {
 		tracker := &trackingTransport{transport: http.DefaultTransport}
 		client := &http.Client{Transport: tracker}
 
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = doPostAllowNoContent[map[string]string, struct{}](
-			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, false)
+		_, err = doPost[map[string]string, struct{}](
+			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, allowNoContent())
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,
@@ -1244,7 +1349,7 @@ func TestHandleNon200_DecodeFlatMessagePreservesSentinel(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"message":"flat error"}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "flat error", err.Error())
 	require.True(t, errors.Is(err, ErrBadRequest))
@@ -1257,7 +1362,7 @@ func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"error":{"message":"nested error","type":"ValidationException"}}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "ValidationException: nested error", err.Error())
 	require.True(t, errors.Is(err, ErrForbidden))
@@ -1270,11 +1375,64 @@ func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
 		Body:          http.NoBody,
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrBadRequest))
 	require.Equal(t, ErrBadRequest.Error(), err.Error())
 	require.NotEqual(t, ": ", err.Error())
+}
+
+func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
+	t.Parallel()
+
+	sentinelByType := errors.New("mapped by type")
+	sentinelByStatus := errors.New("mapped by status")
+	typeOverride := map[string]error{"NoSuchThingException": sentinelByType}
+	statusOverride := map[int]error{http.StatusNotFound: sentinelByStatus}
+
+	newRsp := func(status int, body string) *http.Response {
+		return &http.Response{
+			StatusCode:    status,
+			ContentLength: int64(len(body)),
+			Body:          io.NopCloser(bytes.NewBufferString(body)),
+		}
+	}
+
+	t.Run("error.type override wins over status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"NoSuchThingException","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
+
+	t.Run("unmatched error.type falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"SomethingElse","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("empty body falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		rsp := &http.Response{StatusCode: http.StatusNotFound, ContentLength: 0, Body: http.NoBody}
+		err := handleNon200(rsp, statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("type override ignored on an unmapped status", func(t *testing.T) {
+		t.Parallel()
+
+		// The error.type values are defined for 404 in the spec; a 503 carrying
+		// one must resolve on status (ErrServiceUnavailable), not a 404 sentinel.
+		err := handleNon200(newRsp(http.StatusServiceUnavailable, `{"error":{"type":"NoSuchThingException","message":"down"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		assert.NotErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
 }
 
 func TestErrorResponse_ErrorFormattingTypeAndMessage(t *testing.T) {

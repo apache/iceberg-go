@@ -73,6 +73,12 @@ const (
 	bearerPrefix        = "Bearer"
 	keyPrefix           = "prefix"
 
+	// headerIcebergAccessDelegation requests server-side storage-credential
+	// vending. It is a session default (defaultAccessDelegation) and a
+	// per-request header on the scan-planning endpoints that vend credentials.
+	headerIcebergAccessDelegation = "X-Iceberg-Access-Delegation"
+	defaultAccessDelegation       = "vended-credentials"
+
 	keyNamespaceSeparator     = "namespace-separator"
 	defaultNamespaceSeparator = "%1F"
 
@@ -228,10 +234,17 @@ type sessionTransport struct {
 const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A session default is applied unless the request already carries that
+	// header (a per-request override of any default, not just Content-Type
+	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
+	// the context as an explicit set, never inferred from header values).
+	suppressed := suppressedHeadersFrom(r.Context())
 	for k, v := range s.defaultHeaders {
-		// Skip Content-Type if it's already set in the request
-		// to avoid duplicate headers (e.g., when using PostForm)
-		if http.CanonicalHeaderKey(k) == "Content-Type" && r.Header.Get("Content-Type") != "" {
+		ck := http.CanonicalHeaderKey(k)
+		if _, ok := r.Header[ck]; ok {
+			continue
+		}
+		if _, ok := suppressed[ck]; ok {
 			continue
 		}
 		for _, hdr := range v {
@@ -239,6 +252,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// Ordering is load-bearing: authManager runs after the default-header loop
+	// and Set-overwrites, so the managed auth header always wins even though the
+	// loop above lets an arbitrary per-request header (withHeaders) override a
+	// session default of the same key. A caller cannot suppress or spoof the
+	// Authorization header by supplying its own. Do not reorder this before the
+	// default-header loop.
 	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
 		k, v, err := s.authManager.AuthHeader()
 		if err != nil {
@@ -293,16 +312,117 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.RoundTripper.RoundTrip(r)
 }
 
-func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
+// suppressHeadersKey carries the set of session-default header keys (canonical
+// form) that a request opted out of, so sessionTransport.RoundTrip can consult
+// an explicit set rather than inferring suppression from header values.
+type suppressHeadersKey struct{}
+
+// reqConfig holds the optional per-request knobs shared by do and doPost:
+// headers to set, session-default headers to suppress, a body error.type ->
+// error override, and whether an HTTP 204 is a valid empty result.
+type reqConfig struct {
+	headers           map[string]string
+	suppressHeaders   []string
+	errorTypeOverride map[string]error
+	allowNoContent    bool
+	requireBody       bool
+}
+
+type reqOption func(*reqConfig)
+
+// withHeaders sets per-request headers, merging with any already set so options
+// compose. A per-request header takes precedence over a session default because
+// sessionTransport.RoundTrip skips any default whose key is already present.
+func withHeaders(headers map[string]string) reqOption {
+	return func(c *reqConfig) {
+		if c.headers == nil {
+			c.headers = make(map[string]string, len(headers))
+		}
+		maps.Copy(c.headers, headers)
+	}
+}
+
+// withSuppressedHeaders prevents the named session-default headers from being
+// sent on this request. Names accumulate so options compose. Suppression is
+// carried through the request context (see RoundTrip), not encoded as a header
+// value, so req.Header only ever means "headers to send".
+func withSuppressedHeaders(names ...string) reqOption {
+	return func(c *reqConfig) { c.suppressHeaders = append(c.suppressHeaders, names...) }
+}
+
+// withErrorTypeOverride maps a non-200 response to a specific error by the REST
+// error.type in the response body. It takes precedence over the status-code
+// override so a shared status (e.g. a 404 that can be a missing plan, table, or
+// namespace) can split into distinct sentinels. Entries accumulate so options
+// compose; an unset or unmatched error.type falls through to the status-code
+// override.
+func withErrorTypeOverride(byType map[string]error) reqOption {
+	return func(c *reqConfig) {
+		if c.errorTypeOverride == nil {
+			c.errorTypeOverride = make(map[string]error, len(byType))
+		}
+		maps.Copy(c.errorTypeOverride, byType)
+	}
+}
+
+// allowNoContent treats an HTTP 204 No Content response as a valid empty result
+// rather than trying to decode a body.
+func allowNoContent() reqOption {
+	return func(c *reqConfig) { c.allowNoContent = true }
+}
+
+// requireBody rejects an HTTP 200 with an empty body rather than decoding it to
+// the zero result. Use it when a 200 must carry a payload, so a truncated or
+// proxy-stripped response cannot masquerade as a successful empty result (e.g.
+// fetchScanTasks returning "zero tasks" and silently dropping work).
+func requireBody() reqOption {
+	return func(c *reqConfig) { c.requireBody = true }
+}
+
+func newReqConfig(opts []reqOption) reqConfig {
+	var cfg reqConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
+// withSuppressedHeadersCtx returns ctx carrying the canonicalized suppression
+// set, or ctx unchanged when nothing is suppressed.
+func withSuppressedHeadersCtx(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[http.CanonicalHeaderKey(n)] = struct{}{}
+	}
+
+	return context.WithValue(ctx, suppressHeadersKey{}, set)
+}
+
+func suppressedHeadersFrom(ctx context.Context) map[string]struct{} {
+	set, _ := ctx.Value(suppressHeadersKey{}).(map[string]struct{})
+
+	return set
+}
+
+func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	cfg := newReqConfig(opts)
+
 	var (
 		req *http.Request
 		rsp *http.Response
 	)
 
 	uri := baseURI.JoinPath(path...).String()
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return ret, err
 	}
+	setRequestHeaders(req, cfg.headers)
 
 	if rsp, err = cl.Do(req); err != nil {
 		return ret, err
@@ -312,12 +432,12 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		_ = rsp.Body.Close()
 	}()
 
-	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
+	if cfg.allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if method == http.MethodHead || method == http.MethodDelete {
@@ -331,25 +451,23 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	return ret, err
 }
 
-func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
-	return do[T](ctx, http.MethodGet, baseURI, path, cl, override, false)
+func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	return do[T](ctx, http.MethodGet, baseURI, path, cl, override, opts...)
 }
 
-func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
-	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, true)
+func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, append([]reqOption{allowNoContent()}, opts...)...)
 }
 
 func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) error {
-	_, err := do[struct{}](ctx, http.MethodHead, baseURI, path, cl, override, true)
+	_, err := do[struct{}](ctx, http.MethodHead, baseURI, path, cl, override, allowNoContent())
 
 	return err
 }
 
-func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
-	return doPostAllowNoContent[Payload, Result](ctx, baseURI, path, payload, cl, override, false)
-}
+func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, opts ...reqOption) (ret Result, err error) {
+	cfg := newReqConfig(opts)
 
-func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, allowNoContent bool) (ret Result, err error) {
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -362,10 +480,12 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 		return ret, err
 	}
 
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
 		return ret, err
 	}
+	setRequestHeaders(req, cfg.headers)
 
 	rsp, err = cl.Do(req)
 	if err != nil {
@@ -376,15 +496,19 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 		_ = rsp.Body.Close()
 	}()
 
-	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
+	if cfg.allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if rsp.ContentLength == 0 {
+		if cfg.requireBody {
+			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+		}
+
 		return ret, err
 	}
 
@@ -395,7 +519,13 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 	return ret, err
 }
 
-func handleNon200(rsp *http.Response, override map[int]error) error {
+func setRequestHeaders(req *http.Request, headers map[string]string) {
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+}
+
+func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
 	var e errorResponse
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
@@ -420,9 +550,23 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 		}
 	}
 
+	// The status-code override maps a status to a sentinel; a body error.type
+	// override refines it further (e.g. splitting a 404 into missing-plan vs.
+	// table vs. namespace). The type refinement only applies to a status the
+	// caller already mapped, because these error.type values are defined for
+	// specific statuses (404) in the REST spec: a 503 body carrying, say,
+	// NoSuchPlanIdException must still resolve to ErrServiceUnavailable rather
+	// than a 404 sentinel.
 	if override != nil {
-		if err, ok := override[rsp.StatusCode]; ok {
-			e.wrapping = err
+		if statusErr, ok := override[rsp.StatusCode]; ok {
+			if typeOverride != nil && e.Type != "" {
+				if typeErr, ok := typeOverride[e.Type]; ok {
+					e.wrapping = typeErr
+
+					return e
+				}
+			}
+			e.wrapping = statusErr
 
 			return e
 		}
@@ -768,7 +912,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -1259,7 +1403,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		return err
 	}
 
-	_, err = doPostAllowNoContent[payload, struct{}](
+	_, err = doPost[payload, struct{}](
 		ctx, r.baseURI, path,
 		payload{TableChanges: changes}, r.cl,
 		map[int]error{
@@ -1270,7 +1414,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
 		},
-		true,
+		allowNoContent(),
 	)
 
 	return err
@@ -1468,8 +1612,8 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	_, err = doPostAllowNoContent[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, true)
+	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, allowNoContent())
 	if err != nil {
 		return nil, err
 	}
