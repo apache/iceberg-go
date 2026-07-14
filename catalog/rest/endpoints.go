@@ -114,6 +114,12 @@ var (
 	endpointDeleteView   = endpoint{http.MethodDelete, "/v1/{prefix}/namespaces/{namespace}/views/{view}"}
 	endpointRenameView   = endpoint{http.MethodPost, "/v1/{prefix}/views/rename"}
 	endpointRegisterView = endpoint{http.MethodPost, "/v1/{prefix}/namespaces/{namespace}/register-view"}
+
+	// Function (SQL UDF) endpoints. The spec keeps these out of the assumed
+	// default endpoint set, so they are only used when the server advertises
+	// them.
+	endpointListFunctions = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/functions"}
+	endpointLoadFunction  = endpoint{http.MethodGet, "/v1/{prefix}/namespaces/{namespace}/functions/{function}"}
 )
 
 // defaultEndpoints is the spec default set, assumed when the server advertises
@@ -144,6 +150,7 @@ var allEndpoints = []endpoint{
 	endpointReportMetrics, endpointTableCredentials,
 	endpointListViews, endpointLoadView, endpointViewExists, endpointCreateView,
 	endpointUpdateView, endpointDeleteView, endpointRenameView, endpointRegisterView,
+	endpointListFunctions, endpointLoadFunction,
 }
 
 // endpointSet is the set of endpoints a catalog server supports.
