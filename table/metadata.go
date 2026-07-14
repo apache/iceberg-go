@@ -1821,12 +1821,14 @@ func cloneDefault(value any) any {
 		for i, item := range value {
 			clones[i] = cloneDefault(item)
 		}
+
 		return clones
 	case map[string]any:
 		clones := make(map[string]any, len(value))
 		for key, item := range value {
 			clones[key] = cloneDefault(item)
 		}
+
 		return clones
 	default:
 		return value
@@ -1860,7 +1862,6 @@ func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
 	fields := make([]iceberg.PartitionField, spec.NumFields())
 	for i := range fields {
 		fields[i] = spec.Field(i)
-		fields[i].SourceIDs = slices.Clone(fields[i].SourceIDs)
 	}
 
 	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
