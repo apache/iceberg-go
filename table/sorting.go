@@ -240,6 +240,11 @@ func (s SortOrder) Len() int {
 	return len(s.fields)
 }
 
+// Field returns the sort field at index i.
+func (s SortOrder) Field(i int) SortField {
+	return s.fields[i]
+}
+
 func (s SortOrder) MarshalJSON() ([]byte, error) {
 	type Alias struct {
 		OrderID int         `json:"order-id"`
@@ -319,10 +324,6 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 			if err := validateSortSourceIDs(field.SourceIDs); err != nil {
 				return SortOrder{}, fmt.Errorf("%w: sort field at index %d has invalid source IDs: %v",
 					ErrInvalidSortSourceID, idx, err)
-			}
-			if u, ok := field.Transform.(iceberg.UnknownTransform); ok {
-				return SortOrder{}, fmt.Errorf("%w: cannot write sort order with unknown transform: %s",
-					ErrInvalidTransform, u.String())
 			}
 		}
 	}

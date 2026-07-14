@@ -214,8 +214,9 @@ func TestPartitionFieldUnknownTransformRoundTrip(t *testing.T) {
 	assert.JSONEq(t, jsonData, string(data))
 }
 
-// Writers must not commit a partition spec that uses an unknown transform.
-func TestPartitionSpecRejectsUnknownTransform(t *testing.T) {
+// Building a spec tolerates unknown transforms, matching Java's PartitionSpec
+// builder. Rejection happens later, only when evolving such a spec.
+func TestPartitionSpecAcceptsUnknownTransform(t *testing.T) {
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID:   1,
 		Name: "id",
@@ -225,11 +226,13 @@ func TestPartitionSpecRejectsUnknownTransform(t *testing.T) {
 	unknown, err := iceberg.ParseTransform("custom_transform[42]")
 	require.NoError(t, err)
 
-	_, err = iceberg.NewPartitionSpecOpts(
+	spec, err := iceberg.NewPartitionSpecOpts(
 		iceberg.AddPartitionFieldBySourceID(1, "id_custom", unknown, schema, nil),
 	)
-	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
-	require.ErrorContains(t, err, "custom_transform[42]")
+	require.NoError(t, err)
+
+	_, ok := spec.Field(0).Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok)
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {

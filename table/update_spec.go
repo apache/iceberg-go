@@ -82,6 +82,12 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	nameToField := make(map[string]iceberg.PartitionField)
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
 	for _, partitionField := range partitionSpec.Fields() {
+		if _, ok := partitionField.Transform.(iceberg.UnknownTransform); ok {
+			us.err = fmt.Errorf("%w: cannot update partition spec with unknown transform: %s",
+				iceberg.ErrInvalidTransform, partitionField.Transform)
+
+			return us
+		}
 		transformToField[transformKey{
 			SourceId:  partitionField.SourceID(),
 			Transform: partitionField.Transform.String(),

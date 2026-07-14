@@ -132,20 +132,20 @@ func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
 	assert.Equal(t, 1, sortOrder.Len())
 }
 
-// Writers must not commit an un-evaluatable sort order; reads still load them
-// (TestUnmarshalUnknownSortTransform).
-func TestNewSortOrderRejectsUnknownTransform(t *testing.T) {
+// Unknown sort transforms are tolerated on write, matching Java (canTransform
+// stays true and nothing rejects them).
+func TestNewSortOrderAcceptsUnknownTransform(t *testing.T) {
 	unknown, err := iceberg.ParseTransform("custom_transform[42]")
 	require.NoError(t, err)
 
-	_, err = table.NewSortOrder(1, []table.SortField{{
+	order, err := table.NewSortOrder(1, []table.SortField{{
 		SourceIDs: []int{19},
 		Transform: unknown,
 		NullOrder: table.NullsFirst,
 		Direction: table.SortASC,
 	}})
-	require.ErrorIs(t, err, table.ErrInvalidTransform)
-	require.ErrorContains(t, err, "custom_transform[42]")
+	require.NoError(t, err)
+	assert.Equal(t, unknown, order.Field(0).Transform)
 }
 
 func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
@@ -285,14 +285,7 @@ func TestUnmarshalUnknownSortTransform(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, order.Len())
 
-	var first table.SortField
-	for i, f := range order.Fields() {
-		if i == 0 {
-			first = f
-
-			break
-		}
-	}
+	first := order.Field(0)
 	_, ok := first.Transform.(iceberg.UnknownTransform)
 	assert.True(t, ok, "unknown transform should parse to UnknownTransform")
 	assert.Equal(t, "foobar", first.Transform.String())
