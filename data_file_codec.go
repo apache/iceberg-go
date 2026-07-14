@@ -107,7 +107,7 @@ func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version 
 		return nil, err
 	}
 	clone := cloneDataFileAvroFields(d)
-	clone.PartitionData = avroEncodePartitionData(d.Partition(), maps.nameToID, maps.idToType)
+	clone.PartitionData = avroEncodePartitionData(d.Partition(), maps.nameToID, maps.idToType, maps.idToDecimal)
 
 	return s.Encode(newEncodeEntry(version, clone))
 }
@@ -139,7 +139,7 @@ func unmarshalAvroDataFileEntry(data []byte, spec PartitionSpec, schema *Schema,
 	df.specID = int32(spec.ID())
 	df.fieldNameToID = maps.nameToID
 	df.fieldIDToLogicalType = maps.idToType
-	df.fieldIDToFixedSize = maps.idToFixedSize
+	df.fieldIDToDecimal = maps.idToDecimal
 
 	return df, nil
 }
@@ -205,8 +205,8 @@ func cloneDataFileAvroFields(src *dataFile) *dataFile {
 // iceberg-typed values like Date or Decimal) into the name-keyed
 // avro-friendly map the manifest-entry schema expects. Idempotent:
 // values already in primitive form pass through unchanged.
-func avroEncodePartitionData(idKeyed map[int]any, nameToID map[string]int, logicalTypes map[int]string) map[string]any {
-	converted := avroPartitionData(idKeyed, logicalTypes)
+func avroEncodePartitionData(idKeyed map[int]any, nameToID map[string]int, logicalTypes map[int]string, decimals map[int]decimalMeta) map[string]any {
+	converted := avroPartitionData(idKeyed, logicalTypes, decimals)
 	out := make(map[string]any, len(converted))
 	for name, id := range nameToID {
 		if v, ok := converted[id]; ok {
@@ -218,9 +218,9 @@ func avroEncodePartitionData(idKeyed map[int]any, nameToID map[string]int, logic
 }
 
 type dataFileFieldMaps struct {
-	nameToID      map[string]int
-	idToType      map[int]string
-	idToFixedSize map[int]int
+	nameToID    map[string]int
+	idToType    map[int]string
+	idToDecimal map[int]decimalMeta
 }
 
 // dataFileSchemaCacheKey identifies a cached avro schema by the
@@ -286,13 +286,13 @@ func manifestEntrySchemaFor(spec PartitionSpec, schema *Schema, version int) (*a
 	if err != nil {
 		return nil, dataFileFieldMaps{}, err
 	}
-	n2i, i2t, i2s := getFieldIDMap(fullSchema)
+	n2i, i2t, i2d := getFieldIDMap(fullSchema)
 	entry := &dataFileSchemaEntry{
 		schema: fullSchema,
 		maps: dataFileFieldMaps{
-			nameToID:      n2i,
-			idToType:      i2t,
-			idToFixedSize: i2s,
+			nameToID:    n2i,
+			idToType:    i2t,
+			idToDecimal: i2d,
 		},
 	}
 	dataFileSchemaCache.Add(key, entry)

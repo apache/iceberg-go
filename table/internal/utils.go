@@ -263,7 +263,7 @@ const unsortedSortOrderID = 0
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	fieldIDToLogicalType := make(map[int]string)
-	fieldIDToFixedSize := make(map[int]int)
+	fieldIDToScale := make(map[int]int)
 
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
@@ -293,7 +293,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 					fieldIDToLogicalType[field.FieldID] = atype.TimestampMicros
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = atype.Decimal
-					fieldIDToFixedSize[field.FieldID] = rt.Scale()
+					fieldIDToScale[field.FieldID] = rt.Scale()
 				case iceberg.UUIDType:
 					fieldIDToLogicalType[field.FieldID] = atype.UUID
 				}
@@ -302,7 +302,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	bldr, err := iceberg.NewDataFileBuilder(opts.Spec, opts.Content,
-		opts.Path, opts.Format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, opts.FileSize)
+		opts.Path, opts.Format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToScale, d.RecordCount, opts.FileSize)
 	if err != nil {
 		panic(err)
 	}

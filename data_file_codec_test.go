@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/stretchr/testify/require"
 )
 
@@ -179,6 +180,61 @@ func deepCopyReflect(src reflect.Value) reflect.Value {
 		return dst
 	default:
 		return src
+	}
+}
+
+// TestDecimalPartitionEncodesWithDeclaredPrecision is a regression test for
+// #1027: a decimal partition value whose textual length is smaller than the
+// required fixed-size width (here decimal(10, 2) with value 1.00, string
+// "1.00" of length 4 but requiring DecimalRequiredBytes(10) == 5 bytes) must
+// still encode. Sizing the Avro fixed buffer off len(dec.String()) instead of
+// the declared precision produced a buffer of the wrong width and made the
+// encoder reject the value.
+func TestDecimalPartitionEncodesWithDeclaredPrecision(t *testing.T) {
+	const (
+		fieldID   = 1000
+		precision = 10
+		scale     = 2
+	)
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(precision, scale), Required: true},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: fieldID, Name: "price", Transform: IdentityTransform{}},
+	)
+
+	// value 1.00 -> unscaled 100 at scale 2; "1.00" is 4 chars, but
+	// decimal(10, 2) requires a 5-byte fixed buffer.
+	partVal := Decimal{Val: decimal128.FromI64(100), Scale: scale}
+	builder, err := NewDataFileBuilder(
+		spec,
+		EntryContentData,
+		"s3://bucket/ns/tbl/data/part-0000.parquet",
+		ParquetFile,
+		map[int]any{fieldID: partVal},
+		map[int]string{fieldID: "decimal"},
+		map[int]int{fieldID: scale},
+		1024,
+		1024*1024,
+	)
+	require.NoError(t, err)
+	df := builder.Build().(*dataFile)
+
+	for _, version := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(version), func(t *testing.T) {
+			encoded, err := df.MarshalAvroEntry(spec, schema, version)
+			require.NoError(t, err, "encoding a decimal partition must not fail on fixed-size mismatch")
+
+			decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, version)
+			require.NoError(t, err)
+
+			got, ok := decoded.Partition()[fieldID]
+			require.True(t, ok, "decoded partition must carry the decimal field")
+			dec, ok := got.(DecimalLiteral)
+			require.True(t, ok, "decoded decimal partition value should be a DecimalLiteral, got %T", got)
+			require.Equal(t, scale, dec.Scale)
+			require.Equal(t, "1.00", Decimal(dec).String())
+		})
 	}
 }
 
