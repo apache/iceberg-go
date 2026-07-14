@@ -49,6 +49,31 @@ func TestAcquireLockImmediateSuccess(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestAcquireLocksSortsComponents(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	var request *hive_metastore.LockRequest
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Run(func(args mock.Arguments) {
+			request = args.Get(1).(*hive_metastore.LockRequest)
+		}).
+		Return(&hive_metastore.LockResponse{Lockid: 124, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("Unlock", ctx, int64(124)).Return(nil).Once()
+
+	lock, err := acquireLocks(ctx, mockClient, []tableLockIdentifier{
+		{database: "z_db", table: "source"},
+		{database: "a_db", table: "destination"},
+	}, NewHiveOptions())
+	require.NoError(t, err)
+	require.Len(t, request.Component, 2)
+	assert.Equal(t, "a_db", request.Component[0].Dbname)
+	assert.Equal(t, "destination", *request.Component[0].Tablename)
+	assert.Equal(t, "z_db", request.Component[1].Dbname)
+	assert.Equal(t, "source", *request.Component[1].Tablename)
+	require.NoError(t, lock.Release(ctx))
+	mockClient.AssertExpectations(t)
+}
+
 func TestAcquireLockWithRetry(t *testing.T) {
 	mockClient := new(mockHiveClient)
 	ctx := context.Background()

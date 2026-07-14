@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/beltran/gohive/hive_metastore"
@@ -36,13 +38,37 @@ type HiveLock struct {
 }
 
 func acquireLock(ctx context.Context, client HiveClient, database, tableName string, opts *HiveOptions) (*HiveLock, error) {
-	lockReq := &hive_metastore.LockRequest{
-		Component: []*hive_metastore.LockComponent{{
+	return acquireLocks(ctx, client, []tableLockIdentifier{{database: database, table: tableName}}, opts)
+}
+
+type tableLockIdentifier struct {
+	database string
+	table    string
+}
+
+func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLockIdentifier, opts *HiveOptions) (*HiveLock, error) {
+	identifiers = slices.Clone(identifiers)
+	slices.SortFunc(identifiers, func(a, b tableLockIdentifier) int {
+		if cmp := strings.Compare(a.database, b.database); cmp != 0 {
+			return cmp
+		}
+
+		return strings.Compare(a.table, b.table)
+	})
+	identifiers = slices.Compact(identifiers)
+
+	components := make([]*hive_metastore.LockComponent, len(identifiers))
+	for i, ident := range identifiers {
+		tableName := ident.table
+		components[i] = &hive_metastore.LockComponent{
 			Type:      hive_metastore.LockType_EXCLUSIVE,
 			Level:     hive_metastore.LockLevel_TABLE,
-			Dbname:    database,
+			Dbname:    ident.database,
 			Tablename: &tableName,
-		}},
+		}
+	}
+	lockReq := &hive_metastore.LockRequest{
+		Component: components,
 	}
 
 	lockResp, err := client.Lock(ctx, lockReq)
@@ -98,7 +124,16 @@ func acquireLock(ctx context.Context, client HiveClient, database, tableName str
 
 	_ = client.Unlock(ctx, lockResp.Lockid)
 
-	return nil, fmt.Errorf("%w: exhausted %d retries for table %s.%s", ErrLockAcquisitionFailed, opts.LockRetries, database, tableName)
+	return nil, fmt.Errorf("%w: exhausted %d retries for tables %s", ErrLockAcquisitionFailed, opts.LockRetries, formatLockIdentifiers(identifiers))
+}
+
+func formatLockIdentifiers(identifiers []tableLockIdentifier) string {
+	names := make([]string, len(identifiers))
+	for i, ident := range identifiers {
+		names[i] = ident.database + "." + ident.table
+	}
+
+	return strings.Join(names, ", ")
 }
 
 func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration {
