@@ -130,7 +130,9 @@ type errorResponse struct {
 	Code    int      `json:"code"`
 	Stack   []string `json:"stack,omitempty"`
 
-	wrapping error
+	wrapping   error
+	statusCode int
+	retryAfter string
 }
 
 type contextKey string
@@ -526,7 +528,10 @@ func setRequestHeaders(req *http.Request, headers map[string]string) {
 }
 
 func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
-	var e errorResponse
+	e := errorResponse{
+		statusCode: rsp.StatusCode,
+		retryAfter: rsp.Header.Get("Retry-After"),
+	}
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
 	if rsp.ContentLength != 0 {
@@ -541,7 +546,13 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 
 		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
 		if decErr != nil && decErr != io.EOF {
-			return fmt.Errorf("%w: failed to decode error response: %s", ErrRESTError, decErr.Error())
+			// Preserve the HTTP metadata even when the server returned a non-JSON
+			// error page. Callers such as WaitForPlan still need the status to apply
+			// transport-level retry policy; the wrapping sentinel retains the prior
+			// ErrRESTError classification for malformed error payloads.
+			e.wrapping = ErrRESTError
+
+			return fmt.Errorf("%w: failed to decode error response: %s", e, decErr.Error())
 		}
 
 		if e.Message == "" && e.Type == "" {
