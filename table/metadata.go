@@ -1658,18 +1658,18 @@ func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
 func (c *commonMetadata) Location() string           { return c.Loc }
 func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
 func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
-func (c *commonMetadata) Schemas() []*iceberg.Schema { return slices.Clone(c.SchemaList) }
+func (c *commonMetadata) Schemas() []*iceberg.Schema { return cloneSchemas(c.SchemaList) }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 	for _, s := range c.SchemaList {
 		if s.ID == c.CurrentSchemaID {
-			return s
+			return cloneSchema(s)
 		}
 	}
 	panic("should never get here")
 }
 
 func (c *commonMetadata) PartitionSpecs() []iceberg.PartitionSpec {
-	return slices.Clone(c.Specs)
+	return clonePartitionSpecs(c.Specs)
 }
 
 func (c *commonMetadata) DefaultPartitionSpec() int {
@@ -1679,17 +1679,19 @@ func (c *commonMetadata) DefaultPartitionSpec() int {
 func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
 	for _, s := range c.Specs {
 		if s.ID() == c.DefaultSpecID {
-			return s
+			return clonePartitionSpec(s)
 		}
 	}
 
-	return *iceberg.UnpartitionedSpec
+	return clonePartitionSpec(*iceberg.UnpartitionedSpec)
 }
 
 func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
 	for _, s := range c.Specs {
 		if s.ID() == id {
-			return &s
+			clone := clonePartitionSpec(s)
+
+			return &clone
 		}
 	}
 
@@ -1768,6 +1770,78 @@ func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile]
 
 func (c *commonMetadata) EncryptionKeys() iter.Seq[EncryptionKey] {
 	return slices.Values(c.EncryptionKeyList)
+}
+
+func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
+	if schema == nil {
+		return nil
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(
+		schema.ID,
+		slices.Clone(schema.IdentifierFieldIDs),
+		cloneNestedFields(schema.Fields())...,
+	)
+}
+
+func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
+	clones := make([]*iceberg.Schema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = cloneSchema(schema)
+	}
+
+	return clones
+}
+
+func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
+	clones := slices.Clone(fields)
+	for i := range clones {
+		clones[i].Type = cloneSchemaType(clones[i].Type)
+	}
+
+	return clones
+}
+
+func cloneSchemaType(typ iceberg.Type) iceberg.Type {
+	switch typ := typ.(type) {
+	case *iceberg.StructType:
+		return &iceberg.StructType{FieldList: cloneNestedFields(typ.FieldList)}
+	case *iceberg.ListType:
+		return &iceberg.ListType{
+			ElementID:       typ.ElementID,
+			Element:         cloneSchemaType(typ.Element),
+			ElementRequired: typ.ElementRequired,
+		}
+	case *iceberg.MapType:
+		return &iceberg.MapType{
+			KeyID:         typ.KeyID,
+			KeyType:       cloneSchemaType(typ.KeyType),
+			ValueID:       typ.ValueID,
+			ValueType:     cloneSchemaType(typ.ValueType),
+			ValueRequired: typ.ValueRequired,
+		}
+	default:
+		return typ
+	}
+}
+
+func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
+	fields := make([]iceberg.PartitionField, spec.NumFields())
+	for i := range fields {
+		fields[i] = spec.Field(i)
+		fields[i].SourceIDs = slices.Clone(fields[i].SourceIDs)
+	}
+
+	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
+}
+
+func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec {
+	clones := make([]iceberg.PartitionSpec, len(specs))
+	for i, spec := range specs {
+		clones[i] = clonePartitionSpec(spec)
+	}
+
+	return clones
 }
 
 func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {

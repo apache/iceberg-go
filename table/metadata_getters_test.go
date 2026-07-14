@@ -31,6 +31,14 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	refMaxSnapshotAge := int64(3)
 	refMaxAge := int64(4)
 	metadata := commonMetadata{
+		CurrentSchemaID: 1,
+		DefaultSpecID:   1,
+		SchemaList: []*iceberg.Schema{iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+		})},
+		Specs: []iceberg.PartitionSpec{iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		})},
 		SnapshotList: []Snapshot{{
 			SnapshotID:       2,
 			ParentSnapshotID: &parentID,
@@ -64,6 +72,28 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 
 	properties := metadata.Properties()
 	properties["owner"] = "mutated"
+
+	schemas := metadata.Schemas()
+	schemas[0].ID = 99
+	schemas[0].IdentifierFieldIDs[0] = 99
+	nestedFields := schemas[0].Fields()
+	nestedFields[0].Name = "mutated"
+	nestedFields[0].Type = iceberg.PrimitiveTypes.String
+
+	partitionSpecs := metadata.PartitionSpecs()
+	partitionField := partitionSpecs[0].Field(0)
+	partitionField.SourceIDs[0] = 99
+	partitionField.Name = "mutated"
+
+	currentSchema := metadata.CurrentSchema()
+	currentSchema.ID = 100
+	defaultSpec := metadata.PartitionSpec()
+	defaultSpecField := defaultSpec.Field(0)
+	defaultSpecField.SourceIDs[0] = 100
+	byIDSpec := metadata.PartitionSpecByID(1)
+	require.NotNil(t, byIDSpec)
+	byIDField := byIDSpec.Field(0)
+	byIDField.SourceIDs[0] = 101
 
 	snapshots := metadata.Snapshots()
 	snapshots[0].ParentSnapshotID = new(int64)
