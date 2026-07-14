@@ -56,6 +56,9 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	client HiveClient
 	opts   *HiveOptions
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
@@ -95,8 +98,10 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
 }
 
+// Close releases the Hive client and the catalog's metrics reporter, joining
+// any errors so one failing close does not skip the other.
 func (c *Catalog) Close() error {
-	return c.client.Close()
+	return errors.Join(c.client.Close(), c.reporter.Close())
 }
 
 // ListTables returns a list of table identifiers in the given namespace.
@@ -150,7 +155,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("failed to get metadata location: %w", err)
 	}
 
-	reporter, err := metrics.FromProperties(c.opts.props)
+	reporter, err := c.reporter.Get(c.opts.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
@@ -233,7 +238,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 	}
 
-	reporter, err := metrics.FromProperties(c.opts.props)
+	reporter, err := c.reporter.Get(c.opts.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}

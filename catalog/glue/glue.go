@@ -150,6 +150,9 @@ type Catalog struct {
 	catalogId *string
 	awsCfg    *aws.Config
 	props     iceberg.Properties
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 // NewCatalog creates a new instance of glue.Catalog with the given options.
@@ -245,6 +248,12 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Glue
 }
+
+// Close releases the catalog's metrics reporter. The Glue catalog does not own
+// the lifetime of the AWS clients it was configured with, so only the reporter
+// is released. Callers holding a [catalog.Catalog] can reach this via an
+// io.Closer type assertion.
+func (c *Catalog) Close() error { return c.reporter.Close() }
 
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // This function will create the metadata file in S3 using the catalog and table properties,
@@ -836,7 +845,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		return nil, fmt.Errorf("missing metadata location for table %s", tableName)
 	}
 
-	reporter, err := metrics.FromProperties(c.props)
+	reporter, err := c.reporter.Get(c.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}

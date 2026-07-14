@@ -301,6 +301,9 @@ type Catalog struct {
 	name          string
 	props         iceberg.Properties
 	schemaVersion schemaVer
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 // isV0 reports whether the catalog is operating against a legacy V0 schema that
@@ -359,6 +362,12 @@ func (c *Catalog) Name() string { return c.name }
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.SQL
 }
+
+// Close releases the catalog's metrics reporter. The SQL catalog is constructed
+// from a caller-owned database handle, so it does not close that handle; only
+// the reporter is released. Callers holding a [catalog.Catalog] can reach this
+// via an io.Closer type assertion.
+func (c *Catalog) Close() error { return c.reporter.Close() }
 
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).
@@ -798,7 +807,7 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchTable, identifier)
 	}
 
-	reporter, err := metrics.FromProperties(c.props)
+	reporter, err := c.reporter.Get(c.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}

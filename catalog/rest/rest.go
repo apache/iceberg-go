@@ -774,6 +774,10 @@ type Catalog struct {
 	endpoints endpointSet
 
 	namespaceSeparator string
+
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -1050,6 +1054,12 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
+// Close releases the catalog's metrics reporter. The REST catalog does not own
+// the lifetime of the HTTP client it was configured with, so only the reporter
+// is released. Callers holding a [catalog.Catalog] can reach this via an
+// io.Closer type assertion.
+func (r *Catalog) Close() error { return r.reporter.Close() }
+
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
 		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
@@ -1081,7 +1091,7 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	// reporter choice or turn an unknown server-side name into a hard load
 	// error. Server-vended reporter selection, if ever wanted, should be an
 	// explicit decision rather than a side effect of merge order.
-	reporter, err := metrics.FromProperties(r.props)
+	reporter, err := r.reporter.Get(r.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}

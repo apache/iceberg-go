@@ -184,6 +184,9 @@ type Catalog struct {
 	isLocal    bool
 	filesystem HadoopCatalogFS
 	props      iceberg.Properties
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
@@ -254,6 +257,10 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }
+
+// Close releases the catalog's metrics reporter. Callers holding a
+// [catalog.Catalog] can reach this via an io.Closer type assertion.
+func (c *Catalog) Close() error { return c.reporter.Close() }
 
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.
@@ -550,7 +557,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 
 	c.writeVersionHint(ident, version)
 
-	reporter, err := metrics.FromProperties(c.props)
+	reporter, err := c.reporter.Get(c.props)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
@@ -577,7 +584,7 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, err
 	}
 
-	reporter, err := metrics.FromProperties(c.props)
+	reporter, err := c.reporter.Get(c.props)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
