@@ -209,12 +209,12 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	return out, nil
 }
 
-// isDeletionVector reports whether df is a deletion vector: a Puffin file with
+// IsDeletionVector reports whether df is a deletion vector: a Puffin file with
 // position-delete content. The content-type guard matters because df is an
 // arbitrary DataFile, so a non-pos-delete Puffin from an external writer must
 // not be misclassified. Keying on format rather than referenced_data_file
 // avoids misclassifying a Parquet pos-delete that legally sets it.
-func isDeletionVector(df iceberg.DataFile) bool {
+func IsDeletionVector(df iceberg.DataFile) bool {
 	return df.FileFormat() == iceberg.PuffinFile &&
 		df.ContentType() == iceberg.EntryContentPosDeletes
 }
@@ -737,7 +737,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 				case iceberg.EntryContentData:
 					entries.addDataEntry(e)
 				case iceberg.EntryContentPosDeletes:
-					if isDeletionVector(e.DataFile()) {
+					if IsDeletionVector(e.DataFile()) {
 						entries.addDVEntry(e)
 					} else {
 						entries.addPositionalDeleteEntry(e)

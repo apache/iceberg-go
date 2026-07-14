@@ -282,9 +282,7 @@ func liveDVCount(t *testing.T, tbl *table.Table) int {
 				continue
 			}
 			df := entry.DataFile()
-			if df.FileFormat() == iceberg.PuffinFile &&
-				df.ContentType() == iceberg.EntryContentPosDeletes &&
-				df.ReferencedDataFile() != nil {
+			if table.IsDeletionVector(df) && df.ReferencedDataFile() != nil {
 				count++
 			}
 		}

@@ -19,7 +19,6 @@ package compaction
 
 import (
 	"context"
-	"slices"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -76,7 +75,7 @@ func CollectDeadPositionDeletes(
 	}
 
 	// First pass: delete manifests, resolving each candidate's expunge scope.
-	candidates, err := collectPositionDeleteCandidates(ctx, fs, manifests)
+	candidates, hasPartitionScoped, err := collectPositionDeleteCandidates(ctx, fs, manifests)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +83,7 @@ func CollectDeadPositionDeletes(
 	// Second pass runs only when a partition-scoped candidate needs a survivor
 	// check; file-scoped ones are decided from rewrittenPaths alone.
 	var minSurvivorSeq map[string]int64
-	if slices.ContainsFunc(candidates, func(c positionDeleteCandidate) bool { return c.fileScopedTarget == "" }) {
+	if hasPartitionScoped {
 		minSurvivorSeq, err = minSurvivorSeqByPartition(ctx, fs, manifests, rewrittenPaths)
 		if err != nil {
 			return nil, err
@@ -107,23 +106,23 @@ type positionDeleteCandidate struct {
 
 // collectPositionDeleteCandidates walks the delete manifests and returns the
 // classic position-delete files (deletion vectors excluded), deduplicated by
-// path and resolved to their expunge scope.
-func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) ([]positionDeleteCandidate, error) {
-	var candidates []positionDeleteCandidate
+// path and resolved to their expunge scope. hasPartitionScoped reports whether
+// any candidate needs the data-manifest survivor pass.
+func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests []iceberg.ManifestFile) (candidates []positionDeleteCandidate, hasPartitionScoped bool, err error) {
 	seen := make(map[string]struct{})
 	for _, m := range manifests {
 		if cerr := ctx.Err(); cerr != nil {
-			return nil, cerr
+			return nil, false, cerr
 		}
 		if m.ManifestContent() != iceberg.ManifestContentDeletes {
 			continue
 		}
 		for e, err := range m.Entries(fs, true) {
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			df := e.DataFile()
-			if df.ContentType() != iceberg.EntryContentPosDeletes || isDeletionVector(df) {
+			if df.ContentType() != iceberg.EntryContentPosDeletes || table.IsDeletionVector(df) {
 				continue
 			}
 			path := df.FilePath()
@@ -142,6 +141,7 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 			// sentinel; retain rather than risk expunging a delete whose
 			// applicability cannot be established.
 			if seq := e.SequenceNum(); seq >= 0 {
+				hasPartitionScoped = true
 				candidates = append(candidates, positionDeleteCandidate{
 					df:           df,
 					partitionKey: partitionBucketKey(df.SpecID(), df.Partition()),
@@ -151,7 +151,7 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 		}
 	}
 
-	return candidates, nil
+	return candidates, hasPartitionScoped, nil
 }
 
 // minSurvivorSeqByPartition walks the data manifests and returns, per (specID,
@@ -177,6 +177,10 @@ func minSurvivorSeqByPartition(ctx context.Context, fs iceio.IO, manifests []ice
 			if _, rewritten := rewrittenPaths[df.FilePath()]; rewritten {
 				continue
 			}
+			// The negative "unset" sentinel clamps to 0 here — the opposite
+			// bias from the candidate side, which drops unset deletes: an
+			// unknown survivor is treated as old as possible so it retains
+			// every delete it might predate.
 			seq := max(e.SequenceNum(), 0)
 			key := partitionBucketKey(df.SpecID(), df.Partition())
 			if cur, ok := minSeq[key]; ok {
@@ -210,12 +214,4 @@ func decideDeadPositionDeletes(candidates []positionDeleteCandidate, rewrittenPa
 	}
 
 	return dead
-}
-
-// isDeletionVector reports whether df is a deletion vector: a Puffin file with
-// position-delete content. Mirrors table.isDeletionVector, reimplemented here
-// because that predicate is unexported.
-func isDeletionVector(df iceberg.DataFile) bool {
-	return df.FileFormat() == iceberg.PuffinFile &&
-		df.ContentType() == iceberg.EntryContentPosDeletes
 }

@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,12 +29,12 @@ func TestReferencedDataFilePath(t *testing.T) {
 
 	t.Run("explicit referenced_data_file", func(t *testing.T) {
 		df := newPosDelete(t, "del-a.parquet").ReferencedDataFile("data-a.parquet").Build()
-		assert.Equal(t, "data-a.parquet", referencedDataFilePath(df))
+		require.Equal(t, "data-a.parquet", referencedDataFilePath(df))
 	})
 
 	t.Run("empty referenced_data_file falls through to bounds", func(t *testing.T) {
 		df := newPosDelete(t, "del-a.parquet").ReferencedDataFile("").Build()
-		assert.Equal(t, "", referencedDataFilePath(df))
+		require.Equal(t, "", referencedDataFilePath(df))
 	})
 
 	t.Run("equal file_path bounds resolve the single target", func(t *testing.T) {
@@ -43,7 +42,7 @@ func TestReferencedDataFilePath(t *testing.T) {
 			LowerBoundValues(map[int][]byte{filePathID: []byte("data-a.parquet")}).
 			UpperBoundValues(map[int][]byte{filePathID: []byte("data-a.parquet")}).
 			Build()
-		assert.Equal(t, "data-a.parquet", referencedDataFilePath(df))
+		require.Equal(t, "data-a.parquet", referencedDataFilePath(df))
 	})
 
 	t.Run("unequal file_path bounds are partition-scoped", func(t *testing.T) {
@@ -51,12 +50,32 @@ func TestReferencedDataFilePath(t *testing.T) {
 			LowerBoundValues(map[int][]byte{filePathID: []byte("data-a.parquet")}).
 			UpperBoundValues(map[int][]byte{filePathID: []byte("data-b.parquet")}).
 			Build()
-		assert.Equal(t, "", referencedDataFilePath(df))
+		require.Equal(t, "", referencedDataFilePath(df))
 	})
 
 	t.Run("no bounds and no ref is partition-scoped", func(t *testing.T) {
 		df := newPosDelete(t, "del-a.parquet").Build()
-		assert.Equal(t, "", referencedDataFilePath(df))
+		require.Equal(t, "", referencedDataFilePath(df))
+	})
+}
+
+func TestIsFileScoped(t *testing.T) {
+	t.Run("non-empty referenced_data_file", func(t *testing.T) {
+		df := newPosDelete(t, "del-a.parquet").ReferencedDataFile("data-a.parquet").Build()
+		require.True(t, isFileScoped(df))
+	})
+
+	t.Run("empty referenced_data_file without bounds is not file-scoped", func(t *testing.T) {
+		df := newPosDelete(t, "del-a.parquet").ReferencedDataFile("").Build()
+		require.False(t, isFileScoped(df))
+	})
+
+	t.Run("equality delete is never file-scoped", func(t *testing.T) {
+		b, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+			"eq-del.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 128)
+		require.NoError(t, err)
+		require.False(t, isFileScoped(b.Build()))
 	})
 }
 
@@ -108,7 +127,7 @@ func TestDecideDeadPositionDeletes(t *testing.T) {
 	for _, df := range dead {
 		got[df.FilePath()] = struct{}{}
 	}
-	assert.Equal(t, map[string]struct{}{
+	require.Equal(t, map[string]struct{}{
 		"del-a.parquet":         {},
 		"del-p-covered.parquet": {},
 		"del-p-newer.parquet":   {},

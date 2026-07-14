@@ -20,9 +20,12 @@ package compaction_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -135,6 +138,121 @@ func TestCollectDeadPositionDeletesPartitioned(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, dead, 1, "a survivor in another partition or sequenced after the delete must not retain it")
 	})
+}
+
+// TestDeadPositionDeleteRoundTrip drives the full integration path the
+// collector is documented for: Collect → ExtraDeleteFilesToRemove →
+// RewriteDataFiles → commit → re-scan. It pins that a merge-on-read-deleted
+// row stays deleted after the expunge, that the delete file disappears from
+// scan planning, and that it is removed and counted exactly once even though
+// the per-group staging and the collector both report it.
+func TestDeadPositionDeleteRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	fs := iceio.LocalFS{}
+	tbl := newCDCStressTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := make([]string, 3)
+	for i := range dataPaths {
+		dataPaths[i] = tbl.Location() + fmt.Sprintf("/data/d-%d.parquet", i)
+		writeParquet(t, dataPaths[i], arrowSc, fmt.Sprintf(`[{"id": %d, "data": "r%d"}]`, i+1, i+1))
+	}
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(ctx, dataPaths, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// A real partition-scoped position delete (no ref, no bounds) killing the
+	// single row of dataPaths[1] (id 2).
+	delPath := tbl.Location() + "/data/pos-del.parquet"
+	writeParquet(t, delPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": %q, "pos": 0}]`, dataPaths[1]))
+	delInfo, err := os.Stat(delPath)
+	require.NoError(t, err)
+	delDF, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		delPath, iceberg.ParquetFile, nil, nil, nil, 1, delInfo.Size())
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(delDF.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, []int64{1, 3}, scanIDs(t, tbl), "merge-on-read delete must hide id 2")
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	cfg := compaction.Config{
+		TargetFileSizeBytes: 64 * 1024 * 1024,
+		MinFileSizeBytes:    32 * 1024 * 1024,
+		MaxFileSizeBytes:    128 * 1024 * 1024,
+		MinInputFiles:       2,
+		DeleteFileThreshold: 1,
+		PackingLookback:     compaction.DefaultPackingLookback,
+	}
+	plan, err := cfg.PlanCompaction(tasks)
+	require.NoError(t, err)
+
+	rewritten := make(map[string]struct{})
+	groups := make([]table.CompactionTaskGroup, len(plan.Groups))
+	for i, g := range plan.Groups {
+		groups[i] = table.CompactionTaskGroup{
+			PartitionKey:   g.PartitionKey,
+			Tasks:          g.Tasks,
+			TotalSizeBytes: g.TotalSizeBytes,
+		}
+		for _, task := range g.Tasks {
+			rewritten[task.File.FilePath()] = struct{}{}
+		}
+	}
+	require.Len(t, rewritten, len(dataPaths), "plan must rewrite every data file")
+
+	dead, err := compaction.CollectDeadPositionDeletes(ctx, fs, tbl.CurrentSnapshot(), rewritten)
+	require.NoError(t, err)
+	require.Len(t, dead, 1, "the delete's every covered file is rewritten, so it must be dead")
+
+	tx = tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(ctx, groups, table.RewriteDataFilesOptions{
+		ExtraDeleteFilesToRemove: dead,
+	})
+	require.NoError(t, err)
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, result.RemovedPositionDeleteFiles,
+		"the dead delete must be removed and counted exactly once despite being both group-staged and collected")
+	require.Equal(t, 0, result.RemovedEqualityDeleteFiles,
+		"a dead position delete must not be miscounted as an equality delete")
+
+	require.Equal(t, []int64{1, 3}, scanIDs(t, tbl), "id 2 must stay deleted after the expunge")
+
+	postTasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	for _, task := range postTasks {
+		require.Empty(t, task.DeleteFiles, "no position delete may survive the rewrite")
+	}
+}
+
+func scanIDs(t *testing.T, tbl *table.Table) []int64 {
+	t.Helper()
+
+	_, itr, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for rec, err := range itr {
+		require.NoError(t, err)
+		col := rec.Column(0).(*array.Int64)
+		for i := range int(rec.NumRows()) {
+			ids = append(ids, col.Value(i))
+		}
+	}
+	slices.Sort(ids)
+
+	return ids
 }
 
 func newPartitionedTable(t *testing.T) *table.Table {

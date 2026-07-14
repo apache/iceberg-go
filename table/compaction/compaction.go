@@ -345,6 +345,9 @@ func fileScopedDeletedRows(t table.FileScanTask) int64 {
 
 // isFileScoped reports whether a delete file applies to exactly one data file.
 // Equality deletes and partition-scoped positional deletes are not file-scoped.
+// Mirrors Java ContentFileUtil.isFileScoped. Stricter than a nil check on
+// referenced_data_file: an empty-string ref counts as unset and falls through
+// to the file_path bounds.
 func isFileScoped(d iceberg.DataFile) bool {
 	if d.ContentType() == iceberg.EntryContentEqDeletes {
 		return false
