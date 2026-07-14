@@ -61,6 +61,30 @@ var testNonPartitionedTable = table.New([]string{"non_partitioned"}, testMetadat
 
 var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartitioned, "", nil, nil)
 
+// Evolving a spec whose base already contains an unknown transform is rejected
+// up front with a clear error, matching Java's BaseUpdatePartitionSpec. Loading
+// the table is fine; only the update is blocked.
+func TestNewUpdateSpecRejectsUnknownTransformInBaseSpec(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "id_custom",
+		Transform: unknown,
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"unknown_spec"}, meta, "", nil, nil)
+
+	_, _, err = table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+	require.ErrorContains(t, err, "custom_transform[42]")
+}
+
 func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	err := table.NewUpdateSpec(nil, false).Commit()
 	require.ErrorIs(t, err, table.ErrInvalidMetadata)

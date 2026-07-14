@@ -85,7 +85,8 @@ func ParseTransform(s string) (Transform, error) {
 	}
 
 	// Unknown transform: v3 readers must load these and ignore them when
-	// filtering instead of failing. Keep the original string so it round-trips.
+	// filtering instead of failing. Keep the original string, case and all, so it
+	// round-trips; Equals stays byte-for-byte, matching Java's UnknownTransform.
 	return UnknownTransform{name: s}, nil
 }
 

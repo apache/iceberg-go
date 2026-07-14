@@ -400,6 +400,31 @@ func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
 	assert.ErrorContains(t, err, "last-updated-ms is absent or null")
 }
 
+// A full v3 metadata document must load when its partition spec and sort order
+// use unknown transforms — nothing on the metadata path may trip a guard.
+func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
+	j := strings.NewReplacer(
+		`{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}`,
+		`{"name": "x", "transform": "custom_transform[42]", "source-id": 1, "field-id": 1000}`,
+		`{"transform": "bucket[4]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
+		`{"transform": "custom_sort[7]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
+	).Replace(ExampleTableMetadataV3)
+
+	meta, err := ParseMetadataBytes([]byte(j))
+	require.NoError(t, err)
+
+	spec := meta.PartitionSpec()
+	pf := spec.Field(0)
+	_, ok := pf.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown partition transform should load")
+	assert.Equal(t, "custom_transform[42]", pf.Transform.String())
+
+	sf := meta.SortOrder().Field(1)
+	_, ok = sf.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown sort transform should load")
+	assert.Equal(t, "custom_sort[7]", sf.Transform.String())
+}
+
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	base, err := builder.Build()
