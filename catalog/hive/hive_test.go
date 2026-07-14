@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -525,6 +527,50 @@ func TestHiveDropTable(t *testing.T) {
 	err := hiveCatalog.DropTable(context.TODO(), TableIdentifier("test_database", "test_table"))
 	assert.NoError(err)
 
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCommitTableValidatesRequirementsForMissingTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	snapshotID := int64(1)
+	tests := []struct {
+		name string
+		req  table.Requirement
+	}{
+		{"table_uuid", table.AssertTableUUID(uuid.New())},
+		{"current_schema_id", table.AssertCurrentSchemaID(0)},
+		{"ref_snapshot_id", table.AssertRefSnapshotID(table.MainBranch, &snapshotID)},
+	}
+
+	newCatalog := func(tableName string) (*Catalog, *mockHiveClient) {
+		mockClient := &mockHiveClient{}
+		mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).
+			Return(&hive_metastore.LockResponse{Lockid: 1, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+		mockClient.On("Unlock", mock.Anything, int64(1)).Return(nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", tableName).
+			Return(nil, errNoSuchObject).Once()
+
+		return NewCatalogWithClient(mockClient, iceberg.Properties{}), mockClient
+	}
+
+	for _, tt := range tests {
+		tableName := "requirement_" + tt.name
+		cat, mockClient := newCatalog(tableName)
+		_, _, err := cat.CommitTable(ctx, TableIdentifier("test_database", tableName), []table.Requirement{tt.req}, []table.Update{
+			table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), tableName)),
+		})
+		assert.Error(err)
+		assert.Contains(err.Error(), "current table metadata does not exist")
+		mockClient.AssertExpectations(t)
+	}
+
+	cat, mockClient := newCatalog("requirement_assert_create")
+	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
+	_, _, err := cat.CommitTable(ctx, TableIdentifier("test_database", "requirement_assert_create"), []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), "requirement_assert_create")),
+	})
+	assert.NoError(err)
 	mockClient.AssertExpectations(t)
 }
 
@@ -1402,6 +1448,53 @@ func TestCreateView_Success(t *testing.T) {
 	assert.NoError(err)
 	assert.NotNil(v)
 	assert.Equal(table.Identifier{"test_database", "new_view"}, v.Identifier())
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestCreateViewDoesNotPersistCatalogProperties(t *testing.T) {
+	assert := require.New(t)
+
+	dir := t.TempDir()
+	loc := "file://" + filepath.ToSlash(filepath.Join(dir, "view_loc"))
+	catalogProps := iceberg.Properties{
+		"uri":                  "thrift://hive.example:9083",
+		"s3.secret-access-key": "catalog-secret",
+		"s3.session-token":     "catalog-session-token",
+		"s3.endpoint":          "https://storage.example",
+	}
+	viewProps := iceberg.Properties{"custom.view.property": "visible"}
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+	mockClient.On("GetTable", mock.Anything, "test_database", "safe_view").Return(nil, errNoSuchObject).Twice()
+	mockClient.On("CreateTable", mock.Anything, mock.Anything).Return(nil).Once()
+
+	cat := NewCatalogWithClient(mockClient, catalogProps)
+	ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1 AS col", table.Identifier{"test_database"})
+	assert.NoError(err)
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	created, err := cat.CreateView(context.Background(), TableIdentifier("test_database", "safe_view"), ver, schema,
+		catalog.WithViewLocation(loc), catalog.WithViewProperties(viewProps))
+	assert.NoError(err)
+
+	metadata, err := os.ReadFile(strings.TrimPrefix(created.MetadataLocation(), "file://"))
+	assert.NoError(err)
+	metadataJSON := string(metadata)
+	assert.Contains(metadataJSON, "custom.view.property")
+	assert.Contains(metadataJSON, "visible")
+	for _, value := range []string{
+		catalogProps["uri"],
+		catalogProps["s3.secret-access-key"],
+		catalogProps["s3.session-token"],
+		catalogProps["s3.endpoint"],
+	} {
+		assert.NotContains(metadataJSON, value)
+	}
+	for _, key := range []string{"uri", "s3.secret-access-key", "s3.session-token", "s3.endpoint"} {
+		assert.NotContains(metadataJSON, key)
+	}
 
 	mockClient.AssertExpectations(t)
 }

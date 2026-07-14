@@ -1553,6 +1553,40 @@ func (c *commonMetadata) PreviousFiles() iter.Seq[MetadataLogEntry] {
 	return slices.Values(c.MetadataLog)
 }
 
+func stringPointerEqual(left, right *string) bool {
+	if left == right {
+		return true
+	}
+	if left == nil || right == nil {
+		return false
+	}
+
+	return *left == *right
+}
+
+func blobMetadataEqual(left, right BlobMetadata) bool {
+	return left.Type == right.Type &&
+		left.SnapshotID == right.SnapshotID &&
+		left.SequenceNumber == right.SequenceNumber &&
+		slices.Equal(left.Fields, right.Fields) &&
+		maps.Equal(left.Properties, right.Properties)
+}
+
+func statisticsFileEqual(left, right StatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes &&
+		left.FileFooterSizeInBytes == right.FileFooterSizeInBytes &&
+		stringPointerEqual(left.KeyMetadata, right.KeyMetadata) &&
+		slices.EqualFunc(left.BlobMetadata, right.BlobMetadata, blobMetadataEqual)
+}
+
+func partitionStatisticsFileEqual(left, right PartitionStatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes
+}
+
 func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	if other == nil {
 		return false
@@ -1579,6 +1613,10 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	case !iceinternal.SliceEqualHelper(c.SnapshotList, other.SnapshotList):
 		fallthrough
 	case !iceinternal.SliceEqualHelper(c.Specs, other.Specs):
+		fallthrough
+	case !slices.EqualFunc(c.StatisticsList, other.StatisticsList, statisticsFileEqual):
+		fallthrough
+	case !slices.EqualFunc(c.PartitionStatsList, other.PartitionStatsList, partitionStatisticsFileEqual):
 		fallthrough
 	case !maps.Equal(c.Props, other.Props):
 		fallthrough

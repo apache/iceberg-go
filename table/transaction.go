@@ -335,7 +335,8 @@ func WithRetainLast(n int) ExpireSnapshotsOpt {
 // WithOlderThan expires snapshots older than the given duration, measured from
 // the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
 // table property for this call. The most recent snapshots are still retained up
-// to the count set by WithRetainLast.
+// to the count set by WithRetainLast. This option does not expire branches or
+// tags based on their age; configure max-ref-age-ms on the ref or table for that.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
@@ -361,10 +362,11 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 //
 // A snapshot is retained when it is referenced by a branch or tag, or when it
 // is needed to satisfy the retention rules. Retention is resolved per ref,
-// falling back through the ref's own settings, the options passed here, and
-// finally the table properties (MinSnapshotsToKeepKey, MaxSnapshotAgeMsKey,
-// MaxRefAgeMsKey), mirroring the Java implementation. The current snapshot of
-// the main branch is always kept.
+// with reference age falling back through the ref's max-ref-age-ms, the table's
+// MaxRefAgeMsKey property, and the specification default. Snapshot age falls
+// back through the ref's own settings, the options passed here, and finally the
+// table's MinSnapshotsToKeepKey and MaxSnapshotAgeMsKey properties. The current
+// snapshot of the main branch is always kept.
 //
 // By default the now-unreferenced manifests, manifest lists, and data files are
 // deleted once the commit lands; pass WithPostCommit(false) to defer that
@@ -425,7 +427,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			return err
 		}
 
-		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs, &propMaxRefAgeMs)
+		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, &propMaxRefAgeMs)
 
 		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs && refName != MainBranch {

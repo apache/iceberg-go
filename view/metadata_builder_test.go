@@ -97,6 +97,112 @@ func TestBuild_NullAndMissingFields(t *testing.T) {
 	assert.ErrorContains(t, err, "cannot set uuid to null")
 }
 
+func TestNewVersion_RepresentationValidation(t *testing.T) {
+	tests := []struct {
+		name            string
+		representations Representations
+		wantErr         string
+	}{
+		{
+			name: "valid",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+			},
+		},
+		{
+			name: "invalid type",
+			representations: Representations{
+				{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+			},
+			wantErr: "type should be \"sql\"",
+		},
+		{
+			name: "missing sql",
+			representations: Representations{
+				{Type: "sql", Sql: "", Dialect: "spark"},
+			},
+			wantErr: "sql is required",
+		},
+		{
+			name: "missing dialect",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: ""},
+			},
+			wantErr: "dialect is required",
+		},
+		{
+			name: "duplicate dialect",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "SpArK"},
+				{Type: "sql", Sql: "SELECT 2", Dialect: " spark "},
+			},
+			wantErr: "Cannot add multiple queries for dialect  spark ",
+		},
+		{
+			name: "valid then invalid type",
+			representations: Representations{
+				{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+				{Type: "hive", Sql: "SELECT 2", Dialect: "hive"},
+			},
+			wantErr: "type should be \"sql\"",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewVersion(1, 0, tc.representations, table.Identifier{"ns"})
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+			assert.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestAddVersion_InvalidRepresentation_Validation(t *testing.T) {
+	invalidVersion := &Version{
+		VersionID: 1,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "hive", Sql: "SELECT 1", Dialect: "spark"},
+		},
+	}
+
+	_, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(invalidVersion).
+		SetCurrentVersionID(1).
+		Build()
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+	assert.ErrorContains(t, err, "type should be \"sql\"")
+
+	invalidDuplicateVersion := &Version{
+		VersionID: 2,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "sql", Sql: "SELECT 1", Dialect: "spark"},
+			{Type: "sql", Sql: "SELECT 2", Dialect: "spark "},
+		},
+	}
+
+	_, err = newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(invalidDuplicateVersion).
+		SetCurrentVersionID(2).
+		Build()
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidViewMetadata)
+	assert.ErrorContains(t, err, "Cannot add multiple queries for dialect spark ")
+}
+
 func TestSetFormatVersion_Invalid(t *testing.T) {
 	// Downgrade
 	_, err := newTestBuilder().SetFormatVersion(0).Build()
@@ -459,21 +565,23 @@ func TestViewVersionAndSchemaIDReassignment(t *testing.T) {
 }
 
 func TestAddVersion_MultipleSQLForSameDialect(t *testing.T) {
+	// NewVersion now validates representations, so this test exercises duplicate detection
+	// in the builder path for versions coming from external metadata sources.
+	version := &Version{
+		VersionID: 1,
+		SchemaID:  0,
+		Representations: []Representation{
+			{Type: "sql", Sql: "select * from ns.tbl", Dialect: "spark"},
+			{Type: "sql", Sql: "select * from ns.tbl3", Dialect: "SpArK"},
+		},
+	}
 	_, err := newTestBuilder().
 		SetLoc("location").
 		AddSchema(newTestSchema(0)).
-		AddVersion(
-			stripErr(NewVersion(1, 0,
-				[]Representation{
-					NewRepresentation("select * from ns.tbl", "spark"),
-					NewRepresentation("select * from ns.tbl3", "SpArK"),
-				},
-				table.Identifier{"ns"},
-			)),
-		).
+		AddVersion(version).
 		SetCurrentVersionID(1).
 		Build()
-	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect spark")
+	assert.ErrorContains(t, err, "Invalid view version: Cannot add multiple queries for dialect SpArK")
 }
 
 func TestSetCurrentVersionID_NoLastAddedSchema(t *testing.T) {
@@ -559,6 +667,40 @@ func TestDroppingDialectDoesNotFailWhenAllowed(t *testing.T) {
 		SetCurrentVersion(newTestVersionWithSQL(1, 0, "select `nested`.`field` from tbl"), schema).
 		Build()
 	require.NoError(t, err)
+}
+
+func TestUnknownRepresentationSurvivesBuilderRoundTrip(t *testing.T) {
+	metadataJSON := `{
+		"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+		"format-version": 1,
+		"location": "s3://bucket/warehouse/default.db/event_agg",
+		"current-version-id": 1,
+		"versions": [{"version-id": 1, "schema-id": 0, "timestamp-ms": 1234567890, "representations": [
+			{"type": "hive", "sql": "SELECT 1", "dialect": "hive"},
+			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
+		]}],
+		"schemas": [{"schema-id": 0, "type": "struct", "fields": []}],
+		"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+	}`
+
+	metadata, err := ParseMetadataString(metadataJSON)
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(metadata)
+	require.NoError(t, err)
+	nextVersion, err := NewVersion(
+		2,
+		metadata.CurrentSchemaID(),
+		Representations{NewRepresentation("SELECT 2", "spark")},
+		metadata.CurrentVersion().DefaultNamespace,
+	)
+	require.NoError(t, err)
+
+	result, err := builder.SetCurrentVersion(nextVersion, metadata.CurrentSchema()).Build()
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Versions(), 2)
+	assert.Equal(t, "hive", result.Versions()[0].Representations[0].Type)
 }
 
 func TestCurrentViewVersionIsNeverExpired(t *testing.T) {

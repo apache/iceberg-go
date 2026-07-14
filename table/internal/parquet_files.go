@@ -35,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/compress"
@@ -68,6 +69,12 @@ const (
 	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
 	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+
+	ParquetShredVariantsKey     = "write.parquet.shred-variants"
+	ParquetShredVariantsDefault = false
+	// Rows buffered per file to infer shredding (held per open partition writer).
+	ParquetVariantBufferSizeKey     = "write.parquet.variant-inference-buffer-size"
+	ParquetVariantBufferSizeDefault = 100
 
 	ParquetBatchSizeKey     = "read.parquet.batch-size"
 	ParquetBatchSizeDefault = 1 << 17 // 131072 rows
@@ -403,7 +410,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 
 	counter := &internal.CountingWriter{W: fw}
 	mem := compute.GetAllocator(ctx)
-	writerProps, err := getWriteProperties(info.WriteProps)
+	writerProps, err := getWriteProperties(info.WriteProps, arrowSchema)
 	if err != nil {
 		fw.Close()
 
@@ -444,9 +451,40 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}, nil
 }
 
+// arrowSchemaHasShreddedDecimal reports whether any top-level shredded variant's
+// typed_value carries a Decimal128 leaf (recursively).
+func arrowSchemaHasShreddedDecimal(sc *arrow.Schema) bool {
+	for _, f := range sc.Fields() {
+		if vt, ok := f.Type.(*extensions.VariantType); ok {
+			if tv := vt.TypedValue().Type; tv != nil && typeHasDecimal128(tv) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func typeHasDecimal128(dt arrow.DataType) bool {
+	switch t := dt.(type) {
+	case *arrow.Decimal128Type:
+		return true
+	case *arrow.StructType:
+		for _, f := range t.Fields() {
+			if typeHasDecimal128(f.Type) {
+				return true
+			}
+		}
+	case *arrow.ListType:
+		return typeHasDecimal128(t.Elem())
+	}
+
+	return false
+}
+
 // getWriteProperties requires explicit write properties so misconfigured writer
 // plumbing fails fast instead of silently defaulting Parquet settings.
-func getWriteProperties(writeProps any) (*parquet.WriterProperties, error) {
+func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.WriterProperties, error) {
 	if writeProps == nil {
 		return nil, fmt.Errorf("%w: write properties are required", iceberg.ErrInvalidArgument)
 	}
@@ -456,7 +494,15 @@ func getWriteProperties(writeProps any) (*parquet.WriterProperties, error) {
 		return nil, fmt.Errorf("%w: invalid write properties type %T", iceberg.ErrInvalidArgument, writeProps)
 	}
 
-	return parquet.NewWriterProperties(writerProperties...), nil
+	// Clone: WriteProps is shared across concurrent partition writers; appending in place races.
+	wp := slices.Clone(writerProperties)
+	// Shredded decimals need the spec's INT32/INT64/FLBA-by-precision types; arrow-go
+	// emits those only with StoreDecimalAsInteger, so gate it per file on one being present.
+	if arrowSchemaHasShreddedDecimal(arrowSchema) {
+		wp = append(wp, parquet.WithStoreDecimalAsInteger(true))
+	}
+
+	return parquet.NewWriterProperties(wp...), nil
 }
 
 // Write appends a record batch to the Parquet file.

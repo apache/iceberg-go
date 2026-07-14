@@ -114,6 +114,36 @@ func CreateView(
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, props, props)
+}
+
+// CreateViewWithIOProperties creates a view using ioProps to configure the
+// filesystem and metadataProps as the properties persisted in view metadata.
+func CreateViewWithIOProperties(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	viewSQL string,
+	defaultNS table.Identifier,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, ioProps, metadataProps)
+}
+
+func createView(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	viewSQL string,
+	defaultNS table.Identifier,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+) (*View, error) {
 	versionId := int64(1)
 
 	builder, err := NewMetadataBuilder()
@@ -137,7 +167,7 @@ func CreateView(
 			viewVersion,
 			schema,
 		).
-		SetProperties(props).
+		SetProperties(metadataProps).
 		Build()
 	if err != nil {
 		return nil, err
@@ -153,7 +183,7 @@ func CreateView(
 		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
 
-	fs, err := io.LoadFS(ctx, props, metadataLocation)
+	fs, err := io.LoadFS(ctx, ioProps, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
