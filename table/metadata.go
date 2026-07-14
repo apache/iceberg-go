@@ -1761,15 +1761,15 @@ func (c *commonMetadata) Properties() iceberg.Properties {
 }
 
 func (c *commonMetadata) Statistics() iter.Seq[StatisticsFile] {
-	return slices.Values(c.StatisticsList)
+	return slices.Values(cloneStatisticsFiles(c.StatisticsList))
 }
 
 func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile] {
-	return slices.Values(c.PartitionStatsList)
+	return slices.Values(slices.Clone(c.PartitionStatsList))
 }
 
 func (c *commonMetadata) EncryptionKeys() iter.Seq[EncryptionKey] {
-	return slices.Values(c.EncryptionKeyList)
+	return slices.Values(cloneEncryptionKeys(c.EncryptionKeyList))
 }
 
 func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
@@ -1785,6 +1785,10 @@ func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
 }
 
 func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
+	if schemas == nil {
+		return nil
+	}
+
 	clones := make([]*iceberg.Schema, len(schemas))
 	for i, schema := range schemas {
 		clones[i] = cloneSchema(schema)
@@ -1797,9 +1801,36 @@ func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
 	clones := slices.Clone(fields)
 	for i := range clones {
 		clones[i].Type = cloneSchemaType(clones[i].Type)
+		clones[i].InitialDefault = cloneDefault(clones[i].InitialDefault)
+		clones[i].WriteDefault = cloneDefault(clones[i].WriteDefault)
 	}
 
 	return clones
+}
+
+func cloneDefault(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return slices.Clone(value)
+	case iceberg.BinaryLiteral:
+		return iceberg.BinaryLiteral(slices.Clone([]byte(value)))
+	case iceberg.FixedLiteral:
+		return iceberg.FixedLiteral(slices.Clone([]byte(value)))
+	case []any:
+		clones := make([]any, len(value))
+		for i, item := range value {
+			clones[i] = cloneDefault(item)
+		}
+		return clones
+	case map[string]any:
+		clones := make(map[string]any, len(value))
+		for key, item := range value {
+			clones[key] = cloneDefault(item)
+		}
+		return clones
+	default:
+		return value
+	}
 }
 
 func cloneSchemaType(typ iceberg.Type) iceberg.Type {
@@ -1836,6 +1867,10 @@ func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
 }
 
 func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec {
+	if specs == nil {
+		return nil
+	}
+
 	clones := make([]iceberg.PartitionSpec, len(specs))
 	for i, spec := range specs {
 		clones[i] = clonePartitionSpec(spec)
@@ -1901,6 +1936,10 @@ func cloneSnapshotPtr(snapshot *Snapshot) *Snapshot {
 }
 
 func cloneSnapshots(snapshots []Snapshot) []Snapshot {
+	if snapshots == nil {
+		return nil
+	}
+
 	clones := make([]Snapshot, len(snapshots))
 	for i, snapshot := range snapshots {
 		clones[i] = cloneSnapshot(snapshot)
@@ -1921,9 +1960,56 @@ func cloneSortOrder(order SortOrder) SortOrder {
 }
 
 func cloneSortOrders(orders []SortOrder) []SortOrder {
+	if orders == nil {
+		return nil
+	}
+
 	clones := make([]SortOrder, len(orders))
 	for i, order := range orders {
 		clones[i] = cloneSortOrder(order)
+	}
+
+	return clones
+}
+
+func cloneStatisticsFiles(stats []StatisticsFile) []StatisticsFile {
+	if stats == nil {
+		return nil
+	}
+
+	clones := make([]StatisticsFile, len(stats))
+	for i, stat := range stats {
+		clones[i] = stat
+		if stat.KeyMetadata != nil {
+			value := *stat.KeyMetadata
+			clones[i].KeyMetadata = &value
+		}
+		if stat.BlobMetadata != nil {
+			clones[i].BlobMetadata = make([]BlobMetadata, len(stat.BlobMetadata))
+			for j, blob := range stat.BlobMetadata {
+				clones[i].BlobMetadata[j] = blob
+				clones[i].BlobMetadata[j].Fields = slices.Clone(blob.Fields)
+				clones[i].BlobMetadata[j].Properties = maps.Clone(blob.Properties)
+			}
+		}
+	}
+
+	return clones
+}
+
+func cloneEncryptionKeys(keys []EncryptionKey) []EncryptionKey {
+	if keys == nil {
+		return nil
+	}
+
+	clones := make([]EncryptionKey, len(keys))
+	for i, key := range keys {
+		clones[i] = key
+		if key.EncryptedByID != nil {
+			value := *key.EncryptedByID
+			clones[i].EncryptedByID = &value
+		}
+		clones[i].Properties = maps.Clone(key.Properties)
 	}
 
 	return clones

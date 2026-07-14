@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -30,11 +31,15 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	refMinSnapshots := 2
 	refMaxSnapshotAge := int64(3)
 	refMaxAge := int64(4)
+	keyMetadata := "key-metadata"
+	encryptedByID := "root-key"
 	metadata := commonMetadata{
 		CurrentSchemaID: 1,
 		DefaultSpecID:   1,
 		SchemaList: []*iceberg.Schema{iceberg.NewSchemaWithIdentifiers(1, []int{1}, iceberg.NestedField{
 			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+			InitialDefault: iceberg.BinaryLiteral{1, 2},
+			WriteDefault:   iceberg.FixedLiteral{3, 4},
 		})},
 		Specs: []iceberg.PartitionSpec{iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
 			SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
@@ -58,6 +63,26 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 			},
 		},
 		Props: map[string]string{"owner": "iceberg"},
+		StatisticsList: []StatisticsFile{{
+			SnapshotID:     2,
+			StatisticsPath: "stats.puffin",
+			KeyMetadata:    &keyMetadata,
+			BlobMetadata: []BlobMetadata{{
+				Type:       BlobTypeApacheDatasketchesThetaV1,
+				Fields:     []int32{1},
+				Properties: map[string]string{"source": "test"},
+			}},
+		}},
+		PartitionStatsList: []PartitionStatisticsFile{{
+			SnapshotID:     2,
+			StatisticsPath: "partition-stats.puffin",
+		}},
+		EncryptionKeyList: []EncryptionKey{{
+			KeyID:                "key-1",
+			EncryptedKeyMetadata: "encrypted",
+			EncryptedByID:        &encryptedByID,
+			Properties:           map[string]string{"scope": "table"},
+		}},
 		SortOrderList: []SortOrder{{
 			orderID: 1,
 			fields: []SortField{{
@@ -79,11 +104,14 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	nestedFields := schemas[0].Fields()
 	nestedFields[0].Name = "mutated"
 	nestedFields[0].Type = iceberg.PrimitiveTypes.String
+	nestedFields[0].InitialDefault.(iceberg.BinaryLiteral)[0] = 99
+	nestedFields[0].WriteDefault.(iceberg.FixedLiteral)[0] = 99
 
 	partitionSpecs := metadata.PartitionSpecs()
 	partitionField := partitionSpecs[0].Field(0)
 	partitionField.SourceIDs[0] = 99
 	partitionField.Name = "mutated"
+	require.Equal(t, []int{1}, metadata.Specs[0].Field(0).SourceIDs)
 
 	currentSchema := metadata.CurrentSchema()
 	currentSchema.ID = 100
@@ -108,6 +136,18 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	require.NotNil(t, current)
 	current.Summary.Properties["source"] = "mutated"
 
+	statistics := slices.Collect(metadata.Statistics())
+	statistics[0].BlobMetadata[0].Fields[0] = 99
+	statistics[0].BlobMetadata[0].Properties["source"] = "mutated"
+	*statistics[0].KeyMetadata = "mutated"
+
+	partitionStatistics := slices.Collect(metadata.PartitionStatistics())
+	partitionStatistics[0].StatisticsPath = "mutated"
+
+	encryptionKeys := slices.Collect(metadata.EncryptionKeys())
+	*encryptionKeys[0].EncryptedByID = "mutated"
+	encryptionKeys[0].Properties["scope"] = "mutated"
+
 	refs := metadata.Ref()
 	*refs.MinSnapshotsToKeep = 99
 	for _, ref := range metadata.Refs() {
@@ -119,6 +159,7 @@ func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
 	for _, field := range fields {
 		field.SourceIDs[0] = 99
 	}
+	require.Equal(t, []int{10}, metadata.SortOrderList[0].fields[0].SourceIDs)
 
 	got, err := json.Marshal(metadata)
 	require.NoError(t, err)
