@@ -1485,11 +1485,16 @@ func TestConfigOverrideHeadersApplyToCatalogRequests(t *testing.T) {
 }
 
 type closeTrackingTransport struct {
+	http.RoundTripper
 	closed atomic.Bool
 }
 
-func (t *closeTrackingTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errors.New("unexpected request")
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.RoundTripper == nil {
+		return nil, errors.New("unexpected request")
+	}
+
+	return t.RoundTripper.RoundTrip(req)
 }
 
 func (t *closeTrackingTransport) CloseIdleConnections() {
@@ -1503,6 +1508,24 @@ func TestSessionTransportClosesWrappedIdleConnections(t *testing.T) {
 	client.CloseIdleConnections()
 
 	assert.True(t, base.closed.Load())
+}
+
+func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	_, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	assert.False(t, base.closed.Load(), "user-provided transports must not be closed during bootstrap")
 }
 
 func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
