@@ -310,16 +310,16 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	defaultNS := catalog.NamespaceFromIdent(identifier)
 	catalogName := "hive"
 
-	// Merge catalog props with view props so io.LoadFS can resolve and view metadata gets user properties.
-	props := make(iceberg.Properties)
+	ioProps := make(iceberg.Properties)
 	if c.opts.props != nil {
-		maps.Copy(props, c.opts.props)
+		maps.Copy(ioProps, c.opts.props)
 	}
 	if cfg.Properties != nil {
-		maps.Copy(props, cfg.Properties)
+		maps.Copy(ioProps, cfg.Properties)
 	}
 
-	createdView, err := view.CreateView(ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, props)
+	createdView, err := view.CreateViewWithIOProperties(
+		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties)
 	if err != nil {
 		return nil, err
 	}
@@ -373,6 +373,16 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return err
 	}
 
+	lock, err := acquireLock(ctx, c.client, database, tableName, c.opts)
+	if err != nil {
+		return fmt.Errorf("%w: failed to acquire lock for %s.%s: %w", table.ErrCommitFailed, database, tableName, err)
+	}
+	defer func() {
+		_ = lock.Release(ctx)
+	}()
+
+	// Re-read after acquiring the lock so drop cannot act on table state that a
+	// concurrent commit changed while lock acquisition was waiting.
 	if _, err := c.getIcebergTable(ctx, database, tableName); err != nil {
 		return err
 	}
@@ -423,9 +433,44 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, toDB)
 	}
 
-	hiveTbl, err := c.getIcebergTable(ctx, fromDB, fromTable)
+	source, err := c.getIcebergTable(ctx, fromDB, fromTable)
 	if err != nil {
 		return nil, err
+	}
+	sourceMetadataLocation, err := getMetadataLocation(source)
+	if err != nil {
+		return nil, err
+	}
+
+	lockIdentifiers := []tableLockIdentifier{
+		{database: fromDB, table: fromTable},
+		{database: toDB, table: toTable},
+	}
+	lock, err := acquireLocks(ctx, c.client, lockIdentifiers, c.opts)
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to acquire locks for rename %s.%s to %s.%s: %w",
+			table.ErrCommitFailed, fromDB, fromTable, toDB, toTable, err)
+	}
+	defer func() {
+		_ = lock.Release(ctx)
+	}()
+
+	hiveTbl, err := c.getIcebergTable(ctx, fromDB, fromTable)
+	if err != nil {
+		if errors.Is(err, catalog.ErrNoSuchTable) {
+			return nil, fmt.Errorf("%w: source table %s.%s changed during rename: %w",
+				table.ErrCommitFailed, fromDB, fromTable, err)
+		}
+
+		return nil, err
+	}
+	lockedMetadataLocation, err := getMetadataLocation(hiveTbl)
+	if err != nil {
+		return nil, err
+	}
+	if lockedMetadataLocation != sourceMetadataLocation {
+		return nil, fmt.Errorf("%w: source table %s.%s metadata location changed from %s to %s",
+			table.ErrCommitFailed, fromDB, fromTable, sourceMetadataLocation, lockedMetadataLocation)
 	}
 
 	hiveTbl.TableName = toTable

@@ -1839,6 +1839,58 @@ func (s *HadoopCatalogTestSuite) TestCreateTableWithProperties() {
 	s.Equal("custom.value", tbl.Properties()["custom.key"])
 }
 
+func (s *HadoopCatalogTestSuite) TestPurgeTableRemovesTableRoot() {
+	ctx := context.Background()
+	ident := table.Identifier{"ns", "tbl"}
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	tablePath := s.cat.tableToPath(ident)
+	dataPath := filepath.Join(tablePath, "data", "file.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(dataPath), 0o755))
+	s.Require().NoError(os.WriteFile(dataPath, []byte("data"), 0o644))
+
+	s.Require().NoError(s.cat.PurgeTable(ctx, ident))
+
+	_, err = os.Stat(tbl.MetadataLocation())
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = os.Stat(dataPath)
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = os.Stat(tablePath)
+	s.ErrorIs(err, fs.ErrNotExist)
+
+	exists, err := s.cat.CheckTableExists(ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+func (s *HadoopCatalogTestSuite) TestPurgeTableGCDisabledPreservesData() {
+	ctx := context.Background()
+	ident := table.Identifier{"ns", "tbl"}
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema(),
+		catalog.WithProperties(iceberg.Properties{"gc.enabled": "false"}))
+	s.Require().NoError(err)
+
+	tablePath := s.cat.tableToPath(ident)
+	dataPath := filepath.Join(tablePath, "data", "file.parquet")
+	s.Require().NoError(os.MkdirAll(filepath.Dir(dataPath), 0o755))
+	s.Require().NoError(os.WriteFile(dataPath, []byte("data"), 0o644))
+
+	s.Require().NoError(s.cat.PurgeTable(ctx, ident))
+
+	_, err = os.Stat(tbl.MetadataLocation())
+	s.ErrorIs(err, fs.ErrNotExist)
+	s.FileExists(dataPath)
+
+	exists, err := s.cat.CheckTableExists(ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
 func (s *HadoopCatalogTestSuite) TestCreateTableShortIdentifier() {
 	ctx := context.Background()
 
@@ -2738,6 +2790,38 @@ func (s *HadoopCatalogTestSuite) TestCommitTableCreateViaCommit() {
 	loaded, err := s.cat.LoadTable(ctx, ident)
 	s.Require().NoError(err)
 	s.Equal(meta.TableUUID(), loaded.Metadata().TableUUID())
+}
+
+func (s *HadoopCatalogTestSuite) TestCommitTableValidatesRequirementsForMissingTable() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	snapshotID := int64(1)
+	tests := []struct {
+		name string
+		req  table.Requirement
+	}{
+		{"table UUID", table.AssertTableUUID(uuid.New())},
+		{"current schema ID", table.AssertCurrentSchemaID(0)},
+		{"ref snapshot ID", table.AssertRefSnapshotID(table.MainBranch, &snapshotID)},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			ident := []string{"ns", tt.name}
+			_, _, err := s.cat.CommitTable(ctx, ident, []table.Requirement{tt.req}, []table.Update{
+				table.NewSetLocationUpdate(s.cat.defaultTableLocation(ident)),
+			})
+			s.Require().Error(err)
+			s.Contains(err.Error(), "current table metadata does not exist")
+		})
+	}
+
+	ident := []string{"ns", "assert_create"}
+	_, _, err := s.cat.CommitTable(ctx, ident, []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate(s.cat.defaultTableLocation(ident)),
+	})
+	s.Require().NoError(err)
 }
 
 func (s *HadoopCatalogTestSuite) TestCommitTableShortIdentifier() {

@@ -197,23 +197,24 @@ func ParseMetadataVersion(location string) int {
 
 func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, current *table.Table, ident table.Identifier, reqs []table.Requirement, updates []table.Update, cat table.CatalogIO) (*table.StagedTable, error) {
 	var (
-		baseMeta    table.Metadata
-		metadataLoc string
+		baseMeta        table.Metadata
+		currentMetadata table.Metadata
+		metadataLoc     string
 	)
 
 	if current != nil {
-		for _, r := range reqs {
-			if err := r.Validate(current.Metadata()); err != nil {
-				return nil, err
-			}
-		}
-
-		baseMeta = current.Metadata()
+		currentMetadata = current.Metadata()
+		baseMeta = currentMetadata
 		metadataLoc = current.MetadataLocation()
 	} else {
 		var err error
 		baseMeta, err = table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, "", nil)
 		if err != nil {
+			return nil, err
+		}
+	}
+	for _, r := range reqs {
+		if err := r.Validate(currentMetadata); err != nil {
 			return nil, err
 		}
 	}

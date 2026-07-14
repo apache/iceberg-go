@@ -273,6 +273,20 @@ func TestRepresentationsEqualCrossType(t *testing.T) {
 	assert.False(t, representationsEqual(nil, sqlRepr))
 }
 
+// TestMetadataInitDefaults pins init's nil-guards: a zero-value metadata
+// instance gets non-nil collections and a working definition index.
+func TestMetadataInitDefaults(t *testing.T) {
+	m := &metadata{}
+	m.init()
+
+	assert.NotNil(t, m.DefinitionList)
+	assert.NotNil(t, m.DefinitionLogList)
+	assert.NotNil(t, m.Props)
+
+	_, ok := m.DefinitionByID("missing")
+	assert.False(t, ok)
+}
+
 func TestNewSQLRepresentation(t *testing.T) {
 	repr, err := NewSQLRepresentation("trino", "x + 1")
 	require.NoError(t, err)

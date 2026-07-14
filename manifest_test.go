@@ -2384,6 +2384,259 @@ func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, sn
 	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
 }
 
+type manifestListPartitionsRecord struct {
+	Path               string `avro:"manifest_path"`
+	Len                int64  `avro:"manifest_length"`
+	SpecID             int32  `avro:"partition_spec_id"`
+	Content            int32  `avro:"content"`
+	SeqNumber          int64  `avro:"sequence_number"`
+	MinSeqNumber       int64  `avro:"min_sequence_number"`
+	AddedSnapshotID    int64  `avro:"added_snapshot_id"`
+	AddedFilesCount    int32  `avro:"added_files_count"`
+	ExistingFilesCount int32  `avro:"existing_files_count"`
+	DeletedFilesCount  int32  `avro:"deleted_files_count"`
+	PartitionList      any    `avro:"partitions"`
+	AddedRowsCount     int64  `avro:"added_rows_count"`
+	ExistingRowsCount  int64  `avro:"existing_rows_count"`
+	DeletedRowsCount   int64  `avro:"deleted_rows_count"`
+	Key                []byte `avro:"key_metadata"`
+}
+
+func (m *ManifestTestSuite) manifestListPartitionValues(data []byte) []any {
+	rd, err := ocf.NewReader(bytes.NewReader(data))
+	m.Require().NoError(err)
+	defer func() {
+		m.Require().NoError(rd.Close())
+	}()
+
+	var partitions []any
+	for {
+		var rec manifestListPartitionsRecord
+		err := rd.Decode(&rec)
+		if errors.Is(err, io.EOF) {
+			return partitions
+		}
+		m.Require().NoError(err)
+		partitions = append(partitions, rec.PartitionList)
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestListWriterPreservesEmptyPartitionArrayWhenRewritingInheritedManifest() {
+	seqNum := int64(1)
+	emptyPartitions := []FieldSummary{}
+	originalSnapshotID := int64(101)
+	original := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 0, originalSnapshotID).
+		Partitions(emptyPartitions).
+		AddedFiles(1).
+		AddedRows(10).
+		Build()
+
+	var originalList bytes.Buffer
+	err := WriteManifestList(2, &originalList, originalSnapshotID, nil, &seqNum, 0, []ManifestFile{original})
+	m.Require().NoError(err)
+
+	partitionValues := m.manifestListPartitionValues(originalList.Bytes())
+	m.Require().Len(partitionValues, 1)
+	m.Require().IsType([]any{}, partitionValues[0])
+
+	inherited, err := ReadManifestList(bytes.NewReader(originalList.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(inherited, 1)
+
+	appendSnapshotID := int64(102)
+	newManifest := NewManifestFile(2, "s3://bucket/table/metadata/m1.avro", 50, 0, appendSnapshotID).
+		Partitions(emptyPartitions).
+		AddedFiles(1).
+		AddedRows(5).
+		Build()
+
+	seqNum = 2
+	var rewrittenList bytes.Buffer
+	err = WriteManifestList(2, &rewrittenList, appendSnapshotID, &originalSnapshotID, &seqNum, 0,
+		append([]ManifestFile{newManifest}, inherited...))
+	m.Require().NoError(err)
+
+	partitionValues = m.manifestListPartitionValues(rewrittenList.Bytes())
+	m.Require().Len(partitionValues, 2)
+	for _, value := range partitionValues {
+		m.Require().IsType([]any{}, value)
+		m.Empty(value)
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestListWriterKeepsAbsentPartitionListNull() {
+	seqNum := int64(1)
+	snapshotID := int64(201)
+	// No Partitions(...) call: PartitionList stays nil (absent). partitions is
+	// optional in the manifest-list spec, so an absent value must round-trip as
+	// null rather than be normalized into an empty array.
+	manifest := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
+		AddedFiles(1).
+		AddedRows(10).
+		Build()
+
+	var list bytes.Buffer
+	err := WriteManifestList(2, &list, snapshotID, nil, &seqNum, 0, []ManifestFile{manifest})
+	m.Require().NoError(err)
+
+	partitionValues := m.manifestListPartitionValues(list.Bytes())
+	m.Require().Len(partitionValues, 1)
+	m.Require().Nil(partitionValues[0])
+}
+
+func (m *ManifestTestSuite) TestManifestListV1WriterPartitionListEncoding() {
+	seqNum := int64(1)
+	snapshotID := int64(301)
+	// Exercise the version-1 encode path (the manifestFileV1 toV1 loop, distinct
+	// from the wrapped v2/v3 path): an absent PartitionList must stay null while
+	// a present-but-empty one must encode as an empty array.
+	absent := NewManifestFile(1, "s3://bucket/table/metadata/m0.avro", 100, 0, snapshotID).
+		AddedFiles(1).
+		AddedRows(10).
+		Build()
+	emptyPresent := NewManifestFile(1, "s3://bucket/table/metadata/m1.avro", 100, 0, snapshotID).
+		Partitions([]FieldSummary{}).
+		AddedFiles(1).
+		AddedRows(5).
+		Build()
+
+	var list bytes.Buffer
+	err := WriteManifestList(1, &list, snapshotID, nil, &seqNum, 0, []ManifestFile{absent, emptyPresent})
+	m.Require().NoError(err)
+
+	partitionValues := m.manifestListPartitionValues(list.Bytes())
+	m.Require().Len(partitionValues, 2)
+	m.Require().Nil(partitionValues[0])
+	m.Require().IsType([]any{}, partitionValues[1])
+	m.Empty(partitionValues[1])
+}
+
+func (m *ManifestTestSuite) TestManifestListWriterPreservesPopulatedPartitionSummariesOnRewrite() {
+	// Scope guard, NOT a #1309 reproduction. #1309's null-collapse only affects a
+	// present-but-empty partitions array, which requires a manifest with zero
+	// partition-field summaries — i.e. an empty spec / unpartitioned table. A
+	// partitioned table always has a non-empty summary list (one FieldSummary per
+	// partition field), so it is structurally immune to the collapse and passes
+	// even without the ensurePartitionList fix. This test documents that the fix
+	// is correctly narrowed to empty inherited summaries: a populated summary
+	// must survive the read -> rewrite round trip untouched — top-level array
+	// present and non-empty, every sub-field value preserved.
+	seqNum := int64(1)
+	originalSnapshotID := int64(401)
+	nan := false
+	lower := []byte{0x01, 0x02}
+	upper := []byte{0x0a, 0x0b}
+	summaries := []FieldSummary{{
+		ContainsNull: true,
+		ContainsNaN:  &nan,
+		LowerBound:   &lower,
+		UpperBound:   &upper,
+	}}
+
+	original := NewManifestFile(2, "s3://bucket/table/metadata/m0.avro", 100, 1, originalSnapshotID).
+		Partitions(summaries).
+		AddedFiles(1).
+		AddedRows(10).
+		Build()
+
+	var originalList bytes.Buffer
+	err := WriteManifestList(2, &originalList, originalSnapshotID, nil, &seqNum, 0, []ManifestFile{original})
+	m.Require().NoError(err)
+
+	inherited, err := ReadManifestList(bytes.NewReader(originalList.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(inherited, 1)
+
+	appendSnapshotID := int64(402)
+	newManifest := NewManifestFile(2, "s3://bucket/table/metadata/m1.avro", 50, 1, appendSnapshotID).
+		Partitions(summaries).
+		AddedFiles(1).
+		AddedRows(5).
+		Build()
+
+	seqNum = 2
+	var rewrittenList bytes.Buffer
+	err = WriteManifestList(2, &rewrittenList, appendSnapshotID, &originalSnapshotID, &seqNum, 0,
+		append([]ManifestFile{newManifest}, inherited...))
+	m.Require().NoError(err)
+
+	// Top-level partitions must be a present, non-empty array for every record.
+	rawValues := m.manifestListPartitionValues(rewrittenList.Bytes())
+	m.Require().Len(rawValues, 2)
+	for i, value := range rawValues {
+		m.Require().IsTypef([]any{}, value, "record %d partitions must decode as an array", i)
+		m.Require().Lenf(value.([]any), 1, "record %d must keep its one partition-field summary", i)
+	}
+
+	// Sub-field values must survive the round trip unchanged.
+	rewritten, err := ReadManifestList(bytes.NewReader(rewrittenList.Bytes()))
+	m.Require().NoError(err)
+	m.Require().Len(rewritten, 2)
+	for i, mf := range rewritten {
+		parts := mf.Partitions()
+		m.Require().Lenf(parts, 1, "record %d should preserve one summary", i)
+		m.True(parts[0].ContainsNull, "record %d contains_null", i)
+		m.Require().NotNilf(parts[0].ContainsNaN, "record %d contains_nan", i)
+		m.False(*parts[0].ContainsNaN)
+		m.Require().NotNilf(parts[0].LowerBound, "record %d lower_bound", i)
+		m.Equal(lower, *parts[0].LowerBound)
+		m.Require().NotNilf(parts[0].UpperBound, "record %d upper_bound", i)
+		m.Equal(upper, *parts[0].UpperBound)
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestEntryPresentEmptyListSurvivesRewrite() {
+	// Entry-level analogue of the #1309 concern. A data file's optional list
+	// columns (split_offsets, column_sizes, ...) are *[]T unions that decode to
+	// the exact same state that broke the manifest-list partitions field: a
+	// non-nil pointer over a nil slice. #1309 showed the manifest-*list* writer
+	// collapses that state to Avro null on rewrite; this asserts the manifest-
+	// *entry* writer does NOT — a present-but-empty list survives the decode ->
+	// re-encode round trip (what a manifest merge/rewrite performs) as a present
+	// array. It confirms the collapse is specific to the manifest-list path and
+	// that no entry-level normalization is required.
+	schema := NewSchema(0, NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true})
+	spec := *UnpartitionedSpec
+	snapshotID := int64(10)
+
+	writeAndRead := func(entry ManifestEntry) *dataFile {
+		var buf bytes.Buffer
+		_, err := WriteManifest("/m.avro", &buf, 2, spec, schema, snapshotID, []ManifestEntry{entry})
+		m.Require().NoError(err)
+		rd, err := NewManifestReader(&manifestFile{version: 2, Path: "/m.avro"}, bytes.NewReader(buf.Bytes()))
+		m.Require().NoError(err)
+		defer func() { m.Require().NoError(rd.Close()) }()
+		e, err := rd.ReadEntry()
+		m.Require().NoError(err)
+
+		return e.DataFile().(*dataFile)
+	}
+
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://b/data/f.parquet", ParquetFile, nil, nil, nil, 1, 100)
+	m.Require().NoError(err)
+	// column_sizes is *[]colMap — an array of *records*, the same shape as the
+	// manifest-list partitions field (*[]FieldSummary); split_offsets is *[]int64,
+	// an array of primitives. Cover both so the record-element case (the one that
+	// actually broke for partitions) is guarded here too.
+	built := builder.SplitOffsets([]int64{}).ColumnSizes(map[int]int64{}).Build()
+	m.Require().NotNil(built.(*dataFile).Splits, "builder should keep split_offsets present")
+	m.Require().NotNil(built.(*dataFile).ColSizes, "builder should keep column_sizes present")
+
+	// First round trip mirrors reading an existing manifest: a present-empty
+	// array decodes to a non-nil pointer over a nil slice.
+	first := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, built).SequenceNum(1).Build())
+	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
+	m.Require().NotNil(first.ColSizes, "decoded column_sizes must stay present, not null")
+
+	// Re-encoding the decoded entry is what a manifest rewrite/merge does. The
+	// present-empty lists must not collapse to null here.
+	second := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, first).SequenceNum(1).Build())
+	m.Require().NotNil(second.Splits,
+		"present-empty split_offsets must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.ColSizes,
+		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+}
+
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	// A v2 manifest list cannot reference v3 manifests because the v2 entry
 	// schema has no first_row_id column; this gives us a deterministic

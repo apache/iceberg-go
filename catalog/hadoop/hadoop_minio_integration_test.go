@@ -22,6 +22,7 @@ package hadoop_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -174,6 +175,38 @@ func (s *HadoopMinIOIntegrationSuite) TestDropTableRemovesTableFromListingAndLoa
 		tables = append(tables, found)
 	}
 	s.Empty(tables)
+}
+
+func (s *HadoopMinIOIntegrationSuite) TestPurgeTableRemovesTableRoot() {
+	ns := table.Identifier{"purge_ns"}
+	ident := table.Identifier{"purge_ns", "tbl"}
+
+	s.Require().NoError(s.cat.CreateNamespace(s.ctx, ns, nil))
+	tbl, err := s.cat.CreateTable(s.ctx, ident, s.testSchema())
+	s.Require().NoError(err)
+
+	fileIO, err := icebergio.LoadFS(s.ctx, s.props, s.warehouse)
+	s.Require().NoError(err)
+	statFS, ok := fileIO.(icebergio.StatIO)
+	s.Require().True(ok)
+	writeFS, ok := fileIO.(icebergio.WriteFileIO)
+	s.Require().True(ok)
+
+	dataPath := tbl.Location() + "/data/file.parquet"
+	s.Require().NoError(writeFS.WriteFile(dataPath, []byte("data")))
+
+	s.Require().NoError(s.cat.PurgeTable(s.ctx, ident))
+
+	_, err = statFS.Stat(tbl.MetadataLocation())
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = statFS.Stat(dataPath)
+	s.ErrorIs(err, fs.ErrNotExist)
+	_, err = statFS.Stat(tbl.Location())
+	s.ErrorIs(err, fs.ErrNotExist)
+
+	exists, err := s.cat.CheckTableExists(s.ctx, ident)
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 func (s *HadoopMinIOIntegrationSuite) TestDropNamespaceAfterDropTable() {

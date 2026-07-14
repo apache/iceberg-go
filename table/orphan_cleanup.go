@@ -82,6 +82,7 @@ type orphanCleanupConfig struct {
 	prefixMismatchMode PrefixMismatchMode
 	equalSchemes       map[string]string
 	equalAuthorities   map[string]string
+	validationErr      error
 }
 
 type OrphanCleanupOption func(*orphanCleanupConfig)
@@ -95,6 +96,9 @@ func WithLocation(location string) OrphanCleanupOption {
 func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.olderThan = duration
+		if duration < 0 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("orphan cleanup age must be non-negative")
+		}
 	}
 }
 
@@ -160,10 +164,19 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 }
 
 type OrphanCleanupResult struct {
+	// OrphanFileLocations is retained for backward compatibility with callers
+	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
 	OrphanFileLocations []string
-	DeletedFiles        []string
+	// OrphanFiles is the canonical richer orphan result, carrying both path and size.
+	OrphanFiles  []OrphanFile
+	DeletedFiles []string
 	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
 	TotalSizeBytes int64
+}
+
+type OrphanFile struct {
+	Path      string
+	SizeBytes int64
 }
 
 // DeleteOrphanFiles identifies files under a table location that are no longer
@@ -186,6 +199,9 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 	// Apply functional options
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if cfg.validationErr != nil {
+		return OrphanCleanupResult{}, cfg.validationErr
 	}
 
 	return t.executeOrphanCleanup(ctx, cfg)
@@ -249,6 +265,7 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	}
 
 	var orphanFiles []string
+	orphanFileEntries := make([]OrphanFile, 0)
 	var totalOrphanSize int64
 	for _, f := range scannedFiles {
 		isOrphan, err := isFileOrphan(f.path, referencedFiles, normalizedRef, cfg)
@@ -257,12 +274,17 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 		}
 		if isOrphan {
 			orphanFiles = append(orphanFiles, f.path)
+			orphanFileEntries = append(orphanFileEntries, OrphanFile{
+				Path:      f.path,
+				SizeBytes: f.size,
+			})
 			totalOrphanSize += f.size
 		}
 	}
 
 	result := OrphanCleanupResult{
 		OrphanFileLocations: orphanFiles,
+		OrphanFiles:         orphanFileEntries,
 		TotalSizeBytes:      totalOrphanSize,
 	}
 

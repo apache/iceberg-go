@@ -330,6 +330,8 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.compression-level` | `-1` (codec default) |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
+| `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
+| `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
 ### Parquet reader
 

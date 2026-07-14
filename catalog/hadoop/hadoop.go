@@ -611,11 +611,13 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	// Step 2: Validate requirements against current metadata.
+	var currentMetadata table.Metadata
 	if current != nil {
-		for _, r := range reqs {
-			if err := r.Validate(current.Metadata()); err != nil {
-				return nil, "", err
-			}
+		currentMetadata = current.Metadata()
+	}
+	for _, r := range reqs {
+		if err := r.Validate(currentMetadata); err != nil {
+			return nil, "", err
 		}
 	}
 
@@ -881,8 +883,11 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
 	}
 
-	// Delete the table directory root from the local storage
-	return c.DropTable(ctx, identifier)
+	if !tbl.Metadata().Properties().GetBool("gc.enabled", true) {
+		return c.filesystem.RemoveAll(c.metadataDir(identifier))
+	}
+
+	return c.filesystem.RemoveAll(c.tableToPath(identifier))
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
