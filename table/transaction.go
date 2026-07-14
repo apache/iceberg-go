@@ -313,6 +313,7 @@ type expireSnapshotsCfg struct {
 	minSnapshotsToKeep *int
 	maxSnapshotAgeMs   *int64
 	postCommit         bool
+	validationErr      error
 }
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
@@ -325,6 +326,9 @@ type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
+		if n < 1 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("retain-last must be at least 1")
+		}
 	}
 }
 
@@ -337,6 +341,9 @@ func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
 		cfg.maxSnapshotAgeMs = &n
+		if t < 0 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("snapshot age must be non-negative")
+		}
 	}
 }
 
@@ -377,9 +384,6 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 //
 // The "iceberg expire-snapshots" CLI command wraps the same operation.
 func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
-	if err := t.ensureInitialized(); err != nil {
-		return err
-	}
 	var (
 		cfg         = expireSnapshotsCfg{postCommit: true}
 		updates     []Update
@@ -390,6 +394,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.validationErr != nil {
+		return cfg.validationErr
+	}
+	if err := t.ensureInitialized(); err != nil {
+		return err
 	}
 
 	// Read table-level retention properties as the last-resort defaults,

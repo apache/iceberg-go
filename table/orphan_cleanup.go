@@ -82,6 +82,7 @@ type orphanCleanupConfig struct {
 	prefixMismatchMode PrefixMismatchMode
 	equalSchemes       map[string]string
 	equalAuthorities   map[string]string
+	validationErr      error
 }
 
 type OrphanCleanupOption func(*orphanCleanupConfig)
@@ -95,6 +96,9 @@ func WithLocation(location string) OrphanCleanupOption {
 func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.olderThan = duration
+		if duration < 0 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("orphan cleanup age must be non-negative")
+		}
 	}
 }
 
@@ -195,6 +199,9 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 	// Apply functional options
 	for _, opt := range opts {
 		opt(cfg)
+	}
+	if cfg.validationErr != nil {
+		return OrphanCleanupResult{}, cfg.validationErr
 	}
 
 	return t.executeOrphanCleanup(ctx, cfg)

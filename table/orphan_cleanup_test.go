@@ -773,7 +773,7 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 		WithDryRun(true),
 		WithLocation("s3://bucket/table"),
 		WithMaxConcurrency(1),
-		WithFilesOlderThan(-1*time.Second),
+		WithFilesOlderThan(0), // Consider files created before the scan.
 	)
 
 	require.NoError(t, err)
