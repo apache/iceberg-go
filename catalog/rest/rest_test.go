@@ -2693,6 +2693,10 @@ func (r *RestCatalogSuite) TestRenameView204() {
 	r.mux.HandleFunc("/v1/namespaces/example/views/destination", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}}`,
 			metadataLoc, exampleViewMetadataJSON)
@@ -2717,6 +2721,10 @@ func (r *RestCatalogSuite) TestRenameView404() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
 
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
@@ -2738,6 +2746,10 @@ func (r *RestCatalogSuite) TestRenameView404() {
 func (r *RestCatalogSuite) TestRenameView409() {
 	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -2836,6 +2848,12 @@ func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
 
 	_, err = cat.RenameTable(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
 
 	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
 		{Identifier: table.Identifier{"table"}},

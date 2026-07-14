@@ -304,7 +304,7 @@ func (s *RestIntegrationSuite) TestRenameView() {
 	fromIdent := catalog.ToIdentifier(TestNamespaceIdent, "test-view")
 	toIdent := catalog.ToIdentifier(TestNamespaceIdent, "renamed-view")
 
-	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM  %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table"), "trino")
 	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
 	s.Require().NoError(err)
 
@@ -317,6 +317,8 @@ func (s *RestIntegrationSuite) TestRenameView() {
 	s.Require().NoError(err)
 	s.Equal(toIdent, renamed.Identifier())
 	s.Equal(created.Metadata().ViewUUID(), renamed.Metadata().ViewUUID())
+	// A rename moves the pointer, it must not rewrite the metadata.
+	s.Equal(created.MetadataLocation(), renamed.MetadataLocation())
 
 	// The old name is gone, the new one exists
 	exists, err := s.cat.CheckViewExists(s.ctx, fromIdent)
