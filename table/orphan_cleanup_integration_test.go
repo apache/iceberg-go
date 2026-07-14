@@ -359,7 +359,7 @@ func (s *OrphanCleanupIntegrationSuite) TestOrphanCleanupWithConcurrency() {
 
 			// Run orphan cleanup with specific concurrency
 			result, err := tbl.DeleteOrphanFiles(s.ctx,
-				table.WithMaxConcurrency(tc.concurrency),
+				table.WithCleanupMaxConcurrency(tc.concurrency),
 				table.WithFilesOlderThan(0),
 				table.WithDryRun(false),
 			)

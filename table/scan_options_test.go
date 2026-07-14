@@ -35,3 +35,34 @@ func TestWithSelectedFieldsDoesNotAliasCallerSlice(t *testing.T) {
 	assert.Equal(t, []string{"id", "name"}, scan.selectedFields)
 	assert.NotEqual(t, fields[0], scan.selectedFields[0])
 }
+
+func TestWithMaxConcurrency(t *testing.T) {
+	cases := []struct {
+		name string
+		n    int
+		want int
+	}{
+		{"positive sets concurrency", 4, 4},
+		{"zero is a no-op", 0, 0},
+		{"negative is a no-op", -1, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scan := &Scan{}
+			WithMaxConcurrency(tc.n)(scan)
+			assert.Equal(t, tc.want, scan.concurrency)
+		})
+	}
+}
+
+// The deprecated WitMaxConcurrency alias must stay in lock-step with the
+// canonical WithMaxConcurrency so callers on the old name don't drift.
+func TestWitMaxConcurrencyAliasParity(t *testing.T) {
+	for _, n := range []int{-1, 0, 1, 8} {
+		canonical, alias := &Scan{}, &Scan{}
+		WithMaxConcurrency(n)(canonical)
+		WitMaxConcurrency(n)(alias)
+		assert.Equal(t, canonical.concurrency, alias.concurrency, "n=%d", n)
+	}
+}

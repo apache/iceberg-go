@@ -116,10 +116,10 @@ func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
 	}
 }
 
-// WithMaxConcurrency sets the maximum number of goroutines for parallel deletion.
+// WithCleanupMaxConcurrency sets the maximum number of goroutines for parallel deletion.
 // Defaults to a reasonable number based on the system. Only used when deleteFunc is nil or when
 // the FileIO doesn't support bulk operations.
-func WithMaxConcurrency(maxWorkers int) OrphanCleanupOption {
+func WithCleanupMaxConcurrency(maxWorkers int) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		if maxWorkers > 0 {
 			cfg.maxConcurrency = maxWorkers

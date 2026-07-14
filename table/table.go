@@ -866,9 +866,9 @@ func WithLimit(n int64) ScanOption {
 	}
 }
 
-// WithScanMaxConcurrency sets the maximum concurrency for table scan and plan
+// WithMaxConcurrency sets the maximum concurrency for table scan and plan
 // operations. When unset it defaults to runtime.GOMAXPROCS.
-func WithScanMaxConcurrency(n int) ScanOption {
+func WithMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
 	}
@@ -878,12 +878,12 @@ func WithScanMaxConcurrency(n int) ScanOption {
 	}
 }
 
-// WitMaxConcurrency is a deprecated alias for [WithScanMaxConcurrency], kept for
-// backwards compatibility with the pre-existing typo'd name.
+// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
+// backward compatibility with the pre-existing typo'd name.
 //
-// Deprecated: use [WithScanMaxConcurrency].
+// Deprecated: use [WithMaxConcurrency].
 func WitMaxConcurrency(n int) ScanOption {
-	return WithScanMaxConcurrency(n)
+	return WithMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {
