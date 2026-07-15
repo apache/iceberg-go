@@ -423,3 +423,60 @@ func TestNewGeoBoundsAggregatorGeometry(t *testing.T) {
 	assert.Equal(t, []float64{1, 5}, decodeBound(t, lower))
 	assert.Equal(t, []float64{30, 20}, decodeBound(t, upper))
 }
+
+func TestGeoBoundsXY(t *testing.T) {
+	minX, minY, maxX, maxY, ok := GeoBoundsXY(encGeo(5, 10), encGeo(30, 40))
+	require.True(t, ok)
+	assert.Equal(t, [4]float64{5, 10, 30, 40}, [4]float64{minX, minY, maxX, maxY})
+
+	// Higher-dimension bounds still yield their XY extents.
+	minX, minY, maxX, maxY, ok = GeoBoundsXY(encGeoZ(1, 2, 3), encGeoZ(4, 5, 6))
+	require.True(t, ok)
+	assert.Equal(t, [4]float64{1, 2, 4, 5}, [4]float64{minX, minY, maxX, maxY})
+
+	// Missing or malformed bounds are unusable for pruning.
+	_, _, _, _, ok = GeoBoundsXY(nil, encGeo(1, 2))
+	assert.False(t, ok, "missing lower bound")
+	_, _, _, _, ok = GeoBoundsXY(encGeo(1, 2), []byte{0x01})
+	assert.False(t, ok, "malformed upper bound")
+
+	// A NaN X/Y coordinate cannot bound anything.
+	var nan [geoNumDims]float64
+	nan[geoDimX], nan[geoDimY] = math.NaN(), 2
+	_, _, _, _, ok = GeoBoundsXY(encodeGeoBound(nan, geom.XY), encGeo(3, 4))
+	assert.False(t, ok, "NaN coordinate")
+
+	// Inverted bounds (lower > upper) from an untrusted writer are unusable:
+	// treating them as valid would make BBoxIntersectsXY always report no-overlap
+	// and prune a file that should be kept.
+	_, _, _, _, ok = GeoBoundsXY(encGeo(30, 10), encGeo(5, 40))
+	assert.False(t, ok, "inverted X bound must be rejected")
+	_, _, _, _, ok = GeoBoundsXY(encGeo(5, 40), encGeo(30, 10))
+	assert.False(t, ok, "inverted Y bound must be rejected")
+}
+
+func TestBBoxIntersectsXY(t *testing.T) {
+	// file box [0,0]-[10,10]
+	tests := []struct {
+		name                       string
+		qMinX, qMinY, qMaxX, qMaxY float64
+		want                       bool
+	}{
+		{"overlapping", 5, 5, 15, 15, true},
+		{"contained", 2, 2, 3, 3, true},
+		{"touching edge", 10, 0, 20, 10, true},
+		{"touching corner", 10, 10, 20, 20, true},
+		{"disjoint right", 11, 0, 20, 10, false},
+		{"disjoint above", 0, 11, 10, 20, false},
+		{"disjoint diagonal", 20, 20, 30, 30, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want,
+				BBoxIntersectsXY(0, 0, 10, 10, tt.qMinX, tt.qMinY, tt.qMaxX, tt.qMaxY))
+			// intersection is symmetric
+			assert.Equal(t, tt.want,
+				BBoxIntersectsXY(tt.qMinX, tt.qMinY, tt.qMaxX, tt.qMaxY, 0, 0, 10, 10))
+		})
+	}
+}
