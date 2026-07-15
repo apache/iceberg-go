@@ -18,7 +18,6 @@
 package internal
 
 import (
-	"bytes"
 	"container/heap"
 	"context"
 	"encoding/binary"
@@ -27,6 +26,7 @@ import (
 	"iter"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -543,13 +543,10 @@ func TruncateUpperBoundText(s string, trunc int) string {
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	if trunc >= len(val) {
-		return val
+		return slices.Clone(val)
 	}
 
-	result := val[:trunc]
-	if bytes.Equal(result, val) {
-		return result
-	}
+	result := slices.Clone(val[:trunc])
 
 	for i := len(result) - 1; i >= 0; i-- {
 		if result[i] < 255 {
