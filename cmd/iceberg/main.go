@@ -534,7 +534,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.SortOrder != "" {
-			sortOrder, err := parseSortOrder(tbl.SortOrder)
+			sortOrder, err := parseSortOrder(tbl.SortOrder, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
 				os.Exit(1)
