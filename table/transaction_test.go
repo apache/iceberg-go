@@ -747,6 +747,11 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantGoWriteSparkRead() {
 	s.Require().NotEmpty(tasks)
 	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
 
+	// #988: the shredded fields' bounds are written under the parent variant field id,
+	// and Spark plans/reads the table below without choking on them.
+	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
+	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
+
 	// Spark reads the Go-written shredded file back and reassembles values.
 	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
 		"SELECT id, to_json(payload) AS pj FROM default.go_shred_write ORDER BY id")

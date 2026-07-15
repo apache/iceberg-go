@@ -444,7 +444,7 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
 	require.NoError(t, err)
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil, nil)
 	const sortOrderID = 7
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tblMeta.CurrentSchema(),
@@ -606,7 +606,7 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 		2: {FieldID: 2, Mode: modeFull, ColName: "tstz_ns", IcebergTyp: iceberg.PrimitiveTypes.TimestampTzNs},
 	}
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:   tableMeta.CurrentSchema(),
 		Spec:     tableMeta.PartitionSpec(),
@@ -755,7 +755,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			}
 
 			// This should not panic - the fix allows INT32/INT64 physical types for decimals
-			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
+			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
 			require.NotNil(t, stats)
 
 			df := stats.ToDataFile(internal.DataFileOpts{
@@ -1452,7 +1452,7 @@ func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
 
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 	assert.NotPanics(t, func() {
-		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs)
+		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs, nil)
 	})
 }
 
@@ -1520,7 +1520,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	statsCols := map[int]internal.StatisticsCollector{}
 	variantFieldIDs := internal.VariantFieldIDsFromSchema(iceSc)
 	assert.NotPanics(t, func() {
-		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs)
+		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs, nil)
 	})
 
 	tbl, err := arrRdr.ReadTable(context.Background())
