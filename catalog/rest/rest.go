@@ -2210,6 +2210,47 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 	return view.New(identifier, metadata, rsp.MetadataLoc), nil
 }
 
+func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error) {
+	if err := r.endpoints.check(endpointRenameView); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateViewIdentifier(from); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateViewIdentifier(to); err != nil {
+		return nil, err
+	}
+
+	type payload struct {
+		Source      identifier `json:"source"`
+		Destination identifier `json:"destination"`
+	}
+	src := identifier{
+		Namespace: catalog.NamespaceFromIdent(from),
+		Name:      catalog.TableNameFromIdent(from),
+	}
+	dst := identifier{
+		Namespace: catalog.NamespaceFromIdent(to),
+		Name:      catalog.TableNameFromIdent(to),
+	}
+
+	path, err := endpointRenameView.reqPath()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchView,
+			http.StatusConflict: catalog.ErrViewAlreadyExists,
+		}, allowNoContent())
+	if err != nil {
+		return nil, err
+	}
+
+	return r.LoadView(ctx, to)
+}
+
 // FunctionCatalog is an optional interface for catalogs that support the
 // function (SQL UDF) read endpoints defined by the REST spec: list and load.
 // The function endpoints are not part of the spec's assumed default endpoint
