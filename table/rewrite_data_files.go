@@ -216,6 +216,9 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
 // + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+	if _, err := t.txnMeta(); err != nil {
+		return nil, err
+	}
 	if len(groups) == 0 {
 		return &RewriteResult{}, nil
 	}
