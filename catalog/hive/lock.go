@@ -32,6 +32,8 @@ import (
 // ErrLockAcquisitionFailed is returned when a lock cannot be acquired after all retries.
 var ErrLockAcquisitionFailed = errors.New("failed to acquire lock")
 
+const pendingLockCleanupTimeout = 5 * time.Second
+
 type HiveLock struct {
 	client HiveClient
 	lockId int64
@@ -46,7 +48,7 @@ type tableLockIdentifier struct {
 	table    string
 }
 
-func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLockIdentifier, opts *HiveOptions) (*HiveLock, error) {
+func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLockIdentifier, opts *HiveOptions) (_ *HiveLock, err error) {
 	identifiers = slices.Clone(identifiers)
 	slices.SortFunc(identifiers, func(a, b tableLockIdentifier) int {
 		if cmp := strings.Compare(a.database, b.database); cmp != 0 {
@@ -83,6 +85,19 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 		}, nil
 	}
 
+	cleanupPending := true
+	defer func() {
+		if !cleanupPending {
+			return
+		}
+
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pendingLockCleanupTimeout)
+		defer cancel()
+		if cleanupErr := client.Unlock(cleanupCtx, lockResp.Lockid); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to release pending lock %d: %w", lockResp.Lockid, cleanupErr))
+		}
+	}()
+
 	// If not acquired immediately, wait and retry
 	for attempt := 0; attempt < opts.LockRetries; attempt++ {
 		// Wait before checking again
@@ -90,8 +105,6 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 
 		select {
 		case <-ctx.Done():
-			_ = client.Unlock(ctx, lockResp.Lockid)
-
 			return nil, ctx.Err()
 		case <-time.After(waitTime):
 		}
@@ -99,13 +112,13 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 		// Check lock state
 		checkResp, err := client.CheckLock(ctx, lockResp.Lockid)
 		if err != nil {
-			_ = client.Unlock(ctx, lockResp.Lockid)
-
 			return nil, fmt.Errorf("failed to check lock status: %w", err)
 		}
 
 		switch checkResp.State {
 		case hive_metastore.LockState_ACQUIRED:
+			cleanupPending = false
+
 			return &HiveLock{
 				client: client,
 				lockId: lockResp.Lockid,
@@ -121,8 +134,6 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 			return nil, fmt.Errorf("%w: unexpected lock state: %v", ErrLockAcquisitionFailed, checkResp.State)
 		}
 	}
-
-	_ = client.Unlock(ctx, lockResp.Lockid)
 
 	return nil, fmt.Errorf("%w: exhausted %d retries for tables %s", ErrLockAcquisitionFailed, opts.LockRetries, formatLockIdentifiers(identifiers))
 }
