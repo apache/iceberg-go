@@ -1280,6 +1280,15 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
+	// Resolve the reporter before the create POST mutates the server: it is
+	// otherwise first built in the trailing tableFromResponse, so a bad
+	// metrics-reporter-impl would turn a table the server already created into a
+	// reported failure whose retry hits ErrTableAlreadyExists. CachedReporter
+	// caches this for that tableFromResponse call.
+	if _, err := r.reporter.Get(r.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	cfg := catalog.NewCreateTableCfg()
 	for _, o := range opts {
 		o(&cfg)
@@ -1512,6 +1521,14 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	type payload struct {
 		Name        string `json:"name"`
 		MetadataLoc string `json:"metadata-location"`
+	}
+
+	// Resolve the reporter before the register POST mutates the server, for the
+	// same reason as CreateTable: it is otherwise first built in the trailing
+	// tableFromResponse, so an invalid reporter would turn a successful
+	// registration into a reported failure. CachedReporter caches this.
+	if _, err := r.reporter.Get(r.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	path, err := endpointRegisterTable.reqPath(ns)

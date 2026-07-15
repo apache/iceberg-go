@@ -626,6 +626,15 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	// Resolve the reporter before any mutation: this method ends in LoadTable,
+	// which is where the reporter is otherwise first built, so a bad
+	// metrics-reporter-impl would only surface after the row was inserted —
+	// turning a successful create into a reported failure whose retry hits
+	// ErrTableAlreadyExists. CachedReporter caches this for that LoadTable.
+	if _, err := c.reporter.Get(c.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	nsIdent := catalog.NamespaceFromIdent(ident)
 	tblIdent := catalog.TableNameFromIdent(ident)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)

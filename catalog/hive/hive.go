@@ -176,6 +176,15 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 		return nil, err
 	}
 
+	// Resolve the reporter before any mutation: this method ends in LoadTable,
+	// which is where the reporter is otherwise first built, so a bad
+	// metrics-reporter-impl would only surface after the metastore entry was
+	// created — turning a successful create into a reported failure whose retry
+	// hits ErrTableAlreadyExists. CachedReporter caches this for that LoadTable.
+	if _, err := c.reporter.Get(c.opts.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	// Ensure there is no view with the same identifier.
 	viewExists, err := c.CheckViewExists(ctx, identifier)
 	if err != nil {

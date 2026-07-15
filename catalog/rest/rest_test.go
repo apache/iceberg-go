@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
@@ -1314,6 +1315,29 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
+// TestCreateTableInvalidReporterDoesNotHitServer pins that an invalid
+// metrics-reporter-impl fails CreateTable before the create POST is sent, so a
+// bad reporter can't turn a table the server already created into a reported
+// failure. The reporter is resolved at the top of CreateTable, so the server
+// endpoint is never hit.
+func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"}),
+	)
+	r.Require().NoError(err)
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	r.Require().Error(err)
+	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
+}
+
 func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodHead, req.Method)
@@ -1331,7 +1355,6 @@ func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.Require().NoError(err)
 	r.True(exists)
 }
-
 func (r *RestCatalogSuite) TestCheckTableExists404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/nonexistent", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodHead, req.Method)

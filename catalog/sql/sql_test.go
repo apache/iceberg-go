@@ -950,6 +950,21 @@ func (s *SqliteCatalogTestSuite) TestMetricsReporterWiring() {
 		_, err = bad.LoadTable(ctx, tblID)
 		s.Require().Error(err)
 	})
+
+	s.Run("invalid reporter fails CreateTable before inserting the row", func() {
+		cat := newCatMemory(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"})
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+
+		_, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().Error(err)
+
+		// The row must not have been inserted, so the failure is a clean no-op
+		// and the caller can retry rather than hit ErrTableAlreadyExists.
+		exists, err := cat.CheckTableExists(ctx, tblID)
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateV1Table() {

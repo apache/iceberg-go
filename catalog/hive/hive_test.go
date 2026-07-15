@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
@@ -310,6 +311,26 @@ func TestHiveListNamespacesHierarchicalError(t *testing.T) {
 	assert.Contains(err.Error(), "hierarchical namespace is not supported")
 }
 
+// TestHiveCreateTableInvalidReporterDoesNotMutate pins that an invalid
+// metrics-reporter-impl fails CreateTable before any metastore mutation, so a
+// bad reporter can't turn a successful create into a reported failure. The
+// reporter is resolved at the top of CreateTable, so the client is never
+// touched.
+func TestHiveCreateTableInvalidReporterDoesNotMutate(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{
+		metrics.ReporterImplKey: "does-not-exist",
+	})
+
+	_, err := hiveCatalog.CreateTable(context.TODO(), TableIdentifier("test_database", "test_table"), testSchema)
+	assert.Error(err)
+
+	// The create must fail before any metastore call, so nothing was mutated.
+	mockClient.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything)
+}
+
 func TestHiveCreateNamespace(t *testing.T) {
 	assert := require.New(t)
 
@@ -333,7 +354,6 @@ func TestHiveCreateNamespace(t *testing.T) {
 
 	mockClient.AssertExpectations(t)
 }
-
 func TestHiveCreateNamespaceAlreadyExists(t *testing.T) {
 	assert := require.New(t)
 
