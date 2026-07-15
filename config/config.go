@@ -18,6 +18,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -51,23 +53,45 @@ type CatalogConfig struct {
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
+// LoadConfig returns configuration data when it can be read. It retains the
+// historical best-effort behavior; callers that must distinguish a missing
+// default from a broken explicit file should use LoadConfigFile.
 func LoadConfig(configPath string) []byte {
+	data, _ := LoadConfigFile(configPath)
+
+	return data
+}
+
+// LoadConfigFile loads configuration data and reports path and read failures.
+// A missing implicit home-directory configuration is not an error.
+func LoadConfigFile(configPath string) ([]byte, error) {
+	implicit := configPath == ""
 	var path string
-	if len(configPath) > 0 {
+	if !implicit {
 		path = configPath
 	} else {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("resolve home directory for config: %w", err)
 		}
 		path = filepath.Join(homeDir, cfgFile)
 	}
-	file, err := os.ReadFile(path)
+
+	path, err := filepath.Abs(path)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
 	}
 
-	return file
+	file, err := os.ReadFile(path)
+	if err != nil {
+		if implicit && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
+	}
+
+	return file, nil
 }
 
 // ParseConfig unmarshals the config file once and resolves the catalog to use.
