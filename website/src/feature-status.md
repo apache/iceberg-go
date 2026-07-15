@@ -106,6 +106,7 @@ S3, GCS, and Azure require a blank import: `_ "github.com/apache/iceberg-go/io/g
 | Load View                   |      |  X   |        |  X   |        |
 | List View                   |  X   |  X   |        |  X   |        |
 | Drop View                   |  X   |  X   |        |  X   |        |
+| Rename View                 |  X   |      |        |      |        |
 | Check View Exists           |  X   |  X   |        |  X   |        |
 
 A Hadoop catalog is also available - see [`catalog/hadoop`](https://github.com/apache/iceberg-go/tree/main/catalog/hadoop).

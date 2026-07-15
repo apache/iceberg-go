@@ -490,7 +490,7 @@ import (
 result, err := tbl.DeleteOrphanFiles(ctx,
     table.WithFilesOlderThan(72*time.Hour),
     table.WithDryRun(false),
-    table.WithMaxConcurrency(8),
+    table.WithCleanupMaxConcurrency(8),
 )
 if err != nil { /* ... */ }
 fmt.Printf("removed %d files\n", len(result.DeletedFiles))

@@ -244,14 +244,9 @@ func main() {
 		}
 	}
 
-	configData := config.LoadConfig(args.Config)
-	fileCfg, err := config.ParseConfig(configData, resolveCatalogName(explicitFlags, args.CatalogName))
-	if err != nil {
-		log.Printf("warning: failed to parse config file: %v", err)
-	} else if fileCfg != nil {
-		mergeConf(fileCfg, &args, explicitFlags)
-	} else if len(configData) > 0 {
-		log.Printf("warning: catalog %q not found in config file", args.CatalogName)
+	if err := applyConfigFile(&args, explicitFlags); err != nil {
+		log.Printf("configuration error: %v", err)
+		os.Exit(1)
 	}
 
 	// Validate nested subcommands before catalog init.
@@ -539,7 +534,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.SortOrder != "" {
-			sortOrder, err := parseSortOrder(tbl.SortOrder)
+			sortOrder, err := parseSortOrder(tbl.SortOrder, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
 				os.Exit(1)
@@ -814,6 +809,49 @@ func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string 
 	}
 
 	return ""
+}
+
+func applyConfigFile(args *Args, explicitFlags map[string]bool) error {
+	configData, err := config.LoadConfigFile(args.Config)
+	if err != nil {
+		return err
+	}
+
+	catalogName := resolveCatalogName(explicitFlags, args.CatalogName)
+	fileCfg, err := config.ParseConfig(configData, catalogName)
+	if err != nil {
+		return fmt.Errorf("parse config file %s: %w", resolvedConfigPath(args.Config), err)
+	}
+	if fileCfg != nil {
+		mergeConf(fileCfg, args, explicitFlags)
+
+		return nil
+	}
+	if len(configData) == 0 {
+		return nil
+	}
+	if args.Config != "" || explicitFlags["catalog-name"] {
+		if catalogName == "" {
+			catalogName = "default"
+		}
+
+		return fmt.Errorf("catalog %q not found in config file %s", catalogName, resolvedConfigPath(args.Config))
+	}
+
+	log.Printf("warning: catalog %q not found in config file", args.CatalogName)
+
+	return nil
+}
+
+func resolvedConfigPath(configPath string) string {
+	if configPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		configPath = filepath.Join(homeDir, ".iceberg-go.yaml")
+	}
+
+	path, _ := filepath.Abs(configPath)
+
+	return path
 }
 
 // mergeConf applies values from the file config into args for any option

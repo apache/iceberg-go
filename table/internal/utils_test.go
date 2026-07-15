@@ -70,8 +70,34 @@ func TestTruncateUpperBoundString(t *testing.T) {
 }
 
 func TestTruncateUpperBoundBinary(t *testing.T) {
-	assert.Equal(t, []byte{0x01, 0x03}, internal.TruncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
-	assert.Nil(t, internal.TruncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
+	tests := []struct {
+		name     string
+		value    []byte
+		truncate int
+		expected []byte
+	}{
+		{"increment", []byte{0x01, 0x02, 0x03}, 2, []byte{0x01, 0x03}},
+		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
+		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
+		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := slices.Clone(tt.value)
+			first := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+			second := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+
+			assert.Equal(t, tt.expected, first)
+			assert.Equal(t, first, second)
+			assert.Equal(t, original, tt.value)
+
+			if len(first) > 0 {
+				first[0] ^= 0xff
+				assert.Equal(t, original, tt.value)
+			}
+		})
+	}
 }
 
 func TestMapExecAllWorkersError(t *testing.T) {

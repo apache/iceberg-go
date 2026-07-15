@@ -18,6 +18,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/alexflint/go-arg"
@@ -326,6 +329,57 @@ func TestResolveCatalogName(t *testing.T) {
 			assert.Equal(t, tt.want, resolveCatalogName(tt.explicitFlags, tt.flagValue))
 		})
 	}
+}
+
+func TestApplyConfigFileFailsClosed(t *testing.T) {
+	t.Run("explicit missing file", func(t *testing.T) {
+		args := Args{Config: filepath.Join(t.TempDir(), "missing.yaml")}
+		err := applyConfigFile(&args, map[string]bool{"config": true})
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("malformed file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(":\t[broken yaml"), 0o600))
+		args := Args{Config: path}
+		err := applyConfigFile(&args, map[string]bool{"config": true})
+		require.ErrorContains(t, err, "parse config file")
+		require.ErrorContains(t, err, path)
+	})
+
+	t.Run("missing selected catalog", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("catalog:\n  available:\n    type: rest\n"), 0o600))
+		args := Args{Config: path, CatalogName: "missing"}
+		err := applyConfigFile(&args, map[string]bool{"config": true, "catalog-name": true})
+		require.EqualError(t, err, `catalog "missing" not found in config file `+path)
+	})
+
+	t.Run("valid selected catalog", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("catalog:\n  selected:\n    type: rest\n    uri: http://catalog.example\n"), 0o600))
+		args := Args{Config: path, CatalogName: "selected"}
+		err := applyConfigFile(&args, map[string]bool{"config": true, "catalog-name": true})
+		require.NoError(t, err)
+		require.Equal(t, "http://catalog.example", args.URI)
+	})
+}
+
+func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	cmd := exec.Command(os.Args[0], "list", "--config", path)
+	cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+	out, err := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "expected non-zero exit; output: %s", out)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(out), "configuration error")
+	assert.Contains(t, string(out), path)
 }
 
 func TestMergeConfAwsProfile(t *testing.T) {

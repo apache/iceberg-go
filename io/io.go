@@ -241,16 +241,12 @@ type readFileFS struct {
 }
 
 func (r readFileFS) ReadFile(name string) ([]byte, error) {
-	if r.preProcessName != nil {
-		name = r.preProcessName(name)
-	}
-
 	rfs, ok := r.fsys.(fs.ReadFileFS)
 	if !ok {
 		return nil, errMissingReadFile
 	}
 
-	return rfs.ReadFile(name)
+	return rfs.ReadFile(r.processName(name))
 }
 
 type ioFS struct {
@@ -260,6 +256,16 @@ type ioFS struct {
 }
 
 func (f ioFS) Open(name string) (File, error) {
+	name = f.processName(name)
+	file, err := f.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return ioFile{file}, nil
+}
+
+func (f ioFS) processName(name string) string {
 	if f.preProcessName != nil {
 		name = f.preProcessName(name)
 	}
@@ -269,12 +275,8 @@ func (f ioFS) Open(name string) (File, error) {
 	} else {
 		name = strings.TrimPrefix(name, "/")
 	}
-	file, err := f.fsys.Open(name)
-	if err != nil {
-		return nil, err
-	}
 
-	return ioFile{file}, nil
+	return name
 }
 
 func (f ioFS) Remove(name string) error {
@@ -283,7 +285,7 @@ func (f ioFS) Remove(name string) error {
 		return errMissingRemove
 	}
 
-	return r.Remove(name)
+	return r.Remove(f.processName(name))
 }
 
 var (

@@ -71,7 +71,7 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	WithDeleteFunc(deleteFunc)(cfg)
 	assert.NotNil(t, cfg.deleteFunc)
 
-	WithMaxConcurrency(8)(cfg)
+	WithCleanupMaxConcurrency(8)(cfg)
 	assert.Equal(t, 8, cfg.maxConcurrency)
 
 	WithPrefixMismatchMode(PrefixMismatchIgnore)(cfg)
@@ -772,8 +772,8 @@ func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
 	result, err := tbl.DeleteOrphanFiles(context.Background(),
 		WithDryRun(true),
 		WithLocation("s3://bucket/table"),
-		WithMaxConcurrency(1),
-		WithFilesOlderThan(-1*time.Second),
+		WithCleanupMaxConcurrency(1),
+		WithFilesOlderThan(0), // Consider files created before the scan.
 	)
 
 	require.NoError(t, err)
