@@ -198,12 +198,19 @@ func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
 	assert.Len(t, resp.DeleteFiles, 1)
 }
 
-func TestPlanTableScanResponseRejectsFailedWithoutError(t *testing.T) {
+func TestPlanTableScanResponseAcceptsFailedWithoutUsableError(t *testing.T) {
 	t.Parallel()
 
-	var resp PlanTableScanResponse
-	err := json.Unmarshal([]byte(`{"status":"failed"}`), &resp)
-	require.ErrorIs(t, err, ErrRESTError)
+	for _, payload := range []string{
+		`{"status":"failed"}`,
+		`{"status":"failed","error":null}`,
+		`{"status":"failed","error":"oops"}`,
+	} {
+		var resp PlanTableScanResponse
+		require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+		assert.Equal(t, PlanStatusFailed, resp.Status)
+		assert.Nil(t, resp.Error)
+	}
 }
 
 func TestPlanTableScanResponseAcceptsFailedWithError(t *testing.T) {
@@ -224,15 +231,22 @@ func TestPlanTableScanResponseRejectsUnknownStatus(t *testing.T) {
 	require.ErrorIs(t, err, ErrRESTError)
 }
 
-func TestFetchPlanningResultResponseRejectsMalformedResponses(t *testing.T) {
+func TestFetchPlanningResultResponseValidation(t *testing.T) {
 	t.Parallel()
 
-	t.Run("failed without error", func(t *testing.T) {
+	t.Run("failed without usable error is accepted", func(t *testing.T) {
 		t.Parallel()
 
-		var resp FetchPlanningResultResponse
-		err := json.Unmarshal([]byte(`{"status":"failed"}`), &resp)
-		require.ErrorIs(t, err, ErrRESTError)
+		for _, payload := range []string{
+			`{"status":"failed"}`,
+			`{"status":"failed","error":null}`,
+			`{"status":"failed","error":"oops"}`,
+		} {
+			var resp FetchPlanningResultResponse
+			require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+			assert.Equal(t, PlanStatusFailed, resp.Status)
+			assert.Nil(t, resp.Error)
+		}
 	})
 
 	t.Run("unknown status", func(t *testing.T) {
@@ -654,6 +668,28 @@ func TestFetchPlanningResultStatusArms(t *testing.T) {
 		require.ErrorAs(t, err, &pfe)
 		require.NotNil(t, pfe.Detail)
 		assert.Equal(t, "boom", pfe.Detail.Message)
+	})
+
+	t.Run("failed without usable error still returns PlanFailedError", func(t *testing.T) {
+		t.Parallel()
+
+		for _, payload := range []string{
+			`{"status":"failed"}`,
+			`{"status":"failed","error":"oops"}`,
+		} {
+			cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchPlanResult}, func(mux *http.ServeMux) {
+				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-123", func(w http.ResponseWriter, req *http.Request) {
+					_, err := w.Write([]byte(payload))
+					require.NoError(t, err)
+				})
+			})
+
+			_, err := cat.FetchPlanningResult(context.Background(), table.Identifier{"db", "tbl"}, "plan-123", FetchPlanningResultOptions{})
+			require.ErrorIs(t, err, ErrPlanFailed)
+			var pfe *PlanFailedError
+			require.ErrorAs(t, err, &pfe)
+			assert.Nil(t, pfe.Detail)
+		}
 	})
 }
 

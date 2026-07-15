@@ -1382,6 +1382,43 @@ func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
 	require.NotEqual(t, ": ", err.Error())
 }
 
+func TestHandleNon200_CapturesStatusAndRetryAfter(t *testing.T) {
+	body := `{"error":{"message":"busy","type":"ServiceUnavailable"}}`
+	rsp := &http.Response{
+		StatusCode:    http.StatusServiceUnavailable,
+		Header:        http.Header{"Retry-After": {"3"}},
+		ContentLength: int64(len(body)),
+		Body:          io.NopCloser(bytes.NewBufferString(body)),
+	}
+
+	err := handleNon200(rsp, nil, nil)
+
+	var restErr errorResponse
+	require.ErrorAs(t, err, &restErr)
+	require.Equal(t, http.StatusServiceUnavailable, restErr.statusCode)
+	require.Equal(t, "3", restErr.retryAfter)
+	require.ErrorIs(t, err, ErrServiceUnavailable)
+}
+
+func TestHandleNon200_PreservesStatusOnMalformedBody(t *testing.T) {
+	// A non-JSON error page must still carry the HTTP status (so a poller can apply
+	// transport-level retry policy) and stay classified as ErrRESTError.
+	rsp := &http.Response{
+		StatusCode:    http.StatusBadGateway,
+		Header:        http.Header{"Retry-After": {"5"}},
+		ContentLength: int64(len("not json")),
+		Body:          io.NopCloser(bytes.NewBufferString("not json")),
+	}
+
+	err := handleNon200(rsp, nil, nil)
+
+	var restErr errorResponse
+	require.ErrorAs(t, err, &restErr)
+	require.Equal(t, http.StatusBadGateway, restErr.statusCode)
+	require.Equal(t, "5", restErr.retryAfter)
+	require.ErrorIs(t, err, ErrRESTError)
+}
+
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
 	t.Parallel()
 
