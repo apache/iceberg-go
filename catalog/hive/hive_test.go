@@ -1468,15 +1468,23 @@ func TestCreateView_TableAlreadyExists(t *testing.T) {
 }
 
 func TestCreateView_InvalidIdentifier(t *testing.T) {
-	assert := require.New(t)
-
 	cat := NewCatalogWithClient(&mockHiveClient{}, iceberg.Properties{})
-
-	ver, _ := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"db"})
 	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "col", Type: iceberg.PrimitiveTypes.Int32, Required: true})
 
-	_, err := cat.CreateView(context.Background(), table.Identifier{"only_db"}, ver, schema)
-	assert.Error(err)
+	for _, ident := range []table.Identifier{nil, {}, {"only_db"}} {
+		ver, err := view.NewVersionFromSQL(1, 0, "SELECT 1", table.Identifier{"db"})
+		require.NoError(t, err)
+		_, err = cat.CreateView(context.Background(), ident, ver, schema)
+		require.ErrorIs(t, err, catalog.ErrNoSuchView)
+		require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
+		_, err = cat.LoadView(context.Background(), ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchView)
+		require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
+		require.ErrorIs(t, cat.DropView(context.Background(), ident), catalog.ErrNoSuchView)
+		_, err = cat.CheckViewExists(context.Background(), ident)
+		require.ErrorIs(t, err, catalog.ErrNoSuchView)
+		require.NotErrorIs(t, err, catalog.ErrNoSuchTable)
+	}
 }
 
 func TestCreateView_Success(t *testing.T) {
