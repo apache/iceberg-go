@@ -495,6 +495,15 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
+	// Resolve the reporter before any catalog mutation: a bad
+	// metrics-reporter-impl must fail here, not after the metadata file and
+	// version hint are written, which would report a failure for a table that
+	// was actually created (and make the retry hit ErrTableAlreadyExists).
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
@@ -556,11 +565,6 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	c.writeVersionHint(ident, version)
-
-	reporter, err := c.reporter.Get(c.props)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
-	}
 
 	tbl := table.New(
 		ident,

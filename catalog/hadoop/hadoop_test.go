@@ -34,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -1529,6 +1530,30 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 	s.Equal(created.Metadata().TableUUID(), loaded.Metadata().TableUUID())
 	s.Equal(created.Location(), loaded.Location())
 	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
+}
+
+// TestCreateTableInvalidReporterDoesNotMutate pins that an invalid
+// metrics-reporter-impl fails CreateTable before any table is written to disk,
+// so a bad reporter can't turn a successful create into a reported failure that
+// then leaves the caller unable to retry (ErrTableAlreadyExists).
+func (s *HadoopCatalogTestSuite) TestCreateTableInvalidReporterDoesNotMutate() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	cat, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+		metrics.ReporterImplKey: "does-not-exist",
+	})
+	s.Require().NoError(err)
+
+	_, err = cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().Error(err)
+
+	// The table must not have been created, so the failure is a clean no-op and
+	// the caller can retry rather than hit ErrTableAlreadyExists.
+	s.NoDirExists(filepath.Join(s.warehouse, "ns", "tbl", "metadata"))
+	exists, err := cat.CheckTableExists(ctx, []string{"ns", "tbl"})
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {

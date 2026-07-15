@@ -259,6 +259,15 @@ func (c *Catalog) Close() error { return c.reporter.Close() }
 // This function will create the metadata file in S3 using the catalog and table properties,
 // to determine the bucket and key for the metadata location.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	// Resolve the reporter before mutating the catalog: a bad
+	// metrics-reporter-impl must fail before the Glue entry is created, not
+	// after, which would report a failure for a table that was actually created
+	// (and make the retry hit ErrTableAlreadyExists). CachedReporter caches this
+	// first result, so the trailing LoadTable reuses it.
+	if _, err := c.reporter.Get(c.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
 		return nil, err
@@ -290,6 +299,14 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	database, tableName, err := identifierToGlueTable(identifier)
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve the reporter before mutating the catalog, for the same reason as
+	// CreateTable: an invalid reporter must not turn a successful registration
+	// into a reported failure. CachedReporter caches this for the trailing
+	// LoadTable.
+	if _, err := c.reporter.Get(c.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
