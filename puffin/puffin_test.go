@@ -134,6 +134,30 @@ func TestRoundTrip(t *testing.T) {
 	assert.Equal(t, blob2Data, allBlobs[1].Data)
 }
 
+func TestAddBlobCopiesMetadataInputs(t *testing.T) {
+	w, buf := newWriter()
+	fields := []int32{1, 2}
+	properties := map[string]string{"ndv": "10"}
+
+	meta, err := w.AddBlob(puffin.BlobMetadataInput{
+		Type:       puffin.BlobTypeDataSketchesTheta,
+		Fields:     fields,
+		Properties: properties,
+	}, []byte("sketch"))
+	require.NoError(t, err)
+
+	fields[0] = 99
+	properties["ndv"] = "20"
+	meta.Fields[1] = 88
+	meta.Properties["ndv"] = "30"
+	require.NoError(t, w.Finish())
+
+	blobs := newReader(t, buf).Blobs()
+	require.Len(t, blobs, 1)
+	assert.Equal(t, []int32{1, 2}, blobs[0].Fields)
+	assert.Equal(t, map[string]string{"ndv": "10"}, blobs[0].Properties)
+}
+
 // TestEmptyFile verifies that a puffin file with no blobs is valid.
 // Empty files are valid per spec and used when no statistics exist yet.
 func TestEmptyFile(t *testing.T) {
