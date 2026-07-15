@@ -1852,6 +1852,31 @@ func (s *SqliteCatalogTestSuite) TestDropNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestDropNamespaceRejectsViewOnlyNamespace() {
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+	viewID := append(slices.Clone(namespace), tableName())
+	viewSQL := "SELECT 1"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+
+	s.Require().NoError(cat.CreateNamespace(ctx, namespace, nil))
+	s.Require().NoError(cat.CreateView(ctx, viewID, schema, viewSQL, nil))
+
+	err := cat.DropNamespace(ctx, namespace)
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	s.ErrorContains(err, "catalog objects exist")
+
+	exists, err := cat.CheckNamespaceExists(ctx, namespace)
+	s.Require().NoError(err)
+	s.True(exists)
+	exists, err = cat.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
 func (s *SqliteCatalogTestSuite) TestDropNamespaceNotExist() {
 	tests := []struct {
 		cat       *sqlcat.Catalog
