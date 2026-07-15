@@ -32,10 +32,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -187,9 +189,181 @@ func (r *Catalog) SupportsRemoteScanPlanning() bool {
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
-// plan-scoped FileIO) for the table to read.
+// plan-scoped FileIO) for the table to read. It submits the plan, polls a
+// submitted plan to completion, and expands any plan-task handles into their
+// tasks before returning.
+//
+// Decoding the returned tasks into table.FileScanTask is the one piece still
+// stubbed: RESTFileScanTask/RESTDeleteFile are empty pending the scan-task
+// decoder phase, so a plan that yields any task surfaces ErrNotImplemented (see
+// remoteScanTasks). SupportsRemoteScanPlanning therefore stays false until that
+// lands, so auto-mode scans keep planning locally rather than routing here.
 func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
-	return table.ScanPlanningResult{}, fmt.Errorf("%w: REST scan planning", iceberg.ErrNotImplemented)
+	wire, err := planTableScanRequestFrom(req)
+	if err != nil {
+		return table.ScanPlanningResult{}, err
+	}
+
+	resp, err := r.PlanTableScan(ctx, req.Identifier, wire)
+	if err != nil {
+		return table.ScanPlanningResult{}, err
+	}
+
+	// Resolve to a completed plan: use an inline result as-is, or poll a
+	// submitted one to completion. PlanTableScan maps failed to an error and
+	// rejects other statuses, so only completed/submitted reach here.
+	var completed CompletedPlanningResult
+	switch resp.Status {
+	case PlanStatusCompleted:
+		completed = CompletedPlanningResult{
+			Status:             resp.Status,
+			ScanTasks:          resp.ScanTasks,
+			StorageCredentials: resp.StorageCredentials,
+		}
+	case PlanStatusSubmitted:
+		completed, err = r.WaitForPlan(ctx, req.Identifier, *resp.PlanID, WaitForPlanOptions{})
+		if err != nil {
+			return table.ScanPlanningResult{}, err
+		}
+	default:
+		return table.ScanPlanningResult{}, fmt.Errorf(
+			"%w: unexpected plan status %q from planTableScan", ErrRESTError, resp.Status)
+	}
+
+	files, deletes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
+	if err != nil {
+		return table.ScanPlanningResult{}, err
+	}
+
+	tasks, err := remoteScanTasks(files, deletes)
+	if err != nil {
+		return table.ScanPlanningResult{}, err
+	}
+
+	return table.ScanPlanningResult{
+		Tasks: tasks,
+		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation),
+	}, nil
+}
+
+// collectScanTasks expands plan-task handles into their tasks, walking the
+// fanout: a fetchScanTasks response can itself return more plan-tasks. It
+// accumulates the file-scan-tasks and delete-files reachable from the initial
+// set. A handle is fetched at most once; a server that re-issues one would
+// otherwise loop forever.
+func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]RESTFileScanTask, []RESTDeleteFile, error) {
+	files := append([]RESTFileScanTask(nil), tasks.FileScanTasks...)
+	deletes := append([]RESTDeleteFile(nil), tasks.DeleteFiles...)
+
+	queue := append([]string(nil), tasks.PlanTasks...)
+	seen := make(map[string]bool, len(queue))
+	for len(queue) > 0 {
+		handle := queue[0]
+		queue = queue[1:]
+		if seen[handle] {
+			continue
+		}
+		seen[handle] = true
+
+		resp, err := r.FetchScanTasks(ctx, ident, FetchScanTasksRequest{PlanTask: handle})
+		if err != nil {
+			return nil, nil, err
+		}
+		files = append(files, resp.FileScanTasks...)
+		deletes = append(deletes, resp.DeleteFiles...)
+		queue = append(queue, resp.PlanTasks...)
+	}
+
+	return files, deletes, nil
+}
+
+// remoteScanTasks decodes the server's task payload into domain FileScanTasks.
+// Blocked for now: RESTFileScanTask/RESTDeleteFile are empty pending the
+// scan-task decoder phase, so an empty plan decodes to no tasks while any actual
+// task surfaces ErrNotImplemented. The decoder phase replaces this body.
+func remoteScanTasks(files []RESTFileScanTask, deletes []RESTDeleteFile) ([]table.FileScanTask, error) {
+	if len(files) == 0 && len(deletes) == 0 {
+		return nil, nil
+	}
+
+	return nil, fmt.Errorf("%w: decoding remote scan tasks", iceberg.ErrNotImplemented)
+}
+
+// planIOFromCredentials wraps a plan's vended storage credentials in a lazy
+// PlanIO. With none vended it returns a nil PlanIO, and the scan falls back to
+// the table's own FileIO.
+func planIOFromCredentials(creds []StorageCredential, location string) table.PlanIO {
+	if len(creds) == 0 {
+		return nil
+	}
+
+	return &planScopedIO{creds: creds, location: location}
+}
+
+// planScopedIO builds a FileIO from a plan's vended storage credentials on first
+// use and caches it. It satisfies table.PlanIO. Per the delivery contract a Scan
+// carrying plan-scoped IO is not read concurrently, but the mutex keeps the lazy
+// build and Close honest.
+type planScopedIO struct {
+	creds    []StorageCredential
+	location string
+
+	mu     sync.Mutex
+	cached iceio.IO
+}
+
+func (p *planScopedIO) Load(ctx context.Context) (iceio.IO, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.cached != nil {
+		return p.cached, nil
+	}
+
+	fs, err := iceio.LoadFS(ctx, resolveStorageCredentials(p.creds, p.location), p.location)
+	if err != nil {
+		return nil, err
+	}
+	p.cached = fs
+
+	return p.cached, nil
+}
+
+func (p *planScopedIO) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	closer, ok := p.cached.(interface{ Close() error })
+	p.cached = nil
+	if ok {
+		return closer.Close()
+	}
+
+	return nil
+}
+
+// planTableScanRequestFrom builds the planTableScan request body from the
+// planner-level request, serializing the row filter to ExpressionParser JSON. A
+// nil or always-true filter is left off so the server plans without one.
+func planTableScanRequestFrom(req table.ScanPlanningRequest) (PlanTableScanRequest, error) {
+	out := PlanTableScanRequest{
+		SnapshotID:        req.SnapshotID,
+		Select:            req.SelectedFields,
+		MinRowsRequested:  req.MinRowsRequested,
+		CaseSensitive:     req.CaseSensitive,
+		UseSnapshotSchema: req.UseSnapshotSchema,
+		StatsFields:       req.StatsFields,
+	}
+
+	if req.RowFilter != nil && !req.RowFilter.Equals(iceberg.AlwaysTrue{}) {
+		filter, err := json.Marshal(req.RowFilter)
+		if err != nil {
+			return PlanTableScanRequest{}, fmt.Errorf("%w: encoding scan filter: %s", iceberg.ErrInvalidArgument, err)
+		}
+		out.Filter = filter
+	}
+
+	return out, nil
 }
 
 // --- Low-level client methods -----------------------------------------------
@@ -758,7 +932,8 @@ type CompletedPlanningResult struct {
 }
 
 // PlanTableScanRequest is the POST .../plan request body. Filter is the
-// ExpressionParser-format JSON produced by iceberg.MarshalExpressionJSON.
+// ExpressionParser-format JSON of the scan's row filter, produced by
+// json.Marshal over the BooleanExpression (see planTableScanRequestFrom).
 //
 // Point-in-time only for now: the spec's incremental start-snapshot-id /
 // end-snapshot-id fields are deliberately omitted and land with the incremental
