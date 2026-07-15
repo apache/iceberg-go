@@ -18,11 +18,37 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadConfigFile(t *testing.T) {
+	t.Run("implicit missing config", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		data, err := LoadConfigFile("")
+		require.NoError(t, err)
+		assert.Nil(t, data)
+	})
+
+	t.Run("explicit missing config", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.yaml")
+		_, err := LoadConfigFile(path)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+		assert.ErrorContains(t, err, path)
+	})
+
+	t.Run("explicit path is directory", func(t *testing.T) {
+		path := t.TempDir()
+		_, err := LoadConfigFile(path)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, path)
+	})
+}
 
 var testArgs = []struct {
 	file     []byte
