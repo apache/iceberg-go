@@ -878,7 +878,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       scan.identifier,
+		Identifier:       slices.Clone(scan.identifier),
 		Metadata:         scan.metadata,
 		MetadataLocation: scan.metadataLocation,
 		SnapshotID:       scan.snapshotID,

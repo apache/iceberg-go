@@ -26,6 +26,7 @@ import (
 	"iter"
 	"log/slog"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -2194,7 +2195,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	}
 
 	s := &Scan{
-		identifier:       t.tbl.identifier,
+		identifier:       slices.Clone(t.tbl.identifier),
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
