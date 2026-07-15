@@ -216,7 +216,6 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 	switch resp.Status {
 	case PlanStatusCompleted:
 		completed = CompletedPlanningResult{
-			Status:             resp.Status,
 			ScanTasks:          resp.ScanTasks,
 			StorageCredentials: resp.StorageCredentials,
 		}
