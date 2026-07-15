@@ -83,20 +83,43 @@ func parsePartitionSpec(specStr string, schema *iceberg.Schema) (*iceberg.Partit
 	return &spec, nil
 }
 
-func parseSortOrder(sortStr string) (table.SortOrder, error) {
+func parseSortOrder(sortStr string, schema *iceberg.Schema) (table.SortOrder, error) {
+	if schema == nil {
+		return table.UnsortedSortOrder, errors.New("schema is required for sort order parsing")
+	}
+
 	if sortStr == "" {
 		return table.UnsortedSortOrder, nil
 	}
 
 	fields := strings.Split(sortStr, ",")
 	var sortFields []table.SortField
+	seenSourceIDs := make(map[int]struct{}, len(fields))
 
-	for i, field := range fields {
+	for _, field := range fields {
 		field = strings.TrimSpace(field)
 		if field == "" {
-			continue
+			return table.UnsortedSortOrder, errors.New("sort field name cannot be empty")
 		}
 		parts := strings.Split(field, ":")
+		if len(parts) > 3 {
+			return table.UnsortedSortOrder, fmt.Errorf(
+				"invalid sort field %q: expected field[:direction[:null-order]]", field)
+		}
+
+		fieldName := strings.TrimSpace(parts[0])
+		if fieldName == "" {
+			return table.UnsortedSortOrder, errors.New("sort field name cannot be empty")
+		}
+		sourceField, ok := schema.FindFieldByName(fieldName)
+		if !ok {
+			return table.UnsortedSortOrder, fmt.Errorf("sort field %q not found in schema", fieldName)
+		}
+		if _, ok := seenSourceIDs[sourceField.ID]; ok {
+			return table.UnsortedSortOrder, fmt.Errorf("duplicate sort field %q", fieldName)
+		}
+		seenSourceIDs[sourceField.ID] = struct{}{}
+
 		direction := "asc" // default value
 		var nullOrder table.NullOrder
 
@@ -134,7 +157,7 @@ func parseSortOrder(sortStr string) (table.SortOrder, error) {
 			}
 		}
 		sortFields = append(sortFields, table.SortField{
-			SourceIDs: []int{i + 1},
+			SourceIDs: []int{sourceField.ID},
 			Transform: iceberg.IdentityTransform{},
 			Direction: sortDirection,
 			NullOrder: nullOrder,
@@ -144,8 +167,16 @@ func parseSortOrder(sortStr string) (table.SortOrder, error) {
 		return table.UnsortedSortOrder, nil
 	}
 
-	return table.NewSortOrder(
+	sortOrder, err := table.NewSortOrder(
 		table.InitialSortOrderID,
 		sortFields,
 	)
+	if err != nil {
+		return table.UnsortedSortOrder, err
+	}
+	if err := sortOrder.CheckCompatibility(schema); err != nil {
+		return table.UnsortedSortOrder, err
+	}
+
+	return sortOrder, nil
 }

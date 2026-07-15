@@ -183,6 +183,15 @@ func TestParsePartitionSpec(t *testing.T) {
 }
 
 func TestParseSortOrder(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 42, Name: "field1", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 10, Name: "field2", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 27, Name: "field3", Type: iceberg.PrimitiveTypes.Timestamp},
+		iceberg.NestedField{ID: 50, Name: "nested", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 51, Name: "value", Type: iceberg.PrimitiveTypes.String},
+		}}},
+	)
+
 	tests := []struct {
 		name                string
 		input               string
@@ -190,6 +199,7 @@ func TestParseSortOrder(t *testing.T) {
 		expectedFieldsCount int
 		expectedNullOrders  []table.NullOrder // for validation
 		expectedDirections  []table.SortDirection
+		expectedSourceIDs   []int
 	}{
 		{
 			name:                "empty string",
@@ -202,6 +212,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortASC},
 			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "single field descending (default null order)",
@@ -209,6 +220,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortDESC},
 			expectedNullOrders:  []table.NullOrder{table.NullsLast},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "single field with explicit nulls-first",
@@ -216,6 +228,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortASC},
 			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "single field with explicit nulls-last",
@@ -223,6 +236,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortDESC},
 			expectedNullOrders:  []table.NullOrder{table.NullsLast},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "asc with nulls-last (overriding default)",
@@ -230,6 +244,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortASC},
 			expectedNullOrders:  []table.NullOrder{table.NullsLast},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "desc with nulls-first (overriding default)",
@@ -237,6 +252,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 1,
 			expectedDirections:  []table.SortDirection{table.SortDESC},
 			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
+			expectedSourceIDs:   []int{42},
 		},
 		{
 			name:                "multiple fields with mixed null orders",
@@ -244,6 +260,7 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 3,
 			expectedDirections:  []table.SortDirection{table.SortASC, table.SortDESC, table.SortASC},
 			expectedNullOrders:  []table.NullOrder{table.NullsFirst, table.NullsFirst, table.NullsLast},
+			expectedSourceIDs:   []int{42, 10, 27},
 		},
 		{
 			name:                "with spaces",
@@ -251,6 +268,15 @@ func TestParseSortOrder(t *testing.T) {
 			expectedFieldsCount: 2,
 			expectedDirections:  []table.SortDirection{table.SortASC, table.SortDESC},
 			expectedNullOrders:  []table.NullOrder{table.NullsLast, table.NullsLast},
+			expectedSourceIDs:   []int{42, 10},
+		},
+		{
+			name:                "nested field path",
+			input:               "nested.value",
+			expectedFieldsCount: 1,
+			expectedDirections:  []table.SortDirection{table.SortASC},
+			expectedNullOrders:  []table.NullOrder{table.NullsFirst},
+			expectedSourceIDs:   []int{51},
 		},
 		{
 			name:  "invalid direction",
@@ -262,11 +288,36 @@ func TestParseSortOrder(t *testing.T) {
 			input: "field1:asc:invalid-order",
 			isErr: true,
 		},
+		{
+			name:  "unknown field",
+			input: "missing:asc",
+			isErr: true,
+		},
+		{
+			name:  "duplicate field",
+			input: "field1:asc,field1:desc",
+			isErr: true,
+		},
+		{
+			name:  "non-primitive field",
+			input: "nested",
+			isErr: true,
+		},
+		{
+			name:  "too many components",
+			input: "field1:asc:nulls-first:extra",
+			isErr: true,
+		},
+		{
+			name:  "empty field",
+			input: "field1,",
+			isErr: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseSortOrder(tt.input)
+			got, err := parseSortOrder(tt.input, schema)
 			if (err != nil) != tt.isErr {
 				t.Errorf("parseSortOrder() error = %v, isErr %v", err, tt.isErr)
 
@@ -293,6 +344,9 @@ func TestParseSortOrder(t *testing.T) {
 				// Validate sort directions and null orders
 				i := 0
 				for _, field := range got.Fields() {
+					if i < len(tt.expectedSourceIDs) && field.SourceID() != tt.expectedSourceIDs[i] {
+						t.Errorf("parseSortOrder() field %d source ID = %v, expected %v", i, field.SourceID(), tt.expectedSourceIDs[i])
+					}
 					if i < len(tt.expectedDirections) && field.Direction != tt.expectedDirections[i] {
 						t.Errorf("parseSortOrder() field %d direction = %v, expected %v", i, field.Direction, tt.expectedDirections[i])
 					}
@@ -304,18 +358,21 @@ func TestParseSortOrder(t *testing.T) {
 			}
 		})
 	}
+
+	_, err := parseSortOrder("field1", nil)
+	require.ErrorContains(t, err, "schema is required")
 }
 
-func TestParsePartitionSpecSendsFieldIDsInRestCreatePayload(t *testing.T) {
+func TestParsedLayoutSendsFieldIDsInRestCreatePayload(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{
-			ID:       10,
+			ID:       42,
 			Name:     "customer_id",
 			Type:     iceberg.PrimitiveTypes.String,
 			Required: false,
 		},
 		iceberg.NestedField{
-			ID:       20,
+			ID:       10,
 			Name:     "event_time",
 			Type:     iceberg.PrimitiveTypes.TimestampNs,
 			Required: false,
@@ -325,6 +382,8 @@ func TestParsePartitionSpecSendsFieldIDsInRestCreatePayload(t *testing.T) {
 	spec, err := parsePartitionSpec("customer_id,event_time", schema)
 	require.NoError(t, err)
 	require.NotNil(t, spec)
+	sortOrder, err := parseSortOrder("event_time:desc,customer_id:asc", schema)
+	require.NoError(t, err)
 
 	var lastCreateBody map[string]any
 	createCalled := false
@@ -364,7 +423,7 @@ func TestParsePartitionSpecSendsFieldIDsInRestCreatePayload(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = cat.CreateTable(context.Background(), table.Identifier{"db", "test_table"}, schema,
-		catalog.WithPartitionSpec(spec))
+		catalog.WithPartitionSpec(spec), catalog.WithSortOrder(sortOrder))
 	require.NoError(t, err)
 	require.True(t, createCalled, "create endpoint should be called")
 
@@ -380,6 +439,21 @@ func TestParsePartitionSpecSendsFieldIDsInRestCreatePayload(t *testing.T) {
 	require.True(t, ok)
 	require.EqualValues(t, 1000, field0["field-id"])
 	require.EqualValues(t, 1001, field1["field-id"])
+	require.EqualValues(t, 42, field0["source-id"])
+	require.EqualValues(t, 10, field1["source-id"])
+
+	rawSortOrder, ok := lastCreateBody["write-order"].(map[string]any)
+	require.True(t, ok)
+	sortFields, ok := rawSortOrder["fields"].([]any)
+	require.True(t, ok)
+	require.Len(t, sortFields, 2)
+
+	sortField0, ok := sortFields[0].(map[string]any)
+	require.True(t, ok)
+	sortField1, ok := sortFields[1].(map[string]any)
+	require.True(t, ok)
+	require.EqualValues(t, 10, sortField0["source-id"])
+	require.EqualValues(t, 42, sortField1["source-id"])
 }
 
 func tableMetadataJSON(tableUUID string) string {
@@ -392,13 +466,13 @@ func tableMetadataJSON(tableUUID string) string {
 		"table-uuid": "` + tableUUID + `",
 		"location": "s3://warehouse/db/tbl",
 		"last-updated-ms": 1657810967051,
-		"last-column-id": 20,
+		"last-column-id": 42,
 		"schema": {
 			"type": "struct",
 			"schema-id": 0,
 			"fields": [
-				{"id": 10, "name": "customer_id", "required": false, "type": "string"},
-				{"id": 20, "name": "event_time", "required": false, "type": "timestamp_ns"}
+				{"id": 42, "name": "customer_id", "required": false, "type": "string"},
+				{"id": 10, "name": "event_time", "required": false, "type": "timestamp_ns"}
 			]
 		},
 		"current-schema-id": 0,
@@ -406,8 +480,8 @@ func tableMetadataJSON(tableUUID string) string {
 			"type": "struct",
 			"schema-id": 0,
 			"fields": [
-				{"id": 10, "name": "customer_id", "required": false, "type": "string"},
-				{"id": 20, "name": "event_time", "required": false, "type": "timestamp_ns"}
+				{"id": 42, "name": "customer_id", "required": false, "type": "string"},
+				{"id": 10, "name": "event_time", "required": false, "type": "timestamp_ns"}
 			]
 		}],
 		"partition-spec": [],
