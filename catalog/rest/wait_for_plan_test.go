@@ -452,7 +452,11 @@ func TestWaitForPlanBoundsSlowServerSideCancel(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, context.Canceled)
-		assert.True(t, cancelStarted.Load(), "expected the server-side cancel to be attempted")
+		// The server-side cancel runs on a context detached from the caller, so it
+		// may be issued slightly after WaitForPlan returns. Poll instead of reading
+		// the flag once to avoid a race with the detached cancel on slower runners.
+		assert.Eventually(t, cancelStarted.Load, time.Second, 5*time.Millisecond,
+			"expected the server-side cancel to be attempted")
 	case <-time.After(3 * time.Second):
 		t.Fatal("WaitForPlan hung on a stalled server-side cancel; CancelGracePeriod not enforced")
 	}
