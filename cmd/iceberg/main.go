@@ -167,31 +167,38 @@ type CompactCmd struct {
 	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack compaction"`
 }
 
+type RewriteManifestsCmd struct {
+	TableID            string `arg:"positional,required" help:"full path to a table"`
+	TargetManifestSize int64  `arg:"--target-manifest-size" default:"0" help:"target manifest size in bytes (default: table property)"`
+	SpecID             int    `arg:"--spec-id" default:"-1" help:"only rewrite manifests of this partition spec id"`
+}
+
 // Top-level args
 
 type Args struct {
-	List         *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
-	Describe     *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
-	Schema       *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
-	Spec         *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
-	Uuid         *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
-	Location     *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
-	Create       *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
-	Drop         *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
-	Files        *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
-	Rename       *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
-	Properties   *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
-	Compact      *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
-	Info         *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
-	Snapshots    *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
-	Refs         *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
-	PartStats    *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
-	Branch       *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
-	Tag          *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
-	ExpireSnaps  *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
-	CleanOrphans *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
-	Upgrade      *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
-	Rollback     *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
+	List             *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
+	Describe         *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
+	Schema           *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
+	Spec             *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
+	Uuid             *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
+	Location         *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
+	Create           *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
+	Drop             *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
+	Files            *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
+	Rename           *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
+	Properties       *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
+	Compact          *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	RewriteManifests *RewriteManifestsCmd `arg:"subcommand:rewrite-manifests" help:"rewrite (compact) table manifests"`
+	Info             *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
+	Snapshots        *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
+	Refs             *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
+	PartStats        *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
+	Branch           *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
+	Tag              *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
+	ExpireSnaps      *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
+	CleanOrphans     *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
+	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
+	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
 	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
@@ -237,14 +244,9 @@ func main() {
 		}
 	}
 
-	configData := config.LoadConfig(args.Config)
-	fileCfg, err := config.ParseConfig(configData, resolveCatalogName(explicitFlags, args.CatalogName))
-	if err != nil {
-		log.Printf("warning: failed to parse config file: %v", err)
-	} else if fileCfg != nil {
-		mergeConf(fileCfg, &args, explicitFlags)
-	} else if len(configData) > 0 {
-		log.Printf("warning: catalog %q not found in config file", args.CatalogName)
+	if err := applyConfigFile(&args, explicitFlags); err != nil {
+		log.Printf("configuration error: %v", err)
+		os.Exit(1)
 	}
 
 	// Validate nested subcommands before catalog init.
@@ -324,6 +326,8 @@ func main() {
 		runProperties(ctx, output, cat, args.Properties)
 	case args.Compact != nil:
 		runCompact(ctx, output, cat, args.Compact)
+	case args.RewriteManifests != nil:
+		runRewriteManifests(ctx, output, cat, args.RewriteManifests)
 	case args.Info != nil:
 		tbl := loadTable(ctx, output, cat, args.Info.TableID)
 		output.Info(tbl)
@@ -520,7 +524,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.PartitionSpec != "" {
-			spec, err := parsePartitionSpec(tbl.PartitionSpec)
+			spec, err := parsePartitionSpec(tbl.PartitionSpec, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
 				os.Exit(1)
@@ -530,7 +534,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.SortOrder != "" {
-			sortOrder, err := parseSortOrder(tbl.SortOrder)
+			sortOrder, err := parseSortOrder(tbl.SortOrder, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
 				os.Exit(1)
@@ -805,6 +809,49 @@ func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string 
 	}
 
 	return ""
+}
+
+func applyConfigFile(args *Args, explicitFlags map[string]bool) error {
+	configData, err := config.LoadConfigFile(args.Config)
+	if err != nil {
+		return err
+	}
+
+	catalogName := resolveCatalogName(explicitFlags, args.CatalogName)
+	fileCfg, err := config.ParseConfig(configData, catalogName)
+	if err != nil {
+		return fmt.Errorf("parse config file %s: %w", resolvedConfigPath(args.Config), err)
+	}
+	if fileCfg != nil {
+		mergeConf(fileCfg, args, explicitFlags)
+
+		return nil
+	}
+	if len(configData) == 0 {
+		return nil
+	}
+	if args.Config != "" || explicitFlags["catalog-name"] {
+		if catalogName == "" {
+			catalogName = "default"
+		}
+
+		return fmt.Errorf("catalog %q not found in config file %s", catalogName, resolvedConfigPath(args.Config))
+	}
+
+	log.Printf("warning: catalog %q not found in config file", args.CatalogName)
+
+	return nil
+}
+
+func resolvedConfigPath(configPath string) string {
+	if configPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		configPath = filepath.Join(homeDir, ".iceberg-go.yaml")
+	}
+
+	path, _ := filepath.Abs(configPath)
+
+	return path
 }
 
 // mergeConf applies values from the file config into args for any option

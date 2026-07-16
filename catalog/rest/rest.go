@@ -40,6 +40,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -72,6 +73,12 @@ const (
 	bearerPrefix        = "Bearer"
 	keyPrefix           = "prefix"
 
+	// headerIcebergAccessDelegation requests server-side storage-credential
+	// vending. It is a session default (defaultAccessDelegation) and a
+	// per-request header on the scan-planning endpoints that vend credentials.
+	headerIcebergAccessDelegation = "X-Iceberg-Access-Delegation"
+	defaultAccessDelegation       = "vended-credentials"
+
 	keyNamespaceSeparator     = "namespace-separator"
 	defaultNamespaceSeparator = "%1F"
 
@@ -81,7 +88,12 @@ const (
 	keyRestSigV4Region  = "rest.signing-region"
 	keyRestSigV4Service = "rest.signing-name"
 	keyAuthUrl          = "rest.authorization-url"
-	keyTlsSkipVerify    = "rest.tls.skip-verify"
+	// keyOAuth2ServerURI is the portable, spec-aligned property for the OAuth2
+	// token endpoint used by Java, PyIceberg and iceberg-rust. It is the
+	// preferred key; keyAuthUrl is retained as a compatibility alias. When both
+	// are set, oauth2-server-uri takes precedence.
+	keyOAuth2ServerURI = "oauth2-server-uri"
+	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
 )
@@ -118,7 +130,9 @@ type errorResponse struct {
 	Code    int      `json:"code"`
 	Stack   []string `json:"stack,omitempty"`
 
-	wrapping error
+	wrapping   error
+	statusCode int
+	retryAfter string
 }
 
 type contextKey string
@@ -222,10 +236,17 @@ type sessionTransport struct {
 const emptyStringHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// A session default is applied unless the request already carries that
+	// header (a per-request override of any default, not just Content-Type
+	// wins) or explicitly opted out of it via withSuppressedHeaders (carried on
+	// the context as an explicit set, never inferred from header values).
+	suppressed := suppressedHeadersFrom(r.Context())
 	for k, v := range s.defaultHeaders {
-		// Skip Content-Type if it's already set in the request
-		// to avoid duplicate headers (e.g., when using PostForm)
-		if http.CanonicalHeaderKey(k) == "Content-Type" && r.Header.Get("Content-Type") != "" {
+		ck := http.CanonicalHeaderKey(k)
+		if _, ok := r.Header[ck]; ok {
+			continue
+		}
+		if _, ok := suppressed[ck]; ok {
 			continue
 		}
 		for _, hdr := range v {
@@ -233,6 +254,12 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 
+	// Ordering is load-bearing: authManager runs after the default-header loop
+	// and Set-overwrites, so the managed auth header always wins even though the
+	// loop above lets an arbitrary per-request header (withHeaders) override a
+	// session default of the same key. A caller cannot suppress or spoof the
+	// Authorization header by supplying its own. Do not reorder this before the
+	// default-header loop.
 	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
 		k, v, err := s.authManager.AuthHeader()
 		if err != nil {
@@ -287,16 +314,117 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.RoundTripper.RoundTrip(r)
 }
 
-func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, allowNoContent bool) (ret T, err error) {
+// suppressHeadersKey carries the set of session-default header keys (canonical
+// form) that a request opted out of, so sessionTransport.RoundTrip can consult
+// an explicit set rather than inferring suppression from header values.
+type suppressHeadersKey struct{}
+
+// reqConfig holds the optional per-request knobs shared by do and doPost:
+// headers to set, session-default headers to suppress, a body error.type ->
+// error override, and whether an HTTP 204 is a valid empty result.
+type reqConfig struct {
+	headers           map[string]string
+	suppressHeaders   []string
+	errorTypeOverride map[string]error
+	allowNoContent    bool
+	requireBody       bool
+}
+
+type reqOption func(*reqConfig)
+
+// withHeaders sets per-request headers, merging with any already set so options
+// compose. A per-request header takes precedence over a session default because
+// sessionTransport.RoundTrip skips any default whose key is already present.
+func withHeaders(headers map[string]string) reqOption {
+	return func(c *reqConfig) {
+		if c.headers == nil {
+			c.headers = make(map[string]string, len(headers))
+		}
+		maps.Copy(c.headers, headers)
+	}
+}
+
+// withSuppressedHeaders prevents the named session-default headers from being
+// sent on this request. Names accumulate so options compose. Suppression is
+// carried through the request context (see RoundTrip), not encoded as a header
+// value, so req.Header only ever means "headers to send".
+func withSuppressedHeaders(names ...string) reqOption {
+	return func(c *reqConfig) { c.suppressHeaders = append(c.suppressHeaders, names...) }
+}
+
+// withErrorTypeOverride maps a non-200 response to a specific error by the REST
+// error.type in the response body. It takes precedence over the status-code
+// override so a shared status (e.g. a 404 that can be a missing plan, table, or
+// namespace) can split into distinct sentinels. Entries accumulate so options
+// compose; an unset or unmatched error.type falls through to the status-code
+// override.
+func withErrorTypeOverride(byType map[string]error) reqOption {
+	return func(c *reqConfig) {
+		if c.errorTypeOverride == nil {
+			c.errorTypeOverride = make(map[string]error, len(byType))
+		}
+		maps.Copy(c.errorTypeOverride, byType)
+	}
+}
+
+// allowNoContent treats an HTTP 204 No Content response as a valid empty result
+// rather than trying to decode a body.
+func allowNoContent() reqOption {
+	return func(c *reqConfig) { c.allowNoContent = true }
+}
+
+// requireBody rejects an HTTP 200 with an empty body rather than decoding it to
+// the zero result. Use it when a 200 must carry a payload, so a truncated or
+// proxy-stripped response cannot masquerade as a successful empty result (e.g.
+// fetchScanTasks returning "zero tasks" and silently dropping work).
+func requireBody() reqOption {
+	return func(c *reqConfig) { c.requireBody = true }
+}
+
+func newReqConfig(opts []reqOption) reqConfig {
+	var cfg reqConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return cfg
+}
+
+// withSuppressedHeadersCtx returns ctx carrying the canonicalized suppression
+// set, or ctx unchanged when nothing is suppressed.
+func withSuppressedHeadersCtx(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+
+	set := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[http.CanonicalHeaderKey(n)] = struct{}{}
+	}
+
+	return context.WithValue(ctx, suppressHeadersKey{}, set)
+}
+
+func suppressedHeadersFrom(ctx context.Context) map[string]struct{} {
+	set, _ := ctx.Value(suppressHeadersKey{}).(map[string]struct{})
+
+	return set
+}
+
+func do[T any](ctx context.Context, method string, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	cfg := newReqConfig(opts)
+
 	var (
 		req *http.Request
 		rsp *http.Response
 	)
 
 	uri := baseURI.JoinPath(path...).String()
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return ret, err
 	}
+	setRequestHeaders(req, cfg.headers)
 
 	if rsp, err = cl.Do(req); err != nil {
 		return ret, err
@@ -306,12 +434,12 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		_ = rsp.Body.Close()
 	}()
 
-	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
+	if cfg.allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if method == http.MethodHead || method == http.MethodDelete {
@@ -325,25 +453,23 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 	return ret, err
 }
 
-func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
-	return do[T](ctx, http.MethodGet, baseURI, path, cl, override, false)
+func doGet[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	return do[T](ctx, http.MethodGet, baseURI, path, cl, override, opts...)
 }
 
-func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) (ret T, err error) {
-	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, true)
+func doDelete[T any](ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error, opts ...reqOption) (ret T, err error) {
+	return do[T](ctx, http.MethodDelete, baseURI, path, cl, override, append([]reqOption{allowNoContent()}, opts...)...)
 }
 
 func doHead(ctx context.Context, baseURI *url.URL, path []string, cl *http.Client, override map[int]error) error {
-	_, err := do[struct{}](ctx, http.MethodHead, baseURI, path, cl, override, true)
+	_, err := do[struct{}](ctx, http.MethodHead, baseURI, path, cl, override, allowNoContent())
 
 	return err
 }
 
-func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error) (ret Result, err error) {
-	return doPostAllowNoContent[Payload, Result](ctx, baseURI, path, payload, cl, override, false)
-}
+func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, opts ...reqOption) (ret Result, err error) {
+	cfg := newReqConfig(opts)
 
-func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url.URL, path []string, payload Payload, cl *http.Client, override map[int]error, allowNoContent bool) (ret Result, err error) {
 	var (
 		req  *http.Request
 		rsp  *http.Response
@@ -356,10 +482,12 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 		return ret, err
 	}
 
+	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	req, err = http.NewRequestWithContext(ctx, http.MethodPost, uri, bytes.NewReader(data))
 	if err != nil {
 		return ret, err
 	}
+	setRequestHeaders(req, cfg.headers)
 
 	rsp, err = cl.Do(req)
 	if err != nil {
@@ -370,15 +498,19 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 		_ = rsp.Body.Close()
 	}()
 
-	if allowNoContent && rsp.StatusCode == http.StatusNoContent {
+	if cfg.allowNoContent && rsp.StatusCode == http.StatusNoContent {
 		return ret, err
 	}
 
 	if rsp.StatusCode != http.StatusOK {
-		return ret, handleNon200(rsp, override)
+		return ret, handleNon200(rsp, override, cfg.errorTypeOverride)
 	}
 
 	if rsp.ContentLength == 0 {
+		if cfg.requireBody {
+			return ret, fmt.Errorf("%w: empty response body on %s %s", ErrRESTError, req.Method, req.URL.Path)
+		}
+
 		return ret, err
 	}
 
@@ -389,8 +521,17 @@ func doPostAllowNoContent[Payload, Result any](ctx context.Context, baseURI *url
 	return ret, err
 }
 
-func handleNon200(rsp *http.Response, override map[int]error) error {
-	var e errorResponse
+func setRequestHeaders(req *http.Request, headers map[string]string) {
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+}
+
+func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[string]error) error {
+	e := errorResponse{
+		statusCode: rsp.StatusCode,
+		retryAfter: rsp.Header.Get("Retry-After"),
+	}
 
 	// Only try to decode if there's a body (HEAD requests don't have one)
 	if rsp.ContentLength != 0 {
@@ -405,7 +546,13 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 
 		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
 		if decErr != nil && decErr != io.EOF {
-			return fmt.Errorf("%w: failed to decode error response: %s", ErrRESTError, decErr.Error())
+			// Preserve the HTTP metadata even when the server returned a non-JSON
+			// error page. Callers such as WaitForPlan still need the status to apply
+			// transport-level retry policy; the wrapping sentinel retains the prior
+			// ErrRESTError classification for malformed error payloads.
+			e.wrapping = ErrRESTError
+
+			return fmt.Errorf("%w: failed to decode error response: %s", e, decErr.Error())
 		}
 
 		if e.Message == "" && e.Type == "" {
@@ -414,9 +561,23 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 		}
 	}
 
+	// The status-code override maps a status to a sentinel; a body error.type
+	// override refines it further (e.g. splitting a 404 into missing-plan vs.
+	// table vs. namespace). The type refinement only applies to a status the
+	// caller already mapped, because these error.type values are defined for
+	// specific statuses (404) in the REST spec: a 503 body carrying, say,
+	// NoSuchPlanIdException must still resolve to ErrServiceUnavailable rather
+	// than a 404 sentinel.
 	if override != nil {
-		if err, ok := override[rsp.StatusCode]; ok {
-			e.wrapping = err
+		if statusErr, ok := override[rsp.StatusCode]; ok {
+			if typeOverride != nil && e.Type != "" {
+				if typeErr, ok := typeOverride[e.Type]; ok {
+					e.wrapping = typeErr
+
+					return e
+				}
+			}
+			e.wrapping = statusErr
 
 			return e
 		}
@@ -449,6 +610,11 @@ func handleNon200(rsp *http.Response, override map[int]error) error {
 }
 
 func fromProps(props iceberg.Properties, o *options) error {
+	// The OAuth token endpoint may be configured via either the portable
+	// oauth2-server-uri key or the legacy rest.authorization-url alias. Capture
+	// both and resolve precedence after the loop, since map iteration order is
+	// non-deterministic.
+	var authURL, oauth2ServerURI *url.URL
 	for k, v := range props {
 		switch k {
 		case keyOauthToken:
@@ -466,11 +632,17 @@ func fromProps(props iceberg.Properties, o *options) error {
 		case keyRestSigV4Service:
 			o.sigv4Service = v
 		case keyAuthUrl:
-			u, err := parseAuthURL(v)
+			u, err := parseAuthURL(keyAuthUrl, v)
 			if err != nil {
 				return err
 			}
-			o.authUri = u
+			authURL = u
+		case keyOAuth2ServerURI:
+			u, err := parseAuthURL(keyOAuth2ServerURI, v)
+			if err != nil {
+				return err
+			}
+			oauth2ServerURI = u
 		case keyOauthCredential:
 			o.credential = v
 		case keyScope:
@@ -501,19 +673,44 @@ func fromProps(props iceberg.Properties, o *options) error {
 		}
 	}
 
+	// oauth2-server-uri is the portable, preferred key and takes precedence over
+	// the rest.authorization-url alias when both are set.
+	switch {
+	case oauth2ServerURI != nil:
+		o.authUri = oauth2ServerURI
+	case authURL != nil:
+		o.authUri = authURL
+	}
+
 	return nil
 }
 
-func parseAuthURL(raw string) (*url.URL, error) {
+// resolveAuthURLAlias collapses the oauth2-server-uri / rest.authorization-url
+// alias within a single configuration layer into the canonical
+// oauth2-server-uri key. oauth2-server-uri wins over the rest.authorization-url
+// alias within the same layer. Collapsing per layer before merging keeps
+// defaults -> client -> overrides precedence intact.
+func resolveAuthURLAlias(props iceberg.Properties) {
+	v, ok := props[keyOAuth2ServerURI]
+	if !ok {
+		v, ok = props[keyAuthUrl]
+	}
+	delete(props, keyAuthUrl)
+	if ok {
+		props[keyOAuth2ServerURI] = v
+	}
+}
+
+func parseAuthURL(key, raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s %q: %w", keyAuthUrl, raw, err)
+		return nil, fmt.Errorf("invalid %s %q: %w", key, raw, err)
 	}
 	if u.Scheme == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing scheme", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing scheme", key, raw)
 	}
 	if u.Host == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing host", keyAuthUrl, raw)
+		return nil, fmt.Errorf("invalid %s %q: missing host", key, raw)
 	}
 
 	return u, nil
@@ -552,7 +749,12 @@ func toProps(o *options) iceberg.Properties {
 
 	setIf(keyPrefix, o.prefix)
 	if o.authUri != nil {
-		setIf(keyAuthUrl, o.authUri.String())
+		// Advertise the endpoint only under the portable oauth2-server-uri key.
+		// We canonicalize to this key everywhere else (fromProps precedence,
+		// resolveAuthURLAlias), so emitting the legacy rest.authorization-url
+		// alias too would leave the endpoint under two names in r.props and any
+		// table config cloned from it - two sources of truth that can drift.
+		setIf(keyOAuth2ServerURI, o.authUri.String())
 	}
 
 	return props
@@ -721,7 +923,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
 	session.defaultHeaders.Set("Content-Type", "application/json")
 	session.defaultHeaders.Set("User-Agent", "GoIceberg/"+iceberg.Version())
-	session.defaultHeaders.Set("X-Iceberg-Access-Delegation", "vended-credentials")
+	session.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
 
 	for k, v := range opts.headers {
 		session.defaultHeaders.Set(k, v)
@@ -781,7 +983,17 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	if cfg == nil {
 		cfg = iceberg.Properties{}
 	}
-	maps.Copy(cfg, toProps(opts))
+
+	// Collapse the oauth2-server-uri / rest.authorization-url alias within each
+	// layer before merging so the defaults -> client -> overrides precedence is
+	// preserved. Merging first would leave both keys in the map, letting a
+	// client oauth2-server-uri shadow a server rest.authorization-url override.
+	clientProps := toProps(opts)
+	resolveAuthURLAlias(cfg)
+	resolveAuthURLAlias(clientProps)
+	resolveAuthURLAlias(rsp.Overrides)
+
+	maps.Copy(cfg, clientProps)
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
@@ -971,7 +1183,7 @@ func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, err
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
 }
 
 func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string, error) {
@@ -979,7 +1191,15 @@ func (r *Catalog) splitViewIdentForPath(ident table.Identifier) (string, string,
 		return "", "", err
 	}
 
-	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.TableNameFromIdent(ident), nil
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
+}
+
+func (r *Catalog) splitFunctionIdentForPath(ident table.Identifier) (string, string, error) {
+	if err := catalog.ValidateFunctionIdentifier(ident); err != nil {
+		return "", "", err
+	}
+
+	return r.encodeNamespace(catalog.NamespaceFromIdent(ident)), catalog.ObjectNameFromIdent(ident), nil
 }
 
 func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
@@ -1194,7 +1414,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 		return err
 	}
 
-	_, err = doPostAllowNoContent[payload, struct{}](
+	_, err = doPost[payload, struct{}](
 		ctx, r.baseURI, path,
 		payload{TableChanges: changes}, r.cl,
 		map[int]error{
@@ -1205,7 +1425,7 @@ func (r *Catalog) CommitTransaction(ctx context.Context, commits []table.TableCo
 			http.StatusServiceUnavailable:  ErrCommitStateUnknown,
 			http.StatusGatewayTimeout:      ErrCommitStateUnknown,
 		},
-		true,
+		allowNoContent(),
 	)
 
 	return err
@@ -1403,8 +1623,8 @@ func (r *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 		return nil, err
 	}
 
-	_, err = doPostAllowNoContent[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
-		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, true)
+	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, allowNoContent())
 	if err != nil {
 		return nil, err
 	}
@@ -1988,4 +2208,237 @@ func (r *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 	}
 
 	return view.New(identifier, metadata, rsp.MetadataLoc), nil
+}
+
+func (r *Catalog) RenameView(ctx context.Context, from, to table.Identifier) (*view.View, error) {
+	if err := r.endpoints.check(endpointRenameView); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateViewIdentifier(from); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateViewIdentifier(to); err != nil {
+		return nil, err
+	}
+
+	type payload struct {
+		Source      identifier `json:"source"`
+		Destination identifier `json:"destination"`
+	}
+	src := identifier{
+		Namespace: catalog.NamespaceFromIdent(from),
+		Name:      catalog.TableNameFromIdent(from),
+	}
+	dst := identifier{
+		Namespace: catalog.NamespaceFromIdent(to),
+		Name:      catalog.TableNameFromIdent(to),
+	}
+
+	path, err := endpointRenameView.reqPath()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = doPost[payload, any](ctx, r.baseURI, path, payload{Source: src, Destination: dst}, r.cl,
+		map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchView,
+			http.StatusConflict: catalog.ErrViewAlreadyExists,
+		}, allowNoContent())
+	if err != nil {
+		return nil, err
+	}
+
+	return r.LoadView(ctx, to)
+}
+
+// FunctionCatalog is an optional interface for catalogs that support the
+// function (SQL UDF) read endpoints defined by the REST spec: list and load.
+// The function endpoints are not part of the spec's assumed default endpoint
+// set, so they are only used when the server advertises them: unsupported
+// loads fail with ErrEndpointNotSupported and unsupported listings yield no
+// results. Callers holding a catalog.Catalog can check for this capability
+// via a type assertion:
+//
+//	if fc, ok := cat.(rest.FunctionCatalog); ok {
+//	    fn, err := fc.LoadFunction(ctx, ident)
+//	}
+type FunctionCatalog interface {
+	// ListFunctions returns the function identifiers under a namespace,
+	// with the returned identifiers containing the information required
+	// to load the function via this catalog.
+	ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error]
+	// LoadFunction loads a function from the catalog. All overloaded
+	// definitions are included in the single metadata response.
+	LoadFunction(ctx context.Context, identifier table.Identifier) (*udf.UDF, error)
+	// CheckFunctionExists returns if the function exists. The REST spec
+	// defines no HEAD endpoint for functions, so existence is checked by
+	// loading the function.
+	CheckFunctionExists(ctx context.Context, identifier table.Identifier) (bool, error)
+}
+
+// ListFunctions returns the function (SQL UDF) identifiers under a
+// namespace, with the returned identifiers containing the information
+// required to load the function via this catalog. The function endpoints
+// are not part of the spec's assumed default endpoint set; if the server
+// does not advertise the list-functions endpoint, it yields no functions
+// rather than an error.
+func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
+	return func(yield func(table.Identifier, error) bool) {
+		pageSize := r.getPageSize(ctx)
+		var pageToken string
+
+		for {
+			functions, nextPageToken, err := r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
+			if err != nil {
+				yield(table.Identifier{}, err)
+
+				return
+			}
+			for _, function := range functions {
+				if !yield(function, nil) {
+					return
+				}
+			}
+			if nextPageToken == "" {
+				return
+			}
+			pageToken = nextPageToken
+		}
+	}
+}
+
+func (r *Catalog) listFunctionsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+	if err := checkValidNamespace(namespace); err != nil {
+		return nil, "", err
+	}
+	// Unsupported listing yields an empty result rather than an error.
+	if !r.endpoints.allowed(endpointListFunctions) {
+		return nil, "", nil
+	}
+	ns := r.encodeNamespace(namespace)
+	path, err := endpointListFunctions.reqPath(ns)
+	if err != nil {
+		return nil, "", err
+	}
+	uri := r.baseURI.JoinPath(path...)
+
+	v := url.Values{}
+	if pageSize > 0 {
+		v.Set("pageSize", strconv.Itoa(pageSize))
+	}
+	if pageToken != "" {
+		v.Set("pageToken", pageToken)
+	}
+
+	uri.RawQuery = v.Encode()
+	// Function identifiers are CatalogObjectIdentifier values: ordered
+	// hierarchy levels (the namespace levels followed by the function
+	// name), not the {namespace, name} object tables and views use.
+	type resp struct {
+		Identifiers   [][]string `json:"identifiers"`
+		NextPageToken string     `json:"next-page-token,omitempty"`
+	}
+
+	rsp, err := doGet[resp](ctx, uri, []string{}, r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+	if err != nil {
+		return nil, "", err
+	}
+
+	out := make([]table.Identifier, len(rsp.Identifiers))
+	for i, levels := range rsp.Identifiers {
+		out[i] = table.Identifier(levels)
+	}
+
+	return out, rsp.NextPageToken, nil
+}
+
+// loadFunctionResponse contains the response from loading a function.
+type loadFunctionResponse struct {
+	MetadataLoc string          `json:"metadata-location"`
+	RawMetadata json.RawMessage `json:"metadata"`
+}
+
+// LoadFunction loads a function (SQL UDF) from the catalog. All overloaded
+// definitions are included in the single metadata response. The function
+// endpoints are not part of the spec's assumed default endpoint set; if the
+// server does not advertise the load-function endpoint, LoadFunction fails
+// with ErrEndpointNotSupported.
+func (r *Catalog) LoadFunction(ctx context.Context, identifier table.Identifier) (*udf.UDF, error) {
+	if err := r.endpoints.check(endpointLoadFunction); err != nil {
+		return nil, err
+	}
+
+	ns, fn, err := r.splitFunctionIdentForPath(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.loadFunction(ctx, identifier, ns, fn)
+}
+
+// loadFunction fetches and parses a function after endpoint negotiation and
+// identifier validation, so its ErrNoSuchFunction is always server-reported.
+func (r *Catalog) loadFunction(ctx context.Context, identifier table.Identifier, ns, fn string) (*udf.UDF, error) {
+	path, err := endpointLoadFunction.reqPath(ns, fn)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := doGet[loadFunctionResponse](ctx, r.baseURI, path,
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchFunction,
+		})
+	if err != nil {
+		// The spec's load 404 covers both a missing namespace and a missing
+		// function; discriminate on the error type so a missing namespace is
+		// not reported as a missing function.
+		var errRsp errorResponse
+		if errors.As(err, &errRsp) && errRsp.Type == "NoSuchNamespaceException" {
+			errRsp.wrapping = catalog.ErrNoSuchNamespace
+
+			return nil, errRsp
+		}
+
+		return nil, err
+	}
+
+	// The spec marks metadata as required; guard so a buggy server yields a
+	// clear error instead of a JSON parsing artifact.
+	if len(rsp.RawMetadata) == 0 {
+		return nil, fmt.Errorf("%w: load function response is missing metadata", ErrRESTError)
+	}
+
+	metadata, err := udf.ParseMetadataBytes(rsp.RawMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse function metadata: %w", err)
+	}
+
+	return udf.New(identifier, metadata, rsp.MetadataLoc), nil
+}
+
+// CheckFunctionExists returns if the function exists. The REST spec defines
+// no HEAD endpoint for functions, so existence is checked by loading the
+// function; if loading is unsupported, ErrEndpointNotSupported surfaces
+// rather than a bogus "not found". The identifier is validated once here, so
+// an invalid one surfaces as an error and only a server-reported "not found"
+// becomes (false, nil), matching the table and view existence checks.
+func (r *Catalog) CheckFunctionExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	if err := r.endpoints.check(endpointLoadFunction); err != nil {
+		return false, err
+	}
+
+	ns, fn, err := r.splitFunctionIdentForPath(identifier)
+	if err != nil {
+		return false, err
+	}
+
+	if _, err := r.loadFunction(ctx, identifier, ns, fn); err != nil {
+		if errors.Is(err, catalog.ErrNoSuchFunction) {
+			return false, nil
+		}
+
+		return false, err
+	}
+
+	return true, nil
 }

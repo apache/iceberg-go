@@ -105,6 +105,10 @@ func isFloatingPointType(typ iceberg.Type) bool {
 //	rd.AddDeletes(deleteFiles...)
 //	err = rd.Commit(ctx)
 func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs []int, records iter.Seq2[arrow.RecordBatch, error]) ([]iceberg.DataFile, error) {
+	if err := t.ensureInitialized(); err != nil {
+		return nil, err
+	}
+
 	if t.meta.formatVersion < 2 {
 		return nil, fmt.Errorf("equality deletes require table format version >= 2, got v%d",
 			t.meta.formatVersion)

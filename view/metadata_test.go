@@ -372,7 +372,7 @@ func TestDuplicateDialects(t *testing.T) {
 			"timestamp-ms": 1234567890,
 			"representations": [
 				{"type": "sql", "sql": "SELECT 1", "dialect": "spark"},
-				{"type": "sql", "sql": "SELECT 2", "dialect": "SPARK"}
+				{"type": "sql", "sql": "SELECT 2", "dialect": " SPARK "}
 			]
 		}],
 		"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
@@ -384,6 +384,71 @@ func TestDuplicateDialects(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrInvalidViewMetadata))
 	assert.Contains(t, err.Error(), "duplicate dialect")
+	assert.Contains(t, err.Error(), "version 1")
+	assert.Contains(t, err.Error(), " SPARK ")
+}
+
+func TestInvalidRepresentationInJSON(t *testing.T) {
+	testCases := []struct {
+		name string
+		json string
+	}{
+		{
+			name: "missing-sql",
+			json: `{
+				"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+				"format-version": 1,
+				"location": "s3://bucket/warehouse/default.db/event_agg",
+				"current-version-id": 1,
+				"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [{"type": "sql", "sql": "   ", "dialect": "spark"}]}],
+				"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
+				"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+			}`,
+		},
+		{
+			name: "missing-dialect",
+			json: `{
+				"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+				"format-version": 1,
+				"location": "s3://bucket/warehouse/default.db/event_agg",
+				"current-version-id": 1,
+				"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [{"type": "sql", "sql": "SELECT 1", "dialect": ""}]}],
+				"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
+				"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+			}`,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var meta metadata
+			err := json.Unmarshal([]byte(tc.json), &meta)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrInvalidViewMetadata))
+			assert.Contains(t, err.Error(), "invalid view representation")
+		})
+	}
+}
+
+func TestUnknownRepresentationTypeInJSON(t *testing.T) {
+	validJSON := `{
+		"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
+		"format-version": 1,
+		"location": "s3://bucket/warehouse/default.db/event_agg",
+		"current-version-id": 1,
+		"versions": [{"version-id": 1, "schema-id": 1, "timestamp-ms": 1234567890, "representations": [
+			{"type": "hive", "sql": "SELECT 1", "dialect": "spark"},
+			{"type": "sql", "sql": "SELECT 1", "dialect": "spark"}
+		]}],
+		"schemas": [{"schema-id": 1, "type": "struct", "fields": []}],
+		"version-log": [{"timestamp-ms": 1234567890, "version-id": 1}]
+	}`
+
+	var meta metadata
+	require.NoError(t, json.Unmarshal([]byte(validJSON), &meta))
+	require.Len(t, meta.VersionList, 1)
+	require.Len(t, meta.VersionList[0].Representations, 2)
+	assert.Equal(t, "hive", meta.VersionList[0].Representations[0].Type)
 }
 
 func TestNilFieldsInJSON(t *testing.T) {

@@ -17,7 +17,10 @@
 
 package table
 
-import "errors"
+import (
+	"errors"
+	"slices"
+)
 
 // TableCommit holds the identifier, requirements, and updates for a single
 // table within a multi-table transaction. It is used with
@@ -54,13 +57,17 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	if err := t.ensureInitialized(); err != nil {
+		return TableCommit{}, err
+	}
+
 	if t.committed {
 		return TableCommit{}, errors.New("transaction has already been committed")
 	}
 
 	if len(t.meta.updates) == 0 {
 		return TableCommit{
-			Identifier:   t.tbl.identifier,
+			Identifier:   slices.Clone(t.tbl.identifier),
 			Requirements: []Requirement{},
 			Updates:      []Update{},
 		}, nil
@@ -74,7 +81,7 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 	copy(updates, t.meta.updates)
 
 	return TableCommit{
-		Identifier:   t.tbl.identifier,
+		Identifier:   slices.Clone(t.tbl.identifier),
 		Requirements: reqs,
 		Updates:      updates,
 	}, nil

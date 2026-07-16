@@ -67,6 +67,21 @@ func TestTable(t *testing.T) {
 	suite.Run(t, new(TableTestSuite))
 }
 
+func TestTableIdentifierIsolation(t *testing.T) {
+	meta, err := table.ParseMetadataBytes([]byte(table.ExampleTableMetadataV2))
+	require.NoError(t, err)
+
+	ident := table.Identifier{"db", "my_table"}
+	tbl := table.New(ident, meta, "s3://bucket/test/location/metadata.json", nil, nil)
+
+	ident[0] = "altered_ns"
+	require.Equal(t, table.Identifier{"db", "my_table"}, tbl.Identifier())
+
+	out := tbl.Identifier()
+	out[1] = "altered_table"
+	require.Equal(t, table.Identifier{"db", "my_table"}, tbl.Identifier())
+}
+
 func mustFS(t *testing.T, tbl *table.Table) iceio.IO {
 	r, err := tbl.FS(context.Background())
 	require.NoError(t, err)

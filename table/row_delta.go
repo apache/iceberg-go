@@ -101,6 +101,10 @@ func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 // commit, if any file has an unexpected content type, or if the table
 // format version does not support delete files.
 func (rd *RowDelta) Commit(ctx context.Context) error {
+	if err := rd.txn.ensureInitialized(); err != nil {
+		return err
+	}
+
 	if len(rd.dataFiles) == 0 && len(rd.delFiles) == 0 {
 		return errors.New("row delta must have at least one data file or delete file")
 	}
@@ -200,8 +204,10 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
 func (rd *RowDelta) validate(cc *conflictContext) error {
-	if cc == nil {
-		return nil
+	level, err := readIsolationLevel(rd.txn.meta.props,
+		WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+	if err != nil {
+		return err
 	}
 
 	// Collect every data-file path the pos-deletes in this delta
@@ -224,6 +230,10 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		}
 	}
 
+	if cc == nil {
+		return nil
+	}
+
 	if len(referenced) > 0 {
 		if err := validateDataFilesExist(cc, referenced); err != nil {
 			return err
@@ -231,8 +241,6 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	if len(eqDeleteFiles) > 0 {
-		level := readIsolationLevel(rd.txn.meta.props,
-			WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
 		// Route through the existing validateNoConflictingDataFiles path,
 		// which calls validateAddedDataFilesMatchingFilter internally.
 		// For unpartitioned tables, use AlwaysTrue conservatively — an
@@ -245,14 +253,14 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 			return fmt.Errorf("reading current partition spec: %w", specErr)
 		}
 
-		var err error
+		var conflictErr error
 		if currentSpec == nil || currentSpec.NumFields() == 0 {
-			err = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
+			conflictErr = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
 		} else {
-			err = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
+			conflictErr = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
 		}
-		if err != nil {
-			return err
+		if conflictErr != nil {
+			return conflictErr
 		}
 	}
 

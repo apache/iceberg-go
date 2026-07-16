@@ -75,9 +75,9 @@ func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
 	return wfs, nil
 }
 
-// ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
-// computeOwnManifests when a snapshot ID does not exist in the table's
-// snapshot list. Tests pin meaning via errors.Is(err, ErrSnapshotNotFound).
+// ErrSnapshotNotFound is returned (wrapped) by metadata lookups when a
+// snapshot ID does not exist in the table's snapshot list. Tests pin meaning
+// via errors.Is(err, ErrSnapshotNotFound).
 var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 type FSysF func(ctx context.Context) (icebergio.IO, error)
@@ -104,7 +104,7 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier                       { return t.identifier }
+func (t Table) Identifier() Identifier                       { return slices.Clone(t.identifier) }
 func (t Table) Metadata() Metadata                           { return t.metadata }
 func (t Table) MetadataLocation() string                     { return t.metadataLocation }
 func (t Table) FS(ctx context.Context) (icebergio.IO, error) { return t.fsF(ctx) }
@@ -131,24 +131,57 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	return t.NewTransactionOnBranch(MainBranch)
+	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	if err != nil {
+		return t.newBrokenTransaction(MainBranch, err)
+	}
+
+	return txn
 }
 
 // NewTransactionOnBranch creates a new transaction that commits to the named
 // branch. Use [NewTransaction] to commit to the default "main" branch.
 func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	meta, _ := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	txn, err := t.NewTransactionOnBranchWithError(branch)
+	if err != nil {
+		return t.newBrokenTransaction(branch, err)
+	}
 
+	return txn
+}
+
+func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 	return &Transaction{
-		tbl:    &t,
-		meta:   meta,
-		branch: branch,
-		reqs:   []Requirement{},
+		tbl:     &t,
+		initErr: err,
+		branch:  branch,
+		reqs:    []Requirement{},
 	}
 }
 
+// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
+// initialization error that prevents builder construction.
+//
+// This preserves the old non-failing constructor contract while allowing
+// callers to receive the precise initialization error instead of hitting
+// panic/undefined behavior later.
+func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Transaction{
+		tbl:     &t,
+		meta:    meta,
+		branch:  branch,
+		reqs:    []Requirement{},
+		initErr: nil,
+	}, nil
+}
+
 func (t *Table) Refresh(ctx context.Context) error {
-	fresh, err := t.cat.LoadTable(ctx, t.identifier)
+	fresh, err := t.cat.LoadTable(ctx, slices.Clone(t.identifier))
 	if err != nil {
 		return err
 	}
@@ -476,7 +509,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// the new branch head so re-submission is not rejected
 			// just because a peer advanced the head with a
 			// non-conflicting commit.
-			fresh, refreshErr := t.cat.LoadTable(retryCtx, t.identifier)
+			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
@@ -532,7 +565,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			return nil, context.Cause(retryCtx)
 		}
 
-		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, t.identifier, reqs, updates)
+		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
 			break
 		}
@@ -547,6 +580,21 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 			return nil, err
 		}
+	}
+
+	// Inner data manifests written by superseded retry attempts (a rewrite
+	// re-merges everything on each retry) are orphaned objects. On a safe
+	// exhausted-ErrCommitFailed failure (err != nil here) nothing committed, so
+	// the accumulator also folds in the final attempt's manifests. On success
+	// the committed snapshot references those, so they are excluded. The defer
+	// skips cleanup only on the unsafe non-ErrCommitFailed path, which returned
+	// above with cleanupOrphans = false.
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.supersededSource == nil {
+			continue
+		}
+		orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(err == nil)...)
 	}
 
 	if err != nil {
@@ -647,6 +695,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			Snapshot:            newSnap,
 			ownManifests:        su.ownManifests,
 			rebuildManifestList: su.rebuildManifestList,
+			supersededSource:    su.supersededSource,
 		}
 
 		// The old manifest list is now an orphaned object in object storage.
@@ -817,9 +866,9 @@ func WithLimit(n int64) ScanOption {
 	}
 }
 
-// WitMaxConcurrency sets the maximum concurrency for table scan and plan
+// WithMaxConcurrency sets the maximum concurrency for table scan and plan
 // operations. When unset it defaults to runtime.GOMAXPROCS.
-func WitMaxConcurrency(n int) ScanOption {
+func WithMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
 	}
@@ -827,6 +876,14 @@ func WitMaxConcurrency(n int) ScanOption {
 	return func(scan *Scan) {
 		scan.concurrency = n
 	}
+}
+
+// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
+// backward compatibility with the pre-existing typo'd name.
+//
+// Deprecated: use [WithMaxConcurrency].
+func WitMaxConcurrency(n int) ScanOption {
+	return WithMaxConcurrency(n)
 }
 
 func WithOptions(opts iceberg.Properties) ScanOption {
@@ -852,7 +909,7 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		identifier:       t.identifier,
+		identifier:       slices.Clone(t.identifier),
 		metadata:         t.metadata,
 		metadataLocation: t.metadataLocation,
 		ioF:              t.fsF,
@@ -888,7 +945,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 	}
 
 	return &Table{
-		identifier:       ident,
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,

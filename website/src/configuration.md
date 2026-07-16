@@ -199,7 +199,7 @@ There is no `PYICEBERG_*`-style env var convention. Use the YAML config file or 
 | Setting | Source | Effect |
 |---|---|---|
 | `max-workers` in `~/.iceberg-go.yaml` (`config.EnvConfig.MaxWorkers`) | YAML config | Worker pool size used by parallel column writes, snapshot producers, scan plan, equality-delete writers. Default `5`. |
-| `WitMaxConcurrency(n int) ScanOption` | Code (`table.WitMaxConcurrency`) | Per-scan override. Note: function name is `Wit...` (not `With...`) - this is a pre-existing typo in the public API. |
+| `WithMaxConcurrency(n int) ScanOption` | Code (`table.WithMaxConcurrency`) | Per-scan override. `WitMaxConcurrency` (missing `h`) remains as a deprecated alias. |
 | `WithMaxWriteWorkers(n int)` | Code (per-write API on `WriteRecords`) | Per-write override of the worker count. |
 | `WithClusteredWrite()` | Code (per-write API on `WriteRecords`) | Forces single-threaded writes. Mutually exclusive with `WithMaxWriteWorkers`. |
 
@@ -330,6 +330,8 @@ All defined in `table/internal/parquet_files.go` and read by the Parquet writer:
 | `write.parquet.compression-level` | `-1` (codec default) |
 | `write.parquet.bloom-filter-max-bytes` | 1 MB |
 | `write.parquet.bloom-filter-enabled.column.<name>` | (per-column toggle, prefix-matched) |
+| `write.parquet.shred-variants` | `false` (opt-in shredding of top-level variant columns) |
+| `write.parquet.variant-inference-buffer-size` | 100 rows (buffered per file to infer the shredding schema) |
 
 ### Parquet reader
 

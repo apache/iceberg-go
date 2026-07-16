@@ -144,6 +144,7 @@ Tests requiring Spark 4 (currently the variant and unknown-type tests) automatic
 | Load View                   |      |  X   |        |  X   |        |
 | List View                   |  X   |  X   |        |  X   |        |
 | Drop View                   |  X   |  X   |        |  X   |        |
+| Rename View                 |  X   |      |        |      |        |
 | Check View Exists           |  X   |  X   |        |  X   |        |
 
 ### Read/Write Data Support

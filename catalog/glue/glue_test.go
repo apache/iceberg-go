@@ -43,6 +43,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/awsdocs/aws-doc-sdk-examples/gov2/testtools"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -1652,6 +1653,53 @@ func TestGlueCheckTableNotExists(t *testing.T) {
 	exists, err := glueCatalog.CheckTableExists(context.TODO(), TableIdentifier("test_database", "nonexistent_table"))
 	assert.Nil(err)
 	assert.False(exists)
+}
+
+func TestGlueCommitTableValidatesRequirementsForMissingTable(t *testing.T) {
+	assert := require.New(t)
+	ctx := context.Background()
+	snapshotID := int64(1)
+	tests := []struct {
+		name string
+		req  table.Requirement
+	}{
+		{"table_uuid", table.AssertTableUUID(uuid.New())},
+		{"current_schema_id", table.AssertCurrentSchemaID(0)},
+		{"ref_snapshot_id", table.AssertRefSnapshotID(table.MainBranch, &snapshotID)},
+	}
+
+	for _, tt := range tests {
+		ident := TableIdentifier("test_database", "requirement_"+tt.name)
+		mockGlueSvc := &mockGlueClient{}
+		mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+			DatabaseName: aws.String("test_database"),
+			Name:         aws.String(ident[1]),
+		}, mock.Anything).Return(&glue.GetTableOutput{}, &types.EntityNotFoundException{}).Once()
+
+		glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+		_, _, err := glueCatalog.CommitTable(ctx, ident, []table.Requirement{tt.req}, []table.Update{
+			table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), ident[1])),
+		})
+		assert.Error(err)
+		assert.Contains(err.Error(), "current table metadata does not exist")
+		mockGlueSvc.AssertExpectations(t)
+	}
+
+	ident := TableIdentifier("test_database", "requirement_assert_create")
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+		DatabaseName: aws.String("test_database"),
+		Name:         aws.String(ident[1]),
+	}, mock.Anything).Return(&glue.GetTableOutput{}, &types.EntityNotFoundException{}).Once()
+	mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+		Return(&glue.CreateTableOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+	_, _, err := glueCatalog.CommitTable(ctx, ident, []table.Requirement{table.AssertCreate()}, []table.Update{
+		table.NewSetLocationUpdate("file://" + filepath.Join(t.TempDir(), ident[1])),
+	})
+	assert.NoError(err)
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, awsCfg aws.Config) {

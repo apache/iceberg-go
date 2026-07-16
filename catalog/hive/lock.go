@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/beltran/gohive/hive_metastore"
@@ -30,19 +32,45 @@ import (
 // ErrLockAcquisitionFailed is returned when a lock cannot be acquired after all retries.
 var ErrLockAcquisitionFailed = errors.New("failed to acquire lock")
 
+const pendingLockCleanupTimeout = 5 * time.Second
+
 type HiveLock struct {
 	client HiveClient
 	lockId int64
 }
 
 func acquireLock(ctx context.Context, client HiveClient, database, tableName string, opts *HiveOptions) (*HiveLock, error) {
-	lockReq := &hive_metastore.LockRequest{
-		Component: []*hive_metastore.LockComponent{{
+	return acquireLocks(ctx, client, []tableLockIdentifier{{database: database, table: tableName}}, opts)
+}
+
+type tableLockIdentifier struct {
+	database string
+	table    string
+}
+
+func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLockIdentifier, opts *HiveOptions) (_ *HiveLock, err error) {
+	identifiers = slices.Clone(identifiers)
+	slices.SortFunc(identifiers, func(a, b tableLockIdentifier) int {
+		if cmp := strings.Compare(a.database, b.database); cmp != 0 {
+			return cmp
+		}
+
+		return strings.Compare(a.table, b.table)
+	})
+	identifiers = slices.Compact(identifiers)
+
+	components := make([]*hive_metastore.LockComponent, len(identifiers))
+	for i, ident := range identifiers {
+		tableName := ident.table
+		components[i] = &hive_metastore.LockComponent{
 			Type:      hive_metastore.LockType_EXCLUSIVE,
 			Level:     hive_metastore.LockLevel_TABLE,
-			Dbname:    database,
+			Dbname:    ident.database,
 			Tablename: &tableName,
-		}},
+		}
+	}
+	lockReq := &hive_metastore.LockRequest{
+		Component: components,
 	}
 
 	lockResp, err := client.Lock(ctx, lockReq)
@@ -57,6 +85,19 @@ func acquireLock(ctx context.Context, client HiveClient, database, tableName str
 		}, nil
 	}
 
+	cleanupPending := true
+	defer func() {
+		if !cleanupPending {
+			return
+		}
+
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pendingLockCleanupTimeout)
+		defer cancel()
+		if cleanupErr := client.Unlock(cleanupCtx, lockResp.Lockid); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to release pending lock %d: %w", lockResp.Lockid, cleanupErr))
+		}
+	}()
+
 	// If not acquired immediately, wait and retry
 	for attempt := 0; attempt < opts.LockRetries; attempt++ {
 		// Wait before checking again
@@ -64,8 +105,6 @@ func acquireLock(ctx context.Context, client HiveClient, database, tableName str
 
 		select {
 		case <-ctx.Done():
-			_ = client.Unlock(ctx, lockResp.Lockid)
-
 			return nil, ctx.Err()
 		case <-time.After(waitTime):
 		}
@@ -73,13 +112,13 @@ func acquireLock(ctx context.Context, client HiveClient, database, tableName str
 		// Check lock state
 		checkResp, err := client.CheckLock(ctx, lockResp.Lockid)
 		if err != nil {
-			_ = client.Unlock(ctx, lockResp.Lockid)
-
 			return nil, fmt.Errorf("failed to check lock status: %w", err)
 		}
 
 		switch checkResp.State {
 		case hive_metastore.LockState_ACQUIRED:
+			cleanupPending = false
+
 			return &HiveLock{
 				client: client,
 				lockId: lockResp.Lockid,
@@ -96,9 +135,16 @@ func acquireLock(ctx context.Context, client HiveClient, database, tableName str
 		}
 	}
 
-	_ = client.Unlock(ctx, lockResp.Lockid)
+	return nil, fmt.Errorf("%w: exhausted %d retries for tables %s", ErrLockAcquisitionFailed, opts.LockRetries, formatLockIdentifiers(identifiers))
+}
 
-	return nil, fmt.Errorf("%w: exhausted %d retries for table %s.%s", ErrLockAcquisitionFailed, opts.LockRetries, database, tableName)
+func formatLockIdentifiers(identifiers []tableLockIdentifier) string {
+	names := make([]string, len(identifiers))
+	for i, ident := range identifiers {
+		names[i] = ident.database + "." + ident.table
+	}
+
+	return strings.Join(names, ", ")
 }
 
 func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration {

@@ -266,9 +266,17 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
 }
 
-func (scan *Scan) Snapshot() *Snapshot {
+// ResolveSnapshot resolves the snapshot selected by this scan. Live scans use
+// the table's current snapshot; explicit snapshot IDs and as-of timestamps
+// must resolve to an existing snapshot.
+func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
 	if scan.snapshotID != nil {
-		return scan.metadata.SnapshotByID(*scan.snapshotID)
+		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
+		if snap == nil {
+			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
+		}
+
+		return snap, nil
 	}
 
 	if scan.asOfTimestamp != nil {
@@ -276,12 +284,28 @@ func (scan *Scan) Snapshot() *Snapshot {
 		for i := len(entries) - 1; i >= 0; i-- {
 			entry := entries[i]
 			if entry.TimestampMs <= *scan.asOfTimestamp {
-				return scan.metadata.SnapshotByID(entry.SnapshotID)
+				snap := scan.metadata.SnapshotByID(entry.SnapshotID)
+				if snap == nil {
+					break
+				}
+
+				return snap, nil
 			}
 		}
+
+		return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
 	}
 
-	return scan.metadata.CurrentSnapshot()
+	return scan.metadata.CurrentSnapshot(), nil
+}
+
+// Snapshot returns the snapshot selected by this scan. It returns nil when an
+// explicit snapshot cannot be resolved; use ResolveSnapshot when the reason
+// for that result must be distinguished from a table with no current snapshot.
+func (scan *Scan) Snapshot() *Snapshot {
+	snap, _ := scan.ResolveSnapshot()
+
+	return snap
 }
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
@@ -347,25 +371,12 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		return curSchema, nil
 	}
 
-	var snap *Snapshot
-	if scan.snapshotID != nil {
-		snap = scan.metadata.SnapshotByID(*scan.snapshotID)
-		if snap == nil {
-			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
-		}
-	} else if scan.asOfTimestamp != nil {
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snap = scan.metadata.SnapshotByID(entry.SnapshotID)
-
-				break
-			}
-		}
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
 	}
 
-	if snap == nil || snap.SchemaID == nil {
+	if snap.SchemaID == nil {
 		return curSchema, nil
 	}
 
@@ -633,7 +644,10 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 }
 
 func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema) ([]iceberg.ManifestFile, error) {
-	snap := scan.Snapshot()
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	if snap == nil {
 		return nil, nil
 	}
@@ -765,18 +779,9 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // building a list of FileScanTasks that match the current Scan criteria.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if scan.asOfTimestamp != nil {
-		var snapshot *Snapshot
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snapshot = scan.metadata.SnapshotByID(entry.SnapshotID)
-
-				break
-			}
-		}
-		if snapshot == nil {
-			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+		snapshot, err := scan.ResolveSnapshot()
+		if err != nil {
+			return nil, err
 		}
 		scan.snapshotID = &snapshot.SnapshotID
 		scan.asOfTimestamp = nil
@@ -873,7 +878,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       scan.identifier,
+		Identifier:       slices.Clone(scan.identifier),
 		Metadata:         scan.metadata,
 		MetadataLocation: scan.metadataLocation,
 		SnapshotID:       scan.snapshotID,

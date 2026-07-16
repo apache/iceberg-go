@@ -49,6 +49,31 @@ func TestAcquireLockImmediateSuccess(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestAcquireLocksSortsComponents(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	var request *hive_metastore.LockRequest
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Run(func(args mock.Arguments) {
+			request = args.Get(1).(*hive_metastore.LockRequest)
+		}).
+		Return(&hive_metastore.LockResponse{Lockid: 124, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("Unlock", ctx, int64(124)).Return(nil).Once()
+
+	lock, err := acquireLocks(ctx, mockClient, []tableLockIdentifier{
+		{database: "z_db", table: "source"},
+		{database: "a_db", table: "destination"},
+	}, NewHiveOptions())
+	require.NoError(t, err)
+	require.Len(t, request.Component, 2)
+	assert.Equal(t, "a_db", request.Component[0].Dbname)
+	assert.Equal(t, "destination", *request.Component[0].Tablename)
+	assert.Equal(t, "z_db", request.Component[1].Dbname)
+	assert.Equal(t, "source", *request.Component[1].Tablename)
+	require.NoError(t, lock.Release(ctx))
+	mockClient.AssertExpectations(t)
+}
+
 func TestAcquireLockWithRetry(t *testing.T) {
 	mockClient := new(mockHiveClient)
 	ctx := context.Background()
@@ -109,7 +134,11 @@ func TestAcquireLockExhaustsRetries(t *testing.T) {
 			State:  hive_metastore.LockState_WAITING,
 		}, nil)
 
-	mockClient.On("Unlock", ctx, int64(789)).Return(nil)
+	mockClient.On("Unlock", mock.MatchedBy(func(cleanupCtx context.Context) bool {
+		_, hasDeadline := cleanupCtx.Deadline()
+
+		return cleanupCtx.Err() == nil && hasDeadline
+	}), int64(789)).Return(nil)
 
 	lock, err := acquireLock(ctx, mockClient, "testdb", "testtable", opts)
 
@@ -140,6 +169,7 @@ func TestAcquireLockAborted(t *testing.T) {
 			Lockid: 111,
 			State:  hive_metastore.LockState_ABORT,
 		}, nil)
+	mockClient.On("Unlock", mock.Anything, int64(111)).Return(nil)
 
 	lock, err := acquireLock(ctx, mockClient, "testdb", "testtable", opts)
 
@@ -148,6 +178,26 @@ func TestAcquireLockAborted(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLockAcquisitionFailed)
 	assert.Contains(t, err.Error(), "aborted")
 
+	mockClient.AssertExpectations(t)
+}
+
+func TestAcquireLockUnexpectedStateCleansUp(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	opts := NewHiveOptions()
+	opts.LockMinWaitTime = time.Millisecond
+
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Return(&hive_metastore.LockResponse{Lockid: 112, State: hive_metastore.LockState_WAITING}, nil)
+	mockClient.On("CheckLock", ctx, int64(112)).
+		Return(&hive_metastore.LockResponse{Lockid: 112, State: hive_metastore.LockState(99)}, nil)
+	mockClient.On("Unlock", mock.Anything, int64(112)).Return(nil)
+
+	lock, err := acquireLock(ctx, mockClient, "testdb", "testtable", opts)
+
+	require.Nil(t, lock)
+	require.ErrorIs(t, err, ErrLockAcquisitionFailed)
+	require.ErrorContains(t, err, "unexpected lock state")
 	mockClient.AssertExpectations(t)
 }
 
@@ -187,7 +237,7 @@ func TestAcquireLockCheckFails(t *testing.T) {
 		Return(nil, errors.New("check failed"))
 
 	// Lock should be released on error
-	mockClient.On("Unlock", ctx, int64(222)).Return(nil)
+	mockClient.On("Unlock", mock.Anything, int64(222)).Return(nil)
 
 	lock, err := acquireLock(ctx, mockClient, "testdb", "testtable", opts)
 
@@ -211,8 +261,12 @@ func TestAcquireLockContextCancelled(t *testing.T) {
 			State:  hive_metastore.LockState_WAITING,
 		}, nil)
 
-	// Lock should be released when context is cancelled
-	mockClient.On("Unlock", ctx, int64(333)).Return(nil)
+	// Lock cleanup must use a live, bounded context after the caller is cancelled.
+	mockClient.On("Unlock", mock.MatchedBy(func(cleanupCtx context.Context) bool {
+		_, hasDeadline := cleanupCtx.Deadline()
+
+		return cleanupCtx.Err() == nil && hasDeadline
+	}), int64(333)).Return(nil)
 
 	// Cancel context before the wait completes
 	go func() {
@@ -226,6 +280,29 @@ func TestAcquireLockContextCancelled(t *testing.T) {
 	require.Nil(t, lock)
 	assert.ErrorIs(t, err, context.Canceled)
 
+	mockClient.AssertExpectations(t)
+}
+
+func TestAcquireLockJoinsCleanupFailure(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	opts := NewHiveOptions()
+	opts.LockMinWaitTime = time.Millisecond
+	opts.LockRetries = 1
+	checkErr := errors.New("check failed")
+	cleanupErr := errors.New("unlock failed")
+
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Return(&hive_metastore.LockResponse{Lockid: 334, State: hive_metastore.LockState_WAITING}, nil)
+	mockClient.On("CheckLock", ctx, int64(334)).Return(nil, checkErr)
+	mockClient.On("Unlock", mock.Anything, int64(334)).Return(cleanupErr)
+
+	lock, err := acquireLock(ctx, mockClient, "testdb", "testtable", opts)
+
+	require.Nil(t, lock)
+	require.ErrorIs(t, err, checkErr)
+	require.ErrorIs(t, err, cleanupErr)
+	require.ErrorContains(t, err, "failed to release pending lock 334")
 	mockClient.AssertExpectations(t)
 }
 

@@ -92,6 +92,7 @@ type UpdateSchema struct {
 	txn          *Transaction
 	schema       *iceberg.Schema
 	lastColumnID int
+	err          error
 
 	deletes map[int]struct{}
 	updates map[int]map[int]iceberg.NestedField
@@ -137,12 +138,6 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 	u := &UpdateSchema{
 		txn:    txn,
 		schema: nil,
-		// Seed from metadata's last-column-id rather than the current schema's
-		// highest field id. Per the Iceberg spec, last-column-id is a monotonic
-		// counter that preserves ids across schema evolution (including
-		// deletions) so that newly-allocated ids never collide with ids still
-		// referenced by historical schemas.
-		lastColumnID: txn.meta.LastColumnID(),
 
 		deletes: make(map[int]struct{}),
 		updates: make(map[int]map[int]iceberg.NestedField),
@@ -159,6 +154,23 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 		ops:                      make([]func() error, 0),
 	}
 
+	if txn == nil {
+		u.err = fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
+
+		return u
+	}
+	u.err = txn.ensureInitialized()
+	if u.err != nil {
+		return u
+	}
+
+	// Seed from metadata's last-column-id rather than the current schema's
+	// highest field id. Per the Iceberg spec, last-column-id is a monotonic
+	// counter that preserves ids across schema evolution (including
+	// deletions) so that newly-allocated ids never collide with ids still
+	// referenced by historical schemas.
+	u.lastColumnID = txn.meta.LastColumnID()
+
 	for _, opt := range opts {
 		opt(u)
 	}
@@ -167,6 +179,9 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 }
 
 func (u *UpdateSchema) init() error {
+	if u.err != nil {
+		return u.err
+	}
 	if u.txn == nil {
 		return errors.New("transaction is nil")
 	}
@@ -909,6 +924,10 @@ func isPromotionAllowed(from, to iceberg.PrimitiveType) bool {
 }
 
 func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
+	if u.err != nil {
+		return nil, nil, u.err
+	}
+
 	newSchema, err := u.Apply()
 	if err != nil {
 		return nil, nil, err
@@ -963,6 +982,10 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 }
 
 func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
+	if u.err != nil {
+		return nil, u.err
+	}
+
 	if err := u.init(); err != nil {
 		return nil, err
 	}
@@ -1014,6 +1037,10 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 }
 
 func (u *UpdateSchema) Commit() error {
+	if u.err != nil {
+		return u.err
+	}
+
 	updates, requirements, err := u.BuildUpdates()
 	if err != nil {
 		return err

@@ -23,9 +23,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
+	pathpkg "path"
 	"slices"
 	"strings"
+	"time"
 
 	icebergio "github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
@@ -41,7 +42,7 @@ type blobOpenFile struct {
 	*blob.Reader
 
 	name, key string
-	b         *blobFileIO
+	b         *BlobFileIO
 	ctx       context.Context
 }
 
@@ -174,7 +175,7 @@ func defaultKeyExtractor(bucketName string, allowedSchemes ...string) KeyExtract
 	return keyExtractorFromObjectLocation(defaultObjectLocationExtractor(bucketName, allowedSchemes...))
 }
 
-type blobFileIO struct {
+type BlobFileIO struct {
 	*blob.Bucket
 
 	extractObject objectLocationExtractor
@@ -185,9 +186,28 @@ type blobFileIO struct {
 	newRangeReader func(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
 
-var _ icebergio.ListableIO = (*blobFileIO)(nil)
+var _ icebergio.ListableIO = (*BlobFileIO)(nil)
 
-func (bfs *blobFileIO) preprocess(path string) (string, error) {
+type blobFileInfo struct {
+	name    string
+	size    int64
+	mode    fs.FileMode
+	modTime time.Time
+	sys     any
+}
+
+// blobFileInfo implements the fs.FileInfo interface for a blob object
+var _ fs.FileInfo = (*blobFileInfo)(nil)
+
+func (f blobFileInfo) Name() string       { return f.name }
+func (f blobFileInfo) Size() int64        { return f.size }
+func (f blobFileInfo) Mode() fs.FileMode  { return f.mode }
+func (f blobFileInfo) ModTime() time.Time { return f.modTime }
+func (f blobFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f blobFileInfo) Sys() any           { return f.sys }
+
+// preprocess returns the object key from an input path
+func (bfs *BlobFileIO) preprocess(path string) (string, error) {
 	location, err := bfs.objectLocation(path)
 	if err != nil {
 		return "", err
@@ -196,7 +216,39 @@ func (bfs *blobFileIO) preprocess(path string) (string, error) {
 	return location.key, nil
 }
 
-func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
+// blobErrToFsErr converts a gocloud blob error to an error from the fs package; this is
+// necessary for comply with certain iceberg-go/io interface functions that expect fs.ErrNotExist
+// for missing files, rather than the gocloud error.
+func blobErrToFsErr(op, name string, err error) error {
+	if gcerrors.Code(err) == gcerrors.NotFound {
+		err = fs.ErrNotExist
+	}
+
+	return &fs.PathError{Op: op, Path: name, Err: err}
+}
+
+// directoryMarker turns a key into a string which can be interpreted as a directory marker
+// for path based operations
+func directoryMarker(key string) string {
+	key = strings.TrimRight(key, "/")
+	if key == "" {
+		return ""
+	}
+
+	return key + "/"
+}
+
+// directoryName returns the last component of a key, which is interpreted as the directory name
+func directoryName(key string) string {
+	key = strings.TrimRight(key, "/")
+	if key == "" {
+		return "."
+	}
+
+	return pathpkg.Base(key)
+}
+
+func (bfs *BlobFileIO) Open(path string) (icebergio.File, error) {
 	var err error
 	path, err = bfs.preprocess(path)
 	if err != nil {
@@ -206,7 +258,7 @@ func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
 	}
 
-	key, name := path, filepath.Base(path)
+	key, name := path, pathpkg.Base(path)
 
 	r, err := bfs.NewReader(bfs.ctx, key, nil)
 	if err != nil {
@@ -216,7 +268,7 @@ func (bfs *blobFileIO) Open(path string) (icebergio.File, error) {
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil
 }
 
-func (bfs *blobFileIO) Remove(name string) error {
+func (bfs *BlobFileIO) Remove(name string) error {
 	var err error
 	name, err = bfs.preprocess(name)
 	if err != nil {
@@ -225,6 +277,15 @@ func (bfs *blobFileIO) Remove(name string) error {
 
 	if err := bfs.Delete(bfs.ctx, name); err != nil {
 		if gcerrors.Code(err) == gcerrors.NotFound {
+			marker := directoryMarker(name)
+			if marker != "" {
+				if markerErr := bfs.Delete(bfs.ctx, marker); markerErr == nil {
+					return nil
+				} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
+					return &fs.PathError{Op: "remove", Path: name, Err: markerErr}
+				}
+			}
+
 			err = fs.ErrNotExist
 		}
 
@@ -234,11 +295,11 @@ func (bfs *blobFileIO) Remove(name string) error {
 	return nil
 }
 
-func (bfs *blobFileIO) Create(name string) (icebergio.FileWriter, error) {
+func (bfs *BlobFileIO) Create(name string) (icebergio.FileWriter, error) {
 	return bfs.NewWriter(bfs.ctx, name, true, nil)
 }
 
-func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
+func (bfs *BlobFileIO) WriteFile(name string, content []byte) error {
 	var err error
 	name, err = bfs.preprocess(name)
 	if err != nil {
@@ -256,7 +317,7 @@ func (bfs *blobFileIO) WriteFile(name string, content []byte) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
+func (bfs *BlobFileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
 	path, err = bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
@@ -287,10 +348,10 @@ func (bfs *blobFileIO) NewWriter(ctx context.Context, path string, overwrite boo
 }
 
 func createBlobFS(ctx context.Context, bucket *blob.Bucket, extractObject objectLocationExtractor) icebergio.IO {
-	return &blobFileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
+	return &BlobFileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
 }
 
-func (bfs *blobFileIO) objectLocation(root string) (objectLocation, error) {
+func (bfs *BlobFileIO) objectLocation(root string) (objectLocation, error) {
 	if bfs.extractObject == nil {
 		return objectLocation{}, errors.New("blob file IO missing object location extractor")
 	}
@@ -310,7 +371,27 @@ func walkedURIPath(location objectLocation, walked string) string {
 	return location.uriPrefix + walked
 }
 
-func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
+// isDirectoryMarker reports whether dirEntry is the marker object for
+// the path passed to WalkDir
+func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
+	// Directory entries and nil entries are never the marker object itself.
+	if dirEntry == nil || dirEntry.IsDir() {
+		return false
+	}
+
+	info, err := dirEntry.Info()
+	if err != nil {
+		return false
+	}
+
+	// blob fs is the only implementation that uses directory markers
+	// so we can use a type assertion to check
+	obj, ok := info.Sys().(*blob.ListObject)
+
+	return ok && obj.Key == directoryMarker(walkRootKey)
+}
+
+func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	location, err := bfs.objectLocation(root)
 	var walkPath string
 	if err != nil {
@@ -324,6 +405,12 @@ func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	}
 
 	return fs.WalkDir(bfs.Bucket, walkPath, func(path string, d fs.DirEntry, err error) error {
+		// Skip the marker for the path passed to WalkDir. Otherwise walking
+		// "warehouse/ns" reports "warehouse/ns/" as a child file.
+		if err == nil && isDirectoryMarker(walkPath, d) {
+			return nil
+		}
+
 		if location.hasAuthority {
 			path = walkedURIPath(location, path)
 		}
@@ -332,7 +419,7 @@ func (bfs *blobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	})
 }
 
-func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
+func (bfs *BlobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
@@ -368,10 +455,194 @@ func (bfs *blobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]strin
 	return deleted, errs
 }
 
+// MkdirAll mimics creating a directory by creating a zero-length object for each component of the path
+func (bfs *BlobFileIO) MkdirAll(path string) error {
+	key, err := bfs.preprocess(path)
+	if err != nil {
+		return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+	}
+
+	key = strings.Trim(key, "/")
+	if key == "" || key == "." {
+		return nil
+	}
+
+	parts := strings.Split(key, "/")
+	for idx := range parts {
+		marker := strings.Join(parts[:idx+1], "/") + "/"
+		if err := bfs.WriteAll(bfs.ctx, marker, nil, nil); err != nil {
+			return &fs.PathError{Op: "mkdir", Path: path, Err: err}
+		}
+	}
+
+	return nil
+}
+
+// ReadFile reads the contents of the file at the given path and returns it as a byte slice.
+func (bfs *BlobFileIO) ReadFile(path string) ([]byte, error) {
+	key, err := bfs.preprocess(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "ReadFile", Path: path, Err: err}
+	}
+
+	data, err := bfs.ReadAll(bfs.ctx, key)
+	if err != nil {
+		return nil, blobErrToFsErr("ReadFile", path, err)
+	}
+
+	return data, nil
+}
+
+// Stat interprets the input path as a directory or file and returns the corresponding FileInfo.
+// If the path does not exist, it returns fs.ErrNotExist
+func (bfs *BlobFileIO) Stat(path string) (fs.FileInfo, error) {
+	key, err := bfs.preprocess(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "Stat", Path: path, Err: err}
+	}
+
+	// If the path ends with a slash, we know by path semantics that we can
+	// check for a directory immediately and skip needing to check it as both an object
+	// or a directory marker.
+	if strings.HasSuffix(key, "/") {
+		if attrs, markerErr := bfs.Attributes(bfs.ctx, key); markerErr == nil {
+			return blobFileInfo{
+				name:    directoryName(key),
+				mode:    fs.ModeDir,
+				modTime: attrs.ModTime,
+				sys:     attrs,
+			}, nil
+		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
+			return nil, blobErrToFsErr("Stat", path, markerErr)
+		}
+	}
+
+	attrs, err := bfs.Attributes(bfs.ctx, key)
+	// if there is no error and we have attributes, we can return a FileInfo for object
+	if err == nil {
+		return blobFileInfo{
+			name:    pathpkg.Base(key),
+			size:    attrs.Size,
+			mode:    fs.ModeIrregular,
+			modTime: attrs.ModTime,
+			sys:     attrs,
+		}, nil
+	}
+
+	if gcerrors.Code(err) != gcerrors.NotFound {
+		return nil, blobErrToFsErr("Stat", path, err)
+	}
+
+	marker := directoryMarker(key)
+	// if the marker exists, we can return a FileInfo for the directory
+	if marker != "" {
+		if attrs, markerErr := bfs.Attributes(bfs.ctx, marker); markerErr == nil {
+			return blobFileInfo{
+				name:    directoryName(key),
+				mode:    fs.ModeDir,
+				modTime: attrs.ModTime,
+				sys:     attrs,
+			}, nil
+		} else if gcerrors.Code(markerErr) != gcerrors.NotFound {
+			return nil, blobErrToFsErr("Stat", path, markerErr)
+		}
+	}
+
+	prefix := marker
+	if prefix == "" {
+		prefix = key
+	}
+
+	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
+	if obj, listErr := iter.Next(bfs.ctx); listErr == nil {
+		return blobFileInfo{
+			name: directoryName(key),
+			mode: fs.ModeDir,
+			sys:  obj,
+		}, nil
+	} else if listErr != io.EOF {
+		return nil, blobErrToFsErr("Stat", path, listErr)
+	}
+
+	return nil, &fs.PathError{Op: "Stat", Path: path, Err: fs.ErrNotExist}
+}
+
+// Rename renames one file from oldpath to newpath, replacing newpath if it already exists.
+func (bfs *BlobFileIO) Rename(oldpath, newpath string) error {
+	oldKey, err := bfs.preprocess(oldpath)
+	if err != nil {
+		return &fs.PathError{Op: "Rename", Path: oldpath, Err: err}
+	}
+
+	newKey, err := bfs.preprocess(newpath)
+	if err != nil {
+		return &fs.PathError{Op: "Rename", Path: newpath, Err: err}
+	}
+
+	if err := bfs.Copy(bfs.ctx, newKey, oldKey, nil); err != nil {
+		return blobErrToFsErr("Rename", oldpath, err)
+	}
+
+	if err := bfs.Delete(bfs.ctx, oldKey); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+		return blobErrToFsErr("Rename", oldpath, err)
+	}
+
+	return nil
+}
+
+// RenameNoReplace renames one file/object (non-recursive) from oldpath to newpath, returning an error if newpath already exists.
+func (bfs *BlobFileIO) RenameNoReplace(oldpath, newpath string) error {
+	if _, err := bfs.Stat(newpath); err == nil {
+		return &fs.PathError{Op: "RenameNoReplace", Path: newpath, Err: fs.ErrExist}
+		// if the error is just that the file doesn't exist, we can continue with the rename
+		// since we will be creating the new file. If the error is something else, we should return it.
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+
+	return bfs.Rename(oldpath, newpath)
+}
+
+// RemoveAll removes either a single file or interprets the path as and removes both
+// it and and all its children.
+func (bfs *BlobFileIO) RemoveAll(name string) error {
+	key, err := bfs.preprocess(name)
+	if err != nil {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+	}
+
+	if err := bfs.Delete(bfs.ctx, key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+		return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+	}
+
+	prefix := directoryMarker(key)
+	if prefix == "" {
+		prefix = key
+	}
+
+	iter := bfs.List(&blob.ListOptions{Prefix: prefix})
+	for {
+		obj, err := iter.Next(bfs.ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+		}
+		// If the err in question was NotFound, that just means the object was already deleted,
+		// so we can ignore it and continue deleting the rest of the objects.
+		if err := bfs.Delete(bfs.ctx, obj.Key); err != nil && gcerrors.Code(err) != gcerrors.NotFound {
+			return &fs.PathError{Op: "RemoveAll", Path: name, Err: err}
+		}
+	}
+
+	return nil
+}
+
 type blobWriteFile struct {
 	*blob.Writer
 	name string
-	b    *blobFileIO
+	b    *BlobFileIO
 }
 
 func (f *blobWriteFile) Name() string                { return f.name }

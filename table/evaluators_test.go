@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 
@@ -2992,6 +2993,22 @@ func TestEvaluators(t *testing.T) {
 	suite.Run(t, &ProjectionTestSuite{})
 	suite.Run(t, &InclusiveMetricsTestSuite{})
 	suite.Run(t, &StrictMetricsTestSuite{})
+}
+
+func TestGetCmpLiteralRejectsGeo(t *testing.T) {
+	// Little-endian float64 X,Y - a valid geospatial single-value bound that
+	// must never be routed into an ordering comparison.
+	coords := make([]byte, 16)
+	binary.LittleEndian.PutUint64(coords[0:8], math.Float64bits(1))
+	binary.LittleEndian.PutUint64(coords[8:16], math.Float64bits(2))
+
+	lit, err := iceberg.LiteralFromBytes(iceberg.GeometryType{}, coords)
+	require.NoError(t, err)
+
+	// getCmpLiteral must reject geo explicitly rather than silently comparing
+	// coordinate bytes with bytes.Compare.
+	assert.PanicsWithError(t, "type error: geometry/geography has no ordering, cannot compare geometry bounds",
+		func() { getCmpLiteral(lit) })
 }
 
 func TestLiteralToPhysBytes(t *testing.T) {
