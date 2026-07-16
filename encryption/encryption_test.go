@@ -68,7 +68,7 @@ func TestPlaintextEncryptionManager_OutputFile(t *testing.T) {
 	mgr := encryption.PlaintextEncryptionManager{}
 	fw := &memFileWriter{}
 
-	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "unused-key-id")
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "")
 	require.NoError(t, err)
 
 	data := []byte("hello iceberg")
@@ -80,19 +80,36 @@ func TestPlaintextEncryptionManager_OutputFile(t *testing.T) {
 	assert.Equal(t, data, fw.Bytes(), "plaintext manager must not alter data on write")
 }
 
+func TestPlaintextEncryptionManager_OutputFile_KeyIDRejected(t *testing.T) {
+	mgr := encryption.PlaintextEncryptionManager{}
+	fw := &memFileWriter{}
+
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "some-key-id")
+	require.ErrorIs(t, err, encryption.ErrKeyIDNotSupported, "a non-empty keyID must fail closed, not silently write plaintext")
+	assert.Nil(t, out)
+}
+
 func TestPlaintextEncryptionManager_InputFile(t *testing.T) {
 	payload := []byte("plaintext data")
-	km := encryption.EncryptionKeyMetadata([]byte("some-metadata"))
 	mgr := encryption.PlaintextEncryptionManager{}
 
-	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(payload), km)
+	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(payload), nil)
 	require.NoError(t, err)
 
-	assert.Equal(t, km, in.KeyMetadata(), "key metadata should be passed through unchanged")
+	assert.Nil(t, in.KeyMetadata())
 
 	got, err := io.ReadAll(in)
 	require.NoError(t, err)
 	assert.Equal(t, payload, got, "plaintext manager must not alter data on read")
+}
+
+func TestPlaintextEncryptionManager_InputFile_KeyMetadataRejected(t *testing.T) {
+	km := encryption.EncryptionKeyMetadata([]byte("some-metadata"))
+	mgr := encryption.PlaintextEncryptionManager{}
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile([]byte("ciphertext")), km)
+	require.ErrorIs(t, err, encryption.ErrKeyMetadataNotSupported, "non-empty key metadata must fail closed, not silently expose bytes as plaintext")
+	assert.Nil(t, in)
 }
 
 func TestPlaintextEncryptionManager_InputFile_NilMetadata(t *testing.T) {

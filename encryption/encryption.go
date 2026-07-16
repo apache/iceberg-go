@@ -31,8 +31,23 @@ package encryption
 
 import (
 	"context"
+	"errors"
 
 	icebergio "github.com/apache/iceberg-go/io"
+)
+
+var (
+	// ErrKeyIDNotSupported is returned by [PlaintextEncryptionManager.NewEncryptedOutputFile]
+	// when a caller supplies a non-empty keyID. Accepting the keyID but writing
+	// plaintext would fail open: the caller believes the file is encrypted, but
+	// no encryption is actually performed.
+	ErrKeyIDNotSupported = errors.New("encryption: PlaintextEncryptionManager does not support a non-empty keyID; configure a real EncryptionManager")
+
+	// ErrKeyMetadataNotSupported is returned by [PlaintextEncryptionManager.NewDecryptedInputFile]
+	// when a caller supplies non-empty key metadata. Ignoring the metadata and
+	// returning the raw bytes would fail open: the caller would silently read
+	// encrypted bytes as if they were plaintext.
+	ErrKeyMetadataNotSupported = errors.New("encryption: PlaintextEncryptionManager does not support non-empty key metadata; configure a real EncryptionManager")
 )
 
 // EncryptionKeyMetadata is the opaque per-file key metadata blob embedded in
@@ -111,23 +126,37 @@ type EncryptionManager interface {
 // PlaintextEncryptionManager is a no-op [EncryptionManager] that passes all
 // data through without any encryption or decryption. It is the default manager
 // used when no KMS is configured or when a table carries no encryption-keys
-// metadata.
+// metadata. It fails closed: any call that supplies a non-empty keyID or
+// non-empty key metadata returns an error rather than silently reading or
+// writing plaintext, since doing so could mask a misconfigured encryption
+// setup.
 type PlaintextEncryptionManager struct{}
 
 var _ EncryptionManager = PlaintextEncryptionManager{}
 
 // NewEncryptedOutputFile returns a pass-through [EncryptedOutputFile] that
-// writes data unmodified and returns nil [EncryptionKeyMetadata]. Any
-// non-empty keyID is silently ignored so that callers do not need to detect
-// whether encryption is configured before invoking this method.
-func (PlaintextEncryptionManager) NewEncryptedOutputFile(_ context.Context, writer icebergio.FileWriter, _ string) (EncryptedOutputFile, error) {
+// writes data unmodified and returns nil [EncryptionKeyMetadata]. It fails
+// closed: a non-empty keyID indicates the caller expects the file to be
+// encrypted, and returning nil here would silently write plaintext instead,
+// so it returns [ErrKeyIDNotSupported] rather than ignoring the keyID.
+func (PlaintextEncryptionManager) NewEncryptedOutputFile(_ context.Context, writer icebergio.FileWriter, keyID string) (EncryptedOutputFile, error) {
+	if keyID != "" {
+		return nil, ErrKeyIDNotSupported
+	}
+
 	return &plaintextOutputFile{FileWriter: writer}, nil
 }
 
 // NewDecryptedInputFile returns a pass-through [EncryptedInputFile] that reads
-// data unmodified and surfaces the provided keyMetadata unchanged. Any
-// non-nil keyMetadata is preserved but not interpreted.
+// data unmodified. It fails closed: non-empty keyMetadata indicates the
+// underlying bytes were encrypted, and returning them unchanged would
+// silently hand ciphertext to the caller as if it were plaintext, so it
+// returns [ErrKeyMetadataNotSupported] rather than ignoring the metadata.
 func (PlaintextEncryptionManager) NewDecryptedInputFile(_ context.Context, file icebergio.File, keyMetadata EncryptionKeyMetadata) (EncryptedInputFile, error) {
+	if len(keyMetadata) != 0 {
+		return nil, ErrKeyMetadataNotSupported
+	}
+
 	return &plaintextInputFile{File: file, keyMetadata: keyMetadata}, nil
 }
 
