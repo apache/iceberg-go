@@ -632,29 +632,25 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 	return u
 }
 
-// UnionByNameWith stages the changes needed to evolve the current schema into
-// the union of itself and newSchema. Fields are matched by name (respecting
-// caseSensitive on the UpdateSchema), with the following semantics:
+// UnionByNameWith stages changes to evolve the current schema into the union of
+// itself and newSchema, matching fields by name (honoring caseSensitive):
 //
-//   - Fields present only in newSchema are added. Added columns are always
-//     forced to be optional, regardless of their required flag in newSchema.
-//     Added columns preserve their Doc, InitialDefault, and WriteDefault, and
-//     receive fresh field ids.
-//   - Fields present in both schemas may be evolved: required->optional is
-//     allowed; optional->required is intentionally skipped. Primitive type
-//     changes are applied only when they are a valid promotion
-//     (int->long, float->double, decimal same-scale wider-precision, or an
-//     exact match); anything else errors. Narrowing promotions are ignored.
-//   - Doc updates are applied only when the incoming Doc is non-empty and
-//     differs; an empty Doc never clears an existing Doc.
-//   - WriteDefault updates are applied when the incoming value differs from
-//     the existing one. InitialDefault of an existing column is never modified.
-//   - Map keys are immutable: any non-ignorable key change is rejected.
-//   - Cross-kind changes (list->map, struct->list, etc.) are rejected.
+//   - New fields are added as optional (regardless of their incoming required
+//     flag), keeping their Doc/InitialDefault/WriteDefault and getting fresh ids.
+//   - Existing fields may be evolved: required->optional is applied,
+//     optional->required is skipped. A primitive type change is applied only if
+//     it is a valid promotion (int->long, float->double, decimal same-scale
+//     wider-precision, or exact match); narrowing is ignored and any other
+//     change errors.
+//   - A Doc is updated only when the incoming Doc is non-empty and differs (an
+//     empty Doc never clears an existing one).
+//   - A WriteDefault is updated when the incoming value differs; an existing
+//     column's InitialDefault is never modified.
+//   - Map keys are immutable and cross-kind changes (list->map, struct->list,
+//     etc.) are rejected rather than silently grafted onto the existing column.
 //
-// UnionByNameWith is queued and applied together with other pending updates
-// when Apply/Commit is invoked, and composes with them: fields added earlier
-// in the same UpdateSchema are visible to a subsequent union.
+// The change is queued and applied with other pending updates on Apply/Commit,
+// so fields added by an earlier op in the same UpdateSchema are visible here.
 func (u *UpdateSchema) UnionByNameWith(newSchema *iceberg.Schema) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.unionByName(newSchema)
@@ -803,6 +799,8 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	}
 
 	if !isIgnorableTypeUpdate(existing.Type, newField.Type) {
+		// Only a valid primitive promotion may change a column's type. Anything
+		// else (non-primitive, cross-kind, or a disallowed promotion) is an error.
 		existingPrim, existingIsPrim := existing.Type.(iceberg.PrimitiveType)
 		newPrim, newIsPrim := newField.Type.(iceberg.PrimitiveType)
 		if !existingIsPrim || !newIsPrim || !isPromotionAllowed(existingPrim, newPrim) {
@@ -831,15 +829,13 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	return nil
 }
 
-// setWriteDefault stages a write-default change for an existing field.
+// setWriteDefault stages a write-default change for an existing field
 //
-// The incoming default is a raw any rather than an iceberg.Literal because
-// NestedField.WriteDefault is untyped in the Iceberg Go model; a full
-// value-vs-type compatibility check therefore requires a runtime any->Literal
-// converter that iceberg-go does not currently expose (NewLiteral is generic
-// and compile-time only). We enforce the guards updateColumn provides that we
-// *can* enforce here: reject writes against a deleted field, and refuse to
-// stage a non-nil default on a complex-typed column.
+// TODO: the incoming default is a raw any (NestedField.WriteDefault is
+// untyped), so its value is not checked against the field's primitive type. A
+// mistyped default (e.g. an int64 for an int32 field) is accepted here and only
+// fails later, as a panic, when defaultToScalar/defaultToArray materialize it
+// on the write path. A proper fix needs a runtime any+Type validator.
 func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) error {
 	if u.isDeleted(existing.ID) {
 		return fmt.Errorf("field that has been deleted cannot be updated: %s", existing.Name)
@@ -863,14 +859,21 @@ func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefaul
 	return nil
 }
 
-// isIgnorableTypeUpdate reports whether a change from existingType to newType
-// should be treated as a no-op by union-by-name
+// isIgnorableTypeUpdate reports whether changing existingType to newType is a
+// no-op for union-by-name: either the incoming primitive is narrower-or-equal
+// (so the existing, wider type already covers it), or both types are the same
+// complex kind. Cross-kind changes return false so the caller can reject them.
 //
-// Note: the argument order is inteionally reversed here.
-// Unlike the rest, we are checking whether the incoming type can be promoted to
-// the existing type. If so, the incoming change is narrower (or equal) 
-// and can be ignored.
+// Note: the promotion check is called with the arguments reversed relative to
+// the rest of the file. Here we ask whether newType can be promoted *up* to
+// existingType; a true result means the change is narrowing and ignorable.
 func isIgnorableTypeUpdate(existingType, newType iceberg.Type) bool {
+	// An unchanged type is always a no-op. This also covers parameterless
+	// non-primitive types such as variant.
+	if existingType.Equals(newType) {
+		return true
+	}
+
 	if existingPrim, ok := existingType.(iceberg.PrimitiveType); ok {
 		newPrimitive, ok := newType.(iceberg.PrimitiveType)
 		if !ok {
