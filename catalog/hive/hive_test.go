@@ -354,6 +354,7 @@ func TestHiveCreateNamespace(t *testing.T) {
 
 	mockClient.AssertExpectations(t)
 }
+
 func TestHiveCreateNamespaceAlreadyExists(t *testing.T) {
 	assert := require.New(t)
 

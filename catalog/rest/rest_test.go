@@ -1355,6 +1355,7 @@ func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.Require().NoError(err)
 	r.True(exists)
 }
+
 func (r *RestCatalogSuite) TestCheckTableExists404() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/nonexistent", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodHead, req.Method)
