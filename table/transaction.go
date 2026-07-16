@@ -1053,7 +1053,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if path == "" {
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
 		}
-		if isDeletionVector(df) {
+		if IsDeletionVector(df) {
 			ref := df.ReferencedDataFile()
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
@@ -1102,7 +1102,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+			} else if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
 					markedDVsForRemoval[*ref] = df
 				}
@@ -2084,7 +2084,7 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 			continue
 		}
 		df := entry.DataFile()
-		if !isDeletionVector(df) {
+		if !IsDeletionVector(df) {
 			continue
 		}
 		ref := df.ReferencedDataFile()
