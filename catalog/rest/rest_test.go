@@ -583,6 +583,66 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 	r.Require().NoError(lastErr)
 }
 
+func (r *RestCatalogSuite) TestListTablesPaginationCycle() {
+	const namespace = "accounting"
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+		if requestCount > 3 {
+			r.Fail("pagination continued after a repeated token")
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+
+			return
+		}
+
+		var name, nextPageToken string
+		switch req.URL.Query().Get("pageToken") {
+		case "":
+			name, nextPageToken = "first", "token-a"
+		case "token-a":
+			name, nextPageToken = "second", "token-b"
+		case "token-b":
+			name, nextPageToken = "third", "token-a"
+		default:
+			r.Fail("unexpected page token")
+			http.Error(w, "unexpected page token", http.StatusBadRequest)
+
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{map[string]any{
+				"namespace": []string{namespace},
+				"name":      name,
+			}},
+			"next-page-token": nextPageToken,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var identifiers []table.Identifier
+	var paginationErr error
+	for identifier, err := range cat.ListTables(context.Background(), catalog.ToIdentifier(namespace)) {
+		if err != nil {
+			paginationErr = err
+
+			break
+		}
+		identifiers = append(identifiers, identifier)
+	}
+
+	r.ErrorIs(paginationErr, rest.ErrRESTError)
+	r.ErrorContains(paginationErr, "pagination cycle: repeated page token")
+	r.Equal(3, requestCount)
+	r.Equal([]table.Identifier{
+		{"accounting", "first"},
+		{"accounting", "second"},
+		{"accounting", "third"},
+	}, identifiers)
+}
+
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
