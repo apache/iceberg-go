@@ -1655,10 +1655,8 @@ func TestUnionByNameRejectsMapKeyChange(t *testing.T) {
 		}, Required: false},
 	)
 
-	assert.NotPanics(t, func() {
-		_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
-		assert.Error(t, err)
-	})
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.Error(t, err, "widening map key promotion int -> long must be rejected")
 }
 
 func TestUnionByNameIgnoresNarrowingMapKey(t *testing.T) {
@@ -1886,4 +1884,177 @@ func TestUnionByNameInvalidListElementTypeChange(t *testing.T) {
 
 	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
 	assert.Error(t, err, "list<string> -> list<long> is not a valid promotion")
+}
+
+// Cross-kind changes must be rejected outright
+func TestUnionByNameRejectsCrossKindChanges(t *testing.T) {
+	cases := []struct {
+		name        string
+		existing    iceberg.NestedField
+		incoming    iceberg.NestedField
+		errContains string
+	}{
+		{
+			name: "list -> map",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
+			}, Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+				ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
+			}, Required: false},
+			errContains: "cannot change column type",
+		},
+		{
+			name: "struct -> list",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			}, Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.ListType{
+				ElementID: 2, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: false,
+			}, Required: false},
+			errContains: "cannot change column type",
+		},
+		{
+			name: "map -> struct",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.MapType{
+				KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+				ValueID: 3, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: false,
+			}, Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			}, Required: false},
+			errContains: "cannot change column type",
+		},
+		{
+			name:     "primitive -> struct",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			incoming: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			}, Required: false},
+			errContains: "cannot change column type",
+		},
+		{
+			name: "struct -> primitive",
+			existing: iceberg.NestedField{ID: 1, Name: "c", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+				},
+			}, Required: false},
+			incoming:    iceberg.NestedField{ID: 1, Name: "c", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+			errContains: "cannot change column type",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current := iceberg.NewSchema(1, tc.existing)
+			incoming := iceberg.NewSchema(1, tc.incoming)
+
+			_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.errContains)
+		})
+	}
+}
+
+func TestUnionByNameRejectsNonJavaPromotions(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing iceberg.Type
+		incoming iceberg.Type
+	}{
+		{"string -> binary", iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary},
+		{"binary -> string", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.String},
+		{"fixed[16] -> uuid", iceberg.FixedTypeOf(16), iceberg.PrimitiveTypes.UUID},
+		{"decimal scale widening", iceberg.DecimalTypeOf(10, 1), iceberg.DecimalTypeOf(10, 2)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			current := iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "c", Type: tc.existing, Required: false},
+			)
+			incoming := iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "c", Type: tc.incoming, Required: false},
+			)
+
+			_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot change column type")
+		})
+	}
+}
+
+// Two sequential UnionByNameWith calls on the same UpdateSchema must both
+// take effect when they contribute disjoint additions.
+func TestUnionByNameSequentialCalls(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	first := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	// Note: second schema intentionally omits "name" so we don't retry an add
+	// that is already staged.
+	second := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "age", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).
+		UnionByNameWith(first).
+		UnionByNameWith(second).
+		Apply()
+	require.NoError(t, err)
+
+	_, ok := applied.FindFieldByName("name")
+	assert.True(t, ok, "field added by first union must survive the second call")
+	_, ok = applied.FindFieldByName("age")
+	assert.True(t, ok, "field added by second union must be present")
+}
+
+// A second UnionByNameWith that re-adds a field already staged by the first
+// must error rather than silently double-add.
+func TestUnionByNameRejectsOverlappingAdds(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	overlap := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).
+		UnionByNameWith(overlap).
+		UnionByNameWith(overlap).
+		Apply()
+	require.Error(t, err, "re-adding a field already pending must be rejected")
+	assert.Contains(t, err.Error(), "name")
+}
+
+// A union following an explicit AddColumn that adds the same column 
+// must not double-add
+func TestUnionByNameDedupsAgainstPendingAddColumn(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "email", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).
+		AddColumn([]string{"email"}, iceberg.PrimitiveTypes.String, "", false, nil).
+		UnionByNameWith(incoming).
+		Apply()
+	require.Error(t, err, "union must not silently double-add a field already pending via AddColumn")
+	assert.Contains(t, err.Error(), "email")
 }

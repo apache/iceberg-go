@@ -617,6 +617,29 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 	return u
 }
 
+// UnionByNameWith stages the changes needed to evolve the current schema into
+// the union of itself and newSchema. Fields are matched by name (respecting
+// caseSensitive on the UpdateSchema), with the following semantics:
+//
+//   - Fields present only in newSchema are added. Added columns are always
+//     forced to be optional, regardless of their required flag in newSchema.
+//     Added columns preserve their Doc, InitialDefault, and WriteDefault, and
+//     receive fresh field ids.
+//   - Fields present in both schemas may be evolved: required->optional is
+//     allowed; optional->required is intentionally skipped. Primitive type
+//     changes are applied only when they are a valid promotion
+//     (int->long, float->double, decimal same-scale wider-precision, or an
+//     exact match); anything else errors. Narrowing promotions are ignored.
+//   - Doc updates are applied only when the incoming Doc is non-empty and
+//     differs; an empty Doc never clears an existing Doc.
+//   - WriteDefault updates are applied when the incoming value differs from
+//     the existing one. InitialDefault of an existing column is never modified.
+//   - Map keys are immutable: any non-ignorable key change is rejected.
+//   - Cross-kind changes (list->map, struct->list, etc.) are rejected.
+//
+// UnionByNameWith is queued and applied together with other pending updates
+// when Apply/Commit is invoked, and composes with them: fields added earlier
+// in the same UpdateSchema are visible to a subsequent union.
 func (u *UpdateSchema) UnionByNameWith(newSchema *iceberg.Schema) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.unionByName(newSchema)
@@ -662,14 +685,18 @@ func (u *UpdateSchema) unionField(path []string, newField iceberg.NestedField) e
 		}
 	case *iceberg.MapType:
 		// Map keys are immutable; reject any key change up front
-		if existingMap, ok := existing.Type.(*iceberg.MapType); ok {
-			if !isIgnorableTypeUpdate(existingMap.KeyType, t.KeyType) {
-				return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
-			}
+		existingMap, ok := existing.Type.(*iceberg.MapType)
+		if !ok {
+			return fmt.Errorf("cannot change field to map: %s", strings.Join(path, "."))
+		}
+		if !isIgnorableTypeUpdate(existingMap.KeyType, t.KeyType) {
+			return fmt.Errorf("cannot update map key: %s", strings.Join(childPath(path, "key"), "."))
 		}
 		if err := u.unionField(childPath(path, "value"), t.ValueField()); err != nil {
 			return err
 		}
+	default:
+		// Primitive and Variant types have no nested children to recurse into.
 	}
 
 	return nil
@@ -716,6 +743,24 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 	}
 
+	// guard against colliding with a pending rename
+	if field, ok := u.findField(fullName); ok {
+		if !u.isDeleted(field.ID) {
+			for _, upd := range u.updates[parentID] {
+				if upd.Name == name {
+					return fmt.Errorf("field already exists: %s", fullName)
+				}
+			}
+		}
+	}
+
+	// complex types cannot carry defaults.
+	if _, isPrimitive := newField.Type.(iceberg.PrimitiveType); !isPrimitive {
+		if newField.InitialDefault != nil || newField.WriteDefault != nil {
+			return fmt.Errorf("default values are not supported for %s", newField.Type)
+		}
+	}
+
 	field := iceberg.NestedField{
 		Name:           name,
 		Type:           newField.Type,
@@ -743,6 +788,12 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	}
 
 	if !isIgnorableTypeUpdate(existing.Type, newField.Type) {
+		existingPrim, existingIsPrim := existing.Type.(iceberg.PrimitiveType)
+		newPrim, newIsPrim := newField.Type.(iceberg.PrimitiveType)
+		if !existingIsPrim || !newIsPrim || !isPromotionAllowed(existingPrim, newPrim) {
+			return fmt.Errorf("cannot change column type: %s: %s -> %s",
+				strings.Join(path, "."), existing.Type, newField.Type)
+		}
 		update.FieldType = iceberg.Optional[iceberg.Type]{Valid: true, Val: newField.Type}
 	}
 
@@ -757,13 +808,31 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	}
 
 	if newField.WriteDefault != nil && !reflect.DeepEqual(newField.WriteDefault, existing.WriteDefault) {
-		u.setWriteDefault(existing, newField.WriteDefault)
+		if err := u.setWriteDefault(existing, newField.WriteDefault); err != nil {
+			return err
+		}
 	}
 
 	return nil
 }
 
-func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) {
+// setWriteDefault stages a write-default change for an existing field.
+//
+// The incoming default is a raw any rather than an iceberg.Literal because
+// NestedField.WriteDefault is untyped in the Iceberg Go model; a full
+// value-vs-type compatibility check therefore requires a runtime any->Literal
+// converter that iceberg-go does not currently expose (NewLiteral is generic
+// and compile-time only). We enforce the guards updateColumn provides that we
+// *can* enforce here: reject writes against a deleted field, and refuse to
+// stage a non-nil default on a complex-typed column.
+func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) error {
+	if u.isDeleted(existing.ID) {
+		return fmt.Errorf("field that has been deleted cannot be updated: %s", existing.Name)
+	}
+	if _, ok := existing.Type.(iceberg.PrimitiveType); !ok {
+		return fmt.Errorf("default values are not supported for %s", existing.Type)
+	}
+
 	parentID := u.findParentID(existing.ID)
 	if u.updates[parentID] == nil {
 		u.updates[parentID] = make(map[int]iceberg.NestedField)
@@ -775,25 +844,68 @@ func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefaul
 	}
 	updatedField.WriteDefault = writeDefault
 	u.updates[parentID][existing.ID] = updatedField
+
+	return nil
 }
 
+// isIgnorableTypeUpdate reports whether a change from existingType to newType
+// should be treated as a no-op by union-by-name
+//
+// Note: the argument order is inteionally reversed here.
+// Unlike the rest, we are checking whether the incoming type can be promoted to
+// the existing type. If so, the incoming change is narrower (or equal) 
+// and can be ignored.
 func isIgnorableTypeUpdate(existingType, newType iceberg.Type) bool {
-	if _, ok := existingType.(iceberg.PrimitiveType); ok {
+	if existingPrim, ok := existingType.(iceberg.PrimitiveType); ok {
 		newPrimitive, ok := newType.(iceberg.PrimitiveType)
 		if !ok {
 			return false
 		}
-		if existingType.Equals(newType) {
-			return true
-		}
-		_, err := iceberg.PromoteType(newPrimitive, existingType)
 
-		return err == nil
+		return isPromotionAllowed(newPrimitive, existingPrim)
 	}
 
-	_, ok := newType.(iceberg.PrimitiveType)
+	switch existingType.(type) {
+	case *iceberg.StructType:
+		_, ok := newType.(*iceberg.StructType)
 
-	return !ok
+		return ok
+	case *iceberg.ListType:
+		_, ok := newType.(*iceberg.ListType)
+
+		return ok
+	case *iceberg.MapType:
+		_, ok := newType.(*iceberg.MapType)
+
+		return ok
+	}
+
+	return false
+}
+
+func isPromotionAllowed(from, to iceberg.PrimitiveType) bool {
+	if from.Equals(to) {
+		return true
+	}
+	switch f := from.(type) {
+	case iceberg.Int32Type:
+		_, ok := to.(iceberg.Int64Type)
+
+		return ok
+	case iceberg.Float32Type:
+		_, ok := to.(iceberg.Float64Type)
+
+		return ok
+	case iceberg.DecimalType:
+		t, ok := to.(iceberg.DecimalType)
+		if !ok {
+			return false
+		}
+
+		return f.Scale() == t.Scale() && f.Precision() <= t.Precision()
+	}
+
+	return false
 }
 
 func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
