@@ -39,7 +39,9 @@ type RewriteResult struct {
 	RemovedDataFiles int
 
 	// RemovedPositionDeleteFiles is the count of position delete files
-	// removed because their referenced data file was rewritten.
+	// removed because their referenced data file was rewritten or
+	// because they were passed via
+	// [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
 	RemovedPositionDeleteFiles int
 
 	// RemovedEqualityDeleteFiles is the count of equality delete files
@@ -145,15 +147,16 @@ type RewriteDataFilesOptions struct {
 	// per-group snapshot rather than being summed or split.
 	SnapshotProps iceberg.Properties
 
-	// ExtraDeleteFilesToRemove are delete files (typically equality
-	// deletes that are dead after the rewrite) that the caller wants
-	// expunged in the same snapshot as the rewrite. Honored only when
-	// PartialProgress is false.
+	// ExtraDeleteFilesToRemove are delete files that are dead after
+	// the rewrite and that the caller wants expunged in the same
+	// snapshot. Honored only when PartialProgress is false.
 	//
-	// Use [compaction.CollectDeadEqualityDeletes] to compute this list
-	// from the current snapshot. Position delete files that are fully
-	// applied are removed automatically and do NOT need to be passed
-	// in here.
+	// Use [compaction.CollectDeadEqualityDeletes] and
+	// [compaction.CollectDeadPositionDeletes] to compute this list
+	// from the current snapshot. Position deletes attached to
+	// rewritten tasks are already removed by the per-group staging;
+	// listing them again here is harmless (each file is removed and
+	// counted once).
 	ExtraDeleteFilesToRemove []iceberg.DataFile
 
 	// GroupOptions are forwarded to every [ExecuteCompactionGroup]
@@ -202,9 +205,11 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // applied (every referenced data file is in the rewrite set) are
 // removed automatically.
 //
-// Equality-delete cleanup is the caller's responsibility: compute the
-// dead set with [compaction.CollectDeadEqualityDeletes] (against the
-// same snapshot the rewrite is staged on) and pass it via
+// Cleanup beyond that per-group staging is the caller's
+// responsibility: compute the dead sets with
+// [compaction.CollectDeadEqualityDeletes] and
+// [compaction.CollectDeadPositionDeletes] (against the same snapshot
+// the rewrite is staged on) and pass them via
 // [RewriteDataFilesOptions.ExtraDeleteFilesToRemove]. The executor
 // only orchestrates the commit; it does not impose a cleanup policy.
 // This split keeps the pure spec predicate in table/compaction and
@@ -216,6 +221,9 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
 // + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+	if _, err := t.txnMeta(); err != nil {
+		return nil, err
+	}
 	if len(groups) == 0 {
 		return &RewriteResult{}, nil
 	}
@@ -226,6 +234,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
+	stagedDeleteFiles := make(map[string]struct{})
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -247,15 +256,36 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 		rewrite.ApplyResult(gr)
 		accumulateGroupMetrics(result, gr)
+		for _, df := range gr.SafePosDeletes {
+			stagedDeleteFiles[df.FilePath()] = struct{}{}
+		}
+		for _, df := range gr.SafeDeletionVectors {
+			stagedDeleteFiles[df.FilePath()] = struct{}{}
+		}
 	}
 
 	if result.RewrittenGroups == 0 {
 		return result, nil
 	}
 
+	// Extra delete files may overlap what the groups already staged
+	// (e.g. [compaction.CollectDeadPositionDeletes] output includes
+	// deletes attached to rewritten tasks); ReplaceFiles rejects
+	// duplicate removals, so stage each file once.
 	for _, df := range opts.ExtraDeleteFilesToRemove {
+		if _, ok := stagedDeleteFiles[df.FilePath()]; ok {
+			continue
+		}
+		stagedDeleteFiles[df.FilePath()] = struct{}{}
 		rewrite.DeleteFile(df)
-		result.RemovedEqualityDeleteFiles++
+		switch {
+		case df.ContentType() == iceberg.EntryContentEqDeletes:
+			result.RemovedEqualityDeleteFiles++
+		case IsDeletionVector(df):
+			result.RemovedDeletionVectorFiles++
+		default:
+			result.RemovedPositionDeleteFiles++
+		}
 	}
 
 	if err := rewrite.Commit(ctx); err != nil {

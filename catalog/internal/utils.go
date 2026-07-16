@@ -95,6 +95,33 @@ func UpdateTableMetadata(base table.Metadata, updates []table.Update, metadataLo
 }
 
 func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nspropsFn GetNamespacePropsFn, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (table.StagedTable, error) {
+	return createStagedTable(ctx, catprops, nspropsFn, ident, "", sc, opts...)
+}
+
+// CreateStagedTableWithNamespaceKey creates a staged table using namespaceKey
+// in its default warehouse location while retaining ident's namespace
+// components for namespace property lookup.
+func CreateStagedTableWithNamespaceKey(
+	ctx context.Context,
+	catprops iceberg.Properties,
+	nspropsFn GetNamespacePropsFn,
+	ident table.Identifier,
+	namespaceKey string,
+	sc *iceberg.Schema,
+	opts ...catalog.CreateTableOpt,
+) (table.StagedTable, error) {
+	return createStagedTable(ctx, catprops, nspropsFn, ident, namespaceKey, sc, opts...)
+}
+
+func createStagedTable(
+	ctx context.Context,
+	catprops iceberg.Properties,
+	nspropsFn GetNamespacePropsFn,
+	ident table.Identifier,
+	namespaceKey string,
+	sc *iceberg.Schema,
+	opts ...catalog.CreateTableOpt,
+) (table.StagedTable, error) {
 	var cfg catalog.CreateTableCfg
 	for _, opt := range opts {
 		opt(&cfg)
@@ -102,9 +129,12 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 
 	dbIdent := catalog.NamespaceFromIdent(ident)
 	tblname := catalog.TableNameFromIdent(ident)
-	dbname := strings.Join(dbIdent, ".")
+	if namespaceKey == "" {
+		namespaceKey = strings.Join(dbIdent, ".")
+	}
 
-	loc, err := ResolveTableLocation(ctx, cfg.Location, dbname, tblname, catprops, nspropsFn)
+	loc, err := ResolveTableLocationWithNamespace(
+		ctx, cfg.Location, dbIdent, namespaceKey, tblname, catprops, nspropsFn)
 	if err != nil {
 		return table.StagedTable{}, err
 	}
@@ -143,26 +173,45 @@ func CreateStagedTable(ctx context.Context, catprops iceberg.Properties, nsprops
 
 type GetNamespacePropsFn func(context.Context, table.Identifier) (iceberg.Properties, error)
 
-func ResolveTableLocation(ctx context.Context, loc, dbname, tablename string, catprops iceberg.Properties, nsprops GetNamespacePropsFn) (string, error) {
+func ResolveTableLocation(
+	ctx context.Context,
+	loc, dbname, tablename string,
+	catprops iceberg.Properties,
+	nsprops GetNamespacePropsFn,
+) (string, error) {
+	return ResolveTableLocationWithNamespace(
+		ctx, loc, strings.Split(dbname, "."), dbname, tablename, catprops, nsprops)
+}
+
+// ResolveTableLocationWithNamespace keeps namespace property lookup component-aware
+// while allowing catalogs to provide a distinct key for the default warehouse path.
+func ResolveTableLocationWithNamespace(
+	ctx context.Context,
+	loc string,
+	namespace table.Identifier,
+	namespaceKey, tablename string,
+	catprops iceberg.Properties,
+	nsprops GetNamespacePropsFn,
+) (string, error) {
 	if len(loc) == 0 {
-		dbprops, err := nsprops(ctx, strings.Split(dbname, "."))
+		dbprops, err := nsprops(ctx, namespace)
 		if err != nil {
 			return "", err
 		}
 
-		return getDefaultWarehouseLocation(dbname, tablename, dbprops, catprops)
+		return getDefaultWarehouseLocation(namespaceKey, tablename, dbprops, catprops)
 	}
 
 	return strings.TrimSuffix(loc, "/"), nil
 }
 
-func getDefaultWarehouseLocation(dbname, tablename string, nsprops, catprops iceberg.Properties) (string, error) {
+func getDefaultWarehouseLocation(namespaceKey, tablename string, nsprops, catprops iceberg.Properties) (string, error) {
 	if dblocation := nsprops.Get("location", ""); dblocation != "" {
 		return url.JoinPath(dblocation, tablename)
 	}
 
 	if warehousepath := catprops.Get("warehouse", ""); warehousepath != "" {
-		return url.JoinPath(warehousepath, dbname+".db", tablename)
+		return url.JoinPath(warehousepath, namespaceKey+".db", tablename)
 	}
 
 	return "", errors.New("no default path set, please specify a location when creating a table")

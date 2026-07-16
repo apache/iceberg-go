@@ -48,12 +48,12 @@ import (
 //
 //	err = mtx.Commit(ctx)
 type MultiTableTransaction struct {
-	cat       TransactionalCatalog
-	loader    Catalog
-	txns      []*table.Transaction
-	idents    []string
-	tableIDs  []table.Identifier
-	committed bool
+	cat        TransactionalCatalog
+	loader     Catalog
+	txns       []*table.Transaction
+	tableNames []string
+	tableIDs   []table.Identifier
+	committed  bool
 }
 
 // NewMultiTableTransaction creates a new multi-table transaction backed
@@ -86,14 +86,16 @@ func (m *MultiTableTransaction) AddTransaction(tx *table.Transaction) error {
 		return err
 	}
 
-	key := strings.Join(tc.Identifier, ".")
-	if slices.Contains(m.idents, key) {
-		return fmt.Errorf("duplicate table in multi-table transaction: %s", key)
+	for _, identifier := range m.tableIDs {
+		if slices.Equal(identifier, tc.Identifier) {
+			return fmt.Errorf("duplicate table in multi-table transaction: %s",
+				strings.Join(tc.Identifier, "."))
+		}
 	}
 
 	m.txns = append(m.txns, tx)
-	m.idents = append(m.idents, key)
-	m.tableIDs = append(m.tableIDs, tc.Identifier)
+	m.tableNames = append(m.tableNames, strings.Join(tc.Identifier, "."))
+	m.tableIDs = append(m.tableIDs, slices.Clone(tc.Identifier))
 
 	return nil
 }
@@ -127,7 +129,7 @@ func (m *MultiTableTransaction) Commit(ctx context.Context) error {
 
 	if err := m.cat.CommitTransaction(ctx, commits); err != nil {
 		return fmt.Errorf("commit transaction for tables [%s]: %w",
-			strings.Join(m.idents, ", "), err)
+			strings.Join(m.tableNames, ", "), err)
 	}
 
 	m.committed = true

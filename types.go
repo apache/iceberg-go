@@ -1108,11 +1108,12 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		}
 	case DecimalType:
 		if rt, ok := readType.(DecimalType); ok {
-			if t.precision <= rt.precision && t.scale <= rt.scale {
+			// Only precision may widen; scale must stay the same (spec: widen precision only).
+			if t.scale == rt.scale && t.precision <= rt.precision {
 				return readType, nil
 			}
 
-			return nil, fmt.Errorf("%w: cannot reduce precision from %s to %s",
+			return nil, fmt.Errorf("%w: cannot promote %s to %s",
 				ErrResolve, fileType, readType)
 		}
 	case FixedType:

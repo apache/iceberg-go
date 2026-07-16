@@ -656,7 +656,7 @@ func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
 	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
 		return true
 	}
-	if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+	if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
 		want, ok := sp.deletedDVsByRef[*ref]
 
 		return ok && want.FilePath() == df.FilePath()
@@ -1039,7 +1039,7 @@ type removedFilePresence struct {
 }
 
 func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
-	if isDeletionVector(df) {
+	if IsDeletionVector(df) {
 		ref := df.ReferencedDataFile()
 		if ref == nil {
 			return false
@@ -1098,7 +1098,7 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 
 				continue
 			}
-			if isDeletionVector(df) {
+			if IsDeletionVector(df) {
 				// A DV without a referenced data file cannot be matched by ref;
 				// skip it rather than misclassifying it as a path-keyed delete file.
 				// The path must match too: a peer may have superseded our DV with

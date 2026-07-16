@@ -58,10 +58,10 @@ var versionPattern = regexp.MustCompile(`^v([0-9]+)(?:\.gz)?\.metadata\.json$`)
 
 // uuidMetadataPattern matches UUID-style metadata filenames produced by
 // Java/PyIceberg catalogs: 00000-<uuid>.metadata.json or
-// 00000-<uuid>.gz.metadata.json. The sequence is a 5-digit zero-padded
-// number and the UUID is in canonical 8-4-4-4-12 hex format.
+// 00000-<uuid>.gz.metadata.json. The numeric sequence has a minimum width
+// of 5 digits and the UUID is in canonical 8-4-4-4-12 hex format.
 var uuidMetadataPattern = regexp.MustCompile(
-	`^([0-9]{5})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
+	`^([0-9]{5,})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
 )
 
 // Claims expire aggressively so crashed writers do not permanently block a
