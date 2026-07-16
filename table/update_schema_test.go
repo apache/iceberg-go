@@ -1915,6 +1915,101 @@ func TestUnionByNameAddedColumnPreservesInitialDefault(t *testing.T) {
 	assert.Equal(t, int32(42), count.WriteDefault)
 }
 
+func TestUnionByNameRejectsInvalidAddedColumnDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	incomingInitial := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32,
+			Required: false, InitialDefault: "not-an-int",
+		},
+	)
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingInitial).Apply()
+	require.ErrorContains(t, err, "invalid initial-default for count")
+
+	incomingWrite := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "when", Type: iceberg.PrimitiveTypes.Date,
+			Required: false, WriteDefault: "not-a-date",
+		},
+	)
+	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingWrite).Apply()
+	require.ErrorContains(t, err, "invalid write-default for when")
+}
+
+func TestUnionByNameRejectsInvalidWriteDefaultUpdate(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+			WriteDefault: "not-an-int",
+		},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.ErrorContains(t, err, "invalid write-default for id")
+}
+
+func TestUnionByNameRejectsInvalidNestedAddedColumnDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	incomingStruct := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{
+					ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.Int32,
+					Required: false, InitialDefault: "not-an-int",
+				},
+			},
+		}},
+	)
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingStruct).Apply()
+	require.ErrorContains(t, err, "invalid initial-default for zip")
+
+	incomingMap := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "events", Required: false, Type: &iceberg.MapType{
+			KeyID: 3, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 4, ValueRequired: false, ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{
+						ID: 5, Name: "when", Type: iceberg.PrimitiveTypes.Date,
+						Required: false, WriteDefault: "not-a-date",
+					},
+				},
+			},
+		}},
+	)
+	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingMap).Apply()
+	require.ErrorContains(t, err, "invalid write-default for when")
+
+	incomingMapKey := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "lookup", Required: false, Type: &iceberg.MapType{
+			KeyID: 3, KeyType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{
+						ID: 4, Name: "code", Type: iceberg.PrimitiveTypes.Int32,
+						Required: false, InitialDefault: "not-an-int",
+					},
+				},
+			},
+			ValueID: 5, ValueRequired: false, ValueType: iceberg.PrimitiveTypes.String,
+		}},
+	)
+	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incomingMapKey).Apply()
+	require.ErrorContains(t, err, "invalid initial-default for code")
+}
+
 func TestUnionByNameMirroredSchemas(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 9, Name: "s", Type: &iceberg.StructType{

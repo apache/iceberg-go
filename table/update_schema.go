@@ -765,10 +765,19 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 	}
 
-	// complex types cannot carry defaults.
 	if _, isPrimitive := newField.Type.(iceberg.PrimitiveType); !isPrimitive {
 		if newField.InitialDefault != nil || newField.WriteDefault != nil {
 			return fmt.Errorf("default values are not supported for %s", newField.Type)
+		}
+		if err := validateNestedDefaults(newField.Type); err != nil {
+			return err
+		}
+	} else {
+		if err := validateDefaultValue(newField.Type, newField.InitialDefault); err != nil {
+			return fmt.Errorf("invalid initial-default for %s: %w", fullName, err)
+		}
+		if err := validateDefaultValue(newField.Type, newField.WriteDefault); err != nil {
+			return fmt.Errorf("invalid write-default for %s: %w", fullName, err)
 		}
 	}
 
@@ -829,19 +838,15 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	return nil
 }
 
-// setWriteDefault stages a write-default change for an existing field
-//
-// TODO: the incoming default is a raw any (NestedField.WriteDefault is
-// untyped), so its value is not checked against the field's primitive type. A
-// mistyped default (e.g. an int64 for an int32 field) is accepted here and only
-// fails later, as a panic, when defaultToScalar/defaultToArray materialize it
-// on the write path. A proper fix needs a runtime any+Type validator.
 func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) error {
 	if u.isDeleted(existing.ID) {
 		return fmt.Errorf("field that has been deleted cannot be updated: %s", existing.Name)
 	}
 	if _, ok := existing.Type.(iceberg.PrimitiveType); !ok {
 		return fmt.Errorf("default values are not supported for %s", existing.Type)
+	}
+	if err := validateDefaultValue(existing.Type, writeDefault); err != nil {
+		return fmt.Errorf("invalid write-default for %s: %w", existing.Name, err)
 	}
 
 	parentID := u.findParentID(existing.ID)
@@ -855,6 +860,69 @@ func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefaul
 	}
 	updatedField.WriteDefault = writeDefault
 	u.updates[parentID][existing.ID] = updatedField
+
+	return nil
+}
+
+func validateNestedDefaults(t iceberg.Type) error {
+	switch typ := t.(type) {
+	case *iceberg.StructType:
+		for _, f := range typ.FieldList {
+			if err := validateFieldDefaults(f); err != nil {
+				return err
+			}
+		}
+	case *iceberg.ListType:
+		return validateFieldDefaults(typ.ElementField())
+	case *iceberg.MapType:
+		if err := validateFieldDefaults(typ.KeyField()); err != nil {
+			return err
+		}
+
+		return validateFieldDefaults(typ.ValueField())
+	}
+
+	return nil
+}
+
+func validateFieldDefaults(f iceberg.NestedField) error {
+	if _, isPrimitive := f.Type.(iceberg.PrimitiveType); !isPrimitive {
+		if f.InitialDefault != nil || f.WriteDefault != nil {
+			return fmt.Errorf("default values are not supported for %s", f.Type)
+		}
+
+		return validateNestedDefaults(f.Type)
+	}
+
+	if err := validateDefaultValue(f.Type, f.InitialDefault); err != nil {
+		return fmt.Errorf("invalid initial-default for %s: %w", f.Name, err)
+	}
+	if err := validateDefaultValue(f.Type, f.WriteDefault); err != nil {
+		return fmt.Errorf("invalid write-default for %s: %w", f.Name, err)
+	}
+
+	return nil
+}
+
+func validateDefaultValue(t iceberg.Type, v any) (err error) {
+	if v == nil {
+		return nil
+	}
+	if _, ok := t.(iceberg.PrimitiveType); !ok {
+		return fmt.Errorf("default values are not supported for %s", t)
+	}
+
+	dt, err := TypeToArrowType(t, false, false)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("value %#v is not valid for type %s: %v", v, t, r)
+		}
+	}()
+	_ = defaultToScalar(v, t, dt)
 
 	return nil
 }
