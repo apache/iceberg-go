@@ -973,3 +973,44 @@ func TestNestedFieldEqualsWithNonComparableDefaults(t *testing.T) {
 		Required: true,
 	}))
 }
+
+func TestPromoteType(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileType iceberg.Type
+		readType iceberg.Type
+		want     iceberg.Type
+		wantErr  bool
+	}{
+		{"int to long", iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, false},
+		{"float to double", iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Float64, false},
+		{"string to binary", iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.Binary, false},
+		{"binary to string", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.String, false},
+		{"fixed[16] to uuid", iceberg.FixedTypeOf(16), iceberg.PrimitiveTypes.UUID, iceberg.PrimitiveTypes.UUID, false},
+		{"unknown to any", iceberg.PrimitiveTypes.Unknown, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, false},
+
+		// Decimal: precision may widen, scale must stay the same.
+		{"decimal widen precision", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(18, 2), iceberg.DecimalTypeOf(18, 2), false},
+		{"decimal same", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(9, 2), false},
+		{"decimal narrow precision", iceberg.DecimalTypeOf(18, 2), iceberg.DecimalTypeOf(9, 2), nil, true},
+		{"decimal increase scale", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(18, 4), nil, true},
+		{"decimal decrease scale", iceberg.DecimalTypeOf(9, 4), iceberg.DecimalTypeOf(18, 2), nil, true},
+
+		{"disallowed int to string", iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.String, nil, true},
+		{"disallowed fixed[8] to uuid", iceberg.FixedTypeOf(8), iceberg.PrimitiveTypes.UUID, nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := iceberg.PromoteType(tt.fileType, tt.readType)
+			if tt.wantErr {
+				require.ErrorIs(t, err, iceberg.ErrResolve)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Truef(t, tt.want.Equals(got), "expected: %s\ngot: %s", tt.want, got)
+		})
+	}
+}
