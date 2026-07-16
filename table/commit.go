@@ -54,10 +54,14 @@ type TableCommit struct {
 // commit endpoint returns 204 No Content (no metadata), callers must
 // LoadTable after a successful CommitTransaction if they need updated state.
 func (t *Transaction) TableCommit() (TableCommit, error) {
+	if err := t.checkNotNil(); err != nil {
+		return TableCommit{}, err
+	}
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
-	if err := t.ensureInitialized(); err != nil {
+	meta, err := t.txnMeta()
+	if err != nil {
 		return TableCommit{}, err
 	}
 
@@ -65,7 +69,7 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 		return TableCommit{}, errors.New("transaction has already been committed")
 	}
 
-	if len(t.meta.updates) == 0 {
+	if len(meta.updates) == 0 {
 		return TableCommit{
 			Identifier:   slices.Clone(t.tbl.identifier),
 			Requirements: []Requirement{},
@@ -75,10 +79,10 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 
 	reqs := make([]Requirement, len(t.reqs), len(t.reqs)+1)
 	copy(reqs, t.reqs)
-	reqs = append(reqs, AssertTableUUID(t.meta.uuid))
+	reqs = append(reqs, AssertTableUUID(meta.uuid))
 
-	updates := make([]Update, len(t.meta.updates))
-	copy(updates, t.meta.updates)
+	updates := make([]Update, len(meta.updates))
+	copy(updates, meta.updates)
 
 	return TableCommit{
 		Identifier:   slices.Clone(t.tbl.identifier),

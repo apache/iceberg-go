@@ -73,7 +73,11 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 
 		return us
 	}
-	us.err = t.ensureInitialized()
+	// UpdateSpec reads exclusively from the committed table metadata
+	// (t.tbl.Metadata() / t.tbl.Schema()) rather than the transaction's
+	// metadata builder, but still routes its initialization check through the
+	// canonical txnMeta accessor for consistency.
+	_, us.err = t.txnMeta()
 	if us.err != nil {
 		return us
 	}
