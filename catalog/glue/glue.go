@@ -93,7 +93,7 @@ func init() {
 			return nil, err
 		}
 
-		return NewCatalog(WithAwsConfig(awsConfig), WithAwsProperties(AwsProperties(props))), nil
+		return NewCatalog(WithAwsConfig(awsConfig), WithAwsProperties(AwsProperties(props)))
 	}))
 }
 
@@ -165,9 +165,9 @@ type Catalog struct {
 //     ...other transport options...
 // })
 // awsCfg.HTTPClient = client
-// catalog := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
+// catalog, err := glue.NewCatalog(glue.WithAwsConfig(awsCfg))
 
-func NewCatalog(opts ...Option) *Catalog {
+func NewCatalog(opts ...Option) (*Catalog, error) {
 	glueOps := &options{}
 
 	for _, o := range opts {
@@ -185,12 +185,23 @@ func NewCatalog(opts ...Option) *Catalog {
 		catalogId = nil
 	}
 
-	return &Catalog{
+	cat := &Catalog{
 		glueSvc:   glue.NewFromConfig(glueOps.awsConfig),
 		catalogId: catalogId,
 		awsCfg:    &glueOps.awsConfig,
 		props:     iceberg.Properties(glueOps.awsProperties),
 	}
+
+	// Resolve the metrics reporter once, up front. CachedReporter caches the
+	// first result, so building it here means a bad metrics-reporter-impl fails
+	// construction — rather than surfacing later as a spurious CreateTable error
+	// (after the Glue entry is written, via the trailing convertGlueToIceberg) or
+	// as a cached error that wedges every later table op on this catalog.
+	if _, err := cat.reporter.Get(cat.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	return cat, nil
 }
 
 // ListTables returns a list of Iceberg tables in the given Glue database.
@@ -251,23 +262,20 @@ func (c *Catalog) CatalogType() catalog.Type {
 
 // Close releases the catalog's metrics reporter. The Glue catalog does not own
 // the lifetime of the AWS clients it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via an
-// io.Closer type assertion.
+// is released. Callers holding a [catalog.Catalog] can reach this via a
+// [catalog.Closer] type assertion.
 func (c *Catalog) Close() error { return c.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // CreateTable creates a new Iceberg table in the Glue catalog.
 // This function will create the metadata file in S3 using the catalog and table properties,
 // to determine the bucket and key for the metadata location.
 func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	// Resolve the reporter before mutating the catalog: a bad
-	// metrics-reporter-impl must fail before the Glue entry is created, not
-	// after, which would report a failure for a table that was actually created
-	// (and make the retry hit ErrTableAlreadyExists). CachedReporter caches this
-	// first result, so the trailing LoadTable reuses it.
-	if _, err := c.reporter.Get(c.props); err != nil {
-		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
-	}
-
+	// The reporter is resolved once at construction (see NewCatalog), so a bad
+	// metrics-reporter-impl already failed there — no per-op guard is needed
+	// before mutating the catalog, and the trailing LoadTable reuses the cached
+	// reporter.
 	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, identifier, schema, opts...)
 	if err != nil {
 		return nil, err
@@ -301,13 +309,6 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, err
 	}
 
-	// Resolve the reporter before mutating the catalog, for the same reason as
-	// CreateTable: an invalid reporter must not turn a successful registration
-	// into a reported failure. CachedReporter caches this for the trailing
-	// LoadTable.
-	if _, err := c.reporter.Get(c.props); err != nil {
-		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
-	}
 	// Load the metadata file to get table properties
 	ctx = utils.WithAwsConfig(ctx, c.awsCfg)
 	// Read the metadata file. The reporter is intentionally not wired here: the

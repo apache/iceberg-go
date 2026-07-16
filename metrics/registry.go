@@ -37,6 +37,11 @@ const (
 // Factory builds a Reporter from configuration properties. The same property
 // map that selected the reporter is passed in, so a factory may read its own
 // configuration keys.
+//
+// A factory must return either a usable [Reporter] or a non-nil error, never a
+// typed-nil reporter (e.g. (*Custom)(nil)): that is a non-nil interface value,
+// so it passes interface nil checks and its Report/Close would nil-deref where a
+// caller reasonably assumed a nil interface meant "no reporter".
 type Factory func(props map[string]string) (Reporter, error)
 
 var (

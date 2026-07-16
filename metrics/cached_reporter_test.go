@@ -61,6 +61,35 @@ func TestCachedReporter(t *testing.T) {
 		assert.NoError(t, c.Close())
 	})
 
+	t.Run("Close is idempotent and does not re-close", func(t *testing.T) {
+		cr := &countingReporter{}
+		Register("cached-idempotent", func(map[string]string) (Reporter, error) { return cr, nil })
+		t.Cleanup(func() { Deregister("cached-idempotent") })
+
+		var c CachedReporter
+		_, err := c.Get(map[string]string{ReporterImplKey: "cached-idempotent"})
+		require.NoError(t, err)
+		require.NoError(t, c.Close())
+		require.NoError(t, c.Close())
+		assert.Equal(t, 1, cr.closeCalls(), "a second Close must not re-close the reporter")
+	})
+
+	t.Run("Get after Close returns the nop reporter", func(t *testing.T) {
+		cr := &countingReporter{}
+		Register("cached-post-close", func(map[string]string) (Reporter, error) { return cr, nil })
+		t.Cleanup(func() { Deregister("cached-post-close") })
+
+		var c CachedReporter
+		props := map[string]string{ReporterImplKey: "cached-post-close"}
+		_, err := c.Get(props)
+		require.NoError(t, err)
+		require.NoError(t, c.Close())
+
+		got, err := c.Get(props)
+		require.NoError(t, err)
+		assert.IsType(t, NopReporter{}, got, "Get after Close must not hand back the released reporter")
+	})
+
 	t.Run("a build error is cached and not retried", func(t *testing.T) {
 		var c CachedReporter
 		props := map[string]string{ReporterImplKey: "does-not-exist"}

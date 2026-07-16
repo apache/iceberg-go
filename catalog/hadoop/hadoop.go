@@ -244,14 +244,25 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		return nil, fmt.Errorf("hadoop catalog: %T does not implement HadoopCatalogFS", filesystem)
 	}
 
-	return &Catalog{
+	cat := &Catalog{
 		name:      name,
 		warehouse: warehouse,
 		isLocal:   isLocal,
 		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
 		filesystem: hadoopFs,
 		props:      props,
-	}, nil
+	}
+
+	// Resolve the metrics reporter once, up front. CachedReporter caches the
+	// first result, so building it here means a bad metrics-reporter-impl fails
+	// construction — rather than surfacing later as a spurious CreateTable error
+	// after the table is already on disk, or as a cached error that wedges every
+	// later table op on this catalog.
+	if _, err := cat.reporter.Get(props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	return cat, nil
 }
 
 func (c *Catalog) CatalogType() catalog.Type {
@@ -259,8 +270,10 @@ func (c *Catalog) CatalogType() catalog.Type {
 }
 
 // Close releases the catalog's metrics reporter. Callers holding a
-// [catalog.Catalog] can reach this via an io.Closer type assertion.
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
 func (c *Catalog) Close() error { return c.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.

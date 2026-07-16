@@ -778,6 +778,12 @@ type Catalog struct {
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
 	reporter metrics.CachedReporter
+	// reporterProps holds only the client-supplied properties, captured before
+	// the server's /v1/config defaults and overrides are merged into props. The
+	// metrics reporter is resolved from these so a server-vended
+	// metrics-reporter-impl cannot select (or, via an unregistered name, break)
+	// a reporter the client never asked for.
+	reporterProps iceberg.Properties
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -898,6 +904,12 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
+
+	// Capture the client-supplied properties before fetchConfig folds in the
+	// server's /v1/config defaults and overrides, so the metrics reporter is
+	// resolved from the client's choice alone (see the reporterProps field).
+	r.reporterProps = toProps(ops)
+
 	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
@@ -1056,9 +1068,11 @@ func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
 // Close releases the catalog's metrics reporter. The REST catalog does not own
 // the lifetime of the HTTP client it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via an
-// io.Closer type assertion.
+// is released. Callers holding a [catalog.Catalog] can reach this via a
+// [catalog.Closer] type assertion.
 func (r *Catalog) Close() error { return r.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
@@ -1085,13 +1099,13 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF = iceio.LoadFSFunc(config, loc)
 	}
 
-	// Resolve the reporter from the catalog's own properties, not the merged
-	// config. The merged config folds in table metadata, server-vended
-	// ret.Config, and creds, any of which could otherwise shadow the client's
-	// reporter choice or turn an unknown server-side name into a hard load
-	// error. Server-vended reporter selection, if ever wanted, should be an
+	// Resolve the reporter from the client-supplied properties only (see the
+	// reporterProps field). r.props folds in server-vended /v1/config and, per
+	// call, table metadata and creds — any of which could otherwise shadow the
+	// client's reporter choice or turn an unknown server-side name into a hard
+	// load error. Server-vended reporter selection, if ever wanted, should be an
 	// explicit decision rather than a side effect of merge order.
-	reporter, err := r.reporter.Get(r.props)
+	reporter, err := r.reporter.Get(r.reporterProps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
@@ -1284,8 +1298,9 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	// otherwise first built in the trailing tableFromResponse, so a bad
 	// metrics-reporter-impl would turn a table the server already created into a
 	// reported failure whose retry hits ErrTableAlreadyExists. CachedReporter
-	// caches this for that tableFromResponse call.
-	if _, err := r.reporter.Get(r.props); err != nil {
+	// caches this for that tableFromResponse call. Resolved from the
+	// client-supplied properties only (see the reporterProps field).
+	if _, err := r.reporter.Get(r.reporterProps); err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
@@ -1526,8 +1541,9 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	// Resolve the reporter before the register POST mutates the server, for the
 	// same reason as CreateTable: it is otherwise first built in the trailing
 	// tableFromResponse, so an invalid reporter would turn a successful
-	// registration into a reported failure. CachedReporter caches this.
-	if _, err := r.reporter.Get(r.props); err != nil {
+	// registration into a reported failure. CachedReporter caches this. Resolved
+	// from the client-supplied properties only (see the reporterProps field).
+	if _, err := r.reporter.Get(r.reporterProps); err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 

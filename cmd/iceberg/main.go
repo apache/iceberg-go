@@ -402,7 +402,9 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		opts := []glue.Option{
 			glue.WithAwsConfig(awscfg),
 		}
-		cat = glue.NewCatalog(opts...)
+		if cat, err = glue.NewCatalog(opts...); err != nil {
+			log.Fatal(err)
+		}
 	case catalog.Hive:
 		props := iceberg.Properties{
 			hive.URI: args.URI,

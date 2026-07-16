@@ -366,8 +366,10 @@ func (c *Catalog) CatalogType() catalog.Type {
 // Close releases the catalog's metrics reporter. The SQL catalog is constructed
 // from a caller-owned database handle, so it does not close that handle; only
 // the reporter is released. Callers holding a [catalog.Catalog] can reach this
-// via an io.Closer type assertion.
+// via a [catalog.Closer] type assertion.
 func (c *Catalog) Close() error { return c.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).

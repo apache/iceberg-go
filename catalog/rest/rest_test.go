@@ -1338,6 +1338,36 @@ func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
 	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
 }
 
+// TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
+// the server via /v1/config cannot select — or, with an unregistered name, break
+// — the client's reporter. The client configured none, so the op must succeed and
+// fall back to the nop reporter; selection is resolved from client props only.
+func TestServerVendedReporterImplIgnored(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// A server-vended reporter impl the Go client does not recognize.
+			"overrides": map[string]any{metrics.ReporterImplKey: "does-not-exist"},
+			"endpoints": rest.AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(createTableRestExample))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Client does NOT configure a reporter.
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	tbl, err := cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	require.NoError(t, err, "an unregistered server-vended reporter must not fail the create")
+	assert.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
+}
+
 func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodHead, req.Method)

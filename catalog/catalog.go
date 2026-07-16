@@ -193,6 +193,28 @@ type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }
 
+// Closer is an optional interface implemented by catalogs that hold releasable
+// resources — currently a metrics reporter, and in future a stateful (e.g.
+// HTTP-backed) one. It is not part of [Catalog] because adding a method to that
+// widely-implemented interface would break every external implementation; a
+// follow-up may promote it. Callers holding a [Catalog] from [Load] should
+// release it via a type assertion:
+//
+//	cat, err := catalog.Load(ctx, name, props)
+//	if err != nil {
+//	    return err
+//	}
+//	if closer, ok := cat.(catalog.Closer); ok {
+//	    defer closer.Close()
+//	}
+//
+// All built-in catalogs (REST, SQL, Glue, Hive, Hadoop) implement Closer. Close
+// releases the catalog's own resources; a catalog built on a caller-owned handle
+// (e.g. the SQL catalog's *sql.DB) does not close that handle.
+type Closer interface {
+	Close() error
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {

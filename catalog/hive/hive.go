@@ -98,11 +98,33 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
 }
 
-// Close releases the Hive client and the catalog's metrics reporter, joining
-// any errors so one failing close does not skip the other.
+// Close releases the Hive client and the catalog's metrics reporter. Each close
+// is isolated from the other so one failing does not skip the other and leak its
+// resource — not just when a close returns an error (errors.Join already keeps
+// both), but when it panics: a bare errors.Join(c.client.Close(), c.reporter.Close())
+// would let a panic in the first close abort the second. Recovered panics are
+// converted to errors and joined with any close errors. Callers holding a
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
 func (c *Catalog) Close() error {
-	return errors.Join(c.client.Close(), c.reporter.Close())
+	return errors.Join(
+		closeIsolated(c.client.Close),
+		closeIsolated(c.reporter.Close),
+	)
 }
+
+// closeIsolated runs a close function, converting a panic into an error so a
+// single misbehaving close cannot abort a sibling close in the same Close call.
+func closeIsolated(closeFn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("hive catalog: panic during close: %v", r)
+		}
+	}()
+
+	return closeFn()
+}
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {

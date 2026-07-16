@@ -1533,27 +1533,19 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 }
 
 // TestCreateTableInvalidReporterDoesNotMutate pins that an invalid
-// metrics-reporter-impl fails CreateTable before any table is written to disk,
-// so a bad reporter can't turn a successful create into a reported failure that
-// then leaves the caller unable to retry (ErrTableAlreadyExists).
+// metrics-reporter-impl fails at catalog construction, before any table op runs,
+// so a bad reporter can never turn a successful create into a reported failure
+// (ErrTableAlreadyExists on retry) or leave a cached error that wedges later ops.
 func (s *HadoopCatalogTestSuite) TestCreateTableInvalidReporterDoesNotMutate() {
-	ctx := context.Background()
 	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
 
-	cat, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+	_, err := NewCatalog("test", s.warehouse, iceberg.Properties{
 		metrics.ReporterImplKey: "does-not-exist",
 	})
-	s.Require().NoError(err)
-
-	_, err = cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
 	s.Require().Error(err)
 
-	// The table must not have been created, so the failure is a clean no-op and
-	// the caller can retry rather than hit ErrTableAlreadyExists.
+	// No table op ran, so nothing was written to disk.
 	s.NoDirExists(filepath.Join(s.warehouse, "ns", "tbl", "metadata"))
-	exists, err := cat.CheckTableExists(ctx, []string{"ns", "tbl"})
-	s.Require().NoError(err)
-	s.False(exists)
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {
