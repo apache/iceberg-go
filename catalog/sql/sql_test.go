@@ -1093,6 +1093,177 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestDottedNamespaceComponentsRemainDistinct() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+	tag := databaseName()
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		dotted := table.Identifier{"company_." + tag, "sales"}
+		hierarchical := table.Identifier{"company_", tag, "sales"}
+		dottedChild := append(slices.Clone(dotted), "regional")
+		hierarchicalChild := append(slices.Clone(hierarchical), "regional")
+		s.Require().NoError(cat.CreateNamespace(ctx, dotted, iceberg.Properties{"kind": "dotted"}))
+		s.Require().NoError(cat.CreateNamespace(ctx, hierarchical, iceberg.Properties{"kind": "hierarchical"}))
+		s.Require().NoError(cat.CreateNamespace(ctx, dottedChild, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, hierarchicalChild, nil))
+
+		namespaces, err := cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.Contains(namespaces, dotted)
+		s.Contains(namespaces, hierarchical)
+		s.Contains(namespaces, dottedChild)
+		s.Contains(namespaces, hierarchicalChild)
+
+		dottedNamespaces, err := cat.ListNamespaces(ctx, dotted)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{dotted, dottedChild}, dottedNamespaces)
+		hierarchicalNamespaces, err := cat.ListNamespaces(ctx, hierarchical)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{hierarchical, hierarchicalChild}, hierarchicalNamespaces)
+
+		dottedProps, err := cat.LoadNamespaceProperties(ctx, dotted)
+		s.Require().NoError(err)
+		s.Equal("dotted", dottedProps["kind"])
+		hierarchicalProps, err := cat.LoadNamespaceProperties(ctx, hierarchical)
+		s.Require().NoError(err)
+		s.Equal("hierarchical", hierarchicalProps["kind"])
+
+		dottedTable := append(slices.Clone(dotted), "orders")
+		hierarchicalTable := append(slices.Clone(hierarchical), "orders")
+		dottedCreated, err := cat.CreateTable(ctx, dottedTable, tableSchemaNested)
+		s.Require().NoError(err)
+		hierarchicalCreated, err := cat.CreateTable(ctx, hierarchicalTable, tableSchemaNested)
+		s.Require().NoError(err)
+		s.NotEqual(dottedCreated.Location(), hierarchicalCreated.Location())
+		s.NotEqual(dottedCreated.MetadataLocation(), hierarchicalCreated.MetadataLocation())
+
+		var dottedTables []table.Identifier
+		for ident, listErr := range cat.ListTables(ctx, dotted) {
+			s.Require().NoError(listErr)
+			dottedTables = append(dottedTables, ident)
+		}
+		s.Equal([]table.Identifier{dottedTable}, dottedTables)
+		var hierarchicalTables []table.Identifier
+		for ident, listErr := range cat.ListTables(ctx, hierarchical) {
+			s.Require().NoError(listErr)
+			hierarchicalTables = append(hierarchicalTables, ident)
+		}
+		s.Equal([]table.Identifier{hierarchicalTable}, hierarchicalTables)
+
+		renamed := append(slices.Clone(hierarchical), "renamed_orders")
+		loaded, err := cat.RenameTable(ctx, dottedTable, renamed)
+		s.Require().NoError(err)
+		s.Equal(renamed, loaded.Identifier())
+		_, err = cat.LoadTable(ctx, dottedTable)
+		s.ErrorIs(err, catalog.ErrNoSuchTable)
+		_, err = cat.LoadTable(ctx, hierarchicalTable)
+		s.Require().NoError(err)
+
+		s.Require().NoError(cat.DropTable(ctx, renamed))
+		s.Require().NoError(cat.DropTable(ctx, hierarchicalTable))
+		s.Require().NoError(cat.DropNamespace(ctx, dottedChild))
+		s.Require().NoError(cat.DropNamespace(ctx, hierarchicalChild))
+		s.Require().NoError(cat.DropNamespace(ctx, dotted))
+		s.Require().NoError(cat.DropNamespace(ctx, hierarchical))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestDottedNamespaceUsesOwnLocationProperties() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+
+	for i, cat := range catalogs {
+		ctx := context.Background()
+		namespace := table.Identifier{"company." + databaseName(), "sales"}
+		location := "file://" + filepath.Join(s.warehouse, fmt.Sprintf("dotted-location-%d", i))
+		s.Require().NoError(cat.CreateNamespace(ctx, namespace, iceberg.Properties{"location": location}))
+
+		tableIdent := append(slices.Clone(namespace), "orders")
+		createdTable, err := cat.CreateTable(ctx, tableIdent, tableSchemaNested)
+		s.Require().NoError(err)
+		s.Equal(location+"/orders", createdTable.Location())
+
+		viewIdent := append(slices.Clone(namespace), "orders_view")
+		s.Require().NoError(cat.CreateView(ctx, viewIdent, tableSchemaNested, "SELECT * FROM orders", nil))
+		createdView, err := cat.LoadView(ctx, viewIdent)
+		s.Require().NoError(err)
+		s.Equal(location+"/orders_view", createdView.Location())
+
+		s.Require().NoError(cat.DropView(ctx, viewIdent))
+		s.Require().NoError(cat.DropTable(ctx, tableIdent))
+		s.Require().NoError(cat.DropNamespace(ctx, namespace))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestLegacyNamespaceEncodingPrefixRemainsReadable() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	db := s.getDB()
+	defer db.Close()
+
+	legacyName := "__iceberg_namespace_v1__:legacy_" + databaseName()
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO "iceberg_namespace_properties" `+
+			`("catalog_name", "namespace", "property_key", "property_value") VALUES (?, ?, ?, ?)`,
+		cat.Name(), legacyName, "owner", "legacy")
+	s.Require().NoError(err)
+
+	namespaces, err := cat.ListNamespaces(ctx, nil)
+	s.Require().NoError(err)
+	s.Contains(namespaces, table.Identifier{legacyName})
+
+	legacyIdent := table.Identifier{legacyName}
+	exists, err := cat.CheckNamespaceExists(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.True(exists)
+	children, err := cat.ListNamespaces(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Contains(children, legacyIdent)
+	props, err := cat.LoadNamespaceProperties(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Equal("legacy", props["owner"])
+	_, err = cat.UpdateNamespaceProperties(ctx, legacyIdent, nil, iceberg.Properties{"owner": "updated"})
+	s.Require().NoError(err)
+	props, err = cat.LoadNamespaceProperties(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Equal("updated", props["owner"])
+
+	tableIdent := append(slices.Clone(legacyIdent), "orders")
+	created, err := cat.CreateTable(ctx, tableIdent, tableSchemaNested)
+	s.Require().NoError(err)
+	loaded, err := cat.LoadTable(ctx, tableIdent)
+	s.Require().NoError(err)
+	s.Equal(created.MetadataLocation(), loaded.MetadataLocation())
+
+	s.Require().NoError(cat.DropTable(ctx, tableIdent))
+	s.Require().NoError(cat.DropNamespace(ctx, legacyIdent))
+}
+
+func (s *SqliteCatalogTestSuite) TestListNamespacesEscapesLikeWildcards() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+	tag := databaseName()
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		parent := table.Identifier{"sales%_!" + tag}
+		child := append(slices.Clone(parent), "regional")
+		// This namespace would match the unescaped SQL pattern for parent.
+		decoy := table.Identifier{"salesZZX" + tag, "regional"}
+
+		s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, decoy, nil))
+
+		namespaces, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{parent, child}, namespaces)
+
+		s.Require().NoError(cat.DropNamespace(ctx, child))
+		s.Require().NoError(cat.DropNamespace(ctx, parent))
+		s.Require().NoError(cat.DropNamespace(ctx, decoy))
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestLoadTableFromSelfIdentifier() {
 	tests := []struct {
 		cat   *sqlcat.Catalog
