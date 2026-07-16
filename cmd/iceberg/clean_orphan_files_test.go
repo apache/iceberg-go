@@ -19,14 +19,85 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io/fs"
 	"os"
 	"testing"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cleanOrphanCatalog struct {
+	catalog.Catalog
+	table *table.Table
+}
+
+func (c cleanOrphanCatalog) LoadTable(context.Context, table.Identifier) (*table.Table, error) {
+	return c.table, nil
+}
+
+type cleanOrphanOutput struct {
+	Output
+	results []CleanOrphanFilesResult
+	errors  []error
+}
+
+func (o *cleanOrphanOutput) CleanOrphanFilesResult(result CleanOrphanFilesResult) {
+	o.results = append(o.results, result)
+}
+
+func (o *cleanOrphanOutput) Error(err error) {
+	o.errors = append(o.errors, err)
+}
+
+func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	memFS := icebergio.NewMemFS()
+	location := "mem://preview/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	orphanPath := location + "/data/orphan.parquet"
+
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	require.NoError(t, memFS.WriteFile(metadataLocation, nil))
+	require.NoError(t, memFS.WriteFile(orphanPath, []byte("orphan")))
+
+	tbl := table.New(
+		table.Identifier{"db", "preview"},
+		meta,
+		metadataLocation,
+		func(context.Context) (icebergio.IO, error) { return memFS, nil },
+		nil,
+	)
+	output := &cleanOrphanOutput{}
+
+	runCleanOrphanFiles(ctx, output, cleanOrphanCatalog{table: tbl}, &CleanOrphanFilesCmd{
+		TableID:   "db.preview",
+		OlderThan: "1h",
+		Yes:       true,
+	})
+
+	require.Empty(t, output.errors)
+	require.Len(t, output.results, 2)
+	preview := output.results[0]
+	assert.True(t, preview.DryRun)
+	assert.Equal(t, 1, preview.OrphanFileCount)
+	require.Len(t, preview.OrphanFiles, 1)
+	assert.Equal(t, orphanPath, preview.OrphanFiles[0].Path)
+
+	deleted := output.results[1]
+	assert.False(t, deleted.DryRun)
+	assert.Equal(t, 1, deleted.OrphanFileCount)
+	assert.Equal(t, orphanPath, deleted.OrphanFiles[0].Path)
+	_, err = memFS.Open(orphanPath)
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+}
 
 func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 	const metadata = `{
@@ -169,6 +240,11 @@ func TestBuildCleanOrphanFilesResultDeletedFiltersToDeletedFiles(t *testing.T) {
 	require.Len(t, result.OrphanFiles, 1)
 	assert.Equal(t, "s3://bucket/data/file2.parquet", result.OrphanFiles[0].Path)
 	assert.Equal(t, int64(2048), result.OrphanFiles[0].SizeBytes)
+}
+
+func TestShouldPrintCleanOrphanPreview(t *testing.T) {
+	assert.False(t, shouldPrintCleanOrphanPreview(jsonOutput{}))
+	assert.True(t, shouldPrintCleanOrphanPreview(textOutput{}))
 }
 
 func TestTextOutputCleanOrphanFilesResultEmpty(t *testing.T) {

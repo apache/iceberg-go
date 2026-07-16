@@ -86,6 +86,102 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	assert.Equal(t, authorities, cfg.equalAuthorities)
 }
 
+func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
+	ctx := context.Background()
+	fs := io.NewMemFS()
+	location := "mem://plan-race/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+
+	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(metadataLocation, nil))
+
+	plannedOrphan := location + "/data/planned.parquet"
+	newOrphan := location + "/data/appeared-after-confirmation.parquet"
+	require.NoError(t, fs.WriteFile(plannedOrphan, []byte("planned")))
+
+	tbl := New(
+		[]string{"db", "plan_race"},
+		meta,
+		metadataLocation,
+		func(context.Context) (io.IO, error) { return fs, nil },
+		nil,
+	)
+
+	plan, err := tbl.PlanOrphanFiles(ctx, WithFilesOlderThan(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, []string{plannedOrphan}, plan.Files())
+	assert.Equal(t, []OrphanFile{{Path: plannedOrphan, SizeBytes: int64(len("planned"))}}, plan.OrphanFiles())
+	assert.False(t, plan.Cutoff().IsZero())
+
+	require.NoError(t, fs.WriteFile(newOrphan, []byte("new")))
+	_, err = tbl.ExecuteOrphanCleanup(ctx, plan, WithFilesOlderThan(time.Hour))
+	require.ErrorContains(t, err, "WithFilesOlderThan")
+
+	result, err := tbl.ExecuteOrphanCleanup(ctx, plan, WithCleanupMaxConcurrency(1))
+	require.NoError(t, err)
+	assert.Equal(t, []string{plannedOrphan}, result.DeletedFiles)
+
+	_, err = fs.Open(plannedOrphan)
+	assert.ErrorIs(t, err, stdfs.ErrNotExist)
+	file, err := fs.Open(newOrphan)
+	require.NoError(t, err)
+	assert.NoError(t, file.Close())
+}
+
+func TestExecuteOrphanCleanupRejectsPlanningOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  OrphanCleanupOption
+	}{
+		{name: "location", opt: WithLocation("mem://other")},
+		{name: "age", opt: WithFilesOlderThan(time.Hour)},
+		{name: "prefix mismatch mode", opt: WithPrefixMismatchMode(PrefixMismatchIgnore)},
+		{name: "equal schemes", opt: WithEqualSchemes(map[string]string{"s3a": "s3"})},
+		{name: "equal authorities", opt: WithEqualAuthorities(map[string]string{"old": "new"})},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := (Table{}).ExecuteOrphanCleanup(context.Background(), OrphanCleanupPlan{}, tt.opt)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "only valid while planning")
+		})
+	}
+}
+
+func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
+	ctx := context.Background()
+	location := "s3://bucket/mtime-table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	oldPath := location + "/data/old.parquet"
+	recentPath := location + "/data/recent.parquet"
+	now := time.Now()
+
+	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	mockFS := &mockListableIO{
+		entries: []mockWalkEntry{
+			{path: location, info: mockFileInfo{name: "mtime-table", mode: stdfs.ModeDir}},
+			{path: metadataLocation, info: mockFileInfo{name: "v1.metadata.json"}},
+			{path: oldPath, info: mockFileInfo{name: "old.parquet", size: 10, modTime: now.Add(-2 * time.Hour)}},
+			{path: recentPath, info: mockFileInfo{name: "recent.parquet", size: 20, modTime: now.Add(-10 * time.Minute)}},
+		},
+	}
+	tbl := New(
+		Identifier{"db", "mtime"},
+		meta,
+		metadataLocation,
+		func(context.Context) (io.IO, error) { return mockFS, nil },
+		nil,
+	)
+
+	plan, err := tbl.PlanOrphanFiles(ctx, WithFilesOlderThan(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, []string{oldPath}, plan.Files())
+	assert.Equal(t, []OrphanFile{{Path: oldPath, SizeBytes: 10}}, plan.OrphanFiles())
+}
+
 func TestNormalizeFilePath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
 		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
@@ -687,15 +783,16 @@ func (m *mockListableIO) WalkDir(root string, fn stdfs.WalkDirFunc) error {
 }
 
 type mockFileInfo struct {
-	name string
-	size int64
-	mode stdfs.FileMode
+	name    string
+	size    int64
+	mode    stdfs.FileMode
+	modTime time.Time
 }
 
 func (m mockFileInfo) Name() string         { return m.name }
 func (m mockFileInfo) Size() int64          { return m.size }
 func (m mockFileInfo) Mode() stdfs.FileMode { return m.mode }
-func (m mockFileInfo) ModTime() time.Time   { return time.Time{} }
+func (m mockFileInfo) ModTime() time.Time   { return m.modTime }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
 
