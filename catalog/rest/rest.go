@@ -1079,29 +1079,46 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
 }
 
+type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
+
+func paginateIdentifiers(fetch identifierPageFetcher, yield func(table.Identifier) bool) error {
+	seenTokens := make(map[string]struct{})
+	var pageToken string
+
+	for {
+		identifiers, nextPageToken, err := fetch(pageToken)
+		if err != nil {
+			return err
+		}
+		for _, identifier := range identifiers {
+			if !yield(identifier) {
+				return nil
+			}
+		}
+		if nextPageToken == "" {
+			return nil
+		}
+		if _, ok := seenTokens[nextPageToken]; ok {
+			return fmt.Errorf("%w: pagination cycle: repeated page token", ErrRESTError)
+		}
+
+		seenTokens[nextPageToken] = struct{}{}
+		pageToken = nextPageToken
+	}
+}
+
 // ListTables lists the tables in a namespace. If the server does not advertise
 // the list-tables endpoint, it yields no tables rather than an error.
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			tables, nextPageToken, err := r.listTablesPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, tbl := range tables {
-				if !yield(tbl, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listTablesPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }
@@ -1679,18 +1696,15 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	var allNamespaces []table.Identifier
 	pageSize := r.getPageSize(ctx)
-	var pageToken string
+	err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+		return r.listNamespacesPage(ctx, parent, pageToken, pageSize)
+	}, func(identifier table.Identifier) bool {
+		allNamespaces = append(allNamespaces, identifier)
 
-	for {
-		namespaces, nextPageToken, err := r.listNamespacesPage(ctx, parent, pageToken, pageSize)
-		if err != nil {
-			return nil, err
-		}
-		allNamespaces = append(allNamespaces, namespaces...)
-		if nextPageToken == "" {
-			break
-		}
-		pageToken = nextPageToken
+		return true
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return allNamespaces, nil
@@ -1873,24 +1887,13 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			views, nextPageToken, err := r.listViewsPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, view := range views {
-				if !yield(view, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listViewsPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }
@@ -2285,24 +2288,13 @@ type FunctionCatalog interface {
 func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			functions, nextPageToken, err := r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, function := range functions {
-				if !yield(function, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }
