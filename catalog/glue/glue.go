@@ -288,7 +288,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		ctx,
 		[]string{tableName},
 		metadataLocation,
-		io.LoadFSFunc(nil, metadataLocation),
+		io.LoadFSFunc(c.props, metadataLocation),
 		c,
 	)
 	if err != nil {
@@ -837,7 +837,7 @@ func (c *Catalog) convertGlueToIceberg(ctx context.Context, glueTable *types.Tab
 		utils.WithAwsConfig(ctx, c.awsCfg),
 		TableIdentifier(database, tableName),
 		metadataLocation,
-		io.LoadFSFunc(nil, metadataLocation),
+		io.LoadFSFunc(c.props, metadataLocation),
 		c,
 	)
 	if err != nil {
