@@ -27,12 +27,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -40,6 +40,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"golang.org/x/sync/semaphore"
 )
 
 // Compile-time proof that the REST catalog satisfies the table planner seam.
@@ -241,8 +242,21 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 	return table.ScanPlanningResult{
 		Tasks: tasks,
-		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation),
+		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req.Metadata)),
 	}, nil
+}
+
+// planIOBaseProps rebuilds the props the table's own FileIO was built with, so a
+// plan-scoped IO keeps settings like a custom S3 endpoint or region. loadTable's
+// config block never reaches the planner seam, so it isn't included.
+func (r *Catalog) planIOBaseProps(meta table.ScanPlanningMetadata) iceberg.Properties {
+	props := make(iceberg.Properties, len(r.props))
+	maps.Copy(props, r.props)
+	if meta != nil {
+		maps.Copy(props, meta.Properties())
+	}
+
+	return props
 }
 
 // collectScanTasks expands plan-task handles into their tasks, walking the
@@ -289,56 +303,43 @@ func remoteScanTasks(files []RESTFileScanTask, deletes []RESTDeleteFile) ([]tabl
 }
 
 // planIOFromCredentials wraps a plan's vended storage credentials in a lazy
-// PlanIO. With none vended it returns a nil PlanIO, and the scan falls back to
-// the table's own FileIO.
-func planIOFromCredentials(creds []StorageCredential, location string) table.PlanIO {
+// PlanIO, overlaid on the table's base IO props so vended keys win on collision.
+// With none vended it returns a nil PlanIO, and the scan falls back to the
+// table's own FileIO.
+func planIOFromCredentials(creds []StorageCredential, location string, baseProps iceberg.Properties) table.PlanIO {
 	if len(creds) == 0 {
 		return nil
 	}
 
-	return &planScopedIO{creds: creds, location: location}
+	// TODO(#1178): plan.storage-credentials is prefix-scoped, but this builds one
+	// IO from the metadata location — wrong cred if data/delete files sit under a
+	// different prefix. The scan-task decoder settles the PlanIO shape.
+	resolved := resolveStorageCredentials(creds, location)
+	props := make(iceberg.Properties, len(baseProps)+len(resolved))
+	maps.Copy(props, baseProps)
+	maps.Copy(props, resolved)
+
+	return &planScopedIO{refresher: &vendedCredentialRefresher{
+		mu:       semaphore.NewWeighted(1),
+		location: location,
+		props:    props,
+		// fetchCreds stays nil: a plan's creds can't be renewed via the
+		// table-credentials endpoint, so an expiry is fatal, not a re-fetch.
+	}}
 }
 
-// planScopedIO builds a FileIO from a plan's vended storage credentials on first
-// use and caches it. It satisfies table.PlanIO. Per the delivery contract a Scan
-// carrying plan-scoped IO is not read concurrently, but the mutex keeps the lazy
-// build and Close honest.
+// planScopedIO lazily builds and caches a FileIO from a plan's vended creds,
+// reusing vendedCredentialRefresher for expiry handling. Satisfies table.PlanIO.
 type planScopedIO struct {
-	creds    []StorageCredential
-	location string
-
-	mu     sync.Mutex
-	cached iceio.IO
+	refresher *vendedCredentialRefresher
 }
 
 func (p *planScopedIO) Load(ctx context.Context) (iceio.IO, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.cached != nil {
-		return p.cached, nil
-	}
-
-	fs, err := iceio.LoadFS(ctx, resolveStorageCredentials(p.creds, p.location), p.location)
-	if err != nil {
-		return nil, err
-	}
-	p.cached = fs
-
-	return p.cached, nil
+	return p.refresher.loadFS(ctx)
 }
 
 func (p *planScopedIO) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	closer, ok := p.cached.(interface{ Close() error })
-	p.cached = nil
-	if ok {
-		return closer.Close()
-	}
-
-	return nil
+	return p.refresher.close()
 }
 
 // planTableScanRequestFrom builds the planTableScan request body from the
@@ -355,14 +356,42 @@ func planTableScanRequestFrom(req table.ScanPlanningRequest) (PlanTableScanReque
 	}
 
 	if req.RowFilter != nil && !req.RowFilter.Equals(iceberg.AlwaysTrue{}) {
-		filter, err := json.Marshal(req.RowFilter)
+		filter, err := marshalScanFilter(req)
 		if err != nil {
-			return PlanTableScanRequest{}, fmt.Errorf("%w: encoding scan filter: %s", iceberg.ErrInvalidArgument, err)
+			return PlanTableScanRequest{}, err
 		}
 		out.Filter = filter
 	}
 
 	return out, nil
+}
+
+// marshalScanFilter binds the row filter before encoding it: a bound term gives
+// the encoder the field type it needs for ambiguous literals (a bare timestamp
+// can't pick timestamp vs timestamptz and won't serialize unbound), and binding
+// errors loudly on an expression type it doesn't know.
+func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
+	if req.Metadata == nil {
+		return nil, fmt.Errorf("%w: cannot encode scan filter without table metadata", iceberg.ErrInvalidArgument)
+	}
+
+	caseSensitive := true
+	if req.CaseSensitive != nil {
+		caseSensitive = *req.CaseSensitive
+	}
+
+	// Snapshot-schema selection (UseSnapshotSchema) is OQ4, deferred; bind current.
+	bound, err := iceberg.BindExpr(req.Metadata.CurrentSchema(), req.RowFilter, caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("%w: binding scan filter: %s", iceberg.ErrInvalidArgument, err)
+	}
+
+	filter, err := json.Marshal(bound)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encoding scan filter: %s", iceberg.ErrInvalidArgument, err)
+	}
+
+	return filter, nil
 }
 
 // --- Low-level client methods -----------------------------------------------

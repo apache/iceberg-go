@@ -25,9 +25,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -845,14 +847,44 @@ func stringPtr(s string) *string { return &s }
 func TestPlanTableScanRequestFromEncodesFilter(t *testing.T) {
 	t.Parallel()
 
+	meta := scanTestMetadata{schema: scanFilterSchema()}
+
 	t.Run("predicate", func(t *testing.T) {
 		t.Parallel()
 
 		wire, err := planTableScanRequestFrom(table.ScanPlanningRequest{
+			Metadata:  meta,
 			RowFilter: iceberg.EqualTo(iceberg.Reference("i"), int32(25)),
 		})
 		require.NoError(t, err)
 		assert.JSONEq(t, `{"type":"eq","term":"i","value":25}`, string(wire.Filter))
+	})
+
+	// Only serializable once bound: binding to the timestamptz field is what adds
+	// the +00:00 offset a bare timestamp literal can't pick on its own.
+	t.Run("timestamp predicate", func(t *testing.T) {
+		t.Parallel()
+
+		lit, err := iceberg.NewLiteral("2022-08-14T10:00:00").To(iceberg.PrimitiveTypes.Timestamp)
+		require.NoError(t, err)
+
+		wire, err := planTableScanRequestFrom(table.ScanPlanningRequest{
+			Metadata:  meta,
+			RowFilter: iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("ts"), lit),
+		})
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"type":"eq","term":"ts","value":"2022-08-14T10:00:00+00:00"}`, string(wire.Filter))
+	})
+
+	// A filter that can't bind is a loud error, not a dropped or bad filter.
+	t.Run("unbindable filter errors", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := planTableScanRequestFrom(table.ScanPlanningRequest{
+			Metadata:  meta,
+			RowFilter: iceberg.EqualTo(iceberg.Reference("nonesuch"), int32(1)),
+		})
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 
 	for _, tt := range []struct {
@@ -893,9 +925,32 @@ func TestPlanTableScanRequestFromPassesFields(t *testing.T) {
 	assert.Nil(t, wire.Filter)
 }
 
+// scanFilterSchema is the schema filter-binding tests resolve references against.
+func scanFilterSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "i", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "ts", Type: iceberg.PrimitiveTypes.TimestampTz},
+	)
+}
+
+// scanTestMetadata is a ScanPlanningMetadata carrying only a schema — all filter
+// encoding needs.
+type scanTestMetadata struct{ schema *iceberg.Schema }
+
+func (m scanTestMetadata) CurrentSchema() *iceberg.Schema               { return m.schema }
+func (m scanTestMetadata) Schemas() []*iceberg.Schema                   { return []*iceberg.Schema{m.schema} }
+func (m scanTestMetadata) PartitionSpec() iceberg.PartitionSpec         { return iceberg.PartitionSpec{} }
+func (m scanTestMetadata) PartitionSpecByID(int) *iceberg.PartitionSpec { return nil }
+func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot             { return nil }
+func (m scanTestMetadata) SnapshotByID(int64) *table.Snapshot           { return nil }
+func (m scanTestMetadata) Properties() iceberg.Properties               { return nil }
+
 // planFilesReq is a minimal planner request naming the test table.
 func planFilesReq() table.ScanPlanningRequest {
-	return table.ScanPlanningRequest{Identifier: table.Identifier{"db", "tbl"}}
+	return table.ScanPlanningRequest{
+		Identifier: table.Identifier{"db", "tbl"},
+		Metadata:   scanTestMetadata{schema: scanFilterSchema()},
+	}
 }
 
 // TestPlanFilesCompletedEmpty covers an inline-completed plan with no tasks: it
@@ -1039,20 +1094,85 @@ func TestPlanFilesFanoutCycleTerminates(t *testing.T) {
 }
 
 // TestPlanFilesSurfacesVendedCredentials checks a plan that vends storage
-// credentials yields a non-nil plan-scoped IO.
+// credentials yields a plan-scoped IO that keeps the catalog's IO props (the
+// custom endpoint here) rather than running on the vended creds alone, with the
+// vended values winning where they overlap.
 func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 	t.Parallel()
 
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"s3://bucket/","config":{"s3.access-key-id":"ak"}}]}`))
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"s3://bucket/","config":{"s3.access-key-id":"vended"}}]}`))
 			require.NoError(t, err)
 		})
 	})
+	cat.props["s3.endpoint"] = "https://minio.local"
+	cat.props["s3.access-key-id"] = "static"
 
-	result, err := cat.PlanFiles(context.Background(), planFilesReq())
+	req := planFilesReq()
+	req.MetadataLocation = "s3://bucket/db/tbl/metadata/v1.json"
+
+	result, err := cat.PlanFiles(context.Background(), req)
 	require.NoError(t, err)
-	assert.NotNil(t, result.IO)
+	require.NotNil(t, result.IO)
+
+	planIO, ok := result.IO.(*planScopedIO)
+	require.True(t, ok)
+	assert.Equal(t, "https://minio.local", planIO.refresher.props["s3.endpoint"])
+	assert.Equal(t, "vended", planIO.refresher.props["s3.access-key-id"])
+}
+
+// TestPlanScopedIOExpiredCredentials checks a plan whose creds state an expiry
+// fails loudly once past it, since plan creds can't be renewed.
+func TestPlanScopedIOExpiredCredentials(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	// file:// keeps LoadFS offline; the scheme is incidental to the expiry logic.
+	creds := []StorageCredential{{
+		Prefix: "file:///bucket/",
+		Config: iceberg.Properties{
+			"s3.access-key-id":               "vended",
+			"s3.session-token-expires-at-ms": strconv.FormatInt(now.Add(time.Hour).UnixMilli(), 10),
+		},
+	}}
+
+	planIO := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil)
+	require.NotNil(t, planIO)
+
+	p, ok := planIO.(*planScopedIO)
+	require.True(t, ok)
+	p.refresher.nowFunc = func() time.Time { return now }
+
+	// The first load caches an IO and picks up the stated expiry.
+	fs, err := p.Load(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, fs)
+	assert.Equal(t, now.Add(time.Hour).UnixMilli(), p.refresher.expiresAt.UnixMilli())
+
+	// Past the expiry, with no endpoint to renew from, the load fails.
+	p.refresher.nowFunc = func() time.Time { return now.Add(2 * time.Hour) }
+	_, err = p.Load(context.Background())
+	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
+}
+
+// TestPlanScopedIOCredentialsWithoutExpiry checks creds stating no expiry never
+// expire: the fallback TTL exists to trigger a re-fetch a plan-scoped IO can't do.
+func TestPlanScopedIOCredentialsWithoutExpiry(t *testing.T) {
+	t.Parallel()
+
+	creds := []StorageCredential{{Prefix: "file:///bucket/", Config: iceberg.Properties{"s3.access-key-id": "vended"}}}
+
+	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil).(*planScopedIO)
+	require.True(t, ok)
+
+	_, err := p.Load(context.Background())
+	require.NoError(t, err)
+	assert.True(t, p.refresher.expiresAt.IsZero())
+
+	p.refresher.nowFunc = func() time.Time { return time.Now().Add(999 * time.Hour) }
+	_, err = p.Load(context.Background())
+	require.NoError(t, err)
 }
 
 // TestPlanFilesPropagatesFailure checks a failed plan surfaces as ErrPlanFailed.
