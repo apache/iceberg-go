@@ -20,13 +20,19 @@ package hive
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/table"
 	"github.com/beltran/gohive/hive_metastore"
 )
 
 func schemaToHiveColumns(schema *iceberg.Schema) []*hive_metastore.FieldSchema {
+	if schema == nil {
+		return nil
+	}
+
 	columns := make([]*hive_metastore.FieldSchema, 0, len(schema.Fields()))
 	for _, field := range schema.Fields() {
 		columns = append(columns, fieldToHiveColumn(field))
@@ -136,46 +142,97 @@ func constructHiveTable(dbName, tableName, location, metadataLocation string, sc
 	for k, v := range props {
 		parameters[k] = v
 	}
+	setTranslatedIcebergProperties(parameters, props)
 	delete(parameters, PreviousMetadataLocationKey)
 
 	parameters[TableTypeKey] = TableTypeIceberg
 	parameters[MetadataLocationKey] = metadataLocation
 	parameters[ExternalKey] = "TRUE"
-	parameters["storage_handler"] = "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler"
+	parameters[StorageHandlerKey] = IcebergStorageHandler
 
 	return &hive_metastore.Table{
-		TableName: tableName,
-		DbName:    dbName,
-		TableType: TableTypeExternalTable,
-		Sd: &hive_metastore.StorageDescriptor{
-			Cols:         schemaToHiveColumns(schema),
-			Location:     location,
-			InputFormat:  "org.apache.iceberg.mr.hive.HiveIcebergInputFormat",
-			OutputFormat: "org.apache.iceberg.mr.hive.HiveIcebergOutputFormat",
-			SerdeInfo: &hive_metastore.SerDeInfo{
-				SerializationLib: "org.apache.iceberg.mr.hive.HiveIcebergSerDe",
-			},
-		},
+		TableName:  tableName,
+		DbName:     dbName,
+		TableType:  TableTypeExternalTable,
+		Sd:         buildIcebergStorageDescriptor(location, schema),
 		Parameters: parameters,
 	}
 }
 
-func updateHiveTableForCommit(existing *hive_metastore.Table, newMetadataLocation string) *hive_metastore.Table {
-	// Copy the existing table
-	updated := *existing
+func buildIcebergStorageDescriptor(location string, schema *iceberg.Schema) *hive_metastore.StorageDescriptor {
+	return &hive_metastore.StorageDescriptor{
+		Cols:         schemaToHiveColumns(schema),
+		Location:     location,
+		InputFormat:  "org.apache.iceberg.mr.hive.HiveIcebergInputFormat",
+		OutputFormat: "org.apache.iceberg.mr.hive.HiveIcebergOutputFormat",
+		SerdeInfo: &hive_metastore.SerDeInfo{
+			SerializationLib: "org.apache.iceberg.mr.hive.HiveIcebergSerDe",
+		},
+	}
+}
 
-	// Update parameters
+func cloneStorageDescriptor(existing *hive_metastore.StorageDescriptor) *hive_metastore.StorageDescriptor {
+	cloned := *existing
+	cloned.Parameters = maps.Clone(existing.Parameters)
+	cloned.BucketCols = append([]string(nil), existing.BucketCols...)
+	cloned.SortCols = append([]*hive_metastore.Order(nil), existing.SortCols...)
+	if existing.SerdeInfo != nil {
+		serdeInfo := *existing.SerdeInfo
+		serdeInfo.Parameters = maps.Clone(existing.SerdeInfo.Parameters)
+		cloned.SerdeInfo = &serdeInfo
+	}
+
+	return &cloned
+}
+
+func setTranslatedIcebergProperties(parameters map[string]string, props iceberg.Properties) {
+	if value, ok := props[GCEnabledKey]; ok {
+		parameters[ExternalTablePurgeKey] = value
+	}
+}
+
+func updateHiveTableForCommit(
+	existing *hive_metastore.Table,
+	current, staged table.Metadata,
+	newMetadataLocation string,
+) *hive_metastore.Table {
+	updated := *existing
+	updated.Parameters = maps.Clone(existing.Parameters)
 	if updated.Parameters == nil {
 		updated.Parameters = make(map[string]string)
 	}
 
-	// Store previous metadata location
-	if oldLocation, ok := updated.Parameters[MetadataLocationKey]; ok {
+	// HMS has no ownership marker for user properties. As in the Java implementation,
+	// obsolete keys are assumed to have been written from the previous Iceberg metadata.
+	for key := range current.Properties() {
+		delete(updated.Parameters, key)
+	}
+	if _, ok := current.Properties()[GCEnabledKey]; ok {
+		delete(updated.Parameters, ExternalTablePurgeKey)
+	}
+	for key, value := range staged.Properties() {
+		updated.Parameters[key] = value
+	}
+	setTranslatedIcebergProperties(updated.Parameters, staged.Properties())
+	delete(updated.Parameters, PreviousMetadataLocationKey)
+
+	// Read the unmodified parameters so a property cannot replace the real previous pointer.
+	if oldLocation, ok := existing.Parameters[MetadataLocationKey]; ok {
 		updated.Parameters[PreviousMetadataLocationKey] = oldLocation
 	}
 
-	// Set new metadata location
+	updated.Parameters[TableTypeKey] = TableTypeIceberg
 	updated.Parameters[MetadataLocationKey] = newMetadataLocation
+	updated.Parameters[ExternalKey] = "TRUE"
+	updated.Parameters[StorageHandlerKey] = IcebergStorageHandler
+
+	if existing.Sd == nil {
+		updated.Sd = buildIcebergStorageDescriptor(staged.Location(), staged.CurrentSchema())
+	} else {
+		updated.Sd = cloneStorageDescriptor(existing.Sd)
+		updated.Sd.Cols = schemaToHiveColumns(staged.CurrentSchema())
+		updated.Sd.Location = staged.Location()
+	}
 
 	return &updated
 }
