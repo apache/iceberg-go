@@ -192,10 +192,10 @@ func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
 	require.NotNil(t, resp.PlanID)
 	assert.Equal(t, "abc", *resp.PlanID)
 	assert.Len(t, resp.PlanTasks, 1)
-	// TODO(Phase 2): assert decoded task/delete-file content once the
-	// scan-task decoder fills RESTFileScanTask and RESTDeleteFile.
-	assert.Len(t, resp.FileScanTasks, 1)
-	assert.Len(t, resp.DeleteFiles, 1)
+	require.Len(t, resp.FileScanTasks, 1)
+	require.NotNil(t, resp.FileScanTasks[0].DataFile)
+	require.Len(t, resp.DeleteFiles, 1)
+	assert.Equal(t, "position-deletes", resp.DeleteFiles[0].Content)
 }
 
 func TestPlanTableScanResponseAcceptsFailedWithoutUsableError(t *testing.T) {

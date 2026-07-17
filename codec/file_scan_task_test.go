@@ -69,6 +69,8 @@ func TestEncodeDecodeFileScanTaskRoundTrip(t *testing.T) {
 			require.Equal(t, original.Length, decoded.Length)
 			require.Equal(t, original.FirstRowID, decoded.FirstRowID)
 			require.Equal(t, original.DataSequenceNumber, decoded.DataSequenceNumber)
+			require.NotNil(t, decoded.Residual)
+			require.True(t, decoded.Residual.Equals(original.Residual))
 		})
 	}
 }
@@ -154,6 +156,7 @@ func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
 	task.DeleteFiles = nil
 	task.EqualityDeleteFiles = nil
 	task.DeletionVectorFiles = nil
+	task.Residual = nil
 
 	bytes, err := codec.EncodeFileScanTask(task, spec, schema, 2)
 	require.NoError(t, err)
@@ -163,6 +166,38 @@ func TestEncodeFileScanTaskEmptyDeleteLists(t *testing.T) {
 	require.Empty(t, decoded.DeleteFiles)
 	require.Empty(t, decoded.EqualityDeleteFiles)
 	require.Empty(t, decoded.DeletionVectorFiles)
+	require.Nil(t, decoded.Residual)
+}
+
+func TestEncodeFileScanTaskTimestampResidualUsesSchema(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "event_time", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+	)
+	spec := *iceberg.UnpartitionedSpec
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"s3://bucket/data.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		10,
+		100,
+	)
+	require.NoError(t, err)
+	task := table.FileScanTask{
+		File:     builder.Build(),
+		Length:   100,
+		Residual: iceberg.EqualTo(iceberg.Reference("event_time"), iceberg.Timestamp(1_700_000_000_000_000)),
+	}
+
+	encoded, err := codec.EncodeFileScanTask(task, spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := codec.DecodeFileScanTask(encoded, spec, schema, 2)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.Residual)
+	require.True(t, decoded.Residual.Equals(task.Residual))
 }
 
 func TestEncodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
@@ -206,6 +241,7 @@ func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpe
 		DeleteFiles:        []iceberg.DataFile{delete1},
 		Start:              0,
 		Length:             1024 * 1024,
+		Residual:           iceberg.EqualTo(iceberg.Reference("id"), int64(42)),
 		FirstRowID:         &firstRow,
 		DataSequenceNumber: &dataSeq,
 	}
