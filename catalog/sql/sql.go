@@ -662,6 +662,10 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 }
 
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	if err := catalog.ValidateTableIdentifier(ident); err != nil {
+		return nil, "", err
+	}
+
 	ns := catalog.NamespaceFromIdent(ident)
 	tblName := catalog.TableNameFromIdent(ident)
 	nsKey, err := c.namespaceKey(ctx, ns)
@@ -752,6 +756,10 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 }
 
 func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return nil, err
+	}
+
 	ns := catalog.NamespaceFromIdent(identifier)
 	tbl := catalog.TableNameFromIdent(identifier)
 	nsKey, err := c.namespaceKey(ctx, ns)
@@ -799,6 +807,10 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return err
+	}
+
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
 	if err != nil {
 		return err
@@ -833,6 +845,10 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 }
 
 func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) error {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return err
+	}
+
 	tbl, err := c.LoadTable(ctx, identifier)
 	if err != nil {
 		return err
@@ -853,6 +869,13 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+	if err := catalog.ValidateTableIdentifier(from); err != nil {
+		return nil, err
+	}
+	if err := catalog.ValidateTableIdentifier(to); err != nil {
+		return nil, err
+	}
+
 	fromNs, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(from))
 	if err != nil {
 		return nil, err
@@ -919,6 +942,10 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 }
 
 func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return false, err
+	}
+
 	_, err := c.LoadTable(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, catalog.ErrNoSuchTable) {

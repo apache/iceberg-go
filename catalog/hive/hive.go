@@ -254,7 +254,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 // identifier, version (with SQL representations), schema, and optional CreateViewOpt for location and properties.
 // Returns the created *view.View, or an error if the namespace is missing, a view/table already exists, or creation fails.
 func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +616,7 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 
 // LoadView loads a view from the catalog.
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +650,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 
 // DropView drops a view from the catalog.
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return err
 	}
@@ -691,7 +691,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 
 // CheckViewExists checks if a view exists in the catalog.
 func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -897,8 +897,19 @@ func (c *Catalog) getIcebergTable(ctx context.Context, database, tableName strin
 }
 
 func identifierToTableName(identifier table.Identifier) (string, string, error) {
+	return identifierToObjectName(identifier, catalog.ValidateTableIdentifier, catalog.ErrNoSuchTable, "table")
+}
+
+func identifierToViewName(identifier table.Identifier) (string, string, error) {
+	return identifierToObjectName(identifier, catalog.ValidateViewIdentifier, catalog.ErrNoSuchView, "view")
+}
+
+func identifierToObjectName(identifier table.Identifier, validate func(table.Identifier) error, notFound error, objectType string) (string, string, error) {
+	if err := validate(identifier); err != nil {
+		return "", "", err
+	}
 	if len(identifier) != 2 {
-		return "", "", fmt.Errorf("invalid identifier, expected [database, table]: %v", identifier)
+		return "", "", fmt.Errorf("%w: expected [database, %s], got %v", notFound, objectType, identifier)
 	}
 
 	return identifier[0], identifier[1], nil
