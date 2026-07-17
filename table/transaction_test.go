@@ -747,8 +747,7 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantGoWriteSparkRead() {
 	s.Require().NotEmpty(tasks)
 	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
 
-	// #988: the shredded fields' bounds are written under the parent variant field id,
-	// and Spark plans/reads the table below without choking on them.
+	// Shredded child bounds are stored under the parent variant field id.
 	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
 	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
 

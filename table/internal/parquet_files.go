@@ -979,6 +979,7 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		leaf     variantLeaf
 		parentID int
 		agg      StatsAgg
+		invalid  bool
 	}
 
 	byTyped := make(map[string]*leafAgg)
@@ -996,8 +997,8 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		}
 		for _, lf := range enumerateVariantLeaves([]string{f.Name}, vt.TypedValue()) {
 			byTyped[lf.typedPath] = &leafAgg{leaf: lf, parentID: parentID}
-			if lf.valuePath != "" {
-				residualParent[lf.valuePath] = struct{}{}
+			for _, vp := range lf.valuePaths {
+				residualParent[vp] = struct{}{}
 			}
 		}
 	}
@@ -1031,36 +1032,38 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 			}
 
 			e, isTyped := byTyped[path]
-			if !isTyped {
+			if !isTyped || e.invalid {
 				continue
 			}
 			set, serr := cc.StatsSet()
-			if serr != nil || !set {
-				continue
-			}
 			st, terr := cc.Statistics()
-			if terr != nil || st == nil || !st.HasMinMax() {
-				continue
-			}
-			if e.agg == nil {
-				agg, aerr := p.createStatsAgg(e.leaf.icebergType, st.Type().String(), 0)
-				if aerr != nil {
-					slog.Warn("variant bounds: no stats aggregator for shredded field", "path", e.leaf.jsonPath, "err", aerr)
+			switch {
+			case serr != nil || !set || terr != nil || st == nil:
+				e.invalid = true
+			case st.HasMinMax():
+				if e.agg == nil {
+					agg, aerr := p.createStatsAgg(e.leaf.icebergType, st.Type().String(), 0)
+					if aerr != nil {
+						slog.Warn("variant bounds: no stats aggregator for shredded field", "path", e.leaf.jsonPath, "err", aerr)
+						e.invalid = true
 
-					continue
+						break
+					}
+					e.agg = agg
 				}
-				e.agg = agg
+				e.agg.Update(wrapStatsForType(st, e.leaf.icebergType))
+			case !st.HasNullCount() || cc.NumValues()-st.NullCount() > 0:
+				e.invalid = true
 			}
-			e.agg.Update(wrapStatsForType(st, e.leaf.icebergType))
 		}
 	}
 
 	perParent := make(map[int][]variantFieldBound)
 	for _, e := range byTyped {
-		if e.agg == nil {
+		if e.invalid || e.agg == nil {
 			continue
 		}
-		if e.leaf.valuePath != "" && residualBad[e.leaf.valuePath] {
+		if slices.ContainsFunc(e.leaf.valuePaths, func(vp string) bool { return residualBad[vp] }) {
 			continue
 		}
 		lo, hi := e.agg.Min(), e.agg.Max()

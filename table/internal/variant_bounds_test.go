@@ -18,11 +18,15 @@
 package internal
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
+	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
@@ -76,10 +80,12 @@ func TestEnumerateVariantLeavesNestedObject(t *testing.T) {
 	assert.Len(t, leaves, 3)
 
 	assert.Equal(t, "payload.typed_value.a.typed_value", got["$['a']"].typedPath)
-	assert.Equal(t, "payload.typed_value.a.value", got["$['a']"].valuePath)
+	assert.Equal(t, []string{"payload.value", "payload.typed_value.a.value"}, got["$['a']"].valuePaths)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, got["$['a']"].icebergType)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, got["$['n']"].icebergType)
 	assert.Equal(t, "payload.typed_value.location.typed_value.latitude.typed_value", got["$['location']['latitude']"].typedPath)
+	// nested leaf carries the full ancestor residual chain: root, location, latitude.
+	assert.Equal(t, []string{"payload.value", "payload.typed_value.location.value", "payload.typed_value.location.typed_value.latitude.value"}, got["$['location']['latitude']"].valuePaths)
 	assert.Equal(t, iceberg.PrimitiveTypes.Float64, got["$['location']['latitude']"].icebergType)
 }
 
@@ -89,7 +95,7 @@ func TestEnumerateVariantLeavesRootScalar(t *testing.T) {
 	require.Len(t, leaves, 1)
 	assert.Equal(t, "$", leaves[0].jsonPath)
 	assert.Equal(t, "payload.typed_value", leaves[0].typedPath)
-	assert.Equal(t, "payload.value", leaves[0].valuePath)
+	assert.Equal(t, []string{"payload.value"}, leaves[0].valuePaths)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, leaves[0].icebergType)
 }
 
@@ -138,4 +144,196 @@ func TestIsNaNLiteral(t *testing.T) {
 	assert.False(t, isNaNLiteral(iceberg.NewLiteral(float32(1.5))))
 	assert.False(t, isNaNLiteral(iceberg.NewLiteral(1.5)))
 	assert.False(t, isNaNLiteral(iceberg.NewLiteral(int64(3))))
+}
+
+func le64(v int64) []byte {
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, uint64(v))
+
+	return b
+}
+
+// buildShreddedVariantMeta builds a 2-row-group FileMetaData with caller-set typed_value stats per row group.
+func buildShreddedVariantMeta(t *testing.T, tv0, tv1 metadata.EncodedStatistics) *metadata.FileMetaData {
+	t.Helper()
+
+	payload, err := schema.NewGroupNode("payload", parquet.Repetitions.Optional, schema.FieldList{
+		schema.NewByteArrayNode("metadata", parquet.Repetitions.Optional, -1),
+		schema.NewByteArrayNode("value", parquet.Repetitions.Optional, -1),
+		schema.NewInt64Node("typed_value", parquet.Repetitions.Optional, -1),
+	}, -1)
+	require.NoError(t, err)
+	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{payload}, -1)
+	require.NoError(t, err)
+
+	fmb := metadata.NewFileMetadataBuilder(schema.NewSchema(root), parquet.NewWriterProperties(), nil)
+
+	var metaStats, valStats metadata.EncodedStatistics
+	metaStats.SetNullCount(0)
+	valStats.SetNullCount(2) // residual all-null
+
+	info := metadata.ChunkMetaInfo{NumValues: 2, DataPageOffset: 4, IndexPageOffset: -1, CompressedSize: 8, UncompressedSize: 8}
+	setChunk := func(rg *metadata.RowGroupMetaDataBuilder, st metadata.EncodedStatistics) {
+		c := rg.NextColumnChunk()
+		if st.IsSet() {
+			c.SetStats(st)
+		}
+		require.NoError(t, c.Finish(info, false, false, metadata.EncodingStats{}))
+	}
+
+	for i, tv := range []metadata.EncodedStatistics{tv0, tv1} {
+		rg := fmb.AppendRowGroup()
+		setChunk(rg, metaStats)
+		setChunk(rg, valStats)
+		setChunk(rg, tv)
+		require.NoError(t, rg.Finish(24, int16(i)))
+	}
+
+	fmd, err := fmb.Finish()
+	require.NoError(t, err)
+
+	return fmd
+}
+
+func TestCollectVariantBoundsIncompleteRowGroup(t *testing.T) {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name:     "payload",
+		Type:     extensions.NewShreddedVariantType(arrow.PrimitiveTypes.Int64),
+		Nullable: true,
+	}}, nil)
+	colMapping := map[string]int{"payload": 1}
+
+	minmax := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetMin(le64(5))
+		e.SetMax(le64(9))
+		e.SetNullCount(0)
+
+		return e
+	}
+	nonNullNoMinMax := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetNullCount(0) // 2 non-null values, no min/max
+
+		return e
+	}
+	allNull := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetNullCount(2)
+
+		return e
+	}
+
+	for _, tt := range []struct {
+		name      string
+		tv0, tv1  metadata.EncodedStatistics
+		wantBound bool
+	}{
+		{"non-null row group without min/max drops bound", nonNullNoMinMax(), minmax(), false},
+		{"row group with no stats drops bound", metadata.EncodedStatistics{}, minmax(), false},
+		{"all-null row group keeps bound", allNull(), minmax(), true},
+		{"both row groups valued keeps bound", minmax(), minmax(), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := buildShreddedVariantMeta(t, tt.tv0, tt.tv1)
+			lo, hi := parquetFormat{}.collectVariantBounds(meta, arrowSchema, colMapping)
+			_, hasLo := lo[1]
+			_, hasHi := hi[1]
+			assert.Equal(t, tt.wantBound, hasLo, "lower bound presence")
+			assert.Equal(t, tt.wantBound, hasHi, "upper bound presence")
+		})
+	}
+}
+
+func le64f(v float64) []byte {
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, math.Float64bits(v))
+
+	return b
+}
+
+func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
+	// payload variant shredded as { location: { latitude: float64 } }.
+	inner := arrow.StructOf(arrow.Field{Name: "latitude", Type: arrow.PrimitiveTypes.Float64})
+	obj := arrow.StructOf(arrow.Field{Name: "location", Type: inner})
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: extensions.NewShreddedVariantType(obj), Nullable: true,
+	}}, nil)
+	colMapping := map[string]int{"payload": 1}
+
+	lat, err := schema.NewGroupNode("latitude", parquet.Repetitions.Optional, schema.FieldList{
+		schema.NewByteArrayNode("value", parquet.Repetitions.Optional, -1),
+		schema.NewFloat64Node("typed_value", parquet.Repetitions.Optional, -1),
+	}, -1)
+	require.NoError(t, err)
+	latTyped, err := schema.NewGroupNode("typed_value", parquet.Repetitions.Optional, schema.FieldList{lat}, -1)
+	require.NoError(t, err)
+	loc, err := schema.NewGroupNode("location", parquet.Repetitions.Optional, schema.FieldList{
+		schema.NewByteArrayNode("value", parquet.Repetitions.Optional, -1),
+		latTyped,
+	}, -1)
+	require.NoError(t, err)
+	payloadTyped, err := schema.NewGroupNode("typed_value", parquet.Repetitions.Optional, schema.FieldList{loc}, -1)
+	require.NoError(t, err)
+	payload, err := schema.NewGroupNode("payload", parquet.Repetitions.Optional, schema.FieldList{
+		schema.NewByteArrayNode("metadata", parquet.Repetitions.Optional, -1),
+		schema.NewByteArrayNode("value", parquet.Repetitions.Optional, -1),
+		payloadTyped,
+	}, -1)
+	require.NoError(t, err)
+	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{payload}, -1)
+	require.NoError(t, err)
+
+	allNull := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetNullCount(2)
+
+		return e
+	}
+	latMinMax := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetMin(le64f(1.5))
+		e.SetMax(le64f(8.5))
+		e.SetNullCount(0)
+
+		return e
+	}
+	info := metadata.ChunkMetaInfo{NumValues: 2, DataPageOffset: 4, IndexPageOffset: -1, CompressedSize: 8, UncompressedSize: 8}
+
+	// locValStats is the ancestor (location) residual value column under test.
+	// Column order (depth-first leaves): payload.metadata, payload.value,
+	// location.value, latitude.value, latitude.typed_value.
+	build := func(locValStats metadata.EncodedStatistics) *metadata.FileMetaData {
+		fmb := metadata.NewFileMetadataBuilder(schema.NewSchema(root), parquet.NewWriterProperties(), nil)
+		set := func(rg *metadata.RowGroupMetaDataBuilder, st metadata.EncodedStatistics) {
+			c := rg.NextColumnChunk()
+			if st.IsSet() {
+				c.SetStats(st)
+			}
+			require.NoError(t, c.Finish(info, false, false, metadata.EncodingStats{}))
+		}
+		rg := fmb.AppendRowGroup()
+		set(rg, allNull())   // payload.metadata
+		set(rg, allNull())   // payload.value (root residual, benign)
+		set(rg, locValStats) // location.value (ancestor residual under test)
+		set(rg, allNull())   // latitude.value (leaf residual, benign)
+		set(rg, latMinMax()) // latitude.typed_value (produces the bound)
+		require.NoError(t, rg.Finish(40, 0))
+		fmd, err := fmb.Finish()
+		require.NoError(t, err)
+
+		return fmd
+	}
+
+	// location residual has non-null (non-object location) values: latitude bound must drop.
+	nonNull := metadata.EncodedStatistics{}
+	nonNull.SetNullCount(0)
+	lo, hi := parquetFormat{}.collectVariantBounds(build(nonNull), arrowSchema, colMapping)
+	assert.NotContains(t, lo, 1, "latitude bound must drop when the location ancestor residual has non-null values")
+	assert.NotContains(t, hi, 1)
+
+	// location residual all-null: latitude bound kept.
+	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull()), arrowSchema, colMapping)
+	assert.Contains(t, lo2, 1, "latitude bound kept when the location ancestor residual is all-null")
+	assert.Contains(t, hi2, 1)
 }
