@@ -70,8 +70,34 @@ func TestTruncateUpperBoundString(t *testing.T) {
 }
 
 func TestTruncateUpperBoundBinary(t *testing.T) {
-	assert.Equal(t, []byte{0x01, 0x03}, internal.TruncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
-	assert.Nil(t, internal.TruncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
+	tests := []struct {
+		name     string
+		value    []byte
+		truncate int
+		expected []byte
+	}{
+		{"increment", []byte{0x01, 0x02, 0x03}, 2, []byte{0x01, 0x03}},
+		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
+		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
+		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := slices.Clone(tt.value)
+			first := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+			second := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+
+			assert.Equal(t, tt.expected, first)
+			assert.Equal(t, first, second)
+			assert.Equal(t, original, tt.value)
+
+			if len(first) > 0 {
+				first[0] ^= 0xff
+				assert.Equal(t, original, tt.value)
+			}
+		})
+	}
 }
 
 func TestMapExecAllWorkersError(t *testing.T) {
@@ -208,4 +234,114 @@ func TestPartitionValue_MismatchPanics(t *testing.T) {
 	}
 
 	assert.Panics(t, func() { stats.PartitionValue(partitionField, schema) })
+}
+
+func TestToDataFile_PartitionedCallerValueWins(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	// The column spans more than one value (1..9), so inference would panic.
+	// A caller-supplied value must be recorded verbatim and short-circuit inference entirely.
+	stats := &internal.DataFileStatistics{
+		RecordCount: 2,
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(int32(1)),
+				max: iceberg.NewLiteral(int32(9)),
+			},
+		},
+	}
+
+	df := stats.ToDataFile(internal.DataFileOpts{
+		Schema:          schema,
+		Spec:            spec,
+		Path:            "s3://bucket/data/id=42/file.parquet",
+		Format:          iceberg.ParquetFile,
+		Content:         iceberg.EntryContentData,
+		FileSize:        1024,
+		PartitionValues: map[int]any{1000: int32(42)},
+	})
+
+	require.Contains(t, df.Partition(), 1000)
+	assert.EqualValues(t, 42, df.Partition()[1000],
+		"a non-nil caller-supplied partition value must be recorded and must not be overwritten by inference")
+}
+
+func TestToDataFile_NonOrderPreservingNilStaysAbsent(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+
+	// A multi-valued column with a non-order-preserving transform must not
+	// trigger inference (which would panic); the nil caller value stays nil.
+	stats := &internal.DataFileStatistics{
+		RecordCount: 2,
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(int32(1)),
+				max: iceberg.NewLiteral(int32(9)),
+			},
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:          schema,
+			Spec:            spec,
+			Path:            "s3://bucket/data/file.parquet",
+			Format:          iceberg.ParquetFile,
+			Content:         iceberg.EntryContentData,
+			FileSize:        1024,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.Contains(t, df.Partition(), 1000)
+		assert.Nil(t, df.Partition()[1000])
+	})
+}
+
+func TestToDataFile_ReferencedDataFile(t *testing.T) {
+	const ref = "s3://bucket/data/data-001.parquet"
+	stats := &internal.DataFileStatistics{RecordCount: 2}
+	refPtr := ref
+
+	t.Run("position delete records referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/pos-del.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentPosDeletes,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		require.NotNil(t, df.ReferencedDataFile())
+		assert.Equal(t, ref, *df.ReferencedDataFile())
+	})
+
+	t.Run("data content ignores referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/data.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentData,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		assert.Nil(t, df.ReferencedDataFile(),
+			"ToDataFile must ignore ReferencedDataFile for non-position-delete content")
+	})
 }

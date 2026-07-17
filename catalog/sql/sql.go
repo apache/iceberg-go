@@ -20,6 +20,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -37,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect"
 	"github.com/uptrace/bun/dialect/feature"
 	"github.com/uptrace/bun/dialect/mssqldialect"
 	"github.com/uptrace/bun/dialect/mysqldialect"
@@ -57,11 +59,125 @@ const (
 	Oracle   SupportedDialect = "oracle"
 )
 
+const encodedNamespacePrefix = "__iceberg_namespace_v1__:"
+
+func namespaceToString(namespace table.Identifier) string {
+	legacy := strings.Join(namespace, ".")
+	if !strings.Contains(legacy, encodedNamespacePrefix) && !slices.ContainsFunc(namespace, func(part string) bool {
+		return strings.Contains(part, ".")
+	}) {
+		return legacy
+	}
+
+	encoded, err := json.Marshal(namespace)
+	if err != nil {
+		panic(err) // table.Identifier contains only strings
+	}
+
+	return encodedNamespacePrefix + string(encoded)
+}
+
+func namespaceFromString(namespace string) (table.Identifier, error) {
+	if !strings.HasPrefix(namespace, encodedNamespacePrefix) {
+		return strings.Split(namespace, "."), nil
+	}
+
+	var ident table.Identifier
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(namespace, encodedNamespacePrefix)), &ident); err != nil ||
+		len(ident) == 0 || namespaceToString(ident) != namespace {
+		// Before encoded namespaces existed, the prefix was valid ordinary
+		// namespace text. Only canonical, non-empty encodings claim the marker.
+		return strings.Split(namespace, "."), nil
+	}
+
+	return ident, nil
+}
+
+func namespaceStorageKeys(namespace table.Identifier) []string {
+	primary := namespaceToString(namespace)
+	legacy := strings.Join(namespace, ".")
+	if primary == legacy || slices.ContainsFunc(namespace, func(part string) bool {
+		return strings.Contains(part, ".")
+	}) {
+		return []string{primary}
+	}
+
+	// Only marker collisions get a legacy fallback. Dotted components must
+	// never fall back because their legacy key belongs to a different namespace.
+	return []string{primary, legacy}
+}
+
+func namespaceDescendantPrefixes(namespace table.Identifier) []string {
+	legacy := strings.Join(namespace, ".")
+	prefixes := make([]string, 0, 2)
+	if !slices.ContainsFunc(namespace, func(part string) bool { return strings.Contains(part, ".") }) {
+		prefixes = append(prefixes, legacy+".")
+	}
+
+	encoded, err := json.Marshal(namespace)
+	if err != nil {
+		panic(err) // table.Identifier contains only strings
+	}
+	prefixes = append(prefixes, encodedNamespacePrefix+string(encoded[:len(encoded)-1])+",")
+
+	return prefixes
+}
+
+func namespaceLikePrefix(prefix string) string {
+	return strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(prefix) + "%"
+}
+
+func whereNamespaceParent(query *bun.SelectQuery, column string, parent table.Identifier) *bun.SelectQuery {
+	return query.WhereGroup(" AND ", func(query *bun.SelectQuery) *bun.SelectQuery {
+		keys := namespaceStorageKeys(parent)
+		query = query.Where("? = ?", bun.Ident(column), keys[0])
+		for _, key := range keys[1:] {
+			query = query.WhereOr("? = ?", bun.Ident(column), key)
+		}
+		for _, prefix := range namespaceDescendantPrefixes(parent) {
+			query = query.WhereOr("? LIKE ? ESCAPE '!'", bun.Ident(column), namespaceLikePrefix(prefix))
+		}
+
+		return query
+	})
+}
+
 const (
 	DialectKey           = "sql.dialect"
 	DriverKey            = "sql.driver"
 	initCatalogTablesKey = "init_catalog_tables"
+
+	// SchemaVersionKey opts in to migrating a legacy V0 catalog (one that lacks
+	// the iceberg_type column) up to the V1 schema.
+	//
+	// When set to SchemaVersionV1 the catalog issues the one-way ALTER TABLE
+	// that adds the iceberg_type column; otherwise it stays on V0 and emits
+	// column-free queries that never reference iceberg_type.
+	SchemaVersionKey = "jdbc.schema-version"
 )
+
+const (
+	SchemaVersionV1 = "V1"
+)
+
+// schemaVer tracks which physical layout of the iceberg_tables table the catalog is operating against.
+//
+// schemaV1 has the iceberg_type column. schemaV0 is the legacy JDBC default that lacks the column entirely.
+// Queries against a V0 catalog must never reference iceberg_type.
+//
+// The zero value is schemaV0
+type schemaVer int
+
+const (
+	schemaV0 schemaVer = iota
+	schemaV1
+)
+
+var v0WarnOnce sync.Once
+
+var errViewsUnsupportedOnV0 = fmt.Errorf(
+	"views are not supported on a legacy V0 catalog schema (no iceberg_type column); "+
+		"migrate to V1 by setting %q=%q", SchemaVersionKey, SchemaVersionV1)
 
 const (
 	TableType = "TABLE"
@@ -144,10 +260,10 @@ func getDialect(d SupportedDialect) (schema.Dialect, error) {
 type sqlIcebergTable struct {
 	bun.BaseModel `bun:"table:iceberg_tables"`
 
-	CatalogName              string `bun:",pk"`
-	TableNamespace           string `bun:",pk"`
-	TableName                string `bun:",pk"`
-	IcebergType              string // TableType or ViewType
+	CatalogName              string         `bun:",pk"`
+	TableNamespace           string         `bun:",pk"`
+	TableName                string         `bun:",pk"`
+	IcebergType              sql.NullString // TableType, ViewType, or NULL for legacy V0 rows
 	MetadataLocation         sql.NullString
 	PreviousMetadataLocation sql.NullString
 }
@@ -180,10 +296,15 @@ func withWriteTx(ctx context.Context, db *bun.DB, fn func(context.Context, bun.T
 var _ catalog.PurgeableTable = (*Catalog)(nil)
 
 type Catalog struct {
-	db    *bun.DB
-	name  string
-	props iceberg.Properties
+	db            *bun.DB
+	name          string
+	props         iceberg.Properties
+	schemaVersion schemaVer
 }
+
+// isV0 reports whether the catalog is operating against a legacy V0 schema that
+// lacks the iceberg_type column. Callers use this to emit column-free queries.
+func (c *Catalog) isV0() bool { return c.schemaVersion == schemaV0 }
 
 // NewCatalog creates a new sql-based catalog using the provided sql.DB handle to perform any queries.
 //
@@ -217,8 +338,16 @@ func NewCatalog(name string, db *sql.DB, dialect SupportedDialect, props iceberg
 		// ICEBERG_SQL_DEBUG=2 log all queries
 		bundebug.FromEnv("ICEBERG_SQL_DEBUG")))
 
+	ctx := context.Background()
+
 	if cat.props.GetBool(initCatalogTablesKey, true) {
-		return cat, cat.ensureTablesExist()
+		if err := cat.CreateSQLTables(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := cat.initSchemaVersion(ctx); err != nil {
+		return nil, err
 	}
 
 	return cat, nil
@@ -256,13 +385,178 @@ func (c *Catalog) DropSQLTables(ctx context.Context) error {
 	return err
 }
 
-func (c *Catalog) ensureTablesExist() error {
-	return c.CreateSQLTables(context.Background())
+func (c *Catalog) initSchemaVersion(ctx context.Context) error {
+	hasCol, err := c.icebergTypeColumnExists(ctx)
+	if err != nil {
+		return fmt.Errorf("detecting catalog schema version: %w", err)
+	}
+	if hasCol {
+		c.schemaVersion = schemaV1
+
+		return nil
+	}
+
+	tableExists, err := c.icebergTablesExists(ctx)
+	if err != nil {
+		return fmt.Errorf("detecting catalog schema version: %w", err)
+	}
+	if !tableExists {
+		c.schemaVersion = schemaV1
+
+		return nil
+	}
+
+	// legacy V0 table: only migrate when explicitly opted in.
+	//
+	// The comparison is intentionally case-insensitive: matching Java's JdbcCatalog
+	if !strings.EqualFold(c.props.Get(SchemaVersionKey, ""), SchemaVersionV1) {
+		v0WarnOnce.Do(func() {
+			log.Printf("WARNING: iceberg_tables is on the legacy V0 schema (no iceberg_type column); "+
+				"set %q=%q to migrate to V1. Operating in V0-compatible mode (column-free queries).",
+				SchemaVersionKey, SchemaVersionV1)
+		})
+		c.schemaVersion = schemaV0
+
+		return nil
+	}
+
+	return c.migrateV0ToV1(ctx)
+}
+
+func (c *Catalog) migrateV0ToV1(ctx context.Context) error {
+	ddl, err := addIcebergTypeColumnDDL(c.db.Dialect().Name())
+	if err != nil {
+		return err
+	}
+
+	if _, err := c.db.ExecContext(ctx, ddl); err != nil {
+		has, reprobeErr := c.icebergTypeColumnExists(ctx)
+		if has {
+			c.schemaVersion = schemaV1
+
+			return nil
+		}
+		if reprobeErr != nil {
+			return fmt.Errorf("migration of V0 schema failed: %w (re-probe also failed: %v)", err, reprobeErr)
+		}
+
+		return fmt.Errorf("migration of V0 schema failed: %w", err)
+	}
+
+	c.schemaVersion = schemaV1
+
+	return nil
+}
+
+func addIcebergTypeColumnDDL(name dialect.Name) (string, error) {
+	switch name {
+	case dialect.PG, dialect.SQLite:
+		return "ALTER TABLE iceberg_tables ADD COLUMN iceberg_type VARCHAR", nil
+	case dialect.MySQL:
+		return "ALTER TABLE iceberg_tables ADD COLUMN iceberg_type VARCHAR(255)", nil
+	case dialect.MSSQL:
+		return "ALTER TABLE iceberg_tables ADD iceberg_type VARCHAR(255)", nil
+	case dialect.Oracle:
+		return "ALTER TABLE iceberg_tables ADD (iceberg_type VARCHAR2(255))", nil
+	default:
+		return "", fmt.Errorf("unsupported dialect for V0 migration: %s", name)
+	}
+}
+
+func icebergTypeColumnExistsQuery(name dialect.Name) (string, error) {
+	switch name {
+	case dialect.PG:
+		return `SELECT 1 FROM information_schema.columns
+		         WHERE table_schema = current_schema()
+		           AND table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`, nil
+	case dialect.MySQL:
+		return `SELECT 1 FROM information_schema.columns
+		         WHERE table_schema = DATABASE()
+		           AND table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type' LIMIT 1`, nil
+	case dialect.MSSQL:
+		return `SELECT TOP 1 1 FROM information_schema.columns
+		         WHERE table_schema = SCHEMA_NAME()
+		           AND table_name = 'iceberg_tables'
+		           AND column_name = 'iceberg_type'`, nil
+	case dialect.SQLite:
+		return `SELECT 1 FROM pragma_table_info('iceberg_tables')
+		         WHERE name = 'iceberg_type' LIMIT 1`, nil
+	case dialect.Oracle:
+		return `SELECT 1 FROM user_tab_columns
+		         WHERE UPPER(table_name) = 'ICEBERG_TABLES'
+		           AND UPPER(column_name) = 'ICEBERG_TYPE'
+		           AND ROWNUM = 1`, nil
+	default:
+		return "", fmt.Errorf("unsupported dialect for V0 migration: %s", name)
+	}
+}
+
+func icebergTablesExistsQuery(name dialect.Name) (string, error) {
+	switch name {
+	case dialect.PG:
+		return `SELECT 1 FROM information_schema.tables
+		         WHERE table_schema = current_schema()
+		           AND table_name = 'iceberg_tables' LIMIT 1`, nil
+	case dialect.MySQL:
+		return `SELECT 1 FROM information_schema.tables
+		         WHERE table_schema = DATABASE()
+		           AND table_name = 'iceberg_tables' LIMIT 1`, nil
+	case dialect.MSSQL:
+		return `SELECT TOP 1 1 FROM information_schema.tables
+		         WHERE table_schema = SCHEMA_NAME()
+		           AND table_name = 'iceberg_tables'`, nil
+	case dialect.SQLite:
+		return `SELECT 1 FROM sqlite_master
+		         WHERE type = 'table' AND name = 'iceberg_tables' LIMIT 1`, nil
+	case dialect.Oracle:
+		return `SELECT 1 FROM user_tables
+		         WHERE UPPER(table_name) = 'ICEBERG_TABLES' AND ROWNUM = 1`, nil
+	default:
+		return "", fmt.Errorf("unsupported dialect for V0 migration: %s", name)
+	}
+}
+
+func (c *Catalog) icebergTypeColumnExists(ctx context.Context) (bool, error) {
+	query, err := icebergTypeColumnExistsQuery(c.db.Dialect().Name())
+	if err != nil {
+		return false, err
+	}
+
+	return c.probeExists(ctx, query, "probing for iceberg_type column")
+}
+
+func (c *Catalog) icebergTablesExists(ctx context.Context) (bool, error) {
+	query, err := icebergTablesExistsQuery(c.db.Dialect().Name())
+	if err != nil {
+		return false, err
+	}
+
+	return c.probeExists(ctx, query, "probing for iceberg_tables table")
+}
+
+func (c *Catalog) probeExists(ctx context.Context, query, what string) (bool, error) {
+	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
+		var exists int
+		if err := tx.QueryRowContext(ctx, query).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+
+			return false, fmt.Errorf("%s: %w", what, err)
+		}
+
+		return true, nil
+	})
 }
 
 func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) {
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
+		// ColumnExpr("1") keeps the existence probe from selecting iceberg_type,
+		// which would not exist on a V0 schema.
 		exists, err := tx.NewSelect().Model((*sqlIcebergTable)(nil)).
+			ColumnExpr("1").
 			Where("catalog_name = ?", c.name).
 			Where("table_namespace = ?", ns).
 			Limit(1).Exists(ctx)
@@ -279,6 +573,40 @@ func (c *Catalog) namespaceExists(ctx context.Context, ns string) (bool, error) 
 	})
 }
 
+func (c *Catalog) resolveNamespaceKey(ctx context.Context, namespace table.Identifier) (string, bool, error) {
+	keys := namespaceStorageKeys(namespace)
+	for _, key := range keys {
+		exists, err := c.namespaceExists(ctx, key)
+		if err != nil {
+			return "", false, err
+		}
+		if exists {
+			return key, true, nil
+		}
+	}
+
+	return keys[0], false, nil
+}
+
+func (c *Catalog) namespaceKey(ctx context.Context, namespace table.Identifier) (string, error) {
+	keys := namespaceStorageKeys(namespace)
+	if len(keys) == 1 {
+		return keys[0], nil
+	}
+
+	for _, key := range keys {
+		exists, err := c.namespaceExists(ctx, key)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			return key, nil
+		}
+	}
+
+	return keys[0], nil
+}
+
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
 		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
@@ -288,15 +616,9 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
-	staged, err := internal.CreateStagedTable(ctx, c.props, c.LoadNamespaceProperties, ident, sc, opts...)
-	if err != nil {
-		return nil, err
-	}
-
 	nsIdent := catalog.NamespaceFromIdent(ident)
 	tblIdent := catalog.TableNameFromIdent(ident)
-	ns := strings.Join(nsIdent, ".")
-	exists, err := c.namespaceExists(ctx, ns)
+	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return nil, err
 	}
@@ -305,19 +627,28 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
+	staged, err := internal.CreateStagedTableWithNamespaceKey(
+		ctx, c.props, c.LoadNamespaceProperties, ident, ns, sc, opts...)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := internal.WriteMetadata(ctx, staged.Table); err != nil {
 		return nil, err
 	}
 
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		_, err := tx.NewInsert().Model(&sqlIcebergTable{
+		ins := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        tblIdent,
 			MetadataLocation: sql.NullString{String: staged.MetadataLocation(), Valid: true},
-			IcebergType:      TableType,
-		}).Exec(ctx)
-		if err != nil {
+			IcebergType:      sql.NullString{String: TableType, Valid: true},
+		})
+		if c.isV0() {
+			ins = ins.ExcludeColumn("iceberg_type")
+		}
+		if _, err := ins.Exec(ctx); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 
@@ -333,6 +664,10 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
 	ns := catalog.NamespaceFromIdent(ident)
 	tblName := catalog.TableNameFromIdent(ident)
+	nsKey, err := c.namespaceKey(ctx, ns)
+	if err != nil {
+		return nil, "", err
+	}
 
 	current, err := c.LoadTable(ctx, ident)
 	if err != nil && !errors.Is(err, catalog.ErrNoSuchTable) {
@@ -355,16 +690,24 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 
 	err = withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		if current != nil {
-			res, err := tx.NewUpdate().Model(&sqlIcebergTable{
+			// On V1, the model-driven UPDATE emits every non-PK field, writing
+			// iceberg_type=TABLE; this also heals legacy NULLs on commit, and the
+			// predicate treats NULL and TABLE identically. On V0 the column does
+			// not exist, so it is excluded from both the SET list and the WHERE.
+			upd := tx.NewUpdate().Model(&sqlIcebergTable{
 				CatalogName:              c.name,
-				TableNamespace:           strings.Join(ns, "."),
+				TableNamespace:           nsKey,
 				TableName:                tblName,
-				IcebergType:              TableType,
+				IcebergType:              sql.NullString{String: TableType, Valid: true},
 				MetadataLocation:         sql.NullString{Valid: true, String: staged.MetadataLocation()},
 				PreviousMetadataLocation: sql.NullString{Valid: true, String: current.MetadataLocation()},
-			}).WherePK().Where("metadata_location = ?", current.MetadataLocation()).
-				Where("iceberg_type = ?", TableType).
-				Exec(ctx)
+			}).WherePK().Where("metadata_location = ?", current.MetadataLocation())
+			if c.isV0() {
+				upd = upd.ExcludeColumn("iceberg_type")
+			} else {
+				upd = upd.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+			}
+			res, err := upd.Exec(ctx)
 			if err != nil {
 				return fmt.Errorf("error updating table information: %w", err)
 			}
@@ -385,14 +728,17 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 			return nil
 		}
 
-		_, err := tx.NewInsert().Model(&sqlIcebergTable{
+		ins := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
-			TableNamespace:   strings.Join(ns, "."),
+			TableNamespace:   nsKey,
 			TableName:        tblName,
-			IcebergType:      TableType,
+			IcebergType:      sql.NullString{String: TableType, Valid: true},
 			MetadataLocation: sql.NullString{Valid: true, String: staged.MetadataLocation()},
-		}).Exec(ctx)
-		if err != nil {
+		})
+		if c.isV0() {
+			ins = ins.ExcludeColumn("iceberg_type")
+		}
+		if _, err := ins.Exec(ctx); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 
@@ -408,14 +754,23 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	ns := catalog.NamespaceFromIdent(identifier)
 	tbl := catalog.TableNameFromIdent(identifier)
+	nsKey, err := c.namespaceKey(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
 
 	result, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {
 		t := new(sqlIcebergTable)
-		err := tx.NewSelect().Model(t).
+		sel := tx.NewSelect().Model(t).
 			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", strings.Join(ns, ".")).
-			Where("table_name = ?", tbl).
-			Scan(ctx)
+			Where("table_namespace = ?", nsKey).
+			Where("table_name = ?", tbl)
+		if c.isV0() {
+			sel = sel.ExcludeColumn("iceberg_type")
+		} else {
+			sel = sel.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+		}
+		err := sel.Scan(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, identifier)
 		}
@@ -444,15 +799,22 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 }
 
 func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
-	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
+	if err != nil {
+		return err
+	}
 	tbl := catalog.TableNameFromIdent(identifier)
 
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
-		res, err := tx.NewDelete().Model(&sqlIcebergTable{
+		del := tx.NewDelete().Model(&sqlIcebergTable{
 			CatalogName:    c.name,
 			TableNamespace: ns,
 			TableName:      tbl,
-		}).WherePK().Where("iceberg_type = ?", TableType).Exec(ctx)
+		}).WherePK()
+		if !c.isV0() {
+			del = del.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+		}
+		res, err := del.Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to delete table entry: %w", err)
 		}
@@ -491,16 +853,18 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 }
 
 func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
-	fromNs := strings.Join(catalog.NamespaceFromIdent(from), ".")
-	fromTbl := catalog.TableNameFromIdent(from)
-
-	toNs := strings.Join(catalog.NamespaceFromIdent(to), ".")
-	toTbl := catalog.TableNameFromIdent(to)
-
-	exists, err := c.namespaceExists(ctx, toNs)
+	fromNs, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(from))
 	if err != nil {
 		return nil, err
 	}
+	fromTbl := catalog.TableNameFromIdent(from)
+
+	toNs, exists, err := c.resolveNamespaceKey(ctx, catalog.NamespaceFromIdent(to))
+	if err != nil {
+		return nil, err
+	}
+	toTbl := catalog.TableNameFromIdent(to)
+
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, toNs)
 	}
@@ -510,7 +874,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			CatalogName:    c.name,
 			TableNamespace: toNs,
 			TableName:      toTbl,
-		}).WherePK().Exists(ctx)
+		}).ColumnExpr("1").WherePK().Exists(ctx)
 		if err != nil {
 			return fmt.Errorf("error encountered checking existence of table '%s': %w", to, err)
 		}
@@ -519,14 +883,19 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			return catalog.ErrTableAlreadyExists
 		}
 
-		res, err := tx.NewUpdate().Model(&sqlIcebergTable{
+		// Only table_namespace/table_name are updated via Set, so iceberg_type is
+		// never written; on V1 we still scope the row with the type predicate.
+		upd := tx.NewUpdate().Model(&sqlIcebergTable{
 			CatalogName:    c.name,
 			TableNamespace: fromNs,
 			TableName:      fromTbl,
-		}).WherePK().Where("iceberg_type = ?", TableType).
+		}).WherePK().
 			Set("table_namespace = ?", toNs).
-			Set("table_name = ?", toTbl).
-			Exec(ctx)
+			Set("table_name = ?", toTbl)
+		if !c.isV0() {
+			upd = upd.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+		}
+		res, err := upd.Exec(ctx)
 		if err != nil {
 			return fmt.Errorf("error renaming table from '%s' to %s': %w", from, to, err)
 		}
@@ -567,7 +936,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	exists, err := c.namespaceExists(ctx, strings.Join(namespace, "."))
+	_, exists, err := c.resolveNamespaceKey(ctx, namespace)
 	if err != nil {
 		return err
 	}
@@ -580,7 +949,7 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		props = minimalNamespaceProps
 	}
 
-	nsToCreate := strings.Join(namespace, ".")
+	nsToCreate := namespaceToString(namespace)
 
 	return withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		toInsert := make([]sqlIcebergNamespaceProps, 0, len(props))
@@ -607,9 +976,7 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	nsToDelete := strings.Join(namespace, ".")
-
-	exists, err := c.namespaceExists(ctx, nsToDelete)
+	nsToDelete, exists, err := c.resolveNamespaceKey(ctx, namespace)
 	if err != nil {
 		return err
 	}
@@ -651,8 +1018,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		return nil, err
 	}
 
-	nsToLoad := strings.Join(namespace, ".")
-	exists, err := c.namespaceExists(ctx, nsToLoad)
+	nsToLoad, exists, err := c.resolveNamespaceKey(ctx, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -697,8 +1063,11 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 }
 
 func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+	ns := namespaceToString(namespace)
 	if len(namespace) > 0 {
-		exists, err := c.namespaceExists(ctx, strings.Join(namespace, "."))
+		var exists bool
+		var err error
+		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -707,14 +1076,17 @@ func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier)
 		}
 	}
 
-	ns := strings.Join(namespace, ".")
 	tables, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
 		var tables []sqlIcebergTable
-		err := tx.NewSelect().Model(&tables).
+		sel := tx.NewSelect().Model(&tables).
 			Where("catalog_name = ?", c.name).
-			Where("table_namespace = ?", ns).
-			Where("iceberg_type = ?", TableType).
-			Scan(ctx)
+			Where("table_namespace = ?", ns)
+		if c.isV0() {
+			sel = sel.ExcludeColumn("iceberg_type")
+		} else {
+			sel = sel.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+		}
+		err := sel.Scan(ctx)
 
 		return tables, err
 	})
@@ -724,7 +1096,11 @@ func (c *Catalog) listTablesAll(ctx context.Context, namespace table.Identifier)
 
 	ret := make([]table.Identifier, len(tables))
 	for i, t := range tables {
-		ret[i] = append(strings.Split(t.TableNamespace, "."), t.TableName)
+		namespace, err := namespaceFromString(t.TableNamespace)
+		if err != nil {
+			return nil, err
+		}
+		ret[i] = append(namespace, t.TableName)
 	}
 
 	return ret, nil
@@ -737,8 +1113,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		Column("namespace").Where("catalog_name = ?", c.name)
 
 	if len(parent) > 0 {
-		ns := strings.Join(parent, ".")
-		exists, err := c.namespaceExists(ctx, ns)
+		_, exists, err := c.resolveNamespaceKey(ctx, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -746,9 +1121,8 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 			return nil, fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, strings.Join(parent, "."))
 		}
 
-		ns += "%"
-		tableQuery = tableQuery.Where("table_namespace like ?", ns)
-		nsQuery = nsQuery.Where("namespace like ?", ns)
+		tableQuery = whereNamespaceParent(tableQuery, "table_namespace", parent)
+		nsQuery = whereNamespaceParent(nsQuery, "namespace", parent)
 	}
 
 	namespaces, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]string, error) {
@@ -767,9 +1141,15 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		return nil, err
 	}
 
-	ret := make([]table.Identifier, len(namespaces))
-	for i, n := range namespaces {
-		ret[i] = strings.Split(n, ".")
+	ret := make([]table.Identifier, 0, len(namespaces))
+	for _, n := range namespaces {
+		ident, err := namespaceFromString(n)
+		if err != nil {
+			return nil, err
+		}
+		if len(parent) == 0 || (len(ident) >= len(parent) && slices.Equal(ident[:len(parent)], parent)) {
+			ret = append(ret, ident)
+		}
 	}
 
 	return ret, nil
@@ -793,7 +1173,10 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return summary, err
 	}
 
-	nsToUpdate := strings.Join(namespace, ".")
+	nsToUpdate, err := c.namespaceKey(ctx, namespace)
+	if err != nil {
+		return summary, err
+	}
 
 	return summary, withWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		var m *sqlIcebergNamespaceProps
@@ -847,16 +1230,20 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 }
 
 func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
-	return c.namespaceExists(ctx, strings.Join(namespace, "."))
+	_, exists, err := c.resolveNamespaceKey(ctx, namespace)
+
+	return exists, err
 }
 
 // CreateView creates a new view in the catalog.
 func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, viewSQL string, props iceberg.Properties) error {
+	if c.isV0() {
+		return errViewsUnsupportedOnV0
+	}
+
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.TableNameFromIdent(identifier)
-	ns := strings.Join(nsIdent, ".")
-
-	exists, err := c.namespaceExists(ctx, ns)
+	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
 	if err != nil {
 		return err
 	}
@@ -872,7 +1259,8 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return fmt.Errorf("%w: %s", catalog.ErrViewAlreadyExists, identifier)
 	}
 
-	loc, err := internal.ResolveTableLocation(ctx, "", ns, viewIdent, c.props, c.LoadNamespaceProperties)
+	loc, err := internal.ResolveTableLocationWithNamespace(
+		ctx, "", nsIdent, ns, viewIdent, c.props, c.LoadNamespaceProperties)
 	if err != nil {
 		return err
 	}
@@ -888,7 +1276,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 			CatalogName:      c.name,
 			TableNamespace:   ns,
 			TableName:        viewIdent,
-			IcebergType:      ViewType,
+			IcebergType:      sql.NullString{String: ViewType, Valid: true},
 			MetadataLocation: sql.NullString{String: metadataLocation, Valid: true},
 		}).Exec(ctx)
 		if err != nil {
@@ -920,8 +1308,15 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+	if c.isV0() {
+		return nil, nil
+	}
+
+	ns := namespaceToString(namespace)
 	if len(namespace) > 0 {
-		exists, err := c.namespaceExists(ctx, strings.Join(namespace, "."))
+		var exists bool
+		var err error
+		ns, exists, err = c.resolveNamespaceKey(ctx, namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -930,7 +1325,6 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 		}
 	}
 
-	ns := strings.Join(namespace, ".")
 	views, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) ([]sqlIcebergTable, error) {
 		var views []sqlIcebergTable
 		err := tx.NewSelect().Model(&views).
@@ -947,7 +1341,11 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 
 	ret := make([]table.Identifier, len(views))
 	for i, v := range views {
-		ret[i] = append(strings.Split(v.TableNamespace, "."), v.TableName)
+		namespace, err := namespaceFromString(v.TableNamespace)
+		if err != nil {
+			return nil, err
+		}
+		ret[i] = append(namespace, v.TableName)
 	}
 
 	return ret, nil
@@ -955,7 +1353,14 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 
 // DropView deletes a view from the catalog.
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
-	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	if c.isV0() {
+		return errViewsUnsupportedOnV0
+	}
+
+	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
+	if err != nil {
+		return err
+	}
 	viewName := catalog.TableNameFromIdent(identifier)
 
 	metadataLocation := ""
@@ -1023,7 +1428,14 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 
 // CheckViewExists returns true if a view exists in the catalog.
 func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	if c.isV0() {
+		return false, nil
+	}
+
+	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
+	if err != nil {
+		return false, err
+	}
 	viewName := catalog.TableNameFromIdent(identifier)
 
 	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
@@ -1042,7 +1454,14 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 
 // LoadView loads a view from the catalog.
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
-	ns := strings.Join(catalog.NamespaceFromIdent(identifier), ".")
+	if c.isV0() {
+		return nil, errViewsUnsupportedOnV0
+	}
+
+	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
+	if err != nil {
+		return nil, err
+	}
 	viewName := catalog.TableNameFromIdent(identifier)
 
 	v, err := withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (*sqlIcebergTable, error) {

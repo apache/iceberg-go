@@ -56,12 +56,14 @@ var (
 	// ErrNoSuchTable is returned when a table does not exist in the catalog.
 	ErrNoSuchTable            = errors.New("table does not exist")
 	ErrNoSuchNamespace        = errors.New("namespace does not exist")
+	ErrInvalidIdentifier      = errors.New("identifier is invalid")
 	ErrNamespaceAlreadyExists = errors.New("namespace already exists")
 	ErrTableAlreadyExists     = errors.New("table already exists")
 	ErrCatalogNotFound        = errors.New("catalog type not registered")
 	ErrNamespaceNotEmpty      = errors.New("namespace is not empty")
 	ErrNoSuchView             = errors.New("view does not exist")
 	ErrViewAlreadyExists      = errors.New("view already exists")
+	ErrNoSuchFunction         = errors.New("function does not exist")
 	ErrEmptyCommitList        = errors.New("commit list must not be empty")
 	ErrMissingIdentifier      = errors.New("every table commit must have a valid identifier")
 )
@@ -203,7 +205,9 @@ func ToIdentifier(ident ...string) table.Identifier {
 	return table.Identifier(ident)
 }
 
-func TableNameFromIdent(ident table.Identifier) string {
+// ObjectNameFromIdent returns the name of a catalog object (a table, view,
+// or function), which is the last element of its identifier.
+func ObjectNameFromIdent(ident table.Identifier) string {
 	if len(ident) == 0 {
 		return ""
 	}
@@ -211,11 +215,15 @@ func TableNameFromIdent(ident table.Identifier) string {
 	return ident[len(ident)-1]
 }
 
+func TableNameFromIdent(ident table.Identifier) string {
+	return ObjectNameFromIdent(ident)
+}
+
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
 	return ident[:len(ident)-1]
 }
 
-func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) error {
+func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 	if len(ident) < 2 {
 		return fmt.Errorf("%w: missing namespace or invalid identifier %v",
 			notFoundErr, strings.Join(ident, "."))
@@ -240,12 +248,17 @@ func validateTableOrViewIdentifier(ident table.Identifier, notFoundErr error) er
 
 // ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
 func ValidateTableIdentifier(ident table.Identifier) error {
-	return validateTableOrViewIdentifier(ident, ErrNoSuchTable)
+	return validateIdentifier(ident, ErrNoSuchTable)
 }
 
 // ValidateViewIdentifier checks that an identifier contains at least one valid namespace level and a view name.
 func ValidateViewIdentifier(ident table.Identifier) error {
-	return validateTableOrViewIdentifier(ident, ErrNoSuchView)
+	return validateIdentifier(ident, ErrNoSuchView)
+}
+
+// ValidateFunctionIdentifier checks that an identifier contains at least one valid namespace level and a function name.
+func ValidateFunctionIdentifier(ident table.Identifier) error {
+	return validateIdentifier(ident, ErrNoSuchFunction)
 }
 
 type CreateTableOpt func(*CreateTableCfg)

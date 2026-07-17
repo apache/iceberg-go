@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"
@@ -647,6 +649,48 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	}
 }
 
+func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
+	const (
+		removedID = int64(100)
+		currentID = int64(200)
+	)
+	lastPartitionID := 999
+	meta := &metadataV2{
+		LastSeqNum: 0,
+		commonMetadata: commonMetadata{
+			FormatVersion:     2,
+			UUID:              uuid.New(),
+			Loc:               "s3://test/table",
+			LastUpdatedMS:     1000,
+			LastColumnId:      1,
+			SchemaList:        []*iceberg.Schema{iceberg.NewSchema(0)},
+			CurrentSchemaID:   0,
+			Specs:             []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+			DefaultSpecID:     0,
+			LastPartitionID:   &lastPartitionID,
+			Props:             iceberg.Properties{},
+			SnapshotList:      []Snapshot{{SnapshotID: removedID}, {SnapshotID: currentID}},
+			CurrentSnapshotID: ptr(currentID),
+			SnapshotLog:       []SnapshotLogEntry{},
+			SortOrderList:     []SortOrder{UnsortedSortOrder},
+			SnapshotRefs: map[string]SnapshotRef{
+				MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+			},
+		},
+	}
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots([]int64{removedID}, false))
+
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	require.Empty(t, slices.Collect(rebuilt.SnapshotLogs()))
+	current := rebuilt.CurrentSnapshot()
+	require.NotNil(t, current)
+	require.Equal(t, currentID, current.SnapshotID)
+}
+
 // TestRemoveSnapshotsPrunesStatistics verifies that RemoveSnapshots also
 // prunes StatisticsList and PartitionStatsList entries whose SnapshotID
 // matches a removed snapshot. See iceberg-go#836.
@@ -921,6 +965,47 @@ func TestV2SequenceNumberCannotDecrease(t *testing.T) {
 	}
 	err = builder.AddSnapshot(&snapshot2)
 	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 1")
+}
+
+func TestV3SequenceNumberCannotDecrease(t *testing.T) {
+	builder := builderWithoutChanges(3)
+	schemaID := 0
+	firstRowID1 := int64(0)
+	addedRows := int64(10)
+
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+		FirstRowID:       &firstRowID1,
+		AddedRows:        &addedRows,
+	}
+
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+
+	firstRowID2 := int64(10)
+	parentSnapshotID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentSnapshotID,
+		SequenceNumber:   0,
+		TimestampMs:      builder.lastUpdatedMS + 1,
+		ManifestList:     "/snap-0.avro",
+		Summary: &Summary{
+			Operation:  OpAppend,
+			Properties: map[string]string{},
+		},
+		SchemaID:   &schemaID,
+		FirstRowID: &firstRowID2,
+		AddedRows:  &addedRows,
+	}
+
+	err := builder.AddSnapshot(&snapshot2)
+	require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 0")
 }
 
 func TestCannotAddDuplicateSnapshotID(t *testing.T) {
@@ -2232,6 +2317,83 @@ func TestGeometryGeographyNullOnlyDefaults(t *testing.T) {
 	}
 }
 
+func TestNonSpecialDefaultsRequireV3(t *testing.T) {
+	testTypes := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{"int", iceberg.Int32Type{}},
+		{"string", iceberg.StringType{}},
+	}
+
+	for _, tt := range testTypes {
+		t.Run(tt.name+" v2 with initial default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid initial default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with write default", func(t *testing.T) {
+			defaultValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:         tt.typ,
+					ID:           1,
+					Name:         "col",
+					Required:     false,
+					WriteDefault: &defaultValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.ErrorContains(t, err, "invalid write default")
+			require.ErrorContains(t, err, "non-null default")
+			require.ErrorContains(t, err, "non-null default (7)")
+			require.ErrorContains(t, err, "is not supported until v3")
+		})
+
+		t.Run(tt.name+" v2 with initial and write defaults", func(t *testing.T) {
+			initialValue := 7
+			writeValue := 7
+			sc := iceberg.NewSchema(0,
+				iceberg.NestedField{
+					Type:           tt.typ,
+					ID:             1,
+					Name:           "col",
+					Required:       false,
+					InitialDefault: &initialValue,
+					WriteDefault:   &writeValue,
+				},
+			)
+
+			err := checkSchemaCompatibility(sc, 2)
+			require.Error(t, err)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+			errStr := err.Error()
+			assert.Equal(t, 1, strings.Count(errStr, "invalid initial default"), "expected exactly one initial-default line in: %s", errStr)
+			assert.Equal(t, 1, strings.Count(errStr, "invalid write default"), "expected exactly one write-default line in: %s", errStr)
+		})
+	}
+}
+
 func TestComplexTypeDefaultValidation(t *testing.T) {
 	t.Run("InvalidStructInitialDefault", func(t *testing.T) {
 		schema := iceberg.NewSchema(1,
@@ -2561,4 +2723,159 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 	require.Equal(t, 3, meta3.Version())
 	require.Equal(t, int64(34), meta3.LastSequenceNumber())
 	require.Equal(t, int64(0), meta3.NextRowID())
+}
+
+// sharedCloneFields names the MetadataBuilder fields that clone() intentionally
+// shares with the original instead of copying. Keep this in sync with clone();
+// both the drift guard and its filler consult it.
+var sharedCloneFields = map[string]struct{}{
+	"base": {}, // immutable snapshot, shared by design.
+}
+
+// TestMetadataBuilderCloneCoversAllFields guards clone() against field drift:
+// it fills every field of MetadataBuilder with non-zero data and asserts the
+// clone is value-equal yet backed by independent storage. A field added to the
+// struct but omitted from clone() fails the value-equal check; a field copied
+// by reference instead of cloned fails the aliasing check. The filler recurses
+// into pointers, slices, and maps to give their targets non-zero contents, so a
+// clone() that allocates fresh storage but forgets to copy the underlying
+// values is caught too; a field the filler leaves entirely zero fails the test,
+// so a new field of an unhandled type cannot slip through as a vacuous pass.
+//
+// The aliasing check is one level deep: it verifies each slice/map/pointer
+// field has its own backing storage, not that reference types nested inside
+// elements are independent (clone() shares those by design). A future field
+// nesting references inside an element would need its own dedicated coverage.
+func TestMetadataBuilderCloneCoversAllFields(t *testing.T) {
+	orig := &MetadataBuilder{}
+	fillReferenceFields(t, reflect.ValueOf(orig).Elem())
+
+	cloned := orig.clone()
+
+	ov := reflect.ValueOf(orig).Elem()
+	cv := reflect.ValueOf(cloned).Elem()
+	typ := ov.Type()
+	for i := range ov.NumField() {
+		name := typ.Field(i).Name
+		if _, shared := sharedCloneFields[name]; shared {
+			continue
+		}
+
+		of := fieldValue(ov.Field(i))
+		cf := fieldValue(cv.Field(i))
+
+		require.Truef(t, reflect.DeepEqual(of.Interface(), cf.Interface()),
+			"field %q not copied by clone()", name)
+
+		switch of.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Ptr:
+			require.NotEqualf(t, of.Pointer(), cf.Pointer(),
+				"field %q shares backing storage with the original", name)
+		}
+	}
+}
+
+// fillReferenceFields populates every field of an addressable struct value with
+// non-zero data so clone() has something observable to copy for each field. It
+// recurses into pointer targets, slice/array elements, map keys+values, and
+// nested structs so a clone() that allocates fresh storage but drops the
+// underlying values is caught too. A top-level field of a kind it cannot fill
+// fails the test, forcing the helper to grow alongside the struct rather than
+// silently skipping a new field and turning the drift guard into a vacuous pass.
+func fillReferenceFields(t *testing.T, sv reflect.Value) {
+	t.Helper()
+	typ := sv.Type()
+	for i := range sv.NumField() {
+		name := typ.Field(i).Name
+		if _, shared := sharedCloneFields[name]; shared {
+			continue
+		}
+
+		if !fillNonZero(fieldValue(sv.Field(i)), map[reflect.Type]bool{}) {
+			t.Fatalf("fillReferenceFields: unhandled kind %v for field %q; extend the filler", sv.Field(i).Kind(), name)
+		}
+	}
+}
+
+// fillNonZero sets v to a non-zero value, recursing into the target of pointers,
+// the first element of slices/arrays, and the key and value of maps so their
+// contents are observable rather than left zero — a shallow clone that rebuilds
+// the container but drops the underlying values then fails the value-equal
+// check. seen guards against infinite recursion on self-referential pointer
+// types. It reports whether it populated v: the top-level caller treats false as
+// a drift failure, while nested callers tolerate it for kinds that cannot carry
+// non-zero data (interfaces, funcs), which clone() shares by reference anyway.
+func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
+	switch v.Kind() {
+	case reflect.Ptr:
+		v.Set(reflect.New(v.Type().Elem()))
+		if !seen[v.Type()] {
+			seen[v.Type()] = true
+			fillNonZero(v.Elem(), seen)
+		}
+
+		return true
+	case reflect.Slice:
+		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+		fillNonZero(v.Index(0), seen)
+
+		return true
+	case reflect.Array:
+		if v.Len() > 0 {
+			fillNonZero(v.Index(0), seen)
+		}
+
+		return true
+	case reflect.Map:
+		// A populated map gives the aliasing check real bite (a shallow clone
+		// yields a distinct backing map, a direct assignment does not) and,
+		// with a non-zero key and value, also catches a clone that rebuilds the
+		// map but drops its entries.
+		m := reflect.MakeMap(v.Type())
+		key := reflect.New(v.Type().Key()).Elem()
+		val := reflect.New(v.Type().Elem()).Elem()
+		fillNonZero(key, seen)
+		fillNonZero(val, seen)
+		m.SetMapIndex(key, val)
+		v.Set(m)
+
+		return true
+	case reflect.Struct:
+		filled := false
+		for i := range v.NumField() {
+			if fillNonZero(fieldValue(v.Field(i)), seen) {
+				filled = true
+			}
+		}
+
+		return filled
+	case reflect.Bool:
+		v.SetBool(true)
+
+		return true
+	case reflect.String:
+		v.SetString("x")
+
+		return true
+	}
+
+	switch {
+	case v.CanInt():
+		v.SetInt(7)
+	case v.CanUint():
+		v.SetUint(7)
+	case v.CanFloat():
+		v.SetFloat(1)
+	default:
+		return false
+	}
+
+	return true
+}
+
+// fieldValue returns an addressable, settable view of an unexported struct
+// field. The field must belong to an addressable struct (e.g. obtained via
+// reflect.ValueOf(ptr).Elem()); UnsafeAddr panics otherwise.
+func fieldValue(f reflect.Value) reflect.Value {
+	return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
 }

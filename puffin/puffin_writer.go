@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
@@ -134,6 +136,8 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	if input.Fields == nil {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: fields is required")
 	}
+	fields := slices.Clone(input.Fields)
+	properties := maps.Clone(input.Properties)
 
 	// Deletion vectors have special requirements per spec. Format matches
 	// the reader-side validateBlobs check so both sides surface the same
@@ -151,7 +155,7 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		// for deletion-vector-v1; the reader in table/dv does not enforce
 		// them today, so we hold the line here to keep Go-emitted files
 		// always conformant.
-		if input.Properties["cardinality"] == "" {
+		if properties["cardinality"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a cardinality property")
 		}
 		// Reject non-numeric or negative values at write time too — otherwise
@@ -159,11 +163,11 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		// hard-rejects later. ParseUint covers both: "-1" fails as invalid
 		// syntax (the minus is rejected before any value is parsed), so
 		// non-numeric and negative collapse into one error path.
-		if _, err := strconv.ParseUint(input.Properties["cardinality"], 10, 64); err != nil {
+		if _, err := strconv.ParseUint(properties["cardinality"], 10, 64); err != nil {
 			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer: %w",
-				input.Properties["cardinality"], err)
+				properties["cardinality"], err)
 		}
-		if input.Properties["referenced-data-file"] == "" {
+		if properties["referenced-data-file"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a referenced-data-file property")
 		}
 	}
@@ -172,10 +176,10 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		Type:           input.Type,
 		SnapshotID:     input.SnapshotID,
 		SequenceNumber: input.SequenceNumber,
-		Fields:         input.Fields,
+		Fields:         fields,
 		Offset:         w.offset,
 		Length:         int64(len(data)),
-		Properties:     input.Properties,
+		Properties:     properties,
 	}
 
 	if err := writeAll(w.w, data); err != nil {
@@ -184,6 +188,9 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 
 	w.offset += meta.Length
 	w.blobs = append(w.blobs, meta)
+
+	meta.Fields = slices.Clone(meta.Fields)
+	meta.Properties = maps.Clone(meta.Properties)
 
 	return meta, nil
 }

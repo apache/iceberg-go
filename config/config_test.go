@@ -18,19 +18,46 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestLoadConfigFile(t *testing.T) {
+	t.Run("implicit missing config", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		data, err := LoadConfigFile("")
+		require.NoError(t, err)
+		assert.Nil(t, data)
+	})
+
+	t.Run("explicit missing config", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.yaml")
+		_, err := LoadConfigFile(path)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, os.ErrNotExist)
+		assert.ErrorContains(t, err, path)
+	})
+
+	t.Run("explicit path is directory", func(t *testing.T) {
+		path := t.TempDir()
+		_, err := LoadConfigFile(path)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, path)
+	})
+}
 
 var testArgs = []struct {
 	file     []byte
 	catName  string
 	expected *CatalogConfig
 }{
-	// config file does not exist
-	{nil, "default", nil},
-	// config does not have default catalog
+	// config file does not exist; empty name falls back to built-in "default"
+	{nil, "", nil},
+	// config does not have requested catalog
 	{[]byte(`
 catalog:
   custom-catalog:
@@ -115,12 +142,50 @@ catalog:
 			AwsProfile:  "my-aws-profile",
 		},
 	},
+	// empty name resolves via the file's default-catalog field
+	{
+		[]byte(`
+default-catalog: custom-catalog
+catalog:
+  custom-catalog:
+    type: rest
+    uri: http://localhost:8181/
+    warehouse: my_wh
+`), "",
+		&CatalogConfig{
+			CatalogType: "rest",
+			URI:         "http://localhost:8181/",
+			Warehouse:   "my_wh",
+		},
+	},
+	// explicit name takes precedence over the file's default-catalog
+	{
+		[]byte(`
+default-catalog: custom-catalog
+catalog:
+  custom-catalog:
+    type: rest
+    uri: http://localhost:8181/
+  other:
+    type: rest
+    uri: http://other:8181/
+`), "other",
+		&CatalogConfig{
+			CatalogType: "rest",
+			URI:         "http://other:8181/",
+		},
+	},
 }
 
 func TestParseConfig(t *testing.T) {
 	for _, tt := range testArgs {
-		actual := ParseConfig([]byte(tt.file), tt.catName)
-
+		actual, err := ParseConfig(tt.file, tt.catName)
+		require.NoError(t, err)
 		assert.Equal(t, tt.expected, actual)
 	}
+}
+
+func TestParseConfigMalformed(t *testing.T) {
+	_, err := ParseConfig([]byte(":\t[broken yaml"), "default")
+	assert.Error(t, err)
 }

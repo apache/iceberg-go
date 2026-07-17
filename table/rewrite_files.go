@@ -38,13 +38,13 @@ import (
 //     is the defining behavior of a rewrite).
 //   - A rewrite-specific conflict validator is registered so concurrent
 //     pos/eq-delete files targeting any rewritten data file are
-//     rejected pre-flight at [Transaction.Commit] time. The pos-delete
-//     branch only fires when the concurrent writer populated the
-//     manifest's referenced_data_file column (field id 143). That
-//     column is V2-optional and V3-required for deletion-vector
-//     deletes; V2 pos-delete writers commonly leave it empty, in
-//     which case only the conservative eq-delete-during-rewrite rule
-//     fires.
+//     rejected pre-flight at [Transaction.Commit] time. A pos-delete
+//     is matched to a rewritten file via its referenced_data_file
+//     column, via equal file_path lower/upper bounds when that column
+//     is unset, or — when neither resolves a single path — via
+//     partition overlap with a rewritten file. Eq-deletes are matched
+//     conservatively: any concurrent eq-delete during the rewrite
+//     conflicts.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
 // the leader transaction, feed worker outputs in via [RewriteFiles.ApplyResult],
@@ -242,11 +242,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	}
 
 	if len(r.dataFilesToDelete) > 0 {
-		rewritten := make([]string, 0, len(r.dataFilesToDelete))
-		for _, df := range r.dataFilesToDelete {
-			rewritten = append(rewritten, df.FilePath())
-		}
-		r.txn.addValidator(rewriteValidator(rewritten))
+		r.txn.addValidator(rewriteValidator(r.dataFilesToDelete))
 	}
 
 	return nil

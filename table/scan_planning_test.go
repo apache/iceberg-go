@@ -94,6 +94,44 @@ func TestScanPlanningAutoUsesCapablePlanner(t *testing.T) {
 	assert.Len(t, tasks, 1)
 }
 
+func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
+	t.Parallel()
+
+	scan := &Scan{
+		planner: &fakeScanPlanner{
+			result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
+			supports: true,
+		},
+		planningMode:   ScanPlanningAuto,
+		identifier:     Identifier{"db", "scan-copy-test"},
+		selectedFields: []string{"*"},
+	}
+
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1)
+
+	planReq := scan.planner.(*fakeScanPlanner)
+	planReq.receivedIdentifier[0] = "corrupt"
+	assert.Equal(t, Identifier{"db", "scan-copy-test"}, scan.identifier)
+}
+
+func TestTransactionScanCopiesIdentifier(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	txn.tbl.planner = &fakeScanPlanner{
+		result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
+		supports: true,
+	}
+
+	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningAuto))
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	scan.identifier[0] = "corrupt"
+	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+}
+
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -107,11 +145,15 @@ type fakeScanPlanner struct {
 	result   ScanPlanningResult
 	supports bool
 	err      error
+	// captured after PlanFiles receives it
+	receivedIdentifier Identifier
 }
 
 func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports }
 
-func (f *fakeScanPlanner) PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error) {
+func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
+	f.receivedIdentifier = req.Identifier
+
 	return f.result, f.err
 }
 

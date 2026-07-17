@@ -103,6 +103,10 @@ func WithSigV4RegionSvc(region, service string) Option {
 	}
 }
 
+// WithAuthURI sets the OAuth2 token endpoint (oauth2-server-uri). When not set,
+// the client falls back to {catalog}/v1/oauth/tokens. This is the programmatic
+// equivalent of the oauth2-server-uri property (or its rest.authorization-url
+// alias).
 func WithAuthURI(uri *url.URL) Option {
 	return func(o *options) {
 		o.authUri = uri

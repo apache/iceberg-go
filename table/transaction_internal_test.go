@@ -18,10 +18,12 @@
 package table
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,6 +44,26 @@ func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", &featureSnapshotID)
 }
 
+func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	now := time.Now().UnixMilli()
+	oldTimestamp := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+	txn.meta.snapshotList[0].TimestampMs = oldTimestamp
+	txn.meta.snapshotList[1].TimestampMs = now
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 10, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("old-tag", 10, TagRef))
+	txn.meta.lastUpdatedMS = now
+
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(7*24*time.Hour)))
+
+	_, branchExists := txn.meta.refs["old-branch"]
+	_, tagExists := txn.meta.refs["old-tag"]
+	require.True(t, branchExists, "WithOlderThan must not expire a branch without max-ref-age-ms")
+	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 
@@ -58,6 +80,293 @@ func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *te
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
+}
+
+func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T) {
+	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
+	require.NoError(t, err, "new metadata")
+
+	txn, err := New(Identifier{"db", "broken"}, brokenMetadata{
+		Metadata: baseMeta,
+	}, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return nil, nil
+	}, nil).NewTransactionOnBranchWithError(MainBranch)
+	require.Error(t, err, "expected metadata builder initialization to fail")
+	require.ErrorContains(t, err, "current schema is missing")
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.Nil(t, txn)
+}
+
+func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
+	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
+	require.NoError(t, err, "new metadata")
+
+	txn := New(Identifier{"db", "broken"}, brokenMetadata{
+		Metadata: baseMeta,
+	}, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return nil, nil
+	}, nil).NewTransaction()
+
+	t.Run("set properties returns init error", func(t *testing.T) {
+		err := txn.SetProperties(iceberg.Properties{"k": "v"})
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("update schema no longer panics", func(t *testing.T) {
+		var err error
+		require.NotPanics(t, func() {
+			err = txn.UpdateSchema(true, false).
+				AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit()
+		})
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("update spec returns init error", func(t *testing.T) {
+		err := txn.UpdateSpec(true).AddIdentity("id").Commit()
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("table commit returns init error", func(t *testing.T) {
+		_, err := txn.TableCommit()
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("write equality deletes returns init error", func(t *testing.T) {
+		_, err := txn.WriteEqualityDeletes(context.Background(), []int{1}, nil)
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("commit returns init error", func(t *testing.T) {
+		_, err := txn.Commit(context.Background())
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+
+	t.Run("row delta commit returns init error", func(t *testing.T) {
+		rowFile, dataErr := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentData,
+			"file://data.parquet",
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			10,
+			10,
+		)
+		require.NoError(t, dataErr, "new data file builder")
+
+		rd := txn.NewRowDelta(nil).AddRows(rowFile.Build())
+		err := rd.Commit(context.Background())
+		require.ErrorContains(t, err, "current schema is missing")
+	})
+}
+
+func TestTransactionEnsureInitializedNilReceiver(t *testing.T) {
+	var txn *Transaction
+
+	err := txn.ensureInitialized()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestTransactionTxnMetaNilReceiver(t *testing.T) {
+	var txn *Transaction
+
+	meta, err := txn.txnMeta()
+	require.Nil(t, meta)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "transaction is nil")
+}
+
+// newBrokenTransaction builds a transaction whose deferred initialization fails
+// ("current schema is missing") because the base metadata reports a nil current
+// schema. It is non-nil and its mutex is usable, so it exercises the
+// post-lock/deferred-error path distinctly from a nil receiver.
+func newBrokenTransaction(t *testing.T) *Transaction {
+	t.Helper()
+
+	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
+	require.NoError(t, err, "new metadata")
+
+	return New(Identifier{"db", "broken"}, brokenMetadata{Metadata: baseMeta}, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return nil, nil }, nil).NewTransaction()
+}
+
+// TestTransactionEntryPointsRejectNilAndBrokenTransaction asserts the public
+// contract that issue #1431 targets: each exported entry point below must
+// return an error (never panic) when the transaction is nil or failed to
+// initialize. It covers both terminal commit paths (Commit, TableCommit), the
+// metadata builders (UpdateSpec, UpdateSchema, RowDelta), and the compaction
+// entry points (RewriteManifests, RewriteDataFiles) — not just the txnMeta
+// accessor. OverwriteTable is exercised via Overwrite (it only wraps a reader
+// around it); NewRewrite is exercised via ReplaceFiles.
+func TestTransactionEntryPointsRejectNilAndBrokenTransaction(t *testing.T) {
+	dfBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"file://data.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		10,
+		10,
+	)
+	require.NoError(t, err, "new data file builder")
+	dataFile := dfBuilder.Build()
+
+	ctx := context.Background()
+	entryPoints := []struct {
+		name string
+		call func(txn *Transaction) error
+	}{
+		{"SetProperties", func(txn *Transaction) error { return txn.SetProperties(iceberg.Properties{"k": "v"}) }},
+		{"UpgradeFormatVersion", func(txn *Transaction) error { return txn.UpgradeFormatVersion(2) }},
+		{"RollbackToSnapshot", func(txn *Transaction) error { return txn.RollbackToSnapshot(1) }},
+		{"ExpireSnapshots", func(txn *Transaction) error { return txn.ExpireSnapshots() }},
+		{"AppendTable", func(txn *Transaction) error { return txn.AppendTable(ctx, nil, 0, nil) }},
+		{"Append", func(txn *Transaction) error { return txn.Append(ctx, nil, nil) }},
+		{"AddDataFiles", func(txn *Transaction) error { return txn.AddDataFiles(ctx, []iceberg.DataFile{dataFile}, nil) }},
+		{"AddFiles", func(txn *Transaction) error { return txn.AddFiles(ctx, []string{"file://a.parquet"}, nil, false) }},
+		{"ReplaceDataFiles", func(txn *Transaction) error { return txn.ReplaceDataFiles(ctx, []string{"a"}, []string{"b"}, nil) }},
+		{"ReplaceDataFilesWithDataFiles", func(txn *Transaction) error {
+			return txn.ReplaceDataFilesWithDataFiles(ctx, []iceberg.DataFile{dataFile}, nil, nil)
+		}},
+		{"ReplaceFiles", func(txn *Transaction) error {
+			return txn.ReplaceFiles(ctx, []iceberg.DataFile{dataFile}, nil, []iceberg.DataFile{dataFile}, nil)
+		}},
+		{"Delete", func(txn *Transaction) error { return txn.Delete(ctx, iceberg.AlwaysTrue{}, nil) }},
+		{"Overwrite", func(txn *Transaction) error { return txn.Overwrite(ctx, nil, nil) }},
+		{"Scan", func(txn *Transaction) error {
+			_, err := txn.Scan()
+
+			return err
+		}},
+		{"StagedTable", func(txn *Transaction) error {
+			_, err := txn.StagedTable()
+
+			return err
+		}},
+		{"Commit", func(txn *Transaction) error {
+			_, err := txn.Commit(ctx)
+
+			return err
+		}},
+		{"TableCommit", func(txn *Transaction) error {
+			_, err := txn.TableCommit()
+
+			return err
+		}},
+		{"RewriteManifests", func(txn *Transaction) error {
+			_, err := txn.RewriteManifests(ctx)
+
+			return err
+		}},
+		{"RewriteDataFiles", func(txn *Transaction) error {
+			// A non-empty task group forces the path that would otherwise
+			// dereference t.tbl (panicking on a nil transaction).
+			groups := []CompactionTaskGroup{{Tasks: []FileScanTask{{}}}}
+			_, err := txn.RewriteDataFiles(ctx, groups, RewriteDataFilesOptions{})
+
+			return err
+		}},
+		{"WriteEqualityDeletes", func(txn *Transaction) error {
+			_, err := txn.WriteEqualityDeletes(ctx, []int{1}, nil)
+
+			return err
+		}},
+		{"UpdateSpec", func(txn *Transaction) error { return txn.UpdateSpec(true).AddIdentity("id").Commit() }},
+		{"UpdateSchema", func(txn *Transaction) error {
+			return txn.UpdateSchema(true, false).
+				AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+				Commit()
+		}},
+		{"RowDelta", func(txn *Transaction) error { return txn.NewRowDelta(nil).AddRows(dataFile).Commit(ctx) }},
+	}
+
+	t.Run("nil transaction", func(t *testing.T) {
+		for _, ep := range entryPoints {
+			t.Run(ep.name, func(t *testing.T) {
+				var txn *Transaction
+				var err error
+				require.NotPanics(t, func() { err = ep.call(txn) })
+				require.ErrorIs(t, err, ErrInvalidMetadata)
+				require.ErrorContains(t, err, "transaction is nil")
+			})
+		}
+	})
+
+	t.Run("broken transaction", func(t *testing.T) {
+		for _, ep := range entryPoints {
+			t.Run(ep.name, func(t *testing.T) {
+				txn := newBrokenTransaction(t)
+				var err error
+				require.NotPanics(t, func() { err = ep.call(txn) })
+				require.ErrorContains(t, err, "current schema is missing")
+			})
+		}
+	})
+}
+
+type brokenMetadata struct {
+	Metadata
+}
+
+func (m brokenMetadata) CurrentSchema() *iceberg.Schema {
+	return nil
+}
+
+func TestTransactionApplyKeepsMetadataUnchangedOnUpdateFailure(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	baseMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	updates := []Update{
+		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewSetCurrentSchemaUpdate(9999),
+	}
+
+	err = txn.apply(updates, nil)
+	require.Error(t, err)
+
+	postMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.True(t, baseMeta.Equals(postMeta))
+	require.Len(t, txn.reqs, 0)
+}
+
+func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	baseMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	// Stage a requirement with a successful apply so txn.reqs is non-empty
+	// going into the failing call; this distinguishes a genuine rollback from
+	// an implementation that simply never accumulates requirements.
+	err = txn.apply(nil, []Requirement{AssertTableUUID(baseMeta.TableUUID())})
+	require.NoError(t, err)
+	require.Len(t, txn.reqs, 1)
+
+	// The requirement passed to the failing call must itself validate, so the
+	// rollback is driven by the update failure (not by requirement validation
+	// bailing out early). Assert that here so a future fixture change surfaces
+	// as a loud failure in the right place.
+	require.NoError(t, AssertCurrentSchemaID(0).Validate(baseMeta))
+
+	// A batch whose second update fails must leave both the staged metadata and
+	// the requirement list at their pre-call state — not the one extra req this
+	// call would add, and not an empty list.
+	updates := []Update{
+		NewUpgradeFormatVersionUpdate(baseMeta.Version() + 1),
+		NewSetCurrentSchemaUpdate(9999),
+	}
+	err = txn.apply(updates, []Requirement{AssertCurrentSchemaID(0)})
+	require.Error(t, err)
+
+	require.Len(t, txn.reqs, 1)
+	require.Equal(t, AssertTableUUID(baseMeta.TableUUID()), txn.reqs[0])
 }
 
 // TestTransactionApplyDedupesSameRefAssertionsNewTable covers two appends in a

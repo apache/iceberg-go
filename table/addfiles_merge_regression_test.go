@@ -32,7 +32,7 @@ package table_test
 //
 // to:
 //
-//	updater := t.appendSnapshotProducer(fs, snapshotProps)
+//	updater := t.appendSnapshotProducer(meta, fs, snapshotProps)
 
 import (
 	"context"

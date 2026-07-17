@@ -306,6 +306,27 @@ func (m *manifestFile) toV1(v1file *manifestFileV1) {
 	}
 }
 
+// ensurePartitionList normalizes the narrow case behind #1309: an inherited
+// manifest whose partition-field summary list is present but empty. Only an
+// empty-spec manifest has zero summaries, so in practice this is an
+// unpartitioned table. On decode that present-empty array becomes a non-nil
+// pointer over a nil slice, which the manifest-list writer would otherwise
+// re-encode as Avro null for the optional partitions union (field 507) — a
+// value strict readers such as Redshift Spectrum reject. Only that
+// present-but-nil slice is normalized back to an empty array. A genuinely
+// absent value (nil pointer) is left null, which is spec-legal because
+// partitions is optional; populated (partitioned) summaries are non-empty and
+// pass through untouched.
+func ensurePartitionList(partitions **[]FieldSummary) {
+	if *partitions == nil {
+		return
+	}
+	if **partitions == nil {
+		empty := []FieldSummary{}
+		*partitions = &empty
+	}
+}
+
 func (m *manifestFile) Version() int                     { return m.version }
 func (m *manifestFile) FilePath() string                 { return m.Path }
 func (m *manifestFile) Length() int64                    { return m.Len }
@@ -1531,6 +1552,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 		var tmp manifestFileV1
 		for _, file := range files {
 			file.(*manifestFile).toV1(&tmp)
+			ensurePartitionList(&tmp.PartitionList)
 			if err := m.writer.Encode(&tmp); err != nil {
 				return err
 			}
@@ -1553,6 +1575,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 
 			wrapped := *(file.(*manifestFile))
+			ensurePartitionList(&wrapped.PartitionList)
 			if m.version == 3 {
 				// Ref: https://github.com/apache/iceberg/blob/ea2071568dc66148b483a82eefedcd2992b435f7/core/src/main/java/org/apache/iceberg/ManifestListWriter.java#L157-L168
 				if wrapped.Content == ManifestContentData {
@@ -2180,7 +2203,13 @@ func (m *manifestEntry) SequenceNum() int64 {
 }
 
 func (m *manifestEntry) FileSequenceNum() *int64 {
-	return m.FileSeqNum
+	if m.FileSeqNum == nil {
+		return nil
+	}
+
+	fileSeqNum := *m.FileSeqNum
+
+	return &fileSeqNum
 }
 
 func (m *manifestEntry) DataFile() DataFile { return m.Data }

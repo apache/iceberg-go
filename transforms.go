@@ -425,6 +425,10 @@ func (t BucketTransform) Project(name string, pred BoundPredicate) (UnboundPredi
 		return projectTransformPredicate(t, name, pred)
 	}
 
+	if !t.CanTransform(pred.Term().Type()) {
+		return nil, nil
+	}
+
 	transformer := t.Transformer(pred.Term().Type())
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:

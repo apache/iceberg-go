@@ -289,6 +289,51 @@ func (s *RestIntegrationSuite) TestUpdateView() {
 	s.Require().NoError(s.cat.DropView(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-view")))
 }
 
+func (s *RestIntegrationSuite) TestRenameView() {
+	s.ensureNamespace()
+
+	const location = "s3://warehouse/iceberg"
+	tbl, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "test-table"),
+		tableSchemaSimple, catalog.WithProperties(iceberg.Properties{"foobar": "baz"}),
+		catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl)
+
+	// Create a view to rename
+	fromIdent := catalog.ToIdentifier(TestNamespaceIdent, "test-view")
+	toIdent := catalog.ToIdentifier(TestNamespaceIdent, "renamed-view")
+
+	viewRepr := view.NewRepresentation(fmt.Sprintf("SELECT * FROM %s.%s", TestNamespaceIdent, "test-table"), "trino")
+	viewVersion, err := view.NewVersion(1, 1, []view.Representation{viewRepr}, table.Identifier{TestNamespaceIdent})
+	s.Require().NoError(err)
+
+	created, err := s.cat.CreateView(s.ctx, fromIdent, viewVersion, tableSchemaSimple,
+		catalog.WithViewProperties(iceberg.Properties{"foobar": "baz"}))
+	s.Require().NoError(err)
+
+	// Rename it
+	renamed, err := s.cat.RenameView(s.ctx, fromIdent, toIdent)
+	s.Require().NoError(err)
+	s.Equal(toIdent, renamed.Identifier())
+	s.Equal(created.Metadata().ViewUUID(), renamed.Metadata().ViewUUID())
+	// A rename moves the pointer, it must not rewrite the metadata.
+	s.Equal(created.MetadataLocation(), renamed.MetadataLocation())
+
+	// The old name is gone, the new one exists
+	exists, err := s.cat.CheckViewExists(s.ctx, fromIdent)
+	s.Require().NoError(err)
+	s.False(exists)
+
+	exists, err = s.cat.CheckViewExists(s.ctx, toIdent)
+	s.Require().NoError(err)
+	s.True(exists)
+
+	// Cleanup
+	s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "test-table")))
+	s.Require().NoError(s.cat.DropView(s.ctx, toIdent))
+}
+
 func (s *RestIntegrationSuite) TestWriteCommitTable() {
 	s.ensureNamespace()
 
