@@ -2043,6 +2043,9 @@ func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	if err := r.endpoints.check(endpointCreateView); err != nil {
 		return nil, err
 	}
+	if version == nil {
+		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
+	}
 
 	ns, viewName, err := r.splitViewIdentForPath(identifier)
 	if err != nil {
