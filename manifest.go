@@ -144,13 +144,48 @@ func (b *ManifestBuilder) DeletedRows(cnt int64) *ManifestBuilder {
 }
 
 func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
-	b.m.PartitionList = &p
+	if p == nil {
+		// Preserve the semantic "no partition summaries" state by clearing the
+		// union pointer entirely instead of storing a pointer to a nil slice.
+		b.m.PartitionList = nil
+
+		return b
+	}
+
+	copied := make([]FieldSummary, len(p))
+	for i, partition := range p {
+		copiedPartition := partition
+		if partition.LowerBound != nil {
+			lowerBound := slices.Clone(*partition.LowerBound)
+			copiedPartition.LowerBound = &lowerBound
+		}
+		if partition.UpperBound != nil {
+			upperBound := slices.Clone(*partition.UpperBound)
+			copiedPartition.UpperBound = &upperBound
+		}
+		if partition.ContainsNaN != nil {
+			containsNaN := *partition.ContainsNaN
+			copiedPartition.ContainsNaN = &containsNaN
+		}
+
+		copied[i] = copiedPartition
+	}
+	b.m.PartitionList = &copied
 
 	return b
 }
 
 func (b *ManifestBuilder) KeyMetadata(km []byte) *ManifestBuilder {
-	b.m.Key = &km
+	if km == nil {
+		// Preserve the semantic "no key metadata" state by clearing the union
+		// pointer entirely instead of storing a pointer to a nil slice.
+		b.m.Key = nil
+
+		return b
+	}
+
+	keyMetadata := slices.Clone(km)
+	b.m.Key = &keyMetadata
 
 	return b
 }
