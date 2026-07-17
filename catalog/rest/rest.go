@@ -312,15 +312,6 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return s.RoundTripper.RoundTrip(r)
 }
 
-// CloseIdleConnections forwards cleanup to transports that own idle
-// connections, allowing http.Client.CloseIdleConnections to work through the
-// session wrapper.
-func (s *sessionTransport) CloseIdleConnections() {
-	if transport, ok := s.RoundTripper.(interface{ CloseIdleConnections() }); ok {
-		transport.CloseIdleConnections()
-	}
-}
-
 // suppressHeadersKey carries the set of session-default header keys (canonical
 // form) that a request opted out of, so sessionTransport.RoundTrip can consult
 // an explicit set rather than inferring suppression from header values.
@@ -807,7 +798,8 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
-func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
+// The returned cleanup closes an internally-created OAuth transport, if any.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager, func()) {
 	// If a static token is provided, use it directly.
 	if opts.oauthToken != "" {
 		return &Oauth2AuthManager{
@@ -815,12 +807,12 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 				AccessToken: opts.oauthToken,
 				TokenType:   "Bearer",
 			}),
-		}
+		}, nil
 	}
 
 	// If no credential, no auth needed.
 	if opts.credential == "" {
-		return nil
+		return nil, nil
 	}
 
 	authURL := opts.authUri
@@ -865,19 +857,22 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 	// client. This is needed when the OAuth2 server is a different host with
 	// different TLS requirements.
 	oauthClient := cl
+	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
-		oauthClient = &http.Client{
-			Transport: &http.Transport{
-				Proxy:           http.ProxyFromEnvironment,
-				TLSClientConfig: opts.oauthTLSConfig,
-			},
+		transport := &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: opts.oauthTLSConfig,
 		}
+		oauthClient = &http.Client{
+			Transport: transport,
+		}
+		closeIdleConnections = transport.CloseIdleConnections
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
 	return &Oauth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
-	}
+	}, closeIdleConnections
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
@@ -891,7 +886,7 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		return err
 	}
 
-	r.cl, err = r.createSession(ctx, ops)
+	r.cl, _, err = r.createSession(ctx, ops)
 	if err != nil {
 		return err
 	}
@@ -903,12 +898,22 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
-func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
+// createSession returns a cleanup that closes only transports created by this
+// function, never transports supplied by the caller.
+func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
 	var baseTransport http.RoundTripper
+	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
 	} else {
-		baseTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		baseTransport = transport
+		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
+	}
+	cleanup := func() {
+		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
+			cleanupFuncs[i]()
+		}
 	}
 
 	session := &sessionTransport{
@@ -922,7 +927,11 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	// the final session after server configuration has been applied.
 	authManager := opts.authManager
 	if authManager == nil {
-		authManager = setupOAuthManager(r, cl, opts)
+		var cleanupOAuth func()
+		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
+		if cleanupOAuth != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanupOAuth)
+		}
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
@@ -951,7 +960,9 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 			var err error
 			cfg, err = config.LoadDefaultConfig(ctx)
 			if err != nil {
-				return nil, err
+				cleanup()
+
+				return nil, nil, err
 			}
 		}
 		if opts.sigv4Region != "" {
@@ -962,7 +973,7 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.signer, session.newHash = v4.NewSigner(), sha256.New
 	}
 
-	return cl, nil
+	return cl, cleanup, nil
 }
 
 func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
@@ -974,13 +985,11 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
 
-	sess, err := r.createSession(ctx, opts)
+	sess, cleanup, err := r.createSession(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	if opts.transport == nil {
-		defer sess.CloseIdleConnections()
-	}
+	defer cleanup()
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
