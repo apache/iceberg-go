@@ -712,7 +712,19 @@ type wrappedUUIDStats struct {
 	*metadata.FixedLenByteArrayStatistics
 }
 
+func (w *wrappedUUIDStats) HasMinMax() bool {
+	const uuidByteWidth = 16
+
+	return w.FixedLenByteArrayStatistics.HasMinMax() &&
+		len(w.FixedLenByteArrayStatistics.Min()) == uuidByteWidth &&
+		len(w.FixedLenByteArrayStatistics.Max()) == uuidByteWidth
+}
+
 func (w *wrappedUUIDStats) Min() uuid.UUID {
+	if !w.HasMinMax() {
+		return uuid.Nil
+	}
+
 	uid, err := uuid.FromBytes(w.FixedLenByteArrayStatistics.Min())
 	if err != nil {
 		panic(err)
@@ -722,6 +734,10 @@ func (w *wrappedUUIDStats) Min() uuid.UUID {
 }
 
 func (w *wrappedUUIDStats) Max() uuid.UUID {
+	if !w.HasMinMax() {
+		return uuid.Nil
+	}
+
 	uid, err := uuid.FromBytes(w.FixedLenByteArrayStatistics.Max())
 	if err != nil {
 		panic(err)
@@ -732,6 +748,13 @@ func (w *wrappedUUIDStats) Max() uuid.UUID {
 
 type wrappedFLBAStats struct {
 	*metadata.FixedLenByteArrayStatistics
+	expectedLen int
+}
+
+func (w *wrappedFLBAStats) HasMinMax() bool {
+	return w.FixedLenByteArrayStatistics.HasMinMax() &&
+		len(w.FixedLenByteArrayStatistics.Min()) == w.expectedLen &&
+		len(w.FixedLenByteArrayStatistics.Max()) == w.expectedLen
 }
 
 func (w *wrappedFLBAStats) Min() []byte {
@@ -744,10 +767,21 @@ func (w *wrappedFLBAStats) Max() []byte {
 
 type wrappedDecStats struct {
 	*metadata.FixedLenByteArrayStatistics
-	scale int
+	expectedLen int
+	scale       int
+}
+
+func (w wrappedDecStats) HasMinMax() bool {
+	return w.FixedLenByteArrayStatistics.HasMinMax() &&
+		len(w.FixedLenByteArrayStatistics.Min()) == w.expectedLen &&
+		len(w.FixedLenByteArrayStatistics.Max()) == w.expectedLen
 }
 
 func (w wrappedDecStats) Min() iceberg.Decimal {
+	if !w.HasMinMax() {
+		return iceberg.Decimal{Scale: w.scale}
+	}
+
 	dec, err := BigEndianToDecimal(w.FixedLenByteArrayStatistics.Min())
 	if err != nil {
 		panic(err)
@@ -757,6 +791,10 @@ func (w wrappedDecStats) Min() iceberg.Decimal {
 }
 
 func (w wrappedDecStats) Max() iceberg.Decimal {
+	if !w.HasMinMax() {
+		return iceberg.Decimal{Scale: w.scale}
+	}
+
 	dec, err := BigEndianToDecimal(w.FixedLenByteArrayStatistics.Max())
 	if err != nil {
 		panic(err)
@@ -848,6 +886,9 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
 			}
+			if _, invalid := invalidateCol[fieldID]; invalid {
+				continue
+			}
 
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
 			valueCounts[fieldID] += colChunk.NumValues()
@@ -903,18 +944,32 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			case iceberg.StringType:
 				stats = &wrappedStringStats{stats.(*metadata.ByteArrayStatistics)}
 			case iceberg.FixedType:
-				stats = &wrappedFLBAStats{stats.(*metadata.FixedLenByteArrayStatistics)}
+				stats = &wrappedFLBAStats{
+					FixedLenByteArrayStatistics: stats.(*metadata.FixedLenByteArrayStatistics),
+					expectedLen:                 t.Len(),
+				}
 			case iceberg.DecimalType:
 				// Decimals can be stored as INT32/INT64 (small precision) or FIXED_LEN_BYTE_ARRAY/BYTE_ARRAY.
 				// Only wrap FIXED_LEN_BYTE_ARRAY and BYTE_ARRAY statistics; INT32/INT64 stats
 				// are used directly by decAsIntAgg.
 				switch s := stats.(type) {
 				case *metadata.FixedLenByteArrayStatistics:
-					stats = &wrappedDecStats{s, t.Scale()}
+					stats = &wrappedDecStats{
+						FixedLenByteArrayStatistics: s,
+						expectedLen:                 internal.DecimalRequiredBytes(t.Precision()),
+						scale:                       t.Scale(),
+					}
 				case *metadata.ByteArrayStatistics:
 					stats = &wrappedDecByteArrayStats{s, t.Scale()}
 					// INT32/INT64 statistics are used directly by decAsIntAgg
 				}
+			}
+
+			if !stats.HasMinMax() {
+				invalidateCol[fieldID] = struct{}{}
+				delete(colAggs, fieldID)
+
+				continue
 			}
 
 			agg.Update(stats)
