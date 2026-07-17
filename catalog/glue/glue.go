@@ -733,7 +733,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		CatalogId: c.catalogId,
 	}
 
-	if parent != nil {
+	if len(parent) > 0 {
 		return nil, errors.New("hierarchical namespace is not supported")
 	}
 

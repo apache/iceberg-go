@@ -553,6 +553,19 @@ func TestGlueListNamespaces(t *testing.T) {
 	assert.Equal([]string{"test_database"}, databases[0])
 }
 
+func TestGlueListNamespacesAcceptsEmptyRootIdentifier(t *testing.T) {
+	mockGlueSvc := &mockGlueClient{}
+	mockGlueSvc.On("GetDatabases", mock.Anything, &glue.GetDatabasesInput{}, mock.Anything).
+		Return(&glue.GetDatabasesOutput{}, nil).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+	databases, err := glueCatalog.ListNamespaces(context.Background(), table.Identifier{})
+
+	require.NoError(t, err)
+	require.Empty(t, databases)
+	mockGlueSvc.AssertExpectations(t)
+}
+
 func TestGlueDropTable(t *testing.T) {
 	assert := require.New(t)
 
