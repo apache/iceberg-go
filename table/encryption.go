@@ -42,11 +42,12 @@ func (e EncryptionKey) validate() error {
 		return errors.New("encryption key-id must not have leading or trailing whitespace")
 	}
 
-	if e.EncryptedKeyMetadata == "" {
-		return errors.New("encrypted key metadata must be non-empty")
-	}
-	if _, err := base64.StdEncoding.DecodeString(e.EncryptedKeyMetadata); err != nil {
+	decodedMetadata, err := base64.StdEncoding.DecodeString(e.EncryptedKeyMetadata)
+	if err != nil {
 		return fmt.Errorf("encrypted key metadata must be valid base64: %w", err)
+	}
+	if len(decodedMetadata) == 0 {
+		return errors.New("encrypted key metadata must be non-empty")
 	}
 
 	return nil

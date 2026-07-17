@@ -904,6 +904,15 @@ func TestAddEncryptionKeyUpdate_Apply_RejectsMissingEncryptedKeyMetadata(t *test
 	assert.Contains(t, err.Error(), "metadata")
 }
 
+func TestAddEncryptionKeyUpdate_Apply_RejectsWhitespaceOnlyEncryptedKeyMetadata(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "\n"}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "metadata must be non-empty")
+}
+
 func TestMetadataBuilderAddEncryptionKeyRejectsMissingKeyID(t *testing.T) {
 	b := buildFromBaseV3(t)
 	err := b.AddEncryptionKey(EncryptionKey{EncryptedKeyMetadata: "dGVzdA=="})
