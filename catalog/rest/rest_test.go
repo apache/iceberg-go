@@ -2546,6 +2546,19 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
+func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = ctlg.CreateView(
+		context.Background(),
+		table.Identifier{"ns", "view"},
+		nil,
+		iceberg.NewSchema(0),
+	)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
+}
+
 func (r *RestCatalogSuite) TestCreateView409() {
 	ns := "ns"
 	viewName := "view"

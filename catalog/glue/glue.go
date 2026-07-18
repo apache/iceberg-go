@@ -733,7 +733,7 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 		CatalogId: c.catalogId,
 	}
 
-	if parent != nil {
+	if len(parent) > 0 {
 		return nil, errors.New("hierarchical namespace is not supported")
 	}
 
@@ -863,8 +863,11 @@ func (c *Catalog) getDatabase(ctx context.Context, databaseName string) (*types.
 }
 
 func identifierToGlueTable(identifier table.Identifier) (string, string, error) {
+	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
+		return "", "", err
+	}
 	if len(identifier) != 2 {
-		return "", "", fmt.Errorf("invalid identifier, missing database name: %v", identifier)
+		return "", "", fmt.Errorf("%w: expected [database, table], got %v", catalog.ErrNoSuchTable, identifier)
 	}
 
 	return identifier[0], identifier[1], nil

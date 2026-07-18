@@ -987,6 +987,31 @@ func (s *SqliteCatalogTestSuite) TestCreateTableWithoutNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestTableOperationsRejectEmptyIdentifiers() {
+	ctx := context.Background()
+	valid := table.Identifier{"db", "table"}
+
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		for _, ident := range []table.Identifier{nil, {}, {"table"}} {
+			_, err := cat.CreateTable(ctx, ident, tableSchemaNested)
+			s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+			_, _, err = cat.CommitTable(ctx, ident, nil, nil)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.LoadTable(ctx, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			s.ErrorIs(cat.DropTable(ctx, ident), catalog.ErrNoSuchTable)
+			s.ErrorIs(cat.PurgeTable(ctx, ident), catalog.ErrNoSuchTable)
+			_, err = cat.RenameTable(ctx, ident, valid)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.RenameTable(ctx, valid, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.CheckTableExists(ctx, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+		}
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestListTables() {
 	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
 	tbl1, tbl2 := s.randomTableIdentifier(), s.randomHierarchicalIdentifier()
