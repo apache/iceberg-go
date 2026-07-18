@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	icebergcatalog "github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/catalog/rest/internal/planfake"
 	"github.com/apache/iceberg-go/table"
@@ -127,6 +128,41 @@ func TestPlanFakeCapabilityDiscovery(t *testing.T) {
 			assert.Equal(t, "/v1/config", requests[0].Path)
 		})
 	}
+}
+
+func TestPlanFakeConfigOverrideRoutesPlanningPrefix(t *testing.T) {
+	t.Parallel()
+
+	srv := planfake.New(t, planfake.Scenario{
+		ConfigResponse: planFakeJSONResponse(`{
+			"defaults": {},
+			"overrides": {"prefix": "server-prefix"},
+			"endpoints": [
+				"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/plan"
+			]
+		}`),
+		ExpectedTarget: &planfake.ExpectedTarget{
+			Prefix: "server-prefix", Namespace: "analytics", Table: "events",
+		},
+		PlanResponse: planFakeJSONResponse(`{
+			"status":"completed",
+			"plan-id":"prefix-plan"
+		}`),
+	})
+	catalog, err := rest.NewCatalog(t.Context(), "rest", srv.URL(), rest.WithPrefix("client-prefix"))
+	require.NoError(t, err)
+
+	_, err = catalog.PlanTableScan(t.Context(), standardPlanFakeIdentifier(), rest.PlanTableScanRequest{})
+	require.NoError(t, err)
+
+	requests := srv.Requests()
+	require.Len(t, requests, 2)
+	assert.Equal(t, http.MethodGet, requests[0].Method)
+	assert.Equal(t, "/v1/config", requests[0].Path)
+	assert.Equal(t, http.MethodPost, requests[1].Method)
+	assert.Equal(t, "/v1/server-prefix/namespaces/analytics/tables/events/plan", requests[1].Path)
+	assert.Equal(t, "server-prefix", requests[1].Prefix)
+	assert.Empty(t, srv.ScenarioErrors())
 }
 
 func TestPlanFakeSynchronousPlanningCapturesRequest(t *testing.T) {
@@ -256,6 +292,119 @@ func TestPlanFakeAsynchronousPlanningWaitsThroughRetry(t *testing.T) {
 	require.Len(t, pollRequests, 3)
 	for _, request := range pollRequests {
 		assert.Equal(t, accessDelegation, request.Header.Get("X-Iceberg-Access-Delegation"))
+	}
+}
+
+func TestPlanFakeSurfacesTerminalPlanningStatuses(t *testing.T) {
+	t.Parallel()
+
+	t.Run("failed submission preserves structured detail", func(t *testing.T) {
+		t.Parallel()
+
+		srv := planfake.New(t, planfake.Scenario{
+			ConfigResponse: fullPlanningConfigResponse(),
+			ExpectedTarget: standardPlanFakeTarget(),
+			PlanResponse: planFakeJSONResponse(`{
+				"status":"failed",
+				"error":{
+					"message":"manifest read failed",
+					"type":"PlanningException",
+					"code":500,
+					"stack":["planner.go:42"]
+				}
+			}`),
+		})
+		catalog, err := rest.NewCatalog(t.Context(), "rest", srv.URL(), rest.WithPrefix("warehouse"))
+		require.NoError(t, err)
+
+		_, err = catalog.PlanTableScan(t.Context(), standardPlanFakeIdentifier(), rest.PlanTableScanRequest{})
+		require.ErrorIs(t, err, rest.ErrPlanFailed)
+		var failed *rest.PlanFailedError
+		require.ErrorAs(t, err, &failed)
+		require.NotNil(t, failed.Detail)
+		assert.Equal(t, "manifest read failed", failed.Detail.Message)
+		assert.Equal(t, "PlanningException", failed.Detail.Type)
+		assert.Equal(t, 500, failed.Detail.Code)
+		assert.Equal(t, []string{"planner.go:42"}, failed.Detail.Stack)
+		assert.Empty(t, srv.ScenarioErrors())
+	})
+
+	t.Run("cancelled poll returns cancellation sentinel", func(t *testing.T) {
+		t.Parallel()
+
+		const planID = "cancelled-plan"
+		srv := planfake.New(t, planfake.Scenario{
+			ConfigResponse: fullPlanningConfigResponse(),
+			ExpectedTarget: standardPlanFakeTarget(),
+			PollResponses: map[string]planfake.ResponseSequence{
+				planID: {
+					Responses: []planfake.Response{
+						planFakeJSONResponse(`{"status":"cancelled"}`),
+					},
+				},
+			},
+		})
+		catalog, err := rest.NewCatalog(t.Context(), "rest", srv.URL(), rest.WithPrefix("warehouse"))
+		require.NoError(t, err)
+
+		_, err = catalog.WaitForPlan(t.Context(), standardPlanFakeIdentifier(), planID, rest.WaitForPlanOptions{})
+		require.ErrorIs(t, err, rest.ErrPlanCancelled)
+		assert.NotErrorIs(t, err, rest.ErrPlanFailed)
+		assert.Equal(t, 1, srv.PollCount(planID))
+		assert.Zero(t, srv.CancelCount(planID))
+		assert.Empty(t, srv.ScenarioErrors())
+	})
+}
+
+func TestPlanFakePlanSubmissionMapsMissingTarget(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		errorType string
+		wantErr   error
+		notErr    error
+	}{
+		{
+			name:      "table",
+			errorType: "NoSuchTableException",
+			wantErr:   icebergcatalog.ErrNoSuchTable,
+			notErr:    icebergcatalog.ErrNoSuchNamespace,
+		},
+		{
+			name:      "namespace",
+			errorType: "NoSuchNamespaceException",
+			wantErr:   icebergcatalog.ErrNoSuchNamespace,
+			notErr:    icebergcatalog.ErrNoSuchTable,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := planfake.New(t, planfake.Scenario{
+				ConfigResponse: fullPlanningConfigResponse(),
+				ExpectedTarget: standardPlanFakeTarget(),
+				PlanResponse: planfake.Response{
+					Status: http.StatusNotFound,
+					Body: json.RawMessage(`{
+						"error":{
+							"message":"planning target does not exist",
+							"type":"` + test.errorType + `",
+							"code":404
+						}
+					}`),
+				},
+			})
+			catalog, err := rest.NewCatalog(t.Context(), "rest", srv.URL(), rest.WithPrefix("warehouse"))
+			require.NoError(t, err)
+
+			_, err = catalog.PlanTableScan(t.Context(), standardPlanFakeIdentifier(), rest.PlanTableScanRequest{})
+			require.ErrorIs(t, err, test.wantErr)
+			assert.NotErrorIs(t, err, test.notErr)
+			assert.Empty(t, srv.ScenarioErrors())
+		})
 	}
 }
 
