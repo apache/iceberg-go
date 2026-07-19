@@ -25,19 +25,11 @@ import (
 	"sync"
 )
 
-// Catalog/table property keys used to select and configure a KeyManagementClient.
-const (
-	// KMSTypeKey selects a built-in KeyManagementClient implementation
-	// registered via [RegisterKMS] (e.g. "memory").
-	KMSTypeKey = "encryption.kms-type"
-
-	// KMSImplKey selects a custom KeyManagementClient implementation by a
-	// name registered via [RegisterKMS]. It is an alternative to
-	// [KMSTypeKey] for vendors that ship their own KMS integration under a
-	// distinct name; the two properties share the same registry and
-	// resolution mechanism.
-	KMSImplKey = "encryption.kms-impl"
-)
+// KMSTypeKey is the catalog/table property that selects a
+// [KeyManagementClient] implementation registered via [RegisterKMS] (e.g.
+// "memory"). It is a registered short name, not a fully-qualified class
+// name.
+const KMSTypeKey = "encryption.kms-type"
 
 // ErrKMSTypeNotFound is returned by [LoadKeyManagementClient] when the
 // requested kmsType has not been registered via [RegisterKMS].
@@ -55,8 +47,8 @@ var (
 )
 
 // RegisterKMS adds a new named [KMSFactory] to the registry so it can later
-// be selected via the [KMSTypeKey] or [KMSImplKey] catalog property. It
-// panics if factory is nil or if name is already registered.
+// be selected via the [KMSTypeKey] catalog property. It panics if factory is
+// nil or if name is already registered.
 func RegisterKMS(name string, factory KMSFactory) {
 	if factory == nil {
 		panic("encryption: RegisterKMS factory is nil")
@@ -88,18 +80,13 @@ func GetRegisteredKMSNames() []string {
 }
 
 // LoadKeyManagementClient resolves and constructs a [KeyManagementClient]
-// from props. It looks up the KMS name under [KMSTypeKey] first, falling
-// back to [KMSImplKey] if present; it returns an error wrapping
-// [ErrKMSTypeNotFound] if neither property is set or the named KMS has not
-// been registered via [RegisterKMS].
+// from props. It looks up the KMS name under [KMSTypeKey]; it returns an
+// error wrapping [ErrKMSTypeNotFound] if the property is unset or the named
+// KMS has not been registered via [RegisterKMS].
 func LoadKeyManagementClient(props map[string]string) (KeyManagementClient, error) {
 	name := props[KMSTypeKey]
 	if name == "" {
-		name = props[KMSImplKey]
-	}
-
-	if name == "" {
-		return nil, fmt.Errorf("%w: neither %q nor %q is set", ErrKMSTypeNotFound, KMSTypeKey, KMSImplKey)
+		return nil, fmt.Errorf("%w: %q is not set", ErrKMSTypeNotFound, KMSTypeKey)
 	}
 
 	kmsRegMutex.RLock()

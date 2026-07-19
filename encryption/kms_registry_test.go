@@ -33,29 +33,6 @@ func TestLoadKeyManagementClient_Memory(t *testing.T) {
 	assert.IsType(t, &encryption.InMemoryKeyManagementClient{}, kms)
 }
 
-func TestLoadKeyManagementClient_KMSImplFallback(t *testing.T) {
-	kms, err := encryption.LoadKeyManagementClient(map[string]string{
-		encryption.KMSImplKey: "memory",
-	})
-	require.NoError(t, err)
-	assert.IsType(t, &encryption.InMemoryKeyManagementClient{}, kms)
-}
-
-func TestLoadKeyManagementClient_KMSTypeTakesPrecedence(t *testing.T) {
-	const customName = "test-precedence-kms"
-	encryption.RegisterKMS(customName, func(_ map[string]string) (encryption.KeyManagementClient, error) {
-		return encryption.NewInMemoryKeyManagementClient(), nil
-	})
-	defer encryption.UnregisterKMS(customName)
-
-	kms, err := encryption.LoadKeyManagementClient(map[string]string{
-		encryption.KMSTypeKey: "memory",
-		encryption.KMSImplKey: customName,
-	})
-	require.NoError(t, err)
-	assert.IsType(t, &encryption.InMemoryKeyManagementClient{}, kms)
-}
-
 func TestLoadKeyManagementClient_NoPropertiesSet(t *testing.T) {
 	_, err := encryption.LoadKeyManagementClient(map[string]string{})
 	require.ErrorIs(t, err, encryption.ErrKMSTypeNotFound)
@@ -105,4 +82,24 @@ func TestLoadKeyManagementClient_FactoryError(t *testing.T) {
 		encryption.KMSTypeKey: name,
 	})
 	require.ErrorIs(t, err, wantErr)
+}
+
+func TestLoadKeyManagementClient_PassesPropsToFactory(t *testing.T) {
+	const name = "test-props-kms"
+	wantProps := map[string]string{
+		encryption.KMSTypeKey:   name,
+		"encryption.kms.region": "us-east-1",
+	}
+
+	var gotProps map[string]string
+	encryption.RegisterKMS(name, func(props map[string]string) (encryption.KeyManagementClient, error) {
+		gotProps = props
+
+		return encryption.NewInMemoryKeyManagementClient(), nil
+	})
+	defer encryption.UnregisterKMS(name)
+
+	_, err := encryption.LoadKeyManagementClient(wantProps)
+	require.NoError(t, err)
+	assert.Equal(t, wantProps, gotProps, "the full props map given to LoadKeyManagementClient must reach the factory unmodified")
 }
