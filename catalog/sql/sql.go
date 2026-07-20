@@ -212,6 +212,11 @@ func init() {
 			return nil, err
 		}
 
+		// This registrar opened sqldb itself, so nobody else holds the handle;
+		// Close must release its connection pool. NewCatalog leaves ownsDB false
+		// for caller-supplied handles, which stay owned by the caller.
+		cat.ownsDB = true
+
 		return cat, nil
 	}))
 }
@@ -304,6 +309,10 @@ type Catalog struct {
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
 	reporter metrics.CachedReporter
+	// ownsDB reports whether this catalog opened its own *sql.DB (the registrar
+	// path) and must therefore close it in Close. It stays false for handles
+	// supplied to NewCatalog, which remain owned by the caller.
+	ownsDB bool
 }
 
 // isV0 reports whether the catalog is operating against a legacy V0 schema that
@@ -363,11 +372,21 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.SQL
 }
 
-// Close releases the catalog's metrics reporter. The SQL catalog is constructed
-// from a caller-owned database handle, so it does not close that handle; only
-// the reporter is released. Callers holding a [catalog.Catalog] can reach this
-// via a [catalog.Closer] type assertion.
-func (c *Catalog) Close() error { return c.reporter.Close() }
+// Close releases the catalog's metrics reporter. When the catalog opened its own
+// database handle (the registry [catalog.Load] path), Close also closes that
+// handle's connection pool; a handle supplied to [NewCatalog] stays owned by the
+// caller and is left open. Callers holding a [catalog.Catalog] can reach this via
+// a [catalog.Closer] type assertion.
+func (c *Catalog) Close() error {
+	err := c.reporter.Close()
+	if c.ownsDB {
+		if dbErr := c.db.Close(); dbErr != nil && err == nil {
+			err = dbErr
+		}
+	}
+
+	return err
+}
 
 var _ catalog.Closer = (*Catalog)(nil)
 
