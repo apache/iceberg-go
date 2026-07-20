@@ -202,6 +202,7 @@ func TestCollectVariantBoundsIncompleteRowGroup(t *testing.T) {
 		Nullable: true,
 	}}, nil)
 	colMapping := map[string]int{"payload": 1}
+	statsCols := map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeFull}}}
 
 	minmax := func() metadata.EncodedStatistics {
 		var e metadata.EncodedStatistics
@@ -236,7 +237,46 @@ func TestCollectVariantBoundsIncompleteRowGroup(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			meta := buildShreddedVariantMeta(t, tt.tv0, tt.tv1)
-			lo, hi := parquetFormat{}.collectVariantBounds(meta, arrowSchema, colMapping)
+			lo, hi := parquetFormat{}.collectVariantBounds(meta, arrowSchema, colMapping, statsCols)
+			_, hasLo := lo[1]
+			_, hasHi := hi[1]
+			assert.Equal(t, tt.wantBound, hasLo, "lower bound presence")
+			assert.Equal(t, tt.wantBound, hasHi, "upper bound presence")
+		})
+	}
+}
+
+func TestCollectVariantBoundsMetricsMode(t *testing.T) {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name:     "payload",
+		Type:     extensions.NewShreddedVariantType(arrow.PrimitiveTypes.Int64),
+		Nullable: true,
+	}}, nil)
+	colMapping := map[string]int{"payload": 1}
+
+	minmax := func() metadata.EncodedStatistics {
+		var e metadata.EncodedStatistics
+		e.SetMin(le64(5))
+		e.SetMax(le64(9))
+		e.SetNullCount(0)
+
+		return e
+	}
+	meta := buildShreddedVariantMeta(t, minmax(), minmax())
+
+	for _, tt := range []struct {
+		name      string
+		statsCols map[int]StatisticsCollector
+		wantBound bool
+	}{
+		{"full emits", map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeFull}}}, true},
+		{"truncate emits", map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeTruncate, Len: 16}}}, true},
+		{"none skips", map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeNone}}}, false},
+		{"counts skips", map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeCounts}}}, false},
+		{"missing entry skips", map[int]StatisticsCollector{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lo, hi := parquetFormat{}.collectVariantBounds(meta, arrowSchema, colMapping, tt.statsCols)
 			_, hasLo := lo[1]
 			_, hasHi := hi[1]
 			assert.Equal(t, tt.wantBound, hasLo, "lower bound presence")
@@ -260,6 +300,7 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 		Name: "payload", Type: extensions.NewShreddedVariantType(obj), Nullable: true,
 	}}, nil)
 	colMapping := map[string]int{"payload": 1}
+	statsCols := map[int]StatisticsCollector{1: {Mode: MetricsMode{Typ: MetricModeFull}}}
 
 	lat, err := schema.NewGroupNode("latitude", parquet.Repetitions.Optional, schema.FieldList{
 		schema.NewByteArrayNode("value", parquet.Repetitions.Optional, -1),
@@ -328,12 +369,12 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 	// location residual has non-null (non-object location) values: latitude bound must drop.
 	nonNull := metadata.EncodedStatistics{}
 	nonNull.SetNullCount(0)
-	lo, hi := parquetFormat{}.collectVariantBounds(build(nonNull), arrowSchema, colMapping)
+	lo, hi := parquetFormat{}.collectVariantBounds(build(nonNull), arrowSchema, colMapping, statsCols)
 	assert.NotContains(t, lo, 1, "latitude bound must drop when the location ancestor residual has non-null values")
 	assert.NotContains(t, hi, 1)
 
 	// location residual all-null: latitude bound kept.
-	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull()), arrowSchema, colMapping)
+	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull()), arrowSchema, colMapping, statsCols)
 	assert.Contains(t, lo2, 1, "latitude bound kept when the location ancestor residual is all-null")
 	assert.Contains(t, hi2, 1)
 }

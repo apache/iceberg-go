@@ -1547,7 +1547,7 @@ func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
 		"payload": 1,
 	}
 
-	// No stats collector for variant (arrowStatsCollector.Variant returns empty)
+	// Empty stats collector: nil arrow schema skips variant bounds anyway.
 	statsCols := map[int]internal.StatisticsCollector{}
 
 	variantFieldIDs := map[int]struct{}{1: {}}

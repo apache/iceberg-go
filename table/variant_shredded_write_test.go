@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -1285,6 +1286,41 @@ func TestShreddedVariantWriteFloatBound(t *testing.T) {
 	}
 	assert.Equal(t, buildObj(1.5), files[0].LowerBoundValues()[2])
 	assert.Equal(t, buildObj(8.5), files[0].UpperBoundValues()[2])
+}
+
+// TestShreddedVariantWriteBoundsMetricsMode verifies none/counts (default or per-column) skip variant child bounds while full/truncate emit them.
+func TestShreddedVariantWriteBoundsMetricsMode(t *testing.T) {
+	base := iceberg.Properties{
+		PropertyFormatVersion:       "3",
+		ParquetShredVariantsKey:     "true",
+		ParquetVariantBufferSizeKey: "4",
+	}
+	for _, tt := range []struct {
+		name      string
+		override  iceberg.Properties
+		wantBound bool
+	}{
+		{"default emits", nil, true},
+		{"default none skips", iceberg.Properties{"write.metadata.metrics.default": "none"}, false},
+		{"default counts skips", iceberg.Properties{"write.metadata.metrics.default": "counts"}, false},
+		{"column none skips", iceberg.Properties{"write.metadata.metrics.column.payload": "none"}, false},
+		{"column full over default none emits", iceberg.Properties{
+			"write.metadata.metrics.default":        "none",
+			"write.metadata.metrics.column.payload": "full",
+		}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			props := iceberg.Properties{}
+			maps.Copy(props, base)
+			maps.Copy(props, tt.override)
+			files := writeVariantTable(t, props)
+			require.Len(t, files, 1)
+			_, hasLo := files[0].LowerBoundValues()[2]
+			_, hasHi := files[0].UpperBoundValues()[2]
+			assert.Equal(t, tt.wantBound, hasLo, "lower bound presence")
+			assert.Equal(t, tt.wantBound, hasHi, "upper bound presence")
+		})
+	}
 }
 
 // TestShreddedVariantWriteScalarBounds pins the emitted bound for each shredded scalar

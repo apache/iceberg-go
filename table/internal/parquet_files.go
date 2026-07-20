@@ -964,7 +964,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		return ok
 	})
 
-	vlo, vup := p.collectVariantBounds(pqmeta, arrowSchema, colMapping)
+	vlo, vup := p.collectVariantBounds(pqmeta, arrowSchema, colMapping, statsCols)
 
 	return &DataFileStatistics{
 		RecordCount:        pqmeta.GetNumRows(),
@@ -1025,7 +1025,7 @@ func isVariantNull(b []byte) bool {
 }
 
 // collectVariantBounds builds spec "Bounds for Variant" objects per shredded variant column.
-func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSchema *arrow.Schema, colMapping map[string]int) (lower, upper map[int][]byte) {
+func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSchema *arrow.Schema, colMapping map[string]int, statsCols map[int]StatisticsCollector) (lower, upper map[int][]byte) {
 	if arrowSchema == nil {
 		return nil, nil
 	}
@@ -1048,6 +1048,10 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		}
 		parentID, ok := colMapping[f.Name]
 		if !ok {
+			continue
+		}
+		// Honor the parent variant column's metrics mode: none/counts skip min/max bounds.
+		if sc, ok := statsCols[parentID]; !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
 			continue
 		}
 		for _, lf := range enumerateVariantLeaves([]string{f.Name}, vt.TypedValue()) {

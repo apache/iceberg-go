@@ -1451,24 +1451,28 @@ func (a *arrowStatsCollector) Map(m iceberg.MapType, keyResult, valResult func()
 	return append(keyRes, valRes...)
 }
 
+func (a *arrowStatsCollector) resolveColumnMetricsMode(colName string) tblutils.MetricsMode {
+	metMode, err := tblutils.MatchMetricsMode(a.defaultMode)
+	if err != nil {
+		panic(err)
+	}
+	if colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]; ok {
+		metMode, err = tblutils.MatchMetricsMode(colMode)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return metMode
+}
+
 func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.StatisticsCollector {
 	colName, ok := a.schema.FindColumnName(a.fieldID)
 	if !ok {
 		return []tblutils.StatisticsCollector{}
 	}
 
-	metMode, err := tblutils.MatchMetricsMode(a.defaultMode)
-	if err != nil {
-		panic(err)
-	}
-
-	colMode, ok := a.props[MetricsModeColumnConfPrefix+"."+colName]
-	if ok {
-		metMode, err = tblutils.MatchMetricsMode(colMode)
-		if err != nil {
-			panic(err)
-		}
-	}
+	metMode := a.resolveColumnMetricsMode(colName)
 
 	switch dt.(type) {
 	case iceberg.StringType:
@@ -1493,7 +1497,16 @@ func (a *arrowStatsCollector) Primitive(dt iceberg.PrimitiveType) []tblutils.Sta
 }
 
 func (a *arrowStatsCollector) Variant(_ iceberg.VariantType) []tblutils.StatisticsCollector {
-	return []tblutils.StatisticsCollector{}
+	colName, ok := a.schema.FindColumnName(a.fieldID)
+	if !ok {
+		return []tblutils.StatisticsCollector{}
+	}
+
+	return []tblutils.StatisticsCollector{{
+		FieldID: a.fieldID,
+		ColName: colName,
+		Mode:    a.resolveColumnMetricsMode(colName),
+	}}
 }
 
 func computeStatsPlan(sc *iceberg.Schema, props iceberg.Properties) (map[int]tblutils.StatisticsCollector, error) {
