@@ -39,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -864,6 +865,106 @@ func (s *SqliteCatalogTestSuite) TestCreateTableDefaultSortOrder() {
 		s.Equal(0, tbl.SortOrder().OrderID())
 		s.NoError(tt.cat.DropTable(context.Background(), tt.tblID))
 	}
+}
+
+func (s *SqliteCatalogTestSuite) TestMetricsReporterWiring() {
+	ctx := context.Background()
+
+	newCatMemory := func(extra iceberg.Properties) *sqlcat.Catalog {
+		props := iceberg.Properties{
+			"uri":             ":memory:",
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+			"type":            "sql",
+			"warehouse":       "file://" + s.warehouse,
+		}
+		maps.Copy(props, extra)
+		cat, err := catalog.Load(ctx, "default", props)
+		s.Require().NoError(err)
+
+		return cat.(*sqlcat.Catalog)
+	}
+
+	createTable := func(cat *sqlcat.Catalog) (*table.Table, table.Identifier) {
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+		tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		return tbl, tblID
+	}
+
+	s.Run("configured reporter reaches created and loaded table", func() {
+		cat := newCatMemory(iceberg.Properties{metrics.ReporterImplKey: "logging"})
+		created, tblID := createTable(cat)
+		s.IsType(&metrics.LoggingReporter{}, created.MetricsReporter())
+
+		loaded, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.IsType(&metrics.LoggingReporter{}, loaded.MetricsReporter())
+
+		// Scans inherit the table's reporter.
+		s.IsType(&metrics.LoggingReporter{}, loaded.Scan().Reporter())
+	})
+
+	s.Run("default is the no-op reporter", func() {
+		cat := newCatMemory(nil)
+		created, _ := createTable(cat)
+		s.IsType(metrics.NopReporter{}, created.MetricsReporter())
+	})
+
+	s.Run("unknown reporter name fails table load", func() {
+		// Fully self-contained: provision a dedicated on-disk DB, create a
+		// table with a well-configured catalog, then reopen the same DB with a
+		// bad reporter name so the failure is isolated to LoadTable rather than
+		// leaning on shared suite fixtures.
+		dir, err := os.MkdirTemp(os.TempDir(), "test_sql_reporter_*")
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(os.RemoveAll(dir)) })
+
+		uri := "file://" + filepath.Join(dir, "sql-catalog.db")
+		warehouse := "file://" + dir
+		baseProps := iceberg.Properties{
+			"uri":             uri,
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+			"type":            "sql",
+			"warehouse":       warehouse,
+		}
+
+		goodProps := maps.Clone(baseProps)
+		goodProps["init_catalog_tables"] = "true"
+		good, err := catalog.Load(ctx, "default", goodProps)
+		s.Require().NoError(err)
+
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(good.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+		_, err = good.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		badProps := maps.Clone(baseProps)
+		badProps[metrics.ReporterImplKey] = "does-not-exist"
+		bad, err := catalog.Load(ctx, "default", badProps)
+		s.Require().NoError(err)
+
+		_, err = bad.LoadTable(ctx, tblID)
+		s.Require().Error(err)
+	})
+
+	s.Run("invalid reporter fails CreateTable before inserting the row", func() {
+		cat := newCatMemory(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"})
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+
+		_, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().Error(err)
+
+		// The row must not have been inserted, so the failure is a clean no-op
+		// and the caller can retry rather than hit ErrTableAlreadyExists.
+		exists, err := cat.CheckTableExists(ctx, tblID)
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateV1Table() {

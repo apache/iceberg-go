@@ -35,6 +35,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/uptrace/bun"
@@ -211,6 +212,11 @@ func init() {
 			return nil, err
 		}
 
+		// This registrar opened sqldb itself, so nobody else holds the handle;
+		// Close must release its connection pool. NewCatalog leaves ownsDB false
+		// for caller-supplied handles, which stay owned by the caller.
+		cat.ownsDB = true
+
 		return cat, nil
 	}))
 }
@@ -300,6 +306,13 @@ type Catalog struct {
 	name          string
 	props         iceberg.Properties
 	schemaVersion schemaVer
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
+	// ownsDB reports whether this catalog opened its own *sql.DB (the registrar
+	// path) and must therefore close it in Close. It stays false for handles
+	// supplied to NewCatalog, which remain owned by the caller.
+	ownsDB bool
 }
 
 // isV0 reports whether the catalog is operating against a legacy V0 schema that
@@ -358,6 +371,24 @@ func (c *Catalog) Name() string { return c.name }
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.SQL
 }
+
+// Close releases the catalog's metrics reporter. When the catalog opened its own
+// database handle (the registry [catalog.Load] path), Close also closes that
+// handle's connection pool; a handle supplied to [NewCatalog] stays owned by the
+// caller and is left open. Callers holding a [catalog.Catalog] can reach this via
+// a [catalog.Closer] type assertion.
+func (c *Catalog) Close() error {
+	err := c.reporter.Close()
+	if c.ownsDB {
+		if dbErr := c.db.Close(); dbErr != nil && err == nil {
+			err = dbErr
+		}
+	}
+
+	return err
+}
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 func (c *Catalog) CreateSQLTables(ctx context.Context) error {
 	_, err := c.db.NewCreateTable().Model((*sqlIcebergTable)(nil)).
@@ -616,6 +647,15 @@ func checkValidNamespace(ident table.Identifier) error {
 }
 
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
+	// Resolve the reporter before any mutation: this method ends in LoadTable,
+	// which is where the reporter is otherwise first built, so a bad
+	// metrics-reporter-impl would only surface after the row was inserted —
+	// turning a successful create into a reported failure whose retry hits
+	// ErrTableAlreadyExists. CachedReporter caches this for that LoadTable.
+	if _, err := c.reporter.Get(c.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	nsIdent := catalog.NamespaceFromIdent(ident)
 	tblIdent := catalog.TableNameFromIdent(ident)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
@@ -797,12 +837,18 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("%w: %s, metadata location is missing", catalog.ErrNoSuchTable, identifier)
 	}
 
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	return table.NewFromLocation(
 		ctx,
 		identifier,
 		result.MetadataLocation.String,
 		io.LoadFSFunc(c.props, result.MetadataLocation.String),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 }
 

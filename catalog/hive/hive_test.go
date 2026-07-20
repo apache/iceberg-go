@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	cataloginternal "github.com/apache/iceberg-go/catalog/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
@@ -308,6 +309,70 @@ func TestHiveListNamespacesHierarchicalError(t *testing.T) {
 	_, err := hiveCatalog.ListNamespaces(context.TODO(), []string{"parent"})
 	assert.Error(err)
 	assert.Contains(err.Error(), "hierarchical namespace is not supported")
+}
+
+// TestHiveCreateTableInvalidReporterDoesNotMutate pins that an invalid
+// metrics-reporter-impl fails CreateTable before any metastore mutation, so a
+// bad reporter can't turn a successful create into a reported failure. The
+// reporter is resolved at the top of CreateTable, so the client is never
+// touched.
+func TestHiveCreateTableInvalidReporterDoesNotMutate(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{
+		metrics.ReporterImplKey: "does-not-exist",
+	})
+
+	_, err := hiveCatalog.CreateTable(context.TODO(), TableIdentifier("test_database", "test_table"), testSchema)
+	assert.Error(err)
+
+	// The create must fail before any metastore call, so nothing was mutated.
+	mockClient.AssertNotCalled(t, "CreateTable", mock.Anything, mock.Anything)
+}
+
+// panicOnCloseClient is a HiveClient whose Close panics; the embedded interface
+// is nil, so any other method call would panic too, but the Close-isolation test
+// touches only Close.
+type panicOnCloseClient struct{ HiveClient }
+
+func (panicOnCloseClient) Close() error { panic("client close boom") }
+
+// recordingReporter records that Close was called, so a test can assert the
+// reporter was released even when a sibling close panics.
+type recordingReporter struct{ closed *bool }
+
+func (recordingReporter) Report(context.Context, metrics.MetricsReport) {}
+func (r recordingReporter) Close() error {
+	*r.closed = true
+
+	return nil
+}
+
+// TestHiveCloseIsolatesClientPanicFromReporter pins that a panic in the client's
+// Close does not skip the reporter's Close (which would leak the reporter): the
+// panic is recovered and returned as an error, and the reporter is still closed.
+func TestHiveCloseIsolatesClientPanicFromReporter(t *testing.T) {
+	assert := require.New(t)
+
+	var reporterClosed bool
+	metrics.Register("hive-close-panic", func(map[string]string) (metrics.Reporter, error) {
+		return recordingReporter{closed: &reporterClosed}, nil
+	})
+	t.Cleanup(func() { metrics.Deregister("hive-close-panic") })
+
+	cat := NewCatalogWithClient(panicOnCloseClient{}, iceberg.Properties{
+		metrics.ReporterImplKey: "hive-close-panic",
+	})
+	// Force the reporter to be built so Close has something to release.
+	_, err := cat.reporter.Get(cat.opts.props)
+	assert.NoError(err)
+
+	assert.NotPanics(func() {
+		err = cat.Close()
+	})
+	assert.Error(err, "the recovered client-close panic must surface as an error")
+	assert.True(reporterClosed, "a client-close panic must not skip the reporter close")
 }
 
 func TestHiveCreateNamespace(t *testing.T) {
