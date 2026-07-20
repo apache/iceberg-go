@@ -809,7 +809,8 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
-func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
+// The returned cleanup closes an internally-created OAuth transport, if any.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager, func()) {
 	// If a static token is provided, use it directly.
 	if opts.oauthToken != "" {
 		return &Oauth2AuthManager{
@@ -817,12 +818,12 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 				AccessToken: opts.oauthToken,
 				TokenType:   "Bearer",
 			}),
-		}
+		}, nil
 	}
 
 	// If no credential, no auth needed.
 	if opts.credential == "" {
-		return nil
+		return nil, nil
 	}
 
 	authURL := opts.authUri
@@ -867,19 +868,22 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 	// client. This is needed when the OAuth2 server is a different host with
 	// different TLS requirements.
 	oauthClient := cl
+	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
-		oauthClient = &http.Client{
-			Transport: &http.Transport{
-				Proxy:           http.ProxyFromEnvironment,
-				TLSClientConfig: opts.oauthTLSConfig,
-			},
+		transport := &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: opts.oauthTLSConfig,
 		}
+		oauthClient = &http.Client{
+			Transport: transport,
+		}
+		closeIdleConnections = transport.CloseIdleConnections
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
 	return &Oauth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
-	}
+	}, closeIdleConnections
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
@@ -889,10 +893,14 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
+	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
 
+	r.cl, _, err = r.createSession(ctx, ops)
+	if err != nil {
+		return err
+	}
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
@@ -901,12 +909,22 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
-func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
+// createSession returns a cleanup that closes only transports created by this
+// function, never transports supplied by the caller.
+func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
 	var baseTransport http.RoundTripper
+	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
 	} else {
-		baseTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		baseTransport = transport
+		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
+	}
+	cleanup := func() {
+		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
+			cleanupFuncs[i]()
+		}
 	}
 
 	session := &sessionTransport{
@@ -915,9 +933,16 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
-	if opts.authManager == nil {
-		opts.authManager = setupOAuthManager(r, cl, opts)
+	// If the user does not set an AuthManager, construct one for this session
+	// without storing it in opts. Bootstrap authentication must not leak into
+	// the final session after server configuration has been applied.
+	authManager := opts.authManager
+	if authManager == nil {
+		var cleanupOAuth func()
+		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
+		if cleanupOAuth != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanupOAuth)
+		}
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
@@ -935,8 +960,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	if opts.authManager != nil {
-		session.authManager = opts.authManager
+	if authManager != nil {
+		session.authManager = authManager
 	}
 
 	if opts.enableSigv4 {
@@ -946,7 +971,9 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 			var err error
 			cfg, err = config.LoadDefaultConfig(ctx)
 			if err != nil {
-				return nil, err
+				cleanup()
+
+				return nil, nil, err
 			}
 		}
 		if opts.sigv4Region != "" {
@@ -957,10 +984,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.signer, session.newHash = v4.NewSigner(), sha256.New
 	}
 
-	return cl, nil
+	return cl, cleanup, nil
 }
 
-func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client, *options, error) {
+func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -969,14 +996,15 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
 
-	sess, err := r.createSession(ctx, opts)
+	sess, cleanup, err := r.createSession(ctx, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	defer cleanup()
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	cfg := rsp.Defaults
@@ -1004,18 +1032,18 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 
 	o := *opts
 	if err := fromProps(cfg, &o); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return sess, &o, nil
+	return &o, nil
 }
 
 func (r *Catalog) Name() string              { return r.name }
