@@ -330,14 +330,28 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 			mutate: func(w *ScanTasks) {
 				w.FileScanTasks[0].DataFile.RecordCount = -1
 			},
-			want: "record-count must be non-negative",
+			want: "record-count must be positive",
+		},
+		{
+			name: "zero record count",
+			mutate: func(w *ScanTasks) {
+				w.FileScanTasks[0].DataFile.RecordCount = 0
+			},
+			want: "record-count must be positive",
 		},
 		{
 			name: "negative file size",
 			mutate: func(w *ScanTasks) {
 				w.FileScanTasks[0].DataFile.FileSizeInBytes = -1
 			},
-			want: "file-size-in-bytes must be non-negative",
+			want: "file-size-in-bytes must be positive",
+		},
+		{
+			name: "zero file size",
+			mutate: func(w *ScanTasks) {
+				w.FileScanTasks[0].DataFile.FileSizeInBytes = 0
+			},
+			want: "file-size-in-bytes must be positive",
 		},
 		{
 			name: "referenced data file disagrees with task",

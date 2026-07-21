@@ -385,13 +385,11 @@ func contentFileBuilder(
 	if wire.Content != wantContent {
 		return nil, "", fmt.Errorf("content is %q, want %q", wire.Content, wantContent)
 	}
-	// record-count and file-size may be 0 per the wire contract (e.g. an empty
-	// data file); only reject the negative values a conformant server never sends.
-	if wire.RecordCount < 0 {
-		return nil, "", fmt.Errorf("record-count must be non-negative: %d", wire.RecordCount)
+	if wire.RecordCount <= 0 {
+		return nil, "", fmt.Errorf("record-count must be positive: %d", wire.RecordCount)
 	}
-	if wire.FileSizeInBytes < 0 {
-		return nil, "", fmt.Errorf("file-size-in-bytes must be non-negative: %d", wire.FileSizeInBytes)
+	if wire.FileSizeInBytes <= 0 {
+		return nil, "", fmt.Errorf("file-size-in-bytes must be positive: %d", wire.FileSizeInBytes)
 	}
 
 	spec := metadata.PartitionSpecByID(wire.SpecID)
