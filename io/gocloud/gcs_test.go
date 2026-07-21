@@ -18,11 +18,20 @@
 package gocloud
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// authorizedUserJSON is a minimal, non-secret credentials document. The
+// "authorized_user" type parses without a real RSA private key (unlike
+// "service_account"), keeping these tests hermetic.
+const authorizedUserJSON = `{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"token"}`
 
 func TestParseGCSConfigUseJSONAPI(t *testing.T) {
 	t.Run("defaults to disabled", func(t *testing.T) {
@@ -44,4 +53,40 @@ func TestParseGCSConfigUseJSONAPI(t *testing.T) {
 		cfg := ParseGCSConfig(map[string]string{io.GCSUseJSONAPI: "not-a-bool"})
 		assert.Len(t, cfg.ClientOptions, 0)
 	})
+}
+
+// gcsCredentials must build credentials from an inline JSON key (GCSJSONKey)
+// rather than silently falling back to Application Default Credentials. This
+// guards the fix for the GCS FileIO ignoring explicitly-provided credentials.
+func TestGCSCredentialsFromInlineJSONKey(t *testing.T) {
+	creds, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSJSONKey:  authorizedUserJSON,
+		io.GCSCredType: "authorized_user",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds, "GCSJSONKey should yield explicit credentials")
+	assert.JSONEq(t, authorizedUserJSON, string(creds.JSON),
+		"credentials must originate from the supplied key, not ADC")
+}
+
+// gcsCredentials must build credentials from a key file (GCSKeyPath).
+func TestGCSCredentialsFromKeyPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sa.json")
+	require.NoError(t, os.WriteFile(path, []byte(authorizedUserJSON), 0o600))
+
+	creds, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSKeyPath:  path,
+		io.GCSCredType: "authorized_user",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds, "GCSKeyPath should yield explicit credentials")
+	assert.JSONEq(t, authorizedUserJSON, string(creds.JSON))
+}
+
+// A missing key file is a hard error, not a silent fallback to ADC.
+func TestGCSCredentialsMissingKeyPath(t *testing.T) {
+	_, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSKeyPath: filepath.Join(t.TempDir(), "does-not-exist.json"),
+	})
+	require.Error(t, err)
 }
