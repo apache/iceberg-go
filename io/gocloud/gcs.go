@@ -19,7 +19,9 @@ package gocloud
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 
 	"cloud.google.com/go/storage"
@@ -28,6 +30,7 @@ import (
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/gcsblob"
 	"gocloud.dev/gcp"
+	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
 
@@ -67,15 +70,58 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	}
 }
 
+// gcsScope grants read/write access to GCS objects.
+const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
+
+// gcsCredentials builds credentials from the gcs.jsonkey / gcs.keypath
+// properties (defaulting to a service-account key, honouring gcs.credtype),
+// falling back to Application Default Credentials when neither is set.
+func gcsCredentials(ctx context.Context, props map[string]string) (*google.Credentials, error) {
+	credType := google.ServiceAccount
+	if v := props[io.GCSCredType]; v != "" {
+		credType = google.CredentialsType(v)
+	}
+
+	if jsonKey := props[io.GCSJSONKey]; jsonKey != "" {
+		creds, err := google.CredentialsFromJSONWithType(ctx, []byte(jsonKey), credType, gcsScope)
+		if err != nil {
+			return nil, fmt.Errorf("gcs: parsing %s: %w", io.GCSJSONKey, err)
+		}
+
+		return creds, nil
+	}
+
+	if path := props[io.GCSKeyPath]; path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("gcs: reading %s %q: %w", io.GCSKeyPath, path, err)
+		}
+		creds, err := google.CredentialsFromJSONWithType(ctx, data, credType, gcsScope)
+		if err != nil {
+			return nil, fmt.Errorf("gcs: parsing credentials file %q: %w", path, err)
+		}
+
+		return creds, nil
+	}
+
+	creds, _ := gcp.DefaultCredentials(ctx)
+
+	return creds, nil
+}
+
 // Construct a GCS bucket from a URL
 func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
 	gcscfg := ParseGCSConfig(props)
-	creds, _ := gcp.DefaultCredentials(ctx)
+
+	creds, err := gcsCredentials(ctx, props)
+	if err != nil {
+		return nil, err
+	}
+
 	var client *gcp.HTTPClient
 	if creds == nil {
 		client = gcp.NewAnonymousHTTPClient(gcp.DefaultTransport())
 	} else {
-		var err error
 		client, err = gcp.NewHTTPClient(
 			gcp.DefaultTransport(),
 			gcp.CredentialsTokenSource(creds))
