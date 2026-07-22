@@ -368,7 +368,8 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 	}
 
 	createdView, err := view.CreateViewWithIOProperties(
-		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties)
+		ctx, catalogName, identifier, freshSchema, viewSQL, defaultNS, loc, ioProps, cfg.Properties,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -776,6 +777,16 @@ func (c *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 }
 
 // CreateNamespace creates a new namespace in the catalog.
+// defaultNamespaceLocation derives <warehouse>/<db>.db, the metastore's
+// conventional database location, or "" when no warehouse is configured.
+func defaultNamespaceLocation(warehouse, database string) string {
+	if warehouse == "" {
+		return ""
+	}
+
+	return strings.TrimRight(warehouse, "/") + "/" + database + ".db"
+}
+
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	database, err := identifierToDatabase(namespace)
 	if err != nil {
@@ -796,6 +807,12 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		default:
 			db.Parameters[k] = v
 		}
+	}
+
+	// Derive a location from the warehouse when none is given, so the metastore
+	// is not handed an empty path (which it rejects).
+	if db.LocationUri == "" {
+		db.LocationUri = defaultNamespaceLocation(c.opts.Warehouse, database)
 	}
 
 	if err := c.client.CreateDatabase(ctx, db); err != nil {

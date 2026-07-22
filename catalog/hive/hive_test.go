@@ -399,6 +399,28 @@ func TestHiveCreateNamespace(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestDefaultNamespaceLocation(t *testing.T) {
+	require.Equal(t, "s3://warehouse/db.db", defaultNamespaceLocation("s3://warehouse", "db"))
+	require.Equal(t, "s3://warehouse/db.db", defaultNamespaceLocation("s3://warehouse/", "db"))
+	require.Empty(t, defaultNamespaceLocation("", "db"))
+}
+
+func TestHiveCreateNamespaceDerivesLocationFromWarehouse(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == "s3://warehouse/new_database.db"
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{Warehouse: "s3://warehouse/"})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), nil)
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
 func TestHiveCreateNamespaceAlreadyExists(t *testing.T) {
 	assert := require.New(t)
 
@@ -770,7 +792,8 @@ func TestHivePurgeTableWithGCDisabled(t *testing.T) {
 	ctx := context.Background()
 	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
 	metadataLocation, dataFile := writeHivePurgeTableFilesWithProperties(
-		t, tableLocation, iceberg.Properties{"gc.enabled": "false"})
+		t, tableLocation, iceberg.Properties{"gc.enabled": "false"},
+	)
 	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
 
 	mockClient := &mockHiveClient{}
@@ -990,7 +1013,8 @@ func TestHiveRegisterTableNoSuchNamespace(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("missing_db", "t"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1011,7 +1035,8 @@ func TestHiveRegisterTableConflictsWithView(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "test_table"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1034,7 +1059,8 @@ func TestHiveRegisterTableAlreadyExists(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "test_table"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1055,7 +1081,8 @@ func TestHiveRegisterTableMetadataNotFound(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "new_table"),
 		"s3://nonexistent-bucket/metadata/metadata.json",
 	)
@@ -1104,7 +1131,8 @@ func TestHiveRegisterTableSuccess(t *testing.T) {
 
 	// TODO: should we drop table here
 
-	tbl, err := hiveCatalog.RegisterTable(context.TODO(),
+	tbl, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "reg_table"),
 		metaPath,
 	)
