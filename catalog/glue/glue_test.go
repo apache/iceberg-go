@@ -382,6 +382,64 @@ func TestGlueConvertGlueToIcebergCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestGlueMetadataLoadsUseCatalogProperties(t *testing.T) {
+	const scheme = "gluecatalogprops"
+	const propertyKey = "custom.io.token"
+	const propertyValue = "configured"
+
+	memFS := iceio.NewMemFS()
+	metadataLocation := scheme + "://bucket/test_table/metadata/v1.metadata.json"
+	writeGluePurgeTableMetadata(
+		t,
+		memFS,
+		scheme+"://bucket/test_table",
+		metadataLocation,
+		nil,
+	)
+
+	iceio.Unregister(scheme)
+	iceio.Register(scheme, func(_ context.Context, _ *url.URL, props map[string]string) (iceio.IO, error) {
+		if props[propertyKey] != propertyValue {
+			return nil, errors.New("catalog properties were not passed to IO factory")
+		}
+
+		return memFS, nil
+	})
+	t.Cleanup(func() { iceio.Unregister(scheme) })
+
+	glueTable := gluePurgeTable(metadataLocation)
+	t.Run("load table", func(t *testing.T) {
+		cat := &Catalog{props: iceberg.Properties{propertyKey: propertyValue}}
+		loaded, err := cat.convertGlueToIceberg(context.Background(), &glueTable)
+		require.NoError(t, err)
+		require.Equal(t, metadataLocation, loaded.MetadataLocation())
+	})
+
+	t.Run("register table", func(t *testing.T) {
+		mockGlueSvc := &mockGlueClient{}
+		mockGlueSvc.On("CreateTable", mock.Anything, mock.Anything, mock.Anything).
+			Return(&glue.CreateTableOutput{}, nil).Once()
+		mockGlueSvc.On("GetTable", mock.Anything, &glue.GetTableInput{
+			DatabaseName: aws.String("test_database"),
+			Name:         aws.String("test_table"),
+		}, mock.Anything).Return(&glue.GetTableOutput{Table: &glueTable}, nil).Once()
+
+		cat := &Catalog{
+			glueSvc: mockGlueSvc,
+			awsCfg:  &aws.Config{},
+			props:   iceberg.Properties{propertyKey: propertyValue},
+		}
+		loaded, err := cat.RegisterTable(
+			context.Background(),
+			TableIdentifier("test_database", "test_table"),
+			metadataLocation,
+		)
+		require.NoError(t, err)
+		require.Equal(t, metadataLocation, loaded.MetadataLocation())
+		mockGlueSvc.AssertExpectations(t)
+	})
+}
+
 func TestGlueListTables(t *testing.T) {
 	assert := require.New(t)
 
@@ -1437,7 +1495,8 @@ func TestGlueListTablesIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	iter := ctlg.ListTables(context.TODO(), DatabaseIdentifier(os.Getenv("TEST_DATABASE_NAME")))
 
@@ -1469,7 +1528,8 @@ func TestGlueLoadTableIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	tbl, err := ctlg.LoadTable(context.TODO(), []string{os.Getenv("TEST_DATABASE_NAME"), os.Getenv("TEST_TABLE_NAME")})
 	assert.NoError(err)
@@ -1485,7 +1545,8 @@ func TestGlueListNamespacesIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	namespaces, err := ctlg.ListNamespaces(context.TODO(), nil)
 	assert.NoError(err)
@@ -1508,7 +1569,8 @@ func TestGlueCreateTableSuccessIntegration(t *testing.T) {
 	metadataLocation := os.Getenv("TEST_TABLE_LOCATION")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
 	assert.Equal([]string{dbName, sourceTableName}, sourceTable.Identifier())
@@ -1538,7 +1600,8 @@ func TestGlueCreateTableInvalidMetadataRollback(t *testing.T) {
 	sourceTableName := os.Getenv("TEST_TABLE_NAME")
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 	sourceTable, err := ctlg.LoadTable(context.TODO(), []string{dbName, sourceTableName})
 	assert.NoError(err)
 	newTableName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), sourceTableName)
@@ -1628,7 +1691,8 @@ func TestRegisterTableIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	// Drop table if it exists
 	_ = ctlg.DropTable(context.TODO(), TableIdentifier(dbName, tableName))
@@ -1663,7 +1727,8 @@ func TestAlterTableIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	// Create a table within the input database and location
 	testProps := iceberg.Properties{
@@ -1759,7 +1824,8 @@ func TestSnapshotManagementIntegration(t *testing.T) {
 
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	// clean up table after test
 	defer cleanupTable(t, ctlg, tbIdent, awsCfg)
@@ -1958,7 +2024,8 @@ func TestCommitTableOptimisticLockingIntegration(t *testing.T) {
 	awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithClientLogMode(aws.LogRequest|aws.LogResponse))
 	assert.NoError(err)
 
-	ctlg := NewCatalog(WithAwsConfig(awsCfg))
+	ctlg, err := NewCatalog(WithAwsConfig(awsCfg))
+	assert.NoError(err)
 
 	createOpts := []catalog.CreateTableOpt{
 		catalog.WithLocation(metadataLocation),

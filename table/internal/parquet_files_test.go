@@ -112,7 +112,8 @@ func mustParquetBytesWithInvalidArrowSchema(t *testing.T) []byte {
 	w := file.NewParquetWriter(&buf, sc)
 	require.NoError(t, w.AppendKeyValueMetadata("ARROW:schema", "not-base64"))
 
-	rowGroup := w.AppendRowGroup()
+	rowGroup, err := w.AppendRowGroupChecked()
+	require.NoError(t, err)
 	column, err := rowGroup.NextColumn()
 	require.NoError(t, err)
 
@@ -791,7 +792,8 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 				rootNode,
 				file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
 
-			rgw := writer.AppendRowGroup()
+			rgw, err := writer.AppendRowGroupChecked()
+			require.NoError(t, err)
 			colWriter, err := rgw.NextColumn()
 			require.NoError(t, err)
 
@@ -1228,7 +1230,8 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 				parquet.NewWriterProperties(writeProps...),
 			))
 
-			rgw := pw.AppendRowGroup()
+			rgw, err := pw.AppendRowGroupChecked()
+			require.NoError(t, err)
 			cw, _ := rgw.NextColumn()
 			cw.(*file.Int32ColumnChunkWriter).WriteBatch(
 				[]int32{1, 2, 3}, nil, nil,
@@ -1322,7 +1325,8 @@ func buildBloomTestParquet(t *testing.T, rgSize int) []byte {
 	pw := file.NewParquetWriter(&buf, rootNode, file.WithWriterProps(writerProps))
 
 	writeRG := func(start, end int) {
-		rgw := pw.AppendRowGroup()
+		rgw, werr := pw.AppendRowGroupChecked()
+		require.NoError(t, werr)
 		cw, werr := rgw.NextColumn()
 		require.NoError(t, werr)
 

@@ -1085,7 +1085,7 @@ var (
 		{Name: "timestamp_ns", Type: &arrow.TimestampType{Unit: arrow.Nanosecond}, Nullable: true},
 		{Name: "timestamptz_ns", Type: arrow.FixedWidthTypes.Timestamp_ns, Nullable: true},
 		{Name: "timestamptz_us_etc_utc", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "Etc/UTC"}, Nullable: true},
-		{Name: "timestamptz_ns_z", Type: &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "Z"}, Nullable: true},
+		{Name: "timestamptz_ns_z", Type: &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "+00:00"}, Nullable: true},
 		{Name: "timestamptz_s_0000", Type: &arrow.TimestampType{Unit: arrow.Second, TimeZone: "+00:00"}, Nullable: true},
 	}, nil)
 

@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
@@ -96,6 +97,12 @@ type Table struct {
 	cat              CatalogIO
 	fsF              FSysF
 	planner          ScanPlanner
+	reporter         metrics.Reporter
+	// reporterSet records whether a caller injected a reporter via
+	// WithMetricsReporter. It distinguishes an explicit reporter (including an
+	// explicit NopReporter opt-out) from the construction-time default, so
+	// Refresh knows whether it may overwrite reporter with the catalog default.
+	reporterSet bool
 }
 
 func (t Table) Equals(other Table) bool {
@@ -112,11 +119,20 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
-func (t Table) NameMapping() iceberg.NameMapping             { return t.metadata.NameMapping() }
-func (t Table) Location() string                             { return t.metadata.Location() }
-func (t Table) CurrentSnapshot() *Snapshot                   { return t.metadata.CurrentSnapshot() }
-func (t Table) SnapshotByID(id int64) *Snapshot              { return t.metadata.SnapshotByID(id) }
-func (t Table) SnapshotByName(name string) *Snapshot         { return t.metadata.SnapshotByName(name) }
+
+// MetricsReporter returns the table's metrics reporter, never nil.
+func (t Table) MetricsReporter() metrics.Reporter {
+	if t.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return t.reporter
+}
+func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
+func (t Table) Location() string                     { return t.metadata.Location() }
+func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
+func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
+func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {
@@ -190,6 +206,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.planner = fresh.planner
+	// Only inherit the catalog-derived reporter when the caller hasn't set one
+	// of their own. Refresh runs inside commit retry loops, so unconditionally
+	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
+	// reporter to the catalog default mid-operation. reporterSet distinguishes an
+	// explicit reporter — including an explicit NopReporter opt-out — from the
+	// construction-time default.
+	if !t.reporterSet {
+		t.reporter = fresh.reporter
+	}
 
 	return nil
 }
@@ -603,7 +628,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -896,6 +921,19 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 }
 
+// WithReporter overrides the metrics reporter for a single scan, taking
+// precedence over the reporter inherited from the table. A nil reporter is
+// ignored.
+func WithReporter(r metrics.Reporter) ScanOption {
+	if r == nil {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.reporter = r
+	}
+}
+
 // WithRowLineage projects the row-lineage metadata columns (_row_id and
 // _last_updated_sequence_number) so that row identity and per-row update
 // sequence are preserved through rewrites and compactions. Requires a v3
@@ -921,6 +959,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -930,28 +969,70 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
+// Option configures a [Table] at construction. Options are applied in order
+// after the core fields are set.
+type Option func(*Table)
+
+// noopTableOption is the shared no-op [Option], returned when an option has
+// nothing to apply (e.g. WithMetricsReporter(nil)). It mirrors noopOption on
+// the ScanOption side.
+func noopTableOption(*Table) {}
+
+// WithMetricsReporter sets the metrics reporter for the table; scans created
+// from the table inherit it. A nil reporter is ignored (the table keeps its
+// default no-op reporter).
+func WithMetricsReporter(r metrics.Reporter) Option {
+	if r == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = true
+	}
+}
+
+// withReporterState copies both the reporter and the reporterSet flag verbatim.
+// Unlike WithMetricsReporter it does not force reporterSet true, so a table
+// riding the catalog default (reporterSet == false) stays defaulted across a
+// New(...) rebuild instead of being frozen to its current reporter. Used by
+// doCommit and StagedTable to carry reporter state without breaking the Refresh
+// inheritance invariant — WithMetricsReporter cannot be used there because
+// MetricsReporter() is never nil, so it would always mark the table caller-set.
+func withReporterState(r metrics.Reporter, set bool) Option {
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = set
+	}
+}
+
 // New constructs a Table. If cat implements ScanPlanner — as rest.Catalog does
 // for servers that support remote scan planning — it is wired as the table's
 // planner so (*Scan).PlanFiles can delegate to it; catalogs that do not
 // implement ScanPlanner leave planner nil and planning stays local. This is the
-// concrete Catalog -> Table -> Scan wiring for #1178: no New signature change
-// and no catalog accessor are needed, because the catalog already satisfies
-// ScanPlanner.
-func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
+// concrete Catalog -> Table -> Scan wiring for #1178: the catalog already
+// satisfies ScanPlanner, so no catalog accessor is needed.
+func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO, opts ...Option) *Table {
 	// A catalog that supports server-side scan planning implements ScanPlanner.
 	var planner ScanPlanner
 	if p, ok := cat.(ScanPlanner); ok {
 		planner = p
 	}
 
-	return &Table{
+	t := &Table{
 		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
 		cat:              cat,
 		planner:          planner,
+		reporter:         metrics.NopReporter{},
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+
+	return t
 }
 
 func NewFromLocation(
@@ -960,6 +1041,7 @@ func NewFromLocation(
 	metalocation string,
 	fsysF FSysF,
 	cat CatalogIO,
+	opts ...Option,
 ) (_ *Table, err error) {
 	var meta Metadata
 
@@ -1012,7 +1094,7 @@ func NewFromLocation(
 		}
 	}
 
-	return New(ident, meta, metalocation, fsysF, cat), nil
+	return New(ident, meta, metalocation, fsysF, cat, opts...), nil
 }
 
 func metadataCompressionCodec(location string) string {

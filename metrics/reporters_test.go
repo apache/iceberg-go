@@ -20,6 +20,7 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
@@ -35,8 +36,10 @@ type testReport struct{ name string }
 
 // countingReporter records how many reports it received.
 type countingReporter struct {
-	mu    sync.Mutex
-	count int
+	mu       sync.Mutex
+	count    int
+	closes   int
+	closeErr error
 }
 
 func (c *countingReporter) Report(context.Context, MetricsReport) {
@@ -52,10 +55,27 @@ func (c *countingReporter) calls() int {
 	return c.count
 }
 
-// panickingReporter always panics, to verify Combine isolates failures.
+func (c *countingReporter) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closes++
+
+	return c.closeErr
+}
+
+func (c *countingReporter) closeCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.closes
+}
+
+// panickingReporter always panics, to verify Combine isolates failures. It also
+// panics on Close to verify Close isolation.
 type panickingReporter struct{}
 
 func (panickingReporter) Report(context.Context, MetricsReport) { panic("boom") }
+func (panickingReporter) Close() error                          { panic("close boom") }
 
 func TestNopReporter(t *testing.T) {
 	// NopReporter must accept anything, including nil, without panicking.
@@ -231,4 +251,35 @@ func TestInMemoryReporterConcurrent(t *testing.T) {
 	reader.Wait()
 
 	assert.Len(t, r.Reports(), writers)
+}
+
+func TestReporterClose(t *testing.T) {
+	t.Run("built-in reporters close without error", func(t *testing.T) {
+		assert.NoError(t, NopReporter{}.Close())
+		assert.NoError(t, NewLoggingReporter(nil).Close())
+		assert.NoError(t, (&InMemoryReporter{}).Close())
+	})
+
+	t.Run("composite closes every child once", func(t *testing.T) {
+		a, b := &countingReporter{}, &countingReporter{}
+		require.NoError(t, Combine(a, b).Close())
+		assert.Equal(t, 1, a.closeCalls())
+		assert.Equal(t, 1, b.closeCalls())
+	})
+
+	t.Run("composite joins child errors and still closes peers", func(t *testing.T) {
+		boom := errors.New("boom")
+		bad := &countingReporter{closeErr: boom}
+		good := &countingReporter{}
+		err := Combine(bad, good).Close()
+		assert.ErrorIs(t, err, boom)
+		assert.Equal(t, 1, good.closeCalls(), "a failing child must not stop peers from closing")
+	})
+
+	t.Run("composite isolates a panicking Close", func(t *testing.T) {
+		good := &countingReporter{}
+		err := Combine(panickingReporter{}, good).Close()
+		assert.Error(t, err, "a panic on Close is converted to an error")
+		assert.Equal(t, 1, good.closeCalls(), "a panicking child must not stop peers from closing")
+	})
 }
