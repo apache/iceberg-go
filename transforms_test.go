@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -337,22 +338,19 @@ func TestManifestPartitionVals(t *testing.T) {
 }
 
 func TestBucketTransform_NumBucketsValidation(t *testing.T) {
-	transform := iceberg.BucketTransform{}
-	t.Run("ApplyRejectsInvalidBuckets", func(t *testing.T) {
+	testValidation := func(t *testing.T, transform iceberg.BucketTransform, errorContains string) {
+		t.Helper()
+
 		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
 			Valid: true,
 			Val:   iceberg.Int32Literal(123),
 		})
 		require.False(t, out.Valid)
-	})
 
-	t.Run("TransformerRejectsInvalidBuckets", func(t *testing.T) {
 		fn := transform.Transformer(iceberg.PrimitiveTypes.String)
-		out := fn("abc")
-		require.False(t, out.Valid)
-	})
+		transformed := fn("abc")
+		require.False(t, transformed.Valid)
 
-	t.Run("ProjectRejectsInvalidBuckets", func(t *testing.T) {
 		schema := iceberg.NewSchema(1, iceberg.NestedField{
 			ID:   1,
 			Name: "id",
@@ -363,7 +361,84 @@ func TestBucketTransform_NumBucketsValidation(t *testing.T) {
 
 		_, err = transform.Project("id_bucket", bound.(iceberg.BoundPredicate))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-		require.ErrorContains(t, err, "numBuckets > 0")
+		require.ErrorContains(t, err, errorContains)
+	}
+
+	t.Run("non-positive", func(t *testing.T) {
+		testValidation(t, iceberg.BucketTransform{}, "numBuckets > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		testValidation(t, iceberg.BucketTransform{NumBuckets: overflowingInt32TransformParameter(t)}, "numBuckets <=")
+	})
+}
+
+func overflowingInt32TransformParameter(t *testing.T) int {
+	t.Helper()
+	if strconv.IntSize < 64 {
+		t.Skip("an int cannot exceed math.MaxInt32 on this platform")
+	}
+
+	value := uint64(1) << 32
+
+	return int(value)
+}
+
+func TestTruncateTransform_WidthValidation(t *testing.T) {
+	testValidation := func(t *testing.T, transform iceberg.TruncateTransform, errorContains string) {
+		t.Helper()
+
+		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+			Valid: true,
+			Val:   iceberg.Int32Literal(123),
+		})
+		require.False(t, out.Valid)
+
+		fn, err := transform.Transformer(iceberg.PrimitiveTypes.Int32)
+		require.Nil(t, fn)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, errorContains)
+
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID:   1,
+			Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64,
+		})
+		bound, err := iceberg.EqualTo(iceberg.Reference("id"), int64(42)).Bind(schema, true)
+		require.NoError(t, err)
+
+		_, err = transform.Project("id_truncate", bound.(iceberg.BoundPredicate))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, errorContains)
+	}
+
+	t.Run("non-positive", func(t *testing.T) {
+		testValidation(t, iceberg.TruncateTransform{}, "width > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		testValidation(t, iceberg.TruncateTransform{Width: overflowingInt32TransformParameter(t)}, "width <=")
+	})
+}
+
+func TestTruncateTransform_MarshalTextRejectsInvalidWidths(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: 0}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width > 0")
+	})
+	t.Run("negative", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: -1}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: overflowingInt32TransformParameter(t)}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width <=")
+	})
+	t.Run("valid", func(t *testing.T) {
+		txt, err := iceberg.TruncateTransform{Width: 16}.MarshalText()
+		require.NoError(t, err)
+		assert.Equal(t, "truncate[16]", string(txt))
 	})
 }
 
@@ -377,6 +452,11 @@ func TestBucketTransform_MarshalTextRejectsInvalidBuckets(t *testing.T) {
 		_, err := iceberg.BucketTransform{NumBuckets: -1}.MarshalText()
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: overflowingInt32TransformParameter(t)}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets <=")
 	})
 	t.Run("valid", func(t *testing.T) {
 		txt, err := iceberg.BucketTransform{NumBuckets: 16}.MarshalText()
