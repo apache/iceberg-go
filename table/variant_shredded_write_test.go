@@ -469,7 +469,7 @@ func TestShreddedVariantPartitionedDecimalRace(t *testing.T) {
 	require.Equal(t, nPart, files, "one file per partition")
 }
 
-func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n int) ([]iceberg.DataFile, string) {
+func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n int, extraProps ...iceberg.Properties) ([]iceberg.DataFile, string) {
 	t.Helper()
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -507,10 +507,14 @@ func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n
 
 	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
 	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
-	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+	props := iceberg.Properties{
 		PropertyFormatVersion:   "3",
 		ParquetShredVariantsKey: "true",
-	})
+	}
+	for _, ep := range extraProps {
+		maps.Copy(props, ep)
+	}
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, props)
 	require.NoError(t, err)
 	mb, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -1372,4 +1376,42 @@ func TestShreddedVariantWriteScalarBounds(t *testing.T) {
 			assert.Equalf(t, want, files[0].UpperBoundValues()[2], "%s upper bound", c.name)
 		})
 	}
+}
+
+// TestShreddedVariantWriteTruncateBound verifies variant string/binary bounds always truncate to 16 (even under full mode), matching Java's ParquetVariantUtil.
+func TestShreddedVariantWriteTruncateBound(t *testing.T) {
+	rootBound := func(build func(*variant.Builder) error) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$")}
+		require.NoError(t, build(&b))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+
+	// full mode (not truncate): proves variant truncation is fixed at 16 regardless of the configured length.
+	full := iceberg.Properties{MetricsModeColumnConfPrefix + ".payload": "full"}
+
+	t.Run("string", func(t *testing.T) {
+		long := strings.Repeat("a", 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, full)
+		require.Len(t, files, 1)
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 16)) }),
+			files[0].LowerBoundValues()[2], "string lower truncated to 16")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 15) + "b") }),
+			files[0].UpperBoundValues()[2], "string upper truncated to 16 (last rune incremented)")
+	})
+
+	t.Run("binary", func(t *testing.T) {
+		long := bytes.Repeat([]byte{0x01}, 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendBinary(long) }, 4, full)
+		require.Len(t, files, 1)
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(bytes.Repeat([]byte{0x01}, 16)) }),
+			files[0].LowerBoundValues()[2], "binary lower truncated to 16")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(append(bytes.Repeat([]byte{0x01}, 15), 0x02)) }),
+			files[0].UpperBoundValues()[2], "binary upper truncated to 16 (last byte incremented)")
+	})
 }

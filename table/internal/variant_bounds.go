@@ -20,8 +20,10 @@ package internal
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
@@ -210,6 +212,38 @@ type variantFieldBound struct {
 	lower, upper iceberg.Literal
 }
 
+const variantBoundTruncateLen = 16
+
+// truncateVariantBound truncates string/binary leaf bounds to variantBoundTruncateLen; a nil upper drops that bound.
+func truncateVariantBound(it iceberg.PrimitiveType, lo, hi iceberg.Literal) (iceberg.Literal, iceberg.Literal) {
+	switch it.(type) {
+	case iceberg.StringType:
+		if s := lo.Any().(string); utf8.RuneCountInString(s) > variantBoundTruncateLen {
+			lo = iceberg.StringLiteral(string([]rune(s)[:variantBoundTruncateLen]))
+		}
+		if s := hi.Any().(string); utf8.RuneCountInString(s) > variantBoundTruncateLen {
+			if up := TruncateUpperBoundText(s, variantBoundTruncateLen); up != "" {
+				hi = iceberg.StringLiteral(up)
+			} else {
+				hi = nil
+			}
+		}
+	case iceberg.BinaryType:
+		if b := lo.Any().([]byte); len(b) > variantBoundTruncateLen {
+			lo = iceberg.BinaryLiteral(slices.Clone(b[:variantBoundTruncateLen]))
+		}
+		if b := hi.Any().([]byte); len(b) > variantBoundTruncateLen {
+			if up := TruncateUpperBoundBinary(b, variantBoundTruncateLen); len(up) > 0 {
+				hi = iceberg.BinaryLiteral(up)
+			} else {
+				hi = nil
+			}
+		}
+	}
+
+	return lo, hi
+}
+
 // serializeVariantBounds builds the lower and upper bound objects, per spec.
 func serializeVariantBounds(fields []variantFieldBound) (lower, upper []byte, ok bool, err error) {
 	if len(fields) == 0 {
@@ -239,11 +273,14 @@ func boundsObjectValue(fields []variantFieldBound, useLower bool) (v variant.Val
 	start := b.Offset()
 	entries := make([]variant.FieldEntry, 0, len(fields))
 	for _, f := range fields {
-		entries = append(entries, b.NextField(start, f.jsonPath))
 		lit := f.upper
 		if useLower {
 			lit = f.lower
 		}
+		if lit == nil {
+			continue
+		}
+		entries = append(entries, b.NextField(start, f.jsonPath))
 		if err := appendLiteralToVariant(&b, f.icebergType, lit); err != nil {
 			return variant.Value{}, err
 		}
