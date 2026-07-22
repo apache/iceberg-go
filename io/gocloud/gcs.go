@@ -34,30 +34,31 @@ import (
 	"google.golang.org/api/option"
 )
 
-var allowedGCSCredTypes = map[string]option.CredentialsType{
-	"service_account":              option.ServiceAccount,
-	"authorized_user":              option.AuthorizedUser,
-	"impersonated_service_account": option.ImpersonatedServiceAccount,
-	"external_account":             option.ExternalAccount,
+var allowedGCSCredTypes = map[string]struct{}{
+	"service_account":              {},
+	"authorized_user":              {},
+	"impersonated_service_account": {},
+	"external_account":             {},
 }
 
-// ParseGCSConfig parses GCS properties and returns a configuration.
+func resolveGCSCredType(props map[string]string) (string, bool) {
+	v := props[io.GCSCredType]
+	if v == "" {
+		return "", false
+	}
+	if _, ok := allowedGCSCredTypes[v]; !ok {
+		return "", false
+	}
+
+	return v, true
+}
+
+// ParseGCSConfig parses non-credential GCS blob options; credentials are set on
+// the client by gcsCredentials, which supersedes any credential option here.
 func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	var o []option.ClientOption
 	if url := props[io.GCSEndpoint]; url != "" {
 		o = append(o, option.WithEndpoint(url))
-	}
-	var credType option.CredentialsType
-	if key := props[io.GCSCredType]; key != "" {
-		if ct, ok := allowedGCSCredTypes[key]; ok {
-			credType = ct
-		}
-	}
-	if key := props[io.GCSJSONKey]; key != "" {
-		o = append(o, option.WithAuthCredentialsJSON(credType, []byte(key)))
-	}
-	if path := props[io.GCSKeyPath]; path != "" {
-		o = append(o, option.WithAuthCredentialsFile(credType, path))
 	}
 	if v, ok := props[io.GCSUseJSONAPI]; ok {
 		if parse, err := strconv.ParseBool(v); err == nil && parse {
@@ -70,25 +71,27 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	}
 }
 
-// gcsScope grants read/write access to GCS objects.
 const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
-// gcsCredentials builds credentials from the gcs.jsonkey / gcs.keypath
-// properties (defaulting to a service-account key, honouring gcs.credtype),
-// falling back to Application Default Credentials when neither is set.
 func gcsCredentials(ctx context.Context, props map[string]string) (*google.Credentials, error) {
 	credType := google.ServiceAccount
-	if v := props[io.GCSCredType]; v != "" {
+	if v, ok := resolveGCSCredType(props); ok {
 		credType = google.CredentialsType(v)
 	}
 
-	if jsonKey := props[io.GCSJSONKey]; jsonKey != "" {
-		creds, err := google.CredentialsFromJSONWithType(ctx, []byte(jsonKey), credType, gcsScope)
+	// CredentialsFromJSONWithType requires the key's type to equal credType, so
+	// hint at gcs.credtype when a non-service-account key fails against it.
+	parse := func(data []byte, source string) (*google.Credentials, error) {
+		creds, err := google.CredentialsFromJSONWithType(ctx, data, credType, gcsScope)
 		if err != nil {
-			return nil, fmt.Errorf("gcs: parsing %s: %w", io.GCSJSONKey, err)
+			return nil, fmt.Errorf("gcs: parsing %s: set %s if the key is not a service account: %w", source, io.GCSCredType, err)
 		}
 
 		return creds, nil
+	}
+
+	if jsonKey := props[io.GCSJSONKey]; jsonKey != "" {
+		return parse([]byte(jsonKey), io.GCSJSONKey)
 	}
 
 	if path := props[io.GCSKeyPath]; path != "" {
@@ -96,12 +99,8 @@ func gcsCredentials(ctx context.Context, props map[string]string) (*google.Crede
 		if err != nil {
 			return nil, fmt.Errorf("gcs: reading %s %q: %w", io.GCSKeyPath, path, err)
 		}
-		creds, err := google.CredentialsFromJSONWithType(ctx, data, credType, gcsScope)
-		if err != nil {
-			return nil, fmt.Errorf("gcs: parsing credentials file %q: %w", path, err)
-		}
 
-		return creds, nil
+		return parse(data, fmt.Sprintf("%s %q", io.GCSKeyPath, path))
 	}
 
 	creds, _ := gcp.DefaultCredentials(ctx)
@@ -124,7 +123,8 @@ func createGCSBucket(ctx context.Context, parsed *url.URL, props map[string]stri
 	} else {
 		client, err = gcp.NewHTTPClient(
 			gcp.DefaultTransport(),
-			gcp.CredentialsTokenSource(creds))
+			gcp.CredentialsTokenSource(creds),
+		)
 		if err != nil {
 			return nil, err
 		}

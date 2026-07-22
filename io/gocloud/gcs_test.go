@@ -28,8 +28,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// authorizedUserJSON parses without a real RSA key, keeping tests hermetic.
-const authorizedUserJSON = `{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"token"}`
+// Both parse without a real RSA key (the private key is only read lazily when a
+// token is fetched), keeping tests hermetic.
+const (
+	authorizedUserJSON = `{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"token"}`
+	serviceAccountJSON = `{"type":"service_account","project_id":"p","private_key":"fake","client_email":"sa@p.iam.gserviceaccount.com","token_uri":"https://oauth2.googleapis.com/token"}`
+)
 
 func TestParseGCSConfigUseJSONAPI(t *testing.T) {
 	t.Run("defaults to disabled", func(t *testing.T) {
@@ -85,4 +89,46 @@ func TestGCSCredentialsMissingKeyPath(t *testing.T) {
 		io.GCSKeyPath: filepath.Join(t.TempDir(), "does-not-exist.json"),
 	})
 	require.Error(t, err)
+}
+
+func TestResolveGCSCredType(t *testing.T) {
+	for _, ct := range []string{"service_account", "authorized_user", "impersonated_service_account", "external_account"} {
+		got, ok := resolveGCSCredType(map[string]string{io.GCSCredType: ct})
+		require.True(t, ok, ct)
+		assert.Equal(t, ct, got)
+	}
+
+	for name, props := range map[string]map[string]string{
+		"unset":   {},
+		"unknown": {io.GCSCredType: "not-a-real-type"},
+	} {
+		_, ok := resolveGCSCredType(props)
+		assert.False(t, ok, name)
+	}
+}
+
+func TestGCSCredentialsDefaultsToServiceAccount(t *testing.T) {
+	creds, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSJSONKey: serviceAccountJSON,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	assert.JSONEq(t, serviceAccountJSON, string(creds.JSON))
+}
+
+func TestGCSCredentialsNonServiceAccountNeedsCredType(t *testing.T) {
+	_, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSJSONKey: authorizedUserJSON,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), io.GCSCredType)
+}
+
+func TestGCSCredentialsIgnoresUnknownCredType(t *testing.T) {
+	creds, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSJSONKey:  serviceAccountJSON,
+		io.GCSCredType: "not-a-real-type",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
 }
