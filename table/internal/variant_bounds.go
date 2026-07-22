@@ -205,35 +205,36 @@ func rfc9535Escape(name string) string {
 	return b.String()
 }
 
-// variantFieldBound is a shredded field's lower and upper bound (both required).
+// variantFieldBound is a shredded field's lower bound and upper bound; a nil upper is omitted.
 type variantFieldBound struct {
 	jsonPath     string
 	icebergType  iceberg.PrimitiveType
 	lower, upper iceberg.Literal
 }
 
-const variantBoundTruncateLen = 16
-
-// truncateVariantBound truncates string/binary leaf bounds to variantBoundTruncateLen; a nil upper drops that bound.
-func truncateVariantBound(it iceberg.PrimitiveType, lo, hi iceberg.Literal) (iceberg.Literal, iceberg.Literal) {
+// truncateVariantBound truncates string/binary leaf bounds to truncLen; a nil upper drops that bound.
+func truncateVariantBound(it iceberg.PrimitiveType, lo, hi iceberg.Literal, truncLen int) (iceberg.Literal, iceberg.Literal) {
+	if truncLen <= 0 {
+		return lo, hi
+	}
 	switch it.(type) {
 	case iceberg.StringType:
-		if s := lo.Any().(string); utf8.RuneCountInString(s) > variantBoundTruncateLen {
-			lo = iceberg.StringLiteral(string([]rune(s)[:variantBoundTruncateLen]))
+		if s := lo.Any().(string); utf8.RuneCountInString(s) > truncLen {
+			lo = iceberg.StringLiteral(string([]rune(s)[:truncLen]))
 		}
-		if s := hi.Any().(string); utf8.RuneCountInString(s) > variantBoundTruncateLen {
-			if up := TruncateUpperBoundText(s, variantBoundTruncateLen); up != "" {
+		if s := hi.Any().(string); utf8.RuneCountInString(s) > truncLen {
+			if up := TruncateUpperBoundText(s, truncLen); up != "" {
 				hi = iceberg.StringLiteral(up)
 			} else {
 				hi = nil
 			}
 		}
 	case iceberg.BinaryType:
-		if b := lo.Any().([]byte); len(b) > variantBoundTruncateLen {
-			lo = iceberg.BinaryLiteral(slices.Clone(b[:variantBoundTruncateLen]))
+		if b := lo.Any().([]byte); len(b) > truncLen {
+			lo = iceberg.BinaryLiteral(slices.Clone(b[:truncLen]))
 		}
-		if b := hi.Any().([]byte); len(b) > variantBoundTruncateLen {
-			if up := TruncateUpperBoundBinary(b, variantBoundTruncateLen); len(up) > 0 {
+		if b := hi.Any().([]byte); len(b) > truncLen {
+			if up := TruncateUpperBoundBinary(b, truncLen); len(up) > 0 {
 				hi = iceberg.BinaryLiteral(up)
 			} else {
 				hi = nil

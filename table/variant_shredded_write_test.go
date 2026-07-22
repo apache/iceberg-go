@@ -1378,7 +1378,7 @@ func TestShreddedVariantWriteScalarBounds(t *testing.T) {
 	}
 }
 
-// TestShreddedVariantWriteTruncateBound verifies variant string/binary bounds always truncate to 16 (even under full mode), matching Java's ParquetVariantUtil.
+// TestShreddedVariantWriteTruncateBound verifies variant string/binary bounds honor the parent column's metrics mode: truncate(N) clips to N, full does not truncate.
 func TestShreddedVariantWriteTruncateBound(t *testing.T) {
 	rootBound := func(build func(*variant.Builder) error) []byte {
 		var b variant.Builder
@@ -1391,27 +1391,36 @@ func TestShreddedVariantWriteTruncateBound(t *testing.T) {
 
 		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
 	}
+	col := func(mode string) iceberg.Properties {
+		return iceberg.Properties{MetricsModeColumnConfPrefix + ".payload": mode}
+	}
 
-	// full mode (not truncate): proves variant truncation is fixed at 16 regardless of the configured length.
-	full := iceberg.Properties{MetricsModeColumnConfPrefix + ".payload": "full"}
-
-	t.Run("string", func(t *testing.T) {
+	t.Run("string truncate(8)", func(t *testing.T) {
 		long := strings.Repeat("a", 40)
-		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, full)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, col("truncate(8)"))
 		require.Len(t, files, 1)
-		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 16)) }),
-			files[0].LowerBoundValues()[2], "string lower truncated to 16")
-		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 15) + "b") }),
-			files[0].UpperBoundValues()[2], "string upper truncated to 16 (last rune incremented)")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 8)) }),
+			files[0].LowerBoundValues()[2], "string lower truncated to 8")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 7) + "b") }),
+			files[0].UpperBoundValues()[2], "string upper truncated to 8 (last rune incremented)")
 	})
 
-	t.Run("binary", func(t *testing.T) {
-		long := bytes.Repeat([]byte{0x01}, 40)
-		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendBinary(long) }, 4, full)
+	t.Run("string full not truncated", func(t *testing.T) {
+		long := strings.Repeat("a", 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, col("full"))
 		require.Len(t, files, 1)
-		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(bytes.Repeat([]byte{0x01}, 16)) }),
-			files[0].LowerBoundValues()[2], "binary lower truncated to 16")
-		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(append(bytes.Repeat([]byte{0x01}, 15), 0x02)) }),
-			files[0].UpperBoundValues()[2], "binary upper truncated to 16 (last byte incremented)")
+		want := rootBound(func(b *variant.Builder) error { return b.AppendString(long) })
+		assert.Equal(t, want, files[0].LowerBoundValues()[2], "string lower not truncated under full")
+		assert.Equal(t, want, files[0].UpperBoundValues()[2], "string upper not truncated under full")
+	})
+
+	t.Run("binary truncate(8)", func(t *testing.T) {
+		long := bytes.Repeat([]byte{0x01}, 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendBinary(long) }, 4, col("truncate(8)"))
+		require.Len(t, files, 1)
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(bytes.Repeat([]byte{0x01}, 8)) }),
+			files[0].LowerBoundValues()[2], "binary lower truncated to 8")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(append(bytes.Repeat([]byte{0x01}, 7), 0x02)) }),
+			files[0].UpperBoundValues()[2], "binary upper truncated to 8 (last byte incremented)")
 	})
 }

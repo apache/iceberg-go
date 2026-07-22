@@ -18,8 +18,10 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -377,4 +379,102 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull()), arrowSchema, colMapping, statsCols)
 	assert.Contains(t, lo2, 1, "latitude bound kept when the location ancestor residual is all-null")
 	assert.Contains(t, hi2, 1)
+}
+
+func TestTruncateVariantBound(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		typ       iceberg.PrimitiveType
+		lower     iceberg.Literal
+		upper     iceberg.Literal
+		truncLen  int
+		wantLower any
+		wantUpper any // nil means the upper bound is dropped
+	}{
+		{
+			name:      "string truncates lower and increments upper",
+			typ:       iceberg.PrimitiveTypes.String,
+			lower:     iceberg.NewLiteral(strings.Repeat("a", 40)),
+			upper:     iceberg.NewLiteral(strings.Repeat("a", 40)),
+			truncLen:  8,
+			wantLower: strings.Repeat("a", 8),
+			wantUpper: strings.Repeat("a", 7) + "b",
+		},
+		{
+			name:      "string upper dropped when it cannot be incremented",
+			typ:       iceberg.PrimitiveTypes.String,
+			lower:     iceberg.NewLiteral(strings.Repeat("\U0010FFFF", 40)),
+			upper:     iceberg.NewLiteral(strings.Repeat("\U0010FFFF", 40)),
+			truncLen:  8,
+			wantLower: strings.Repeat("\U0010FFFF", 8),
+			wantUpper: nil,
+		},
+		{
+			name:      "binary truncates lower and increments upper",
+			typ:       iceberg.PrimitiveTypes.Binary,
+			lower:     iceberg.NewLiteral(bytes.Repeat([]byte{0x01}, 40)),
+			upper:     iceberg.NewLiteral(bytes.Repeat([]byte{0x01}, 40)),
+			truncLen:  8,
+			wantLower: bytes.Repeat([]byte{0x01}, 8),
+			wantUpper: append(bytes.Repeat([]byte{0x01}, 7), 0x02),
+		},
+		{
+			name:      "binary upper dropped when it cannot be incremented",
+			typ:       iceberg.PrimitiveTypes.Binary,
+			lower:     iceberg.NewLiteral(bytes.Repeat([]byte{0xff}, 40)),
+			upper:     iceberg.NewLiteral(bytes.Repeat([]byte{0xff}, 40)),
+			truncLen:  8,
+			wantLower: bytes.Repeat([]byte{0xff}, 8),
+			wantUpper: nil,
+		},
+		{
+			name:      "full leaves bounds unchanged",
+			typ:       iceberg.PrimitiveTypes.String,
+			lower:     iceberg.NewLiteral("short"),
+			upper:     iceberg.NewLiteral("zzzz"),
+			truncLen:  0,
+			wantLower: "short",
+			wantUpper: "zzzz",
+		},
+		{
+			name:      "short value is not truncated or dropped",
+			typ:       iceberg.PrimitiveTypes.String,
+			lower:     iceberg.NewLiteral("hi"),
+			upper:     iceberg.NewLiteral("hi"),
+			truncLen:  8,
+			wantLower: "hi",
+			wantUpper: "hi",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lo, hi := truncateVariantBound(tt.typ, tt.lower, tt.upper, tt.truncLen)
+			assert.Equal(t, tt.wantLower, lo.Any())
+			if tt.wantUpper == nil {
+				assert.Nil(t, hi, "upper bound dropped")
+			} else {
+				require.NotNil(t, hi)
+				assert.Equal(t, tt.wantUpper, hi.Any())
+			}
+		})
+	}
+}
+
+func TestSerializeVariantBoundsDropsNilUpper(t *testing.T) {
+	// One field keeps both bounds; the second has a dropped (nil) upper.
+	both := []variantFieldBound{
+		{jsonPath: "$['a']", icebergType: iceberg.PrimitiveTypes.Int64, lower: iceberg.NewLiteral(int64(1)), upper: iceberg.NewLiteral(int64(9))},
+		{jsonPath: "$['b']", icebergType: iceberg.PrimitiveTypes.String, lower: iceberg.NewLiteral("aaaaaaaa"), upper: nil},
+	}
+	lower, upper, ok, err := serializeVariantBounds(both)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Same fields but $['b'] never had an upper: the upper object must match dropping it entirely.
+	lowerOnlyB := []variantFieldBound{
+		{jsonPath: "$['a']", icebergType: iceberg.PrimitiveTypes.Int64, lower: iceberg.NewLiteral(int64(1)), upper: iceberg.NewLiteral(int64(9))},
+	}
+	_, wantUpper, _, err := serializeVariantBounds(lowerOnlyB)
+	require.NoError(t, err)
+	assert.Equal(t, wantUpper, upper, "dropped upper must be omitted from the upper object")
+	assert.NotEqual(t, lower, upper, "lower still carries $['b']")
 }

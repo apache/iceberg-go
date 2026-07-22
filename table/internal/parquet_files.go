@@ -1129,7 +1129,7 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		if lo == nil || hi == nil || isNaNLiteral(lo) || isNaNLiteral(hi) {
 			continue
 		}
-		lo, hi = truncateVariantBound(e.leaf.icebergType, lo, hi)
+		lo, hi = truncateVariantBound(e.leaf.icebergType, lo, hi, statsCols[e.parentID].Mode.Len)
 		perParent[e.parentID] = append(perParent[e.parentID], variantFieldBound{
 			jsonPath:    e.leaf.jsonPath,
 			icebergType: e.leaf.icebergType,
