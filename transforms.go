@@ -252,6 +252,9 @@ func (t BucketTransform) validateNumBuckets() error {
 	if t.NumBuckets <= 0 {
 		return fmt.Errorf("%w: bucket transform requires numBuckets > 0", ErrInvalidArgument)
 	}
+	if t.NumBuckets > math.MaxInt32 {
+		return fmt.Errorf("%w: bucket transform requires numBuckets <= %d", ErrInvalidArgument, math.MaxInt32)
+	}
 
 	return nil
 }
@@ -456,10 +459,25 @@ type TruncateTransform struct {
 }
 
 func (t TruncateTransform) MarshalText() ([]byte, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	return []byte(t.String()), nil
 }
 
 func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.Width) }
+
+func (t TruncateTransform) validateWidth() error {
+	if t.Width <= 0 {
+		return fmt.Errorf("%w: truncate transform requires width > 0", ErrInvalidArgument)
+	}
+	if t.Width > math.MaxInt32 {
+		return fmt.Errorf("%w: truncate transform requires width <= %d", ErrInvalidArgument, math.MaxInt32)
+	}
+
+	return nil
+}
 
 func (TruncateTransform) CanTransform(t Type) bool {
 	switch t.(type) {
@@ -485,6 +503,10 @@ func (t TruncateTransform) Equals(other Transform) bool {
 }
 
 func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	switch src.(type) {
 	case Int32Type:
 		return func(v any) any {
@@ -606,6 +628,10 @@ func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
 	}

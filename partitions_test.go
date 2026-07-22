@@ -183,6 +183,21 @@ func TestPartitionSpecRejectsNegativeSpecID(t *testing.T) {
 	require.ErrorContains(t, err, "spec id must be non-negative: -1")
 }
 
+func TestPartitionSpecRejectsInvalidTruncateTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_truncate", iceberg.TruncateTransform{Width: 0}, schema, nil),
+	)
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "width > 0")
+}
+
 func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
@@ -196,6 +211,21 @@ func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	_, err := json.Marshal(spec)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
+func TestPartitionSpec_MarshalTextRejectsInvalidTruncateTransform(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "bad_truncate",
+			Transform: iceberg.TruncateTransform{Width: 0},
+		},
+	)
+
+	_, err := json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "width > 0")
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {

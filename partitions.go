@@ -294,6 +294,10 @@ func validateTransform(transform Transform) error {
 		return t.validateNumBuckets()
 	case *BucketTransform:
 		return t.validateNumBuckets()
+	case TruncateTransform:
+		return t.validateWidth()
+	case *TruncateTransform:
+		return t.validateWidth()
 	default:
 		return nil
 	}
