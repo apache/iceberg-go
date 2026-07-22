@@ -25,11 +25,11 @@ import (
 	"sync"
 )
 
-// KMSTypeKey is the catalog/table property that selects a
-// [KeyManagementClient] implementation registered via [RegisterKMS] (e.g.
-// "memory"). It is a registered short name, not a fully-qualified class
-// name.
-const KMSTypeKey = "encryption.kms-type"
+// KMSTypeKey is the catalog property that selects a [KeyManagementClient]
+// implementation registered via [RegisterKMS] (e.g. "memory"). It is a
+// registered short name, not a fully-qualified class name.
+
+const KMSTypeKey = "kms-type"
 
 // ErrKMSTypeNotFound is returned by [LoadKeyManagementClient] when the
 // requested kmsType has not been registered via [RegisterKMS].
