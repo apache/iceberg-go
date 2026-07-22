@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"time"
@@ -69,10 +70,22 @@ func counterBytes(v int64) *metrics.CounterResult {
 // vector); positional deletes suppressed by a deletion vector never appear on a
 // task, so they are excluded. This keeps the counts consistent with
 // result-data-files and total-file-size-in-bytes.
+//
+// Parity note: Java's ScanMetricsUtil.fileTask counts result-delete-files per
+// data-file task with no cross-task dedup, so a positional delete covering 5
+// data files counts as 5 there and once here. Counting once by path is the
+// deliberate choice for this result-scoped metric; keep it if touching this.
+//
+// Deletion vectors are keyed by the data file they reference, not by their
+// Puffin file path: a single Puffin file holds one DV blob per data file (see
+// DVWriter.Flush), so all DVs from one flush share a FilePath() and would
+// collapse into one entry if keyed by it. Their size is the per-blob
+// content_size_in_bytes, not the whole Puffin file size, matching Java's
+// ScanTaskUtil.contentSizeInBytes.
 func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask) {
 	posDeletes := make(map[string]int64)
 	eqDeletes := make(map[string]int64)
-	dvs := make(map[string]int64)
+	dvByRef := make(map[string]int64)
 	for _, t := range tasks {
 		for _, df := range t.DeleteFiles {
 			posDeletes[df.FilePath()] = df.FileSizeBytes()
@@ -81,15 +94,26 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 			eqDeletes[df.FilePath()] = df.FileSizeBytes()
 		}
 		for _, df := range t.DeletionVectorFiles {
-			dvs[df.FilePath()] = df.FileSizeBytes()
+			// Key by the referenced data file so multiple DVs sharing one
+			// Puffin path stay distinct; fall back to the Puffin path if the
+			// reference is somehow unset. Size is the per-blob content size.
+			key := df.FilePath()
+			if ref := df.ReferencedDataFile(); ref != nil {
+				key = *ref
+			}
+			var size int64
+			if csb := df.ContentSizeInBytes(); csb != nil {
+				size = *csb
+			}
+			dvByRef[key] = size
 		}
 	}
 
 	acc.positionalDeleteFiles = int64(len(posDeletes))
 	acc.equalityDeleteFiles = int64(len(eqDeletes))
-	acc.dvs = int64(len(dvs))
+	acc.dvs = int64(len(dvByRef))
 	acc.resultDeleteFiles = acc.positionalDeleteFiles + acc.equalityDeleteFiles + acc.dvs
-	for _, deletes := range []map[string]int64{posDeletes, eqDeletes, dvs} {
+	for _, deletes := range []map[string]int64{posDeletes, eqDeletes, dvByRef} {
 		for _, size := range deletes {
 			acc.totalDeleteFileSize += size
 		}
@@ -97,22 +121,27 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 }
 
 // buildScanReport assembles the ScanReport for a completed planning operation.
+// schema is the schema the scan planned against, threaded in from the planner so
+// the report describes exactly what was used rather than re-resolving it here.
 // Only the metrics that are actually measured are populated; unmeasured ones
 // (e.g. skipped-data-files, indexed-delete-files) are left unset and omitted.
-func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, planning time.Duration) metrics.ScanReport {
-	// Resolve the schema the scan actually planned against (the snapshot schema
-	// for snapshot/as-of scans, the current schema otherwise). Best-effort: a
-	// report must never fail the scan, so fall back to the current schema.
-	schema, err := scan.effectiveSchema()
-	if err != nil || schema == nil {
-		schema = scan.metadata.CurrentSchema()
-	}
-
+func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema *iceberg.Schema, planning time.Duration) metrics.ScanReport {
 	ids, names := scan.projectedFields(schema)
 
 	var snapshotID int64
 	if snap := scan.Snapshot(); snap != nil {
 		snapshotID = snap.SnapshotID
+	}
+
+	// Serialize the actual row filter as Expression JSON. On a marshal error we
+	// leave Filter unset so ScanReport.MarshalJSON falls back to always-true
+	// rather than failing the scan; literal sanitization (Java's ExpressionUtil)
+	// is a follow-up.
+	var filter json.RawMessage
+	if scan.rowFilter != nil {
+		if raw, err := json.Marshal(scan.rowFilter); err == nil {
+			filter = raw
+		}
 	}
 
 	return metrics.ScanReport{
@@ -121,6 +150,7 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, planning time.Dur
 		SchemaID:            schema.ID,
 		ProjectedFieldIDs:   ids,
 		ProjectedFieldNames: names,
+		Filter:              filter,
 		Metrics: metrics.ScanMetricsResult{
 			TotalPlanningDuration:      metrics.NewNanosTimerResult(1, planning.Nanoseconds()),
 			ResultDataFiles:            counterCount(acc.resultDataFiles),

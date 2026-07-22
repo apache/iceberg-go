@@ -64,12 +64,14 @@ func TestBuildScanReport(t *testing.T) {
 		totalDeleteFileSize:   512,
 	}
 
-	sr := scan.buildScanReport(acc, 5*time.Millisecond)
+	sr := scan.buildScanReport(acc, meta.CurrentSchema(), 5*time.Millisecond)
 
 	assert.Equal(t, "db.tbl", sr.TableName)
 	assert.Equal(t, meta.CurrentSchema().ID, sr.SchemaID)
 	assert.Equal(t, []int{1, 2}, sr.ProjectedFieldIDs)
 	assert.Equal(t, []string{"id", "data"}, sr.ProjectedFieldNames)
+	// No row filter set: Filter stays unset and defaults to always-true on the wire.
+	assert.Nil(t, sr.Filter)
 
 	m := sr.Metrics
 	require.NotNil(t, m.TotalPlanningDuration)
@@ -111,7 +113,13 @@ func TestApplyResultDeleteMetrics(t *testing.T) {
 	posA := &mockDataFile{path: "s3://b/pos-a.parquet", filesize: 100}
 	posB := &mockDataFile{path: "s3://b/pos-b.parquet", filesize: 200}
 	eq := &mockDataFile{path: "s3://b/eq.parquet", filesize: 40}
-	dv := &mockDataFile{path: "s3://b/dv.puffin", filesize: 10}
+	// A DV is a Puffin file; its size is the per-blob content_size_in_bytes, not
+	// the whole Puffin file size, so filesize (the Puffin length) must be ignored.
+	dv := &dvMockDataFile{
+		mockDataFile:       mockDataFile{path: "s3://b/deletes.puffin", filesize: 9999},
+		referencedDataFile: strPtr("s3://b/data-2.parquet"),
+		contentSizeInBytes: int64Ptr(10),
+	}
 
 	// posA applies to both data files: it must be counted (and sized) once.
 	tasks := []FileScanTask{
@@ -134,13 +142,58 @@ func TestApplyResultDeleteMetrics(t *testing.T) {
 	assert.Equal(t, int64(1), acc.equalityDeleteFiles)
 	assert.Equal(t, int64(1), acc.dvs)
 	assert.Equal(t, int64(4), acc.resultDeleteFiles)
-	// 100 (posA once) + 200 (posB) + 40 (eq) + 10 (dv)
+	// 100 (posA once) + 200 (posB) + 40 (eq) + 10 (dv content size, not 9999)
 	assert.Equal(t, int64(350), acc.totalDeleteFileSize)
 }
 
-func TestPlanFilesEmitsScanReport(t *testing.T) {
-	// A table with no snapshot still completes planning (zero results) and must
-	// emit exactly one ScanReport through the configured reporter.
+func TestApplyResultDeleteMetricsDVsShareOnePuffin(t *testing.T) {
+	// DVWriter.Flush writes one Puffin file with a separate DV blob per data
+	// file, so both DVs below share a FilePath() and differ only by the data
+	// file they reference. Keying by referenced data file must keep them
+	// distinct (2 DVs), and each blob's own content size must be summed.
+	puffin := "s3://b/deletes.puffin"
+	ref1, ref2 := "s3://b/data-1.parquet", "s3://b/data-2.parquet"
+	dv1 := &dvMockDataFile{
+		mockDataFile:       mockDataFile{path: puffin, filesize: 9999},
+		referencedDataFile: &ref1,
+		contentSizeInBytes: int64Ptr(30),
+	}
+	dv2 := &dvMockDataFile{
+		mockDataFile:       mockDataFile{path: puffin, filesize: 9999},
+		referencedDataFile: &ref2,
+		contentSizeInBytes: int64Ptr(70),
+	}
+
+	tasks := []FileScanTask{
+		{File: &mockDataFile{path: ref1, filesize: 1000}, DeletionVectorFiles: []iceberg.DataFile{dv1}},
+		{File: &mockDataFile{path: ref2, filesize: 2000}, DeletionVectorFiles: []iceberg.DataFile{dv2}},
+	}
+
+	var acc scanMetricsAccumulator
+	acc.applyResultDeleteMetrics(tasks)
+
+	assert.Equal(t, int64(2), acc.dvs, "two DVs in one Puffin file must not collapse")
+	assert.Equal(t, int64(2), acc.resultDeleteFiles)
+	assert.Equal(t, int64(100), acc.totalDeleteFileSize, "sum of per-blob content sizes, not Puffin file size")
+}
+
+func TestBuildScanReportSetsFilter(t *testing.T) {
+	meta := metricsTestMetadata(t)
+	scan := &Scan{
+		metadata:       meta,
+		identifier:     Identifier{"db", "tbl"},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		rowFilter:      iceberg.AlwaysFalse{},
+	}
+
+	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), time.Millisecond)
+	assert.JSONEq(t, `false`, string(sr.Filter), "Filter must reflect the real row filter, not default to always-true")
+}
+
+func TestPlanFilesNoSnapshotEmitsNoReport(t *testing.T) {
+	// A table with no snapshot plans zero files and has no real snapshot id, so
+	// no ScanReport is emitted (matching Java, which skips the report entirely).
 	rep := &metrics.InMemoryReporter{}
 	meta := metricsTestMetadata(t)
 	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil,
@@ -150,16 +203,7 @@ func TestPlanFilesEmitsScanReport(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, tasks)
 
-	reports := rep.Reports()
-	require.Len(t, reports, 1)
-
-	sr, ok := reports[0].(metrics.ScanReport)
-	require.True(t, ok, "expected a ScanReport, got %T", reports[0])
-	assert.Equal(t, "db.tbl", sr.TableName)
-	assert.Equal(t, meta.CurrentSchema().ID, sr.SchemaID)
-	require.NotNil(t, sr.Metrics.TotalPlanningDuration)
-	require.NotNil(t, sr.Metrics.ResultDataFiles)
-	assert.Equal(t, int64(0), sr.Metrics.ResultDataFiles.Value)
+	assert.Empty(t, rep.Reports(), "no snapshot means no scan report")
 }
 
 func TestPlanFilesNopReporterDoesNotPanic(t *testing.T) {

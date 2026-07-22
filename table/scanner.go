@@ -654,6 +654,10 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 		return nil, err
 	}
 
+	// This path has no reporter behind it, so the manifest counts recorded into
+	// this accumulator are intentionally discarded. A future caller that needs
+	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
+	// pass in an accumulator it actually reads.
 	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
 }
 
@@ -838,33 +842,47 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	start := time.Now()
 	var acc scanMetricsAccumulator
 
-	results, err := scan.planFilesLocal(ctx, &acc)
+	// Resolve the planning schema once and thread it through both planning and
+	// the report, so the report describes exactly the schema that was used.
+	schema, err := scan.effectiveSchema()
 	if err != nil {
 		return nil, err
 	}
 
-	// Building the report is skipped for the no-op reporter — the opt-in default
-	// set by Table.Scan, and the nil-reporter case for scans constructed directly
-	// in tests (see Reporter, which maps nil to NopReporter). A NopReporter
-	// discards the report, so assembling one would be pure overhead.
-	rep := scan.Reporter()
-	if _, isNop := rep.(metrics.NopReporter); !isNop {
-		rep.Report(ctx, scan.buildScanReport(&acc, time.Since(start)))
+	results, err := scan.planFilesLocal(ctx, &acc, schema)
+	if err != nil {
+		return nil, err
+	}
+	// Snap the elapsed time right after planning so total-planning-duration
+	// reflects planning alone, not the report assembly below.
+	planningDuration := time.Since(start)
+
+	// Only emit a report when planning ran against a real snapshot. A table with
+	// no snapshot plans zero files and has no real snapshot id to report; Java
+	// skips the scan report entirely in that case, so we do too.
+	//
+	// Building the report is also skipped for a no-op reporter — the opt-in
+	// default set by Table.Scan, the nil-reporter case for scans constructed
+	// directly in tests (see Reporter, which maps nil to NopReporter), and a
+	// Combine of only nop reporters. A nop discards the report, so assembling
+	// one would be pure overhead.
+	if scan.Snapshot() != nil {
+		if rep := scan.Reporter(); !metrics.IsNop(rep) {
+			rep.Report(ctx, scan.buildScanReport(&acc, schema, planningDuration))
+		}
 	}
 
 	return results, nil
 }
 
 // planFilesLocal performs local scan planning: it reads and filters the
-// snapshot's manifests, builds the matching FileScanTasks, and records planning
-// metrics into acc for the caller to report.
-func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator) ([]FileScanTask, error) {
+// snapshot's manifests using schema, builds the matching FileScanTasks, and
+// records planning metrics into acc for the caller to report. It resets the
+// plan-scoped scan.planIO to nil, since local planning reads through the
+// table's default FileIO. It returns a nil slice (not an empty one) when there
+// is no snapshot or every manifest is pruned.
+func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
 	scan.planIO = nil
-
-	schema, err := scan.effectiveSchema()
-	if err != nil {
-		return nil, err
-	}
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
