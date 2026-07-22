@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -468,7 +469,7 @@ func TestShreddedVariantPartitionedDecimalRace(t *testing.T) {
 	require.Equal(t, nPart, files, "one file per partition")
 }
 
-func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n int) ([]iceberg.DataFile, string) {
+func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n int, extraProps ...iceberg.Properties) ([]iceberg.DataFile, string) {
 	t.Helper()
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -506,10 +507,14 @@ func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n
 
 	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
 	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
-	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+	props := iceberg.Properties{
 		PropertyFormatVersion:   "3",
 		ParquetShredVariantsKey: "true",
-	})
+	}
+	for _, ep := range extraProps {
+		maps.Copy(props, ep)
+	}
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, props)
 	require.NoError(t, err)
 	mb, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
@@ -650,6 +655,11 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 		}
 		assert.JSONEqf(t, want, string(got), "row %d (mixed-type minority must round-trip)", i)
 	}
+
+	// f shreds as int64 but the string rows land in the residual value column, so its
+	// typed stats do not cover all values: the bound must be dropped (Java value() rule).
+	_, hasLower := files[0].LowerBoundValues()[2]
+	assert.False(t, hasLower, "partial-shred field must not emit a variant bound")
 }
 
 // TestShreddedVariantWriteRowConservation verifies every row survives bootstrap ->
@@ -1113,4 +1123,304 @@ func TestInferShreddingSkipsUndecodable(t *testing.T) {
 	_, found := st.FieldsByName("a")
 	assert.True(t, found, "schema inferred from the good rows")
 	assert.Contains(t, buf.String(), "skipped", "the skip is logged, not silent")
+}
+
+// TestShreddedVariantWriteChildStats asserts the written data file carries variant
+// child bounds under the parent field id: an object of the shredded fields' min/max
+// keyed by normalized JSON path. writeVariantTable rows are {a: int64(5e9+i), b: "row"}.
+func TestShreddedVariantWriteChildStats(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.Len(t, files, 1)
+	df := files[0]
+
+	const variantField = 2 // payload
+
+	buildObj := func(a int64) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$['a']")}
+		require.NoError(t, b.AppendInt(a))
+		entries = append(entries, b.NextField(start, "$['b']"))
+		require.NoError(t, b.AppendString("row"))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+
+	assert.Equal(t, buildObj(5_000_000_000), df.LowerBoundValues()[variantField], "lower bound object")
+	assert.Equal(t, buildObj(5_000_000_007), df.UpperBoundValues()[variantField], "upper bound object")
+}
+
+// TestShreddedVariantWriteNullFieldKeepsBound: int64+null field still gets a bound.
+func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	const nRows, nNull = 10, 3
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 0; i < nRows; i++ {
+		idb.Append(int64(i))
+		var b variant.Builder
+		if i < nRows-nNull {
+			require.NoError(t, b.Append(map[string]any{"f": int64(1000 + i)}))
+		} else {
+			require.NoError(t, b.Append(map[string]any{"f": nil}))
+		}
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, nRows)
+	defer rec.Release()
+
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+
+	// f has int64 + null (no conflict): its bound is kept and covers the non-null range.
+	buildObj := func(fv int64) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$['f']")}
+		require.NoError(t, b.AppendInt(fv))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+	assert.Equal(t, buildObj(1000), files[0].LowerBoundValues()[2])
+	assert.Equal(t, buildObj(1006), files[0].UpperBoundValues()[2])
+}
+
+func TestShreddedVariantWriteFloatBound(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	arrSchema, err := SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	const nRows = 8
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i := 0; i < nRows; i++ {
+		idb.Append(int64(i))
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"g": 1.5 + float64(i)}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, nRows)
+	defer rec.Release()
+
+	itr := func(yield func(arrow.RecordBatch, error) bool) { yield(rec, nil) }
+	loc := strings.ReplaceAll(t.TempDir(), "\\", "/")
+	meta, err := NewMetadata(iceSchema, iceberg.UnpartitionedSpec, UnsortedSortOrder, loc, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.NoError(t, err)
+	mb, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	u := uuid.New()
+	args := recordWritingArgs{sc: arrSchema, itr: itr, fs: iceio.LocalFS{}, writeUUID: &u, counter: infiniteCounter()}
+	factory, err := newWriterFactory(loc, args, mb, iceSchema, 512*1024*1024)
+	require.NoError(t, err)
+
+	var files []iceberg.DataFile
+	for df, err := range unpartitionedWrite(context.Background(), factory, args.itr) {
+		require.NoError(t, err)
+		files = append(files, df)
+	}
+	require.Len(t, files, 1)
+
+	buildObj := func(g float64) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$['g']")}
+		require.NoError(t, b.AppendFloat64(g))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+	assert.Equal(t, buildObj(1.5), files[0].LowerBoundValues()[2])
+	assert.Equal(t, buildObj(8.5), files[0].UpperBoundValues()[2])
+}
+
+// TestShreddedVariantWriteBoundsMetricsMode verifies none/counts (default or per-column) skip variant child bounds while full/truncate emit them.
+func TestShreddedVariantWriteBoundsMetricsMode(t *testing.T) {
+	base := iceberg.Properties{
+		PropertyFormatVersion:       "3",
+		ParquetShredVariantsKey:     "true",
+		ParquetVariantBufferSizeKey: "4",
+	}
+	for _, tt := range []struct {
+		name      string
+		override  iceberg.Properties
+		wantBound bool
+	}{
+		{"default emits", nil, true},
+		{"default none skips", iceberg.Properties{"write.metadata.metrics.default": "none"}, false},
+		{"default counts skips", iceberg.Properties{"write.metadata.metrics.default": "counts"}, false},
+		{"column none skips", iceberg.Properties{"write.metadata.metrics.column.payload": "none"}, false},
+		{"column full over default none emits", iceberg.Properties{
+			"write.metadata.metrics.default":        "none",
+			"write.metadata.metrics.column.payload": "full",
+		}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			props := iceberg.Properties{}
+			maps.Copy(props, base)
+			maps.Copy(props, tt.override)
+			files := writeVariantTable(t, props)
+			require.Len(t, files, 1)
+			_, hasLo := files[0].LowerBoundValues()[2]
+			_, hasHi := files[0].UpperBoundValues()[2]
+			assert.Equal(t, tt.wantBound, hasLo, "lower bound presence")
+			assert.Equal(t, tt.wantBound, hasHi, "upper bound presence")
+		})
+	}
+}
+
+// TestShreddedVariantWriteScalarBounds pins the emitted bound for each shredded scalar
+// type (uniform rows, so min==max): the root "$" bound must equal the re-encoded value.
+func TestShreddedVariantWriteScalarBounds(t *testing.T) {
+	buildRootBound := func(build func(*variant.Builder) error) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$")}
+		require.NoError(t, build(&b))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+
+	uid := uuid.MustParse("00112233-4455-6677-8899-aabbccddeeff")
+	cases := []struct {
+		name  string
+		build func(*variant.Builder) error
+	}{
+		{"bool", func(b *variant.Builder) error { return b.AppendBool(true) }},
+		{"int-small", func(b *variant.Builder) error { return b.AppendInt(1000) }},
+		{"int64", func(b *variant.Builder) error { return b.AppendInt(5_000_000_000) }},
+		{"float32", func(b *variant.Builder) error { return b.AppendFloat32(1.5) }},
+		{"float64", func(b *variant.Builder) error { return b.AppendFloat64(2.5) }},
+		{"string", func(b *variant.Builder) error { return b.AppendString("hi") }},
+		{"binary", func(b *variant.Builder) error { return b.AppendBinary([]byte{1, 2, 3}) }},
+		{"date", func(b *variant.Builder) error { return b.AppendDate(arrow.Date32(19000)) }},
+		{"time", func(b *variant.Builder) error { return b.AppendTimeMicro(arrow.Time64(3600000000)) }},
+		{"timestamp-tz", func(b *variant.Builder) error {
+			return b.AppendTimestamp(arrow.Timestamp(1700000000000000), true, true)
+		}},
+		{"timestamp-ntz", func(b *variant.Builder) error {
+			return b.AppendTimestamp(arrow.Timestamp(1700000000000000), true, false)
+		}},
+		{"uuid", func(b *variant.Builder) error { return b.AppendUUID(uid) }},
+		{"decimal4", func(b *variant.Builder) error { return b.AppendDecimal4(2, decimal.Decimal32(12345)) }},
+		{"decimal8", func(b *variant.Builder) error { return b.AppendDecimal8(0, decimal.Decimal64(123456789012)) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			files, _ := writeScalarVariantTable(t, c.build, 4)
+			require.Len(t, files, 1)
+			require.Truef(t, payloadHasTypedValue(t, files[0].FilePath()), "%s must shred", c.name)
+			want := buildRootBound(c.build)
+			assert.Equalf(t, want, files[0].LowerBoundValues()[2], "%s lower bound", c.name)
+			assert.Equalf(t, want, files[0].UpperBoundValues()[2], "%s upper bound", c.name)
+		})
+	}
+}
+
+// TestShreddedVariantWriteTruncateBound verifies variant string/binary bounds honor the parent column's metrics mode: truncate(N) clips to N, full does not truncate.
+func TestShreddedVariantWriteTruncateBound(t *testing.T) {
+	rootBound := func(build func(*variant.Builder) error) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$")}
+		require.NoError(t, build(&b))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+	col := func(mode string) iceberg.Properties {
+		return iceberg.Properties{MetricsModeColumnConfPrefix + ".payload": mode}
+	}
+
+	t.Run("string truncate(8)", func(t *testing.T) {
+		long := strings.Repeat("a", 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, col("truncate(8)"))
+		require.Len(t, files, 1)
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 8)) }),
+			files[0].LowerBoundValues()[2], "string lower truncated to 8")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendString(strings.Repeat("a", 7) + "b") }),
+			files[0].UpperBoundValues()[2], "string upper truncated to 8 (last rune incremented)")
+	})
+
+	t.Run("string full not truncated", func(t *testing.T) {
+		long := strings.Repeat("a", 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendString(long) }, 4, col("full"))
+		require.Len(t, files, 1)
+		want := rootBound(func(b *variant.Builder) error { return b.AppendString(long) })
+		assert.Equal(t, want, files[0].LowerBoundValues()[2], "string lower not truncated under full")
+		assert.Equal(t, want, files[0].UpperBoundValues()[2], "string upper not truncated under full")
+	})
+
+	t.Run("binary truncate(8)", func(t *testing.T) {
+		long := bytes.Repeat([]byte{0x01}, 40)
+		files, _ := writeScalarVariantTable(t, func(b *variant.Builder) error { return b.AppendBinary(long) }, 4, col("truncate(8)"))
+		require.Len(t, files, 1)
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(bytes.Repeat([]byte{0x01}, 8)) }),
+			files[0].LowerBoundValues()[2], "binary lower truncated to 8")
+		assert.Equal(t, rootBound(func(b *variant.Builder) error { return b.AppendBinary(append(bytes.Repeat([]byte{0x01}, 7), 0x02)) }),
+			files[0].UpperBoundValues()[2], "binary upper truncated to 8 (last byte incremented)")
+	})
 }
