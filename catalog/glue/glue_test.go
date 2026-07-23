@@ -280,6 +280,53 @@ func TestGlueConstructParametersPreservesReservedParameters(t *testing.T) {
 	assert.Equal("value", params["custom"])
 }
 
+func TestGlueConstructTableInputPreservesExistingColumnComments(t *testing.T) {
+	metadata, err := table.NewMetadata(
+		testSchema,
+		nil,
+		table.UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		nil,
+	)
+	require.NoError(t, err)
+	staged := table.New(
+		TableIdentifier("test_database", "test_table"),
+		metadata,
+		"s3://test-bucket/test_table/metadata/v2.metadata.json",
+		nil,
+		nil,
+	)
+	previous := &types.Table{
+		StorageDescriptor: &types.StorageDescriptor{
+			Columns: []types.Column{
+				{
+					Name:       aws.String("foo"),
+					Comment:    aws.String("existing comment"),
+					Parameters: map[string]string{icebergFieldIDKey: "1"},
+				},
+			},
+		},
+	}
+
+	input := constructTableInput("test_table", staged, previous)
+	columns := make(map[string]types.Column, len(input.StorageDescriptor.Columns))
+	for _, column := range input.StorageDescriptor.Columns {
+		columns[aws.ToString(column.Name)] = column
+	}
+
+	require.Equal(t, "existing comment", aws.ToString(columns["foo"].Comment))
+	require.Nil(t, columns["bar"].Comment)
+	require.Nil(t, columns["baz"].Comment)
+
+	withoutStorageDescriptor := &types.Table{}
+	for _, previous := range []*types.Table{nil, withoutStorageDescriptor} {
+		input := constructTableInput("test_table", staged, previous)
+		for _, column := range input.StorageDescriptor.Columns {
+			require.Nil(t, column.Comment)
+		}
+	}
+}
+
 func TestGlueGetTableCaseInsensitive(t *testing.T) {
 	assert := require.New(t)
 
