@@ -685,6 +685,18 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
+	tables, err := c.glueSvc.GetTables(ctx, &glue.GetTablesInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(databaseName),
+		MaxResults:   aws.Int32(1),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to check namespace %s for tables: %w", databaseName, err)
+	}
+	if len(tables.TableList) > 0 {
+		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, databaseName)
+	}
+
 	params := &glue.DeleteDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)}
 	_, err = c.glueSvc.DeleteDatabase(ctx, params)
 	if err != nil {
