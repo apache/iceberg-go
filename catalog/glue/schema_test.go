@@ -101,7 +101,16 @@ func TestIcebergTypeToGlueType(t *testing.T) {
 		{
 			name:     "fixed type",
 			input:    iceberg.FixedTypeOf(16),
-			expected: "binary(16)",
+			expected: "binary",
+		},
+		{
+			name: "nested fixed type",
+			input: &iceberg.ListType{
+				ElementID:       1,
+				Element:         iceberg.FixedTypeOf(16),
+				ElementRequired: true,
+			},
+			expected: "array<binary>",
 		},
 	}
 	for _, tt := range tests {
