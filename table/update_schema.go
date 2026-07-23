@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	"github.com/google/uuid"
 )
 
 const TableRootID = -1
@@ -648,9 +649,6 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 //     column's InitialDefault is never modified.
 //   - Map keys are immutable and cross-kind changes (list->map, struct->list,
 //     etc.) are rejected rather than silently grafted onto the existing column.
-//
-// The change is queued and applied with other pending updates on Apply/Commit,
-// so fields added by an earlier op in the same UpdateSchema are visible here.
 func (u *UpdateSchema) UnionByNameWith(newSchema *iceberg.Schema) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.unionByName(newSchema)
@@ -765,20 +763,8 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 	}
 
-	if _, isPrimitive := newField.Type.(iceberg.PrimitiveType); !isPrimitive {
-		if newField.InitialDefault != nil || newField.WriteDefault != nil {
-			return fmt.Errorf("default values are not supported for %s", newField.Type)
-		}
-		if err := validateNestedDefaults(newField.Type); err != nil {
-			return err
-		}
-	} else {
-		if err := validateDefaultValue(newField.Type, newField.InitialDefault); err != nil {
-			return fmt.Errorf("invalid initial-default for %s: %w", fullName, err)
-		}
-		if err := validateDefaultValue(newField.Type, newField.WriteDefault); err != nil {
-			return fmt.Errorf("invalid write-default for %s: %w", fullName, err)
-		}
+	if err := validateFieldDefaults(newField); err != nil {
+		return err
 	}
 
 	field := iceberg.NestedField{
@@ -830,7 +816,13 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	}
 
 	if newField.WriteDefault != nil && !reflect.DeepEqual(newField.WriteDefault, existing.WriteDefault) {
-		if err := u.setWriteDefault(existing, newField.WriteDefault); err != nil {
+		// Validate against the promoted type when this same op changes the
+		// column's type
+		effectiveType := existing.Type
+		if update.FieldType.Valid {
+			effectiveType = update.FieldType.Val
+		}
+		if err := u.setWriteDefault(existing, effectiveType, newField.WriteDefault); err != nil {
 			return err
 		}
 	}
@@ -838,14 +830,14 @@ func (u *UpdateSchema) unionUpdateColumn(path []string, existing, newField icebe
 	return nil
 }
 
-func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, writeDefault any) error {
+func (u *UpdateSchema) setWriteDefault(existing iceberg.NestedField, fieldType iceberg.Type, writeDefault any) error {
 	if u.isDeleted(existing.ID) {
 		return fmt.Errorf("field that has been deleted cannot be updated: %s", existing.Name)
 	}
-	if _, ok := existing.Type.(iceberg.PrimitiveType); !ok {
-		return fmt.Errorf("default values are not supported for %s", existing.Type)
+	if _, ok := fieldType.(iceberg.PrimitiveType); !ok {
+		return fmt.Errorf("default values are not supported for %s", fieldType)
 	}
-	if err := validateDefaultValue(existing.Type, writeDefault); err != nil {
+	if err := validateDefaultValue(fieldType, writeDefault); err != nil {
 		return fmt.Errorf("invalid write-default for %s: %w", existing.Name, err)
 	}
 
@@ -886,22 +878,48 @@ func validateNestedDefaults(t iceberg.Type) error {
 }
 
 func validateFieldDefaults(f iceberg.NestedField) error {
-	if _, isPrimitive := f.Type.(iceberg.PrimitiveType); !isPrimitive {
-		if f.InitialDefault != nil || f.WriteDefault != nil {
-			return fmt.Errorf("default values are not supported for %s", f.Type)
+	switch f.Type.(type) {
+	case *iceberg.StructType, *iceberg.ListType, *iceberg.MapType:
+		if err := validateComplexDefault(f); err != nil {
+			return err
 		}
 
 		return validateNestedDefaults(f.Type)
-	}
-
-	if err := validateDefaultValue(f.Type, f.InitialDefault); err != nil {
-		return fmt.Errorf("invalid initial-default for %s: %w", f.Name, err)
-	}
-	if err := validateDefaultValue(f.Type, f.WriteDefault); err != nil {
-		return fmt.Errorf("invalid write-default for %s: %w", f.Name, err)
+	case iceberg.PrimitiveType:
+		if err := validateDefaultValue(f.Type, f.InitialDefault); err != nil {
+			return fmt.Errorf("invalid initial-default for %s: %w", f.Name, err)
+		}
+		if err := validateDefaultValue(f.Type, f.WriteDefault); err != nil {
+			return fmt.Errorf("invalid write-default for %s: %w", f.Name, err)
+		}
 	}
 
 	return nil
+}
+
+func nativeDefaultLiteral(v any) (iceberg.Literal, bool) {
+	switch val := v.(type) {
+	case bool:
+		return iceberg.NewLiteral(val), true
+	case int32:
+		return iceberg.NewLiteral(val), true
+	case int64:
+		return iceberg.NewLiteral(val), true
+	case float32:
+		return iceberg.NewLiteral(val), true
+	case iceberg.Date:
+		return iceberg.NewLiteral(val), true
+	case iceberg.Time:
+		return iceberg.NewLiteral(val), true
+	case iceberg.Timestamp:
+		return iceberg.NewLiteral(val), true
+	case iceberg.TimestampNano:
+		return iceberg.NewLiteral(val), true
+	case uuid.UUID:
+		return iceberg.NewLiteral(val), true
+	}
+
+	return nil, false
 }
 
 func validateDefaultValue(t iceberg.Type, v any) (err error) {
@@ -910,6 +928,10 @@ func validateDefaultValue(t iceberg.Type, v any) (err error) {
 	}
 	if _, ok := t.(iceberg.PrimitiveType); !ok {
 		return fmt.Errorf("default values are not supported for %s", t)
+	}
+
+	if lit, ok := nativeDefaultLiteral(v); ok && !lit.Type().Equals(t) {
+		return fmt.Errorf("value of type %s does not match column type %s", lit.Type(), t)
 	}
 
 	dt, err := TypeToArrowType(t, false, false)

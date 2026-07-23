@@ -2010,6 +2010,104 @@ func TestUnionByNameRejectsInvalidNestedAddedColumnDefault(t *testing.T) {
 	require.ErrorContains(t, err, "invalid initial-default for code")
 }
 
+func TestUnionByNameRejectsMistypedNativeDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "count", Type: iceberg.PrimitiveTypes.Int32,
+			Required: false, InitialDefault: int64(5),
+		},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.ErrorContains(t, err, "invalid initial-default for count")
+}
+
+func TestUnionByNamePromoteDecimalKeepsWiderWriteDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(9, 2), Required: true},
+	)
+	incoming := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true,
+			WriteDefault: "123456789.12",
+		},
+	)
+
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(incoming).Apply()
+	require.NoError(t, err)
+
+	amount, ok := applied.FindFieldByName("amount")
+	require.True(t, ok)
+	assert.Equal(t, iceberg.DecimalTypeOf(18, 2), amount.Type)
+	assert.Equal(t, "123456789.12", amount.WriteDefault)
+}
+
+func TestUnionByNameAddedComplexColumnDefault(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	structType := func() *iceberg.StructType {
+		return &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}
+	}
+
+	valid := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "addr", Required: false, Type: structType(),
+			InitialDefault: map[string]any{"zip": "00000"},
+		},
+	)
+	applied, err := NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(valid).Apply()
+	require.NoError(t, err)
+	addr, ok := applied.FindFieldByName("addr")
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{"zip": "00000"}, addr.InitialDefault)
+
+	invalid := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "addr", Required: false, Type: structType(),
+			InitialDefault: "not-json",
+		},
+	)
+	_, err = NewUpdateSchema(unionTxn(t, current), true, false).UnionByNameWith(invalid).Apply()
+	require.ErrorContains(t, err, "must have null or JSON object initial-default")
+}
+
+func TestUnionByNameCannotExtendStructAddedByPriorOp(t *testing.T) {
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+
+	extend := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "addr", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "zip", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}},
+	)
+
+	_, err := NewUpdateSchema(unionTxn(t, current), true, true).
+		AddColumn([]string{"addr"}, &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "city", Type: iceberg.PrimitiveTypes.String, Required: false},
+			},
+		}, "", false, nil).
+		UnionByNameWith(extend).
+		Apply()
+	require.ErrorContains(t, err, "field already exists in adds: addr")
+}
+
 func TestUnionByNameMirroredSchemas(t *testing.T) {
 	current := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 9, Name: "s", Type: &iceberg.StructType{
