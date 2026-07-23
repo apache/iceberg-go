@@ -173,25 +173,25 @@ func resolveUsePathStyle(endpoint string, props map[string]string) bool {
 // ambient context config but letting explicit s3.* credentials override it.
 func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	var (
-		awscfg *aws.Config
-		err    error
+		base *aws.Config
+		err  error
 	)
 	if v := utils.GetAwsConfig(ctx); v != nil {
-		awscfg = v
-	} else if awscfg, err = ParseAWSConfig(ctx, props); err != nil {
+		base = v
+	} else if base, err = ParseAWSConfig(ctx, props); err != nil {
 		return nil, err
 	}
 
-	// Copy before overriding so the shared context config stays untouched.
+	// Always copy so neither the credential override nor the caller's later
+	// mutations (e.g. HTTPClient) touch a shared context config.
+	cfg := *base
 	if props[io.S3AccessKeyID] != "" || props[io.S3SecretAccessKey] != "" {
-		cfg := *awscfg
 		cfg.Credentials = credentials.NewStaticCredentialsProvider(
 			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
 		)
-		awscfg = &cfg
 	}
 
-	return awscfg, nil
+	return &cfg, nil
 }
 
 func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {

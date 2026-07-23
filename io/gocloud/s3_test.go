@@ -75,6 +75,18 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "PROPS", retrieve(t, cfg))
 	})
+
+	// The result is always a copy, so mutating it never touches the shared config.
+	t.Run("never mutates the shared ctx config", func(t *testing.T) {
+		t.Parallel()
+		shared := &aws.Config{Credentials: credentials.NewStaticCredentialsProvider("CTX", "ctxsecret", "")}
+		cfg, err := resolveS3AWSConfig(utils.WithAwsConfig(context.Background(), shared), map[string]string{})
+		require.NoError(t, err)
+		require.NotSame(t, shared, cfg)
+
+		cfg.HTTPClient = http.DefaultClient
+		assert.Nil(t, shared.HTTPClient, "shared ctx config must stay unmutated")
+	})
 }
 
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
