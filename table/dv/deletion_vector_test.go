@@ -413,18 +413,29 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		assert.Equal(t, int64(5), bm.Cardinality())
 	})
 
-	t.Run("mismatched cardinality is rejected", func(t *testing.T) {
+	t.Run("manifest and puffin cardinality disagreement is rejected", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
 			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			// Bitmap actually has 5 positions; claim 99.
+			// Manifest record_count below says 5; claim 99 in the Puffin property.
 			"cardinality": "99",
 		})
 		offset, size := meta.Offset, meta.Length
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
-		// Pin the specific error path: DeserializeDV's "cardinality
-		// mismatch", not the helper's "invalid cardinality" parse error.
+		assert.Contains(t, err.Error(), "manifest record_count 5 disagrees with puffin cardinality property 99")
+	})
+
+	t.Run("matching manifest and puffin cardinality still validates bitmap", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			// Both metadata sources agree, but the bitmap actually has 5 positions.
+			"cardinality": "99",
+		})
+		offset, size := meta.Offset, meta.Length
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 99, &offset, &size))
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cardinality mismatch")
 	})
 
