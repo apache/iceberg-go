@@ -649,6 +649,9 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 //     column's InitialDefault is never modified.
 //   - Map keys are immutable and cross-kind changes (list->map, struct->list,
 //     etc.) are rejected rather than silently grafted onto the existing column.
+//
+// Matching consults only the current schema, not columns staged by an earlier
+// op in the same UpdateSchema; pre-merge such schemas before a single call.
 func (u *UpdateSchema) UnionByNameWith(newSchema *iceberg.Schema) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.unionByName(newSchema)
