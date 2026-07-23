@@ -159,8 +159,10 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 
 		return u
 	}
-	u.err = txn.ensureInitialized()
-	if u.err != nil {
+	meta, err := txn.txnMeta()
+	if err != nil {
+		u.err = err
+
 		return u
 	}
 
@@ -169,7 +171,7 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 	// counter that preserves ids across schema evolution (including
 	// deletions) so that newly-allocated ids never collide with ids still
 	// referenced by historical schemas.
-	u.lastColumnID = txn.meta.LastColumnID()
+	u.lastColumnID = meta.LastColumnID()
 
 	for _, opt := range opts {
 		opt(u)
@@ -182,14 +184,12 @@ func (u *UpdateSchema) init() error {
 	if u.err != nil {
 		return u.err
 	}
-	if u.txn == nil {
-		return errors.New("transaction is nil")
-	}
-	if u.txn.meta == nil {
-		return errors.New("transaction meta is nil")
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return err
 	}
 
-	u.schema = u.txn.meta.CurrentSchema()
+	u.schema = meta.CurrentSchema()
 	if u.schema == nil {
 		return errors.New("current schema is nil")
 	}
@@ -1004,8 +1004,13 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 		return nil, nil, err
 	}
 
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	existingSchemaID := -1
-	for _, schema := range u.txn.meta.schemaList {
+	for _, schema := range meta.schemaList {
 		if newSchema.Equals(schema) {
 			existingSchemaID = schema.ID
 
@@ -1097,9 +1102,14 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
 
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
 	nextSchemaID := 1
-	if len(u.txn.meta.schemaList) > 0 {
-		nextSchemaID = 1 + slices.MaxFunc(u.txn.meta.schemaList, func(a, b *iceberg.Schema) int {
+	if len(meta.schemaList) > 0 {
+		nextSchemaID = 1 + slices.MaxFunc(meta.schemaList, func(a, b *iceberg.Schema) int {
 			return a.ID - b.ID
 		}).ID
 	}

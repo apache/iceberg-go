@@ -34,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -544,21 +545,43 @@ func (s *HadoopCatalogTestSuite) TestVersionPatternRejects() {
 	}
 }
 
-func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameAcceptsZeroUUIDVersion() {
-	file, ok := metadataFileFromName(
-		"/tmp/00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json",
-		"00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json",
-	)
-	s.True(ok)
-	s.Equal(0, file.version)
-	s.Equal("/tmp/00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", file.location)
+func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameAcceptsUUIDVersions() {
+	tests := []struct {
+		filename   string
+		version    int
+		compressed bool
+	}{
+		{"00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 0, false},
+		{"99999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 99999, false},
+		{"100000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 100000, false},
+		{"1234567-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json", 1234567, true},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.filename, func() {
+			path := filepath.Join("metadata", tt.filename)
+			file, ok := metadataFileFromName(path, tt.filename)
+			s.True(ok)
+			s.Equal(tt.version, file.version)
+			s.Equal(tt.compressed, file.compressed)
+			s.Equal(path, file.location)
+		})
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameRejectsShortUUIDVersion() {
+	filename := "9999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	_, ok := metadataFileFromName(filepath.Join("metadata", filename), filename)
+	s.False(ok)
 }
 
 func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameRejectsOverflowVersion() {
-	_, ok := metadataFileFromName(
-		"/tmp/v99999999999999999999.metadata.json",
-		"v99999999999999999999.metadata.json",
-	)
+	hadoopName := "v99999999999999999999.metadata.json"
+	_, ok := metadataFileFromName(filepath.Join("metadata", hadoopName), hadoopName)
+	s.False(ok)
+
+	uuidName := "99999999999999999999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	_, ok = metadataFileFromName(filepath.Join("metadata", uuidName), uuidName)
 	s.False(ok)
 }
 
@@ -856,6 +879,21 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationUsesCanonicalPathForDup
 	s.Require().NoError(err)
 	s.Equal(3, ver)
 	s.Equal(filepath.Join(dir, "v3.metadata.json"), path)
+}
+
+func (s *HadoopCatalogTestSuite) TestFindMetadataLocationSelectsUUIDVersionBeyondPadding() {
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	previous := "99999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	latest := "100000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json"
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, previous), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, latest), nil, 0o644))
+
+	path, version, err := s.cat.findMetadataLocation(ident)
+	s.Require().NoError(err)
+	s.Equal(100000, version)
+	s.Equal(filepath.Join(dir, latest), path)
 }
 
 // CreateNamespace tests
@@ -1492,6 +1530,22 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 	s.Equal(created.Metadata().TableUUID(), loaded.Metadata().TableUUID())
 	s.Equal(created.Location(), loaded.Location())
 	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
+}
+
+// TestCreateTableInvalidReporterDoesNotMutate pins that an invalid
+// metrics-reporter-impl fails at catalog construction, before any table op runs,
+// so a bad reporter can never turn a successful create into a reported failure
+// (ErrTableAlreadyExists on retry) or leave a cached error that wedges later ops.
+func (s *HadoopCatalogTestSuite) TestCreateTableInvalidReporterDoesNotMutate() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+		metrics.ReporterImplKey: "does-not-exist",
+	})
+	s.Require().Error(err)
+
+	// No table op ran, so nothing was written to disk.
+	s.NoDirExists(filepath.Join(s.warehouse, "ns", "tbl", "metadata"))
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {

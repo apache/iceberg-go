@@ -649,6 +649,48 @@ func TestRemoveSnapshotRemovesBranch(t *testing.T) {
 	}
 }
 
+func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
+	const (
+		removedID = int64(100)
+		currentID = int64(200)
+	)
+	lastPartitionID := 999
+	meta := &metadataV2{
+		LastSeqNum: 0,
+		commonMetadata: commonMetadata{
+			FormatVersion:     2,
+			UUID:              uuid.New(),
+			Loc:               "s3://test/table",
+			LastUpdatedMS:     1000,
+			LastColumnId:      1,
+			SchemaList:        []*iceberg.Schema{iceberg.NewSchema(0)},
+			CurrentSchemaID:   0,
+			Specs:             []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+			DefaultSpecID:     0,
+			LastPartitionID:   &lastPartitionID,
+			Props:             iceberg.Properties{},
+			SnapshotList:      []Snapshot{{SnapshotID: removedID}, {SnapshotID: currentID}},
+			CurrentSnapshotID: ptr(currentID),
+			SnapshotLog:       []SnapshotLogEntry{},
+			SortOrderList:     []SortOrder{UnsortedSortOrder},
+			SnapshotRefs: map[string]SnapshotRef{
+				MainBranch: {SnapshotID: currentID, SnapshotRefType: BranchRef},
+			},
+		},
+	}
+
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.RemoveSnapshots([]int64{removedID}, false))
+
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	require.Empty(t, slices.Collect(rebuilt.SnapshotLogs()))
+	current := rebuilt.CurrentSnapshot()
+	require.NotNil(t, current)
+	require.Equal(t, currentID, current.SnapshotID)
+}
+
 // TestRemoveSnapshotsPrunesStatistics verifies that RemoveSnapshots also
 // prunes StatisticsList and PartitionStatsList entries whose SnapshotID
 // matches a removed snapshot. See iceberg-go#836.

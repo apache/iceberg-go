@@ -1643,6 +1643,133 @@ func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
 	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
 }
 
+func TestConfigOverrideHeadersApplyToCatalogRequests(t *testing.T) {
+	t.Parallel()
+
+	const (
+		headerName  = "X-Config-Override"
+		headerValue = "required"
+	)
+	var configHeader, catalogHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				"header." + headerName: headerValue,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		catalogHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, configHeader)
+	assert.Equal(t, headerValue, catalogHeader)
+}
+
+type closeTrackingTransport struct {
+	http.RoundTripper
+	closed atomic.Bool
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.RoundTripper == nil {
+		return nil, errors.New("unexpected request")
+	}
+
+	return t.RoundTripper.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closed.Store(true)
+}
+
+func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	_, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	assert.False(t, base.closed.Load(), "user-provided transports must not be closed during bootstrap")
+}
+
+func TestFetchConfigClosesOwnedOAuthTransportWithoutClosingCustomTransport(t *testing.T) {
+	catalogMux := http.NewServeMux()
+	catalogSrv := httptest.NewServer(catalogMux)
+	defer catalogSrv.Close()
+
+	catalogMux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	oauthClosed := make(chan struct{}, 1)
+	oauthMux := http.NewServeMux()
+	oauthMux.HandleFunc("/oauth/tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok",
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+		})
+	})
+	oauthSrv := httptest.NewUnstartedServer(oauthMux)
+	oauthSrv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case oauthClosed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	oauthSrv.StartTLS()
+	defer oauthSrv.Close()
+
+	authURI, err := url.Parse(oauthSrv.URL + "/oauth/tokens")
+	require.NoError(t, err)
+	oauthTransport, ok := oauthSrv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	_, err = NewCatalog(context.Background(), "rest", catalogSrv.URL,
+		WithCustomTransport(base),
+		WithCredential("secret"),
+		WithAuthURI(authURI),
+		WithOAuthTLSConfig(oauthTransport.TLSClientConfig.Clone()),
+	)
+	require.NoError(t, err)
+	assert.False(t, base.closed.Load(), "user-provided transports must not be closed during bootstrap")
+
+	select {
+	case <-oauthClosed:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap OAuth connection was not closed")
+	}
+}
+
 func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
 	t.Parallel()
 

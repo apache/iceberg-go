@@ -39,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/udf"
 	"github.com/apache/iceberg-go/view"
@@ -773,6 +774,16 @@ type Catalog struct {
 	endpoints endpointSet
 
 	namespaceSeparator string
+
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
+	// reporterProps holds only the client-supplied properties, captured before
+	// the server's /v1/config defaults and overrides are merged into props. The
+	// metrics reporter is resolved from these so a server-vended
+	// metrics-reporter-impl cannot select (or, via an unregistered name, break)
+	// a reporter the client never asked for.
+	reporterProps iceberg.Properties
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -809,7 +820,8 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
-func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
+// The returned cleanup closes an internally-created OAuth transport, if any.
+func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager, func()) {
 	// If a static token is provided, use it directly.
 	if opts.oauthToken != "" {
 		return &Oauth2AuthManager{
@@ -817,12 +829,12 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 				AccessToken: opts.oauthToken,
 				TokenType:   "Bearer",
 			}),
-		}
+		}, nil
 	}
 
 	// If no credential, no auth needed.
 	if opts.credential == "" {
-		return nil
+		return nil, nil
 	}
 
 	authURL := opts.authUri
@@ -867,19 +879,22 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) AuthManager {
 	// client. This is needed when the OAuth2 server is a different host with
 	// different TLS requirements.
 	oauthClient := cl
+	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
-		oauthClient = &http.Client{
-			Transport: &http.Transport{
-				Proxy:           http.ProxyFromEnvironment,
-				TLSClientConfig: opts.oauthTLSConfig,
-			},
+		transport := &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: opts.oauthTLSConfig,
 		}
+		oauthClient = &http.Client{
+			Transport: transport,
+		}
+		closeIdleConnections = transport.CloseIdleConnections
 	}
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 
 	return &Oauth2AuthManager{
 		tokenSource: cfg.TokenSource(ctx),
-	}
+	}, closeIdleConnections
 }
 
 func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
@@ -889,10 +904,20 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	}
 
 	r.baseURI = baseuri.JoinPath("v1")
-	if r.cl, ops, err = r.fetchConfig(ctx, ops); err != nil {
+
+	// Capture the client-supplied properties before fetchConfig folds in the
+	// server's /v1/config defaults and overrides, so the metrics reporter is
+	// resolved from the client's choice alone (see the reporterProps field).
+	r.reporterProps = toProps(ops)
+
+	if ops, err = r.fetchConfig(ctx, ops); err != nil {
 		return err
 	}
 
+	r.cl, _, err = r.createSession(ctx, ops)
+	if err != nil {
+		return err
+	}
 	if ops.prefix != "" {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
@@ -901,12 +926,22 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	return nil
 }
 
-func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, error) {
+// createSession returns a cleanup that closes only transports created by this
+// function, never transports supplied by the caller.
+func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Client, func(), error) {
 	var baseTransport http.RoundTripper
+	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
 	} else {
-		baseTransport = &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
+		baseTransport = transport
+		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
+	}
+	cleanup := func() {
+		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
+			cleanupFuncs[i]()
+		}
 	}
 
 	session := &sessionTransport{
@@ -915,9 +950,16 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	}
 	cl := &http.Client{Transport: session}
 
-	// If the user does not set an AuthManager, we can construct an OAuth2AuthManager based off their options.
-	if opts.authManager == nil {
-		opts.authManager = setupOAuthManager(r, cl, opts)
+	// If the user does not set an AuthManager, construct one for this session
+	// without storing it in opts. Bootstrap authentication must not leak into
+	// the final session after server configuration has been applied.
+	authManager := opts.authManager
+	if authManager == nil {
+		var cleanupOAuth func()
+		authManager, cleanupOAuth = setupOAuthManager(r, cl, opts)
+		if cleanupOAuth != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanupOAuth)
+		}
 	}
 
 	session.defaultHeaders.Set("X-Client-Version", icebergRestSpecVersion)
@@ -935,8 +977,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		}
 	}
 
-	if opts.authManager != nil {
-		session.authManager = opts.authManager
+	if authManager != nil {
+		session.authManager = authManager
 	}
 
 	if opts.enableSigv4 {
@@ -946,7 +988,9 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 			var err error
 			cfg, err = config.LoadDefaultConfig(ctx)
 			if err != nil {
-				return nil, err
+				cleanup()
+
+				return nil, nil, err
 			}
 		}
 		if opts.sigv4Region != "" {
@@ -957,10 +1001,10 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		session.signer, session.newHash = v4.NewSigner(), sha256.New
 	}
 
-	return cl, nil
+	return cl, cleanup, nil
 }
 
-func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client, *options, error) {
+func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, error) {
 	params := url.Values{}
 	if opts.warehouseLocation != "" {
 		params.Set(keyWarehouseLocation, opts.warehouseLocation)
@@ -969,14 +1013,15 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 	route := r.baseURI.JoinPath("config")
 	route.RawQuery = params.Encode()
 
-	sess, err := r.createSession(ctx, opts)
+	sess, cleanup, err := r.createSession(ctx, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	defer cleanup()
 
 	rsp, err := doGet[configResponse](ctx, route, []string{}, sess, nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	cfg := rsp.Defaults
@@ -1004,22 +1049,30 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*http.Client,
 
 	o := *opts
 	if err := fromProps(cfg, &o); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	if uri, ok := cfg["uri"]; ok {
 		r.baseURI, err = url.Parse(uri)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		r.baseURI = r.baseURI.JoinPath("v1")
 	}
 
-	return sess, &o, nil
+	return &o, nil
 }
 
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
+
+// Close releases the catalog's metrics reporter. The REST catalog does not own
+// the lifetime of the HTTP client it was configured with, so only the reporter
+// is released. Callers holding a [catalog.Catalog] can reach this via a
+// [catalog.Closer] type assertion.
+func (r *Catalog) Close() error { return r.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 func checkValidNamespace(ident table.Identifier) error {
 	if len(ident) < 1 {
@@ -1046,12 +1099,24 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF = iceio.LoadFSFunc(config, loc)
 	}
 
+	// Resolve the reporter from the client-supplied properties only (see the
+	// reporterProps field). r.props folds in server-vended /v1/config and, per
+	// call, table metadata and creds — any of which could otherwise shadow the
+	// client's reporter choice or turn an unknown server-side name into a hard
+	// load error. Server-vended reporter selection, if ever wanted, should be an
+	// explicit decision rather than a side effect of merge order.
+	reporter, err := r.reporter.Get(r.reporterProps)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	return table.New(
 		identifier,
 		metadata,
 		loc,
 		fsF,
 		r,
+		table.WithMetricsReporter(reporter),
 	), nil
 }
 
@@ -1079,29 +1144,46 @@ func (r *Catalog) fetchTableCreds(ctx context.Context, ident []string, location 
 	return resolveStorageCredentials(ret.StorageCredentials, location), nil
 }
 
+type identifierPageFetcher func(pageToken string) ([]table.Identifier, string, error)
+
+func paginateIdentifiers(fetch identifierPageFetcher, yield func(table.Identifier) bool) error {
+	seenTokens := make(map[string]struct{})
+	var pageToken string
+
+	for {
+		identifiers, nextPageToken, err := fetch(pageToken)
+		if err != nil {
+			return err
+		}
+		for _, identifier := range identifiers {
+			if !yield(identifier) {
+				return nil
+			}
+		}
+		if nextPageToken == "" {
+			return nil
+		}
+		if _, ok := seenTokens[nextPageToken]; ok {
+			return fmt.Errorf("%w: pagination cycle: repeated page token", ErrRESTError)
+		}
+
+		seenTokens[nextPageToken] = struct{}{}
+		pageToken = nextPageToken
+	}
+}
+
 // ListTables lists the tables in a namespace. If the server does not advertise
 // the list-tables endpoint, it yields no tables rather than an error.
 func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			tables, nextPageToken, err := r.listTablesPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, tbl := range tables {
-				if !yield(tbl, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listTablesPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }
@@ -1210,6 +1292,16 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	ns, tbl, err := r.splitIdentForPath(identifier)
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve the reporter before the create POST mutates the server: it is
+	// otherwise first built in the trailing tableFromResponse, so a bad
+	// metrics-reporter-impl would turn a table the server already created into a
+	// reported failure whose retry hits ErrTableAlreadyExists. CachedReporter
+	// caches this for that tableFromResponse call. Resolved from the
+	// client-supplied properties only (see the reporterProps field).
+	if _, err := r.reporter.Get(r.reporterProps); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	cfg := catalog.NewCreateTableCfg()
@@ -1446,6 +1538,15 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		MetadataLoc string `json:"metadata-location"`
 	}
 
+	// Resolve the reporter before the register POST mutates the server, for the
+	// same reason as CreateTable: it is otherwise first built in the trailing
+	// tableFromResponse, so an invalid reporter would turn a successful
+	// registration into a reported failure. CachedReporter caches this. Resolved
+	// from the client-supplied properties only (see the reporterProps field).
+	if _, err := r.reporter.Get(r.reporterProps); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	path, err := endpointRegisterTable.reqPath(ns)
 	if err != nil {
 		return nil, err
@@ -1679,18 +1780,15 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) ([]table.Identifier, error) {
 	var allNamespaces []table.Identifier
 	pageSize := r.getPageSize(ctx)
-	var pageToken string
+	err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+		return r.listNamespacesPage(ctx, parent, pageToken, pageSize)
+	}, func(identifier table.Identifier) bool {
+		allNamespaces = append(allNamespaces, identifier)
 
-	for {
-		namespaces, nextPageToken, err := r.listNamespacesPage(ctx, parent, pageToken, pageSize)
-		if err != nil {
-			return nil, err
-		}
-		allNamespaces = append(allNamespaces, namespaces...)
-		if nextPageToken == "" {
-			break
-		}
-		pageToken = nextPageToken
+		return true
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return allNamespaces, nil
@@ -1873,24 +1971,13 @@ func (r *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			views, nextPageToken, err := r.listViewsPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, view := range views {
-				if !yield(view, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listViewsPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }
@@ -2039,6 +2126,9 @@ func (v *viewResponse) UnmarshalJSON(b []byte) (err error) {
 func (r *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
 	if err := r.endpoints.check(endpointCreateView); err != nil {
 		return nil, err
+	}
+	if version == nil {
+		return nil, fmt.Errorf("%w: view version cannot be nil", iceberg.ErrInvalidArgument)
 	}
 
 	ns, viewName, err := r.splitViewIdentForPath(identifier)
@@ -2285,24 +2375,13 @@ type FunctionCatalog interface {
 func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
 	return func(yield func(table.Identifier, error) bool) {
 		pageSize := r.getPageSize(ctx)
-		var pageToken string
-
-		for {
-			functions, nextPageToken, err := r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
-			if err != nil {
-				yield(table.Identifier{}, err)
-
-				return
-			}
-			for _, function := range functions {
-				if !yield(function, nil) {
-					return
-				}
-			}
-			if nextPageToken == "" {
-				return
-			}
-			pageToken = nextPageToken
+		err := paginateIdentifiers(func(pageToken string) ([]table.Identifier, string, error) {
+			return r.listFunctionsPage(ctx, namespace, pageToken, pageSize)
+		}, func(identifier table.Identifier) bool {
+			return yield(identifier, nil)
+		})
+		if err != nil {
+			yield(table.Identifier{}, err)
 		}
 	}
 }

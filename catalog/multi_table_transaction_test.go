@@ -166,6 +166,29 @@ func TestMultiTableTransactionEmpty(t *testing.T) {
 	assert.ErrorIs(t, mtx.Commit(context.Background()), ErrEmptyCommitList)
 }
 
+func TestMultiTableTransactionDistinguishesIdentifierComponents(t *testing.T) {
+	stub := &stubCatalog{}
+	mtx := &MultiTableTransaction{cat: stub}
+
+	tx1 := mtxTestTable(t, "a.b", "c").NewTransaction()
+	require.NoError(t, tx1.SetProperties(map[string]string{"k": "v"}))
+	require.NoError(t, mtx.AddTransaction(tx1))
+
+	tx2 := mtxTestTable(t, "a", "b.c").NewTransaction()
+	require.NoError(t, tx2.SetProperties(map[string]string{"k": "v"}))
+	require.NoError(t, mtx.AddTransaction(tx2))
+
+	duplicate := mtxTestTable(t, "a.b", "c").NewTransaction()
+	require.NoError(t, duplicate.SetProperties(map[string]string{"k": "v"}))
+	assert.ErrorContains(t, mtx.AddTransaction(duplicate), "duplicate table")
+
+	require.NoError(t, mtx.Commit(context.Background()))
+	require.Len(t, stub.commits, 1)
+	require.Len(t, stub.commits[0], 2)
+	assert.Equal(t, table.Identifier{"a.b", "c"}, stub.commits[0][0].Identifier)
+	assert.Equal(t, table.Identifier{"a", "b.c"}, stub.commits[0][1].Identifier)
+}
+
 func TestNewMultiTableTransactionNonTransactional(t *testing.T) {
 	// nil doesn't implement TransactionalCatalog
 	_, err := NewMultiTableTransaction(nil)

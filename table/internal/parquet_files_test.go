@@ -112,7 +112,8 @@ func mustParquetBytesWithInvalidArrowSchema(t *testing.T) []byte {
 	w := file.NewParquetWriter(&buf, sc)
 	require.NoError(t, w.AppendKeyValueMetadata("ARROW:schema", "not-base64"))
 
-	rowGroup := w.AppendRowGroup()
+	rowGroup, err := w.AppendRowGroupChecked()
+	require.NoError(t, err)
 	column, err := rowGroup.NextColumn()
 	require.NoError(t, err)
 
@@ -444,7 +445,7 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
 	require.NoError(t, err)
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil, nil)
 	const sortOrderID = 7
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tblMeta.CurrentSchema(),
@@ -528,6 +529,108 @@ func TestMetricsPrimitiveTypes(t *testing.T) {
 	})
 }
 
+func TestDataFileStatsFromMetaWithMalformedUUIDStats(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	meta, tblMeta := constructTestTablePrimitiveTypes(t)
+	require.NotNil(t, tblMeta)
+	require.NotNil(t, meta)
+
+	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+	require.NoError(t, err)
+
+	collector := getCollector()
+	found := false
+	for _, rg := range meta.RowGroups {
+		for _, col := range rg.Columns {
+			if col == nil || col.MetaData == nil || col.MetaData.Statistics == nil {
+				continue
+			}
+			path := col.MetaData.GetPathInSchema()
+			if len(path) == 1 && path[0] == "uuids" {
+				col.MetaData.Statistics.Min = []byte{0x01}
+				col.MetaData.Statistics.Max = []byte{0x02}
+				col.MetaData.Statistics.MinValue = []byte{0x01}
+				col.MetaData.Statistics.MaxValue = []byte{0x02}
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "failed to inject malformed UUID stats")
+
+	var fileStats *internal.DataFileStatistics
+	assert.NotPanics(t, func() {
+		fileStats = format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+	})
+	require.NotNil(t, fileStats)
+	require.NotContains(t, fileStats.ColAggs, 11)
+
+	dataFile := fileStats.ToDataFile(internal.DataFileOpts{
+		Schema:      tblMeta.CurrentSchema(),
+		Spec:        tblMeta.PartitionSpec(),
+		Path:        "fake-path.parquet",
+		Format:      iceberg.ParquetFile,
+		Content:     iceberg.EntryContentData,
+		FileSize:    meta.GetSourceFileSize(),
+		SortOrderID: 7,
+	})
+
+	assert.Len(t, dataFile.LowerBoundValues(), len(collector)-1)
+	assert.NotContains(t, dataFile.LowerBoundValues(), 11)
+	assert.NotContains(t, dataFile.UpperBoundValues(), 11)
+}
+
+func TestDataFileStatsFromMetaWithMalformedFixedLenDecimalStats(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	meta, tblMeta := constructTestTablePrimitiveTypes(t)
+	require.NotNil(t, tblMeta)
+	require.NotNil(t, meta)
+
+	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+	require.NoError(t, err)
+
+	collector := getCollector()
+	found := false
+	for _, rg := range meta.RowGroups {
+		for _, col := range rg.Columns {
+			if col == nil || col.MetaData == nil || col.MetaData.Statistics == nil {
+				continue
+			}
+			path := col.MetaData.GetPathInSchema()
+			if len(path) == 1 && path[0] == "large_dec" {
+				col.MetaData.Statistics.Min = []byte{0x01}
+				col.MetaData.Statistics.Max = []byte{0x02}
+				col.MetaData.Statistics.MinValue = []byte{0x01}
+				col.MetaData.Statistics.MaxValue = []byte{0x02}
+				found = true
+			}
+		}
+	}
+	require.True(t, found, "failed to inject malformed fixed-len decimal stats")
+
+	var fileStats *internal.DataFileStatistics
+	assert.NotPanics(t, func() {
+		fileStats = format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+	})
+	require.NotNil(t, fileStats)
+	require.NotContains(t, fileStats.ColAggs, 15)
+
+	dataFile := fileStats.ToDataFile(internal.DataFileOpts{
+		Schema:      tblMeta.CurrentSchema(),
+		Spec:        tblMeta.PartitionSpec(),
+		Path:        "fake-path.parquet",
+		Format:      iceberg.ParquetFile,
+		Content:     iceberg.EntryContentData,
+		FileSize:    meta.GetSourceFileSize(),
+		SortOrderID: 7,
+	})
+
+	assert.Len(t, dataFile.LowerBoundValues(), len(collector)-1)
+	assert.NotContains(t, dataFile.LowerBoundValues(), 15)
+	assert.NotContains(t, dataFile.UpperBoundValues(), 15)
+}
+
 // TestNanosecondTimestampMetrics tests that nanosecond timestamp types (v3)
 // are correctly handled for Parquet stats collection and physical type mapping.
 func TestNanosecondTimestampMetrics(t *testing.T) {
@@ -606,7 +709,7 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 		2: {FieldID: 2, Mode: modeFull, ColName: "tstz_ns", IcebergTyp: iceberg.PrimitiveTypes.TimestampTzNs},
 	}
 
-	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
+	stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
 	df := stats.ToDataFile(internal.DataFileOpts{
 		Schema:   tableMeta.CurrentSchema(),
 		Spec:     tableMeta.PartitionSpec(),
@@ -689,7 +792,8 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 				rootNode,
 				file.WithWriterProps(parquet.NewWriterProperties(parquet.WithStats(true))))
 
-			rgw := writer.AppendRowGroup()
+			rgw, err := writer.AppendRowGroupChecked()
+			require.NoError(t, err)
 			colWriter, err := rgw.NextColumn()
 			require.NoError(t, err)
 
@@ -755,7 +859,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			}
 
 			// This should not panic - the fix allows INT32/INT64 physical types for decimals
-			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil)
+			stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
 			require.NotNil(t, stats)
 
 			df := stats.ToDataFile(internal.DataFileOpts{
@@ -1126,7 +1230,8 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 				parquet.NewWriterProperties(writeProps...),
 			))
 
-			rgw := pw.AppendRowGroup()
+			rgw, err := pw.AppendRowGroupChecked()
+			require.NoError(t, err)
 			cw, _ := rgw.NextColumn()
 			cw.(*file.Int32ColumnChunkWriter).WriteBatch(
 				[]int32{1, 2, 3}, nil, nil,
@@ -1220,7 +1325,8 @@ func buildBloomTestParquet(t *testing.T, rgSize int) []byte {
 	pw := file.NewParquetWriter(&buf, rootNode, file.WithWriterProps(writerProps))
 
 	writeRG := func(start, end int) {
-		rgw := pw.AppendRowGroup()
+		rgw, werr := pw.AppendRowGroupChecked()
+		require.NoError(t, werr)
 		cw, werr := rgw.NextColumn()
 		require.NoError(t, werr)
 
@@ -1445,14 +1551,14 @@ func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
 		"payload": 1,
 	}
 
-	// No stats collector for variant (arrowStatsCollector.Variant returns empty)
+	// Empty stats collector: nil arrow schema skips variant bounds anyway.
 	statsCols := map[int]internal.StatisticsCollector{}
 
 	variantFieldIDs := map[int]struct{}{1: {}}
 
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 	assert.NotPanics(t, func() {
-		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs)
+		format.DataFileStatsFromMeta(internal.Metadata(meta), statsCols, colMapping, variantFieldIDs, nil)
 	})
 }
 
@@ -1520,7 +1626,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	statsCols := map[int]internal.StatisticsCollector{}
 	variantFieldIDs := internal.VariantFieldIDsFromSchema(iceSc)
 	assert.NotPanics(t, func() {
-		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs)
+		format.DataFileStatsFromMeta(internal.Metadata(pqRdr.MetaData()), statsCols, mapping, variantFieldIDs, nil)
 	})
 
 	tbl, err := arrRdr.ReadTable(context.Background())

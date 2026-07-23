@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -241,6 +242,8 @@ type Scan struct {
 	includeRowLineage bool
 
 	concurrency int
+
+	reporter metrics.Reporter
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
@@ -248,6 +251,16 @@ func (scan *Scan) UseRowLimit(n int64) *Scan {
 	out.limit = n
 
 	return &out
+}
+
+// Reporter returns the metrics reporter for this scan, never nil. The
+// scan-planning instrumentation emits its ScanReport through it.
+func (scan *Scan) Reporter() metrics.Reporter {
+	if scan.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return scan.reporter
 }
 
 func (scan *Scan) UseRef(name string) (*Scan, error) {

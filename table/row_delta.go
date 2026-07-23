@@ -101,7 +101,8 @@ func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 // commit, if any file has an unexpected content type, or if the table
 // format version does not support delete files.
 func (rd *RowDelta) Commit(ctx context.Context) error {
-	if err := rd.txn.ensureInitialized(); err != nil {
+	meta, err := rd.txn.txnMeta()
+	if err != nil {
 		return err
 	}
 
@@ -110,9 +111,9 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 	}
 
 	// Delete files require format version >= 2.
-	if len(rd.delFiles) > 0 && rd.txn.meta.formatVersion < 2 {
+	if len(rd.delFiles) > 0 && meta.formatVersion < 2 {
 		return fmt.Errorf("delete files require table format version >= 2, got v%d",
-			rd.txn.meta.formatVersion)
+			meta.formatVersion)
 	}
 
 	for _, f := range rd.dataFiles {
@@ -122,7 +123,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		}
 	}
 
-	schema := rd.txn.meta.CurrentSchema()
+	schema := meta.CurrentSchema()
 	for _, f := range rd.delFiles {
 		ct := f.ContentType()
 		if ct != iceberg.EntryContentPosDeletes && ct != iceberg.EntryContentEqDeletes {
@@ -204,7 +205,12 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
 func (rd *RowDelta) validate(cc *conflictContext) error {
-	level, err := readIsolationLevel(rd.txn.meta.props,
+	meta, err := rd.txn.txnMeta()
+	if err != nil {
+		return err
+	}
+
+	level, err := readIsolationLevel(meta.props,
 		WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
 	if err != nil {
 		return err
@@ -248,7 +254,7 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		// build an OR-of-equalities filter from the eq-delete files'
 		// partition tuples so that concurrent appends to different
 		// partitions are not falsely rejected.
-		currentSpec, specErr := rd.txn.meta.CurrentSpec()
+		currentSpec, specErr := meta.CurrentSpec()
 		if specErr != nil {
 			return fmt.Errorf("reading current partition spec: %w", specErr)
 		}

@@ -206,6 +206,9 @@ type DataFileStatistics struct {
 	ColAggs          map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
+	// Variant bounds: serialized variant objects keyed by parent variant field id.
+	VariantLowerBounds map[int][]byte
+	VariantUpperBounds map[int][]byte
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
@@ -319,6 +322,14 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		if len(max) > 0 {
 			upperBounds[fieldID] = max
 		}
+	}
+
+	// Variant bounds are serialized objects keyed by the parent variant field id.
+	for fieldID, b := range d.VariantLowerBounds {
+		lowerBounds[fieldID] = b
+	}
+	for fieldID, b := range d.VariantUpperBounds {
+		upperBounds[fieldID] = b
 	}
 
 	if len(lowerBounds) > 0 {
