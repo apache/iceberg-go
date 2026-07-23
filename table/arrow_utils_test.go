@@ -812,13 +812,24 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 	})
 
 	t.Run("projjson_error_behavior", func(t *testing.T) {
+		const projjson = `{"type":"GeographicCRS","name":"Custom WGS 84"}`
 		geom, err := iceberg.GeometryTypeOf("projjson:my-custom-crs")
 		require.NoError(t, err)
 
 		_, err = table.TypeToArrowType(geom, true, false)
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "projjson CRS not supported yet")
+		require.ErrorContains(t, err, "could not be resolved from table properties")
+
+		geomArrow, err := table.TypeToArrowTypeWithOptions(geom, table.ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: iceberg.Properties{"my-custom-crs": projjson},
+		})
+		require.NoError(t, err)
+		geomWKB, ok := geomArrow.(*geoarrow.WKBType)
+		require.True(t, ok)
+		assert.Equal(t, geoarrow.CRSTypePROJJSON, geomWKB.Metadata().CRSType)
+		assert.JSONEq(t, projjson, string(geomWKB.Metadata().CRS))
 
 		// Geography goes through VisitGeography; assert the projjson rejection
 		// surfaces symmetrically through the visitor recover.
@@ -828,7 +839,7 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		_, err = table.TypeToArrowType(geog, true, false)
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "projjson CRS not supported yet")
+		require.ErrorContains(t, err, "could not be resolved from table properties")
 
 		stringArrowType, err := geoarrow.NewWKBType().Deserialize(arrow.BinaryTypes.Binary,
 			`{"crs_type":"projjson","crs":"EPSG:3857"}`)
@@ -842,9 +853,53 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			`{"crs_type":"projjson","crs":{"id":{"authority":"OGC", "code":"CRS84"}}}`)
 		require.NoError(t, err)
 
-		g, err := table.ArrowTypeToIceberg(arrowType, false)
+		_, err = table.ArrowTypeToIceberg(arrowType, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "projjson metadata requires table schema and properties")
+
+		tableSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "geom", Type: geom, Required: false},
+		)
+		arrowSchema := arrow.NewSchema([]arrow.Field{{
+			Name:     "geom",
+			Type:     arrowType,
+			Nullable: true,
+			Metadata: arrow.NewMetadata([]string{table.ArrowParquetFieldIDKey}, []string{"1"}),
+		}}, nil)
+
+		g, err := table.ArrowSchemaToIcebergWithOptions(arrowSchema, table.ArrowToIcebergOptions{
+			TableSchema:     tableSchema,
+			TableProperties: iceberg.Properties{"my-custom-crs": `{"id":{"authority":"OGC", "code":"CRS84"}}`},
+		})
 		require.NoError(t, err)
-		assert.Equal(t, g, defaultGeometry)
+		assert.True(t, tableSchema.Equals(g), "expected %s, got %s", tableSchema, g)
+
+		t.Run("table_property_json_mismatch", func(t *testing.T) {
+			mismatched, err := table.ArrowSchemaToIcebergWithOptions(arrowSchema, table.ArrowToIcebergOptions{
+				TableSchema:     tableSchema,
+				TableProperties: iceberg.Properties{"my-custom-crs": `{"id":{"authority":"EPSG", "code":3857}}`},
+			})
+			require.Error(t, err)
+			require.Nil(t, mismatched)
+			require.ErrorContains(t, err, "does not match table property")
+		})
+
+		t.Run("missing_field_id", func(t *testing.T) {
+			noIDSchema := arrow.NewSchema([]arrow.Field{{
+				Name:     "geom",
+				Type:     arrowType,
+				Nullable: true,
+			}}, nil)
+
+			noID, err := table.ArrowSchemaToIcebergWithOptions(noIDSchema, table.ArrowToIcebergOptions{
+				NameMapping:     tableSchema.NameMapping(),
+				TableSchema:     tableSchema,
+				TableProperties: iceberg.Properties{"my-custom-crs": `{"id":{"authority":"OGC", "code":"CRS84"}}`},
+			})
+			require.Error(t, err)
+			require.Nil(t, noID)
+			require.ErrorContains(t, err, "requires field IDs")
+		})
 	})
 
 	t.Run("wkt2:2019_error_behavior", func(t *testing.T) {

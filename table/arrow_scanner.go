@@ -712,7 +712,11 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (
 		return nil, nil, nil, err
 	}
 
-	iceSchema, err := ArrowSchemaToIceberg(fileSchema, false, as.nameMapping)
+	iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+		NameMapping:     as.nameMapping,
+		TableSchema:     as.metadata.CurrentSchema(),
+		TableProperties: as.metadata.Properties(),
+	})
 	if err != nil {
 		rdr.Close()
 
@@ -1132,7 +1136,10 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task internal.Enumerat
 	pipeline = append(pipeline, func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
-		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{UseLargeTypes: as.useLargeTypes})
+		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
+			UseLargeTypes:   as.useLargeTypes,
+			TableProperties: as.metadata.Properties(),
+		})
 	})
 
 	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, posSource, out)
@@ -1376,7 +1383,10 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	ctx = internal.WithTableProperties(ctx, as.metadata.Properties())
 
-	resultSchema, err := SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
+	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
+		UseLargeTypes:   as.useLargeTypes,
+		TableProperties: as.metadata.Properties(),
+	})
 	if err != nil {
 		return nil, nil, err
 	}

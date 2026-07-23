@@ -180,7 +180,10 @@ func (w *PositionDeltaWriter) Close(ctx context.Context) ([]iceberg.DataFile, er
 	}
 
 	fileSchema := iceberg.SchemaWithRowID(w.tbl.Schema())
-	arrowSc, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	arrowSc, err := SchemaToArrowSchemaWithOptions(fileSchema, ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: w.tbl.Metadata().Properties(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("PositionDeltaWriter: build arrow schema: %w", err)
 	}
