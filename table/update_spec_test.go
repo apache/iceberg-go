@@ -126,6 +126,26 @@ func TestUpdateSpecAddField(t *testing.T) {
 		assert.Nil(t, reqs)
 	})
 
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"bucket", iceberg.BucketTransform{NumBuckets: 0}},
+		{"truncate", iceberg.TruncateTransform{Width: 0}},
+	} {
+		t.Run("reject invalid "+tt.name+" transform parameters", func(t *testing.T) {
+			specUpdate := table.NewUpdateSpec(testNonPartitionedTable.NewTransaction(), true)
+			updates, reqs, err := specUpdate.
+				AddField("id", tt.transform, "invalid_transform").
+				BuildUpdates()
+
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "invalid partition transform")
+			assert.Nil(t, updates)
+			assert.Nil(t, reqs)
+		})
+	}
+
 	t.Run("add duplicate partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
 		specUpdate := table.NewUpdateSpec(txn, true)
