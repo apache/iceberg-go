@@ -400,9 +400,23 @@ func TestHiveCreateNamespace(t *testing.T) {
 }
 
 func TestDefaultNamespaceLocation(t *testing.T) {
-	require.Equal(t, "s3://warehouse/db.db", defaultNamespaceLocation("s3://warehouse", "db"))
-	require.Equal(t, "s3://warehouse/db.db", defaultNamespaceLocation("s3://warehouse/", "db"))
-	require.Empty(t, defaultNamespaceLocation("", "db"))
+	tests := []struct {
+		name      string
+		warehouse string
+		want      string
+	}{
+		{"s3 warehouse", "s3://warehouse", "s3://warehouse/db.db"},
+		{"trailing slash", "s3://warehouse/", "s3://warehouse/db.db"},
+		{"double trailing slash trims one", "s3://warehouse//", "s3://warehouse//db.db"},
+		{"file scheme", "file:///wh", "file:///wh/db.db"},
+		{"file root keeps scheme", "file:///", "file:///db.db"},
+		{"no warehouse stays empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, defaultNamespaceLocation(tt.warehouse, "db"))
+		})
+	}
 }
 
 func TestHiveCreateNamespaceDerivesLocationFromWarehouse(t *testing.T) {
@@ -414,6 +428,38 @@ func TestHiveCreateNamespaceDerivesLocationFromWarehouse(t *testing.T) {
 	})).Return(nil).Once()
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{Warehouse: "s3://warehouse/"})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), nil)
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCreateNamespaceExplicitLocationWinsOverWarehouse(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == "s3://explicit"
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{Warehouse: "s3://warehouse"})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), map[string]string{"location": "s3://explicit"})
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCreateNamespaceNoWarehouseKeepsEmptyLocation(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == ""
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
 	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), nil)
 	assert.NoError(err)
