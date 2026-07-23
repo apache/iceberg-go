@@ -908,6 +908,9 @@ func (b *MetadataBuilder) SetSnapshotRef(
 			return fmt.Errorf("%w: invalid snapshot ref option: %w", iceberg.ErrInvalidArgument, err)
 		}
 	}
+	if err := ref.validate(); err != nil {
+		return fmt.Errorf("%w: invalid snapshot ref: %w", iceberg.ErrInvalidArgument, err)
+	}
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
 	var minSnapshotsToKeep int

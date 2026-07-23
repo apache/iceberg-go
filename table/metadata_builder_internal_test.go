@@ -481,6 +481,21 @@ func TestSetRef(t *testing.T) {
 	require.Len(t, builder.snapshotLog, 1)
 }
 
+func TestSetRefRejectsInvalidTypeAndTagRetention(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	err := builder.SetSnapshotRef("invalid", 1, RefType("invalid"))
+	require.ErrorIs(t, err, ErrInvalidRefType)
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMinSnapshotsToKeep(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting min snapshots to keep")
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMaxSnapshotAgeMs(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting max snapshot age")
+}
+
 func TestAddPartitionSpecForV1RequiresSequentialIDs(t *testing.T) {
 	builder := builderWithoutChanges(1)
 
