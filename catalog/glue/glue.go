@@ -50,8 +50,9 @@ const (
 	glueTableType   = "EXTERNAL_TABLE"
 
 	// property keys
-	PropsKeyLocation    = "location"
-	PropsKeyDescription = "Description"
+	PropsKeyLocation          = "location"
+	PropsKeyDescription       = "comment"
+	legacyPropsKeyDescription = "Description"
 
 	// glue table parameter keys
 	tableParamTableType                = "table_type"
@@ -731,6 +732,12 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 			props[k] = v
 		}
 	}
+	if description, ok := props[legacyPropsKeyDescription]; ok {
+		delete(props, legacyPropsKeyDescription)
+		if _, hasComment := props[PropsKeyDescription]; !hasComment {
+			props[PropsKeyDescription] = description
+		}
+	}
 	if database.Description != nil {
 		props[PropsKeyDescription] = aws.ToString(database.Description)
 	}
@@ -989,7 +996,7 @@ func constructTableInput(tableName string, staged *table.Table, previousGlueTabl
 		},
 	}
 
-	if comment, ok := staged.Properties()[PropsKeyDescription]; ok {
+	if comment, ok := descriptionProperty(staged.Properties()); ok {
 		tableInput.Description = aws.String(comment)
 	}
 
@@ -1024,11 +1031,14 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 		Name: aws.String(database),
 	}
 
+	if description, ok := descriptionProperty(props); ok {
+		databaseInput.Description = aws.String(description)
+	}
+
 	parameters := map[string]string{}
 	for k, v := range props {
 		switch k {
-		case PropsKeyDescription:
-			databaseInput.Description = aws.String(v)
+		case PropsKeyDescription, legacyPropsKeyDescription:
 		case PropsKeyLocation:
 			databaseInput.LocationUri = aws.String(v)
 		default:
@@ -1039,6 +1049,16 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 	databaseInput.Parameters = parameters
 
 	return databaseInput
+}
+
+func descriptionProperty(props iceberg.Properties) (string, bool) {
+	if description, ok := props[PropsKeyDescription]; ok {
+		return description, true
+	}
+
+	description, ok := props[legacyPropsKeyDescription]
+
+	return description, ok
 }
 
 // isConcurrentModificationException reports whether err is or wraps
