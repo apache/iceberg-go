@@ -243,7 +243,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.lastUpdatedMS = 0
 	b.lastColumnId = metadata.LastColumnID()
 	b.schemaList = slices.Clone(metadata.Schemas())
-	b.currentSchemaID = metadata.CurrentSchema().ID
+	currentSchema := metadata.CurrentSchema()
+	if currentSchema == nil {
+		return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+	}
+	b.currentSchemaID = currentSchema.ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
 	defaultSpecID := metadata.DefaultPartitionSpec()
 	b.defaultSpecID = defaultSpecID
@@ -281,6 +285,60 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	}
 
 	return b, nil
+}
+
+// clonePtr returns a pointer to a shallow copy of *value, or nil if value is nil.
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
+}
+
+// clone returns a metadata-builder copy suitable for staging updates.
+// The copy shares only immutable data with the original builder and keeps
+// value types separated so partial update attempts remain atomic.
+func (b *MetadataBuilder) clone() *MetadataBuilder {
+	if b == nil {
+		return nil
+	}
+
+	cloned := &MetadataBuilder{
+		base:                 b.base,
+		updates:              append([]Update(nil), b.updates...),
+		formatVersion:        b.formatVersion,
+		uuid:                 b.uuid,
+		loc:                  b.loc,
+		lastUpdatedMS:        b.lastUpdatedMS,
+		lastColumnId:         b.lastColumnId,
+		schemaList:           slices.Clone(b.schemaList),
+		currentSchemaID:      b.currentSchemaID,
+		specs:                slices.Clone(b.specs),
+		defaultSpecID:        b.defaultSpecID,
+		lastPartitionID:      clonePtr(b.lastPartitionID),
+		props:                maps.Clone(b.props),
+		snapshotList:         slices.Clone(b.snapshotList),
+		currentSnapshotID:    clonePtr(b.currentSnapshotID),
+		snapshotLog:          slices.Clone(b.snapshotLog),
+		metadataLog:          slices.Clone(b.metadataLog),
+		sortOrderList:        slices.Clone(b.sortOrderList),
+		defaultSortOrderID:   b.defaultSortOrderID,
+		refs:                 maps.Clone(b.refs),
+		statisticsList:       slices.Clone(b.statisticsList),
+		partitionStatsList:   slices.Clone(b.partitionStatsList),
+		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
+		previousFileEntry:    clonePtr(b.previousFileEntry),
+		lastSequenceNumber:   clonePtr(b.lastSequenceNumber),
+		nextRowID:            clonePtr(b.nextRowID),
+		lastAddedSchemaID:    clonePtr(b.lastAddedSchemaID),
+		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
+		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
+	}
+
+	return cloned
 }
 
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
@@ -450,7 +508,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return errors.New("can't add snapshot with no added partition specs")
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
-	} else if b.formatVersion == 2 &&
+	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
@@ -1015,7 +1073,7 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
 			}
 		}
-		if b.currentSnapshotID != nil {
+		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {
 			last := newSnapsLog[len(newSnapsLog)-1]
 			if last.SnapshotID != *b.currentSnapshotID {
 				return fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
@@ -1338,6 +1396,9 @@ func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {
 		return fmt.Errorf("%w: encryption keys are only supported for format version 3 or higher, current version: %d",
 			iceberg.ErrInvalidArgument, b.formatVersion)
 	}
+	if err := key.validate(); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidArgument, err)
+	}
 
 	replaced := false
 	for i, k := range b.encryptionKeyList {
@@ -1496,6 +1557,40 @@ func (c *commonMetadata) PreviousFiles() iter.Seq[MetadataLogEntry] {
 	return slices.Values(c.MetadataLog)
 }
 
+func stringPointerEqual(left, right *string) bool {
+	if left == right {
+		return true
+	}
+	if left == nil || right == nil {
+		return false
+	}
+
+	return *left == *right
+}
+
+func blobMetadataEqual(left, right BlobMetadata) bool {
+	return left.Type == right.Type &&
+		left.SnapshotID == right.SnapshotID &&
+		left.SequenceNumber == right.SequenceNumber &&
+		slices.Equal(left.Fields, right.Fields) &&
+		maps.Equal(left.Properties, right.Properties)
+}
+
+func statisticsFileEqual(left, right StatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes &&
+		left.FileFooterSizeInBytes == right.FileFooterSizeInBytes &&
+		stringPointerEqual(left.KeyMetadata, right.KeyMetadata) &&
+		slices.EqualFunc(left.BlobMetadata, right.BlobMetadata, blobMetadataEqual)
+}
+
+func partitionStatisticsFileEqual(left, right PartitionStatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes
+}
+
 func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	if other == nil {
 		return false
@@ -1522,6 +1617,10 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	case !iceinternal.SliceEqualHelper(c.SnapshotList, other.SnapshotList):
 		fallthrough
 	case !iceinternal.SliceEqualHelper(c.Specs, other.Specs):
+		fallthrough
+	case !slices.EqualFunc(c.StatisticsList, other.StatisticsList, statisticsFileEqual):
+		fallthrough
+	case !slices.EqualFunc(c.PartitionStatsList, other.PartitionStatsList, partitionStatisticsFileEqual):
 		fallthrough
 	case !maps.Equal(c.Props, other.Props):
 		fallthrough
@@ -2205,15 +2304,17 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	if tableUuid == uuid.Nil {
 		tableUuid = uuid.New()
 	}
+	var inputProps iceberg.Properties
 	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
-		verStr, ok := props[PropertyFormatVersion]
+		inputProps = maps.Clone(props)
+		verStr, ok := inputProps[PropertyFormatVersion]
 		if ok {
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
-				formatVersion = DefaultFormatVersion
+				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(props, PropertyFormatVersion)
+			delete(inputProps, PropertyFormatVersion)
 		}
 	}
 
@@ -2259,7 +2360,7 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	if err = builder.SetProperties(props); err != nil {
+	if err = builder.SetProperties(inputProps); err != nil {
 		return nil, err
 	}
 

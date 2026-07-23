@@ -71,7 +71,7 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	WithDeleteFunc(deleteFunc)(cfg)
 	assert.NotNil(t, cfg.deleteFunc)
 
-	WithMaxConcurrency(8)(cfg)
+	WithCleanupMaxConcurrency(8)(cfg)
 	assert.Equal(t, 8, cfg.maxConcurrency)
 
 	WithPrefixMismatchMode(PrefixMismatchIgnore)(cfg)
@@ -156,6 +156,16 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestIsFileOrphanDoesNotAliasWindowsDrivePaths(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"C:/data/file.parquet": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("D:/data/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.True(t, isOrphan, "different Windows drives must not share a path key")
 }
 
 func TestVersionHintLocation(t *testing.T) {
@@ -345,7 +355,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			testCfg := *cfg
 			testCfg.prefixMismatchMode = tt.mode
 
-			err := checkPrefixMismatch(tt.referencedPath, tt.filesystemPath, &testCfg)
+			decision, err := checkPrefixMismatch(tt.referencedPath, tt.filesystemPath, &testCfg)
 
 			if tt.expectError {
 				assert.Error(t, err)
@@ -354,6 +364,11 @@ func TestCheckPrefixMismatch(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
+				if tt.mode == PrefixMismatchDelete && tt.referencedPath != tt.filesystemPath {
+					assert.Equal(t, prefixMismatchDeleteCandidate, decision)
+				} else {
+					assert.Equal(t, prefixMismatchKeep, decision)
+				}
 			}
 		})
 	}
@@ -423,16 +438,16 @@ func TestIsFileOrphan(t *testing.T) {
 			expectOrphan: false,
 		},
 	}
-	normalizedReferencedFiles := make(map[string]string)
-	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
-		normalizedReferencedFiles[normalizedPath] = refPath
-		normalizedReferencedFiles[refPath] = refPath
-	}
+	referencedIndex := newReferencedFileIndex(referencedFiles, cfg)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isOrphan, err := isFileOrphan(tt.file, referencedFiles, normalizedReferencedFiles, cfg)
+			isOrphan, err := isFileOrphan(
+				tt.file,
+				referencedFiles,
+				referencedIndex,
+				cfg,
+			)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectOrphan, isOrphan)
 		})
@@ -494,7 +509,7 @@ func TestOrphanCleanup_EdgeCases(t *testing.T) {
 			prefixMismatchMode: PrefixMismatchMode(999), // Invalid mode
 		}
 
-		err := checkPrefixMismatch("s3://bucket/file", "gs://bucket/file", cfg)
+		_, err := checkPrefixMismatch("s3://bucket/file", "gs://bucket/file", cfg)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown prefix mismatch mode")
 	})
@@ -684,6 +699,100 @@ func (m mockFileInfo) ModTime() time.Time   { return time.Time{} }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
 
+func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
+	tests := []struct {
+		name           string
+		referencedPath string
+		listedPath     string
+	}{
+		{
+			name:           "scheme mismatch",
+			referencedPath: "s3://bucket/path/file.parquet",
+			listedPath:     "s3a://bucket/path/file.parquet",
+		},
+		{
+			name:           "authority mismatch",
+			referencedPath: "s3://bucket-a/path/file.parquet",
+			listedPath:     "s3://bucket-b/path/file.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+			})
+			meta, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://bucket/table",
+				iceberg.Properties{PropertyFormatVersion: "2"},
+			)
+			require.NoError(t, err)
+			builder, err := MetadataBuilderFromBase(meta, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.SetStatistics(StatisticsFile{
+				SnapshotID:      1,
+				StatisticsPath:  tt.referencedPath,
+				BlobMetadata:    []BlobMetadata{},
+				FileSizeInBytes: 4,
+			}))
+			meta, err = builder.Build()
+			require.NoError(t, err)
+
+			fsys := &mockListableIO{
+				entries: []mockWalkEntry{{
+					path: tt.listedPath,
+					info: mockFileInfo{name: "file.parquet", size: 4},
+				}},
+			}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				"s3://bucket/table/metadata/v1.metadata.json",
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
+
+			for _, mode := range []PrefixMismatchMode{
+				PrefixMismatchError,
+				PrefixMismatchIgnore,
+				PrefixMismatchDelete,
+			} {
+				t.Run(mode.String(), func(t *testing.T) {
+					var deleted []string
+					result, err := tbl.DeleteOrphanFiles(
+						context.Background(),
+						WithLocation("s3://bucket/path"),
+						WithFilesOlderThan(0),
+						WithPrefixMismatchMode(mode),
+						WithDeleteFunc(func(path string) error {
+							deleted = append(deleted, path)
+
+							return nil
+						}),
+					)
+
+					switch mode {
+					case PrefixMismatchError:
+						require.ErrorContains(t, err, "prefix mismatch detected")
+						assert.Empty(t, deleted)
+					case PrefixMismatchIgnore:
+						require.NoError(t, err)
+						assert.Empty(t, result.OrphanFileLocations)
+						assert.Empty(t, deleted)
+					case PrefixMismatchDelete:
+						require.NoError(t, err)
+						assert.Equal(t, []string{tt.listedPath}, result.OrphanFileLocations)
+						assert.Equal(t, []string{tt.listedPath}, deleted)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
 	mock := &mockPlainIO{}
 	orphans := []string{"s3://bucket/data/orphan1.parquet", "s3://bucket/data/orphan2.parquet"}
@@ -724,6 +833,68 @@ func TestWalkDirectoryUsesListableIO(t *testing.T) {
 		"s3://bucket/data/a.parquet":        3,
 		"s3://bucket/data/nested/b.parquet": 4,
 	}, sizes)
+}
+
+func TestDeleteOrphanFilesPopulatesOrphanFileSizes(t *testing.T) {
+	const metaJSON = `{
+        "format-version": 2,
+        "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+        "location": "s3://bucket/table",
+        "last-sequence-number": 0,
+        "last-updated-ms": 1602638573590,
+        "last-column-id": 1,
+        "current-schema-id": 0,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]}],
+        "default-spec-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "last-partition-id": 0,
+        "default-sort-order-id": 0,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "refs": {}
+    }`
+
+	meta, err := ParseMetadataString(metaJSON)
+	require.NoError(t, err)
+
+	mockFS := &mockListableIO{
+		entries: []mockWalkEntry{
+			{path: "s3://bucket/table", info: mockFileInfo{name: "table", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/table/a.parquet", info: mockFileInfo{name: "a.parquet", size: 1024}},
+			{path: "s3://bucket/table/nested", info: mockFileInfo{name: "nested", mode: stdfs.ModeDir}},
+			{path: "s3://bucket/table/nested/b.parquet", info: mockFileInfo{name: "b.parquet", size: 4096}},
+		},
+	}
+
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		"s3://bucket/table/metadata/v1.metadata.json",
+		func(context.Context) (io.IO, error) { return mockFS, nil },
+		nil,
+	)
+
+	result, err := tbl.DeleteOrphanFiles(context.Background(),
+		WithDryRun(true),
+		WithLocation("s3://bucket/table"),
+		WithCleanupMaxConcurrency(1),
+		WithFilesOlderThan(0), // Consider files created before the scan.
+	)
+
+	require.NoError(t, err)
+	require.Len(t, result.OrphanFiles, 2)
+
+	orphanSizes := make(map[string]int64, len(result.OrphanFiles))
+	for _, f := range result.OrphanFiles {
+		orphanSizes[f.Path] = f.SizeBytes
+	}
+
+	assert.Equal(t, int64(1024), orphanSizes["s3://bucket/table/a.parquet"])
+	assert.Equal(t, int64(4096), orphanSizes["s3://bucket/table/nested/b.parquet"])
 }
 
 func TestWalkDirectoryRequiresListableIO(t *testing.T) {

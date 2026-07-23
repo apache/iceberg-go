@@ -329,6 +329,13 @@ type addSnapshotUpdate struct {
 	// each retry snapshot correctly inherits all files committed by
 	// concurrent writers since the original build.
 	rebuildManifestList func(ctx context.Context, freshMeta Metadata, freshParent *Snapshot, fio io.WriteFileIO, attempt int) (*Snapshot, error)
+
+	// supersededSource, when non-nil, is the producer whose merged manifests a
+	// rebuild on a prior attempt wrote and a later attempt replaced. doCommit
+	// reads its accumulated paths and removes them once the commit resolves.
+	// Distinct from the manifest-LIST orphans rebuildSnapshotUpdates returns:
+	// these are the inner data manifests a rewrite re-merges on every retry.
+	supersededSource supersededAccumulator
 }
 
 // NewAddSnapshotUpdate creates a new update that adds the given snapshot to the table metadata.

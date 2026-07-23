@@ -22,6 +22,7 @@ import (
 	"io"
 	"io/fs"
 	"testing"
+	"time"
 
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
@@ -199,4 +200,39 @@ func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
 			}, walked)
 		})
 	}
+}
+
+func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	require.NoError(t, memIO.WriteFile("mem://bucket/root/1.txt", []byte("1")))
+	require.NoError(t, memIO.WriteFile("mem://bucket/root/2.txt", []byte("22")))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- memIO.WalkDir("mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			return memIO.Remove(path)
+		})
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("WalkDir deadlocked when its callback removed a file")
+	}
+
+	var remaining []string
+	require.NoError(t, memIO.WalkDir("mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		remaining = append(remaining, path)
+
+		return nil
+	}))
+	assert.Empty(t, remaining)
 }

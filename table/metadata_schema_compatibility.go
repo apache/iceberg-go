@@ -20,6 +20,7 @@ package table
 import (
 	"cmp"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,7 +48,12 @@ func (e ErrIncompatibleSchema) Error() string {
 					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
 				}
 			} else {
-				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+				if f.Field.InitialDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, formatDefaultValue(f.Field.InitialDefault), f.InvalidDefault.MinFormatVersion)
+				}
+				if f.Field.WriteDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid write default for %s: non-null default (%v) is not supported until v%d", f.ColName, formatDefaultValue(f.Field.WriteDefault), f.InvalidDefault.MinFormatVersion)
+				}
 			}
 		}
 	}
@@ -72,14 +78,32 @@ type UnsupportedType struct {
 
 type InvalidDefault struct {
 	MinFormatVersion  int
-	WriteDefault      any
 	MustBeNullForType bool
+}
+
+func formatDefaultValue(value any) any {
+	v := reflect.ValueOf(value)
+	for v.IsValid() && v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return nil
+	}
+
+	return v.Interface()
 }
 
 // checkSchemaCompatibility checks that the schema is compatible with the table's format version.
 // This validates that the schema does not contain types or features that were released
 // in later format versions.
 // Java: Schema::checkCompatibility
+// This check runs when a schema is added to a MetadataBuilder during table
+// construction or schema evolution. ParseMetadataBytes unmarshals existing
+// metadata directly and does not call this check. We intentionally validate
+// both default fields here, including write-default for pre-v3 schemas.
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	const defaultValuesMinFormatVersion = 3
 	problems := make([]IncompatibleField, 0)
@@ -133,11 +157,11 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 				})
 			}
 		default:
-			if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+			if (field.InitialDefault != nil || field.WriteDefault != nil) && formatVersion < defaultValuesMinFormatVersion {
 				problems = append(problems, IncompatibleField{
 					Field:          field,
 					ColName:        colName,
-					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
+					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion},
 				})
 			}
 		}

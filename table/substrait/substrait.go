@@ -267,9 +267,9 @@ func toByteSliceSubstraitLiteral[T []byte | types.UUID](v T) expr.Literal {
 // https://github.com/apache/iceberg-go/issues/1028). If typ is not a
 // DecimalType, this falls back to v.Type()'s (hardcoded) precision.
 func toDecimalLiteral(typ iceberg.Type, v iceberg.DecimalLiteral) expr.Literal {
-	precision := v.Type().(iceberg.DecimalType).Precision()
+	precision := int32(9)
 	if dt, ok := typ.(iceberg.DecimalType); ok {
-		precision = dt.Precision()
+		precision = int32(dt.Precision())
 	}
 
 	// decimal128.Num is {lo uint64, hi int64} — its raw in-memory bytes on

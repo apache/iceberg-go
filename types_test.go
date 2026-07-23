@@ -47,8 +47,10 @@ func TestTypesBasic(t *testing.T) {
 		{"binary", iceberg.PrimitiveTypes.Binary},
 		{"unknown", iceberg.PrimitiveTypes.Unknown},
 		{"variant", iceberg.VariantType{}},
+		{"fixed[0]", iceberg.FixedTypeOf(0)},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
+		{"decimal(5, 7)", iceberg.DecimalTypeOf(5, 7)},
 	}
 
 	for _, tt := range tests {
@@ -77,6 +79,49 @@ func TestFixedType(t *testing.T) {
 	assert.Equal(t, "fixed[5]", typ.String())
 	assert.True(t, typ.Equals(iceberg.FixedTypeOf(5)))
 	assert.False(t, typ.Equals(iceberg.FixedTypeOf(6)))
+	assert.Equal(t, "fixed[0]", iceberg.FixedTypeOf(0).String())
+
+	t.Run("FixedTypeOf validates length", func(t *testing.T) {
+		assertFixedTypeOfPanicsWithInvalidArgument(t, -1)
+	})
+}
+
+func TestFixedTypeInvalidParse(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "malformed suffix",
+			data: `{"id": 1, "name": "f", "type": "fixed[0]junk", "required": true}`,
+		},
+		{
+			name: "overflow",
+			data: `{"id": 1, "name": "f", "type": "fixed[99999999999999999999]", "required": true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n iceberg.NestedField
+			err := json.Unmarshal([]byte(tt.data), &n)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
+		})
+	}
+}
+
+func assertFixedTypeOfPanicsWithInvalidArgument(t *testing.T, length int) {
+	t.Helper()
+
+	defer func() {
+		r := recover()
+		require.NotNil(t, r)
+		err, ok := r.(error)
+		require.True(t, ok)
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}()
+
+	iceberg.FixedTypeOf(length)
 }
 
 func TestDecimalType(t *testing.T) {
@@ -86,6 +131,51 @@ func TestDecimalType(t *testing.T) {
 	assert.Equal(t, "decimal(9, 2)", typ.String())
 	assert.True(t, typ.Equals(iceberg.DecimalTypeOf(9, 2)))
 	assert.False(t, typ.Equals(iceberg.DecimalTypeOf(9, 3)))
+
+	t.Run("DecimalTypeOf validates precision and scale", func(t *testing.T) {
+		assert.PanicsWithError(t, "invalid argument: invalid precision 0: must be greater than 0", func() {
+			iceberg.DecimalTypeOf(0, 2)
+		})
+		assert.PanicsWithError(t, "invalid argument: invalid precision 39: must be less than or equal to 38", func() {
+			iceberg.DecimalTypeOf(39, 0)
+		})
+		assert.Equal(t, "decimal(10, 11)", iceberg.DecimalTypeOf(10, 11).String())
+		assert.PanicsWithError(t, "invalid argument: invalid scale -1: must be greater than or equal to 0", func() {
+			iceberg.DecimalTypeOf(10, -1)
+		})
+	})
+}
+
+func TestDecimalTypeInvalidParse(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "trailing chars",
+			data: `{"id": 1, "name": "d", "type": "decimal(10,2)junk", "required": true}`,
+		},
+		{
+			name: "precision zero",
+			data: `{"id": 1, "name": "d", "type": "decimal(0,2)", "required": true}`,
+		},
+		{
+			name: "negative scale syntax",
+			data: `{"id": 1, "name": "d", "type": "decimal(10,-1)", "required": true}`,
+		},
+		{
+			name: "precision too large",
+			data: `{"id": 1, "name": "d", "type": "decimal(39,2)", "required": true}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var n iceberg.NestedField
+			err := json.Unmarshal([]byte(tt.data), &n)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidTypeString)
+		})
+	}
 }
 
 func TestStructType(t *testing.T) {
@@ -228,7 +318,7 @@ func TestTypeStrings(t *testing.T) {
 		{iceberg.PrimitiveTypes.Unknown, "unknown"},
 		{iceberg.VariantType{}, "variant"},
 		{iceberg.FixedTypeOf(22), "fixed[22]"},
-		{iceberg.DecimalTypeOf(19, 25), "decimal(19, 25)"},
+		{iceberg.DecimalTypeOf(19, 18), "decimal(19, 18)"},
 		{&iceberg.StructType{
 			FieldList: []iceberg.NestedField{
 				{ID: 1, Name: "required_field", Type: iceberg.PrimitiveTypes.String, Required: true, Doc: "this is a doc"},
@@ -882,4 +972,45 @@ func TestNestedFieldEqualsWithNonComparableDefaults(t *testing.T) {
 		Type:     iceberg.PrimitiveTypes.String,
 		Required: true,
 	}))
+}
+
+func TestPromoteType(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileType iceberg.Type
+		readType iceberg.Type
+		want     iceberg.Type
+		wantErr  bool
+	}{
+		{"int to long", iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, false},
+		{"float to double", iceberg.PrimitiveTypes.Float32, iceberg.PrimitiveTypes.Float64, iceberg.PrimitiveTypes.Float64, false},
+		{"string to binary", iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.Binary, false},
+		{"binary to string", iceberg.PrimitiveTypes.Binary, iceberg.PrimitiveTypes.String, iceberg.PrimitiveTypes.String, false},
+		{"fixed[16] to uuid", iceberg.FixedTypeOf(16), iceberg.PrimitiveTypes.UUID, iceberg.PrimitiveTypes.UUID, false},
+		{"unknown to any", iceberg.PrimitiveTypes.Unknown, iceberg.PrimitiveTypes.Int64, iceberg.PrimitiveTypes.Int64, false},
+
+		// Decimal: precision may widen, scale must stay the same.
+		{"decimal widen precision", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(18, 2), iceberg.DecimalTypeOf(18, 2), false},
+		{"decimal same", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(9, 2), false},
+		{"decimal narrow precision", iceberg.DecimalTypeOf(18, 2), iceberg.DecimalTypeOf(9, 2), nil, true},
+		{"decimal increase scale", iceberg.DecimalTypeOf(9, 2), iceberg.DecimalTypeOf(18, 4), nil, true},
+		{"decimal decrease scale", iceberg.DecimalTypeOf(9, 4), iceberg.DecimalTypeOf(18, 2), nil, true},
+
+		{"disallowed int to string", iceberg.PrimitiveTypes.Int32, iceberg.PrimitiveTypes.String, nil, true},
+		{"disallowed fixed[8] to uuid", iceberg.FixedTypeOf(8), iceberg.PrimitiveTypes.UUID, nil, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := iceberg.PromoteType(tt.fileType, tt.readType)
+			if tt.wantErr {
+				require.ErrorIs(t, err, iceberg.ErrResolve)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Truef(t, tt.want.Equals(got), "expected: %s\ngot: %s", tt.want, got)
+		})
+	}
 }

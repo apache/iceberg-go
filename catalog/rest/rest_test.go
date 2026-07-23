@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
@@ -581,6 +582,66 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 		{"accounting", "owned"},
 	}, tbls)
 	r.Require().NoError(lastErr)
+}
+
+func (r *RestCatalogSuite) TestListTablesPaginationCycle() {
+	const namespace = "accounting"
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+		if requestCount > 3 {
+			r.Fail("pagination continued after a repeated token")
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+
+			return
+		}
+
+		var name, nextPageToken string
+		switch req.URL.Query().Get("pageToken") {
+		case "":
+			name, nextPageToken = "first", "token-a"
+		case "token-a":
+			name, nextPageToken = "second", "token-b"
+		case "token-b":
+			name, nextPageToken = "third", "token-a"
+		default:
+			r.Fail("unexpected page token")
+			http.Error(w, "unexpected page token", http.StatusBadRequest)
+
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{map[string]any{
+				"namespace": []string{namespace},
+				"name":      name,
+			}},
+			"next-page-token": nextPageToken,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var identifiers []table.Identifier
+	var paginationErr error
+	for identifier, err := range cat.ListTables(context.Background(), catalog.ToIdentifier(namespace)) {
+		if err != nil {
+			paginationErr = err
+
+			break
+		}
+		identifiers = append(identifiers, identifier)
+	}
+
+	r.ErrorIs(paginationErr, rest.ErrRESTError)
+	r.ErrorContains(paginationErr, "pagination cycle: repeated page token")
+	r.Equal(3, requestCount)
+	r.Equal([]table.Identifier{
+		{"accounting", "first"},
+		{"accounting", "second"},
+		{"accounting", "third"},
+	}, identifiers)
 }
 
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
@@ -1252,6 +1313,59 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	r.Error(err)
 	r.Contains(err.Error(), "Table already exists")
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+// TestCreateTableInvalidReporterDoesNotHitServer pins that an invalid
+// metrics-reporter-impl fails CreateTable before the create POST is sent, so a
+// bad reporter can't turn a table the server already created into a reported
+// failure. The reporter is resolved at the top of CreateTable, so the server
+// endpoint is never hit.
+func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"}),
+	)
+	r.Require().NoError(err)
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	r.Require().Error(err)
+	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
+}
+
+// TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
+// the server via /v1/config cannot select — or, with an unregistered name, break
+// — the client's reporter. The client configured none, so the op must succeed and
+// fall back to the nop reporter; selection is resolved from client props only.
+func TestServerVendedReporterImplIgnored(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// A server-vended reporter impl the Go client does not recognize.
+			"overrides": map[string]any{metrics.ReporterImplKey: "does-not-exist"},
+			"endpoints": rest.AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(createTableRestExample))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Client does NOT configure a reporter.
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	tbl, err := cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	require.NoError(t, err, "an unregistered server-vended reporter must not fail the create")
+	assert.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
 }
 
 func (r *RestCatalogSuite) TestCheckTableExists204() {
@@ -2486,6 +2600,19 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
 }
 
+func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = ctlg.CreateView(
+		context.Background(),
+		table.Identifier{"ns", "view"},
+		nil,
+		iceberg.NewSchema(0),
+	)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
+}
+
 func (r *RestCatalogSuite) TestCreateView409() {
 	ns := "ns"
 	viewName := "view"
@@ -2660,6 +2787,115 @@ func (r *RestCatalogSuite) TestRegisterView409() {
 	r.ErrorContains(err, "The given view already exists")
 }
 
+func (r *RestCatalogSuite) TestRenameView204() {
+	const metadataLoc = "s3://bucket/warehouse/example.db/destination/metadata/00001.metadata.json"
+
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Source struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"source"`
+			Destination struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"destination"`
+		}
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal([]string{"example"}, payload.Source.Namespace)
+		r.Equal("source", payload.Source.Name)
+		r.Equal([]string{"example"}, payload.Destination.Namespace)
+		r.Equal("destination", payload.Destination.Name)
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Mock the load view endpoint for loading the renamed view.
+	r.mux.HandleFunc("/v1/namespaces/example/views/destination", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}}`,
+			metadataLoc, exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	fromIdent := catalog.ToIdentifier("example", "source")
+	toIdent := catalog.ToIdentifier("example", "destination")
+
+	renamed, err := cat.RenameView(context.Background(), fromIdent, toIdent)
+	r.Require().NoError(err)
+
+	r.Equal(toIdent, renamed.Identifier())
+	r.Equal(metadataLoc, renamed.MetadataLocation())
+	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), renamed.Metadata().ViewUUID())
+	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].Sql)
+}
+
+func (r *RestCatalogSuite) TestRenameView404() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view does not exist",
+			Type:    "NoSuchViewException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "The given view does not exist")
+}
+
+func (r *RestCatalogSuite) TestRenameView409() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view already exists",
+			Type:    "AlreadyExistsException",
+			Code:    409,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrViewAlreadyExists)
+	r.ErrorContains(err, "The given view already exists")
+}
+
 type mockTransport struct {
 	calls []struct {
 		method, path string
@@ -2739,6 +2975,12 @@ func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
 
 	_, err = cat.RenameTable(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
 	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
 
 	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
 		{Identifier: table.Identifier{"table"}},

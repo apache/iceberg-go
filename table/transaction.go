@@ -26,6 +26,7 @@ import (
 	"iter"
 	"log/slog"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
@@ -74,9 +76,10 @@ func (s snapshotUpdate) mergeAppend() *snapshotProducer {
 }
 
 type Transaction struct {
-	tbl    *Table
-	meta   *MetadataBuilder
-	branch string
+	tbl     *Table
+	meta    *MetadataBuilder
+	branch  string
+	initErr error
 
 	reqs []Requirement
 
@@ -93,15 +96,67 @@ type Transaction struct {
 	committed bool
 }
 
+func (t *Transaction) ensureInitialized() error {
+	if t == nil {
+		return fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
+	}
+	if t.initErr != nil {
+		return t.initErr
+	}
+	if t.meta == nil {
+		return fmt.Errorf("%w: transaction metadata builder is not initialized", ErrInvalidMetadata)
+	}
+
+	return nil
+}
+
+// txnMeta returns the transaction's metadata builder after verifying the
+// transaction is initialized. Entry points that need the builder should obtain
+// it here so the nil-transaction / deferred-init / nil-builder checks are
+// applied consistently in one place, rather than each caller having to remember
+// to call ensureInitialized before touching t.meta.
+func (t *Transaction) txnMeta() (*MetadataBuilder, error) {
+	if err := t.ensureInitialized(); err != nil {
+		return nil, err
+	}
+
+	return t.meta, nil
+}
+
+// checkNotNil rejects a nil transaction before any lock is taken. The
+// mutex-guarded entry points that return an error (Commit, TableCommit, apply)
+// must call this before t.mx.Lock(), which would panic on a nil receiver.
+// txnMeta covers the same case, but only after the lock is already held.
+func (t *Transaction) checkNotNil() error {
+	if t == nil {
+		return fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
+	}
+
+	return nil
+}
+
 func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
+	if err := t.checkNotNil(); err != nil {
+		return err
+	}
 	t.mx.Lock()
 	defer t.mx.Unlock()
+
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 
 	if t.committed {
 		return errors.New("transaction has already been committed")
 	}
 
-	current, err := t.meta.Build()
+	stagedMeta := meta.clone()
+	if stagedMeta == nil {
+		return errors.New("cannot apply updates to nil metadata")
+	}
+
+	current, err := stagedMeta.Build()
 	if err != nil {
 		return err
 	}
@@ -113,6 +168,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	}
 
 	existing := map[string]struct{}{}
+	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
 	for _, r := range t.reqs {
 		key, err := requirementSemanticKey(r)
 		if err != nil {
@@ -120,6 +176,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		}
 
 		existing[key] = struct{}{}
+		stagedReqs = append(stagedReqs, r)
 	}
 
 	for _, r := range reqs {
@@ -129,14 +186,14 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		}
 
 		if _, ok := existing[key]; !ok {
-			t.reqs = append(t.reqs, r)
+			stagedReqs = append(stagedReqs, r)
 			existing[key] = struct{}{}
 		}
 	}
 
-	prevUpdates, prevLastUpdated := len(t.meta.updates), t.meta.lastUpdatedMS
+	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
 	for _, u := range updates {
-		if err := u.Apply(t.meta); err != nil {
+		if err := u.Apply(stagedMeta); err != nil {
 			return err
 		}
 	}
@@ -144,11 +201,14 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	// u.Apply will add updates to t.meta.updates if they are not no-ops
 	// and actually perform changes. So let's check if we actually had any
 	// changes added and thus need to update the lastupdated value.
-	if prevUpdates < len(t.meta.updates) {
-		if prevLastUpdated == t.meta.lastUpdatedMS {
-			t.meta.lastUpdatedMS = time.Now().UnixMilli()
+	if prevUpdates < len(stagedMeta.updates) {
+		if prevLastUpdated == stagedMeta.lastUpdatedMS {
+			stagedMeta.lastUpdatedMS = time.Now().UnixMilli()
 		}
 	}
+
+	t.reqs = stagedReqs
+	t.meta = stagedMeta
 
 	return nil
 }
@@ -192,8 +252,8 @@ func (t *Transaction) addValidator(v conflictValidatorFunc) {
 	t.validators = append(t.validators, v)
 }
 
-func (t *Transaction) appendSnapshotProducer(wfs io.WriteFileIO, props iceberg.Properties) *snapshotProducer {
-	manifestMerge := t.meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
+func (t *Transaction) appendSnapshotProducer(meta *MetadataBuilder, wfs io.WriteFileIO, props iceberg.Properties) *snapshotProducer {
+	manifestMerge := meta.props.GetBool(ManifestMergeEnabledKey, ManifestMergeEnabledDefault)
 	updateSnapshot := t.updateSnapshot(wfs, props, OpAppend)
 	if manifestMerge {
 		return updateSnapshot.mergeAppend()
@@ -212,6 +272,9 @@ func (t *Transaction) updateSnapshot(wfs io.WriteFileIO, props iceberg.Propertie
 }
 
 func (t *Transaction) SetProperties(props iceberg.Properties) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
 	if len(props) > 0 {
 		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
 	}
@@ -222,17 +285,25 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 // UpgradeFormatVersion upgrades the table to the given format version. Downgrading
 // is not allowed. If the table is already at the given version, this is a no-op.
 func (t *Transaction) UpgradeFormatVersion(version int) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+
 	return t.apply([]Update{NewUpgradeFormatVersionUpdate(version)}, nil)
 }
 
 func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
-	cs := t.meta.currentSnapshot()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+	cs := meta.currentSnapshot()
 	if cs == nil {
 		return errors.New("cannot rollback: table has no current snapshot")
 	}
 
 	lookup := func(id int64) *Snapshot {
-		s, _ := t.meta.SnapshotByID(id)
+		s, _ := meta.SnapshotByID(id)
 
 		return s
 	}
@@ -273,6 +344,7 @@ type expireSnapshotsCfg struct {
 	minSnapshotsToKeep *int
 	maxSnapshotAgeMs   *int64
 	postCommit         bool
+	validationErr      error
 }
 
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
@@ -285,17 +357,24 @@ type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
+		if n < 1 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("retain-last must be at least 1")
+		}
 	}
 }
 
 // WithOlderThan expires snapshots older than the given duration, measured from
 // the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
 // table property for this call. The most recent snapshots are still retained up
-// to the count set by WithRetainLast.
+// to the count set by WithRetainLast. This option does not expire branches or
+// tags based on their age; configure max-ref-age-ms on the ref or table for that.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
 		cfg.maxSnapshotAgeMs = &n
+		if t < 0 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("snapshot age must be non-negative")
+		}
 	}
 }
 
@@ -314,10 +393,11 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 //
 // A snapshot is retained when it is referenced by a branch or tag, or when it
 // is needed to satisfy the retention rules. Retention is resolved per ref,
-// falling back through the ref's own settings, the options passed here, and
-// finally the table properties (MinSnapshotsToKeepKey, MaxSnapshotAgeMsKey,
-// MaxRefAgeMsKey), mirroring the Java implementation. The current snapshot of
-// the main branch is always kept.
+// with reference age falling back through the ref's max-ref-age-ms, the table's
+// MaxRefAgeMsKey property, and the specification default. Snapshot age falls
+// back through the ref's own settings, the options passed here, and finally the
+// table's MinSnapshotsToKeepKey and MaxSnapshotAgeMsKey properties. The current
+// snapshot of the main branch is always kept.
 //
 // By default the now-unreferenced manifests, manifest lists, and data files are
 // deleted once the commit lands; pass WithPostCommit(false) to defer that
@@ -346,17 +426,24 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.validationErr != nil {
+		return cfg.validationErr
+	}
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 
 	// Read table-level retention properties as the last-resort defaults,
 	// mirroring the Java implementation. When neither the ref nor the
 	// caller provides a value, fall back to the table property; when the
 	// table property is also absent use the constant default (math.MaxInt64,
 	// meaning "keep everything").
-	propMaxRefAgeMs := t.meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
-	propMinSnapshotsToKeep := t.meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
-	propMaxSnapshotAgeMs := t.meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
+	propMaxRefAgeMs := meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
+	propMinSnapshotsToKeep := meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
+	propMaxSnapshotAgeMs := meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
 
-	for refName, ref := range t.meta.refs {
+	for refName, ref := range meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
 		// This ensures we don't accidentally expire snapshots that are now
 		// referenced by updated refs.
@@ -367,12 +454,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			snapsToKeep[ref.SnapshotID] = struct{}{}
 		}
 
-		snap, err := t.meta.SnapshotByID(ref.SnapshotID)
+		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
 			return err
 		}
 
-		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, cfg.maxSnapshotAgeMs, &propMaxRefAgeMs)
+		maxRefAgeMs := cmp.Or(ref.MaxRefAgeMs, &propMaxRefAgeMs)
 
 		refAge := nowMs - snap.TimestampMs
 		if refAge > *maxRefAgeMs && refName != MainBranch {
@@ -398,7 +485,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		)
 
 		for {
-			snap, err := t.meta.SnapshotByID(snapId)
+			snap, err := meta.SnapshotByID(snapId)
 			if err != nil {
 				// Parent snapshot may have been removed by a previous expiration.
 				// Treat missing parent as end of chain - this is expected behavior.
@@ -423,7 +510,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	var snapsToDelete []int64
 
-	for _, snap := range t.meta.snapshotList {
+	for _, snap := range meta.snapshotList {
 		if _, found := snapsToKeep[snap.SnapshotID]; !found {
 			snapsToDelete = append(snapsToDelete, snap.SnapshotID)
 		}
@@ -438,6 +525,9 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 }
 
 func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSize int64, snapshotProps iceberg.Properties) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
 	rdr := array.NewTableReader(tbl, batchSize)
 	defer rdr.Release()
 
@@ -445,6 +535,10 @@ func (t *Transaction) AppendTable(ctx context.Context, tbl arrow.Table, batchSiz
 }
 
 func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return err
@@ -453,8 +547,8 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 	if err != nil {
 		return err
 	}
-	appendFiles := t.appendSnapshotProducer(wfs, snapshotProps)
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
+	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,
@@ -485,6 +579,10 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 //
 // For now, we'll keep using an overwrite operation.
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
 			return t.AddFiles(ctx, filesToAdd, snapshotProps, false)
@@ -512,7 +610,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return errors.New("add file paths must be unique for ReplaceDataFiles")
 	}
 
-	s := t.meta.currentSnapshot()
+	s := meta.currentSnapshot()
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -545,8 +643,8 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		return errors.New("cannot delete files that do not belong to the table")
 	}
 
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
+	if meta.NameMapping() == nil {
+		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
 			return err
@@ -564,7 +662,13 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 		updater.deleteDataFile(df)
 	}
 
-	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filesToAdd, 1)
+	// SetProperties above may have staged a name mapping, rebuilding t.meta;
+	// re-read the current builder through the accessor before parsing files.
+	meta, err = t.txnMeta()
+	if err != nil {
+		return err
+	}
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filesToAdd, 1)
 	if err != nil {
 		return err
 	}
@@ -613,7 +717,12 @@ func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionS
 // first_row_id via inheritance at write time and the output files carry
 // explicit _row_id columns that win on read regardless.
 func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, operation string, requireFirstRowID bool) (map[string]struct{}, error) {
-	currentSpec, err := t.meta.CurrentSpec()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	currentSpec, err := meta.CurrentSpec()
 	if err != nil {
 		return nil, fmt.Errorf("could not get current partition spec: %w", err)
 	}
@@ -658,7 +767,7 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
-		if requireFirstRowID && t.meta.formatVersion >= 3 && df.FirstRowID() == nil {
+		if requireFirstRowID && meta.formatVersion >= 3 && df.FirstRowID() == nil {
 			return nil, fmt.Errorf(
 				"data file %s is missing first_row_id which is required for v3 tables for %s: use DataFileBuilder.FirstRowID() to set it explicitly",
 				path, operation)
@@ -720,8 +829,13 @@ func WithoutDuplicateCheck() WriteOption {
 // does not already exist. This is extracted as a helper so it can be called
 // from any method that accepts WriteOption.
 func (t *Transaction) ensureNameMapping() error {
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+
+	if meta.NameMapping() == nil {
+		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
 			return err
@@ -748,6 +862,9 @@ func (t *Transaction) ensureNameMapping() error {
 // Callers are responsible for ensuring each DataFile is valid and consistent with the table.
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
 func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
 	if len(dataFiles) == 0 {
 		return nil
 	}
@@ -777,8 +894,16 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		}
 	}
 
+	// ensureNameMapping above may have staged a name mapping, rebuilding t.meta;
+	// read the current builder through the accessor before inspecting the
+	// snapshot and creating the producer.
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+
 	if !cfg.skipDuplicateCheck {
-		if s := t.meta.currentSnapshot(); s != nil {
+		if s := meta.currentSnapshot(); s != nil {
 			referenced := make([]string, 0)
 			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
@@ -796,7 +921,7 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 		}
 	}
 
-	appendFiles := t.appendSnapshotProducer(wfs, snapshotProps)
+	appendFiles := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 	for _, df := range dataFiles {
 		appendFiles.appendDataFile(df)
 	}
@@ -832,6 +957,10 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 //   - Avoiding file scanning improves performance or reliability
 //   - Working with storage systems where immediate file reads may be unreliable
 func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	if len(filesToDelete) == 0 {
 		if len(filesToAdd) > 0 {
 			return t.AddDataFiles(ctx, filesToAdd, snapshotProps, opts...)
@@ -867,7 +996,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		setToDelete[path] = struct{}{}
 	}
 
-	s := t.meta.currentSnapshot()
+	s := meta.currentSnapshot()
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -939,6 +1068,10 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 // are replaced with new (compacted) data files, and delete files that are fully
 // applied are removed.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	// Delegate data file replacement to existing logic.
 	if len(deleteFilesToRemove) == 0 {
 		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
@@ -979,7 +1112,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if path == "" {
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
 		}
-		if isDeletionVector(df) {
+		if IsDeletionVector(df) {
 			ref := df.ReferencedDataFile()
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
@@ -997,7 +1130,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		setDeleteFilesToRemove[path] = struct{}{}
 	}
 
-	s := t.meta.currentSnapshot()
+	s := meta.currentSnapshot()
 	if s == nil {
 		return fmt.Errorf("%w: cannot replace files in a table without an existing snapshot", ErrInvalidOperation)
 	}
@@ -1028,7 +1161,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-			} else if ref := df.ReferencedDataFile(); isDeletionVector(df) && ref != nil {
+			} else if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
 					markedDVsForRemoval[*ref] = df
 				}
@@ -1107,6 +1240,10 @@ func WithAddFilesConcurrency(concurrency int) AddFilesOption {
 }
 
 func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshotProps iceberg.Properties, ignoreDuplicates bool, opts ...AddFilesOption) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	addFilesOp := addFilesOperation{
 		concurrency: runtime.GOMAXPROCS(0),
 	}
@@ -1132,7 +1269,7 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	}
 
 	if !ignoreDuplicates {
-		if s := t.meta.currentSnapshot(); s != nil {
+		if s := meta.currentSnapshot(); s != nil {
 			referenced := make([]string, 0)
 			for df, err := range s.dataFiles(fs, nil) {
 				if err != nil {
@@ -1149,8 +1286,8 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		}
 	}
 
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
+	if meta.NameMapping() == nil {
+		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
 			return err
@@ -1161,9 +1298,16 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 		}
 	}
 
-	updater := t.appendSnapshotProducer(wfs, snapshotProps)
+	// SetProperties above may have staged a name mapping, rebuilding t.meta;
+	// re-read the current builder through the accessor before creating the
+	// producer or parsing files.
+	meta, err = t.txnMeta()
+	if err != nil {
+		return err
+	}
+	updater := t.appendSnapshotProducer(meta, wfs, snapshotProps)
 
-	dataFiles, err := filesToDataFiles(ctx, fs, t.meta, filePaths, addFilesOp.concurrency)
+	dataFiles, err := filesToDataFiles(ctx, fs, meta, filePaths, addFilesOp.concurrency)
 	if err != nil {
 		return err
 	}
@@ -1265,6 +1409,9 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 // can be overridden using the WithOverwriteConcurrency option.
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
 	overwrite := overwriteOperation{
 		concurrency:   runtime.GOMAXPROCS(0),
 		filter:        iceberg.AlwaysTrue{},
@@ -1279,7 +1426,15 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 		return err
 	}
 
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+	// Re-read through the accessor: performCopyOnWriteDeletion may have staged a
+	// name mapping (which rebuilds t.meta), and the records must be written
+	// against that current builder.
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+
+	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
 		sc:        rdr.Schema(),
 		itr:       array.IterFromReader(rdr),
 		fs:        wfs,
@@ -1320,6 +1475,10 @@ func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, sna
 }
 
 func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation Operation, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, io.WriteFileIO, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -1329,8 +1488,8 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 		return nil, nil, err
 	}
 
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
+	if meta.NameMapping() == nil {
+		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
 			return nil, nil, err
@@ -1363,6 +1522,10 @@ func (t *Transaction) performCopyOnWriteDeletion(ctx context.Context, operation 
 }
 
 func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotProps iceberg.Properties, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (*snapshotProducer, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
 	fs, err := t.tbl.fsF(ctx)
 	if err != nil {
 		return nil, err
@@ -1372,8 +1535,8 @@ func (t *Transaction) performMergeOnReadDeletion(ctx context.Context, snapshotPr
 		return nil, err
 	}
 
-	if t.meta.NameMapping() == nil {
-		nameMapping := t.meta.CurrentSchema().NameMapping()
+	if meta.NameMapping() == nil {
+		nameMapping := meta.CurrentSchema().NameMapping()
 		mappingJson, err := json.Marshal(nameMapping)
 		if err != nil {
 			return nil, err
@@ -1463,6 +1626,10 @@ func WithDeleteCaseInsensitive() DeleteOption {
 // The concurrency parameter controls the level of parallelism for manifest processing and file rewriting and
 // can be overridden using the WithOverwriteConcurrency option. Defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (err error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
 	deleteOp := deleteOperation{
 		concurrency:   runtime.GOMAXPROCS(0),
 		caseSensitive: true,
@@ -1475,8 +1642,8 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 	writeDeleteMode := WriteDeleteModeDefault
 	// Only copy on write is supported on v1 so we ignore any override to the write delete mode unless the version is
 	// 2 and up
-	if t.meta.formatVersion > 1 {
-		writeDeleteMode = t.meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
+	if meta.formatVersion > 1 {
+		writeDeleteMode = meta.props.Get(WriteDeleteModeKey, WriteDeleteModeDefault)
 	}
 	switch writeDeleteMode {
 	case WriteModeCopyOnWrite:
@@ -1506,7 +1673,12 @@ func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpressi
 // per-file file_sequence_number map for rewrite candidates (used to
 // synthesize row-lineage columns when reading), and any error.
 func (t *Transaction) classifyFilesForDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletions []iceberg.DataFile, fileSeqByPath map[string]*int64, err error) {
-	s := t.meta.currentSnapshot()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	s := meta.currentSnapshot()
 	if s == nil {
 		return nil, nil, nil, nil
 	}
@@ -1557,8 +1729,13 @@ func (t *fileClassificationTask) buildPartitionProjection(specID int) (iceberg.B
 // Returns files to delete completely, files to rewrite partially, the
 // per-file file_sequence_number map for rewrite candidates, and any error.
 func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs io.IO, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (filesToDelete, filesWithPartialDeletes []iceberg.DataFile, fileSeqByPath map[string]*int64, err error) {
-	schema := t.meta.CurrentSchema()
-	meta, err := t.meta.Build()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	schema := meta.CurrentSchema()
+	builtMeta, err := meta.Build()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1573,10 +1750,10 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 		return nil, nil, nil, fmt.Errorf("failed to create strict metrics evaluator: %w", err)
 	}
 
-	classificationTask := newFileClassificationTask(meta, filter, caseSensitive)
+	classificationTask := newFileClassificationTask(builtMeta, filter, caseSensitive)
 	manifestEvaluators := newKeyDefaultMapWrapErr(classificationTask.buildManifestEvaluator)
 
-	s := t.meta.currentSnapshot()
+	s := meta.currentSnapshot()
 	var manifests []iceberg.ManifestFile
 	if s != nil {
 		manifests, err = s.Manifests(fs)
@@ -1683,13 +1860,18 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 // used to synthesize _last_updated_sequence_number when the source row's value is null. The
 // filter binding and substrait conversion are computed once here and reused across every file.
 func (t *Transaction) rewriteFilesWithFilter(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, fileSeqByPath map[string]*int64, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+
 	complementFilter := iceberg.NewNot(filter)
 
 	// Bind + convert the complement filter once for the whole rewrite. The
 	// per-batch filter function is reused across every record batch from
 	// every file in this rewrite — substrait conversion in particular is
 	// non-trivial so doing it inside the iterator loop wastes work.
-	postFilter, err := prepareBatchFilter(complementFilter, t.meta.CurrentSchema(), caseSensitive)
+	postFilter, err := prepareBatchFilter(complementFilter, meta.CurrentSchema(), caseSensitive)
 	if err != nil {
 		return err
 	}
@@ -1747,6 +1929,11 @@ type rewriteSingleFileArgs struct {
 // new files with filtered data. See [rewriteSingleFileArgs] for parameter
 // semantics.
 func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleFileArgs) ([]iceberg.DataFile, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
 	scanTask := &FileScanTask{
 		File:   args.originalFile,
 		Start:  0,
@@ -1772,8 +1959,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// end. File-level skipping (against the bound filter's residual on file
 	// stats) could be re-enabled here without breaking _row_id synthesis,
 	// since synthesis depends only on within-file row positions.
-	preserveRowLineage := t.meta.formatVersion >= 3 && args.originalFile.FirstRowID() != nil
-	projectedSchema := t.meta.CurrentSchema()
+	preserveRowLineage := meta.formatVersion >= 3 && args.originalFile.FirstRowID() != nil
+	projectedSchema := meta.CurrentSchema()
 	var factoryOpts []writerFactoryOption
 	if preserveRowLineage {
 		projectedSchema = iceberg.SchemaWithRowLineage(projectedSchema)
@@ -1792,20 +1979,20 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// the one actually applied. Skip the wasted BindExpr in that case.
 	scanFilter := iceberg.BooleanExpression(iceberg.AlwaysTrue{})
 	if !preserveRowLineage {
-		boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), args.filter, args.caseSensitive)
+		boundFilter, err := iceberg.BindExpr(meta.CurrentSchema(), args.filter, args.caseSensitive)
 		if err != nil {
 			return nil, fmt.Errorf("failed to bind filter: %w", err)
 		}
 		scanFilter = boundFilter
 	}
 
-	meta, err := t.meta.Build()
+	builtMeta, err := meta.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
 	scanner := &arrowScan{
-		metadata:        meta,
+		metadata:        builtMeta,
 		fs:              args.fs,
 		projectedSchema: projectedSchema,
 		boundRowFilter:  scanFilter,
@@ -1823,8 +2010,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// recordsToDataFiles can resolve _row_id via field ID rather than the name
 	// mapping (which doesn't include metadata columns).
 	if preserveRowLineage {
-		writeCtx := internal.WithTableProperties(ctx, t.meta.props)
-		arrowSchema, err = schemaToArrowSchemaWithContext(writeCtx, projectedSchema, nil, true, false)
+		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
 		}
@@ -1870,7 +2056,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	}
 
 	var result []iceberg.DataFile
-	itr := recordsToDataFiles(ctx, t.tbl.Location(), t.meta, recordWritingArgs{
+	itr := recordsToDataFiles(ctx, t.tbl.Location(), meta, recordWritingArgs{
 		sc:          arrowSchema,
 		itr:         releaseIter,
 		fs:          wfs,
@@ -1894,6 +2080,11 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 // record its referenced data file is omitted from the returned paths (it
 // cannot be existence-checked), matching RowDelta.validate and Java.
 func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO, updater *snapshotProducer, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int, commitUUID uuid.UUID) ([]string, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
 	posDeleteRecIter, err := t.makePositionDeleteRecordsForFilter(ctx, fs, files, filter, caseSensitive, concurrency)
 	if err != nil {
 		return nil, err
@@ -1908,11 +2099,38 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		partitionContextByFilePath[df.FilePath()] = partitionContext{partitionData: df.Partition(), specID: df.SpecID()}
 	}
 
-	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, partitionContextByFilePath, recordWritingArgs{
-		sc:        PositionalDeleteArrowSchema,
-		itr:       posDeleteRecIter,
-		writeUUID: &commitUUID,
-		fs:        wfs,
+	// V3 tables store deletes as deletion vectors, and the spec allows at most
+	// one DV per data file. A data file being partially deleted may already
+	// carry a DV from an earlier delete; those existing positions are folded
+	// into the new DV (the incremental deletes) and the superseded DVs are
+	// removed. Without this a second delete on the same file would write a
+	// second live DV, corrupting the table (buildDVIndex rejects it).
+	var (
+		existingDVs       map[string]iceberg.DataFile
+		existingDVBitmaps map[string]*dv.RoaringPositionBitmap
+	)
+	if meta.formatVersion >= 3 {
+		existingDVs, err = t.collectExistingDVs(fs, files)
+		if err != nil {
+			return nil, err
+		}
+
+		existingDVBitmaps = make(map[string]*dv.RoaringPositionBitmap, len(existingDVs))
+		for ref, dvFile := range existingDVs {
+			bitmap, err := dv.ReadDV(fs, dvFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read existing deletion vector for %s: %w", ref, err)
+			}
+			existingDVBitmaps[ref] = bitmap
+		}
+	}
+
+	posDeleteFiles := positionDeleteRecordsToDataFiles(ctx, t.tbl.Location(), meta, partitionContextByFilePath, recordWritingArgs{
+		sc:          PositionalDeleteArrowSchema,
+		itr:         posDeleteRecIter,
+		writeUUID:   &commitUUID,
+		fs:          wfs,
+		existingDVs: existingDVBitmaps,
 	})
 
 	var referenced []string
@@ -1930,10 +2148,71 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 		}
 	}
 
+	// Supersede the old DVs only after the merged replacements are staged, so a
+	// write failure above leaves the existing DVs untouched.
+	for _, dvFile := range existingDVs {
+		updater.removeDeletionVector(dvFile)
+	}
+
 	return referenced, nil
 }
 
+// collectExistingDVs returns the live deletion vectors that reference any of
+// files, keyed by the referenced data file path. Used by the v3 merge-on-read
+// delete path to fold prior deletes into a new DV and remove the superseded
+// entries, preserving the spec's one-DV-per-data-file invariant.
+func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (map[string]iceberg.DataFile, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	s := meta.currentSnapshot()
+	if s == nil {
+		return nil, nil
+	}
+
+	wanted := make(map[string]struct{}, len(files))
+	for _, df := range files {
+		wanted[df.FilePath()] = struct{}{}
+	}
+
+	result := make(map[string]iceberg.DataFile)
+	// Iterate delete manifests only and skip DELETED-status entries: a
+	// superseded DV lingers as a DELETED entry in the deleted-files manifest
+	// against the same referenced data file. Including it here would let the
+	// stale ghost win the last-write into result (manifest concat order places
+	// deleted entries last), seeding the new DV from an outdated bitmap and
+	// resurrecting rows removed by the prior delete. See issue #1372.
+	for entry, err := range s.entries(fs, iceberg.ManifestContentDeletes) {
+		if err != nil {
+			return nil, fmt.Errorf("scanning existing deletion vectors: %w", err)
+		}
+		if entry.Status() == iceberg.EntryStatusDELETED {
+			continue
+		}
+		df := entry.DataFile()
+		if !IsDeletionVector(df) {
+			continue
+		}
+		ref := df.ReferencedDataFile()
+		if ref == nil {
+			continue
+		}
+		if _, ok := wanted[*ref]; ok {
+			result[*ref] = df
+		}
+	}
+
+	return result, nil
+}
+
 func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs io.IO, files []iceberg.DataFile, filter iceberg.BooleanExpression, caseSensitive bool, concurrency int) (seq2 iter.Seq2[arrow.RecordBatch, error], err error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
 	tasks := make([]FileScanTask, 0, len(files))
 	for _, f := range files {
 		tasks = append(tasks, FileScanTask{
@@ -1943,20 +2222,20 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		})
 	}
 
-	boundFilter, err := iceberg.BindExpr(t.meta.CurrentSchema(), filter, caseSensitive)
+	boundFilter, err := iceberg.BindExpr(meta.CurrentSchema(), filter, caseSensitive)
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind filter: %w", err)
 	}
 
-	meta, err := t.meta.Build()
+	builtMeta, err := meta.Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build metadata: %w", err)
 	}
 
 	scanner := &arrowScan{
-		metadata:        meta,
+		metadata:        builtMeta,
 		fs:              fs,
-		projectedSchema: t.meta.CurrentSchema(),
+		projectedSchema: meta.CurrentSchema(),
 		boundRowFilter:  boundFilter,
 		caseSensitive:   caseSensitive,
 		rowLimit:        -1, // No limit
@@ -2020,13 +2299,17 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 }
 
 func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
-	updatedMeta, err := t.meta.Build()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	updatedMeta, err := meta.Build()
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Scan{
-		identifier:       t.tbl.identifier,
+		identifier:       slices.Clone(t.tbl.identifier),
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
@@ -2038,6 +2321,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.tbl.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -2048,7 +2332,11 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 }
 
 func (t *Transaction) StagedTable() (*StagedTable, error) {
-	updatedMeta, err := t.meta.Build()
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	updatedMeta, err := meta.Build()
 	if err != nil {
 		return nil, err
 	}
@@ -2060,13 +2348,22 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			updatedMeta.Location(),
 			t.tbl.fsF,
 			t.tbl.cat,
+			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 		),
 	}, nil
 }
 
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
+	if err := t.checkNotNil(); err != nil {
+		return nil, err
+	}
 	t.mx.Lock()
 	defer t.mx.Unlock()
+
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
 
 	if t.committed {
 		return nil, errors.New("transaction has already been committed")
@@ -2074,9 +2371,9 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 	t.committed = true
 
-	if len(t.meta.updates) > 0 {
-		t.reqs = append(t.reqs, AssertTableUUID(t.meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, t.meta.updates, t.reqs,
+	if len(meta.updates) > 0 {
+		t.reqs = append(t.reqs, AssertTableUUID(meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, meta.updates, t.reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 		)
@@ -2084,7 +2381,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			return tbl, err
 		}
 
-		for _, u := range t.meta.updates {
+		for _, u := range meta.updates {
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
 				err = errors.Join(err, perr)
 			}

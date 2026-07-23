@@ -309,6 +309,31 @@ func TestMetadataV3Parsing(t *testing.T) {
 	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
 }
 
+func TestMetadataEqualsIncludesStatistics(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	base, err := builder.Build()
+	require.NoError(t, err)
+
+	baseV2 := base.(*metadataV2)
+
+	clone := *baseV2
+	assert.True(t, base.Equals(&clone))
+
+	clone.StatisticsList = append(slices.Clone(clone.StatisticsList), StatisticsFile{
+		SnapshotID:     1,
+		StatisticsPath: "s3://bucket/stats.puffin",
+		BlobMetadata:   []BlobMetadata{},
+	})
+	assert.False(t, base.Equals(&clone))
+
+	clone = *baseV2
+	clone.PartitionStatsList = append(slices.Clone(clone.PartitionStatsList), PartitionStatisticsFile{
+		SnapshotID:     1,
+		StatisticsPath: "s3://bucket/partition-stats.parquet",
+	})
+	assert.False(t, base.Equals(&clone))
+}
+
 func TestMetadataV3Builder(t *testing.T) {
 	// Test creating v3 metadata with builder
 	schema := iceberg.NewSchema(0,
@@ -778,6 +803,22 @@ func TestNewMetadataWithExplicitV1Format(t *testing.T) {
 	}
 
 	assert.Truef(t, expected.Equals(actual), "expected: %s\ngot: %s", expected, actual)
+}
+
+func TestNewMetadataRejectInvalidFormatVersion(t *testing.T) {
+	props := iceberg.Properties{
+		"format-version": "banana",
+		"foo":            "bar",
+	}
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "x", Type: iceberg.PrimitiveTypes.Int64})
+
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "s3://bucket/path", props)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidFormatVersion)
+	assert.Nil(t, metadata)
+	assert.Equal(t, "banana", props["format-version"])
+	assert.Equal(t, "bar", props["foo"])
+	assert.Len(t, props, 2)
 }
 
 func TestNewMetadataV2Format(t *testing.T) {

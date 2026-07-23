@@ -91,6 +91,7 @@ type UpdateSchema struct {
 	txn          *Transaction
 	schema       *iceberg.Schema
 	lastColumnID int
+	err          error
 
 	deletes map[int]struct{}
 	updates map[int]map[int]iceberg.NestedField
@@ -136,12 +137,6 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 	u := &UpdateSchema{
 		txn:    txn,
 		schema: nil,
-		// Seed from metadata's last-column-id rather than the current schema's
-		// highest field id. Per the Iceberg spec, last-column-id is a monotonic
-		// counter that preserves ids across schema evolution (including
-		// deletions) so that newly-allocated ids never collide with ids still
-		// referenced by historical schemas.
-		lastColumnID: txn.meta.LastColumnID(),
 
 		deletes: make(map[int]struct{}),
 		updates: make(map[int]map[int]iceberg.NestedField),
@@ -158,6 +153,25 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 		ops:                      make([]func() error, 0),
 	}
 
+	if txn == nil {
+		u.err = fmt.Errorf("%w: transaction is nil", ErrInvalidMetadata)
+
+		return u
+	}
+	meta, err := txn.txnMeta()
+	if err != nil {
+		u.err = err
+
+		return u
+	}
+
+	// Seed from metadata's last-column-id rather than the current schema's
+	// highest field id. Per the Iceberg spec, last-column-id is a monotonic
+	// counter that preserves ids across schema evolution (including
+	// deletions) so that newly-allocated ids never collide with ids still
+	// referenced by historical schemas.
+	u.lastColumnID = meta.LastColumnID()
+
 	for _, opt := range opts {
 		opt(u)
 	}
@@ -166,14 +180,15 @@ func NewUpdateSchema(txn *Transaction, caseSensitive bool, allowIncompatibleChan
 }
 
 func (u *UpdateSchema) init() error {
-	if u.txn == nil {
-		return errors.New("transaction is nil")
+	if u.err != nil {
+		return u.err
 	}
-	if u.txn.meta == nil {
-		return errors.New("transaction meta is nil")
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return err
 	}
 
-	u.schema = u.txn.meta.CurrentSchema()
+	u.schema = meta.CurrentSchema()
 	if u.schema == nil {
 		return errors.New("current schema is nil")
 	}
@@ -617,13 +632,22 @@ func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
 }
 
 func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
+	if u.err != nil {
+		return nil, nil, u.err
+	}
+
 	newSchema, err := u.Apply()
 	if err != nil {
 		return nil, nil, err
 	}
 
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	existingSchemaID := -1
-	for _, schema := range u.txn.meta.schemaList {
+	for _, schema := range meta.schemaList {
 		if newSchema.Equals(schema) {
 			existingSchemaID = schema.ID
 
@@ -671,6 +695,10 @@ func (u *UpdateSchema) BuildUpdates() ([]Update, []Requirement, error) {
 }
 
 func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
+	if u.err != nil {
+		return nil, u.err
+	}
+
 	if err := u.init(); err != nil {
 		return nil, err
 	}
@@ -711,9 +739,14 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
 
+	meta, err := u.txn.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
 	nextSchemaID := 1
-	if len(u.txn.meta.schemaList) > 0 {
-		nextSchemaID = 1 + slices.MaxFunc(u.txn.meta.schemaList, func(a, b *iceberg.Schema) int {
+	if len(meta.schemaList) > 0 {
+		nextSchemaID = 1 + slices.MaxFunc(meta.schemaList, func(a, b *iceberg.Schema) int {
 			return a.ID - b.ID
 		}).ID
 	}
@@ -722,6 +755,10 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 }
 
 func (u *UpdateSchema) Commit() error {
+	if u.err != nil {
+		return u.err
+	}
+
 	updates, requirements, err := u.BuildUpdates()
 	if err != nil {
 		return err
@@ -830,6 +867,21 @@ func (a *applyChanges) Field(field iceberg.NestedField, fieldResult iceberg.Type
 	return fieldResult
 }
 
+// updateColumn seeds each pending update from a copy of the original
+// NestedField. As a result, updates that only modify other properties
+// still preserve the original Required value here.
+//
+// Note: If updateColumn is refactored to lazily populate only the
+// touched fields, this helper must gain an explicit "Required was set"
+// signal or it will silently return the zero-value false.
+func (a *applyChanges) updatedRequired(fieldID int, fallback bool) bool {
+	if update, ok := a.updates[fieldID]; ok {
+		return update.Required
+	}
+
+	return fallback
+}
+
 func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Type) iceberg.Type {
 	elementType := a.Field(listType.ElementField(), elementResult)
 	if elementType == nil {
@@ -839,7 +891,7 @@ func (a *applyChanges) List(listType iceberg.ListType, elementResult iceberg.Typ
 	return &iceberg.ListType{
 		ElementID:       listType.ElementID,
 		Element:         elementType,
-		ElementRequired: listType.ElementRequired,
+		ElementRequired: a.updatedRequired(listType.ElementID, listType.ElementRequired),
 	}
 }
 
@@ -873,7 +925,7 @@ func (a *applyChanges) Map(mapType iceberg.MapType, keyResult, valueResult icebe
 		KeyType:       mapType.KeyType,
 		ValueID:       mapType.ValueID,
 		ValueType:     valueType,
-		ValueRequired: mapType.ValueRequired,
+		ValueRequired: a.updatedRequired(mapType.ValueID, mapType.ValueRequired),
 	}
 }
 

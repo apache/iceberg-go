@@ -27,7 +27,6 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
-	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -106,14 +105,17 @@ func isFloatingPointType(typ iceberg.Type) bool {
 //	rd.AddDeletes(deleteFiles...)
 //	err = rd.Commit(ctx)
 func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs []int, records iter.Seq2[arrow.RecordBatch, error]) ([]iceberg.DataFile, error) {
-	ctx = tblutils.WithTableProperties(ctx, t.meta.props)
-
-	if t.meta.formatVersion < 2 {
-		return nil, fmt.Errorf("equality deletes require table format version >= 2, got v%d",
-			t.meta.formatVersion)
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
 	}
 
-	deleteSchema, err := equalityDeleteSchema(t.meta.CurrentSchema(), equalityFieldIDs)
+	if meta.formatVersion < 2 {
+		return nil, fmt.Errorf("equality deletes require table format version >= 2, got v%d",
+			meta.formatVersion)
+	}
+
+	deleteSchema, err := equalityDeleteSchema(meta.CurrentSchema(), equalityFieldIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +130,7 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		return nil, err
 	}
 
-	arrowSc, err := schemaToArrowSchemaWithContext(ctx, deleteSchema, nil, true, false)
+	arrowSc, err := SchemaToArrowSchema(deleteSchema, nil, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +148,7 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		counter:   internal.Counter(0),
 	}
 
-	dataFiles, err := equalityDeleteRecordsToDataFiles(ctx, t.tbl.Location(), t.meta, deleteSchema, equalityFieldIDs, args)
+	dataFiles, err := equalityDeleteRecordsToDataFiles(ctx, t.tbl.Location(), meta, deleteSchema, equalityFieldIDs, args)
 	if err != nil {
 		return nil, err
 	}

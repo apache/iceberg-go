@@ -173,7 +173,7 @@ func TestLoadRegisteredCatalogAcceptsValidAuthURL(t *testing.T) {
 
 	restCat, ok := cat.(*Catalog)
 	require.True(t, ok)
-	assert.Equal(t, authURL, restCat.props[keyAuthUrl])
+	assert.Equal(t, authURL, restCat.props[keyOAuth2ServerURI])
 }
 
 func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
@@ -189,7 +189,7 @@ func TestNewCatalogRejectsInvalidAuthURLFromConfig(t *testing.T) {
 			name:    "malformed URL in defaults",
 			section: "defaults",
 			authURL: "http://[::1",
-			wantErr: "invalid rest.authorization-url",
+			wantErr: "invalid oauth2-server-uri",
 		},
 		{
 			name:    "scheme-less URL in overrides",
@@ -248,7 +248,105 @@ func TestNewCatalogAcceptsValidAuthURLFromConfig(t *testing.T) {
 
 	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
 	require.NoError(t, err)
-	assert.Equal(t, authURL, cat.props[keyAuthUrl])
+	assert.Equal(t, authURL, cat.props[keyOAuth2ServerURI])
+}
+
+func TestOAuthServerURIProps(t *testing.T) {
+	t.Parallel()
+
+	const (
+		serverURI = "https://auth.example.com/oauth/tokens"
+		authURL   = "https://legacy.example.com/v1/oauth/tokens"
+	)
+
+	t.Run("oauth2-server-uri configures the token endpoint", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyOAuth2ServerURI: serverURI}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("rest.authorization-url still works as an alias", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{keyAuthUrl: authURL}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, authURL, opts.authUri.String())
+	})
+
+	t.Run("oauth2-server-uri takes precedence when both are set", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		require.NotNil(t, opts.authUri)
+		assert.Equal(t, serverURI, opts.authUri.String())
+	})
+
+	t.Run("neither key leaves the endpoint unset for fallback", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{}, &opts))
+		assert.Nil(t, opts.authUri)
+	})
+
+	t.Run("neither key is retained as an additional prop", func(t *testing.T) {
+		t.Parallel()
+
+		var opts options
+		require.NoError(t, fromProps(iceberg.Properties{
+			keyAuthUrl:         authURL,
+			keyOAuth2ServerURI: serverURI,
+		}, &opts))
+		_, hasAuthURL := opts.additionalProps[keyAuthUrl]
+		_, hasServerURI := opts.additionalProps[keyOAuth2ServerURI]
+		assert.False(t, hasAuthURL)
+		assert.False(t, hasServerURI)
+	})
+
+	t.Run("invalid oauth2-server-uri is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tt := range []struct {
+			name    string
+			uri     string
+			wantErr string
+		}{
+			{"malformed URL", "http://[::1", "invalid oauth2-server-uri"},
+			{"missing scheme", "auth.example.com/token", "missing scheme"},
+			{"missing host", "https://", "missing host"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				var opts options
+				err := fromProps(iceberg.Properties{keyOAuth2ServerURI: tt.uri}, &opts)
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantErr)
+			})
+		}
+	})
+
+	t.Run("toProps serializes under the portable oauth2-server-uri key", func(t *testing.T) {
+		t.Parallel()
+
+		u, err := url.Parse(serverURI)
+		require.NoError(t, err)
+
+		props := toProps(&options{authUri: u})
+		assert.Equal(t, serverURI, props[keyOAuth2ServerURI])
+		// Only the portable key is emitted; the legacy rest.authorization-url
+		// alias is not, to avoid carrying the endpoint under two names.
+		_, hasLegacy := props[keyAuthUrl]
+		assert.False(t, hasLegacy)
+	})
 }
 
 func TestTokenAuthenticationPriority(t *testing.T) {
@@ -815,6 +913,111 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func TestRoundTripDefaultHeaderHandling(t *testing.T) {
+	t.Parallel()
+
+	newSession := func(captured *http.Header) *sessionTransport {
+		s := &sessionTransport{
+			RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				*captured = r.Header.Clone()
+
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}),
+			defaultHeaders: http.Header{},
+		}
+		s.defaultHeaders.Set(headerIcebergAccessDelegation, defaultAccessDelegation)
+
+		return s
+	}
+
+	t.Run("applies default when absent", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{defaultAccessDelegation}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("per-request value overrides default without duplicating", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		req.Header.Set(headerIcebergAccessDelegation, "remote-signing")
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"remote-signing"}, got.Values(headerIcebergAccessDelegation))
+	})
+
+	t.Run("context suppression drops the default", func(t *testing.T) {
+		t.Parallel()
+
+		var got http.Header
+		ctx := withSuppressedHeadersCtx(context.Background(), []string{headerIcebergAccessDelegation})
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+		require.NoError(t, err)
+		_, err = newSession(&got).RoundTrip(req)
+		require.NoError(t, err)
+		assert.Empty(t, got.Values(headerIcebergAccessDelegation))
+	})
+}
+
+// staticAuthManager is a test AuthManager returning a fixed authorization header.
+type staticAuthManager struct {
+	key, value string
+}
+
+func (s staticAuthManager) AuthHeader() (string, string, error) { return s.key, s.value, nil }
+
+func TestRoundTripAuthManagerWinsOverPerRequestHeader(t *testing.T) {
+	t.Parallel()
+
+	// The generalized per-request override lets withHeaders replace a session
+	// default of the same key, but the managed Authorization header must still
+	// win: authManager runs after the default-header loop and Set-overwrites, so
+	// a caller cannot suppress or spoof it via withHeaders. This pins that
+	// ordering, which is load-bearing but otherwise implicit.
+	var got http.Header
+	s := &sessionTransport{
+		RoundTripper: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = r.Header.Clone()
+
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+		defaultHeaders: http.Header{},
+		authManager:    staticAuthManager{key: "Authorization", value: "Bearer managed-token"},
+	}
+
+	req, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer caller-supplied")
+
+	_, err = s.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer managed-token"}, got.Values("Authorization"))
+}
+
+func TestReqOptionsCompose(t *testing.T) {
+	t.Parallel()
+
+	cfg := newReqConfig([]reqOption{
+		withHeaders(map[string]string{"X-First": "one"}),
+		withHeaders(map[string]string{"X-Second": "two"}),
+		withSuppressedHeaders("X-First"),
+		withSuppressedHeaders("X-Second", "X-Third"),
+	})
+
+	assert.Equal(t, map[string]string{
+		"X-First":  "one",
+		"X-Second": "two",
+	}, cfg.headers)
+	assert.Equal(t, []string{"X-First", "X-Second", "X-Third"}, cfg.suppressHeaders)
+}
+
 type closeTrackingReadCloser struct {
 	*bytes.Reader
 	closeErr error
@@ -1116,22 +1319,22 @@ func TestResponseBodyLeak(t *testing.T) {
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil, false)
+		_, err = do[struct{}](context.Background(), http.MethodGet, baseURI, []string{"test"}, client, nil)
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,
 			"response body should be closed on non-200 status")
 	})
 
-	t.Run("doPostAllowNoContent", func(t *testing.T) {
+	t.Run("doPost", func(t *testing.T) {
 		tracker := &trackingTransport{transport: http.DefaultTransport}
 		client := &http.Client{Transport: tracker}
 
 		baseURI, err := url.Parse(srv.URL)
 		require.NoError(t, err)
 
-		_, err = doPostAllowNoContent[map[string]string, struct{}](
-			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, false)
+		_, err = doPost[map[string]string, struct{}](
+			context.Background(), baseURI, []string{"test"}, map[string]string{"key": "value"}, client, nil, allowNoContent())
 		require.Error(t, err)
 
 		assert.True(t, tracker.body.closed,
@@ -1146,7 +1349,7 @@ func TestHandleNon200_DecodeFlatMessagePreservesSentinel(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"message":"flat error"}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "flat error", err.Error())
 	require.True(t, errors.Is(err, ErrBadRequest))
@@ -1159,7 +1362,7 @@ func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
 		Body:          io.NopCloser(bytes.NewBufferString(`{"error":{"message":"nested error","type":"ValidationException"}}`)),
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.Equal(t, "ValidationException: nested error", err.Error())
 	require.True(t, errors.Is(err, ErrForbidden))
@@ -1172,11 +1375,101 @@ func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
 		Body:          http.NoBody,
 	}
 
-	err := handleNon200(rsp, nil)
+	err := handleNon200(rsp, nil, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrBadRequest))
 	require.Equal(t, ErrBadRequest.Error(), err.Error())
 	require.NotEqual(t, ": ", err.Error())
+}
+
+func TestHandleNon200_CapturesStatusAndRetryAfter(t *testing.T) {
+	body := `{"error":{"message":"busy","type":"ServiceUnavailable"}}`
+	rsp := &http.Response{
+		StatusCode:    http.StatusServiceUnavailable,
+		Header:        http.Header{"Retry-After": {"3"}},
+		ContentLength: int64(len(body)),
+		Body:          io.NopCloser(bytes.NewBufferString(body)),
+	}
+
+	err := handleNon200(rsp, nil, nil)
+
+	var restErr errorResponse
+	require.ErrorAs(t, err, &restErr)
+	require.Equal(t, http.StatusServiceUnavailable, restErr.statusCode)
+	require.Equal(t, "3", restErr.retryAfter)
+	require.ErrorIs(t, err, ErrServiceUnavailable)
+}
+
+func TestHandleNon200_PreservesStatusOnMalformedBody(t *testing.T) {
+	// A non-JSON error page must still carry the HTTP status (so a poller can apply
+	// transport-level retry policy) and stay classified as ErrRESTError.
+	rsp := &http.Response{
+		StatusCode:    http.StatusBadGateway,
+		Header:        http.Header{"Retry-After": {"5"}},
+		ContentLength: int64(len("not json")),
+		Body:          io.NopCloser(bytes.NewBufferString("not json")),
+	}
+
+	err := handleNon200(rsp, nil, nil)
+
+	var restErr errorResponse
+	require.ErrorAs(t, err, &restErr)
+	require.Equal(t, http.StatusBadGateway, restErr.statusCode)
+	require.Equal(t, "5", restErr.retryAfter)
+	require.ErrorIs(t, err, ErrRESTError)
+}
+
+func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
+	t.Parallel()
+
+	sentinelByType := errors.New("mapped by type")
+	sentinelByStatus := errors.New("mapped by status")
+	typeOverride := map[string]error{"NoSuchThingException": sentinelByType}
+	statusOverride := map[int]error{http.StatusNotFound: sentinelByStatus}
+
+	newRsp := func(status int, body string) *http.Response {
+		return &http.Response{
+			StatusCode:    status,
+			ContentLength: int64(len(body)),
+			Body:          io.NopCloser(bytes.NewBufferString(body)),
+		}
+	}
+
+	t.Run("error.type override wins over status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"NoSuchThingException","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
+
+	t.Run("unmatched error.type falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		err := handleNon200(newRsp(http.StatusNotFound, `{"error":{"type":"SomethingElse","message":"gone"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("empty body falls through to status override", func(t *testing.T) {
+		t.Parallel()
+
+		rsp := &http.Response{StatusCode: http.StatusNotFound, ContentLength: 0, Body: http.NoBody}
+		err := handleNon200(rsp, statusOverride, typeOverride)
+		require.ErrorIs(t, err, sentinelByStatus)
+		assert.NotErrorIs(t, err, sentinelByType)
+	})
+
+	t.Run("type override ignored on an unmapped status", func(t *testing.T) {
+		t.Parallel()
+
+		// The error.type values are defined for 404 in the spec; a 503 carrying
+		// one must resolve on status (ErrServiceUnavailable), not a 404 sentinel.
+		err := handleNon200(newRsp(http.StatusServiceUnavailable, `{"error":{"type":"NoSuchThingException","message":"down"}}`), statusOverride, typeOverride)
+		require.ErrorIs(t, err, ErrServiceUnavailable)
+		assert.NotErrorIs(t, err, sentinelByType)
+		assert.NotErrorIs(t, err, sentinelByStatus)
+	})
 }
 
 func TestErrorResponse_ErrorFormattingTypeAndMessage(t *testing.T) {
@@ -1348,6 +1641,171 @@ func TestFetchConfigTokenOverrideKeepsCallerToken(t *testing.T) {
 
 	assert.Equal(t, "Bearer caller-token", configAuthHeader)
 	assert.Equal(t, "caller-token", cat.props[keyOauthToken])
+}
+
+func TestConfigOverrideHeadersApplyToCatalogRequests(t *testing.T) {
+	t.Parallel()
+
+	const (
+		headerName  = "X-Config-Override"
+		headerValue = "required"
+	)
+	var configHeader, catalogHeader string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		configHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			"overrides": map[string]any{
+				"header." + headerName: headerValue,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, r *http.Request) {
+		catalogHeader = r.Header.Get(headerName)
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": [][]string{}})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL)
+	require.NoError(t, err)
+	_, err = cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, configHeader)
+	assert.Equal(t, headerValue, catalogHeader)
+}
+
+type closeTrackingTransport struct {
+	http.RoundTripper
+	closed atomic.Bool
+}
+
+func (t *closeTrackingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.RoundTripper == nil {
+		return nil, errors.New("unexpected request")
+	}
+
+	return t.RoundTripper.RoundTrip(req)
+}
+
+func (t *closeTrackingTransport) CloseIdleConnections() {
+	t.closed.Store(true)
+}
+
+func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	_, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	assert.False(t, base.closed.Load(), "user-provided transports must not be closed during bootstrap")
+}
+
+func TestFetchConfigClosesOwnedOAuthTransportWithoutClosingCustomTransport(t *testing.T) {
+	catalogMux := http.NewServeMux()
+	catalogSrv := httptest.NewServer(catalogMux)
+	defer catalogSrv.Close()
+
+	catalogMux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	oauthClosed := make(chan struct{}, 1)
+	oauthMux := http.NewServeMux()
+	oauthMux.HandleFunc("/oauth/tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok",
+			"token_type":   "Bearer",
+			"expires_in":   86400,
+		})
+	})
+	oauthSrv := httptest.NewUnstartedServer(oauthMux)
+	oauthSrv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case oauthClosed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	oauthSrv.StartTLS()
+	defer oauthSrv.Close()
+
+	authURI, err := url.Parse(oauthSrv.URL + "/oauth/tokens")
+	require.NoError(t, err)
+	oauthTransport, ok := oauthSrv.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	_, err = NewCatalog(context.Background(), "rest", catalogSrv.URL,
+		WithCustomTransport(base),
+		WithCredential("secret"),
+		WithAuthURI(authURI),
+		WithOAuthTLSConfig(oauthTransport.TLSClientConfig.Clone()),
+	)
+	require.NoError(t, err)
+	assert.False(t, base.closed.Load(), "user-provided transports must not be closed during bootstrap")
+
+	select {
+	case <-oauthClosed:
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap OAuth connection was not closed")
+	}
+}
+
+func TestFetchConfigAuthURLOverridePrecedence(t *testing.T) {
+	t.Parallel()
+
+	const overrideAuthURL = "https://override.example.com/token"
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// The server overrides the token endpoint via the legacy alias while
+			// the client supplied oauth2-server-uri; the override must win.
+			"overrides": map[string]any{
+				keyAuthUrl: overrideAuthURL,
+			},
+			"endpoints": AllEndpointStrings,
+		})
+	})
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL,
+		WithAuthURI(mustParseURL(t, "https://client.example.com/token")))
+	require.NoError(t, err)
+
+	assert.Equal(t, overrideAuthURL, cat.props[keyOAuth2ServerURI])
+	_, hasLegacy := cat.props[keyAuthUrl]
+	assert.False(t, hasLegacy)
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+
+	return u
 }
 
 func TestEncodeNamespace(t *testing.T) {

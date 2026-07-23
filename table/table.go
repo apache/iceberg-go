@@ -38,6 +38,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
@@ -75,9 +76,9 @@ func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
 	return wfs, nil
 }
 
-// ErrSnapshotNotFound is returned (wrapped) by metadata lookups and by
-// computeOwnManifests when a snapshot ID does not exist in the table's
-// snapshot list. Tests pin meaning via errors.Is(err, ErrSnapshotNotFound).
+// ErrSnapshotNotFound is returned (wrapped) by metadata lookups when a
+// snapshot ID does not exist in the table's snapshot list. Tests pin meaning
+// via errors.Is(err, ErrSnapshotNotFound).
 var ErrSnapshotNotFound = errors.New("snapshot not found")
 
 type FSysF func(ctx context.Context) (icebergio.IO, error)
@@ -96,6 +97,12 @@ type Table struct {
 	cat              CatalogIO
 	fsF              FSysF
 	planner          ScanPlanner
+	reporter         metrics.Reporter
+	// reporterSet records whether a caller injected a reporter via
+	// WithMetricsReporter. It distinguishes an explicit reporter (including an
+	// explicit NopReporter opt-out) from the construction-time default, so
+	// Refresh knows whether it may overwrite reporter with the catalog default.
+	reporterSet bool
 }
 
 func (t Table) Equals(other Table) bool {
@@ -104,7 +111,7 @@ func (t Table) Equals(other Table) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t Table) Identifier() Identifier                       { return t.identifier }
+func (t Table) Identifier() Identifier                       { return slices.Clone(t.identifier) }
 func (t Table) Metadata() Metadata                           { return t.metadata }
 func (t Table) MetadataLocation() string                     { return t.metadataLocation }
 func (t Table) FS(ctx context.Context) (icebergio.IO, error) { return t.fsF(ctx) }
@@ -112,11 +119,20 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
-func (t Table) NameMapping() iceberg.NameMapping             { return t.metadata.NameMapping() }
-func (t Table) Location() string                             { return t.metadata.Location() }
-func (t Table) CurrentSnapshot() *Snapshot                   { return t.metadata.CurrentSnapshot() }
-func (t Table) SnapshotByID(id int64) *Snapshot              { return t.metadata.SnapshotByID(id) }
-func (t Table) SnapshotByName(name string) *Snapshot         { return t.metadata.SnapshotByName(name) }
+
+// MetricsReporter returns the table's metrics reporter, never nil.
+func (t Table) MetricsReporter() metrics.Reporter {
+	if t.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return t.reporter
+}
+func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
+func (t Table) Location() string                     { return t.metadata.Location() }
+func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
+func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
+func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {
@@ -131,24 +147,57 @@ func (t Table) LocationProvider() (LocationProvider, error) {
 }
 
 func (t Table) NewTransaction() *Transaction {
-	return t.NewTransactionOnBranch(MainBranch)
+	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	if err != nil {
+		return t.newBrokenTransaction(MainBranch, err)
+	}
+
+	return txn
 }
 
 // NewTransactionOnBranch creates a new transaction that commits to the named
 // branch. Use [NewTransaction] to commit to the default "main" branch.
 func (t Table) NewTransactionOnBranch(branch string) *Transaction {
-	meta, _ := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	txn, err := t.NewTransactionOnBranchWithError(branch)
+	if err != nil {
+		return t.newBrokenTransaction(branch, err)
+	}
 
+	return txn
+}
+
+func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 	return &Transaction{
-		tbl:    &t,
-		meta:   meta,
-		branch: branch,
-		reqs:   []Requirement{},
+		tbl:     &t,
+		initErr: err,
+		branch:  branch,
+		reqs:    []Requirement{},
 	}
 }
 
+// NewTransactionOnBranchWithError creates a new transaction and returns any metadata
+// initialization error that prevents builder construction.
+//
+// This preserves the old non-failing constructor contract while allowing
+// callers to receive the precise initialization error instead of hitting
+// panic/undefined behavior later.
+func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Transaction{
+		tbl:     &t,
+		meta:    meta,
+		branch:  branch,
+		reqs:    []Requirement{},
+		initErr: nil,
+	}, nil
+}
+
 func (t *Table) Refresh(ctx context.Context) error {
-	fresh, err := t.cat.LoadTable(ctx, t.identifier)
+	fresh, err := t.cat.LoadTable(ctx, slices.Clone(t.identifier))
 	if err != nil {
 		return err
 	}
@@ -157,6 +206,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.planner = fresh.planner
+	// Only inherit the catalog-derived reporter when the caller hasn't set one
+	// of their own. Refresh runs inside commit retry loops, so unconditionally
+	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
+	// reporter to the catalog default mid-operation. reporterSet distinguishes an
+	// explicit reporter — including an explicit NopReporter opt-out — from the
+	// construction-time default.
+	if !t.reporterSet {
+		t.reporter = fresh.reporter
+	}
 
 	return nil
 }
@@ -476,7 +534,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// the new branch head so re-submission is not rejected
 			// just because a peer advanced the head with a
 			// non-conflicting commit.
-			fresh, refreshErr := t.cat.LoadTable(retryCtx, t.identifier)
+			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
@@ -532,7 +590,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			return nil, context.Cause(retryCtx)
 		}
 
-		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, t.identifier, reqs, updates)
+		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
 			break
 		}
@@ -549,13 +607,28 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
+	// Inner data manifests written by superseded retry attempts (a rewrite
+	// re-merges everything on each retry) are orphaned objects. On a safe
+	// exhausted-ErrCommitFailed failure (err != nil here) nothing committed, so
+	// the accumulator also folds in the final attempt's manifests. On success
+	// the committed snapshot references those, so they are excluded. The defer
+	// skips cleanup only on the unsafe non-ErrCommitFailed path, which returned
+	// above with cleanupOrphans = false.
+	for _, u := range updates {
+		su, ok := u.(*addSnapshotUpdate)
+		if !ok || su.supersededSource == nil {
+			continue
+		}
+		orphanedManifests = append(orphanedManifests, su.supersededSource.supersededManifests(err == nil)...)
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -647,6 +720,7 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 			Snapshot:            newSnap,
 			ownManifests:        su.ownManifests,
 			rebuildManifestList: su.rebuildManifestList,
+			supersededSource:    su.supersededSource,
 		}
 
 		// The old manifest list is now an orphaned object in object storage.
@@ -817,9 +891,9 @@ func WithLimit(n int64) ScanOption {
 	}
 }
 
-// WitMaxConcurrency sets the maximum concurrency for table scan and plan
+// WithMaxConcurrency sets the maximum concurrency for table scan and plan
 // operations. When unset it defaults to runtime.GOMAXPROCS.
-func WitMaxConcurrency(n int) ScanOption {
+func WithMaxConcurrency(n int) ScanOption {
 	if n <= 0 {
 		return noopOption
 	}
@@ -829,6 +903,14 @@ func WitMaxConcurrency(n int) ScanOption {
 	}
 }
 
+// WitMaxConcurrency is a deprecated alias for [WithMaxConcurrency], kept for
+// backward compatibility with the pre-existing typo'd name.
+//
+// Deprecated: use [WithMaxConcurrency].
+func WitMaxConcurrency(n int) ScanOption {
+	return WithMaxConcurrency(n)
+}
+
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption
@@ -836,6 +918,19 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 
 	return func(scan *Scan) {
 		scan.options = maps.Clone(opts)
+	}
+}
+
+// WithReporter overrides the metrics reporter for a single scan, taking
+// precedence over the reporter inherited from the table. A nil reporter is
+// ignored.
+func WithReporter(r metrics.Reporter) ScanOption {
+	if r == nil {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.reporter = r
 	}
 }
 
@@ -852,7 +947,7 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		identifier:       t.identifier,
+		identifier:       slices.Clone(t.identifier),
 		metadata:         t.metadata,
 		metadataLocation: t.metadataLocation,
 		ioF:              t.fsF,
@@ -864,6 +959,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -873,28 +969,70 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
+// Option configures a [Table] at construction. Options are applied in order
+// after the core fields are set.
+type Option func(*Table)
+
+// noopTableOption is the shared no-op [Option], returned when an option has
+// nothing to apply (e.g. WithMetricsReporter(nil)). It mirrors noopOption on
+// the ScanOption side.
+func noopTableOption(*Table) {}
+
+// WithMetricsReporter sets the metrics reporter for the table; scans created
+// from the table inherit it. A nil reporter is ignored (the table keeps its
+// default no-op reporter).
+func WithMetricsReporter(r metrics.Reporter) Option {
+	if r == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = true
+	}
+}
+
+// withReporterState copies both the reporter and the reporterSet flag verbatim.
+// Unlike WithMetricsReporter it does not force reporterSet true, so a table
+// riding the catalog default (reporterSet == false) stays defaulted across a
+// New(...) rebuild instead of being frozen to its current reporter. Used by
+// doCommit and StagedTable to carry reporter state without breaking the Refresh
+// inheritance invariant — WithMetricsReporter cannot be used there because
+// MetricsReporter() is never nil, so it would always mark the table caller-set.
+func withReporterState(r metrics.Reporter, set bool) Option {
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = set
+	}
+}
+
 // New constructs a Table. If cat implements ScanPlanner — as rest.Catalog does
 // for servers that support remote scan planning — it is wired as the table's
 // planner so (*Scan).PlanFiles can delegate to it; catalogs that do not
 // implement ScanPlanner leave planner nil and planning stays local. This is the
-// concrete Catalog -> Table -> Scan wiring for #1178: no New signature change
-// and no catalog accessor are needed, because the catalog already satisfies
-// ScanPlanner.
-func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
+// concrete Catalog -> Table -> Scan wiring for #1178: the catalog already
+// satisfies ScanPlanner, so no catalog accessor is needed.
+func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO, opts ...Option) *Table {
 	// A catalog that supports server-side scan planning implements ScanPlanner.
 	var planner ScanPlanner
 	if p, ok := cat.(ScanPlanner); ok {
 		planner = p
 	}
 
-	return &Table{
-		identifier:       ident,
+	t := &Table{
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
 		cat:              cat,
 		planner:          planner,
+		reporter:         metrics.NopReporter{},
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+
+	return t
 }
 
 func NewFromLocation(
@@ -903,6 +1041,7 @@ func NewFromLocation(
 	metalocation string,
 	fsysF FSysF,
 	cat CatalogIO,
+	opts ...Option,
 ) (_ *Table, err error) {
 	var meta Metadata
 
@@ -955,7 +1094,7 @@ func NewFromLocation(
 		}
 	}
 
-	return New(ident, meta, metalocation, fsysF, cat), nil
+	return New(ident, meta, metalocation, fsysF, cat, opts...), nil
 }
 
 func metadataCompressionCodec(location string) string {

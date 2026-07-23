@@ -225,8 +225,6 @@ func newConcurrentDataFileWriter(newDataFileWriter dataFileWriterMaker, opts ...
 }
 
 func (w *concurrentDataFileWriter) writeFiles(ctx context.Context, rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, partitionValues map[int]any, tasks iter.Seq[WriteTask]) iter.Seq2[iceberg.DataFile, error] {
-	ctx = internal.WithTableProperties(ctx, props)
-
 	fileSchema := meta.CurrentSchema()
 	if w.sanitizeSchema {
 		sanitized, err := iceberg.SanitizeColumnNames(fileSchema)

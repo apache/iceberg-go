@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"encoding/binary"
 	"math"
 	"strconv"
 	"testing"
@@ -389,6 +390,14 @@ func TestDecimalToDecimalConversion(t *testing.T) {
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 3)")
 }
 
+func TestDecimalLiteralTypeDoesNotPanicForLargeScale(t *testing.T) {
+	lit := iceberg.DecimalLiteral{Scale: 10, Val: decimal128.FromI64(1234)}
+
+	assert.NotPanics(t, func() {
+		assert.NotNil(t, lit.Type())
+	})
+}
+
 func TestDecimalLiteralConversions(t *testing.T) {
 	n1 := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	n2 := iceberg.Decimal{Val: decimal128.FromI64(math.MaxInt32 + 1), Scale: 0}
@@ -604,6 +613,92 @@ func TestVariantLiteralFromBytes(t *testing.T) {
 	assert.ErrorContains(t, err, "variant")
 }
 
+// geoCoords encodes coordinate values as little-endian float64s, matching the
+// Iceberg geospatial single-value bound serialization (spec Appendix D).
+func geoCoords(vals ...float64) []byte {
+	b := make([]byte, 0, len(vals)*8)
+	for _, v := range vals {
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
+		b = append(b, buf[:]...)
+	}
+
+	return b
+}
+
+func TestGeoLiteralFromBytes(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	xy := geoCoords(1.5, 2.5)
+	lit, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+
+	// Type() must report the real geo type, not plain binary, so callers that
+	// key off the literal's own type don't misroute it.
+	assert.True(t, geom.Equals(lit.Type()), "got %s", lit.Type())
+	assert.False(t, iceberg.PrimitiveTypes.Binary.Equals(lit.Type()))
+
+	g, ok := lit.(iceberg.GeoLiteral)
+	require.True(t, ok, "expected GeoLiteral, got %T", lit)
+	assert.Equal(t, xy, g.Value())
+
+	// A geo literal is deliberately not orderable: it must not satisfy the
+	// []byte TypedLiteral that the pruning comparators dispatch on.
+	_, isComparable := lit.(iceberg.TypedLiteral[[]byte])
+	assert.False(t, isComparable, "GeoLiteral must not expose a []byte Comparator")
+}
+
+func TestGeoLiteralToRejectsOrdering(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	lit, err := iceberg.LiteralFromBytes(geom, geoCoords(1, 2))
+	require.NoError(t, err)
+
+	// Identity cast is allowed; casting to anything orderable must fail so a
+	// geo bound can never be smuggled into a comparison.
+	same, err := lit.To(geom)
+	require.NoError(t, err)
+	assert.True(t, lit.Equals(same))
+
+	_, err = lit.To(iceberg.PrimitiveTypes.Binary)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+}
+
+func TestGeoLiteralFromBytesInvalidLength(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	// 8 bytes is a single coordinate; a valid bound needs at least X and Y.
+	_, err = iceberg.LiteralFromBytes(geom, geoCoords(1))
+	assert.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+}
+
+func TestGeoLiteralEquals(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4326", "karney")
+	require.NoError(t, err)
+
+	xy := geoCoords(1, 2)
+	a, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+	b, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+	assert.True(t, a.Equals(b))
+
+	// Same coordinate bytes but a different geo type are not equal.
+	c, err := iceberg.LiteralFromBytes(geog, xy)
+	require.NoError(t, err)
+	assert.False(t, a.Equals(c))
+
+	// Different coordinates are not equal.
+	d, err := iceberg.LiteralFromBytes(geom, geoCoords(3, 4))
+	require.NoError(t, err)
+	assert.False(t, a.Equals(d))
+}
+
 func TestVariantLiteralLargeArray(t *testing.T) {
 	const n = 300
 	elems := make([]any, n)
@@ -656,6 +751,11 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 }
 
 func TestFixedLiteral(t *testing.T) {
+	emptyFixed := iceberg.FixedLiteral(nil)
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "fixed[0]", emptyFixed.Type().String())
+	})
+
 	fixedLit012 := iceberg.FixedLiteral{0x00, 0x01, 0x02}
 	fixedLit013 := iceberg.FixedLiteral{0x00, 0x01, 0x03}
 	assert.True(t, fixedLit012.Equals(fixedLit012))

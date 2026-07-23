@@ -285,6 +285,12 @@ func (m *rowDeltaCatalog) CommitTable(ctx context.Context, ident table.Identifie
 func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
+	return newRowDeltaCommitTestTableVersion(t, 2)
+}
+
+func newRowDeltaCommitTestTableVersion(t *testing.T, formatVersion int) *table.Table {
+	t.Helper()
+
 	location := filepath.ToSlash(t.TempDir())
 
 	schema := iceberg.NewSchema(0,
@@ -294,7 +300,7 @@ func newRowDeltaCommitTestTable(t *testing.T) *table.Table {
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: "2"})
+		iceberg.Properties{table.PropertyFormatVersion: formatVersionStr(formatVersion)})
 	require.NoError(t, err)
 
 	return table.New(
@@ -327,6 +333,27 @@ func TestRowDeltaCommitDataAndDeletes(t *testing.T) {
 	assert.Equal(t, "1", snap.Summary.Properties["added-data-files"])
 	assert.Equal(t, "1", snap.Summary.Properties["added-delete-files"])
 	assert.Equal(t, "10", snap.Summary.Properties["added-records"])
+}
+
+func TestNewRowDeltaCopiesSnapshotProperties(t *testing.T) {
+	tbl := newRowDeltaCommitTestTable(t)
+
+	snapshotProps := iceberg.Properties{"custom-prop": "initial"}
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(snapshotProps)
+	snapshotProps["custom-prop"] = "changed"
+	snapshotProps["new-prop"] = "added"
+
+	rd.AddRows(buildDataFile(t, "s3://bucket/data/insert.parquet"))
+	require.NoError(t, rd.Commit(t.Context()))
+
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	snap := result.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	assert.Equal(t, "initial", snap.Summary.Properties["custom-prop"])
+	assert.NotContains(t, snap.Summary.Properties, "new-prop")
 }
 
 func TestRowDeltaCommitDataOnly(t *testing.T) {

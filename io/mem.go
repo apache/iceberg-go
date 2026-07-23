@@ -106,16 +106,29 @@ func (m *MemFS) WriteFile(name string, content []byte) error {
 }
 
 func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	type walkEntry struct {
+		path string
+		size int64
+	}
 
 	root = strings.TrimRight(root, "/")
+
+	m.mu.RLock()
+	var entries []walkEntry
 	for key, data := range m.files {
 		if !memPathInRoot(key, root) {
 			continue
 		}
-		info := &memFileInfo{name: filepath.Base(key), size: int64(len(data))}
-		if err := fn(key, fs.FileInfoToDirEntry(info), nil); err != nil {
+		entries = append(entries, walkEntry{
+			path: key,
+			size: int64(len(data)),
+		})
+	}
+	m.mu.RUnlock()
+
+	for _, entry := range entries {
+		info := &memFileInfo{name: filepath.Base(entry.path), size: entry.size}
+		if err := fn(entry.path, fs.FileInfoToDirEntry(info), nil); err != nil {
 			return err
 		}
 	}

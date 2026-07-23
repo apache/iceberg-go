@@ -615,7 +615,7 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil)
 	sp.deleteDataFile(deletedFile)
 
-	_, err = sp.existingManifests()
+	_, err = sp.existingManifests(&snap)
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
@@ -857,7 +857,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	}
 
 	mgr := manifestMergeManager{
-		targetSizeBytes:  int(manifests[0].Length() * 2),
+		targetSizeBytes:  manifests[0].Length() * 2,
 		minCountToMerge:  1,
 		mergeEnabled:     true,
 		mergeConcurrency: mergeConcurrency,
@@ -938,7 +938,7 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 
 	trackIO.writers = make(map[string]*trackingWriteCloser)
 
-	_, err = sp.existingManifests()
+	_, err = sp.existingManifests(&snap)
 	require.NoError(t, err, "existingManifests should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
@@ -958,11 +958,11 @@ func (e *errorOnDeletedEntries) processManifests(manifests []iceberg.ManifestFil
 	return manifests, nil
 }
 
-func (e *errorOnDeletedEntries) existingManifests() ([]iceberg.ManifestFile, error) {
+func (e *errorOnDeletedEntries) existingManifests(_ *Snapshot) ([]iceberg.ManifestFile, error) {
 	return nil, nil
 }
 
-func (e *errorOnDeletedEntries) deletedEntries(_ context.Context) ([]iceberg.ManifestEntry, error) {
+func (e *errorOnDeletedEntries) deletedEntries(_ context.Context, _ *Snapshot) ([]iceberg.ManifestEntry, error) {
 	if e.waitForWriter != nil {
 		select {
 		case <-e.waitForWriter:
@@ -1138,18 +1138,18 @@ func TestFastAppendInheritsZeroCountManifests(t *testing.T) {
 	require.True(t, newManifestFound, "new snapshot must include a manifest written by snap2")
 }
 
-// TestComputeOwnManifests_NewTable verifies that when there is no parent
-// snapshot (parentSnapshotID == 0) all manifests are returned as-is with no error.
-func TestComputeOwnManifests_NewTable(t *testing.T) {
+// TestParentDependentManifests_NilParent verifies that with no parent snapshot
+// there is nothing to inherit or delete, so the parent-dependent manifest set
+// is empty.
+func TestParentDependentManifests_NilParent(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	io := newMemIO(1<<20, nil)
 	txn := createTestTransaction(t, io, spec)
 	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
-	// parentSnapshotID is 0 by default (new table) — all manifests belong to this producer.
 
-	got, err := sp.computeOwnManifests(nil)
-	require.NoError(t, err, "new table: computeOwnManifests must not error")
-	require.Nil(t, got, "new table: returned manifests must equal input")
+	got, err := sp.parentDependentManifests(context.Background(), nil)
+	require.NoError(t, err, "nil parent: parentDependentManifests must not error")
+	require.Empty(t, got, "nil parent: nothing to inherit or delete")
 }
 
 // TestSummary_SnapshotByIDError verifies that summary computation fails when
@@ -1225,50 +1225,389 @@ func TestSummary_ParentSnapshotWithoutSummary(t *testing.T) {
 	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
 }
 
-// TestComputeOwnManifests_SnapshotByIDError verifies that when the parent
-// snapshot cannot be found an error is returned instead of silently claiming
-// all manifests as own.
-func TestComputeOwnManifests_SnapshotByIDError(t *testing.T) {
+// TestParentSnapshot_SnapshotByIDError verifies that when the parent snapshot
+// cannot be found an error is returned instead of a silent nil parent — which
+// would drop all inherited data from the new snapshot.
+func TestParentSnapshot_SnapshotByIDError(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	io := newMemIO(1<<20, nil)
 	txn := createTestTransaction(t, io, spec)
 	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
 	sp.parentSnapshotID = 9999 // no such snapshot in metadata
 
-	got, err := sp.computeOwnManifests(nil)
+	got, err := sp.parentSnapshot()
 	require.Error(t, err, "unknown parent snapshot ID: must return error, not silent fallback")
 	require.ErrorIs(t, err, ErrSnapshotNotFound,
 		"production wraps ErrSnapshotNotFound; pin meaning via errors.Is so a regression "+
-			"that swallows the lookup error and returns a programming-bug error would fail this test")
-	require.Nil(t, got, "error path must return nil manifest slice")
+			"that swallows the lookup error would fail this test")
+	require.Nil(t, got, "error path must return nil snapshot")
 }
 
-// TestComputeOwnManifests_ParentManifestsIOError verifies that when the parent
-// snapshot exists but its manifest list file cannot be read an error is returned
-// instead of silently claiming all manifests as own (which would cause duplicates
-// in the rebuilt manifest list).
-func TestComputeOwnManifests_ParentManifestsIOError(t *testing.T) {
+// TestParentDependentManifests_IOError verifies that when the parent snapshot's
+// manifest list file cannot be read an error is surfaced instead of a silent
+// empty inherited set (which would drop the parent's data on an OCC retry).
+func TestParentDependentManifests_IOError(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	io := newMemIO(1<<20, nil)
 	txn := createTestTransaction(t, io, spec)
 	sp := newFastAppendFilesProducer(OpAppend, txn, io, nil, nil)
 
-	// Add a snapshot with a manifest list path that does not exist in the IO.
-	// parent.Manifests will fail with fs.ErrNotExist when it tries to open it.
-	parentID := int64(42)
-	txn.meta.snapshotList = append(txn.meta.snapshotList, Snapshot{
-		SnapshotID:   parentID,
+	// A parent whose manifest list path does not exist in the IO: Manifests()
+	// fails with fs.ErrNotExist when it tries to open it.
+	ghostParent := &Snapshot{
+		SnapshotID:   42,
 		ManifestList: "mem://default/table-location/metadata/ghost-manifest-list.avro",
 		Summary:      &Summary{Operation: OpAppend},
-	})
-	sp.parentSnapshotID = parentID
+	}
 
-	got, err := sp.computeOwnManifests(nil)
-	require.Error(t, err, "IO error reading parent manifests: must return error, not silent fallback")
+	got, err := sp.parentDependentManifests(context.Background(), ghostParent)
+	require.Error(t, err, "IO error reading parent manifests: must surface, not silent empty set")
 	require.ErrorIs(t, err, fs.ErrNotExist,
-		"production wraps the underlying IO error; pin meaning via errors.Is so a regression that "+
-			"swallows the IO error and returns a programming-bug error would fail this test")
+		"production propagates the underlying IO error; pin meaning via errors.Is")
 	require.Nil(t, got, "error path must return nil manifest slice")
+}
+
+func newTestDeletionVectorForRef(t *testing.T, spec iceberg.PartitionSpec, path, referencedDataFile string) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentPosDeletes, path, iceberg.PuffinFile,
+		nil, nil, nil, 1, 1)
+	require.NoError(t, err, "new deletion vector builder")
+
+	return builder.ReferencedDataFile(referencedDataFile).Build()
+}
+
+// TestSummaryOnRetry_SkipsAlreadyRemovedDeleteFile is the regression for the
+// retry summary undercount: when a peer already removed the delete file this
+// producer also intends to remove, the fresh parent no longer counts it, so the
+// retry summary must NOT subtract it again (which would drive total-delete-files
+// below the real value).
+func TestSummaryOnRetry_SkipsAlreadyRemovedDeleteFile(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	posDel := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/data/pos-del.parquet", nil,
+		"mem://default/table-location/data/data.parquet")
+	sp.removeDeleteFile(posDel)
+
+	// Fresh parent: a peer already dropped the pos-delete. Empty manifest list,
+	// summary counts zero delete files.
+	parentManifestList := "mem://default/table-location/metadata/fresh-parent-skip.avro"
+	out, err := wfs.Create(parentManifestList)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, out.Close())
+
+	freshParent := &Snapshot{
+		SnapshotID:   77,
+		ManifestList: parentManifestList,
+		Summary: &Summary{Operation: OpAppend, Properties: iceberg.Properties{
+			"total-delete-files":     "0",
+			"total-position-deletes": "0",
+			"total-equality-deletes": "0",
+			"total-data-files":       "1",
+			"total-records":          "1",
+			"total-files-size":       "1",
+		}},
+	}
+
+	present, err := sp.checkRemovedFiles(freshParent)
+	require.NoError(t, err)
+	require.NotContains(t, present.deleteFiles, posDel.FilePath(),
+		"a pos-delete absent from the fresh parent must not be marked present")
+
+	s, err := sp.summaryOnRetry(nil, freshParent, present)
+	require.NoError(t, err)
+	require.Equal(t, "0", s.Properties["total-delete-files"],
+		"must not subtract a delete file the peer already removed")
+	require.Equal(t, "0", s.Properties["total-position-deletes"],
+		"must not subtract position deletes for an already-removed file")
+}
+
+// TestSummaryOnRetry_SubtractsPresentDeleteFile is the companion guard: when the
+// delete file the producer removes is still present on the fresh parent, the
+// retry summary MUST subtract it (the gate does not silently disable removals).
+func TestSummaryOnRetry_SubtractsPresentDeleteFile(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	posDel := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/data/pos-del.parquet", nil,
+		"mem://default/table-location/data/data.parquet")
+	sp.removeDeleteFile(posDel)
+
+	freshParent := &Snapshot{
+		SnapshotID: 88,
+		Summary: &Summary{Operation: OpAppend, Properties: iceberg.Properties{
+			"total-delete-files":     "1",
+			"total-position-deletes": "1",
+			"total-equality-deletes": "0",
+			"total-data-files":       "1",
+			"total-records":          "1",
+			"total-files-size":       "1",
+		}},
+	}
+
+	// The pos-delete is still live on the fresh parent.
+	present := &removedFilePresence{
+		deleteFiles: map[string]struct{}{posDel.FilePath(): {}},
+		dvRefs:      map[string]struct{}{},
+	}
+
+	s, err := sp.summaryOnRetry(nil, freshParent, present)
+	require.NoError(t, err)
+	require.Equal(t, "0", s.Properties["total-delete-files"],
+		"a delete file still present on the fresh parent must be subtracted (1→0)")
+}
+
+// TestRemovedFilePresenceCounts pins the gate's matching rules: pos/eq deletes
+// match by path, deletion vectors by referenced data file.
+func TestRemovedFilePresenceCounts(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	present := &removedFilePresence{
+		deleteFiles: map[string]struct{}{"file://present-del.parquet": {}},
+		dvRefs:      map[string]struct{}{"file://present-ref.parquet": {}},
+	}
+
+	presentDel := newTestPosDeleteFileForSpec(t, spec, "file://present-del.parquet", nil, "file://x.parquet")
+	absentDel := newTestPosDeleteFileForSpec(t, spec, "file://absent-del.parquet", nil, "file://x.parquet")
+	require.True(t, present.counts(presentDel), "pos-delete present by path")
+	require.False(t, present.counts(absentDel), "pos-delete absent by path")
+
+	presentDV := newTestDeletionVectorForRef(t, spec, "file://dv.puffin", "file://present-ref.parquet")
+	absentDV := newTestDeletionVectorForRef(t, spec, "file://dv.puffin", "file://absent-ref.parquet")
+	require.True(t, present.counts(presentDV), "DV present by referenced data file")
+	require.False(t, present.counts(absentDV), "DV absent by referenced data file")
+}
+
+// TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing pins the terminal abort:
+// when a data file this producer intends to rewrite is no longer on the fresh
+// parent (a peer already removed it), checkRemovedFiles must fail with
+// ErrCommitDiverged rather than resurrecting our replacement beside the peer's
+// result.
+func TestCheckRemovedFiles_AbortsWhenRewriteTargetMissing(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	target := newTestDataFile(t, spec, "mem://default/table-location/data/gone.parquet", nil)
+	sp.deleteDataFile(target)
+
+	// Fresh parent no longer contains the data file (empty manifest list).
+	parentManifestList := "mem://default/table-location/metadata/fresh-parent-diverged.avro"
+	out, err := wfs.Create(parentManifestList)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(2, out, 99, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, out.Close())
+
+	freshParent := &Snapshot{SnapshotID: 99, ManifestList: parentManifestList}
+
+	present, err := sp.checkRemovedFiles(freshParent)
+	require.ErrorIs(t, err, ErrCommitDiverged)
+	require.ErrorContains(t, err, target.FilePath())
+	require.Nil(t, present, "no presence set is returned on a diverged abort")
+}
+
+// TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove guards the append
+// fast-path: a producer that removes nothing must not scan the parent's
+// manifests at all, so a nil parent is fine and an empty presence set is
+// returned.
+func TestCheckRemovedFiles_ShortCircuitsWithNothingToRemove(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	present, err := sp.checkRemovedFiles(nil)
+	require.NoError(t, err)
+	require.Empty(t, present.deleteFiles)
+	require.Empty(t, present.dvRefs)
+}
+
+// TestDeleteFileRemoved_DVMatchesByRefAndPath pins the DV expunge identity:
+// a deletion vector matches a captured removal only when both its referenced
+// data file and its path match. Ref-only matching would drop a peer's
+// replacement DV on an OCC retry; path-only matching would drop Puffin
+// siblings sharing the file.
+func TestDeleteFileRemoved_DVMatchesByRefAndPath(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	dv := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(dv)
+
+	require.True(t, sp.deleteFileRemoved(dv), "exact (ref, path) pair matches")
+
+	replacement := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	require.False(t, sp.deleteFileRemoved(replacement),
+		"a peer's replacement DV (same ref, new path) must survive")
+
+	sibling := newTestDeletionVectorForRef(t, spec, dv.FilePath(), "mem://default/table-location/data/other.parquet")
+	require.False(t, sp.deleteFileRemoved(sibling),
+		"a Puffin sibling (same path, other ref) must survive")
+}
+
+// TestCheckRemovedFiles_SupersededDVReadsAsAbsent covers the concurrent DV
+// replacement race: a peer removed the DV this producer intends to expunge and
+// added a new one for the same data file. The replacement must not read as
+// "our DV is still present" — otherwise the retry summary subtracts a removal
+// the fresh parent no longer counts.
+func TestCheckRemovedFiles_SupersededDVReadsAsAbsent(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 91, "superseded", peerDV)
+
+	present, err := sp.checkRemovedFiles(parent)
+	require.NoError(t, err)
+	require.Empty(t, present.dvRefs,
+		"a superseded DV (same ref, different path) must not read as present")
+
+	s, err := sp.summaryOnRetry(nil, parent, present)
+	require.NoError(t, err)
+	require.Equal(t, "1", s.Properties["total-delete-files"],
+		"the peer's replacement DV stays counted on the retry summary")
+	require.Equal(t, "1", s.Properties["total-position-deletes"],
+		"the peer's position deletes stay counted on the retry summary")
+}
+
+// TestCheckRemovedFiles_ExactDVPresentAndSubtracted is the companion guard:
+// when the exact DV this producer removes is still live on the fresh parent,
+// it must be marked present and the retry summary must subtract it.
+func TestCheckRemovedFiles_ExactDVPresentAndSubtracted(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 92, "exact", staleDV)
+
+	present, err := sp.checkRemovedFiles(parent)
+	require.NoError(t, err)
+	require.Contains(t, present.dvRefs, dataPath, "the exact DV is still live on parent")
+
+	s, err := sp.summaryOnRetry(nil, parent, present)
+	require.NoError(t, err)
+	require.Equal(t, "0", s.Properties["total-delete-files"],
+		"a DV still present on the fresh parent must be subtracted (1→0)")
+}
+
+// TestExistingManifests_SupersededDVSurvivesRetry pins the manifest-filter half
+// of the pair-matching rule: on an OCC retry the fresh parent may carry a
+// peer's replacement DV for the data file whose DV this producer removes. The
+// replacement must be inherited untouched and not tombstoned — ref-only
+// matching would expunge it and resurrect the rows the peer deleted.
+func TestExistingManifests_SupersededDVSurvivesRetry(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	peerDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-new.puffin", dataPath)
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 93, "survives", peerDV)
+
+	parentManifests, err := parent.Manifests(wfs)
+	require.NoError(t, err)
+	require.Len(t, parentManifests, 1)
+
+	got, err := sp.existingManifests(parent)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "the peer's deletes manifest must be inherited")
+	require.Equal(t, parentManifests[0].FilePath(), got[0].FilePath(),
+		"nothing matched, so the manifest is passed through untouched")
+
+	tombstones, err := sp.deletedEntries(context.Background(), parent)
+	require.NoError(t, err)
+	require.Empty(t, tombstones, "no DELETE tombstone for the peer's replacement DV")
+}
+
+// TestExistingManifests_ExactDVStillExpunged is the companion guard: the exact
+// captured DV is still filtered from the inherited manifests and tombstoned.
+func TestExistingManifests_ExactDVStillExpunged(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	dataPath := "mem://default/table-location/data/d.parquet"
+	staleDV := newTestDeletionVectorForRef(t, spec, "mem://default/table-location/data/dv-old.puffin", dataPath)
+	sp.removeDeletionVector(staleDV)
+
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, spec, 94, "expunged", staleDV)
+
+	got, err := sp.existingManifests(parent)
+	require.NoError(t, err)
+	require.Empty(t, got, "a manifest whose only entry is the removed DV is dropped")
+
+	tombstones, err := sp.deletedEntries(context.Background(), parent)
+	require.NoError(t, err)
+	require.Len(t, tombstones, 1)
+	require.Equal(t, staleDV.FilePath(), tombstones[0].DataFile().FilePath())
+}
+
+// writeParentSnapshotWithDeletesManifest writes a v3 deletes manifest holding
+// the given delete files plus its manifest list into fs and returns a parent
+// snapshot pointing at it. v3 because referenced_data_file only serializes in
+// the v3 data_file schema. The summary counts one delete file so retry-summary
+// assertions can observe whether a removal was subtracted.
+func writeParentSnapshotWithDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) *Snapshot {
+	t.Helper()
+
+	manifestPath := "mem://default/table-location/metadata/deletes-" + tag + ".avro"
+	var buf bytes.Buffer
+	wr, err := iceberg.NewManifestWriter(3, &buf, spec, simpleSchema(), snapshotID,
+		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	for _, df := range deleteFiles {
+		require.NoError(t, wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, df)))
+	}
+	require.NoError(t, wr.Close())
+	mf, err := wr.ToManifestFile(manifestPath, int64(buf.Len()),
+		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+
+	out, err := fs.Create(manifestPath)
+	require.NoError(t, err)
+	_, err = out.Write(buf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	listPath := "mem://default/table-location/metadata/snap-" + tag + ".avro"
+	lout, err := fs.Create(listPath)
+	require.NoError(t, err)
+	seq := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, []iceberg.ManifestFile{mf}))
+	require.NoError(t, lout.Close())
+
+	return &Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: seq,
+		ManifestList:   listPath,
+		Summary: &Summary{Operation: OpAppend, Properties: iceberg.Properties{
+			"total-delete-files":     "1",
+			"total-position-deletes": "1",
+			"total-equality-deletes": "0",
+			"total-data-files":       "1",
+			"total-records":          "1",
+			"total-files-size":       "1",
+		}},
+	}
 }
 
 func TestAddDataFilesV3RejectsWithoutFirstRowID(t *testing.T) {

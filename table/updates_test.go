@@ -884,6 +884,72 @@ func TestAddEncryptionKeyUpdate_Apply_RejectsV2(t *testing.T) {
 	assert.Contains(t, err.Error(), "format version 3")
 }
 
+func TestAddEncryptionKeyUpdate_Apply_RejectsMissingKeyID(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "", EncryptedKeyMetadata: "dGVzdA=="}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "key-id")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsMissingEncryptedKeyMetadata(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: ""}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "metadata")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsWhitespaceOnlyEncryptedKeyMetadata(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "\n"}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "metadata must be non-empty")
+}
+
+func TestMetadataBuilderAddEncryptionKeyRejectsMissingKeyID(t *testing.T) {
+	b := buildFromBaseV3(t)
+	err := b.AddEncryptionKey(EncryptionKey{EncryptedKeyMetadata: "dGVzdA=="})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "key-id")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsInvalidEncryptedKeyMetadata(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: "my-key", EncryptedKeyMetadata: "not-base64"}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "base64")
+}
+
+func TestAddEncryptionKeyUpdate_Apply_RejectsPaddedKeyID(t *testing.T) {
+	b := buildFromBaseV3(t)
+	key := EncryptionKey{KeyID: " my-key ", EncryptedKeyMetadata: "dGVzdA=="}
+
+	err := NewAddEncryptionKeyUpdate(key).Apply(b)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "key-id")
+}
+
+func TestAddEncryptionKeyUpdate_UnmarshalMissingFields_ApplyRejects(t *testing.T) {
+	data := []byte(`[{"action":"add-encryption-key","encryption-key":{"key-id":"my-key"}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	err := updates[0].Apply(buildFromBaseV3(t))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Contains(t, err.Error(), "metadata")
+}
+
 func TestRemoveEncryptionKeyUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{"action":"remove-encryption-key","key-id":"key-42"}]`)
 

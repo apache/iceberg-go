@@ -94,6 +94,11 @@ const (
 	WriteTargetFileSizeBytesKey     = "write.target-file-size-bytes"
 	WriteTargetFileSizeBytesDefault = 512 * 1024 * 1024 // 512 MB
 
+	ParquetShredVariantsKey         = internal.ParquetShredVariantsKey
+	ParquetShredVariantsDefault     = internal.ParquetShredVariantsDefault
+	ParquetVariantBufferSizeKey     = internal.ParquetVariantBufferSizeKey
+	ParquetVariantBufferSizeDefault = internal.ParquetVariantBufferSizeDefault
+
 	MinSnapshotsToKeepKey     = "min-snapshots-to-keep"
 	MinSnapshotsToKeepDefault = math.MaxInt
 

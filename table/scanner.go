@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -209,12 +210,12 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	return out, nil
 }
 
-// isDeletionVector reports whether df is a deletion vector: a Puffin file with
+// IsDeletionVector reports whether df is a deletion vector: a Puffin file with
 // position-delete content. The content-type guard matters because df is an
 // arbitrary DataFile, so a non-pos-delete Puffin from an external writer must
 // not be misclassified. Keying on format rather than referenced_data_file
 // avoids misclassifying a Parquet pos-delete that legally sets it.
-func isDeletionVector(df iceberg.DataFile) bool {
+func IsDeletionVector(df iceberg.DataFile) bool {
 	return df.FileFormat() == iceberg.PuffinFile &&
 		df.ContentType() == iceberg.EntryContentPosDeletes
 }
@@ -241,6 +242,8 @@ type Scan struct {
 	includeRowLineage bool
 
 	concurrency int
+
+	reporter metrics.Reporter
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
@@ -248,6 +251,16 @@ func (scan *Scan) UseRowLimit(n int64) *Scan {
 	out.limit = n
 
 	return &out
+}
+
+// Reporter returns the metrics reporter for this scan, never nil. The
+// scan-planning instrumentation emits its ScanReport through it.
+func (scan *Scan) Reporter() metrics.Reporter {
+	if scan.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return scan.reporter
 }
 
 func (scan *Scan) UseRef(name string) (*Scan, error) {
@@ -266,9 +279,17 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
 }
 
-func (scan *Scan) Snapshot() *Snapshot {
+// ResolveSnapshot resolves the snapshot selected by this scan. Live scans use
+// the table's current snapshot; explicit snapshot IDs and as-of timestamps
+// must resolve to an existing snapshot.
+func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
 	if scan.snapshotID != nil {
-		return scan.metadata.SnapshotByID(*scan.snapshotID)
+		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
+		if snap == nil {
+			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
+		}
+
+		return snap, nil
 	}
 
 	if scan.asOfTimestamp != nil {
@@ -276,12 +297,28 @@ func (scan *Scan) Snapshot() *Snapshot {
 		for i := len(entries) - 1; i >= 0; i-- {
 			entry := entries[i]
 			if entry.TimestampMs <= *scan.asOfTimestamp {
-				return scan.metadata.SnapshotByID(entry.SnapshotID)
+				snap := scan.metadata.SnapshotByID(entry.SnapshotID)
+				if snap == nil {
+					break
+				}
+
+				return snap, nil
 			}
 		}
+
+		return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
 	}
 
-	return scan.metadata.CurrentSnapshot()
+	return scan.metadata.CurrentSnapshot(), nil
+}
+
+// Snapshot returns the snapshot selected by this scan. It returns nil when an
+// explicit snapshot cannot be resolved; use ResolveSnapshot when the reason
+// for that result must be distinguished from a table with no current snapshot.
+func (scan *Scan) Snapshot() *Snapshot {
+	snap, _ := scan.ResolveSnapshot()
+
+	return snap
 }
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
@@ -347,25 +384,12 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		return curSchema, nil
 	}
 
-	var snap *Snapshot
-	if scan.snapshotID != nil {
-		snap = scan.metadata.SnapshotByID(*scan.snapshotID)
-		if snap == nil {
-			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
-		}
-	} else if scan.asOfTimestamp != nil {
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snap = scan.metadata.SnapshotByID(entry.SnapshotID)
-
-				break
-			}
-		}
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
 	}
 
-	if snap == nil || snap.SchemaID == nil {
+	if snap.SchemaID == nil {
 		return curSchema, nil
 	}
 
@@ -633,7 +657,10 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 }
 
 func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema) ([]iceberg.ManifestFile, error) {
-	snap := scan.Snapshot()
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	if snap == nil {
 		return nil, nil
 	}
@@ -737,7 +764,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 				case iceberg.EntryContentData:
 					entries.addDataEntry(e)
 				case iceberg.EntryContentPosDeletes:
-					if isDeletionVector(e.DataFile()) {
+					if IsDeletionVector(e.DataFile()) {
 						entries.addDVEntry(e)
 					} else {
 						entries.addPositionalDeleteEntry(e)
@@ -765,18 +792,9 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // building a list of FileScanTasks that match the current Scan criteria.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if scan.asOfTimestamp != nil {
-		var snapshot *Snapshot
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snapshot = scan.metadata.SnapshotByID(entry.SnapshotID)
-
-				break
-			}
-		}
-		if snapshot == nil {
-			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+		snapshot, err := scan.ResolveSnapshot()
+		if err != nil {
+			return nil, err
 		}
 		scan.snapshotID = &snapshot.SnapshotID
 		scan.asOfTimestamp = nil
@@ -873,7 +891,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       scan.identifier,
+		Identifier:       slices.Clone(scan.identifier),
 		Metadata:         scan.metadata,
 		MetadataLocation: scan.metadataLocation,
 		SnapshotID:       scan.snapshotID,

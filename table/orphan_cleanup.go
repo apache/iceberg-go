@@ -82,6 +82,7 @@ type orphanCleanupConfig struct {
 	prefixMismatchMode PrefixMismatchMode
 	equalSchemes       map[string]string
 	equalAuthorities   map[string]string
+	validationErr      error
 }
 
 type OrphanCleanupOption func(*orphanCleanupConfig)
@@ -95,6 +96,9 @@ func WithLocation(location string) OrphanCleanupOption {
 func WithFilesOlderThan(duration time.Duration) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		cfg.olderThan = duration
+		if duration < 0 && cfg.validationErr == nil {
+			cfg.validationErr = errors.New("orphan cleanup age must be non-negative")
+		}
 	}
 }
 
@@ -112,10 +116,10 @@ func WithDeleteFunc(deleteFunc func(string) error) OrphanCleanupOption {
 	}
 }
 
-// WithMaxConcurrency sets the maximum number of goroutines for parallel deletion.
+// WithCleanupMaxConcurrency sets the maximum number of goroutines for parallel deletion.
 // Defaults to a reasonable number based on the system. Only used when deleteFunc is nil or when
 // the FileIO doesn't support bulk operations.
-func WithMaxConcurrency(maxWorkers int) OrphanCleanupOption {
+func WithCleanupMaxConcurrency(maxWorkers int) OrphanCleanupOption {
 	return func(cfg *orphanCleanupConfig) {
 		if maxWorkers > 0 {
 			cfg.maxConcurrency = maxWorkers
@@ -160,10 +164,19 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 }
 
 type OrphanCleanupResult struct {
+	// OrphanFileLocations is retained for backward compatibility with callers
+	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
 	OrphanFileLocations []string
-	DeletedFiles        []string
+	// OrphanFiles is the canonical richer orphan result, carrying both path and size.
+	OrphanFiles  []OrphanFile
+	DeletedFiles []string
 	// TotalSizeBytes is the combined size of orphan files only, not all scanned files.
 	TotalSizeBytes int64
+}
+
+type OrphanFile struct {
+	Path      string
+	SizeBytes int64
 }
 
 // DeleteOrphanFiles identifies files under a table location that are no longer
@@ -187,6 +200,9 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	if cfg.validationErr != nil {
+		return OrphanCleanupResult{}, cfg.validationErr
+	}
 
 	return t.executeOrphanCleanup(ctx, cfg)
 }
@@ -194,6 +210,11 @@ func (t Table) DeleteOrphanFiles(ctx context.Context, opts ...OrphanCleanupOptio
 type scannedFile struct {
 	path string
 	size int64
+}
+
+type referencedFileIndex struct {
+	normalized map[string]struct{}
+	byPath     map[string][]string
 }
 
 func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfig) (OrphanCleanupResult, error) {
@@ -241,28 +262,29 @@ func (t Table) executeOrphanCleanup(ctx context.Context, cfg *orphanCleanupConfi
 	}
 
 	// Identify orphans.
-	normalizedRef := make(map[string]string, len(referencedFiles))
-	for refPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(refPath, cfg)
-		normalizedRef[normalizedPath] = refPath
-		normalizedRef[refPath] = refPath
-	}
+	referencedIndex := newReferencedFileIndex(referencedFiles, cfg)
 
 	var orphanFiles []string
+	orphanFileEntries := make([]OrphanFile, 0)
 	var totalOrphanSize int64
 	for _, f := range scannedFiles {
-		isOrphan, err := isFileOrphan(f.path, referencedFiles, normalizedRef, cfg)
+		isOrphan, err := isFileOrphan(f.path, referencedFiles, referencedIndex, cfg)
 		if err != nil {
 			return OrphanCleanupResult{}, fmt.Errorf("failed to identify orphan %s: %w", f.path, err)
 		}
 		if isOrphan {
 			orphanFiles = append(orphanFiles, f.path)
+			orphanFileEntries = append(orphanFileEntries, OrphanFile{
+				Path:      f.path,
+				SizeBytes: f.size,
+			})
 			totalOrphanSize += f.size
 		}
 	}
 
 	result := OrphanCleanupResult{
 		OrphanFileLocations: orphanFiles,
+		OrphanFiles:         orphanFileEntries,
 		TotalSizeBytes:      totalOrphanSize,
 	}
 
@@ -430,7 +452,12 @@ func walkDirectory(fsys iceio.IO, root string, fn func(path string, info stdfs.F
 	return fmt.Errorf("filesystem %T does not implement iceio.ListableIO", fsys)
 }
 
-func isFileOrphan(file string, referencedFiles map[string]bool, normalizedReferencedFiles map[string]string, cfg *orphanCleanupConfig) (bool, error) {
+func isFileOrphan(
+	file string,
+	referencedFiles map[string]bool,
+	referencedIndex referencedFileIndex,
+	cfg *orphanCleanupConfig,
+) (bool, error) {
 	normalizedFile := normalizeFilePathWithConfig(file, cfg)
 
 	// Any presence in referencedFiles means referenced;
@@ -442,16 +469,45 @@ func isFileOrphan(file string, referencedFiles map[string]bool, normalizedRefere
 		return false, nil
 	}
 
-	if originalPath, exists := normalizedReferencedFiles[normalizedFile]; exists {
-		err := checkPrefixMismatch(originalPath, file, cfg)
-		if err != nil {
-			return false, err
-		}
-
+	if _, exists := referencedIndex.normalized[normalizedFile]; exists {
 		return false, nil
 	}
 
+	references := referencedIndex.byPath[filePathKey(normalizedFile)]
+	if len(references) == 0 {
+		return true, nil
+	}
+
+	for _, referencedPath := range references {
+		decision, err := checkPrefixMismatch(referencedPath, file, cfg)
+		if err != nil {
+			return false, err
+		}
+		if decision == prefixMismatchKeep {
+			return false, nil
+		}
+	}
+
 	return true, nil
+}
+
+func newReferencedFileIndex(referencedFiles map[string]bool, cfg *orphanCleanupConfig) referencedFileIndex {
+	index := referencedFileIndex{
+		normalized: make(map[string]struct{}, len(referencedFiles)*2),
+		byPath:     make(map[string][]string, len(referencedFiles)),
+	}
+	for referencedPath := range referencedFiles {
+		normalizedPath := normalizeFilePathWithConfig(referencedPath, cfg)
+		index.normalized[normalizedPath] = struct{}{}
+		index.normalized[referencedPath] = struct{}{}
+		pathKey := filePathKey(normalizedPath)
+		index.byPath[pathKey] = append(index.byPath[pathKey], referencedPath)
+	}
+	for pathKey := range index.byPath {
+		slices.Sort(index.byPath[pathKey])
+	}
+
+	return index
 }
 
 func deleteFiles(ctx context.Context, fs iceio.IO, orphanFiles []string, cfg *orphanCleanupConfig) ([]string, error) {
@@ -664,6 +720,21 @@ func normalizeNonURLPath(path string) string {
 	return strings.ReplaceAll(normalized, "\\", "/")
 }
 
+// filePathKey returns the path component used to compare listed files with
+// references before applying scheme and authority mismatch policy.
+func filePathKey(file string) string {
+	// A bare Windows path such as C:/data/file.parquet is parsed as a URL
+	// with scheme "c". Only parse URL-shaped values here so drive letters
+	// remain part of the comparison key.
+	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
+		if parsedURL, err := url.Parse(file); err == nil {
+			return normalizeNonURLPath(parsedURL.Path)
+		}
+	}
+
+	return normalizeNonURLPath(file)
+}
+
 // applySchemeEquivalence maps schemes to their equivalent canonical form.
 //
 // Common equivalences include:
@@ -731,14 +802,21 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 	return authority
 }
 
-// checkPrefixMismatch detects and handles prefix mismatches between referenced files and filesystem files
-func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanCleanupConfig) error {
+type prefixMismatchDecision int
+
+const (
+	prefixMismatchKeep prefixMismatchDecision = iota
+	prefixMismatchDeleteCandidate
+)
+
+// checkPrefixMismatch decides how to handle prefix mismatches between referenced files and filesystem files.
+func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanCleanupConfig) (prefixMismatchDecision, error) {
 	// Parse both paths as URLs to compare schemes and authorities
 	refURL, refErr := url.Parse(referencedPath)
 	fsURL, fsErr := url.Parse(filesystemPath)
 
 	if refErr != nil || fsErr != nil {
-		return nil
+		return prefixMismatchKeep, nil
 	}
 
 	refScheme := applySchemeEquivalence(refURL.Scheme, cfg.equalSchemes)
@@ -751,19 +829,19 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 	authMismatch := refAuth != fsAuth
 
 	if !schemeMismatch && !authMismatch {
-		return nil // No mismatch
+		return prefixMismatchKeep, nil
 	}
 
 	switch cfg.prefixMismatchMode {
 	case PrefixMismatchError:
-		return fmt.Errorf("prefix mismatch detected: referenced=%s (scheme=%s, auth=%s) vs filesystem=%s (scheme=%s, auth=%s)",
+		return prefixMismatchKeep, fmt.Errorf("prefix mismatch detected: referenced=%s (scheme=%s, auth=%s) vs filesystem=%s (scheme=%s, auth=%s)",
 			referencedPath, refScheme, refAuth, filesystemPath, fsScheme, fsAuth)
 	case PrefixMismatchIgnore:
-		return nil // Silently ignore mismatch
+		return prefixMismatchKeep, nil
 	case PrefixMismatchDelete:
-		return nil // Allow deletion (treat as orphan)
+		return prefixMismatchDeleteCandidate, nil
 	default:
-		return fmt.Errorf("unknown prefix mismatch mode: %d", cfg.prefixMismatchMode)
+		return prefixMismatchKeep, fmt.Errorf("unknown prefix mismatch mode: %d", cfg.prefixMismatchMode)
 	}
 }
 

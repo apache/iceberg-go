@@ -20,13 +20,11 @@ package table
 import (
 	"bytes"
 	"cmp"
-	"context"
 	"encoding/json"
 	"math"
 	"slices"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
@@ -201,7 +199,7 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping, nil)
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping, nil, nil)
 
 	return stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tableMeta.CurrentSchema(),
@@ -461,11 +459,11 @@ func TestStatsTypes(t *testing.T) {
 func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	// Calling the converter directly (outside the schema visitor) must not panic:
 	// an unsupported CRS comes back as an error, symmetric with the read path.
-	t.Run("projjson returns an error instead of panicking if no definition is found", func(t *testing.T) {
-		_, err := icebergCRSToGeoArrowMetadata(context.Background(), "projjson:my-custom-crs")
+	t.Run("projjson returns an error instead of panicking", func(t *testing.T) {
+		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs")
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "could not be resolved from table properties")
+		require.ErrorContains(t, err, "projjson CRS not supported yet")
 	})
 
 	t.Run("supported CRS values map to the expected CRSType", func(t *testing.T) {
@@ -480,7 +478,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 		}
 		for _, tc := range cases {
 			t.Run(tc.crs, func(t *testing.T) {
-				meta, err := icebergCRSToGeoArrowMetadata(context.Background(), tc.crs)
+				meta, err := icebergCRSToGeoArrowMetadata(tc.crs)
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantCRSType, meta.CRSType)
 			})
@@ -488,124 +486,11 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	})
 
 	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
-		meta, err := icebergCRSToGeoArrowMetadata(context.Background(), "srid:0")
+		meta, err := icebergCRSToGeoArrowMetadata("srid:0")
 		require.NoError(t, err)
 		assert.Empty(t, meta.CRS)
 		assert.Empty(t, meta.CRSType)
 	})
-}
-
-func TestTypeToArrowTypeWithContextResolvesProjJSONCRS(t *testing.T) {
-	const projjson = `{"type":"GeographicCRS","name":"WGS 84"}`
-	ctx := internal.WithTableProperties(context.Background(), iceberg.Properties{
-		"geo.crs": projjson,
-	})
-
-	t.Run("geometry", func(t *testing.T) {
-		geom, err := iceberg.GeometryTypeOf("projjson:geo.crs")
-		require.NoError(t, err)
-
-		dt, err := typeToArrowTypeWithContext(ctx, geom, true, false)
-		require.NoError(t, err)
-
-		wkb, ok := dt.(*geoarrow.WKBType)
-		require.True(t, ok)
-
-		meta := wkb.Metadata()
-		assert.Equal(t, geoarrow.CRSTypePROJJSON, meta.CRSType)
-		assert.JSONEq(t, projjson, string(meta.CRS))
-		// when edge is omitted, it should default to planar
-		assert.Equal(t, geoarrow.EdgePlanar, meta.Edges)
-	})
-
-	t.Run("geography", func(t *testing.T) {
-		geog, err := iceberg.GeographyTypeOf("projjson:geo.crs", string(geoarrow.EdgeSpherical))
-		require.NoError(t, err)
-
-		dt, err := typeToArrowTypeWithContext(ctx, geog, true, false)
-		require.NoError(t, err)
-
-		wkb, ok := dt.(*geoarrow.WKBType)
-		require.True(t, ok)
-
-		meta := wkb.Metadata()
-		assert.Equal(t, geoarrow.CRSTypePROJJSON, meta.CRSType)
-		assert.JSONEq(t, projjson, string(meta.CRS))
-		assert.Equal(t, geoarrow.EdgeSpherical, meta.Edges)
-	})
-}
-
-func TestTypeToArrowTypeWithContextProjJSONCRSErrors(t *testing.T) {
-	geom, err := iceberg.GeometryTypeOf("projjson:geo.crs")
-	require.NoError(t, err)
-
-	t.Run("no properties in context", func(t *testing.T) {
-		_, err := typeToArrowTypeWithContext(context.Background(), geom, true, false)
-		require.Error(t, err)
-		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "could not be resolved from table properties")
-	})
-
-	t.Run("missing table property", func(t *testing.T) {
-		ctx := internal.WithTableProperties(context.Background(), iceberg.Properties{})
-		_, err := typeToArrowTypeWithContext(ctx, geom, true, false)
-		require.Error(t, err)
-		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "references missing table property")
-	})
-
-	t.Run("invalid projjson", func(t *testing.T) {
-		ctx := internal.WithTableProperties(context.Background(), iceberg.Properties{
-			"geo.crs": "{",
-		})
-		_, err := typeToArrowTypeWithContext(ctx, geom, true, false)
-		require.Error(t, err)
-		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "is not valid JSON")
-	})
-}
-
-func TestToRequestedSchemaResolvesProjJSONCRSFromContext(t *testing.T) {
-	const projjson = `{"type":"GeographicCRS","name":"WGS 84"}`
-
-	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-	defer mem.AssertSize(t, 0)
-
-	inputSchema := arrow.NewSchema(nil, nil)
-	bldr := array.NewRecordBuilder(mem, inputSchema)
-	defer bldr.Release()
-
-	rec := bldr.NewRecordBatch()
-	defer rec.Release()
-
-	geom, err := iceberg.GeometryTypeOf("projjson:geo.crs")
-	require.NoError(t, err)
-	requested := iceberg.NewSchema(0, iceberg.NestedField{
-		ID:   1,
-		Name: "geom",
-		Type: geom,
-	})
-	fileSchema := iceberg.NewSchema(0)
-
-	_, err = ToRequestedSchema(context.Background(), requested, fileSchema, rec, SchemaOptions{})
-	require.Error(t, err)
-	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-	require.ErrorContains(t, err, "could not be resolved from table properties")
-
-	ctx := internal.WithTableProperties(context.Background(), iceberg.Properties{
-		"geo.crs": projjson,
-	})
-	out, err := ToRequestedSchema(ctx, requested, fileSchema, rec, SchemaOptions{})
-	require.NoError(t, err)
-	defer out.Release()
-
-	require.Equal(t, 1, int(out.NumCols()))
-	wkb, ok := out.Schema().Field(0).Type.(*geoarrow.WKBType)
-	require.True(t, ok)
-
-	meta := wkb.Metadata()
-	assert.Equal(t, geoarrow.CRSTypePROJJSON, meta.CRSType)
-	assert.JSONEq(t, projjson, string(meta.CRS))
 }
 
 func TestGeoArrowCRSToIcebergCRS(t *testing.T) {

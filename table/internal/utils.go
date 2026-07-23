@@ -18,7 +18,6 @@
 package internal
 
 import (
-	"bytes"
 	"container/heap"
 	"context"
 	"encoding/binary"
@@ -27,6 +26,7 @@ import (
 	"iter"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -206,6 +206,9 @@ type DataFileStatistics struct {
 	ColAggs          map[int]StatsAgg
 	SplitOffsets     []int64
 	EqualityFieldIDs []int
+	// Variant bounds: serialized variant objects keyed by parent variant field id.
+	VariantLowerBounds map[int][]byte
+	VariantUpperBounds map[int][]byte
 }
 
 func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *iceberg.Schema) any {
@@ -251,6 +254,10 @@ type DataFileOpts struct {
 	// SortOrderID claims the file's rows are fully sorted by that order; zero
 	// makes no claim and leaves the field absent.
 	SortOrderID int
+	// FirstRowID is honored only for EntryContentData; the spec requires it to
+	// be null for delete files.
+	FirstRowID         *int64
+	ReferencedDataFile *string
 }
 
 // unsortedSortOrderID mirrors table.UnsortedSortOrderID.
@@ -265,14 +272,13 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		fieldIDToPartitionData = make(map[int]any)
 		for _, field := range opts.Spec.Fields() {
 			partitionVal := opts.PartitionValues[field.FieldID]
-			if partitionVal != nil {
-				val := d.PartitionValue(field, opts.Schema)
-				if val != nil {
-					fieldIDToPartitionData[field.FieldID] = val
-				} else {
-					fieldIDToPartitionData[field.FieldID] = partitionVal
-				}
-			} else {
+			switch {
+			case partitionVal != nil:
+				// prioritizing caller-supplied value.
+				fieldIDToPartitionData[field.FieldID] = partitionVal
+			case field.Transform.PreservesOrder():
+				fieldIDToPartitionData[field.FieldID] = d.PartitionValue(field, opts.Schema)
+			default:
 				fieldIDToPartitionData[field.FieldID] = nil
 			}
 
@@ -318,6 +324,14 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 		}
 	}
 
+	// Variant bounds are serialized objects keyed by the parent variant field id.
+	for fieldID, b := range d.VariantLowerBounds {
+		lowerBounds[fieldID] = b
+	}
+	for fieldID, b := range d.VariantUpperBounds {
+		upperBounds[fieldID] = b
+	}
+
 	if len(lowerBounds) > 0 {
 		bldr.LowerBoundValues(lowerBounds)
 	}
@@ -338,6 +352,14 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	// Claim invariants are enforced upstream in defaultDataFileWriter.writeFile.
 	if opts.SortOrderID != unsortedSortOrderID {
 		bldr.SortOrderID(opts.SortOrderID)
+	}
+
+	if opts.FirstRowID != nil && opts.Content == iceberg.EntryContentData {
+		bldr.FirstRowID(*opts.FirstRowID)
+	}
+
+	if opts.ReferencedDataFile != nil && opts.Content == iceberg.EntryContentPosDeletes {
+		bldr.ReferencedDataFile(*opts.ReferencedDataFile)
 	}
 
 	return bldr.Build()
@@ -532,13 +554,10 @@ func TruncateUpperBoundText(s string, trunc int) string {
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 	if trunc >= len(val) {
-		return val
+		return slices.Clone(val)
 	}
 
-	result := val[:trunc]
-	if bytes.Equal(result, val) {
-		return result
-	}
+	result := slices.Clone(val[:trunc])
 
 	for i := len(result) - 1; i >= 0; i-- {
 		if result[i] < 255 {

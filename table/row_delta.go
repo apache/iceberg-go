@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/apache/iceberg-go"
 )
@@ -74,7 +75,7 @@ type RowDelta struct {
 func (t *Transaction) NewRowDelta(snapshotProps iceberg.Properties) *RowDelta {
 	return &RowDelta{
 		txn:   t,
-		props: snapshotProps,
+		props: maps.Clone(snapshotProps),
 	}
 }
 
@@ -100,14 +101,19 @@ func (rd *RowDelta) AddDeletes(files ...iceberg.DataFile) *RowDelta {
 // commit, if any file has an unexpected content type, or if the table
 // format version does not support delete files.
 func (rd *RowDelta) Commit(ctx context.Context) error {
+	meta, err := rd.txn.txnMeta()
+	if err != nil {
+		return err
+	}
+
 	if len(rd.dataFiles) == 0 && len(rd.delFiles) == 0 {
 		return errors.New("row delta must have at least one data file or delete file")
 	}
 
 	// Delete files require format version >= 2.
-	if len(rd.delFiles) > 0 && rd.txn.meta.formatVersion < 2 {
+	if len(rd.delFiles) > 0 && meta.formatVersion < 2 {
 		return fmt.Errorf("delete files require table format version >= 2, got v%d",
-			rd.txn.meta.formatVersion)
+			meta.formatVersion)
 	}
 
 	for _, f := range rd.dataFiles {
@@ -117,7 +123,7 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 		}
 	}
 
-	schema := rd.txn.meta.CurrentSchema()
+	schema := meta.CurrentSchema()
 	for _, f := range rd.delFiles {
 		ct := f.ContentType()
 		if ct != iceberg.EntryContentPosDeletes && ct != iceberg.EntryContentEqDeletes {
@@ -199,8 +205,15 @@ func (rd *RowDelta) Commit(ctx context.Context) error {
 // Fast appends alongside a RowDelta see no validators from RowDelta:
 // data-only commits are as safe as a fastAppend.
 func (rd *RowDelta) validate(cc *conflictContext) error {
-	if cc == nil {
-		return nil
+	meta, err := rd.txn.txnMeta()
+	if err != nil {
+		return err
+	}
+
+	level, err := readIsolationLevel(meta.props,
+		WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+	if err != nil {
+		return err
 	}
 
 	// Collect every data-file path the pos-deletes in this delta
@@ -223,6 +236,10 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		}
 	}
 
+	if cc == nil {
+		return nil
+	}
+
 	if len(referenced) > 0 {
 		if err := validateDataFilesExist(cc, referenced); err != nil {
 			return err
@@ -230,8 +247,6 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	}
 
 	if len(eqDeleteFiles) > 0 {
-		level := readIsolationLevel(rd.txn.meta.props,
-			WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
 		// Route through the existing validateNoConflictingDataFiles path,
 		// which calls validateAddedDataFilesMatchingFilter internally.
 		// For unpartitioned tables, use AlwaysTrue conservatively — an
@@ -239,19 +254,19 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 		// build an OR-of-equalities filter from the eq-delete files'
 		// partition tuples so that concurrent appends to different
 		// partitions are not falsely rejected.
-		currentSpec, specErr := rd.txn.meta.CurrentSpec()
+		currentSpec, specErr := meta.CurrentSpec()
 		if specErr != nil {
 			return fmt.Errorf("reading current partition spec: %w", specErr)
 		}
 
-		var err error
+		var conflictErr error
 		if currentSpec == nil || currentSpec.NumFields() == 0 {
-			err = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
+			conflictErr = validateNoConflictingDataFiles(cc, iceberg.AlwaysTrue{}, level)
 		} else {
-			err = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
+			conflictErr = validateNoConflictingDataFilesInPartitions(cc, eqDeleteFiles, level)
 		}
-		if err != nil {
-			return err
+		if conflictErr != nil {
+			return conflictErr
 		}
 	}
 

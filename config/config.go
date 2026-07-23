@@ -18,6 +18,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -51,37 +53,74 @@ type CatalogConfig struct {
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 
+// LoadConfig returns configuration data when it can be read. It retains the
+// historical best-effort behavior; callers that must distinguish a missing
+// default from a broken explicit file should use LoadConfigFile.
 func LoadConfig(configPath string) []byte {
+	data, _ := LoadConfigFile(configPath)
+
+	return data
+}
+
+// LoadConfigFile loads configuration data and reports path and read failures.
+// A missing implicit home-directory configuration is not an error.
+func LoadConfigFile(configPath string) ([]byte, error) {
+	implicit := configPath == ""
 	var path string
-	if len(configPath) > 0 {
+	if !implicit {
 		path = configPath
 	} else {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("resolve home directory for config: %w", err)
 		}
 		path = filepath.Join(homeDir, cfgFile)
 	}
+
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path %q: %w", path, err)
+	}
+
 	file, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		if implicit && errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
 
-	return file
+	return file, nil
 }
 
-func ParseConfig(file []byte, catalogName string) *CatalogConfig {
-	var config Config
-	err := yaml.Unmarshal(file, &config)
-	if err != nil {
-		return nil
+// ParseConfig unmarshals the config file once and resolves the catalog to use.
+// When catalogName is empty, it falls back to the file's default-catalog field and
+// then to the built-in "default" name. It returns the matching CatalogConfig, or
+// nil/nil if no such catalog is defined in the file. A non-nil error means the
+// file could not be parsed and should be surfaced to the user.
+func ParseConfig(file []byte, catalogName string) (*CatalogConfig, error) {
+	if len(file) == 0 {
+		return nil, nil
 	}
-	res, ok := config.Catalogs[catalogName]
-	if !ok {
-		return nil
+	var config Config
+	if err := yaml.Unmarshal(file, &config); err != nil {
+		return nil, err
 	}
 
-	return &res
+	if catalogName == "" {
+		catalogName = config.DefaultCatalog
+	}
+	if catalogName == "" {
+		catalogName = "default"
+	}
+
+	res, ok := config.Catalogs[catalogName]
+	if !ok {
+		return nil, nil
+	}
+
+	return &res, nil
 }
 
 func fromConfigFiles() Config {

@@ -30,11 +30,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -57,11 +59,16 @@ var versionPattern = regexp.MustCompile(`^v([0-9]+)(?:\.gz)?\.metadata\.json$`)
 
 // uuidMetadataPattern matches UUID-style metadata filenames produced by
 // Java/PyIceberg catalogs: 00000-<uuid>.metadata.json or
-// 00000-<uuid>.gz.metadata.json. The sequence is a 5-digit zero-padded
-// number and the UUID is in canonical 8-4-4-4-12 hex format.
+// 00000-<uuid>.gz.metadata.json. The numeric sequence has a minimum width
+// of 5 digits and the UUID is in canonical 8-4-4-4-12 hex format.
 var uuidMetadataPattern = regexp.MustCompile(
-	`^([0-9]{5})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
+	`^([0-9]{5,})-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:\.gz)?\.metadata\.json$`,
 )
+
+// Claims expire aggressively so crashed writers do not permanently block a
+// metadata version. Slow live writers may lose a claim and have to retry, but
+// the protocol still fails closed instead of publishing duplicate versions.
+const metadataClaimStaleAfter = time.Minute
 
 type metadataFile struct {
 	location   string
@@ -133,33 +140,33 @@ func shouldSuppressPermissionError(err error) bool {
 // Note: this is POSIX-best-effort validation — it does not catch NUL bytes
 // or Windows reserved names (NUL, CON, COM1, etc.).
 func validateIdentifier(ident table.Identifier) error {
-	return validateIdentifierParts(ident, catalog.ErrNoSuchNamespace, "namespace identifier", "identifier component")
+	return validateIdentifierParts(ident, "namespace identifier", "identifier component")
 }
 
 func validateTableIdentifier(ident table.Identifier) error {
 	if len(ident) < 2 {
-		return fmt.Errorf("%w: table identifier must have at least a namespace and table name", catalog.ErrNoSuchTable)
+		return fmt.Errorf("%w: table identifier must have at least a namespace and table name", catalog.ErrInvalidIdentifier)
 	}
 
-	return validateIdentifierParts(ident, catalog.ErrNoSuchTable, "table identifier", "table identifier component")
+	return validateIdentifierParts(ident, "table identifier", "table identifier component")
 }
 
-func validateIdentifierParts(ident table.Identifier, errType error, identifierName, componentName string) error {
+func validateIdentifierParts(ident table.Identifier, identifierName, componentName string) error {
 	if len(ident) == 0 {
-		return fmt.Errorf("%w: %s must not be empty", errType, identifierName)
+		return fmt.Errorf("%w: %s must not be empty", catalog.ErrInvalidIdentifier, identifierName)
 	}
 
 	for _, part := range ident {
 		if part == "" {
-			return fmt.Errorf("%w: %s must not be empty", errType, componentName)
+			return fmt.Errorf("%w: %s must not be empty", catalog.ErrInvalidIdentifier, componentName)
 		}
 
 		if part == "." || part == ".." {
-			return fmt.Errorf("%w: invalid %s %q", errType, componentName, part)
+			return fmt.Errorf("%w: invalid %s %q", catalog.ErrInvalidIdentifier, componentName, part)
 		}
 
 		if strings.ContainsAny(part, "/\\") {
-			return fmt.Errorf("%w: %s must not contain path separators: %q", errType, componentName, part)
+			return fmt.Errorf("%w: %s must not contain path separators: %q", catalog.ErrInvalidIdentifier, componentName, part)
 		}
 	}
 
@@ -177,6 +184,9 @@ type Catalog struct {
 	isLocal    bool
 	filesystem HadoopCatalogFS
 	props      iceberg.Properties
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
@@ -198,7 +208,7 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 	allowUnsafeCommits := props.GetBool("allow-unsafe-commits", false)
 
 	if !isLocal && !allowUnsafeCommits {
-		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true", u.Scheme)
+		return nil, fmt.Errorf("hadoop catalog: when using warehouse scheme %q, `allow-unsafe-commits` must be set to true; this implementation is not atomic and can lose data with concurrent commits", u.Scheme)
 	}
 
 	if isLocal {
@@ -234,19 +244,36 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		return nil, fmt.Errorf("hadoop catalog: %T does not implement HadoopCatalogFS", filesystem)
 	}
 
-	return &Catalog{
+	cat := &Catalog{
 		name:      name,
 		warehouse: warehouse,
 		isLocal:   isLocal,
 		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
 		filesystem: hadoopFs,
 		props:      props,
-	}, nil
+	}
+
+	// Resolve the metrics reporter once, up front. CachedReporter caches the
+	// first result, so building it here means a bad metrics-reporter-impl fails
+	// construction — rather than surfacing later as a spurious CreateTable error
+	// after the table is already on disk, or as a cached error that wedges every
+	// later table op on this catalog.
+	if _, err := cat.reporter.Get(props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	return cat, nil
 }
 
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }
+
+// Close releases the catalog's metrics reporter. Callers holding a
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+func (c *Catalog) Close() error { return c.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.
@@ -286,8 +313,22 @@ func (c *Catalog) metadataDir(ident table.Identifier) string {
 	return joinPath(c.isLocal, c.tableToPath(ident), "metadata")
 }
 
-func (c *Catalog) metadataFilePath(ident table.Identifier, version int) string {
-	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json", version))
+func (c *Catalog) metadataFilePathForCompression(ident table.Identifier, version int, compression string) (string, error) {
+	var suffix string
+	switch compression {
+	case table.MetadataCompressionCodecNone:
+		suffix = ".metadata.json"
+	case table.MetadataCompressionCodecGzip:
+		suffix = ".gz.metadata.json"
+	default:
+		return "", fmt.Errorf("unsupported write metadata compression codec: %s", compression)
+	}
+
+	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d%s", version, suffix)), nil
+}
+
+func (c *Catalog) metadataVersionClaimPath(ident table.Identifier, version int) string {
+	return joinPath(c.isLocal, c.metadataDir(ident), fmt.Sprintf("v%d.metadata.json.claim", version))
 }
 
 func (c *Catalog) versionHintPath(ident table.Identifier) string {
@@ -417,37 +458,15 @@ func (c *Catalog) scanMetadataFiles(ident table.Identifier) (map[int]metadataFil
 	return byVersion, latest, err
 }
 
-func (c *Catalog) metadataVersionExists(ident table.Identifier, version int) (bool, error) {
-	dir := c.metadataDir(ident)
-	found := false
-
-	// This intentionally scans: UUID metadata filenames contain an
-	// unpredictable UUID, so Stat checks cannot cover every same-version race.
-	err := c.filesystem.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == dir {
-			return nil
-		}
-		if d.IsDir() {
-			return fs.SkipDir
-		}
-
-		file, ok := metadataFileFromName(path, d.Name())
-		if !ok || file.version != version {
-			return nil
-		}
-
-		found = true
-
-		return fs.SkipAll
-	})
+func (c *Catalog) metadataVersionLocation(ident table.Identifier, version int) (string, bool, error) {
+	files, _, err := c.scanMetadataFiles(ident)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 
-	return found, nil
+	file, ok := files[version]
+
+	return file.location, ok, nil
 }
 
 func (c *Catalog) findMetadataLocation(ident table.Identifier) (string, int, error) {
@@ -489,6 +508,15 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
+	// Resolve the reporter before any catalog mutation: a bad
+	// metrics-reporter-impl must fail here, not after the metadata file and
+	// version hint are written, which would report a failure for a table that
+	// was actually created (and make the retry hit ErrTableAlreadyExists).
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
@@ -525,9 +553,6 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 	}
 
 	version := 1
-	metaPath := c.metadataFilePath(ident, version)
-	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
-
 	compression := table.MetadataCompressionDefault
 	if cfg.Properties != nil {
 		if v, ok := cfg.Properties[table.MetadataCompressionKey]; ok {
@@ -535,13 +560,20 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		}
 	}
 
+	metaPath, err := c.metadataFilePathForCompression(ident, version, compression)
+	if err != nil {
+		return nil, fmt.Errorf("hadoop catalog: failed to determine metadata file path: %w", err)
+	}
+
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
+
 	if err := internal.WriteTableMetadata(metadata, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
 
 		return nil, fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	if err := c.commitMetadataFile(ident, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
+	if err := c.commitMetadataFile(ident, version, tempPath, metaPath, catalog.ErrTableAlreadyExists); err != nil {
 		return nil, err
 	}
 
@@ -553,6 +585,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		metaPath,
 		io.LoadFSFunc(c.props, metaPath),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 
 	return tbl, nil
@@ -568,7 +601,12 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, err
 	}
 
-	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c)
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c, table.WithMetricsReporter(reporter))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -584,7 +622,7 @@ func (c *Catalog) LoadTable(ctx context.Context, ident table.Identifier) (*table
 
 func (c *Catalog) CheckTableExists(_ context.Context, ident table.Identifier) (bool, error) {
 	if err := validateTableIdentifier(ident); err != nil {
-		return false, nil
+		return false, err
 	}
 
 	// Direct existence checks surface metadata directory read errors; listing
@@ -609,11 +647,13 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	}
 
 	// Step 2: Validate requirements against current metadata.
+	var currentMetadata table.Metadata
 	if current != nil {
-		for _, r := range reqs {
-			if err := r.Validate(current.Metadata()); err != nil {
-				return nil, "", err
-			}
+		currentMetadata = current.Metadata()
+	}
+	for _, r := range reqs {
+		if err := r.Validate(currentMetadata); err != nil {
+			return nil, "", err
 		}
 	}
 
@@ -655,10 +695,13 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to create metadata directory: %w", err)
 	}
 
-	newMetaPath := c.metadataFilePath(ident, newVersion)
-	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
-
 	compression := updated.Properties().Get(table.MetadataCompressionKey, table.MetadataCompressionDefault)
+	newMetaPath, err := c.metadataFilePathForCompression(ident, newVersion, compression)
+	if err != nil {
+		return nil, "", fmt.Errorf("hadoop catalog: failed to determine metadata file path: %w", err)
+	}
+
+	tempPath := joinPath(c.isLocal, metaDir, uuid.New().String()+".metadata.json")
 
 	if err := internal.WriteTableMetadata(updated, c.filesystem, tempPath, compression); err != nil {
 		_ = c.filesystem.Remove(tempPath)
@@ -666,20 +709,7 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 		return nil, "", fmt.Errorf("hadoop catalog: failed to write table metadata: %w", err)
 	}
 
-	exists, err := c.metadataVersionExists(ident, newVersion)
-	if err != nil {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
-			newVersion, err)
-	}
-	if exists {
-		_ = c.filesystem.Remove(tempPath)
-
-		return nil, "", fmt.Errorf("hadoop catalog: version %d already exists for table %s",
-			newVersion, strings.Join(ident, "."))
-	}
-	if err := c.commitMetadataFile(ident, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
+	if err := c.commitMetadataFile(ident, newVersion, tempPath, newMetaPath, table.ErrCommitFailed); err != nil {
 		return nil, "", err
 	}
 
@@ -689,17 +719,100 @@ func (c *Catalog) CommitTable(ctx context.Context, ident table.Identifier, reqs 
 	return updated, newMetaPath, nil
 }
 
-func (c *Catalog) commitMetadataFile(ident table.Identifier, tempPath, metaPath string, conflictErr error) error {
-	if err := c.filesystem.RenameNoReplace(tempPath, metaPath); err != nil {
-		_ = c.filesystem.Remove(tempPath)
+func (c *Catalog) commitMetadataFile(ident table.Identifier, version int, tempPath, metaPath string, conflictErr error) error {
+	claimPath := c.metadataVersionClaimPath(ident, version)
+	for {
+		if err := c.filesystem.RenameNoReplace(tempPath, claimPath); err != nil {
+			if !errors.Is(err, fs.ErrExist) {
+				_ = c.filesystem.Remove(tempPath)
 
+				return fmt.Errorf("hadoop catalog: failed to claim metadata version: %w", err)
+			}
+
+			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			if err != nil {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+					version, err)
+			}
+			if exists {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+					conflictErr, strings.Join(ident, "."), existingPath)
+			}
+
+			claimInfo, err := c.filesystem.Stat(claimPath)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to inspect stale metadata claim %s: %w", claimPath, err)
+			}
+			if time.Since(claimInfo.ModTime()) < metadataClaimStaleAfter {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("%w: metadata version already claimed for table %s: %s",
+					conflictErr, strings.Join(ident, "."), claimPath)
+			}
+
+			if err := c.filesystem.Remove(claimPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				_ = c.filesystem.Remove(tempPath)
+
+				return fmt.Errorf("hadoop catalog: failed to clear stale metadata claim %s: %w", claimPath, err)
+			}
+
+			continue
+		}
+
+		break
+	}
+
+	removeClaim := true
+	defer func() {
+		if removeClaim {
+			_ = c.filesystem.Remove(claimPath)
+		}
+	}()
+
+	existingPath, exists, err := c.metadataVersionLocation(ident, version)
+	if err != nil {
+		return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+			version, err)
+	}
+	if exists {
+		return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+			conflictErr, strings.Join(ident, "."), existingPath)
+	}
+
+	if err := c.filesystem.RenameNoReplace(claimPath, metaPath); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%w: metadata file already exists for table %s: %s",
 				conflictErr, strings.Join(ident, "."), metaPath)
 		}
+		if errors.Is(err, fs.ErrNotExist) {
+			existingPath, exists, err := c.metadataVersionLocation(ident, version)
+			if err != nil {
+				return fmt.Errorf("hadoop catalog: failed to inspect metadata directory for version %d: %w",
+					version, err)
+			}
+			if exists {
+				return fmt.Errorf("%w: metadata file already exists for table %s: %s",
+					conflictErr, strings.Join(ident, "."), existingPath)
+			}
+
+			return fmt.Errorf("%w: metadata claim for table %s and version %d was removed before publish",
+				conflictErr, strings.Join(ident, "."), version)
+		}
 
 		return fmt.Errorf("hadoop catalog: failed to commit metadata file: %w", err)
 	}
+
+	removeClaim = false
 
 	return nil
 }
@@ -806,8 +919,11 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 		log.Printf("WARNING: failing to purge some files in Hadoop table %s: %v", identifier, purgeErr)
 	}
 
-	// Delete the table directory root from the local storage
-	return c.DropTable(ctx, identifier)
+	if !tbl.Metadata().Properties().GetBool("gc.enabled", true) {
+		return c.filesystem.RemoveAll(c.metadataDir(identifier))
+	}
+
+	return c.filesystem.RemoveAll(c.tableToPath(identifier))
 }
 
 func (c *Catalog) RenameTable(_ context.Context, _, _ table.Identifier) (*table.Table, error) {
