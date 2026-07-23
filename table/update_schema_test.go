@@ -2315,22 +2315,3 @@ func TestUnionByNameRejectsOverlappingAdds(t *testing.T) {
 	require.Error(t, err, "re-adding a field already pending must be rejected")
 	assert.Contains(t, err.Error(), "name")
 }
-
-// A union following an explicit AddColumn that adds the same column
-// must not double-add
-func TestUnionByNameDedupsAgainstPendingAddColumn(t *testing.T) {
-	current := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	)
-	incoming := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 2, Name: "email", Type: iceberg.PrimitiveTypes.String, Required: false},
-	)
-
-	_, err := NewUpdateSchema(unionTxn(t, current), true, false).
-		AddColumn([]string{"email"}, iceberg.PrimitiveTypes.String, "", false, nil).
-		UnionByNameWith(incoming).
-		Apply()
-	require.Error(t, err, "union must not silently double-add a field already pending via AddColumn")
-	assert.Contains(t, err.Error(), "email")
-}

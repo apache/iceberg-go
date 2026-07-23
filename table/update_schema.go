@@ -900,6 +900,10 @@ func validateFieldDefaults(f iceberg.NestedField) error {
 	return nil
 }
 
+// nativeDefaultLiteral wraps a default already in a native iceberg Go type so
+// its Literal type can be checked against the column type. Values whose Go
+// encoding is shared across iceberg types (e.g. string, []byte, float64,
+// Decimal) are excluded, deferring to the materialization check below.
 func nativeDefaultLiteral(v any) (iceberg.Literal, bool) {
 	switch val := v.(type) {
 	case bool:
