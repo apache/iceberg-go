@@ -261,6 +261,65 @@ func TestSerializePartitionSpec(t *testing.T) {
 	assert.True(t, spec.Equals(outspec))
 }
 
+func TestDeserializePartitionSpecWithoutFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "transform": "identity", "name": "id"},
+			{"source-id": 2, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1000, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecWithPartiallyMissingFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "id"},
+			{"source-id": 2, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1000, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecAssignsAfterExistingFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "transform": "identity", "name": "id"},
+			{"source-id": 2, "field-id": 1001, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1002, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecWithNullFieldID(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "field-id": null, "transform": "identity", "name": "id"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	err := json.Unmarshal(data, &spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	require.ErrorContains(t, err, "partition field ID cannot be null")
+}
+
 func TestPartitionType(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{

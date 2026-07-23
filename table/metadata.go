@@ -1506,7 +1506,105 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, ErrInvalidMetadataFormatVersion
 	}
 
-	return ret, json.Unmarshal(b, ret)
+	normalized, err := assignMissingPartitionFieldIDs(b)
+	if err != nil {
+		return nil, err
+	}
+
+	return ret, json.Unmarshal(normalized, ret)
+}
+
+func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return nil, err
+	}
+
+	type rawPartitionSpec struct {
+		ID     int                          `json:"spec-id"`
+		Fields []map[string]json.RawMessage `json:"fields"`
+	}
+
+	var specs []rawPartitionSpec
+	usesSpecList := false
+	if rawSpecs, ok := metadata["partition-specs"]; ok {
+		if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+			return nil, err
+		}
+		usesSpecList = true
+	} else if rawFields, ok := metadata["partition-spec"]; ok {
+		var fields []map[string]json.RawMessage
+		if err := json.Unmarshal(rawFields, &fields); err != nil {
+			return nil, err
+		}
+		specs = []rawPartitionSpec{{Fields: fields}}
+	} else {
+		return b, nil
+	}
+
+	lastAssignedID := iceberg.PartitionDataIDStart - 1
+	lastPartitionIDSet := false
+	if rawLastPartitionID, ok := metadata["last-partition-id"]; ok {
+		var lastPartitionID *int
+		if err := json.Unmarshal(rawLastPartitionID, &lastPartitionID); err == nil && lastPartitionID != nil {
+			lastAssignedID = max(lastAssignedID, *lastPartitionID)
+			lastPartitionIDSet = true
+		}
+	}
+
+	missingFields := make([]map[string]json.RawMessage, 0)
+	for _, spec := range specs {
+		for _, field := range spec.Fields {
+			rawFieldID, ok := field["field-id"]
+			if !ok {
+				missingFields = append(missingFields, field)
+
+				continue
+			}
+
+			var fieldID *int
+			if err := json.Unmarshal(rawFieldID, &fieldID); err == nil && fieldID != nil {
+				lastAssignedID = max(lastAssignedID, *fieldID)
+			}
+		}
+	}
+
+	if len(missingFields) == 0 {
+		return b, nil
+	}
+
+	for _, field := range missingFields {
+		lastAssignedID++
+		rawFieldID, err := json.Marshal(lastAssignedID)
+		if err != nil {
+			return nil, err
+		}
+		field["field-id"] = rawFieldID
+	}
+
+	if usesSpecList {
+		rawSpecs, err := json.Marshal(specs)
+		if err != nil {
+			return nil, err
+		}
+		metadata["partition-specs"] = rawSpecs
+	} else {
+		rawFields, err := json.Marshal(specs[0].Fields)
+		if err != nil {
+			return nil, err
+		}
+		metadata["partition-spec"] = rawFields
+	}
+
+	if lastPartitionIDSet {
+		rawLastPartitionID, err := json.Marshal(lastAssignedID)
+		if err != nil {
+			return nil, err
+		}
+		metadata["last-partition-id"] = rawLastPartitionID
+	}
+
+	return json.Marshal(metadata)
 }
 
 // https://iceberg.apache.org/spec/#iceberg-table-spec
