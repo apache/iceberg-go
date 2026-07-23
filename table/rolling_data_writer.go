@@ -59,6 +59,7 @@ type writerFactory struct {
 	fileSchema       *iceberg.Schema
 	arrowSchema      *arrow.Schema
 	writeProps       any
+	rowGroupBytes    int64
 	statsCols        map[int]tblutils.StatisticsCollector
 	currentSpec      iceberg.PartitionSpec
 	fileFormat       iceberg.FileFormat
@@ -151,6 +152,13 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 	format := tblutils.GetFileFormat(fileFormat)
 
+	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(meta.props)
+	if err != nil {
+		stopCount()
+
+		return nil, err
+	}
+
 	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
 	if err != nil {
 		stopCount()
@@ -177,6 +185,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		fileSchema:     fileSchema,
 		arrowSchema:    arrowSchema,
 		writeProps:     format.GetWriteProperties(meta.props),
+		rowGroupBytes:  rowGroupTargetSizeBytes,
 		currentSpec:    *currentSpec,
 		fileFormat:     fileFormat,
 		format:         format,
@@ -264,6 +273,7 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		FileName:         filePath,
 		StatsCols:        w.statsCols,
 		WriteProps:       w.writeProps,
+		RowGroupBytes:    w.rowGroupBytes,
 		Spec:             w.currentSpec,
 		Content:          w.content,
 		EqualityFieldIDs: w.equalityFieldIDs,

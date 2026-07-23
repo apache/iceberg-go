@@ -1281,6 +1281,138 @@ func TestGetWritePropertiesBloomFilter(t *testing.T) {
 	})
 }
 
+func TestParquetRowGroupTargetSizeBytes(t *testing.T) {
+	tests := []struct {
+		name      string
+		props     iceberg.Properties
+		expected  int64
+		errString string
+	}{
+		{
+			name:     "default",
+			props:    iceberg.Properties{},
+			expected: internal.ParquetRowGroupSizeBytesDefault,
+		},
+		{
+			name: "configured",
+			props: iceberg.Properties{
+				internal.ParquetRowGroupSizeBytesKey: "4096",
+			},
+			expected: 4096,
+		},
+		{
+			name: "not an integer",
+			props: iceberg.Properties{
+				internal.ParquetRowGroupSizeBytesKey: "large",
+			},
+			errString: "invalid write.parquet.row-group-size-bytes value",
+		},
+		{
+			name: "zero",
+			props: iceberg.Properties{
+				internal.ParquetRowGroupSizeBytesKey: "0",
+			},
+			errString: "must be greater than 0",
+		},
+		{
+			name: "negative",
+			props: iceberg.Properties{
+				internal.ParquetRowGroupSizeBytesKey: "-1",
+			},
+			errString: "must be greater than 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := internal.ParquetRowGroupTargetSizeBytes(tt.props)
+			if tt.errString != "" {
+				require.ErrorContains(t, err, tt.errString)
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestParquetRowGroupTargetRotatesBeforeNextBatch(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	icebergSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String, Required: false,
+	})
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	require.NoError(t, err)
+
+	buildBatch := func(value string) arrow.RecordBatch {
+		bldr := array.NewRecordBuilder(mem, arrowSchema)
+		defer bldr.Release()
+		bldr.Field(0).(*array.StringBuilder).Append(value)
+
+		return bldr.NewRecordBatch()
+	}
+
+	first := buildBatch(strings.Repeat("a", 1024))
+	defer first.Release()
+	second := buildBatch(strings.Repeat("b", 1024))
+	defer second.Release()
+
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	// Keep the page size below the batch size so Arrow flushes the first batch
+	// and RowGroupTotalBytesWritten can observe it before the second write.
+	writeProps := format.GetWriteProperties(iceberg.Properties{
+		internal.ParquetPageSizeBytesKey: "1",
+	})
+	for _, tt := range []struct {
+		name          string
+		targetBytes   int64
+		wantRowGroups int
+	}{
+		{name: "target reached", targetBytes: 1, wantRowGroups: 2},
+		{name: "target not reached", targetBytes: math.MaxInt64, wantRowGroups: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fsys := iceio.NewMemFS()
+			_, err = format.WriteDataFile(context.Background(), fsys, nil, internal.WriteFileInfo{
+				FileSchema: icebergSchema,
+				Spec:       *iceberg.UnpartitionedSpec,
+				FileName:   "row-groups.parquet",
+				StatsCols: map[int]internal.StatisticsCollector{
+					1: {
+						FieldID:    1,
+						Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
+						ColName:    "value",
+						IcebergTyp: iceberg.PrimitiveTypes.String,
+					},
+				},
+				WriteProps:    writeProps,
+				RowGroupBytes: tt.targetBytes,
+				Content:       iceberg.EntryContentData,
+			}, []arrow.RecordBatch{first, second})
+			require.NoError(t, err)
+
+			input, err := fsys.Open("row-groups.parquet")
+			require.NoError(t, err)
+			defer input.Close()
+
+			reader, err := file.NewParquetReader(input)
+			require.NoError(t, err)
+			defer reader.Close()
+
+			require.Equal(t, tt.wantRowGroups, reader.MetaData().NumRowGroups())
+			for rowGroup := range reader.MetaData().NumRowGroups() {
+				require.Positive(t, reader.MetaData().RowGroup(rowGroup).NumRows(),
+					"rotation must not create an empty trailing row group")
+			}
+		})
+	}
+}
+
 func TestParquetBatchSizeFromTableProperties(t *testing.T) {
 	t.Run("default batch size when no properties in context", func(t *testing.T) {
 		ctx := context.Background()
