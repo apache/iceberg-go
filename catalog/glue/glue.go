@@ -973,6 +973,8 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 
 	maps.Copy(parameters, staged.Properties())
 	delete(parameters, tableParamPreviousMetadataLocation)
+	delete(parameters, PropsKeyDescription)
+	delete(parameters, legacyPropsKeyDescription)
 
 	if previousGlueTable != nil {
 		if previousMetadataLocation, ok := previousGlueTable.Parameters[tableParamMetadataLocation]; ok {
