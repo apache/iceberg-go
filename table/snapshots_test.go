@@ -106,6 +106,24 @@ func TestInvalidOperation(t *testing.T) {
 	assert.ErrorContains(t, err, "found 'foobar'")
 }
 
+func TestSummaryEqualsHandlesNil(t *testing.T) {
+	var nilSummary *table.Summary
+	summary := &table.Summary{Operation: table.OpAppend}
+
+	assert.True(t, nilSummary.Equals(nil))
+	assert.False(t, nilSummary.Equals(summary))
+	assert.False(t, summary.Equals(nilSummary))
+}
+
+func TestSnapshotEqualsHandlesMissingSummary(t *testing.T) {
+	withSummary := Snapshot()
+	withoutSummary := withSummary
+	withoutSummary.Summary = nil
+
+	assert.False(t, withoutSummary.Equals(withSummary))
+	assert.False(t, withSummary.Equals(withoutSummary))
+}
+
 func TestSnapshotString(t *testing.T) {
 	snapshot := Snapshot()
 	assert.Equal(t, `append: id=25, parent_id=19, schema_id=3, sequence_number=200, timestamp_ms=1602638573590, manifest_list=s3:/a/b/c.avro`,

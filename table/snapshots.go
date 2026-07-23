@@ -199,7 +199,7 @@ func (s *Summary) Equals(other *Summary) bool {
 		return true
 	}
 
-	if s != nil && other == nil {
+	if s == nil || other == nil {
 		return false
 	}
 
