@@ -219,6 +219,71 @@ func TestRESTValueMapMatchesJavaContentFileParser(t *testing.T) {
 	require.Error(t, err, "bounds are binary hex strings, not typed JSON values")
 }
 
+func TestRESTValueMapUsesIcebergBinaryEncoding(t *testing.T) {
+	t.Parallel()
+
+	var bounds RESTValueMap
+	require.NoError(t, json.Unmarshal(
+		[]byte(`{
+			"keys": [1, 2, 3],
+			"values": ["22000000", "04D2", "15CD5B0700000000"]
+		}`),
+		&bounds,
+	))
+	decoded, err := decodeValueMap("lower-bounds", &bounds)
+	require.NoError(t, err)
+
+	decimalType := iceberg.DecimalTypeOf(9, 2)
+	tests := []struct {
+		name    string
+		fieldID int
+		typ     iceberg.Type
+		want    iceberg.Literal
+	}{
+		{
+			name:    "int little-endian",
+			fieldID: 1,
+			typ:     iceberg.PrimitiveTypes.Int32,
+			want:    iceberg.Int32Literal(34),
+		},
+		{
+			name:    "decimal big-endian",
+			fieldID: 2,
+			typ:     decimalType,
+			want:    mustLiteral(t, "12.34", decimalType),
+		},
+		{
+			name:    "timestamp little-endian",
+			fieldID: 3,
+			typ:     iceberg.PrimitiveTypes.Timestamp,
+			want:    iceberg.TimestampLiteral(123456789),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			literal, err := iceberg.LiteralFromBytes(tt.typ, decoded[tt.fieldID])
+			require.NoError(t, err)
+			assert.Truef(t, tt.want.Equals(literal), "got %s, want %s", literal, tt.want)
+		})
+	}
+}
+
+func TestDecodeScanTasksKeyMetadataMatchesJavaContentFileParser(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	// This value mirrors Java TestContentFileParser's all-optional data-file
+	// fixture. SingleValueParser encodes binary values as hexadecimal strings.
+	wire.FileScanTasks[0].DataFile.KeyMetadata = stringPtr("00000000000000000000000000000000")
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, make([]byte, 16), tasks[0].File.KeyMetadata())
+}
+
 func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 	t.Parallel()
 
@@ -269,6 +334,13 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 				w.FileScanTasks[0].DeleteFileReferences = []int{0, 0}
 			},
 			want: "repeats delete-file reference 0",
+		},
+		{
+			name: "unreferenced delete file",
+			mutate: func(w *ScanTasks) {
+				w.FileScanTasks[0].DeleteFileReferences = nil
+			},
+			want: "delete-files[0] is not referenced by any file scan task",
 		},
 		{
 			name: "count map length mismatch",
@@ -484,8 +556,11 @@ func validScanTasksWire() ScanTasks {
 	deleteFile.FilePath = "s3://bucket/table/delete.parquet"
 
 	return ScanTasks{
-		FileScanTasks: []RESTFileScanTask{{DataFile: &RESTDataFile{RESTContentFile: data}}},
-		DeleteFiles:   []RESTDeleteFile{{RESTContentFile: deleteFile}},
+		FileScanTasks: []RESTFileScanTask{{
+			DataFile:             &RESTDataFile{RESTContentFile: data},
+			DeleteFileReferences: []int{0},
+		}},
+		DeleteFiles: []RESTDeleteFile{{RESTContentFile: deleteFile}},
 	}
 }
 

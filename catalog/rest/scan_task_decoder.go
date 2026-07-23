@@ -135,8 +135,8 @@ func DecodeScanTasks(
 		return nil, nil
 	}
 
-	// Decode every delete even if the server did not reference it. This catches
-	// a malformed response rather than silently ignoring corrupt wire data.
+	// Decode every delete before resolving references. This validates all wire
+	// entries, including an unreferenced entry that will be rejected below.
 	deletes := make([]iceberg.DataFile, len(wire.DeleteFiles))
 	for i := range wire.DeleteFiles {
 		decoded, err := decodeRESTDeleteFile(wire.DeleteFiles[i], metadata, "")
@@ -148,6 +148,7 @@ func DecodeScanTasks(
 
 	out := make([]table.FileScanTask, 0, len(wire.FileScanTasks))
 	dvOwners := make(map[int]string)
+	referencedDeletes := make([]bool, len(deletes))
 	for i := range wire.FileScanTasks {
 		wireTask := wire.FileScanTasks[i]
 		if wireTask.DataFile == nil {
@@ -187,6 +188,7 @@ func DecodeScanTasks(
 					ErrRESTError, i, ref)
 			}
 			seenRefs[ref] = struct{}{}
+			referencedDeletes[ref] = true
 
 			wireDelete := wire.DeleteFiles[ref]
 			if wireDelete.ReferencedDataFile != nil && *wireDelete.ReferencedDataFile != dataFile.FilePath() {
@@ -226,6 +228,14 @@ func DecodeScanTasks(
 		}
 
 		out = append(out, task)
+	}
+
+	for i, referenced := range referencedDeletes {
+		if !referenced {
+			return nil, fmt.Errorf(
+				"%w: decoding scan tasks: delete-files[%d] is not referenced by any file scan task",
+				ErrRESTError, i)
+		}
 	}
 
 	return out, nil
