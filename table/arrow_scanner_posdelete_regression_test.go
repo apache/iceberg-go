@@ -24,7 +24,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -263,6 +266,38 @@ func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {
 	_, err := collectPosDeletePositions(positionDeletes{posCol})
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "unsupported pos column type")
+}
+
+func TestReadDeletesRejectsNullPos(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	fields := PositionalDeleteArrowSchema.Fields()
+	fields[1].Nullable = true
+	deleteSchema := arrow.NewSchema(fields, nil)
+	deletePath := "mem://bucket/deletes/null-pos.parquet"
+	dataPath := "mem://bucket/data/data.parquet"
+
+	rec := mustLoadRecordBatchFromJSON(deleteSchema, `[
+		{"file_path": "`+dataPath+`", "pos": null}
+	]`)
+	defer rec.Release()
+	tbl := array.NewTableFromRecords(deleteSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	memFS := iceio.NewMemFS()
+	fw, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()))
+	require.NoError(t, fw.Close())
+
+	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+	assert.Contains(t, err.Error(), "null pos in position delete file")
 }
 
 // TestProcessPositionalDeletesAcrossBatches is the regression net for the
