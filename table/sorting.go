@@ -98,16 +98,18 @@ func (s *SortField) String() string {
 	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID(), s.Direction, s.NullOrder)
 }
 
-func (s *SortField) MarshalJSON() ([]byte, error) {
-	if s.Direction == "" {
-		s.Direction = SortASC
+func (s SortField) MarshalJSON() ([]byte, error) {
+	direction := s.Direction
+	if direction == "" {
+		direction = SortASC
 	}
 
-	if s.NullOrder == "" {
-		if s.Direction == SortASC {
-			s.NullOrder = NullsFirst
+	nullOrder := s.NullOrder
+	if nullOrder == "" {
+		if direction == SortASC {
+			nullOrder = NullsFirst
 		} else {
-			s.NullOrder = NullsLast
+			nullOrder = NullsLast
 		}
 	}
 
@@ -117,7 +119,7 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 			Transform iceberg.Transform `json:"transform"`
 			Direction SortDirection     `json:"direction"`
 			NullOrder NullOrder         `json:"null-order"`
-		}{s.SourceIDs, s.Transform, s.Direction, s.NullOrder})
+		}{s.SourceIDs, s.Transform, direction, nullOrder})
 	}
 
 	return json.Marshal(struct {
@@ -125,7 +127,7 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 		Transform iceberg.Transform `json:"transform"`
 		Direction SortDirection     `json:"direction"`
 		NullOrder NullOrder         `json:"null-order"`
-	}{s.SourceID(), s.Transform, s.Direction, s.NullOrder})
+	}{s.SourceID(), s.Transform, direction, nullOrder})
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {

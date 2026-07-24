@@ -359,3 +359,33 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		assert.NotContains(t, string(data), `"source-ids"`)
 	})
 }
+
+func TestSortFieldMarshalAppliesDefaultsWithoutMutatingReceiver(t *testing.T) {
+	field := table.SortField{
+		SourceIDs: []int{1},
+		Transform: iceberg.IdentityTransform{},
+	}
+	expected := `{
+		"source-id": 1,
+		"transform": "identity",
+		"direction": "asc",
+		"null-order": "nulls-first"
+	}`
+
+	for _, tt := range []struct {
+		name  string
+		input any
+	}{
+		{"value", field},
+		{"pointer", &field},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.input)
+			require.NoError(t, err)
+			assert.JSONEq(t, expected, string(data))
+		})
+	}
+
+	assert.Empty(t, field.Direction)
+	assert.Empty(t, field.NullOrder)
+}
