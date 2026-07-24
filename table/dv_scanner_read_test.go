@@ -51,7 +51,7 @@ import (
 //
 // TODO(#1041): replace the hand-built envelope with a dv.SerializeDV helper
 // once that PR exports one. Today the dv package only exports the read side.
-func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length int64) {
+func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length, cardinality int64) {
 	t.Helper()
 
 	bitmap := dv.NewRoaringPositionBitmap()
@@ -91,20 +91,24 @@ func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile s
 	path = filepath.Join(t.TempDir(), "dv.puffin")
 	require.NoError(t, os.WriteFile(path, puffinBuf.Bytes(), 0o644))
 
-	return path, blobMeta.Offset, blobMeta.Length
+	return path, blobMeta.Offset, blobMeta.Length, bitmap.Cardinality()
 }
 
 // newDVMockDataFile builds a manifest-entry-shaped mock for a DV puffin blob.
-// FileSizeBytes is intentionally left at zero (mockDataFile's default): the
-// scanner read path consults ContentOffset / ContentSizeInBytes only, and
-// setting filesize to the blob length (rather than the puffin file size)
-// invites a misleading test fixture.
-func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSize int64) *dvMockDataFile {
+// recordCount is the manifest entry's record_count (field 103): for a DV it
+// equals the blob cardinality, and ReadDV cross-checks the two, so callers
+// pass the cardinality returned by writeDVPuffinFixture. FileSizeBytes is
+// intentionally left at zero (mockDataFile's default): the scanner read path
+// consults ContentOffset / ContentSizeInBytes only, and setting filesize to
+// the blob length (rather than the puffin file size) invites a misleading
+// test fixture.
+func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSize, recordCount int64) *dvMockDataFile {
 	return &dvMockDataFile{
 		mockDataFile: mockDataFile{
 			path:        puffinPath,
 			contentType: iceberg.EntryContentPosDeletes,
 			format:      iceberg.PuffinFile,
+			count:       recordCount,
 		},
 		referencedDataFile: strPtr(referencedDataFile),
 		contentOffset:      int64Ptr(offset),
@@ -137,10 +141,10 @@ func TestReadAllDeletionVectors(t *testing.T) {
 
 	t.Run("decodes positions and keys by referenced data file", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-001.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataFilePath)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataFilePath)
 
 		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
-			newDVMockDataFile(puffinPath, dataFilePath, offset, length),
+			newDVMockDataFile(puffinPath, dataFilePath, offset, length, card),
 		}}}
 
 		got, err := readAllDeletionVectors(ctx, fs, tasks, 1)
@@ -162,8 +166,8 @@ func TestReadAllDeletionVectors(t *testing.T) {
 
 	t.Run("dedups identical DV referenced by two tasks", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-002.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{2, 4}, dataFilePath)
-		dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{2, 4}, dataFilePath)
+		dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
 
 		tasks := []FileScanTask{
 			{DeletionVectorFiles: []iceberg.DataFile{dvFile}},
@@ -186,7 +190,7 @@ func TestReadAllDeletionVectors(t *testing.T) {
 	})
 
 	t.Run("DV missing referenced_data_file is rejected", func(t *testing.T) {
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
+		puffinPath, offset, length, _ := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
 
 		dvFile := &dvMockDataFile{
 			mockDataFile: mockDataFile{
@@ -232,12 +236,12 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		// right place to catch the case where two blobs share a puffin file
 		// but live at different content offsets — sameDVBlob compares both.
 		const dataFilePath = "file:///table/data/data-003.parquet"
-		puffinA, offsetA, lengthA := writeDVPuffinFixture(t, []uint64{1, 2}, dataFilePath)
-		puffinB, offsetB, lengthB := writeDVPuffinFixture(t, []uint64{3, 4}, dataFilePath)
+		puffinA, offsetA, lengthA, cardA := writeDVPuffinFixture(t, []uint64{1, 2}, dataFilePath)
+		puffinB, offsetB, lengthB, cardB := writeDVPuffinFixture(t, []uint64{3, 4}, dataFilePath)
 
 		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
-			newDVMockDataFile(puffinA, dataFilePath, offsetA, lengthA),
-			newDVMockDataFile(puffinB, dataFilePath, offsetB, lengthB),
+			newDVMockDataFile(puffinA, dataFilePath, offsetA, lengthA, cardA),
+			newDVMockDataFile(puffinB, dataFilePath, offsetB, lengthB, cardB),
 		}}}
 
 		_, err := readAllDeletionVectors(ctx, fs, tasks, 1)
@@ -256,8 +260,8 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		// nil-ref entry in the input, the call returns a clean error and
 		// does not panic, regardless of how concurrency is configured.
 		const dataFilePath = "file:///table/data/data-004.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{42}, dataFilePath)
-		valid := newDVMockDataFile(puffinPath, dataFilePath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{42}, dataFilePath)
+		valid := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
 		broken := &dvMockDataFile{
 			mockDataFile: mockDataFile{
 				path:        "/nonexistent.puffin",

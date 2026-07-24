@@ -18,7 +18,9 @@
 package dv
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"hash/crc32"
 	"os"
@@ -126,6 +128,50 @@ func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte,
 	}, dvBlobBytes)
 	require.NoError(t, err)
 	require.NoError(t, w.Finish())
+
+	return path, meta
+}
+
+// writeRawPuffinWithDVBlobNoCardinality hand-builds a Puffin file whose DV blob
+// deliberately omits the spec-required `cardinality` property. The in-tree
+// puffin.Writer rejects such blobs at AddBlob time, so the only way to exercise
+// ReadDV's missing-property branch (reachable via a non-conformant third-party
+// writer) is to assemble the bytes directly. The reader's validateBlobs does
+// not require the property, so this file loads cleanly.
+func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes []byte) (string, puffin.BlobMetadata) {
+	t.Helper()
+
+	const puffinMagic = "PFA1"
+	meta := puffin.BlobMetadata{
+		Type:           puffin.BlobTypeDeletionVector,
+		Fields:         []int32{2147483546},
+		SnapshotID:     -1,
+		SequenceNumber: -1,
+		Offset:         int64(puffin.MagicSize),
+		Length:         int64(len(dvBlobBytes)),
+		Properties: map[string]string{
+			// No "cardinality" — that is the whole point of this fixture.
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+		},
+	}
+
+	payload, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{meta}})
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	buf.WriteString(puffinMagic) // header magic
+	buf.Write(dvBlobBytes)       // blob at offset MagicSize
+	buf.WriteString(puffinMagic) // footer start magic
+	buf.Write(payload)           // footer JSON payload
+
+	var trailer [12]byte // PayloadSize(4) + Flags(4) + Magic(4)
+	binary.LittleEndian.PutUint32(trailer[0:4], uint32(len(payload)))
+	binary.LittleEndian.PutUint32(trailer[4:8], 0) // flags = 0 (uncompressed)
+	copy(trailer[8:12], puffinMagic)
+	buf.Write(trailer[:])
+
+	path := filepath.Join(dir, "raw-dv-no-cardinality.puffin")
+	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
 
 	return path, meta
 }
@@ -413,33 +459,92 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		assert.Equal(t, int64(5), bm.Cardinality())
 	})
 
-	t.Run("mismatched cardinality is rejected", func(t *testing.T) {
+	t.Run("empty deletion vector with zero cardinality passes", func(t *testing.T) {
+		// record_count is a required non-nullable long, so an empty DV
+		// carries a legitimate zero. Manifest 0, puffin 0, and an empty
+		// bitmap all agree and must be accepted, not treated as "absent".
+		emptyBlob := readDVTestData(t, "empty-position-index.bin")
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, emptyBlob, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			"cardinality":          "0",
+		})
+		offset, size := meta.Offset, meta.Length
+		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), bm.Cardinality())
+	})
+
+	t.Run("manifest disagreeing with puffin property is rejected", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
 			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			// Bitmap actually has 5 positions; claim 99.
+			// Puffin says 99; the manifest entry below says 5.
 			"cardinality": "99",
 		})
 		offset, size := meta.Offset, meta.Length
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
-		// Pin the specific error path: DeserializeDV's "cardinality
-		// mismatch", not the helper's "invalid cardinality" parse error.
+		// Cross-check fires before DeserializeDV: the two metadata sources
+		// disagree, so we never reach the bitmap "cardinality mismatch" path.
+		assert.Contains(t, err.Error(), "manifest record_count 5 disagrees with puffin cardinality property 99")
+	})
+
+	t.Run("manifest zero disagreeing with nonzero puffin property is rejected", func(t *testing.T) {
+		// Regression for the record_count==0 trap: record_count is a required
+		// non-nullable long, so a manifest zero against a nonzero puffin
+		// property is a real disagreement, not "manifest cardinality absent".
+		// Must error rather than fall back to trusting the blob property.
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			"cardinality":          "5",
+		})
+		offset, size := meta.Offset, meta.Length
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "manifest record_count 0 disagrees with puffin cardinality property 5")
+	})
+
+	t.Run("agreeing metadata but wrong bitmap is rejected", func(t *testing.T) {
+		// Both sources agree on 99, but the decoded bitmap holds 5 positions.
+		// The cross-check passes, then DeserializeDV catches the bitmap
+		// against the agreed-upon expected cardinality.
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			"cardinality":          "99",
+		})
+		offset, size := meta.Offset, meta.Length
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 99, &offset, &size))
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cardinality mismatch")
 	})
 
-	t.Run("missing property is tolerated with a warning", func(t *testing.T) {
+	t.Run("missing property falls back to manifest record_count", func(t *testing.T) {
 		// No `cardinality` property — spec deviation tolerated for read
-		// compatibility with third-party writers that omit it. ReadDV logs
-		// a warning (see slog.Warn) and falls back to CRC-only validation
-		// inside DeserializeDV. Strict enforcement is deferred until the
-		// Go writer-side coverage lands.
+		// compatibility with third-party writers that omit it. ReadDV logs a
+		// warning and validates the bitmap against the manifest record_count
+		// (5), which matches, so the read succeeds.
 		dir := t.TempDir()
-		path, meta := writePuffinWithDVBlob(t, dir, dvBlobBytes)
+		path, meta := writeRawPuffinWithDVBlobNoCardinality(t, dir, dvBlobBytes)
 		offset, size := meta.Offset, meta.Length
 		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.NoError(t, err)
 		assert.Equal(t, int64(5), bm.Cardinality())
+	})
+
+	t.Run("missing property still validates against manifest record_count", func(t *testing.T) {
+		// Property absent and the manifest record_count (3) disagrees with the
+		// decoded bitmap (5). With no puffin property to cross-check, the
+		// manifest count is the sole expected cardinality and must still be
+		// enforced by DeserializeDV.
+		dir := t.TempDir()
+		path, meta := writeRawPuffinWithDVBlobNoCardinality(t, dir, dvBlobBytes)
+		offset, size := meta.Offset, meta.Length
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 3, &offset, &size))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cardinality mismatch")
 	})
 
 	// Note: the previous "malformed property is rejected" and "negative
