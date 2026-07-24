@@ -1943,6 +1943,43 @@ func (m *ManifestTestSuite) TestManifestEntryFileSequenceNumReturnsCopy() {
 	m.Assert().Equal(int64(10), *current)
 }
 
+func (m *ManifestTestSuite) TestManifestBuilderPartitionsCopiesInput() {
+	containsNaN := true
+	lowerBound := []byte{0x00, 0x01}
+	upperBound := []byte{0x01, 0x02}
+	partitions := []FieldSummary{{
+		ContainsNull: true,
+		ContainsNaN:  &containsNaN,
+		LowerBound:   &lowerBound,
+		UpperBound:   &upperBound,
+	}}
+
+	manifest := NewManifestFile(2, "file.avro", 1, 1, entrySnapshotID).Partitions(partitions).Build()
+
+	containsNaN = false
+	lowerBound[0] = 0x09
+	upperBound[1] = 0x0a
+	partitions[0].ContainsNull = false
+	partitions[0].ContainsNaN = nil
+
+	manifestPartitions := manifest.Partitions()
+	m.Require().Len(manifestPartitions, 1)
+	m.Assert().True(manifestPartitions[0].ContainsNull)
+	m.Require().NotNil(manifestPartitions[0].ContainsNaN)
+	m.Assert().True(*manifestPartitions[0].ContainsNaN)
+	m.Assert().Equal([]byte{0x00, 0x01}, *manifestPartitions[0].LowerBound)
+	m.Assert().Equal([]byte{0x01, 0x02}, *manifestPartitions[0].UpperBound)
+}
+
+func (m *ManifestTestSuite) TestManifestBuilderKeyMetadataCopiesInput() {
+	keyMetadata := []byte{0x00, 0x01, 0x02}
+	manifest := NewManifestFile(2, "file.avro", 1, 1, entrySnapshotID).KeyMetadata(keyMetadata).Build()
+
+	keyMetadata[1] = 0x09
+
+	m.Assert().Equal([]byte{0x00, 0x01, 0x02}, manifest.KeyMetadata())
+}
+
 // equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
 func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc *avro.Schema) {
 	m.T().Helper()

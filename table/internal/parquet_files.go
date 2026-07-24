@@ -351,16 +351,17 @@ func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.Da
 // lifecycle. It writes Arrow record batches to a Parquet file and tracks bytes
 // written for rolling file decisions.
 type ParquetFileWriter struct {
-	pqWriter   *pqarrow.FileWriter
-	counter    *internal.CountingWriter
-	fileCloser io.Closer
-	fs         iceio.WriteFileIO
-	format     parquetFormat
-	info       WriteFileInfo
-	partition  map[int]any
-	colMapping map[string]int
-	geoCols    []geoColumn
-	geoAccs    map[int]*geoBoundsAccumulator
+	pqWriter    *pqarrow.FileWriter
+	counter     *internal.CountingWriter
+	fileCloser  io.Closer
+	fs          iceio.WriteFileIO
+	format      parquetFormat
+	info        WriteFileInfo
+	partition   map[int]any
+	colMapping  map[string]int
+	geoCols     []geoColumn
+	geoAccs     map[int]*geoBoundsAccumulator
+	arrowSchema *arrow.Schema
 }
 
 // geoColumn locates a top-level geometry/geography column: its position in the
@@ -438,16 +439,17 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	return &ParquetFileWriter{
-		pqWriter:   writer,
-		counter:    counter,
-		fileCloser: fw,
-		fs:         fs,
-		format:     p,
-		info:       info,
-		partition:  partitionValues,
-		colMapping: colMapping,
-		geoCols:    geoCols,
-		geoAccs:    geoAccs,
+		pqWriter:    writer,
+		counter:     counter,
+		fileCloser:  fw,
+		fs:          fs,
+		format:      p,
+		info:        info,
+		partition:   partitionValues,
+		colMapping:  colMapping,
+		geoCols:     geoCols,
+		geoAccs:     geoAccs,
+		arrowSchema: arrowSchema,
 	}, nil
 }
 
@@ -573,7 +575,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema))
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema), w.arrowSchema)
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	if err = w.applyGeoBounds(stats); err != nil {
@@ -826,7 +828,7 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
-func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) *DataFileStatistics {
+func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}, arrowSchema *arrow.Schema) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
 	var (
 		colSizes        = make(map[int]int64)
@@ -936,34 +938,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				colAggs[fieldID] = agg
 			}
 
-			switch t := statsCol.IcebergTyp.(type) {
-			case iceberg.BinaryType:
-				stats = &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
-			case iceberg.UUIDType:
-				stats = &wrappedUUIDStats{stats.(*metadata.FixedLenByteArrayStatistics)}
-			case iceberg.StringType:
-				stats = &wrappedStringStats{stats.(*metadata.ByteArrayStatistics)}
-			case iceberg.FixedType:
-				stats = &wrappedFLBAStats{
-					FixedLenByteArrayStatistics: stats.(*metadata.FixedLenByteArrayStatistics),
-					expectedLen:                 t.Len(),
-				}
-			case iceberg.DecimalType:
-				// Decimals can be stored as INT32/INT64 (small precision) or FIXED_LEN_BYTE_ARRAY/BYTE_ARRAY.
-				// Only wrap FIXED_LEN_BYTE_ARRAY and BYTE_ARRAY statistics; INT32/INT64 stats
-				// are used directly by decAsIntAgg.
-				switch s := stats.(type) {
-				case *metadata.FixedLenByteArrayStatistics:
-					stats = &wrappedDecStats{
-						FixedLenByteArrayStatistics: s,
-						expectedLen:                 internal.DecimalRequiredBytes(t.Precision()),
-						scale:                       t.Scale(),
-					}
-				case *metadata.ByteArrayStatistics:
-					stats = &wrappedDecByteArrayStats{s, t.Scale()}
-					// INT32/INT64 statistics are used directly by decAsIntAgg
-				}
-			}
+			stats = wrapStatsForType(stats, statsCol.IcebergTyp)
 
 			if !stats.HasMinMax() {
 				invalidateCol[fieldID] = struct{}{}
@@ -989,15 +964,200 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		return ok
 	})
 
+	vlo, vup := p.collectVariantBounds(pqmeta, arrowSchema, colMapping, statsCols)
+
 	return &DataFileStatistics{
-		RecordCount:     pqmeta.GetNumRows(),
-		ColSizes:        colSizes,
-		ValueCounts:     valueCounts,
-		NullValueCounts: nullValueCounts,
-		NanValueCounts:  nanValueCounts,
-		SplitOffsets:    splitOffsets,
-		ColAggs:         colAggs,
+		RecordCount:        pqmeta.GetNumRows(),
+		ColSizes:           colSizes,
+		ValueCounts:        valueCounts,
+		NullValueCounts:    nullValueCounts,
+		NanValueCounts:     nanValueCounts,
+		SplitOffsets:       splitOffsets,
+		ColAggs:            colAggs,
+		VariantLowerBounds: vlo,
+		VariantUpperBounds: vup,
 	}
+}
+
+// wrapStatsForType adapts Parquet stats so a StatsAgg reads Iceberg-typed min/max.
+func wrapStatsForType(stats metadata.TypedStatistics, typ iceberg.PrimitiveType) metadata.TypedStatistics {
+	switch t := typ.(type) {
+	case iceberg.BinaryType:
+		return &wrappedBinaryStats{stats.(*metadata.ByteArrayStatistics)}
+	case iceberg.UUIDType:
+		return &wrappedUUIDStats{stats.(*metadata.FixedLenByteArrayStatistics)}
+	case iceberg.StringType:
+		return &wrappedStringStats{stats.(*metadata.ByteArrayStatistics)}
+	case iceberg.FixedType:
+		return &wrappedFLBAStats{
+			FixedLenByteArrayStatistics: stats.(*metadata.FixedLenByteArrayStatistics),
+			expectedLen:                 t.Len(),
+		}
+	case iceberg.DecimalType:
+		switch s := stats.(type) {
+		case *metadata.FixedLenByteArrayStatistics:
+			return &wrappedDecStats{
+				FixedLenByteArrayStatistics: s,
+				expectedLen:                 internal.DecimalRequiredBytes(t.Precision()),
+				scale:                       t.Scale(),
+			}
+		case *metadata.ByteArrayStatistics:
+			return &wrappedDecByteArrayStats{s, t.Scale()}
+		}
+	}
+
+	return stats
+}
+
+// residualAllVariantNull reports whether a residual value column holds only variant-null.
+func residualAllVariantNull(st metadata.TypedStatistics) bool {
+	ba, ok := st.(*metadata.ByteArrayStatistics)
+	if !ok {
+		return false
+	}
+
+	return isVariantNull(ba.Min()) && isVariantNull(ba.Max())
+}
+
+// isVariantNull reports whether a serialized variant value is primitive null (byte 0x00).
+func isVariantNull(b []byte) bool {
+	return len(b) == 1 && b[0] == 0x00
+}
+
+// collectVariantBounds builds spec "Bounds for Variant" objects per shredded variant column.
+func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSchema *arrow.Schema, colMapping map[string]int, statsCols map[int]StatisticsCollector) (lower, upper map[int][]byte) {
+	if arrowSchema == nil {
+		return nil, nil
+	}
+
+	type leafAgg struct {
+		leaf     variantLeaf
+		parentID int
+		agg      StatsAgg
+		invalid  bool
+	}
+
+	byTyped := make(map[string]*leafAgg)
+	residualParent := make(map[string]struct{}) // residual value columns to inspect
+	residualBad := make(map[string]bool)        // residual value column has/may have non-null
+
+	for _, f := range arrowSchema.Fields() {
+		vt, ok := f.Type.(*extensions.VariantType)
+		if !ok || vt.TypedValue().Type == nil {
+			continue
+		}
+		parentID, ok := colMapping[f.Name]
+		if !ok {
+			continue
+		}
+		// Honor the parent variant column's metrics mode: none/counts skip min/max bounds.
+		if sc, ok := statsCols[parentID]; !ok || sc.Mode.Typ == MetricModeNone || sc.Mode.Typ == MetricModeCounts {
+			continue
+		}
+		for _, lf := range enumerateVariantLeaves([]string{f.Name}, vt.TypedValue()) {
+			byTyped[lf.typedPath] = &leafAgg{leaf: lf, parentID: parentID}
+			for _, vp := range lf.valuePaths {
+				residualParent[vp] = struct{}{}
+			}
+		}
+	}
+	if len(byTyped) == 0 {
+		return nil, nil
+	}
+
+	for rg := range meta.NumRowGroups() {
+		rowGroup := meta.RowGroup(rg)
+		for pos := range rowGroup.NumColumns() {
+			cc, err := rowGroup.ColumnChunk(pos)
+			if err != nil {
+				continue
+			}
+			path := cc.PathInSchema().String()
+
+			if _, isResidual := residualParent[path]; isResidual {
+				// Non-null residual entries invalidate the bound unless they are all variant-null.
+				set, serr := cc.StatsSet()
+				st, terr := cc.Statistics()
+				switch {
+				case serr != nil || !set || terr != nil || st == nil || !st.HasNullCount():
+					residualBad[path] = true
+				case cc.NumValues()-st.NullCount() > 0:
+					if !st.HasMinMax() || !residualAllVariantNull(st) {
+						residualBad[path] = true
+					}
+				}
+
+				continue
+			}
+
+			e, isTyped := byTyped[path]
+			if !isTyped || e.invalid {
+				continue
+			}
+			set, serr := cc.StatsSet()
+			st, terr := cc.Statistics()
+			switch {
+			case serr != nil || !set || terr != nil || st == nil:
+				e.invalid = true
+			case st.HasMinMax():
+				if e.agg == nil {
+					agg, aerr := p.createStatsAgg(e.leaf.icebergType, st.Type().String(), 0)
+					if aerr != nil {
+						slog.Warn("variant bounds: no stats aggregator for shredded field", "path", e.leaf.jsonPath, "err", aerr)
+						e.invalid = true
+
+						break
+					}
+					e.agg = agg
+				}
+				e.agg.Update(wrapStatsForType(st, e.leaf.icebergType))
+			case !st.HasNullCount() || cc.NumValues()-st.NullCount() > 0:
+				e.invalid = true
+			}
+		}
+	}
+
+	perParent := make(map[int][]variantFieldBound)
+	for _, e := range byTyped {
+		if e.invalid || e.agg == nil {
+			continue
+		}
+		if slices.ContainsFunc(e.leaf.valuePaths, func(vp string) bool { return residualBad[vp] }) {
+			continue
+		}
+		lo, hi := e.agg.Min(), e.agg.Max()
+		if lo == nil || hi == nil || isNaNLiteral(lo) || isNaNLiteral(hi) {
+			continue
+		}
+		lo, hi = truncateVariantBound(e.leaf.icebergType, lo, hi, statsCols[e.parentID].Mode.Len)
+		perParent[e.parentID] = append(perParent[e.parentID], variantFieldBound{
+			jsonPath:    e.leaf.jsonPath,
+			icebergType: e.leaf.icebergType,
+			lower:       lo,
+			upper:       hi,
+		})
+	}
+	if len(perParent) == 0 {
+		return nil, nil
+	}
+
+	lower = make(map[int][]byte)
+	upper = make(map[int][]byte)
+	for parentID, fields := range perParent {
+		lo, up, ok, err := serializeVariantBounds(fields)
+		if err != nil {
+			slog.Warn("variant bounds serialization skipped", "fieldID", parentID, "err", err)
+
+			continue
+		}
+		if !ok {
+			continue
+		}
+		lower[parentID] = lo
+		upper[parentID] = up
+	}
+
+	return lower, upper
 }
 
 type ParquetFileSource struct {

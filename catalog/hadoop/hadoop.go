@@ -36,6 +36,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -183,6 +184,9 @@ type Catalog struct {
 	isLocal    bool
 	filesystem HadoopCatalogFS
 	props      iceberg.Properties
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 // NewCatalog creates a new Hadoop catalog rooted at the given warehouse path.
@@ -240,19 +244,36 @@ func NewCatalog(name, warehouse string, props iceberg.Properties) (*Catalog, err
 		return nil, fmt.Errorf("hadoop catalog: %T does not implement HadoopCatalogFS", filesystem)
 	}
 
-	return &Catalog{
+	cat := &Catalog{
 		name:      name,
 		warehouse: warehouse,
 		isLocal:   isLocal,
 		// filesystem is resolved dynamically from the IO registry based on the warehouse scheme
 		filesystem: hadoopFs,
 		props:      props,
-	}, nil
+	}
+
+	// Resolve the metrics reporter once, up front. CachedReporter caches the
+	// first result, so building it here means a bad metrics-reporter-impl fails
+	// construction — rather than surfacing later as a spurious CreateTable error
+	// after the table is already on disk, or as a cached error that wedges every
+	// later table op on this catalog.
+	if _, err := cat.reporter.Get(props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	return cat, nil
 }
 
 func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hadoop
 }
+
+// Close releases the catalog's metrics reporter. Callers holding a
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+func (c *Catalog) Close() error { return c.reporter.Close() }
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // joinPath is a helper that allows paths to be joined as both local filesystem
 // paths or as remote URIs needed for filesystems like blob stores.
@@ -487,6 +508,15 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil, err
 	}
 
+	// Resolve the reporter before any catalog mutation: a bad
+	// metrics-reporter-impl must fail here, not after the metadata file and
+	// version hint are written, which would report a failure for a table that
+	// was actually created (and make the retry hit ErrTableAlreadyExists).
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	ns := catalog.NamespaceFromIdent(ident)
 	nsPath := c.namespaceToPath(ns)
 
@@ -555,6 +585,7 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		metaPath,
 		io.LoadFSFunc(c.props, metaPath),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 
 	return tbl, nil
@@ -570,7 +601,12 @@ func (c *Catalog) loadTable(ctx context.Context, ident table.Identifier) (*table
 		return nil, 0, err
 	}
 
-	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c)
+	reporter, err := c.reporter.Get(c.props)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
+	tbl, err := table.NewFromLocation(ctx, ident, metaPath, io.LoadFSFunc(c.props, metaPath), c, table.WithMetricsReporter(reporter))
 	if err != nil {
 		return nil, 0, err
 	}

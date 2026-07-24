@@ -2321,6 +2321,7 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.tbl.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -2347,6 +2348,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			updatedMeta.Location(),
 			t.tbl.fsF,
 			t.tbl.cat,
+			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
 		),
 	}, nil
 }

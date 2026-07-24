@@ -31,6 +31,7 @@ import (
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/beltran/gohive/hive_metastore"
@@ -55,6 +56,9 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	client HiveClient
 	opts   *HiveOptions
+	// reporter builds and caches the catalog's metrics reporter once, so it is
+	// constructed per-catalog rather than per table load. Released by Close.
+	reporter metrics.CachedReporter
 }
 
 func NewCatalog(props iceberg.Properties, opts ...Option) (*Catalog, error) {
@@ -94,9 +98,33 @@ func (c *Catalog) CatalogType() catalog.Type {
 	return catalog.Hive
 }
 
+// Close releases the Hive client and the catalog's metrics reporter. Each close
+// is isolated from the other so one failing does not skip the other and leak its
+// resource — not just when a close returns an error (errors.Join already keeps
+// both), but when it panics: a bare errors.Join(c.client.Close(), c.reporter.Close())
+// would let a panic in the first close abort the second. Recovered panics are
+// converted to errors and joined with any close errors. Callers holding a
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
 func (c *Catalog) Close() error {
-	return c.client.Close()
+	return errors.Join(
+		closeIsolated(c.client.Close),
+		closeIsolated(c.reporter.Close),
+	)
 }
+
+// closeIsolated runs a close function, converting a panic into an error so a
+// single misbehaving close cannot abort a sibling close in the same Close call.
+func closeIsolated(closeFn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("hive catalog: panic during close: %v", r)
+		}
+	}()
+
+	return closeFn()
+}
+
+var _ catalog.Closer = (*Catalog)(nil)
 
 // ListTables returns a list of table identifiers in the given namespace.
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -149,12 +177,18 @@ func (c *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, fmt.Errorf("failed to get metadata location: %w", err)
 	}
 
+	reporter, err := c.reporter.Get(c.opts.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	return table.NewFromLocation(
 		ctx,
 		identifier,
 		metadataLocation,
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 }
 
@@ -162,6 +196,15 @@ func (c *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return nil, err
+	}
+
+	// Resolve the reporter before any mutation: this method ends in LoadTable,
+	// which is where the reporter is otherwise first built, so a bad
+	// metrics-reporter-impl would only surface after the metastore entry was
+	// created — turning a successful create into a reported failure whose retry
+	// hits ErrTableAlreadyExists. CachedReporter caches this for that LoadTable.
+	if _, err := c.reporter.Get(c.opts.props); err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
 
 	// Ensure there is no view with the same identifier.
@@ -226,15 +269,21 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 		return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 	}
 
+	reporter, err := c.reporter.Get(c.opts.props)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
+	}
+
 	tbl, err := table.NewFromLocation(
 		ctx,
 		identifier,
 		metadataLocation,
 		io.LoadFSFunc(c.opts.props, metadataLocation),
 		c,
+		table.WithMetricsReporter(reporter),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read table metadata from %s: %s", metadataLocation, err)
+		return nil, fmt.Errorf("failed to read table metadata from %s: %w", metadataLocation, err)
 	}
 
 	hiveTbl := constructHiveTable(database, tableName, tbl.Location(), metadataLocation, tbl.Metadata().CurrentSchema(), maps.Clone(tbl.Metadata().Properties()))
@@ -254,7 +303,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 // identifier, version (with SQL representations), schema, and optional CreateViewOpt for location and properties.
 // Returns the created *view.View, or an error if the namespace is missing, a view/table already exists, or creation fails.
 func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, version *view.Version, schema *iceberg.Schema, opts ...catalog.CreateViewOpt) (*view.View, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +665,7 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 
 // LoadView loads a view from the catalog.
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*view.View, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +699,7 @@ func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (*v
 
 // DropView drops a view from the catalog.
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return err
 	}
@@ -691,7 +740,7 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 
 // CheckViewExists checks if a view exists in the catalog.
 func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	database, viewName, err := identifierToTableName(identifier)
+	database, viewName, err := identifierToViewName(identifier)
 	if err != nil {
 		return false, err
 	}
@@ -897,8 +946,19 @@ func (c *Catalog) getIcebergTable(ctx context.Context, database, tableName strin
 }
 
 func identifierToTableName(identifier table.Identifier) (string, string, error) {
+	return identifierToObjectName(identifier, catalog.ValidateTableIdentifier, catalog.ErrNoSuchTable, "table")
+}
+
+func identifierToViewName(identifier table.Identifier) (string, string, error) {
+	return identifierToObjectName(identifier, catalog.ValidateViewIdentifier, catalog.ErrNoSuchView, "view")
+}
+
+func identifierToObjectName(identifier table.Identifier, validate func(table.Identifier) error, notFound error, objectType string) (string, string, error) {
+	if err := validate(identifier); err != nil {
+		return "", "", err
+	}
 	if len(identifier) != 2 {
-		return "", "", fmt.Errorf("invalid identifier, expected [database, table]: %v", identifier)
+		return "", "", fmt.Errorf("%w: expected [database, %s], got %v", notFound, objectType, identifier)
 	}
 
 	return identifier[0], identifier[1], nil

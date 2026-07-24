@@ -122,6 +122,13 @@ func createStagedTable(
 	sc *iceberg.Schema,
 	opts ...catalog.CreateTableOpt,
 ) (table.StagedTable, error) {
+	if len(ident) < 2 {
+		return table.StagedTable{}, fmt.Errorf("%w: missing namespace or invalid identifier %v", catalog.ErrNoSuchNamespace, ident)
+	}
+	if err := catalog.ValidateTableIdentifier(ident); err != nil {
+		return table.StagedTable{}, err
+	}
+
 	var cfg catalog.CreateTableCfg
 	for _, opt := range opts {
 		opt(&cfg)
