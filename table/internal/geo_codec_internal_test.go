@@ -22,6 +22,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twpayne/go-geom"
@@ -257,4 +258,168 @@ func TestEncodeGeoBoundRoundTrip(t *testing.T) {
 
 	assert.Len(t, encodeGeoBound(vals, geom.XYZM), 32)
 	assert.Equal(t, []float64{1, 2, 3, 4}, decodeBound(t, encodeGeoBound(vals, geom.XYZM)))
+}
+
+// encGeo encodes a bound point from explicit coordinates for aggregator tests.
+func encGeo(x, y float64) []byte {
+	var v [geoNumDims]float64
+	v[geoDimX], v[geoDimY] = x, y
+
+	return encodeGeoBound(v, geom.XY)
+}
+
+func encGeoZ(x, y, z float64) []byte {
+	var v [geoNumDims]float64
+	v[geoDimX], v[geoDimY], v[geoDimZ] = x, y, z
+
+	return encodeGeoBound(v, geom.XYZ)
+}
+
+func encGeoM(x, y, mv float64) []byte {
+	var v [geoNumDims]float64
+	v[geoDimX], v[geoDimY], v[geoDimM] = x, y, mv
+
+	return encodeGeoBound(v, geom.XYM)
+}
+
+// TestDecodeGeoBound pins that decodeGeoBound is the exact inverse of
+// encodeGeoBound for each layout, including the XYM/XYZM disambiguation by the
+// NaN Z slot, and rejects invalid lengths.
+func TestDecodeGeoBound(t *testing.T) {
+	var v [geoNumDims]float64
+	v[geoDimX], v[geoDimY], v[geoDimZ], v[geoDimM] = 1, 2, 3, 4
+
+	xy, layout, ok := decodeGeoBound(encodeGeoBound(v, geom.XY))
+	require.True(t, ok)
+	assert.Equal(t, geom.XY, layout)
+	assert.Equal(t, [2]float64{1, 2}, [2]float64{xy[geoDimX], xy[geoDimY]})
+
+	xyz, layout, ok := decodeGeoBound(encodeGeoBound(v, geom.XYZ))
+	require.True(t, ok)
+	assert.Equal(t, geom.XYZ, layout)
+	assert.Equal(t, float64(3), xyz[geoDimZ])
+
+	xym, layout, ok := decodeGeoBound(encodeGeoBound(v, geom.XYM))
+	require.True(t, ok)
+	assert.Equal(t, geom.XYM, layout, "NaN Z slot must decode as XYM, not XYZM")
+	assert.Equal(t, float64(4), xym[geoDimM])
+
+	xyzm, layout, ok := decodeGeoBound(encodeGeoBound(v, geom.XYZM))
+	require.True(t, ok)
+	assert.Equal(t, geom.XYZM, layout)
+	assert.Equal(t, [2]float64{3, 4}, [2]float64{xyzm[geoDimZ], xyzm[geoDimM]})
+
+	for _, n := range []int{0, 8, 15, 40} {
+		_, _, ok := decodeGeoBound(make([]byte, n))
+		assert.False(t, ok, "length %d must be rejected", n)
+	}
+}
+
+func TestGeoBoundsAggregatorXY(t *testing.T) {
+	var agg GeoBoundsAggregator
+	require.NoError(t, agg.Add(encGeo(5, 5), encGeo(10, 20)))
+	require.NoError(t, agg.Add(encGeo(1, 8), encGeo(30, 12)))
+
+	lower, upper := agg.Bounds()
+	require.Len(t, lower, 16)
+	assert.Equal(t, []float64{1, 5}, decodeBound(t, lower))
+	assert.Equal(t, []float64{30, 20}, decodeBound(t, upper))
+}
+
+func TestGeoBoundsAggregatorXYZ(t *testing.T) {
+	var agg GeoBoundsAggregator
+	require.NoError(t, agg.Add(encGeoZ(1, 2, 3), encGeoZ(4, 5, 6)))
+	require.NoError(t, agg.Add(encGeoZ(0, 1, -1), encGeoZ(2, 9, 3)))
+
+	lower, upper := agg.Bounds()
+	require.Len(t, lower, 24)
+	assert.Equal(t, []float64{0, 1, -1}, decodeBound(t, lower))
+	assert.Equal(t, []float64{4, 9, 6}, decodeBound(t, upper))
+}
+
+func TestGeoBoundsAggregatorXYM(t *testing.T) {
+	var agg GeoBoundsAggregator
+	require.NoError(t, agg.Add(encGeoM(1, 2, 50), encGeoM(4, 5, 100)))
+	require.NoError(t, agg.Add(encGeoM(0, 1, 10), encGeoM(2, 9, 70)))
+
+	lower, upper := agg.Bounds()
+	require.Len(t, lower, 32)
+	lo := decodeBound(t, lower)
+	assert.Equal(t, []float64{0, 1}, lo[:2])
+	assert.True(t, math.IsNaN(lo[2]), "XYM lower Z slot must be NaN")
+	assert.Equal(t, float64(10), lo[3])
+	hi := decodeBound(t, upper)
+	assert.Equal(t, float64(100), hi[3])
+}
+
+// TestGeoBoundsAggregatorMixedDimensionDropsZ verifies the omit-on-ambiguity
+// rule across files: a file carrying Z followed by a plain-XY file must collapse
+// to an XY box, since not every file carried Z. Emitting Z would claim the XY
+// file has a Z value in range.
+func TestGeoBoundsAggregatorMixedDimensionDropsZ(t *testing.T) {
+	var agg GeoBoundsAggregator
+	require.NoError(t, agg.Add(encGeoZ(1, 2, 3), encGeoZ(4, 5, 6)))
+	require.NoError(t, agg.Add(encGeo(0, 1), encGeo(10, 9)))
+
+	lower, upper := agg.Bounds()
+	require.Len(t, lower, 16, "a file without Z must collapse the aggregate to XY")
+	assert.Equal(t, []float64{0, 1}, decodeBound(t, lower))
+	assert.Equal(t, []float64{10, 9}, decodeBound(t, upper))
+}
+
+// TestGeoBoundsAggregatorEmptyInputs verifies that empty bound pairs (as emitted
+// for geography or all-null geometry columns) contribute nothing.
+func TestGeoBoundsAggregatorEmptyInputs(t *testing.T) {
+	var agg GeoBoundsAggregator
+	require.NoError(t, agg.Add(nil, nil))
+	require.NoError(t, agg.Add([]byte{}, []byte{}))
+
+	lower, upper := agg.Bounds()
+	assert.Nil(t, lower)
+	assert.Nil(t, upper)
+}
+
+func TestGeoBoundsAggregatorInvalidLength(t *testing.T) {
+	var agg GeoBoundsAggregator
+	assert.Error(t, agg.Add([]byte{0x01, 0x02}, encGeo(1, 2)))
+	assert.Error(t, agg.Add(encGeo(1, 2), []byte{0x01, 0x02}))
+}
+
+// TestGeoBoundsAggregatorMismatchedLayouts guards against combining a lower and
+// upper of different dimensionality, which would silently corrupt the box.
+func TestGeoBoundsAggregatorMismatchedLayouts(t *testing.T) {
+	var agg GeoBoundsAggregator
+	assert.Error(t, agg.Add(encGeo(1, 2), encGeoZ(4, 5, 6)))
+}
+
+// TestGeoBoundsAggregatorRejectsGeography verifies a geography aggregator refuses
+// non-empty bounds: scalar min/max folding would silently unwrap an
+// antimeridian-crossing box (lower_x > upper_x), producing bounds that prune rows
+// they should keep. Empty bounds - what iceberg-go emits for geography - stay a
+// harmless no-op, and the aggregate produces no box.
+func TestGeoBoundsAggregatorRejectsGeography(t *testing.T) {
+	agg := NewGeoBoundsAggregator(true)
+
+	require.NoError(t, agg.Add(nil, nil))
+	require.NoError(t, agg.Add([]byte{}, []byte{}))
+
+	// A wrapped box that scalar folding would mis-merge must be refused.
+	err := agg.Add(encGeo(170, 10), encGeo(-170, 20))
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+
+	lower, upper := agg.Bounds()
+	assert.Nil(t, lower)
+	assert.Nil(t, upper)
+}
+
+// TestNewGeoBoundsAggregatorGeometry verifies the constructor's geometry path
+// aggregates identically to the zero value.
+func TestNewGeoBoundsAggregatorGeometry(t *testing.T) {
+	agg := NewGeoBoundsAggregator(false)
+	require.NoError(t, agg.Add(encGeo(5, 5), encGeo(10, 20)))
+	require.NoError(t, agg.Add(encGeo(1, 8), encGeo(30, 12)))
+
+	lower, upper := agg.Bounds()
+	assert.Equal(t, []float64{1, 5}, decodeBound(t, lower))
+	assert.Equal(t, []float64{30, 20}, decodeBound(t, upper))
 }
