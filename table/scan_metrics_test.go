@@ -109,6 +109,30 @@ func TestProjectedFieldsSelectedSubset(t *testing.T) {
 	assert.Equal(t, []string{"data"}, names)
 }
 
+func TestProjectedFieldsNested(t *testing.T) {
+	// Selecting a struct column must report its nested fields by id and full
+	// dotted path, not just the top-level column (Java's TypeUtil.getProjectedIds
+	// + Schema.findColumnName).
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "location", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "lat", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+				{ID: 4, Name: "lon", Type: iceberg.PrimitiveTypes.Float64, Required: false},
+			},
+		}},
+	)
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://bucket/tbl", iceberg.Properties{})
+	require.NoError(t, err)
+
+	scan := &Scan{metadata: meta, selectedFields: []string{"location"}, caseSensitive: true}
+
+	ids, names := scan.projectedFields(meta.CurrentSchema())
+	assert.Equal(t, []int{2, 3, 4}, ids)
+	assert.Equal(t, []string{"location", "location.lat", "location.lon"}, names)
+}
+
 func TestApplyResultDeleteMetrics(t *testing.T) {
 	posA := &mockDataFile{path: "s3://b/pos-a.parquet", filesize: 100}
 	posB := &mockDataFile{path: "s3://b/pos-b.parquet", filesize: 200}
@@ -121,7 +145,8 @@ func TestApplyResultDeleteMetrics(t *testing.T) {
 		contentSizeInBytes: int64Ptr(10),
 	}
 
-	// posA applies to both data files: it must be counted (and sized) once.
+	// posA applies to both data-file tasks: matching Java's per-task
+	// accumulation, it must be counted (and sized) once per task, i.e. twice.
 	tasks := []FileScanTask{
 		{
 			File:        &mockDataFile{path: "s3://b/data-1.parquet", filesize: 1000},
@@ -138,19 +163,21 @@ func TestApplyResultDeleteMetrics(t *testing.T) {
 	var acc scanMetricsAccumulator
 	acc.applyResultDeleteMetrics(tasks)
 
-	assert.Equal(t, int64(2), acc.positionalDeleteFiles, "posA is shared, counted once")
+	assert.Equal(t, int64(3), acc.positionalDeleteFiles, "posA counted once per task it applies to")
 	assert.Equal(t, int64(1), acc.equalityDeleteFiles)
 	assert.Equal(t, int64(1), acc.dvs)
-	assert.Equal(t, int64(4), acc.resultDeleteFiles)
-	// 100 (posA once) + 200 (posB) + 40 (eq) + 10 (dv content size, not 9999)
-	assert.Equal(t, int64(350), acc.totalDeleteFileSize)
+	assert.Equal(t, int64(5), acc.resultDeleteFiles)
+	// task 1: 100 (posA) + 200 (posB); task 2: 100 (posA) + 40 (eq) + 10 (dv
+	// content size, not 9999) = 450 total.
+	assert.Equal(t, int64(450), acc.totalDeleteFileSize)
 }
 
 func TestApplyResultDeleteMetricsDVsShareOnePuffin(t *testing.T) {
 	// DVWriter.Flush writes one Puffin file with a separate DV blob per data
 	// file, so both DVs below share a FilePath() and differ only by the data
-	// file they reference. Keying by referenced data file must keep them
-	// distinct (2 DVs), and each blob's own content size must be summed.
+	// file they reference. Each is planned on its own data-file task, so per-task
+	// counting reports 2 DVs, and each blob's own content size must be summed
+	// (never the shared Puffin file length).
 	puffin := "s3://b/deletes.puffin"
 	ref1, ref2 := "s3://b/data-1.parquet", "s3://b/data-2.parquet"
 	dv1 := &dvMockDataFile{
@@ -189,6 +216,25 @@ func TestBuildScanReportSetsFilter(t *testing.T) {
 
 	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), time.Millisecond)
 	assert.JSONEq(t, `false`, string(sr.Filter), "Filter must reflect the real row filter, not default to always-true")
+}
+
+func TestBuildScanReportSanitizesFilter(t *testing.T) {
+	// Predicate literals can be user data, so the emitted filter must be
+	// sanitized (Java's ExpressionUtil.sanitize) before it reaches a reporter.
+	meta := metricsTestMetadata(t)
+	scan := &Scan{
+		metadata:       meta,
+		identifier:     Identifier{"db", "tbl"},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		rowFilter:      iceberg.EqualTo(iceberg.Reference("data"), "secret-value"),
+	}
+
+	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), time.Millisecond)
+	require.NotNil(t, sr.Filter)
+	assert.NotContains(t, string(sr.Filter), "secret-value", "literal must not leak into the report")
+	assert.Contains(t, string(sr.Filter), "data", "column reference is preserved")
+	assert.Contains(t, string(sr.Filter), "(redacted)")
 }
 
 func TestPlanFilesNoSnapshotEmitsNoReport(t *testing.T) {

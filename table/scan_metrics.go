@@ -65,59 +65,35 @@ func counterBytes(v int64) *metrics.CounterResult {
 }
 
 // applyResultDeleteMetrics derives the result-scoped delete-file metrics from
-// the planned tasks. Each delete file is counted once by path across all the
-// data files it applies to, split by kind (positional, equality, deletion
-// vector); positional deletes suppressed by a deletion vector never appear on a
-// task, so they are excluded. This keeps the counts consistent with
-// result-data-files and total-file-size-in-bytes.
+// the planned tasks. Following Java's ScanMetricsUtil.fileTask, every delete
+// file is counted once per data-file task it applies to — a delete covering N
+// data files is counted N times — with no cross-task dedup, so these
+// Java-parity field names stay directly comparable with what Java consumers
+// report. Sizes accumulate the same way.
 //
-// Parity note: Java's ScanMetricsUtil.fileTask counts result-delete-files per
-// data-file task with no cross-task dedup, so a positional delete covering 5
-// data files counts as 5 there and once here. Counting once by path is the
-// deliberate choice for this result-scoped metric; keep it if touching this.
-//
-// Deletion vectors are keyed by the data file they reference, not by their
-// Puffin file path: a single Puffin file holds one DV blob per data file (see
-// DVWriter.Flush), so all DVs from one flush share a FilePath() and would
-// collapse into one entry if keyed by it. Their size is the per-blob
-// content_size_in_bytes, not the whole Puffin file size, matching Java's
-// ScanTaskUtil.contentSizeInBytes.
+// A deletion vector's size is its per-blob content_size_in_bytes (Java's
+// ScanTaskUtil.contentSizeInBytes), not the size of the Puffin file that holds
+// it: DVWriter.Flush packs one DV blob per data file into a single Puffin file,
+// so the Puffin length would over-count.
 func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask) {
-	posDeletes := make(map[string]int64)
-	eqDeletes := make(map[string]int64)
-	dvByRef := make(map[string]int64)
 	for _, t := range tasks {
 		for _, df := range t.DeleteFiles {
-			posDeletes[df.FilePath()] = df.FileSizeBytes()
+			acc.positionalDeleteFiles++
+			acc.totalDeleteFileSize += df.FileSizeBytes()
 		}
 		for _, df := range t.EqualityDeleteFiles {
-			eqDeletes[df.FilePath()] = df.FileSizeBytes()
+			acc.equalityDeleteFiles++
+			acc.totalDeleteFileSize += df.FileSizeBytes()
 		}
 		for _, df := range t.DeletionVectorFiles {
-			// Key by the referenced data file so multiple DVs sharing one
-			// Puffin path stay distinct; fall back to the Puffin path if the
-			// reference is somehow unset. Size is the per-blob content size.
-			key := df.FilePath()
-			if ref := df.ReferencedDataFile(); ref != nil {
-				key = *ref
-			}
-			var size int64
+			acc.dvs++
 			if csb := df.ContentSizeInBytes(); csb != nil {
-				size = *csb
+				acc.totalDeleteFileSize += *csb
 			}
-			dvByRef[key] = size
 		}
 	}
 
-	acc.positionalDeleteFiles = int64(len(posDeletes))
-	acc.equalityDeleteFiles = int64(len(eqDeletes))
-	acc.dvs = int64(len(dvByRef))
 	acc.resultDeleteFiles = acc.positionalDeleteFiles + acc.equalityDeleteFiles + acc.dvs
-	for _, deletes := range []map[string]int64{posDeletes, eqDeletes, dvByRef} {
-		for _, size := range deletes {
-			acc.totalDeleteFileSize += size
-		}
-	}
 }
 
 // buildScanReport assembles the ScanReport for a completed planning operation.
@@ -133,14 +109,17 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema *iceberg.S
 		snapshotID = snap.SnapshotID
 	}
 
-	// Serialize the actual row filter as Expression JSON. On a marshal error we
-	// leave Filter unset so ScanReport.MarshalJSON falls back to always-true
-	// rather than failing the scan; literal sanitization (Java's ExpressionUtil)
-	// is a follow-up.
+	// Serialize the scan's row filter as Expression JSON, first sanitizing it so
+	// predicate literals (which can be user data) never reach a reporter or REST
+	// metrics sink. On any error we leave Filter unset so ScanReport.MarshalJSON
+	// falls back to always-true rather than failing the scan or, worse, emitting
+	// unsanitized literals.
 	var filter json.RawMessage
 	if scan.rowFilter != nil {
-		if raw, err := json.Marshal(scan.rowFilter); err == nil {
-			filter = raw
+		if sanitized, err := iceberg.SanitizeExpression(scan.rowFilter); err == nil {
+			if raw, err := json.Marshal(sanitized); err == nil {
+				filter = raw
+			}
 		}
 	}
 
@@ -170,33 +149,40 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema *iceberg.S
 	}
 }
 
-// projectedFields resolves the scan's selected fields to their ids and names
-// against schema. A "*" (or empty) selection projects all top-level fields.
-// Unresolvable names are skipped.
+// projectedFields resolves the scan's projection to the field ids and dotted
+// column names it reads, matching Java's TypeUtil.getProjectedIds +
+// Schema.findColumnName: nested fields are reported by id and full dotted path,
+// not just top-level columns. schema is the schema the scan planned against and
+// is used to resolve names; ids are returned sorted for deterministic output.
+// Ids not resolvable to a name in schema (e.g. reserved row-lineage columns) are
+// skipped so ids and names stay aligned.
 func (scan *Scan) projectedFields(schema *iceberg.Schema) ([]int, []string) {
-	if len(scan.selectedFields) == 0 || slices.Contains(scan.selectedFields, "*") {
-		fields := schema.Fields()
-		ids := make([]int, len(fields))
-		names := make([]string, len(fields))
-		for i, f := range fields {
-			ids[i], names[i] = f.ID, f.Name
-		}
-
-		return ids, names
+	projected, err := scan.Projection()
+	if err != nil {
+		return nil, nil
 	}
 
-	ids := make([]int, 0, len(scan.selectedFields))
-	names := make([]string, 0, len(scan.selectedFields))
-	for _, name := range scan.selectedFields {
-		nf, ok := schema.FindFieldByName(name)
-		if !ok && !scan.caseSensitive {
-			nf, ok = schema.FindFieldByNameCaseInsensitive(name)
-		}
-		if ok {
-			ids = append(ids, nf.ID)
-			names = append(names, nf.Name)
-		}
+	idToField, err := iceberg.IndexByID(projected)
+	if err != nil {
+		return nil, nil
 	}
 
-	return ids, names
+	ids := make([]int, 0, len(idToField))
+	for id := range idToField {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+
+	resolvedIDs := make([]int, 0, len(ids))
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		name, ok := schema.FindColumnName(id)
+		if !ok {
+			continue
+		}
+		resolvedIDs = append(resolvedIDs, id)
+		names = append(names, name)
+	}
+
+	return resolvedIDs, names
 }

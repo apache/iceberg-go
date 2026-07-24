@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -651,5 +652,52 @@ func TestRewriteNot(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, out.Equals(tt.expected))
 		})
+	}
+}
+
+func TestSanitizeExpression(t *testing.T) {
+	// A literal predicate must keep its column and operation but never leak the
+	// literal a user scanned with.
+	eq := iceberg.EqualTo(iceberg.Reference("email"), "alice@example.com")
+	sanitized, err := iceberg.SanitizeExpression(eq)
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "alice@example.com", "literal must not leak")
+	assert.Contains(t, string(raw), "email", "column reference is preserved")
+	assert.Contains(t, string(raw), "(redacted)")
+
+	// IN keeps its arity (does not collapse to eq) while masking every member.
+	in := iceberg.IsIn(iceberg.Reference("id"), int32(1), int32(2), int32(3))
+	sanitized, err = iceberg.SanitizeExpression(in)
+	require.NoError(t, err)
+
+	raw, err = json.Marshal(in)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "\"in\"", "precondition: original is an in predicate")
+
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "\"in\"", "in predicate must not collapse to eq")
+	for _, v := range []string{"1", "2", "3"} {
+		assert.NotContains(t, string(raw), "\""+v+"\"", "in literal must not leak")
+	}
+
+	// Unary predicates carry no literal and pass through unchanged; structure is
+	// preserved across and/or/not.
+	expr := iceberg.NewAnd(iceberg.IsNull(iceberg.Reference("name")), eq)
+	sanitized, err = iceberg.SanitizeExpression(expr)
+	require.NoError(t, err)
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "is-null")
+	assert.NotContains(t, string(raw), "alice@example.com")
+
+	// Constant expressions are returned as-is.
+	for _, c := range []iceberg.BooleanExpression{iceberg.AlwaysTrue{}, iceberg.AlwaysFalse{}} {
+		got, err := iceberg.SanitizeExpression(c)
+		require.NoError(t, err)
+		assert.True(t, got.Equals(c))
 	}
 }
