@@ -887,19 +887,12 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 	}
 }
 
-func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
-	if err := validateTableIdentifier(ident); err != nil {
+func (c *Catalog) DropTable(ctx context.Context, ident table.Identifier) error {
+	if _, _, err := c.loadTable(ctx, ident); err != nil {
 		return err
 	}
 
 	tablePath := c.tableToPath(ident)
-	isTable, err := isTableDir(c.filesystem, c.isLocal, tablePath)
-	if err != nil {
-		return fmt.Errorf("hadoop catalog: failed to inspect table directory: %w", err)
-	}
-	if !isTable {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, strings.Join(ident, "."))
-	}
 
 	return c.filesystem.RemoveAll(tablePath)
 }

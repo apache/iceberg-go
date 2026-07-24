@@ -82,18 +82,16 @@ func (s *HadoopIntegrationSuite) sparkSQL(sql string) string {
 	return output
 }
 
-// createFakeTable creates a minimal table directory structure owned by
-// the runner process. This avoids root-ownership issues that arise when
-// Spark creates tables via Docker (root in container).
-func (s *HadoopIntegrationSuite) createFakeTable(ident table.Identifier) {
+// createTable creates a valid table owned by the runner process. This avoids
+// root-ownership issues that arise when Spark creates tables via Docker.
+func (s *HadoopIntegrationSuite) createTable(ident table.Identifier) {
 	s.T().Helper()
 
-	tablePath := filepath.Join(append([]string{s.warehouse}, ident...)...)
-	metaDir := filepath.Join(tablePath, "metadata")
-	s.Require().NoError(os.MkdirAll(metaDir, 0o755))
-	s.Require().NoError(os.WriteFile(
-		filepath.Join(metaDir, "v1.metadata.json"), []byte("{}"), 0o644,
+	_, err := s.cat.CreateTable(s.ctx, ident, iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	))
+	s.Require().NoError(err)
 }
 
 // TestListTablesSparkCreated creates tables in Spark and verifies that
@@ -150,7 +148,7 @@ func (s *HadoopIntegrationSuite) TestDropTableExisting() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"drop_ns"}, nil)
 	s.Require().NoError(err)
 
-	s.createFakeTable([]string{"drop_ns", "to_drop"})
+	s.createTable([]string{"drop_ns", "to_drop"})
 
 	tablePath := filepath.Join(s.warehouse, "drop_ns", "to_drop")
 	_, err = os.Stat(tablePath)
@@ -176,7 +174,7 @@ func (s *HadoopIntegrationSuite) TestDropTableNamespacePreserved() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"preserve_ns"}, nil)
 	s.Require().NoError(err)
 
-	s.createFakeTable([]string{"preserve_ns", "tbl"})
+	s.createTable([]string{"preserve_ns", "tbl"})
 
 	err = s.cat.DropTable(s.ctx, []string{"preserve_ns", "tbl"})
 	s.Require().NoError(err)
@@ -217,8 +215,8 @@ func (s *HadoopIntegrationSuite) TestDropTableThenListReflects() {
 	err := s.cat.CreateNamespace(s.ctx, []string{"droplist_ns"}, nil)
 	s.Require().NoError(err)
 
-	s.createFakeTable([]string{"droplist_ns", "keep"})
-	s.createFakeTable([]string{"droplist_ns", "remove"})
+	s.createTable([]string{"droplist_ns", "keep"})
+	s.createTable([]string{"droplist_ns", "remove"})
 
 	err = s.cat.DropTable(s.ctx, []string{"droplist_ns", "remove"})
 	s.Require().NoError(err)
