@@ -222,7 +222,15 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 
 	op, ok := alias[operationKey]
 	if !ok {
-		return ErrMissingOperation
+		// Match Java's compatibility behavior for older snapshots that contain
+		// summary properties but omit the required operation.
+		s.Operation = ""
+		if len(alias) > 0 {
+			s.Operation = OpOverwrite
+		}
+		s.Properties = alias
+
+		return nil
 	}
 
 	if s.Operation, err = ValidOperation(op); err != nil {

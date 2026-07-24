@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,10 +94,19 @@ func TestSerializeSnapshotWithProps(t *testing.T) {
 	}`, string(data))
 }
 
-func TestMissingOperation(t *testing.T) {
+func TestMissingOperationDefaultsToOverwrite(t *testing.T) {
 	var summary table.Summary
 	err := json.Unmarshal([]byte(`{"foo": "bar"}`), &summary)
-	assert.ErrorIs(t, err, table.ErrMissingOperation)
+	require.NoError(t, err)
+	assert.Equal(t, table.OpOverwrite, summary.Operation)
+	assert.Equal(t, iceberg.Properties{"foo": "bar"}, summary.Properties)
+}
+
+func TestEmptySummary(t *testing.T) {
+	var summary table.Summary
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &summary))
+	assert.Empty(t, summary.Operation)
+	assert.Empty(t, summary.Properties)
 }
 
 func TestInvalidOperation(t *testing.T) {
