@@ -435,6 +435,10 @@ func (m *metadata) validate() error {
 		return fmt.Errorf("%w: at least one schema is required", ErrInvalidViewMetadata)
 	}
 
+	if err := m.checkSchemaAndVersionIDs(); err != nil {
+		return err
+	}
+
 	if err := m.checkCurrentVersionExists(); err != nil {
 		return err
 	}
@@ -445,6 +449,32 @@ func (m *metadata) validate() error {
 
 	if err := m.checkDialectsUnique(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (m *metadata) checkSchemaAndVersionIDs() error {
+	schemaIDs := make(map[int]struct{}, len(m.SchemaList))
+	for i, schema := range m.SchemaList {
+		if schema == nil {
+			return fmt.Errorf("%w: schema at index %d is null", ErrInvalidViewMetadata, i)
+		}
+		if _, ok := schemaIDs[schema.ID]; ok {
+			return fmt.Errorf("%w: duplicate schema-id %d", ErrInvalidViewMetadata, schema.ID)
+		}
+		schemaIDs[schema.ID] = struct{}{}
+	}
+
+	versionIDs := make(map[int64]struct{}, len(m.VersionList))
+	for i, version := range m.VersionList {
+		if version == nil {
+			return fmt.Errorf("%w: version at index %d is null", ErrInvalidViewMetadata, i)
+		}
+		if _, ok := versionIDs[version.VersionID]; ok {
+			return fmt.Errorf("%w: duplicate version-id %d", ErrInvalidViewMetadata, version.VersionID)
+		}
+		versionIDs[version.VersionID] = struct{}{}
 	}
 
 	return nil
