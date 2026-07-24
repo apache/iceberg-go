@@ -215,6 +215,24 @@ func TestCombine(t *testing.T) {
 	})
 }
 
+func TestIsNop(t *testing.T) {
+	t.Run("bare NopReporter is nop", func(t *testing.T) {
+		assert.True(t, IsNop(NopReporter{}))
+	})
+
+	t.Run("Combine of only nops is nop", func(t *testing.T) {
+		// The whole point: a wrapped nop must still be recognized so callers can
+		// skip assembling a report that would be discarded.
+		assert.True(t, IsNop(Combine(NopReporter{})))
+		assert.True(t, IsNop(Combine(NopReporter{}, NopReporter{})))
+	})
+
+	t.Run("Combine with a real reporter is not nop", func(t *testing.T) {
+		assert.False(t, IsNop(Combine(NopReporter{}, &countingReporter{})))
+		assert.False(t, IsNop(&countingReporter{}))
+	})
+}
+
 func TestInMemoryReporterConcurrent(t *testing.T) {
 	var r InMemoryReporter
 	const writers = 100

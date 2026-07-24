@@ -56,6 +56,25 @@ func (NopReporter) Report(context.Context, MetricsReport) {}
 // Close implements [Reporter]. NopReporter holds no resources, so it is a no-op.
 func (NopReporter) Close() error { return nil }
 
+// nopAware is implemented by reporters that can report whether they discard
+// every report, letting callers skip assembling a report that would be thrown
+// away. It is unexported: it is a hint for [IsNop], not part of the [Reporter]
+// contract.
+type nopAware interface {
+	isNop() bool
+}
+
+func (NopReporter) isNop() bool { return true }
+
+// IsNop reports whether r is known to discard every report — a bare
+// [NopReporter] or a [Combine] of only nop reporters. A false result does not
+// guarantee the report is consumed; it only means r is not a recognized no-op.
+func IsNop(r Reporter) bool {
+	n, ok := r.(nopAware)
+
+	return ok && n.isNop()
+}
+
 // LoggingReporter is a [Reporter] that logs each report via an [slog.Logger]. It
 // is a convenient default for development and debugging.
 type LoggingReporter struct {
@@ -173,6 +192,18 @@ type compositeReporter struct {
 }
 
 var _ Reporter = (*compositeReporter)(nil)
+
+// isNop reports true only when every wrapped reporter is itself a nop, so
+// Combine(NopReporter{}) is recognized as a no-op by [IsNop].
+func (c *compositeReporter) isNop() bool {
+	for _, r := range c.reporters {
+		if n, ok := r.(nopAware); !ok || !n.isNop() {
+			return false
+		}
+	}
+
+	return true
+}
 
 func (c *compositeReporter) Report(ctx context.Context, report MetricsReport) {
 	for _, r := range c.reporters {

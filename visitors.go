@@ -520,3 +520,84 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
 }
+
+// sanitizedLiteralMask is the placeholder substituted for every literal value in
+// a sanitized expression. It carries no information about the original value.
+const sanitizedLiteralMask = "(redacted)"
+
+// SanitizeExpression returns a copy of expr with every predicate literal replaced
+// by an opaque placeholder while preserving the boolean structure, column
+// references, and operations. It lets a filter be emitted somewhere untrusted
+// (e.g. a metrics ScanReport shipped to a REST sink) without leaking the literal
+// values a user scanned with, mirroring the intent of Java's ExpressionUtil.sanitize.
+//
+// Unlike Java, which substitutes type-shaped placeholders (e.g. "(2-digit-int)"),
+// every literal is masked with the same marker; the goal here is to withhold the
+// values, not to preserve their shape. Set predicates (IN / NOT IN) keep their
+// arity so the operation is not misrepresented, but the members are masked.
+func SanitizeExpression(expr BooleanExpression) (BooleanExpression, error) {
+	return VisitExpr(expr, sanitizeVisitor{})
+}
+
+type sanitizeVisitor struct{}
+
+func (sanitizeVisitor) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
+func (sanitizeVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
+func (sanitizeVisitor) VisitNot(child BooleanExpression) BooleanExpression {
+	return NewNot(child)
+}
+
+func (sanitizeVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {
+	return NewAnd(left, right)
+}
+
+func (sanitizeVisitor) VisitOr(left, right BooleanExpression) BooleanExpression {
+	return NewOr(left, right)
+}
+
+func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+	switch p := pred.(type) {
+	case *unboundUnaryPredicate:
+		// No literal to mask; the op and term are safe to keep as-is.
+		return pred
+	case *unboundLiteralPredicate:
+		return sanitizeLiteralPredicate(p.op, p.term)
+	case *unboundSetPredicate:
+		return sanitizeSetPredicate(p.op, p.term, p.lits.Len())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
+
+func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
+	// Rebuild over the column name as an unbound reference: the sanitized form is
+	// only serialized or logged, and an unbound predicate with a masked string
+	// literal serializes without needing the field's type.
+	ref := Reference(pred.Term().Ref().Field().Name)
+	switch p := pred.(type) {
+	case BoundUnaryPredicate:
+		return UnaryPredicate(p.Op(), ref)
+	case BoundLiteralPredicate:
+		return sanitizeLiteralPredicate(p.Op(), ref)
+	case BoundSetPredicate:
+		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
+
+func sanitizeLiteralPredicate(op Operation, term UnboundTerm) BooleanExpression {
+	return LiteralPredicate(op, term, NewLiteral(sanitizedLiteralMask))
+}
+
+// sanitizeSetPredicate rebuilds a set predicate with count masked members. The
+// masks are made distinct so the set does not collapse (which would turn IN into
+// EQ); the suffix reveals only the number of values, never a value itself.
+func sanitizeSetPredicate(op Operation, term UnboundTerm, count int) BooleanExpression {
+	masks := make([]Literal, count)
+	for i := range masks {
+		masks[i] = NewLiteral(fmt.Sprintf("%s-%d", sanitizedLiteralMask, i+1))
+	}
+
+	return SetPredicate(op, term, masks)
+}

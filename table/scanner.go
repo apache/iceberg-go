@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -653,10 +654,17 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 		return nil, err
 	}
 
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
+	// This path has no reporter behind it, so the manifest counts recorded into
+	// this accumulator are intentionally discarded. A future caller that needs
+	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
+	// pass in an accumulator it actually reads.
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
 }
 
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema) ([]iceberg.ManifestFile, error) {
+// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
+// using the given schema. It records total/scanned/skipped manifest counts
+// (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
 	snap, err := scan.ResolveSnapshot()
 	if err != nil {
 		return nil, err
@@ -682,6 +690,13 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 	})
 	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
 	for _, mf := range manifestList {
+		isDelete := mf.ManifestContent() == iceberg.ManifestContentDeletes
+		if isDelete {
+			acc.totalDeleteManifests++
+		} else {
+			acc.totalDataManifests++
+		}
+
 		eval, err := manifestEvaluators.Get(int(mf.PartitionSpecID()))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -691,7 +706,16 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
 		if use {
+			if isDelete {
+				acc.scannedDeleteManifests++
+			} else {
+				acc.scannedDataManifests++
+			}
 			filtered = append(filtered, mf)
+		} else if isDelete {
+			acc.skippedDeleteManifests++
+		} else {
+			acc.skippedDataManifests++
 		}
 	}
 
@@ -788,8 +812,11 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	return entries, nil
 }
 
-// PlanFiles orchestrates the fetching and filtering of manifests, and then
-// building a list of FileScanTasks that match the current Scan criteria.
+// PlanFiles orchestrates the fetching and filtering of manifests, building a
+// list of FileScanTasks that match the current Scan criteria. When planning
+// happens locally it times the whole operation and emits a ScanReport to the
+// scan's reporter on success; remote (server-side) planning reports its own
+// metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if scan.asOfTimestamp != nil {
 		snapshot, err := scan.ResolveSnapshot()
@@ -812,15 +839,53 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
 	}
 
-	scan.planIO = nil
+	start := time.Now()
+	var acc scanMetricsAccumulator
 
+	// Resolve the planning schema once and thread it through both planning and
+	// the report, so the report describes exactly the schema that was used.
 	schema, err := scan.effectiveSchema()
 	if err != nil {
 		return nil, err
 	}
 
+	results, err := scan.planFilesLocal(ctx, &acc, schema)
+	if err != nil {
+		return nil, err
+	}
+	// Snap the elapsed time right after planning so total-planning-duration
+	// reflects planning alone, not the report assembly below.
+	planningDuration := time.Since(start)
+
+	// Only emit a report when planning ran against a real snapshot. A table with
+	// no snapshot plans zero files and has no real snapshot id to report; Java
+	// skips the scan report entirely in that case, so we do too.
+	//
+	// Building the report is also skipped for a no-op reporter — the opt-in
+	// default set by Table.Scan, the nil-reporter case for scans constructed
+	// directly in tests (see Reporter, which maps nil to NopReporter), and a
+	// Combine of only nop reporters. A nop discards the report, so assembling
+	// one would be pure overhead.
+	if scan.Snapshot() != nil {
+		if rep := scan.Reporter(); !metrics.IsNop(rep) {
+			rep.Report(ctx, scan.buildScanReport(&acc, schema, planningDuration))
+		}
+	}
+
+	return results, nil
+}
+
+// planFilesLocal performs local scan planning: it reads and filters the
+// snapshot's manifests using schema, builds the matching FileScanTasks, and
+// records planning metrics into acc for the caller to report. It resets the
+// plan-scoped scan.planIO to nil, since local planning reads through the
+// table's default FileIO. It returns a nil slice (not an empty one) when there
+// is no snapshot or every manifest is pruned.
+func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
+	scan.planIO = nil
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -879,7 +944,14 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
+		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
+
+	acc.resultDataFiles = int64(len(results))
+	// Delete-file metrics are derived from the planned tasks so they are
+	// result-scoped, consistent with result-data-files and total-file-size (a
+	// DV-suppressed positional delete never lands on a task, so it is excluded).
+	acc.applyResultDeleteMetrics(results)
 
 	return results, nil
 }
