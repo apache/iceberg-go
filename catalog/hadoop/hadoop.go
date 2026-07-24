@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1060,7 +1061,7 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 			// if a table, not a namespace, don't descend
 			return fs.SkipDir
 		}
-		result = append(result, table.Identifier{d.Name()})
+		result = append(result, append(slices.Clone(parent), d.Name()))
 		// found a namespace dir, don't recurse into it
 		return fs.SkipDir
 	})

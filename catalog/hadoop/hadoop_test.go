@@ -1069,8 +1069,13 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
 	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
 	s.Require().NoError(err)
 	s.Len(namespaces, 2)
-	s.Contains(namespaces, table.Identifier{"child1"})
-	s.Contains(namespaces, table.Identifier{"child2"})
+	s.Contains(namespaces, table.Identifier{"a", "child1"})
+	s.Contains(namespaces, table.Identifier{"a", "child2"})
+	for _, namespace := range namespaces {
+		exists, err := s.cat.CheckNamespaceExists(context.Background(), namespace)
+		s.Require().NoError(err)
+		s.True(exists)
+	}
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
