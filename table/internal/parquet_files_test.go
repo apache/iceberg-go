@@ -1247,10 +1247,64 @@ func TestGetWritePropertiesPageVersion(t *testing.T) {
 			pageRdr, err := rdr.RowGroup(0).GetColumnPageReader(0)
 			require.NoError(t, err)
 
-			require.True(t, pageRdr.Next())
-			assert.Equal(t, tt.expectedPageType, pageRdr.Page().Type())
+			var dataPageType file.PageType
+			var foundDataPage bool
+			for pageRdr.Next() {
+				pt := pageRdr.Page().Type()
+				if pt == file.PageTypeDictionaryPage {
+					continue
+				}
+				dataPageType = pt
+				foundDataPage = true
+
+				break
+			}
+			require.True(t, foundDataPage, "expected a data page in row group")
+			assert.Equal(t, tt.expectedPageType, dataPageType)
 		})
 	}
+}
+
+func TestGetWritePropertiesDictionaryEnabledByDefault(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+	writeProps := format.GetWriteProperties(iceberg.Properties{}).([]parquet.WriterProperty)
+
+	root, err := schema.NewGroupNode("schema", parquet.Repetitions.Required, schema.FieldList{
+		schema.NewInt32Node("col", parquet.Repetitions.Required, -1),
+	}, -1)
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	pw := file.NewParquetWriter(&buf, root, file.WithWriterProps(
+		parquet.NewWriterProperties(writeProps...),
+	))
+
+	rgw := pw.AppendRowGroup()
+	cw, err := rgw.NextColumn()
+	require.NoError(t, err)
+
+	// Low-cardinality column stays dictionary-encoded (well under the dict-size limit).
+	values := make([]int32, 1024)
+	for i := range values {
+		values[i] = int32(i % 8)
+	}
+	_, err = cw.(*file.Int32ColumnChunkWriter).WriteBatch(values, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, cw.Close())
+	require.NoError(t, rgw.Close())
+	require.NoError(t, pw.Close())
+
+	rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	colMeta, err := rdr.MetaData().RowGroup(0).ColumnChunk(0)
+	require.NoError(t, err)
+
+	assert.True(t, colMeta.HasDictionaryPage(),
+		"expected a dictionary page with default write properties")
+	assert.Contains(t, colMeta.Encodings(), parquet.Encodings.RLEDict,
+		"expected RLE_DICTIONARY encoding with default write properties")
 }
 
 func TestGetWritePropertiesBloomFilter(t *testing.T) {
