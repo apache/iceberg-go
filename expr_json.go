@@ -572,6 +572,11 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: cannot parse transform term: %s", ErrInvalidArgument, err)
 		}
+		// Unknown transforms are tolerated in partition/sort metadata, but a
+		// filter expression referencing one can't be evaluated.
+		if _, ok := tf.(UnknownTransform); ok {
+			return nil, fmt.Errorf("%w: unknown transform in expression term: %s", ErrInvalidArgument, t.Transform)
+		}
 
 		return NewUnboundTransform(tf, Reference(t.Term)), nil
 	default:

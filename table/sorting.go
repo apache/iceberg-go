@@ -242,6 +242,11 @@ func (s SortOrder) Len() int {
 	return len(s.fields)
 }
 
+// Field returns the sort field at index i.
+func (s SortOrder) Field(i int) SortField {
+	return s.fields[i]
+}
+
 func (s SortOrder) MarshalJSON() ([]byte, error) {
 	type Alias struct {
 		OrderID int         `json:"order-id"`

@@ -72,7 +72,32 @@ func TestParseTransform(t *testing.T) {
 		})
 	}
 
+	// Malformed known transforms (bucket/truncate with a bad width) still error.
 	errorTests := []struct {
+		name    string
+		toparse string
+	}{
+		{"bucket zero", "bucket[0]"},
+		{"truncate zero", "truncate[0]"},
+		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
+		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
+		{"bucket int32 overflow", "bucket[4294967296]"},
+		{"truncate int32 overflow", "truncate[4294967296]"},
+	}
+
+	for _, tt := range errorTests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr, err := iceberg.ParseTransform(tt.toparse)
+			assert.Nil(t, tr)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+			assert.ErrorContains(t, err, tt.toparse)
+		})
+	}
+
+	// Unrecognized transform strings parse to an UnknownTransform (v3 requires
+	// readers to load unknown transforms) and round-trip verbatim, preserving
+	// the original casing.
+	unknownTests := []struct {
 		name    string
 		toparse string
 	}{
@@ -83,24 +108,28 @@ func TestParseTransform(t *testing.T) {
 		{"truncate no val", "truncate[]"},
 		{"bucket neg", "bucket[-1]"},
 		{"truncate neg", "truncate[-1]"},
-		{"bucket zero", "bucket[0]"},
-		{"truncate zero", "truncate[0]"},
-		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
-		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
-		{"bucket int32 overflow", "bucket[4294967296]"},
-		{"truncate int32 overflow", "truncate[4294967296]"},
 		{"bucket extra suffix", "bucketx[5]"},
 		{"bucket extra token", "bucket_extra[5]"},
 		{"truncate extra suffix", "truncatefoo[10]"},
 		{"truncate extra token", "truncate_garbage[4]"},
+		{"preserves original case", "Custom_V2[3]"},
 	}
 
-	for _, tt := range errorTests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tt := range unknownTests {
+		t.Run("unknown/"+tt.name, func(t *testing.T) {
 			tr, err := iceberg.ParseTransform(tt.toparse)
-			assert.Nil(t, tr)
-			assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
-			assert.ErrorContains(t, err, tt.toparse)
+			require.NoError(t, err)
+			_, ok := tr.(iceberg.UnknownTransform)
+			assert.True(t, ok)
+			assert.Equal(t, tt.toparse, tr.String())
+
+			txt, err := tr.MarshalText()
+			require.NoError(t, err)
+			assert.Equal(t, tt.toparse, string(txt))
+
+			u := tr.(iceberg.UnknownTransform)
+			assert.Equal(t, tt.toparse, u.ToHumanStr(nil))
+			assert.Equal(t, tt.toparse, u.ToHumanStrType(iceberg.StringType{}, nil))
 		})
 	}
 }

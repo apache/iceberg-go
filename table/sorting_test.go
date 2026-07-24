@@ -132,6 +132,22 @@ func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
 	assert.Equal(t, 1, sortOrder.Len())
 }
 
+// Unknown sort transforms are tolerated on write, matching Java (canTransform
+// stays true and nothing rejects them).
+func TestNewSortOrderAcceptsUnknownTransform(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	order, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		Transform: unknown,
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, unknown, order.Field(0).Transform)
+}
+
 func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -252,13 +268,35 @@ func TestUnmarshalInvalidSortNullOrder(t *testing.T) {
 	assert.ErrorIs(t, err, table.ErrInvalidNullOrder)
 }
 
-func TestUnmarshalInvalidSortTransform(t *testing.T) {
-	badJson := `{
+// v3 readers must load sort orders that use unknown transforms, preserving
+// them for round-trip rather than failing.
+func TestUnmarshalUnknownSortTransform(t *testing.T) {
+	j := `{
 		"order-id": 22,
 		"fields": [
 			{"source-id": 19, "transform": "foobar", "direction": "asc", "null-order": "nulls-first"},
 			{"source-id": 25, "transform": "bucket[4]", "direction": "desc", "null-order": "nulls-last"},
 			{"source-id": 22, "transform": "void", "direction": "asc", "null-order": "nulls-first"}
+		]
+	}`
+
+	var order table.SortOrder
+	err := json.Unmarshal([]byte(j), &order)
+	require.NoError(t, err)
+	require.Equal(t, 3, order.Len())
+
+	first := order.Field(0)
+	_, ok := first.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown transform should parse to UnknownTransform")
+	assert.Equal(t, "foobar", first.Transform.String())
+}
+
+// A malformed known sort transform still errors.
+func TestUnmarshalInvalidSortTransform(t *testing.T) {
+	badJson := `{
+		"order-id": 22,
+		"fields": [
+			{"source-id": 25, "transform": "bucket[0]", "direction": "desc", "null-order": "nulls-last"}
 		]
 	}`
 

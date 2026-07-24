@@ -191,6 +191,50 @@ func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	require.ErrorContains(t, err, "numBuckets > 0")
 }
 
+// A v3 table may use a partition transform this implementation doesn't know.
+// Readers must load it and preserve it on write, ignoring it when filtering.
+func TestPartitionFieldUnknownTransformRoundTrip(t *testing.T) {
+	jsonData := `
+	{
+		"source-id": 1,
+		"field-id": 1000,
+		"transform": "custom_transform[42]",
+		"name": "id_custom"
+	}`
+	var field iceberg.PartitionField
+	err := json.Unmarshal([]byte(jsonData), &field)
+	require.NoError(t, err)
+
+	_, ok := field.Transform.(iceberg.UnknownTransform)
+	require.True(t, ok, "unknown transform should parse to UnknownTransform")
+	assert.Equal(t, "custom_transform[42]", field.Transform.String())
+
+	data, err := json.Marshal(field)
+	require.NoError(t, err)
+	assert.JSONEq(t, jsonData, string(data))
+}
+
+// Building a spec tolerates unknown transforms, matching Java's PartitionSpec
+// builder. Rejection happens later, only when evolving such a spec.
+func TestPartitionSpecAcceptsUnknownTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	spec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_custom", unknown, schema, nil),
+	)
+	require.NoError(t, err)
+
+	_, ok := spec.Field(0).Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok)
+}
+
 func TestUnpartitionedWithVoidField(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{3}, FieldID: 1001, Name: "void", Transform: iceberg.VoidTransform{},
