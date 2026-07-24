@@ -31,11 +31,14 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
+	smithymiddleware "github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -193,9 +196,16 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
+	compatMode := s3CompatModeEnabled(props)
+
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
+		}
+		if compatMode {
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm)
+			o.APIOptions = append(o.APIOptions, stripGCSIncompatibleSignedHeaders)
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true
@@ -208,4 +218,76 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	}
 
 	return bucket, nil
+}
+
+func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
+	m := smithymiddleware.InitializeMiddlewareFunc(
+		"iceberg-go/strip-s3-input-checksum-algorithm",
+		func(ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
+			switch v := in.Parameters.(type) {
+			case *s3.PutObjectInput:
+				v.ChecksumAlgorithm = ""
+			case *s3.UploadPartInput:
+				v.ChecksumAlgorithm = ""
+			case *s3.CreateMultipartUploadInput:
+				v.ChecksumAlgorithm = ""
+			}
+
+			return next.HandleInitialize(ctx, in)
+		},
+	)
+
+	if err := stack.Initialize.Insert(m, "AWSChecksum:SetupInputContext", smithymiddleware.Before); err != nil {
+		return stack.Initialize.Add(m, smithymiddleware.Before)
+	}
+
+	return nil
+}
+
+// SDK-internal headers that GCS's S3 interop endpoint doesn't expect in the SigV4 signed set
+var gcsIncompatibleSignedHeaders = []string{
+	"Amz-Sdk-Invocation-Id",
+	"Amz-Sdk-Request",
+	"Accept-Encoding",
+}
+
+// limits header stripping to write ops;
+// reads must keep Accept-Encoding: identity so responses aren't silently gzip-decompressed.
+var gcsStripSignedHeaderOps = map[string]struct{}{
+	"PutObject":             {},
+	"UploadPart":            {},
+	"CreateMultipartUpload": {},
+}
+
+func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
+	m := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/strip-gcs-incompatible-signed-headers",
+		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			if _, isWrite := gcsStripSignedHeaderOps[awsmiddleware.GetOperationName(ctx)]; isWrite {
+				if req, ok := in.Request.(*smithyhttp.Request); ok {
+					for _, h := range gcsIncompatibleSignedHeaders {
+						req.Header.Del(h)
+					}
+				}
+			}
+
+			return next.HandleFinalize(ctx, in)
+		},
+	)
+
+	if err := stack.Finalize.Insert(m, "Signing", smithymiddleware.Before); err != nil {
+		return stack.Finalize.Add(m, smithymiddleware.Before)
+	}
+
+	return nil
+}
+
+func s3CompatModeEnabled(props map[string]string) bool {
+	if v, ok := props[io.S3CompatMode]; ok {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			return enabled
+		}
+	}
+
+	return false
 }

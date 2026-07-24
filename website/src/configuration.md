@@ -140,6 +140,7 @@ Tuning properties:
 | `s3.proxy-uri` (`io.S3ProxyURI`) | HTTP proxy URL. |
 | `s3.connect-timeout` (`io.S3ConnectTimeout`) | Either a number of seconds (`"60"`, `"60.0"`) or a Go duration (`"5s"`). |
 | `s3.force-virtual-addressing` (`io.S3ForceVirtualAddressing`) | Force virtual-host-style addressing. |
+| `s3.compat-mode` (`io.S3CompatMode`) | Enable for non-AWS S3 endpoints. Defaults to off. |
 | `s3.signer.uri` (`io.S3SignerURI`) | Reserved for remote-signing endpoint (not yet implemented). |
 
 ### Google Cloud Storage
