@@ -50,7 +50,7 @@ const (
 	integrationGCSTokenKey            = "gcs.oauth2.token"
 )
 
-func (s *RestIntegrationSuite) TestScanPlanningJavaInteroperability() {
+func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability() {
 	s.requireScanPlanningIntegration()
 
 	transport := newScanPlanningCaptureTransport()
