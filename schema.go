@@ -257,7 +257,13 @@ func (s *Schema) Type() string { return "struct" }
 
 // AsStruct returns a Struct with the same fields as the schema which can
 // then be used as a Type.
-func (s *Schema) AsStruct() StructType    { return StructType{FieldList: s.fields} }
+func (s *Schema) AsStruct() StructType { return StructType{FieldList: cloneFields(s.fields)} }
+
+// asStructRef returns a read-only view over the schema field slice for
+// internal callers that only traverse fields and must avoid clone-on-read
+// overhead on hot paths.
+func (s *Schema) asStructRef() StructType { return StructType{FieldList: s.fields} }
+
 func (s *Schema) NumFields() int          { return len(s.fields) }
 func (s *Schema) Field(i int) NestedField { return s.fields[i] }
 func (s *Schema) Fields() []NestedField   { return slices.Clone(s.fields) }
@@ -308,6 +314,46 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		Fields []NestedField `json:"fields"`
 		*Alias
 	}{Type: "struct", Fields: s.fields, Alias: &aliasCopy})
+}
+
+func cloneFields(fields []NestedField) []NestedField {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	cloned := make([]NestedField, len(fields))
+	for i, field := range fields {
+		cloned[i] = field
+		cloned[i].Type = cloneType(field.Type)
+	}
+
+	return cloned
+}
+
+func cloneType(t Type) Type {
+	if t == nil {
+		return nil
+	}
+
+	switch typed := t.(type) {
+	case *StructType:
+		return &StructType{FieldList: cloneFields(typed.FieldList)}
+	case *ListType:
+		cloned := *typed
+		cloned.Element = cloneType(typed.Element)
+
+		return &cloned
+	case *MapType:
+		cloned := *typed
+		cloned.KeyType = cloneType(typed.KeyType)
+		cloned.ValueType = cloneType(typed.ValueType)
+
+		return &cloned
+	default:
+		// Leaf and parameterized non-container types are immutable value objects,
+		// so sharing them between clones is safe.
+		return t
+	}
 }
 
 // FindColumnName returns the name of the column identified by the
@@ -596,7 +642,7 @@ func Visit[T any](sc *Schema, visitor SchemaVisitor[T]) (res T, err error) {
 		}
 	}()
 
-	return visitor.Schema(sc, visitStruct(sc.AsStruct(), visitor)), nil
+	return visitor.Schema(sc, visitStruct(sc.asStructRef(), visitor)), nil
 }
 
 func visitStruct[T any](obj StructType, visitor SchemaVisitor[T]) T {
@@ -767,7 +813,7 @@ func PreOrderVisit[T any](sc *Schema, visitor PreOrderSchemaVisitor[T]) (res T, 
 	}()
 
 	return visitor.Schema(sc, func() T {
-		return visitStructPreOrder(sc.AsStruct(), visitor)
+		return visitStructPreOrder(sc.asStructRef(), visitor)
 	}), nil
 }
 
@@ -1482,7 +1528,7 @@ func VisitSchemaWithPartner[T, P any](sc *Schema, partner P, visitor SchemaWithP
 
 	structPartner := accessor.SchemaPartner(partner)
 
-	return visitor.Schema(sc, partner, visitStructWithPartner(sc.AsStruct(), structPartner, visitor, accessor)), nil
+	return visitor.Schema(sc, partner, visitStructWithPartner(sc.asStructRef(), structPartner, visitor, accessor)), nil
 }
 
 func visitStructWithPartner[T, P any](st StructType, partner P, visitor SchemaWithPartnerVisitor[T, P], accessor PartnerAccessor[P]) T {
