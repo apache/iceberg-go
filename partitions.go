@@ -425,15 +425,38 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID     int              `json:"spec-id"`
-		Fields []PartitionField `json:"fields"`
-	}{ID: ps.id, Fields: ps.fields}
+		ID     int               `json:"spec-id"`
+		Fields []json.RawMessage `json:"fields"`
+	}{ID: ps.id}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	ps.id, ps.fields = aux.ID, aux.Fields
+	fields := make([]PartitionField, len(aux.Fields))
+	for i, rawField := range aux.Fields {
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(rawField, &keys); err != nil {
+			return err
+		}
+		if rawFieldID, ok := keys["field-id"]; ok {
+			var fieldID *int
+			if err := json.Unmarshal(rawFieldID, &fieldID); err != nil {
+				return fmt.Errorf("%w: invalid partition field ID: %w", ErrInvalidPartitionSpec, err)
+			}
+			if fieldID == nil {
+				return fmt.Errorf("%w: partition field ID cannot be null", ErrInvalidPartitionSpec)
+			}
+		}
+		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
+			return err
+		}
+	}
+
+	ps.id, ps.fields = aux.ID, fields
+	if err := ps.assignPartitionFieldIds(nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
 	ps.initialize()
 
 	return nil
