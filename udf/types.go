@@ -215,6 +215,28 @@ func canonicalString(t Type) string {
 	return sb.String()
 }
 
+func cloneType(t Type) Type {
+	switch v := t.(type) {
+	case nil:
+		return nil
+	case PrimitiveType:
+		return v
+	case ListType:
+		return ListType{Element: cloneType(v.Element)}
+	case MapType:
+		return MapType{Key: cloneType(v.Key), Value: cloneType(v.Value)}
+	case StructType:
+		fields := make([]StructField, len(v.Fields))
+		for i, field := range v.Fields {
+			fields[i] = StructField{Name: field.Name, Type: cloneType(field.Type)}
+		}
+
+		return StructType{Fields: fields}
+	default:
+		return v
+	}
+}
+
 // validateType checks that t and all nested types are fully specified.
 // PrimitiveType values are valid by construction; composite types built as
 // literals may carry nil children, which this rejects.

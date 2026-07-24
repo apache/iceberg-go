@@ -123,7 +123,7 @@ type UnknownRepresentation struct {
 }
 
 // Raw returns the representation's original JSON.
-func (r UnknownRepresentation) Raw() json.RawMessage { return r.raw }
+func (r UnknownRepresentation) Raw() json.RawMessage { return slices.Clone(r.raw) }
 
 func (r UnknownRepresentation) RepresentationType() string { return r.TypeName }
 func (UnknownRepresentation) isRepresentation()            {}
@@ -145,6 +145,21 @@ func representationsEqual(a, b Representation) bool {
 	default:
 		return false
 	}
+}
+
+func cloneRepresentations(representations []Representation) []Representation {
+	cloned := make([]Representation, len(representations))
+	for i, repr := range representations {
+		switch r := repr.(type) {
+		case UnknownRepresentation:
+			r.raw = slices.Clone(r.raw)
+			cloned[i] = r
+		default:
+			cloned[i] = r
+		}
+	}
+
+	return cloned
 }
 
 func unmarshalRepresentation(b json.RawMessage) (Representation, error) {
@@ -284,7 +299,7 @@ func (v *DefinitionVersion) Clone() *DefinitionVersion {
 	}
 
 	cloned := *v
-	cloned.Representations = slices.Clone(v.Representations)
+	cloned.Representations = cloneRepresentations(v.Representations)
 
 	return &cloned
 }
@@ -475,8 +490,12 @@ func (d *Definition) Clone() *Definition {
 	}
 
 	cloned := *d
-	// Type values are immutable, so sharing them across clones is safe.
-	cloned.Parameters = slices.Clone(d.Parameters)
+	cloned.Parameters = make([]Parameter, len(d.Parameters))
+	for i, parameter := range d.Parameters {
+		cloned.Parameters[i] = parameter
+		cloned.Parameters[i].Type = cloneType(parameter.Type)
+	}
+	cloned.ReturnType = cloneType(d.ReturnType)
 	cloned.Versions = cloneSlice(d.Versions)
 	if d.ReturnNullable != nil {
 		nullable := *d.ReturnNullable
@@ -733,19 +752,24 @@ type metadata struct {
 	lazyDefinitionsByID func() map[string]*Definition
 }
 
-func (m *metadata) FormatVersion() int                  { return m.FormatVersionValue }
-func (m *metadata) FunctionUUID() uuid.UUID             { return *m.UUID }
-func (m *metadata) Location() string                    { return m.Loc }
-func (m *metadata) Definitions() []*Definition          { return m.DefinitionList }
-func (m *metadata) DefinitionLog() []DefinitionLogEntry { return m.DefinitionLogList }
-func (m *metadata) Properties() iceberg.Properties      { return m.Props }
-func (m *metadata) Secure() bool                        { return m.SecureValue }
-func (m *metadata) Doc() string                         { return m.DocValue }
+func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
+func (m *metadata) FunctionUUID() uuid.UUID    { return *m.UUID }
+func (m *metadata) Location() string           { return m.Loc }
+func (m *metadata) Definitions() []*Definition { return cloneSlice(m.DefinitionList) }
+func (m *metadata) DefinitionLog() []DefinitionLogEntry {
+	return cloneDefinitionLog(m.DefinitionLogList)
+}
+func (m *metadata) Properties() iceberg.Properties { return maps.Clone(m.Props) }
+func (m *metadata) Secure() bool                   { return m.SecureValue }
+func (m *metadata) Doc() string                    { return m.DocValue }
 
 func (m *metadata) DefinitionByID(definitionID string) (*Definition, bool) {
 	def, ok := m.lazyDefinitionsByID()[definitionID]
+	if !ok {
+		return nil, false
+	}
 
-	return def, ok
+	return def.Clone(), true
 }
 
 func (m *metadata) Equals(other Metadata) bool {
