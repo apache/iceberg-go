@@ -828,6 +828,10 @@ func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return rowsMightMatch
+	}
+
 	fieldID := t.Ref().Field().ID
 	if cnt, exists := m.nullCounts[fieldID]; exists && cnt == 0 {
 		return rowsCannotMatch
@@ -848,6 +852,10 @@ func (m *inclusiveMetricsEval) VisitNotNull(t iceberg.BoundTerm) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitIsNan(t iceberg.BoundTerm) bool {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return rowsMightMatch
+	}
+
 	fieldID := t.Ref().Field().ID
 	if cnt, exists := m.nanCounts[fieldID]; exists && cnt == 0 {
 		return rowsCannotMatch
@@ -862,6 +870,10 @@ func (m *inclusiveMetricsEval) VisitIsNan(t iceberg.BoundTerm) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitNotNan(t iceberg.BoundTerm) bool {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return rowsMightMatch
+	}
+
 	fieldID := t.Ref().Field().ID
 
 	if m.containsNansOnly(fieldID) {
@@ -871,25 +883,44 @@ func (m *inclusiveMetricsEval) VisitNotNan(t iceberg.BoundTerm) bool {
 	return rowsMightMatch
 }
 
-func (m *inclusiveMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
-
-	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
-		return rowsCannotMatch
+// boundFor decodes the file bound for term t from raw: a scalar for a reference, or the
+// variant sub-path value for an extract; ok is false when raw is nil or not castable.
+func (m *inclusiveMetricsEval) boundFor(t iceberg.BoundTerm, raw []byte) (iceberg.Literal, bool) {
+	if raw == nil {
+		return nil, false
 	}
 
+	if ext, ok := t.(iceberg.BoundExtract); ok {
+		lit, found, err := internal.VariantBoundLiteral(raw, ext.Path(), ext.Type().(iceberg.PrimitiveType))
+		if err != nil {
+			panic(err)
+		}
+
+		return lit, found
+	}
+
+	field := t.Ref().Field()
 	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
 		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
 			iceberg.ErrInvalidTypeString, field.Type))
 	}
 
-	if lowerBoundBytes := m.lowerBounds[fieldID]; lowerBoundBytes != nil {
-		lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
-		if err != nil {
-			panic(err)
-		}
+	lit, err := iceberg.LiteralFromBytes(field.Type, raw)
+	if err != nil {
+		panic(err)
+	}
 
+	return lit, true
+}
+
+func (m *inclusiveMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Literal) bool {
+	fieldID := t.Ref().Field().ID
+
+	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
+		return rowsCannotMatch
+	}
+
+	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
 		if m.isNan(lowerBound) {
 			// nan indicates unreliable bounds
 			return rowsMightMatch
@@ -904,24 +935,13 @@ func (m *inclusiveMetricsEval) VisitLess(t iceberg.BoundTerm, lit iceberg.Litera
 }
 
 func (m *inclusiveMetricsEval) VisitLessEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
 
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
-	}
-
-	if lowerBoundBytes := m.lowerBounds[fieldID]; lowerBoundBytes != nil {
-		lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
 		if m.isNan(lowerBound) {
 			// nan indicates unreliable bounds
 			return rowsMightMatch
@@ -936,24 +956,13 @@ func (m *inclusiveMetricsEval) VisitLessEqual(t iceberg.BoundTerm, lit iceberg.L
 }
 
 func (m *inclusiveMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
 
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
-	}
-
-	if upperBoundBytes := m.upperBounds[fieldID]; upperBoundBytes != nil {
-		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
 		if getCmpLiteral(upperBound)(upperBound, lit) <= 0 {
 			if m.isNan(upperBound) {
 				return rowsMightMatch
@@ -967,24 +976,13 @@ func (m *inclusiveMetricsEval) VisitGreater(t iceberg.BoundTerm, lit iceberg.Lit
 }
 
 func (m *inclusiveMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
 
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
-	}
-
-	if upperBoundBytes := m.upperBounds[fieldID]; upperBoundBytes != nil {
-		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
 		if getCmpLiteral(upperBound)(upperBound, lit) < 0 {
 			if m.isNan(upperBound) {
 				return rowsMightMatch
@@ -998,47 +996,28 @@ func (m *inclusiveMetricsEval) VisitGreaterEqual(t iceberg.BoundTerm, lit iceber
 }
 
 func (m *inclusiveMetricsEval) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
 	}
 
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
-	}
-
-	var cmp func(iceberg.Literal, iceberg.Literal) int
-	if lowerBoundBytes := m.lowerBounds[fieldID]; lowerBoundBytes != nil {
-		lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
 
-		cmp = getCmpLiteral(lowerBound)
-		if cmp(lowerBound, lit) == 1 {
+		if getCmpLiteral(lowerBound)(lowerBound, lit) == 1 {
 			return rowsCannotMatch
 		}
 	}
 
-	if upperBoundBytes := m.upperBounds[fieldID]; upperBoundBytes != nil {
-		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
 		if m.isNan(upperBound) {
 			return rowsMightMatch
 		}
 
-		cmp = getCmpLiteral(upperBound)
-		if cmp(upperBound, lit) == -1 {
+		if getCmpLiteral(upperBound)(upperBound, lit) == -1 {
 			return rowsCannotMatch
 		}
 	}
@@ -1051,8 +1030,7 @@ func (m *inclusiveMetricsEval) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal)
 }
 
 func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceberg.Literal]) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) || m.containsNansOnly(fieldID) {
 		return rowsCannotMatch
@@ -1063,18 +1041,8 @@ func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceber
 		return rowsMightMatch
 	}
 
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
-	}
-
 	values := s.Members()
-	if lowerBoundBytes := m.lowerBounds[fieldID]; lowerBoundBytes != nil {
-		lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
-		if err != nil {
-			panic(lowerBound)
-		}
-
+	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
 		if m.isNan(lowerBound) {
 			return rowsMightMatch
 		}
@@ -1085,12 +1053,7 @@ func (m *inclusiveMetricsEval) VisitIn(t iceberg.BoundTerm, s iceberg.Set[iceber
 		}
 	}
 
-	if upperBoundBytes := m.upperBounds[fieldID]; upperBoundBytes != nil {
-		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
 		if m.isNan(upperBound) {
 			return rowsMightMatch
 		}
@@ -1112,16 +1075,10 @@ func (m *inclusiveMetricsEval) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg
 }
 
 func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.Literal) bool {
-	field := t.Ref().Field()
-	fieldID := field.ID
+	fieldID := t.Ref().Field().ID
 
 	if m.containsNullsOnly(fieldID) {
 		return rowsCannotMatch
-	}
-
-	if _, ok := field.Type.(iceberg.PrimitiveType); !ok {
-		panic(fmt.Errorf("%w: expected iceberg.PrimitiveType, got %s",
-			iceberg.ErrInvalidTypeString, field.Type))
 	}
 
 	var prefix string
@@ -1133,12 +1090,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 
 	lenPrefix := len(prefix)
 
-	if lowerBoundBytes := m.lowerBounds[fieldID]; lowerBoundBytes != nil {
-		lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if lowerBound, ok := m.boundFor(t, m.lowerBounds[fieldID]); ok {
 		var v string
 		switch l := lowerBound.(type) {
 		case iceberg.TypedLiteral[string]:
@@ -1156,12 +1108,7 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 		}
 	}
 
-	if upperBoundBytes := m.upperBounds[fieldID]; upperBoundBytes != nil {
-		upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
-		if err != nil {
-			panic(err)
-		}
-
+	if upperBound, ok := m.boundFor(t, m.upperBounds[fieldID]); ok {
 		var v string
 		switch u := upperBound.(type) {
 		case iceberg.TypedLiteral[string]:
@@ -1183,6 +1130,10 @@ func (m *inclusiveMetricsEval) VisitStartsWith(t iceberg.BoundTerm, lit iceberg.
 }
 
 func (m *inclusiveMetricsEval) VisitNotStartsWith(t iceberg.BoundTerm, lit iceberg.Literal) bool {
+	if _, ok := t.(iceberg.BoundExtract); ok {
+		return rowsMightMatch
+	}
+
 	field := t.Ref().Field()
 	fieldID := field.ID
 
@@ -1289,6 +1240,10 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	if _, ok := pred.Term().(iceberg.BoundExtract); ok {
+		return rowsMightNotMatch
+	}
+
 	return iceberg.VisitBoundPredicate(pred, m)
 }
 

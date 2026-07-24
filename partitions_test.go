@@ -176,6 +176,18 @@ func TestPartitionSpecRejectsInvalidBucketTransform(t *testing.T) {
 	require.ErrorContains(t, err, "numBuckets > 0")
 }
 
+func TestPartitionSpecRejectsVariantSource(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "v", Type: iceberg.VariantType{}},
+	)
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "v_p", iceberg.IdentityTransform{}, schema, nil),
+	)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "cannot partition by")
+}
+
 func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{

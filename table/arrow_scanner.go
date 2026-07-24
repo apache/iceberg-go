@@ -727,7 +727,7 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, false, nil
 	}
 
-	translatedFilter, err := iceberg.TranslateColumnNames(as.boundRowFilter, fileSchema)
+	translatedFilter, extracts, err := iceberg.TranslateColumnNamesForScan(as.boundRowFilter, fileSchema)
 	if err != nil {
 		return nil, false, err
 	}
@@ -736,23 +736,35 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, true, nil
 	}
 
-	translatedFilter, err = iceberg.BindExpr(fileSchema, translatedFilter, as.caseSensitive)
+	filterSchema := fileSchema
+	if len(extracts) > 0 {
+		filterSchema, err = augmentSchemaWithExtracts(fileSchema, extracts)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
+	translatedFilter, err = iceberg.BindExpr(filterSchema, translatedFilter, as.caseSensitive)
 	if err != nil {
 		return nil, false, err
 	}
 
-	if !translatedFilter.Equals(iceberg.AlwaysTrue{}) {
-		extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, translatedFilter, as.caseSensitive)
-		if err != nil {
-			return nil, false, err
-		}
-
-		ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
-
-		return filterRecords(ctx, recordFilter), false, nil
+	if translatedFilter.Equals(iceberg.AlwaysTrue{}) {
+		return nil, false, nil
 	}
 
-	return nil, false, nil
+	extSet, recordFilter, err := substrait.ConvertExpr(filterSchema, translatedFilter, as.caseSensitive)
+	if err != nil {
+		return nil, false, err
+	}
+
+	ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
+	base := filterRecords(ctx, recordFilter)
+	if len(extracts) == 0 {
+		return base, false, nil
+	}
+
+	return as.extractResidualFilter(ctx, extracts, base), false, nil
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow

@@ -22,6 +22,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3119,4 +3120,69 @@ func TestBloomPredicateCollector(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, preds)
 	})
+}
+
+// TestVariantExtractPruningGuards confirms extract terms are never pruned by null/nan-count guards.
+func TestVariantExtractPruningGuards(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	extI := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	extF := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Float64)
+	extS := iceberg.Extract("payload", "$.b", iceberg.PrimitiveTypes.String)
+
+	for _, tt := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+		file *mockDataFile
+	}{
+		{"is_null", iceberg.IsNull(extI), &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nullCounts: map[int]int64{2: 0}}},
+		{"is_nan", iceberg.IsNaN(extF), &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nanCounts: map[int]int64{2: 0}}},
+		{"not_nan", iceberg.NotNaN(extF), &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nanCounts: map[int]int64{2: 10}}},
+		{"not_starts_with", iceberg.NotStartsWith(extS, "r"), &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nullCounts: map[int]int64{99: 0}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := newInclusiveMetricsEvaluator(sc, tt.expr, true, true)
+			require.NoError(t, err)
+			res, err := eval(tt.file)
+			require.NoError(t, err)
+			assert.Equal(t, rowsMightMatch, res, "variant extract guard must never prune")
+		})
+	}
+}
+
+// TestStrictMetricsExtractNeverMatches confirms the strict evaluator treats extract terms
+// conservatively (rowsMightNotMatch) instead of decoding the variant bytes and erroring.
+func TestStrictMetricsExtractNeverMatches(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	var b variant.Builder
+	start := b.Offset()
+	entries := []variant.FieldEntry{b.NextField(start, "$['a']")}
+	require.NoError(t, b.AppendInt(5))
+	require.NoError(t, b.FinishObject(start, entries))
+	v, err := b.Build()
+	require.NoError(t, err)
+	bound := append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+
+	// A file whose variant column carries bounds is what triggered the LiteralFromBytes(variant) error.
+	file := &mockDataFile{
+		count:       10,
+		valueCounts: map[int]int64{2: 10},
+		nullCounts:  map[int]int64{2: 0},
+		lowerBounds: map[int][]byte{2: bound},
+		upperBounds: map[int][]byte{2: bound},
+	}
+
+	expr := iceberg.EqualTo(iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64), int64(5))
+	eval, err := newStrictMetricsEvaluator(sc, expr, true, true)
+	require.NoError(t, err)
+
+	res, err := eval(file)
+	require.NoError(t, err)
+	assert.Equal(t, rowsMightNotMatch, res)
 }
