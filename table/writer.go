@@ -164,12 +164,18 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 		return nil, err
 	}
 
+	rowGroupTargetSizeBytes, err := internal.ParquetRowGroupTargetSizeBytes(w.props)
+	if err != nil {
+		return nil, err
+	}
+
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		Content:          w.content,
 		FileName:         filePath,
 		StatsCols:        statsCols,
 		WriteProps:       w.format.GetWriteProperties(w.props),
+		RowGroupBytes:    rowGroupTargetSizeBytes,
 		Spec:             *currentSpec,
 		EqualityFieldIDs: w.equalityFieldIDs,
 		SortOrderID:      task.SortOrderID,
