@@ -136,11 +136,6 @@ type ScanPlanningResult struct {
 //
 // SupportsRemoteScanPlanning reports whether the planner can complete a remote
 // plan end-to-end for the requested scan.
-//
-// Note: FileScanTask is proposed to gain a `Residual iceberg.BooleanExpression`
-// field so remote tasks can carry the server's residual filter. That field is
-// not added here because it would trip the codec/file_scan_task.go drift guard;
-// it lands with the scan-task decoder PR.
 type ScanPlanner interface {
 	SupportsRemoteScanPlanning() bool
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
