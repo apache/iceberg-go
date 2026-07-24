@@ -27,6 +27,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -458,7 +459,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		apply(&co)
 	}
 
-	cfg := readRetryConfig(t.metadata.Properties())
+	cfg, err := readRetryConfig(t.metadata.Properties())
+	if err != nil {
+		return nil, err
+	}
 
 	// Bound total retry time with a derived context so both the wait loop
 	// and the CommitTable call itself respect the deadline uniformly.
@@ -730,20 +734,67 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	return result, orphanedPaths, nil
 }
 
+const (
+	maxRetryDurationMs = uint64(math.MaxInt64 / int64(time.Millisecond))
+	maxRetryCount      = uint64(math.MaxUint32)
+)
+
 type retryConfig struct {
 	numRetries     uint
-	minWaitMs      uint
-	maxWaitMs      uint
-	totalTimeoutMs uint
+	minWaitMs      uint64
+	maxWaitMs      uint64
+	totalTimeoutMs uint64
 }
 
-func readRetryConfig(props iceberg.Properties) retryConfig {
-	return retryConfig{
-		numRetries:     iceberg.PropUInt(props, CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      iceberg.PropUInt(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      iceberg.PropUInt(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: iceberg.PropUInt(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
+	numRetries := props.GetUInt64(CommitNumRetriesKey, CommitNumRetriesDefault)
+	if numRetries >= uint64(^uint(0)) || numRetries > maxRetryCount {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry property %q=%d: retry count exceeds the maximum of %d",
+			CommitNumRetriesKey, numRetries, maxRetryCount)
 	}
+
+	cfg := retryConfig{
+		numRetries:     uint(numRetries),
+		minWaitMs:      props.GetUInt64(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      props.GetUInt64(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: props.GetUInt64(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+	}
+
+	if cfg.minWaitMs == 0 {
+		cfg.minWaitMs = CommitMinRetryWaitMsDefault
+	}
+	if cfg.maxWaitMs == 0 {
+		cfg.maxWaitMs = CommitMaxRetryWaitMsDefault
+	}
+	if cfg.totalTimeoutMs == 0 {
+		cfg.totalTimeoutMs = CommitTotalRetryTimeoutMsDefault
+	}
+
+	for _, property := range []struct {
+		key   string
+		value uint64
+	}{
+		{CommitMinRetryWaitMsKey, cfg.minWaitMs},
+		{CommitMaxRetryWaitMsKey, cfg.maxWaitMs},
+		{CommitTotalRetryTimeoutMsKey, cfg.totalTimeoutMs},
+	} {
+		key, value := property.key, property.value
+		if value > maxRetryDurationMs {
+			return retryConfig{}, fmt.Errorf(
+				"invalid retry property %q=%d: exceeds maximum duration of %d milliseconds",
+				key, value, maxRetryDurationMs)
+		}
+	}
+
+	if cfg.minWaitMs > cfg.maxWaitMs {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry properties %q=%d and %q=%d: minimum wait exceeds maximum wait",
+			CommitMinRetryWaitMsKey, cfg.minWaitMs,
+			CommitMaxRetryWaitMsKey, cfg.maxWaitMs)
+	}
+
+	return cfg, nil
 }
 
 // backoffDuration computes wait time for the given 0-based retry attempt
@@ -754,34 +805,46 @@ func readRetryConfig(props iceberg.Properties) retryConfig {
 // concurrent Go writers. Backoff is client-local, so this does not
 // affect cross-client interop.
 //
-// Inputs are trusted: readRetryConfig is responsible for normalizing
-// user-supplied properties (negatives, zero, min > max).
-func backoffDuration(attempt, minMs, maxMs uint) time.Duration {
+// Inputs from readRetryConfig are validated. The defensive bounds below also
+// keep direct callers from reaching an invalid random bound or duration.
+func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs == 0 {
 		minMs = CommitMinRetryWaitMsDefault
 	}
 	if maxMs == 0 {
 		maxMs = CommitMaxRetryWaitMsDefault
 	}
+	if minMs > maxRetryDurationMs {
+		minMs = maxRetryDurationMs
+	}
+	if maxMs > maxRetryDurationMs {
+		maxMs = maxRetryDurationMs
+	}
 	if minMs > maxMs {
 		minMs = maxMs
 	}
-	// Cap the shift count so the signed int64 below does not overflow
-	// past its operand width; overflow would just be clamped to maxMs
-	// anyway, so keep the math obvious instead.
+	// Cap the shift count so the exponential calculation stays within the
+	// bounded duration range.
 	if attempt > 62 {
 		attempt = 62
 	}
 
-	ceiling := int64(minMs) << attempt
-	if ceiling <= 0 || ceiling > int64(maxMs) {
-		ceiling = int64(maxMs)
+	var ceiling uint64
+	if minMs > maxRetryDurationMs>>attempt {
+		ceiling = maxMs
+	} else {
+		ceiling = minMs << attempt
+		if ceiling > maxMs {
+			ceiling = maxMs
+		}
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
 	// writers don't all sample 0 and retry in lockstep.
-	//nolint:gosec // non-security randomness, jitter for retry spread
-	wait := int64(minMs) + rand.Int64N(ceiling-int64(minMs)+1)
+	// Both conversions are safe because minMs and ceiling-minMs+1 are bounded
+	// by maxRetryDurationMs, which fits in int64.
+	//nolint:gosec // non-security randomness; bounded int64 conversions are safe
+	wait := int64(minMs) + rand.Int64N(int64(ceiling-minMs+1))
 
 	return time.Duration(wait) * time.Millisecond
 }
