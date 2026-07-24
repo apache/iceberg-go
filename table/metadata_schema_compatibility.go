@@ -108,6 +108,10 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	const defaultValuesMinFormatVersion = 3
 	problems := make([]IncompatibleField, 0)
 
+	if err := validateNoReservedMetadataColumnIDs(sc); err != nil {
+		return err
+	}
+
 	if err := validateUnknownTypes(sc); err != nil {
 		return fmt.Errorf("failed to validate unknown types: %w", err)
 	}
@@ -131,11 +135,6 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 		colName, found := sc.FindColumnName(field.ID)
 		if !found {
 			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
-		}
-
-		if iceberg.IsMetadataColumn(field.ID) {
-			return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
-				iceberg.ErrInvalidSchema, colName, field.ID)
 		}
 
 		minFormatVersion := minFormatVersionForType(field.Type)
@@ -169,6 +168,54 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 
 	if len(problems) != 0 {
 		return ErrIncompatibleSchema{fields: problems, formatVersion: formatVersion}
+	}
+
+	return nil
+}
+
+func validateNoReservedMetadataColumnIDs(sc *iceberg.Schema) error {
+	for _, field := range sc.Fields() {
+		if err := validateNoReservedMetadataColumnID(field, field.Name); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateNoReservedMetadataColumnID(field iceberg.NestedField, name string) error {
+	if iceberg.IsMetadataColumn(field.ID) {
+		return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
+			iceberg.ErrInvalidSchema, name, field.ID)
+	}
+
+	switch typ := field.Type.(type) {
+	case *iceberg.StructType:
+		if typ == nil {
+			return nil
+		}
+		for _, child := range typ.FieldList {
+			if err := validateNoReservedMetadataColumnID(child, name+"."+child.Name); err != nil {
+				return err
+			}
+		}
+	case *iceberg.ListType:
+		if typ == nil {
+			return nil
+		}
+		if err := validateNoReservedMetadataColumnID(typ.ElementField(), name+".element"); err != nil {
+			return err
+		}
+	case *iceberg.MapType:
+		if typ == nil {
+			return nil
+		}
+		if err := validateNoReservedMetadataColumnID(typ.KeyField(), name+".key"); err != nil {
+			return err
+		}
+		if err := validateNoReservedMetadataColumnID(typ.ValueField(), name+".value"); err != nil {
+			return err
+		}
 	}
 
 	return nil

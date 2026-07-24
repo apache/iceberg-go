@@ -927,10 +927,11 @@ func TestProjectionWithRowLineageRequiresV3(t *testing.T) {
 	assert.ErrorContains(t, err, "row lineage")
 }
 
-// TestProjectionV3SchemaAlreadyHasRowID covers the case where the user schema
-// already declares _row_id (a reserved field id, but legal in v3). The
-// projection helper must be idempotent and not panic on the duplicate ID.
-func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
+// TestAppendMissingLineageFieldsAlreadyHasRowID covers the helper's idempotent
+// behavior when a schema already includes reserved lineage fields. New table
+// metadata rejects user schemas with these IDs, but projections can still
+// contain them after the scanner adds row-lineage columns.
+func TestAppendMissingLineageFieldsAlreadyHasRowID(t *testing.T) {
 	schema := iceberg.NewSchema(
 		1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -938,34 +939,20 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 		iceberg.RowID(),
 	)
 
-	metadata, err := NewMetadata(
-		schema,
-		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
-		"s3://test-bucket/test_table",
-		iceberg.Properties{"format-version": "3"},
-	)
-	require.NoError(t, err)
-	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
+	proj := appendMissingLineageFields(schema, []iceberg.NestedField{
+		iceberg.RowID(),
+		iceberg.LastUpdatedSequenceNumber(),
+	})
+	require.NotNil(t, proj)
 
-	scan := &Scan{
-		metadata:          metadata,
-		selectedFields:    []string{"*"},
-		caseSensitive:     true,
-		includeRowLineage: true,
+	seen := make(map[int]string, len(proj.Fields()))
+	for _, f := range proj.Fields() {
+		if prev, dup := seen[f.ID]; dup {
+			t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
+		}
+		seen[f.ID] = f.Name
 	}
 
-	require.NotPanics(t, func() {
-		proj, perr := scan.Projection()
-		require.NoError(t, perr)
-		require.NotNil(t, proj)
-
-		seen := make(map[int]string, len(proj.Fields()))
-		for _, f := range proj.Fields() {
-			if prev, dup := seen[f.ID]; dup {
-				t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
-			}
-			seen[f.ID] = f.Name
-		}
-	})
+	assert.Equal(t, iceberg.RowIDColumnName, seen[iceberg.RowIDFieldID])
+	assert.Equal(t, iceberg.LastUpdatedSequenceNumberColumnName, seen[iceberg.LastUpdatedSequenceNumberFieldID])
 }

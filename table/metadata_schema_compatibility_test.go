@@ -50,3 +50,31 @@ func TestNewMetadata_DuplicateValues(t *testing.T) {
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "multiple fields for name foo")
 }
+
+func TestNewMetadataRejectsReservedMetadataColumnIDsBeforeReassignment(t *testing.T) {
+	for _, field := range []iceberg.NestedField{
+		iceberg.RowID(),
+		iceberg.LastUpdatedSequenceNumber(),
+	} {
+		t.Run(field.Name, func(t *testing.T) {
+			schema := iceberg.NewSchema(
+				1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				field,
+			)
+
+			_, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://test-bucket/test_table",
+				iceberg.Properties{PropertyFormatVersion: "3"},
+			)
+
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "reserved metadata column ID")
+			assert.Contains(t, err.Error(), field.Name)
+		})
+	}
+}

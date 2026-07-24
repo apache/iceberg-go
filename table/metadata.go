@@ -2321,6 +2321,10 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		}
 	}
 
+	if err := validateNoReservedMetadataColumnIDs(sc); err != nil {
+		return nil, err
+	}
+
 	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)
 	if err != nil {
 		return nil, err
