@@ -582,7 +582,12 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 	}
 
 	if current != nil {
-		updatedHiveTbl := updateHiveTableForCommit(currentHiveTbl, staged.MetadataLocation())
+		updatedHiveTbl := updateHiveTableForCommit(
+			currentHiveTbl,
+			current.Metadata(),
+			staged.Metadata(),
+			staged.MetadataLocation(),
+		)
 
 		if err := c.client.AlterTable(ctx, database, tableName, updatedHiveTbl); err != nil {
 			return nil, "", fmt.Errorf("failed to commit table %s.%s: %w", database, tableName, err)
