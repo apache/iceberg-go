@@ -614,6 +614,7 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 <tr><td><code>s3.proxy-uri</code> (<code>io.S3ProxyURI</code>)</td><td>HTTP proxy URL.</td></tr>
 <tr><td><code>s3.connect-timeout</code> (<code>io.S3ConnectTimeout</code>)</td><td>Either a number of seconds (<code>&quot;60&quot;</code>, <code>&quot;60.0&quot;</code>) or a Go duration (<code>&quot;5s&quot;</code>).</td></tr>
 <tr><td><code>s3.force-virtual-addressing</code> (<code>io.S3ForceVirtualAddressing</code>)</td><td>Force virtual-host-style addressing.</td></tr>
+<tr><td><code>s3.compat-mode</code> (<code>io.S3CompatMode</code>)</td><td>Enable for non-AWS S3 endpoints. Defaults to off.</td></tr>
 <tr><td><code>s3.signer.uri</code> (<code>io.S3SignerURI</code>)</td><td>Reserved for remote-signing endpoint (not yet implemented).</td></tr>
 </tbody></table>
 </div>
