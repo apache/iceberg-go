@@ -893,9 +893,11 @@ func TestGlueCreateNamespace(t *testing.T) {
 
 func TestGlueDropNamespace(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
+	catalogID := aws.String("test_catalog")
 
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
-		Name: aws.String("test_namespace"),
+		CatalogId: catalogID,
+		Name:      aws.String("test_namespace"),
 	}, mock.Anything).Return(&glue.GetDatabaseOutput{
 		Database: &types.Database{
 			Name: aws.String("test_namespace"),
@@ -906,16 +908,19 @@ func TestGlueDropNamespace(t *testing.T) {
 	}, nil).Once()
 
 	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		CatalogId:    catalogID,
 		DatabaseName: aws.String("test_namespace"),
 		MaxResults:   aws.Int32(1),
 	}, mock.Anything).Return(&glue.GetTablesOutput{}, nil).Once()
 
 	mockGlueSvc.On("DeleteDatabase", mock.Anything, &glue.DeleteDatabaseInput{
-		Name: aws.String("test_namespace"),
+		CatalogId: catalogID,
+		Name:      aws.String("test_namespace"),
 	}, mock.Anything).Return(&glue.DeleteDatabaseOutput{}, nil).Once()
 
 	glueCatalog := &Catalog{
-		glueSvc: mockGlueSvc,
+		glueSvc:   mockGlueSvc,
+		catalogId: catalogID,
 	}
 
 	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
@@ -924,8 +929,17 @@ func TestGlueDropNamespace(t *testing.T) {
 }
 
 func TestGlueDropNamespaceNotEmpty(t *testing.T) {
-	for _, tableType := range []string{glueTypeIceberg, "EXTERNAL_TABLE"} {
-		t.Run(tableType, func(t *testing.T) {
+	tests := []struct {
+		name            string
+		tableType       string
+		expectedMessage string
+	}{
+		{name: "iceberg table", tableType: glueTypeIceberg, expectedMessage: "still contains Iceberg tables"},
+		{name: "non-Iceberg table", tableType: glueTableType, expectedMessage: "still contains non-Iceberg tables"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			mockGlueSvc := &mockGlueClient{}
 
 			mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
@@ -939,7 +953,7 @@ func TestGlueDropNamespaceNotEmpty(t *testing.T) {
 			}, mock.Anything).Return(&glue.GetTablesOutput{
 				TableList: []types.Table{{
 					Name:       aws.String("test_table"),
-					Parameters: map[string]string{tableParamTableType: tableType},
+					Parameters: map[string]string{tableParamTableType: tt.tableType},
 				}},
 			}, nil).Once()
 
@@ -947,6 +961,7 @@ func TestGlueDropNamespaceNotEmpty(t *testing.T) {
 			err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
 
 			require.ErrorIs(t, err, catalog.ErrNamespaceNotEmpty)
+			require.ErrorContains(t, err, tt.expectedMessage)
 			mockGlueSvc.AssertNotCalled(t, "DeleteDatabase", mock.Anything, mock.Anything, mock.Anything)
 			mockGlueSvc.AssertExpectations(t)
 		})
@@ -971,6 +986,7 @@ func TestGlueDropNamespaceGetTablesError(t *testing.T) {
 	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
 
 	require.ErrorIs(t, err, errGetTables)
+	require.ErrorContains(t, err, "failed to list tables in namespace test_namespace")
 	mockGlueSvc.AssertNotCalled(t, "DeleteDatabase", mock.Anything, mock.Anything, mock.Anything)
 	mockGlueSvc.AssertExpectations(t)
 }

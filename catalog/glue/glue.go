@@ -685,16 +685,23 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
+	// Glue has no conditional database delete, so a concurrent table creation can still race this check.
 	tables, err := c.glueSvc.GetTables(ctx, &glue.GetTablesInput{
 		CatalogId:    c.catalogId,
 		DatabaseName: aws.String(databaseName),
 		MaxResults:   aws.Int32(1),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to check namespace %s for tables: %w", databaseName, err)
+		return fmt.Errorf("failed to list tables in namespace %s: %w", databaseName, err)
 	}
 	if len(tables.TableList) > 0 {
-		return fmt.Errorf("%w: %s", catalog.ErrNamespaceNotEmpty, databaseName)
+		tableType := "non-Iceberg"
+		if strings.EqualFold(tables.TableList[0].Parameters[tableParamTableType], glueTypeIceberg) {
+			tableType = "Iceberg"
+		}
+
+		return fmt.Errorf("%w: cannot drop namespace %s because it still contains %s tables",
+			catalog.ErrNamespaceNotEmpty, databaseName, tableType)
 	}
 
 	params := &glue.DeleteDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)}
