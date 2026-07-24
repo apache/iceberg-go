@@ -266,7 +266,6 @@ const unsortedSortOrderID = 0
 func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	var fieldIDToPartitionData map[int]any
 	fieldIDToLogicalType := make(map[int]string)
-	fieldIDToFixedSize := make(map[int]int)
 
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
@@ -285,7 +284,7 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 			if sourceField, ok := opts.Schema.FindFieldByID(field.SourceID()); ok {
 				resultType := field.Transform.ResultType(sourceField.Type)
 
-				switch rt := resultType.(type) {
+				switch resultType.(type) {
 				case iceberg.DateType:
 					fieldIDToLogicalType[field.FieldID] = atype.Date
 				case iceberg.TimeType:
@@ -296,7 +295,6 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 					fieldIDToLogicalType[field.FieldID] = atype.TimestampMicros
 				case iceberg.DecimalType:
 					fieldIDToLogicalType[field.FieldID] = atype.Decimal
-					fieldIDToFixedSize[field.FieldID] = rt.Scale()
 				case iceberg.UUIDType:
 					fieldIDToLogicalType[field.FieldID] = atype.UUID
 				}
@@ -305,11 +303,10 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	bldr, err := iceberg.NewDataFileBuilder(opts.Spec, opts.Content,
-		opts.Path, opts.Format, fieldIDToPartitionData, fieldIDToLogicalType, fieldIDToFixedSize, d.RecordCount, opts.FileSize)
+		opts.Path, opts.Format, fieldIDToPartitionData, fieldIDToLogicalType, nil, d.RecordCount, opts.FileSize)
 	if err != nil {
 		panic(err)
 	}
-
 	lowerBounds := make(map[int][]byte)
 	upperBounds := make(map[int][]byte)
 
