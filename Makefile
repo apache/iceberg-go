@@ -67,7 +67,7 @@ integration-io:
 	go test -tags=integration -v ./io/...
 
 integration-rest:
-	go test -tags=integration -v -run="^TestRestIntegration$$" ./catalog/rest
+	RUN_INTEGRATION_TESTS=1 go test -tags=integration -v -run="^TestRestIntegration$$" ./catalog/rest
 
 integration-spark:
 	go test -tags=integration -v -run="^TestSparkIntegration" ./table
