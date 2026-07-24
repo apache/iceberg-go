@@ -2010,7 +2010,10 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// recordsToDataFiles can resolve _row_id via field ID rather than the name
 	// mapping (which doesn't include metadata columns).
 	if preserveRowLineage {
-		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		arrowSchema, err = SchemaToArrowSchemaWithOptions(projectedSchema, ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: builtMeta.Properties(),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
 		}

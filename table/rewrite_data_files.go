@@ -378,7 +378,10 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		// table's name mapping — which doesn't (and cannot) contain the
 		// reserved metadata column names, so the fallback path panics.
 		projectedSchema := iceberg.SchemaWithRowLineage(tbl.Schema())
-		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		arrowSchema, err = SchemaToArrowSchemaWithOptions(projectedSchema, ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: tbl.Metadata().Properties(),
+		})
 		if err != nil {
 			return CompactionGroupResult{}, fmt.Errorf("build arrow schema for lineage write in group %q: %w", group.PartitionKey, err)
 		}

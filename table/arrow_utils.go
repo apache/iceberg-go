@@ -246,8 +246,16 @@ func (hasIDs) Primitive(arrow.DataType) bool { return true }
 
 type convertToIceberg struct {
 	downcastTimestamp bool
+	// tableSchema and tableProperties provide table context that Arrow schema
+	// metadata does not carry. They are used to recover things like projjson:<property>
+	//  CRS references from embedded PROJJSON metadata.
+	tableSchema     *iceberg.Schema
+	tableProperties iceberg.Properties
 
 	fieldID func(arrow.Field) int
+	// fields tracks the current Arrow traversal path. The top field's ID is used
+	// to match GeoArrow PROJJSON metadata back to the corresponding table field.
+	fields []arrow.Field
 }
 
 func (convertToIceberg) Schema(_ *arrow.Schema, result iceberg.NestedField) iceberg.NestedField {
@@ -300,6 +308,59 @@ func (c convertToIceberg) Map(m *arrow.MapType, keyResult, valueResult iceberg.N
 			ValueRequired: !valField.Nullable,
 		},
 	}
+}
+
+func (c *convertToIceberg) pushField(field arrow.Field) {
+	c.fields = append(c.fields, field)
+}
+
+func (c *convertToIceberg) popField() {
+	c.fields = c.fields[:len(c.fields)-1]
+}
+
+func (c *convertToIceberg) BeforeField(field arrow.Field) {
+	c.pushField(field)
+}
+
+func (c *convertToIceberg) AfterField(arrow.Field) {
+	c.popField()
+}
+
+func (c *convertToIceberg) BeforeListElement(field arrow.Field) {
+	c.pushField(field)
+}
+
+func (c *convertToIceberg) AfterListElement(arrow.Field) {
+	c.popField()
+}
+
+func (c *convertToIceberg) BeforeMapKey(field arrow.Field) {
+	c.pushField(field)
+}
+
+func (c *convertToIceberg) AfterMapKey(arrow.Field) {
+	c.popField()
+}
+
+func (c *convertToIceberg) BeforeMapValue(field arrow.Field) {
+	c.pushField(field)
+}
+
+func (c *convertToIceberg) AfterMapValue(arrow.Field) {
+	c.popField()
+}
+
+func (c convertToIceberg) currentFieldID() (int, bool) {
+	if len(c.fields) == 0 {
+		return 0, false
+	}
+
+	id := getFieldID(c.fields[len(c.fields)-1])
+	if id == nil {
+		return 0, false
+	}
+
+	return *id, true
 }
 
 var utcAliases = []string{"UTC", "+00:00", "Etc/UTC", "Z"}
@@ -384,7 +445,7 @@ func (c convertToIceberg) Primitive(dt arrow.DataType) (result iceberg.NestedFie
 				panic(fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, dt))
 			}
 
-			iceType, err := geoArrowMetadataToIcebergType(wkb.Metadata())
+			iceType, err := c.geoArrowMetadataToIcebergType(wkb.Metadata())
 			if err != nil {
 				panic(fmt.Errorf("%w: converting geoarrow metadata: %w", iceberg.ErrInvalidSchema, err))
 			}
@@ -405,7 +466,7 @@ func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Ty
 		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"1"}),
 	}}, nil)
 
-	out, err := VisitArrowSchema(sc, convertToIceberg{
+	out, err := VisitArrowSchema(sc, &convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
 		fieldID: func(field arrow.Field) int {
 			if id := getFieldID(field); id != nil {
@@ -424,12 +485,34 @@ func ArrowTypeToIceberg(dt arrow.DataType, downcastNsTimestamp bool) (iceberg.Ty
 }
 
 func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMapping iceberg.NameMapping) (*iceberg.Schema, error) {
+	return ArrowSchemaToIcebergWithOptions(sc, ArrowToIcebergOptions{
+		DowncastNsTimestamp: downcastNsTimestamp,
+		NameMapping:         nameMapping,
+	})
+}
+
+// ArrowToIcebergOptions controls conversion from an Arrow schema to an Iceberg schema.
+type ArrowToIcebergOptions struct {
+	DowncastNsTimestamp bool
+	NameMapping         iceberg.NameMapping
+	TableSchema         *iceberg.Schema
+	TableProperties     iceberg.Properties
+}
+
+// ArrowSchemaToIcebergWithOptions converts an Arrow schema to an Iceberg schema.
+// Options carry conversion inputs that are not encoded in the Arrow schema
+// itself, such as table metadata needed for exact CRS recovery.
+// When TableSchema and TableProperties are provided, GeoArrow PROJJSON metadata
+// can be matched back to the table schema's projjson:<property> CRS references.
+func ArrowSchemaToIcebergWithOptions(sc *arrow.Schema, opts ArrowToIcebergOptions) (*iceberg.Schema, error) {
 	hasIDs, _ := VisitArrowSchema(sc, hasIDs{})
 
 	switch {
 	case hasIDs:
-		out, err := VisitArrowSchema(sc, convertToIceberg{
-			downcastTimestamp: downcastNsTimestamp,
+		out, err := VisitArrowSchema(sc, &convertToIceberg{
+			downcastTimestamp: opts.DowncastNsTimestamp,
+			tableSchema:       opts.TableSchema,
+			tableProperties:   opts.TableProperties,
 			fieldID: func(field arrow.Field) int {
 				if id := getFieldID(field); id != nil {
 					return *id
@@ -444,13 +527,13 @@ func ArrowSchemaToIceberg(sc *arrow.Schema, downcastNsTimestamp bool, nameMappin
 		}
 
 		return iceberg.NewSchema(0, out.Type.(*iceberg.StructType).FieldList...), nil
-	case nameMapping != nil:
-		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, downcastNsTimestamp)
+	case opts.NameMapping != nil:
+		schemaWithoutIDs, err := arrowToSchemaWithoutIDs(sc, opts.DowncastNsTimestamp)
 		if err != nil {
 			return nil, err
 		}
 
-		return iceberg.ApplyNameMapping(schemaWithoutIDs, nameMapping)
+		return iceberg.ApplyNameMapping(schemaWithoutIDs, opts.NameMapping)
 	default:
 		return nil, fmt.Errorf("%w: arrow schema does not have field-ids and no name mapping provided",
 			iceberg.ErrInvalidSchema)
@@ -467,7 +550,7 @@ func ArrowSchemaToIcebergWithFreshIDs(sc *arrow.Schema, downcastNsTimestamp bool
 }
 
 func arrowToSchemaWithoutIDs(sc *arrow.Schema, downcastNsTimestamp bool) (*iceberg.Schema, error) {
-	withoutIDs, err := VisitArrowSchema(sc, convertToIceberg{
+	withoutIDs, err := VisitArrowSchema(sc, &convertToIceberg{
 		downcastTimestamp: downcastNsTimestamp,
 		fieldID:           func(_ arrow.Field) int { return -1 },
 	})
@@ -531,6 +614,7 @@ type convertToArrow struct {
 	metadata        map[string]string
 	includeFieldIDs bool
 	useLargeTypes   bool
+	tableProperties iceberg.Properties
 }
 
 func (c convertToArrow) Schema(_ *iceberg.Schema, result arrow.Field) arrow.Field {
@@ -673,7 +757,7 @@ func (c convertToArrow) VisitVariant() arrow.Field {
 }
 
 func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS(), c.tableProperties)
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -688,7 +772,7 @@ func (c convertToArrow) VisitGeometry(g iceberg.GeometryType) arrow.Field {
 }
 
 func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
-	meta, err := icebergCRSToGeoArrowMetadata(g.CRS())
+	meta, err := icebergCRSToGeoArrowMetadata(g.CRS(), c.tableProperties)
 	if err != nil {
 		// Panic to thread the error through iceberg.Visit's recover, matching the
 		// convention used by the other visitor methods.
@@ -709,14 +793,35 @@ func (c convertToArrow) VisitGeography(g iceberg.GeographyType) arrow.Field {
 
 var _ iceberg.SchemaVisitorPerPrimitiveType[arrow.Field] = convertToArrow{}
 
+// ArrowSchemaOptions controls conversion from an Iceberg schema or type to Arrow.
+type ArrowSchemaOptions struct {
+	Metadata        map[string]string
+	IncludeFieldIDs bool
+	UseLargeTypes   bool
+	TableProperties iceberg.Properties
+}
+
 // SchemaToArrowSchema converts an Iceberg schema to an Arrow schema. If the metadata parameter
 // is non-nil, it will be included as the top-level metadata in the schema. If includeFieldIDs
 // is true, then each field of the schema will contain a metadata key PARQUET:field_id set to
 // the field id from the iceberg schema.
 func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, includeFieldIDs, useLargeTypes bool) (*arrow.Schema, error) {
+	return SchemaToArrowSchemaWithOptions(sc, ArrowSchemaOptions{
+		Metadata:        metadata,
+		IncludeFieldIDs: includeFieldIDs,
+		UseLargeTypes:   useLargeTypes,
+	})
+}
+
+// SchemaToArrowSchemaWithOptions converts an Iceberg schema to an Arrow schema.
+// TableProperties are used to resolve references like projjson:<property> CRS which point to
+// metadata in the table properties.
+func SchemaToArrowSchemaWithOptions(sc *iceberg.Schema, opts ArrowSchemaOptions) (*arrow.Schema, error) {
 	top, err := iceberg.Visit(sc, convertToArrow{
-		metadata:        metadata,
-		includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes,
+		metadata:        opts.Metadata,
+		includeFieldIDs: opts.IncludeFieldIDs,
+		useLargeTypes:   opts.UseLargeTypes,
+		tableProperties: opts.TableProperties,
 	})
 	if err != nil {
 		return nil, err
@@ -729,8 +834,22 @@ func SchemaToArrowSchema(sc *iceberg.Schema, metadata map[string]string, include
 // For dealing with nested fields (List, Struct, Map) if includeFieldIDs is true, then
 // the child fields will contain a metadata key PARQUET:field_id set to the field id.
 func TypeToArrowType(t iceberg.Type, includeFieldIDs bool, useLargeTypes bool) (arrow.DataType, error) {
+	return TypeToArrowTypeWithOptions(t, ArrowSchemaOptions{
+		IncludeFieldIDs: includeFieldIDs,
+		UseLargeTypes:   useLargeTypes,
+	})
+}
+
+// TypeToArrowTypeWithOptions converts a given Iceberg type into the equivalent Arrow data type.
+// Options control representation details and provide table properties used to
+// resolve metadata references such as CRS projjson:<property> which are stored as table properties.
+func TypeToArrowTypeWithOptions(t iceberg.Type, opts ArrowSchemaOptions) (arrow.DataType, error) {
 	top, err := iceberg.Visit(iceberg.NewSchema(0, iceberg.NestedField{Type: t}),
-		convertToArrow{includeFieldIDs: includeFieldIDs, useLargeTypes: useLargeTypes})
+		convertToArrow{
+			includeFieldIDs: opts.IncludeFieldIDs,
+			useLargeTypes:   opts.UseLargeTypes,
+			tableProperties: opts.TableProperties,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -927,10 +1046,19 @@ func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memor
 type arrowProjectionVisitor struct {
 	ctx                 context.Context
 	fileSchema          *iceberg.Schema
+	tableProperties     iceberg.Properties
 	includeFieldIDs     bool
 	downcastNsTimestamp bool
 	useLargeTypes       bool
 	useWriteDefault     bool
+}
+
+func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
+	return retOrPanic(TypeToArrowTypeWithOptions(t, ArrowSchemaOptions{
+		IncludeFieldIDs: a.includeFieldIDs,
+		UseLargeTypes:   a.useLargeTypes,
+		TableProperties: a.tableProperties,
+	}))
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
@@ -949,7 +1077,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	if !field.Type.Equals(typ) {
 		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
 			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-			targetType := retOrPanic(TypeToArrowType(promoted, a.includeFieldIDs, a.useLargeTypes))
+			targetType := a.typeToArrowType(promoted)
 			if !a.useLargeTypes {
 				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 			}
@@ -959,7 +1087,7 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 		}
 	}
 
-	targetType := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
+	targetType := a.typeToArrowType(field.Type)
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
@@ -1084,7 +1212,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 			fieldArrs[i] = arr
 			fields[i] = a.constructField(field, arr.DataType())
 		} else {
-			dt := retOrPanic(TypeToArrowType(field.Type, a.includeFieldIDs, a.useLargeTypes))
+			dt := a.typeToArrowType(field.Type)
 			alloc := compute.GetAllocator(a.ctx)
 
 			switch {
@@ -1238,6 +1366,7 @@ type SchemaOptions struct {
 	IncludeFieldIDs   bool
 	UseLargeTypes     bool
 	UseWriteDefault   bool
+	TableProperties   iceberg.Properties
 }
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
@@ -1250,6 +1379,7 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 		&arrowProjectionVisitor{
 			ctx:                 ctx,
 			fileSchema:          fileSchema,
+			tableProperties:     opts.TableProperties,
 			includeFieldIDs:     opts.IncludeFieldIDs,
 			downcastNsTimestamp: opts.DowncastTimestamp,
 			useLargeTypes:       opts.UseLargeTypes,
@@ -1284,6 +1414,20 @@ func checkSchemaCompat(requested, provided *iceberg.Schema) error {
 func checkArrowSchemaCompat(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool) error {
 	mapping := requested.NameMapping()
 	providedSchema, err := ArrowSchemaToIceberg(provided, downcastNanoToMicro, mapping)
+	if err != nil {
+		return err
+	}
+
+	return checkSchemaCompat(requested, providedSchema)
+}
+
+func checkArrowSchemaCompatWithProperties(requested *iceberg.Schema, provided *arrow.Schema, downcastNanoToMicro bool, props iceberg.Properties) error {
+	providedSchema, err := ArrowSchemaToIcebergWithOptions(provided, ArrowToIcebergOptions{
+		DowncastNsTimestamp: downcastNanoToMicro,
+		NameMapping:         requested.NameMapping(),
+		TableSchema:         requested,
+		TableProperties:     props,
+	})
 	if err != nil {
 		return err
 	}
@@ -1574,13 +1718,16 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 	defer rdr.Close()
 
 	arrSchema := must(rdr.Schema())
-	if err := checkArrowSchemaCompat(currentSchema, arrSchema, false); err != nil {
+	if err := checkArrowSchemaCompatWithProperties(currentSchema, arrSchema, false, props); err != nil {
 		panic(err)
 	}
 
 	pathToIDSchema := currentSchema
 	if fileHasIDs := must(VisitArrowSchema(arrSchema, hasIDs{})); fileHasIDs {
-		pathToIDSchema = must(ArrowSchemaToIceberg(arrSchema, false, nil))
+		pathToIDSchema = must(ArrowSchemaToIcebergWithOptions(arrSchema, ArrowToIcebergOptions{
+			TableSchema:     currentSchema,
+			TableProperties: props,
+		}))
 	}
 	statistics := format.DataFileStatsFromMeta(
 		rdr.Metadata(),
@@ -1683,7 +1830,11 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 		WriteTargetFileSizeBytesDefault))
 
 	nameMapping := meta.CurrentSchema().NameMapping()
-	taskSchema, err := ArrowSchemaToIceberg(args.sc, false, nameMapping)
+	taskSchema, err := ArrowSchemaToIcebergWithOptions(args.sc, ArrowToIcebergOptions{
+		NameMapping:     nameMapping,
+		TableSchema:     meta.CurrentSchema(),
+		TableProperties: meta.props,
+	})
 	if err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
@@ -2034,6 +2185,10 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		// Iceberg type contract; preserve them for read/write compatibility.
 		return crs, nil
 	case checkCRSJSON(meta.CRS):
+		if meta.CRSType == geoarrow.CRSTypePROJJSON {
+			return "", errors.New("unsupported CRS: projjson metadata requires table schema and properties to recover the Iceberg CRS reference")
+		}
+
 		var crs map[string]json.RawMessage
 
 		if err := json.Unmarshal(meta.CRS, &crs); err != nil {
@@ -2090,12 +2245,38 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	}
 }
 
+func (c convertToIceberg) geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error) {
+	crs, err := c.geoArrowCRSToIcebergCRS(meta)
+	if err != nil {
+		return nil, err
+	}
+
+	return geoArrowMetadataToIcebergTypeWithCRS(meta, crs)
+}
+
+func (c convertToIceberg) geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
+	if meta.CRSType != geoarrow.CRSTypePROJJSON || !checkCRSJSON(meta.CRS) {
+		return geoArrowCRSToIcebergCRS(meta)
+	}
+
+	fieldID, ok := c.currentFieldID()
+	if !ok {
+		return "", errors.New("unsupported CRS: projjson metadata requires field IDs to recover the Iceberg CRS reference")
+	}
+
+	return projJSONCRSFromTable(fieldID, meta.CRS, c.tableSchema, c.tableProperties)
+}
+
 func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error) {
 	crs, err := geoArrowCRSToIcebergCRS(meta)
 	if err != nil {
 		return nil, err
 	}
 
+	return geoArrowMetadataToIcebergTypeWithCRS(meta, crs)
+}
+
+func geoArrowMetadataToIcebergTypeWithCRS(meta geoarrow.Metadata, crs string) (iceberg.Type, error) {
 	// Missing GeoArrow edges use the planar default, matching arrow-rs
 	// geoarrow.wkb reads. PyIceberg-authored geography files may omit edges,
 	// which is an interop gap: Arrow metadata alone cannot distinguish those
@@ -2112,7 +2293,10 @@ func geoArrowMetadataToIcebergType(meta geoarrow.Metadata) (iceberg.Type, error)
 
 var authorityCodeCRS = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9_.-]+$`)
 
-func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
+// icebergCRSToGeoArrowMetadata converts an Iceberg CRS string to GeoArrow
+// metadata. props is used only for projjson:<property> references, where the
+// property value supplies the PROJJSON document embedded into GeoArrow metadata.
+func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarrow.Metadata, error) {
 	lowerCRS := strings.ToLower(crs)
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
@@ -2130,7 +2314,29 @@ func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 	}
 
 	if strings.HasPrefix(lowerCRS, "projjson:") {
-		return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS not supported yet", iceberg.ErrInvalidSchema)
+		// The scheme is case-insensitive, but the table property key is not.
+		propKey := strings.TrimSpace(crs[len("projjson:"):])
+		if propKey == "" {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS missing table property key", iceberg.ErrInvalidSchema)
+		}
+		if props == nil {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q could not be resolved from table properties", iceberg.ErrInvalidSchema, crs)
+		}
+
+		projjson, ok := props[propKey]
+		if !ok || strings.TrimSpace(projjson) == "" {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS %q references missing table property %q", iceberg.ErrInvalidSchema, crs, propKey)
+		}
+
+		raw := json.RawMessage(projjson)
+		if !json.Valid(raw) {
+			return geoarrow.Metadata{}, fmt.Errorf("%w: projjson CRS table property %q is not valid JSON", iceberg.ErrInvalidSchema, propKey)
+		}
+
+		return geoarrow.Metadata{
+			CRS:     raw,
+			CRSType: geoarrow.CRSTypePROJJSON,
+		}, nil
 	}
 
 	var raw []byte
@@ -2148,4 +2354,61 @@ func icebergCRSToGeoArrowMetadata(crs string) (geoarrow.Metadata, error) {
 	}
 
 	return meta, nil
+}
+
+func projJSONCRSFromTable(fieldID int, rawCRS json.RawMessage, tableSchema *iceberg.Schema, props iceberg.Properties) (string, error) {
+	if tableSchema == nil || props == nil {
+		return "", errors.New("unsupported CRS: projjson metadata requires table schema and properties to recover the Iceberg CRS reference")
+	}
+
+	field, ok := tableSchema.FindFieldByID(fieldID)
+	if !ok {
+		return "", fmt.Errorf("unsupported CRS: projjson field id %d not found in table schema", fieldID)
+	}
+
+	var crs string
+	switch typ := field.Type.(type) {
+	case iceberg.GeometryType:
+		crs = typ.CRS()
+	case iceberg.GeographyType:
+		crs = typ.CRS()
+	default:
+		return "", fmt.Errorf("unsupported CRS: table field id %d is %s, not a geo type", fieldID, field.Type)
+	}
+
+	if !strings.HasPrefix(strings.ToLower(crs), "projjson:") {
+		return "", fmt.Errorf("unsupported CRS: table field id %d has CRS %q, not a projjson reference", fieldID, crs)
+	}
+
+	propKey := strings.TrimSpace(crs[len("projjson:"):])
+	if propKey == "" {
+		return "", fmt.Errorf("%w: projjson CRS missing table property key", iceberg.ErrInvalidSchema)
+	}
+
+	projjson, ok := props[propKey]
+	if !ok || strings.TrimSpace(projjson) == "" {
+		return "", fmt.Errorf("%w: projjson CRS %q references missing table property %q", iceberg.ErrInvalidSchema, crs, propKey)
+	}
+
+	if !json.Valid([]byte(projjson)) {
+		return "", fmt.Errorf("%w: projjson CRS table property %q is not valid JSON", iceberg.ErrInvalidSchema, propKey)
+	}
+
+	if !jsonEqual(rawCRS, []byte(projjson)) {
+		return "", fmt.Errorf("unsupported CRS: projjson metadata for field id %d does not match table property %q", fieldID, propKey)
+	}
+
+	return crs, nil
+}
+
+func jsonEqual(lhs, rhs []byte) bool {
+	var lhsCompact, rhsCompact bytes.Buffer
+	if err := json.Compact(&lhsCompact, lhs); err != nil {
+		return false
+	}
+	if err := json.Compact(&rhsCompact, rhs); err != nil {
+		return false
+	}
+
+	return bytes.Equal(lhsCompact.Bytes(), rhsCompact.Bytes())
 }

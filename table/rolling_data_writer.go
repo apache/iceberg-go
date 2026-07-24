@@ -101,7 +101,10 @@ func withFactoryEqualityFieldIDs(ids []int) writerFactoryOption {
 func withFactoryFileSchema(schema *iceberg.Schema) writerFactoryOption {
 	return func(w *writerFactory) error {
 		w.fileSchema = schema
-		arrowSc, err := SchemaToArrowSchema(schema, nil, true, false)
+		arrowSc, err := SchemaToArrowSchemaWithOptions(schema, ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: w.tableProps,
+		})
 		if err != nil {
 			return fmt.Errorf("withFactoryFileSchema: failed to convert schema: %w", err)
 		}
@@ -151,7 +154,10 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 	format := tblutils.GetFileFormat(fileFormat)
 
-	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	arrowSchema, err := SchemaToArrowSchemaWithOptions(fileSchema, ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.props,
+	})
 	if err != nil {
 		stopCount()
 
@@ -512,6 +518,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 				DowncastTimestamp: true,
 				IncludeFieldIDs:   true,
 				UseWriteDefault:   true,
+				TableProperties:   r.factory.tableProps,
 			})
 		record.Release()
 		if err != nil {

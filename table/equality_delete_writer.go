@@ -130,7 +130,10 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 		return nil, err
 	}
 
-	arrowSc, err := SchemaToArrowSchema(deleteSchema, nil, true, false)
+	arrowSc, err := SchemaToArrowSchemaWithOptions(deleteSchema, ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.props,
+	})
 	if err != nil {
 		return nil, err
 	}

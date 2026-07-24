@@ -143,6 +143,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 				DowncastTimestamp: true,
 				IncludeFieldIDs:   true,
 				UseWriteDefault:   true,
+				TableProperties:   w.meta.props,
 			})
 		if err != nil {
 			return nil, err
