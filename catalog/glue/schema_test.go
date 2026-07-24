@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIcebergTypeToGlueType(t *testing.T) {
@@ -162,6 +163,23 @@ func TestFieldToGlueColumn(t *testing.T) {
 				Comment: aws.String("Price with 2 decimal places"),
 				Parameters: map[string]string{
 					icebergFieldIDKey:       "2",
+					icebergFieldOptionalKey: "true",
+					icebergFieldCurrentKey:  "true",
+				},
+			},
+		},
+		{
+			name: "field without doc",
+			field: iceberg.NestedField{
+				ID:   3,
+				Name: "undocumented",
+				Type: iceberg.PrimitiveTypes.String,
+			},
+			expected: types.Column{
+				Name: aws.String("undocumented"),
+				Type: aws.String("string"),
+				Parameters: map[string]string{
+					icebergFieldIDKey:       "3",
 					icebergFieldOptionalKey: "true",
 					icebergFieldCurrentKey:  "true",
 				},
@@ -413,9 +431,8 @@ func TestSchemasToGlueColumns(t *testing.T) {
 
 	expectedColumns := []types.Column{
 		{
-			Name:    aws.String("id"),
-			Type:    aws.String("bigint"),
-			Comment: aws.String(""),
+			Name: aws.String("id"),
+			Type: aws.String("bigint"),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "1",
 				icebergFieldOptionalKey: "false",
@@ -423,9 +440,8 @@ func TestSchemasToGlueColumns(t *testing.T) {
 			},
 		},
 		{
-			Name:    aws.String("name"),
-			Type:    aws.String("string"),
-			Comment: aws.String(""),
+			Name: aws.String("name"),
+			Type: aws.String("string"),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "2",
 				icebergFieldOptionalKey: "false",
@@ -433,9 +449,8 @@ func TestSchemasToGlueColumns(t *testing.T) {
 			},
 		},
 		{
-			Name:    aws.String("address"),
-			Type:    aws.String("string"),
-			Comment: aws.String(""),
+			Name: aws.String("address"),
+			Type: aws.String("string"),
 			Parameters: map[string]string{
 				icebergFieldIDKey:       "3",
 				icebergFieldOptionalKey: "true",
@@ -444,19 +459,78 @@ func TestSchemasToGlueColumns(t *testing.T) {
 		},
 	}
 	metadata, err := table.NewMetadata(schemas[0], nil, table.SortOrder{}, "s3://example/path", nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	mb, err := table.MetadataBuilderFromBase(metadata, "")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	err = mb.AddSchema(schemas[1])
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	err = mb.SetCurrentSchemaID(1)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	metadata, err = mb.Build()
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	columns := schemasToGlueColumns(metadata)
+	columns := schemasToGlueColumns(metadata, nil)
 	assert.Equal(t, expectedColumns, columns)
+}
+
+func TestSchemasToGlueColumnsPreservesExistingCommentsByFieldID(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "reused", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "overridden", Type: iceberg.PrimitiveTypes.String, Doc: "iceberg comment"},
+		iceberg.NestedField{ID: 4, Name: "missing", Type: iceberg.PrimitiveTypes.String},
+	)
+	metadata, err := table.NewMetadata(schema, nil, table.SortOrder{}, "s3://example/path", nil)
+	require.NoError(t, err)
+
+	existingComment := aws.String("existing comment")
+	existingColumns := []types.Column{
+		{Name: aws.String("old_name"), Comment: existingComment, Parameters: map[string]string{icebergFieldIDKey: "1"}},
+		{Name: aws.String("duplicate"), Comment: aws.String("duplicate comment"), Parameters: map[string]string{icebergFieldIDKey: "1"}},
+		{Name: aws.String("reused"), Comment: aws.String("stale comment"), Parameters: map[string]string{icebergFieldIDKey: "99"}},
+		{Name: aws.String("overridden"), Comment: aws.String("existing comment"), Parameters: map[string]string{icebergFieldIDKey: "3"}},
+		{Name: aws.String("missing"), Parameters: map[string]string{icebergFieldIDKey: "4"}},
+	}
+
+	columns := schemasToGlueColumns(metadata, existingColumns)
+	byName := make(map[string]types.Column, len(columns))
+	for _, column := range columns {
+		byName[aws.ToString(column.Name)] = column
+	}
+	*existingComment = "mutated after conversion"
+
+	assert.Equal(t, "existing comment", aws.ToString(byName["renamed"].Comment))
+	assert.Nil(t, byName["reused"].Comment)
+	assert.Equal(t, "iceberg comment", aws.ToString(byName["overridden"].Comment))
+	assert.Nil(t, byName["missing"].Comment)
+}
+
+func TestSchemasToGlueColumnsClearsPreviousIcebergComment(t *testing.T) {
+	previousSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "field", Type: iceberg.PrimitiveTypes.String, Doc: "old comment"},
+	)
+	metadata, err := table.NewMetadata(previousSchema, nil, table.SortOrder{}, "s3://example/path", nil)
+	require.NoError(t, err)
+
+	mb, err := table.MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	require.NoError(t, mb.AddSchema(iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "field", Type: iceberg.PrimitiveTypes.String},
+	)))
+	require.NoError(t, mb.SetCurrentSchemaID(1))
+	metadata, err = mb.Build()
+	require.NoError(t, err)
+
+	columns := schemasToGlueColumns(metadata, []types.Column{{
+		Name:       aws.String("field"),
+		Comment:    aws.String("old comment"),
+		Parameters: map[string]string{icebergFieldIDKey: "1"},
+	}})
+	require.Len(t, columns, 1)
+
+	require.NotNil(t, columns[0].Comment)
+	assert.Empty(t, aws.ToString(columns[0].Comment))
 }

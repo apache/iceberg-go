@@ -979,13 +979,18 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 }
 
 func constructTableInput(tableName string, staged *table.Table, previousGlueTable *types.Table) *types.TableInput {
+	var existingColumns []types.Column
+	if previousGlueTable != nil && previousGlueTable.StorageDescriptor != nil {
+		existingColumns = previousGlueTable.StorageDescriptor.Columns
+	}
+
 	tableInput := &types.TableInput{
 		Name:       aws.String(tableName),
 		TableType:  aws.String(glueTableType),
 		Parameters: constructParameters(staged, previousGlueTable),
 		StorageDescriptor: &types.StorageDescriptor{
 			Location: aws.String(staged.Location()),
-			Columns:  schemasToGlueColumns(staged.Metadata()),
+			Columns:  schemasToGlueColumns(staged.Metadata(), existingColumns),
 		},
 	}
 
