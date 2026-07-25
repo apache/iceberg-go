@@ -506,20 +506,20 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
-type activePartitionField struct {
+type resolvedPartitionField struct {
 	field      PartitionField
 	resultType Type
 }
 
-func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartitionField {
-	fields := make([]activePartitionField, 0, len(ps.fields))
+func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedPartitionField {
+	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID())
-		if !ok {
-			continue
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
 		}
 
-		fields = append(fields, activePartitionField{
+		fields = append(fields, resolvedPartitionField{
 			field:      field,
 			resultType: field.Transform.ResultType(sourceType),
 		})
@@ -537,21 +537,16 @@ func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartition
 //     have the result field and it may be null.
 //
 // There is a case where we can guarantee that a partition field in the first
-// and only parittion spec that uses a required source column will never be
+// and only partition spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
 //
-// Note: the result is compacted. A partition field whose source column is not
-// present in schema (for example, the column was dropped) is omitted rather
-// than retained, so the returned struct does NOT positionally correspond to a
-// manifest's partition FieldSummary list, which is ordered by the full
-// partition spec. It must therefore not be used to index positional partition
-// summaries; build a schema that keeps every spec field (with an UnknownType
-// placeholder for dropped sources) for that purpose — see manifestPartitionFields
-// in the table package.
+// If a source column is missing, UnknownType is passed to the transform. This
+// retains the field's position and lets transforms with fixed result types,
+// such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	activeFields := ps.activePartitionFields(schema)
-	nestedFields := make([]NestedField, 0, len(activeFields))
-	for _, field := range activeFields {
+	resolvedFields := ps.resolvedPartitionFields(schema)
+	nestedFields := make([]NestedField, 0, len(resolvedFields))
+	for _, field := range resolvedFields {
 		nestedFields = append(nestedFields, NestedField{
 			ID:       field.field.FieldID,
 			Name:     field.field.Name,
@@ -571,9 +566,9 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
 func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
-	activeFields := ps.activePartitionFields(sc)
+	resolvedFields := ps.resolvedPartitionFields(sc)
 
-	if len(activeFields) == 0 {
+	if len(resolvedFields) == 0 {
 		return ""
 	}
 
@@ -581,22 +576,22 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
 	var sb strings.Builder
 	estimatedSize := 0
-	for i := range activeFields {
-		estimatedSize += len(activeFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
+	for i := range resolvedFields {
+		estimatedSize += len(resolvedFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
-	for i := range activeFields {
+	for i := range resolvedFields {
 		if i > 0 {
 			sb.WriteByte('/')
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(activeFields[i].field.EscapedName())
+		sb.WriteString(resolvedFields[i].field.EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := activeFields[i].field.Transform.ToHumanStrType(activeFields[i].resultType, data.Get(i))
+		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 

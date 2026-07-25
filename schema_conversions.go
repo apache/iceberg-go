@@ -58,6 +58,8 @@ func partitionTypeToAvroSchema(t *StructType) (*avro.Schema, error) {
 			node = internal.NullableNode(internal.FixedNode(typ.Len()))
 		case DecimalType:
 			node = internal.NullableNode(internal.DecimalNode(typ.precision, typ.scale))
+		case UnknownType:
+			node = internal.NullNode
 		default:
 			return nil, fmt.Errorf("unsupported partition type: %s", f.Type.String())
 		}

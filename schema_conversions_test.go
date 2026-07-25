@@ -158,6 +158,23 @@ func TestPartitionTypeToAvroSchemaNullableAndNonNullable(t *testing.T) {
 	})
 }
 
+func TestPartitionTypeToAvroSchemaUnknownType(t *testing.T) {
+	partitionType := &StructType{FieldList: []NestedField{
+		{ID: 1, Name: "dropped", Type: UnknownType{}, Required: false},
+	}}
+
+	schema, err := partitionTypeToAvroSchema(partitionType)
+	require.NoError(t, err)
+
+	encoded, err := schema.Encode(map[string]any{"dropped": nil})
+	require.NoError(t, err)
+
+	var decoded map[string]any
+	_, err = schema.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Nil(t, decoded["dropped"])
+}
+
 // TestPartitionTypeToAvroSchemaDuplicateNamedTypes verifies that a
 // partition spec containing multiple fields of the same named Avro type
 // (UUID, Fixed, Decimal) compiles without "duplicate named type" errors.
