@@ -2054,11 +2054,23 @@ func (c *commonMetadata) preValidate() {
 }
 
 func (c *commonMetadata) checkSchemas() error {
-	// check that current-schema-id is present in schemas
-	for _, s := range c.SchemaList {
-		if s.ID == c.CurrentSchemaID {
-			return nil
+	seen := make(map[int]struct{}, len(c.SchemaList))
+	currentFound := false
+	for i, s := range c.SchemaList {
+		if s == nil {
+			return fmt.Errorf("%w: schema at index %d is null", ErrInvalidMetadata, i)
 		}
+		if _, ok := seen[s.ID]; ok {
+			return fmt.Errorf("%w: duplicate schema ID %d", ErrInvalidMetadata, s.ID)
+		}
+		seen[s.ID] = struct{}{}
+
+		if s.ID == c.CurrentSchemaID {
+			currentFound = true
+		}
+	}
+	if currentFound {
+		return nil
 	}
 
 	return fmt.Errorf("%w: current-schema-id %d can't be found in any schema",

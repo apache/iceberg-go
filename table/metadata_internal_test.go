@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -531,6 +532,36 @@ func TestCurrentSchemaNotFound(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "current-schema-id 2 can't be found in any schema")
+}
+
+func TestRejectInvalidSchemaEntries(t *testing.T) {
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+
+	t.Run("null schema", func(t *testing.T) {
+		invalid := maps.Clone(metadata)
+		invalid["schemas"] = []any{nil}
+		data, err := json.Marshal(invalid)
+		require.NoError(t, err)
+
+		assert.NotPanics(t, func() {
+			_, err = ParseMetadataBytes(data)
+		})
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		assert.ErrorContains(t, err, "schema at index 0 is null")
+	})
+
+	t.Run("duplicate schema ID", func(t *testing.T) {
+		invalid := maps.Clone(metadata)
+		schemas := invalid["schemas"].([]any)
+		invalid["schemas"] = append(slices.Clone(schemas), schemas[0])
+		data, err := json.Marshal(invalid)
+		require.NoError(t, err)
+
+		_, err = ParseMetadataBytes(data)
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		assert.ErrorContains(t, err, "duplicate schema ID 0")
+	})
 }
 
 func TestSortOrderNotFound(t *testing.T) {
