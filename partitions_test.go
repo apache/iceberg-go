@@ -74,6 +74,26 @@ func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
 }
 
+func TestPartitionSpecFieldGettersReturnCopies(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1, 2}, FieldID: 1000, Name: "multi", Transform: iceberg.IdentityTransform{},
+	})
+
+	field := spec.Field(0)
+	field.SourceIDs[0] = 99
+
+	for _, iterField := range spec.Fields() {
+		iterField.SourceIDs[0] = 98
+	}
+
+	bySource := spec.FieldsBySourceID(1)
+	bySource[0].SourceIDs[0] = 97
+
+	assert.Equal(t, []int{1, 2}, spec.Field(0).SourceIDs)
+	assert.Len(t, spec.FieldsBySourceID(1), 1)
+	assert.Nil(t, spec.FieldsBySourceID(99))
+}
+
 func TestNewPartitionSpecIDCopiesFields(t *testing.T) {
 	sourceIDs := []int{1}
 	fields := make([]iceberg.PartitionField, 1)

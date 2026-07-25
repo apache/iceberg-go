@@ -370,10 +370,7 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	fieldCopies := make([]PartitionField, len(fields))
 	for i, field := range fields {
-		fieldCopies[i] = field
-		if field.SourceIDs != nil {
-			fieldCopies[i].SourceIDs = slices.Clone(field.SourceIDs)
-		}
+		fieldCopies[i] = clonePartitionField(field)
 	}
 	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
@@ -409,7 +406,13 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 
 // Fields returns an iterator over the partition fields in this spec.
 func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
-	return slices.All(ps.fields)
+	return func(yield func(int, PartitionField) bool) {
+		for i, field := range ps.fields {
+			if !yield(i, clonePartitionField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
@@ -448,9 +451,11 @@ func (ps *PartitionSpec) initialize() {
 	}
 }
 
-func (ps *PartitionSpec) ID() int                    { return ps.id }
-func (ps *PartitionSpec) NumFields() int             { return len(ps.fields) }
-func (ps *PartitionSpec) Field(i int) PartitionField { return ps.fields[i] }
+func (ps *PartitionSpec) ID() int        { return ps.id }
+func (ps *PartitionSpec) NumFields() int { return len(ps.fields) }
+func (ps *PartitionSpec) Field(i int) PartitionField {
+	return clonePartitionField(ps.fields[i])
+}
 
 func (ps PartitionSpec) IsUnpartitioned() bool {
 	if len(ps.fields) == 0 {
@@ -467,7 +472,23 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 }
 
 func (ps *PartitionSpec) FieldsBySourceID(fieldID int) []PartitionField {
-	return slices.Clone(ps.sourceIdToFields[fieldID])
+	fields := ps.sourceIdToFields[fieldID]
+	if fields == nil {
+		return nil
+	}
+
+	clones := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		clones[i] = clonePartitionField(field)
+	}
+
+	return clones
+}
+
+func clonePartitionField(field PartitionField) PartitionField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+
+	return field
 }
 
 func (ps PartitionSpec) String() string {
