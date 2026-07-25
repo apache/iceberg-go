@@ -2594,6 +2594,16 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		}
 	}
 
+	// Reject reserved metadata column IDs on the user-supplied schema before
+	// reassignIDs runs: reassignment overwrites every field ID with a fresh,
+	// non-reserved value, so a reserved ID (e.g. _row_id) would otherwise be
+	// silently remapped and later resolve to the wrong physical column against
+	// Java-written files (see #1107). This is stricter than Java, which relies
+	// on assignFreshIds to remap them; rejecting is the safer contract here.
+	if err := validateNoReservedFieldIDs(sc); err != nil {
+		return nil, err
+	}
+
 	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)
 	if err != nil {
 		return nil, err

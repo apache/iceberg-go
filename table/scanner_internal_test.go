@@ -927,24 +927,44 @@ func TestProjectionWithRowLineageRequiresV3(t *testing.T) {
 	assert.ErrorContains(t, err, "row lineage")
 }
 
-// TestProjectionV3SchemaAlreadyHasRowID covers the case where the user schema
-// already declares _row_id (a reserved field id, but legal in v3). The
-// projection helper must be idempotent and not panic on the duplicate ID.
+// TestProjectionV3SchemaAlreadyHasRowID covers a v3 table whose stored schema
+// already declares _row_id at its reserved field ID. NewMetadata now rejects
+// such user schemas, but tables loaded from a catalog (e.g. written by Java) can
+// legitimately carry the reserved ID, so the metadata is parsed directly here to
+// bypass the creation-time validator. The end-to-end projection must be
+// idempotent and not duplicate the reserved column.
 func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
-	schema := iceberg.NewSchema(
-		1,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.RowID(),
-	)
+	metadataJSON := `{
+		"format-version": 3,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+		"location": "s3://test-bucket/test_table",
+		"last-sequence-number": 0,
+		"last-updated-ms": 1602638573590,
+		"last-column-id": 2,
+		"next-row-id": 0,
+		"current-schema-id": 0,
+		"schemas": [
+			{
+				"type": "struct",
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "id", "required": true, "type": "long"},
+					{"id": 2, "name": "payload", "required": false, "type": "string"},
+					{"id": 2147483540, "name": "_row_id", "required": false, "type": "long"}
+				]
+			}
+		],
+		"default-spec-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"last-partition-id": 999,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
 
-	metadata, err := NewMetadata(
-		schema,
-		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
-		"s3://test-bucket/test_table",
-		iceberg.Properties{"format-version": "3"},
-	)
+	metadata, err := ParseMetadataString(metadataJSON)
 	require.NoError(t, err)
 	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
 
@@ -967,5 +987,6 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 			}
 			seen[f.ID] = f.Name
 		}
+		assert.Contains(t, seen, iceberg.RowIDFieldID, "_row_id must survive projection")
 	})
 }
