@@ -486,7 +486,7 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	})
 	schema := NewSchema(0)
 
-	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: nil}})
+	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
 	if err != nil {
 		t.Fatal(err)
 	}

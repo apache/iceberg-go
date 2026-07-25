@@ -1092,10 +1092,10 @@ func (p *unknownPartitionFieldStats) toSummary() FieldSummary {
 	return FieldSummary{ContainsNull: p.containsNull, ContainsNaN: &containsNaN}
 }
 
-func (p *unknownPartitionFieldStats) update(value any) error {
-	if value == nil {
-		p.containsNull = true
-	}
+func (p *unknownPartitionFieldStats) update(any) error {
+	// Dropped-source values are normalized to Avro null when the entry is
+	// encoded, even if an in-memory data file still carries a historical value.
+	p.containsNull = true
 
 	return nil
 }
