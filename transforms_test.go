@@ -624,12 +624,23 @@ func TestYearMonthTransformNanoseconds(t *testing.T) {
 
 func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 	transform := iceberg.BucketTransform{NumBuckets: 16}
+	specBucket := int32(6)
 	values := []struct {
-		name string
-		ts   iceberg.TimestampNano
+		name       string
+		nanos      iceberg.TimestampNano
+		micros     iceberg.Timestamp
+		wantBucket *int32
 	}{
-		{name: "post-epoch", ts: iceberg.TimestampNano(123456789)},
-		{name: "pre-epoch", ts: iceberg.TimestampNano(-1)},
+		{name: "post-epoch", nanos: iceberg.TimestampNano(123456789), micros: iceberg.Timestamp(123456)},
+		{name: "sub-microsecond", nanos: iceberg.TimestampNano(1), micros: iceberg.Timestamp(0)},
+		{name: "pre-epoch", nanos: iceberg.TimestampNano(-1), micros: iceberg.Timestamp(-1)},
+		{name: "negative microsecond boundary", nanos: iceberg.TimestampNano(-1000), micros: iceberg.Timestamp(-1)},
+		{
+			name:       "spec appendix B",
+			nanos:      iceberg.TimestampNano(time.Date(2017, 11, 16, 22, 31, 8, 1_001, time.UTC).UnixNano()),
+			micros:     iceberg.Timestamp(time.Date(2017, 11, 16, 22, 31, 8, 1_001, time.UTC).UnixMicro()),
+			wantBucket: &specBucket,
+		},
 	}
 
 	for _, srcType := range []iceberg.Type{
@@ -644,13 +655,22 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 				t.Run(tt.name, func(t *testing.T) {
 					applied := transform.Apply(iceberg.Optional[iceberg.Literal]{
 						Valid: true,
-						Val:   iceberg.NewLiteral(tt.ts),
+						Val:   iceberg.NewLiteral(tt.nanos),
 					})
 					require.True(t, applied.Valid)
+					expected := transform.Apply(iceberg.Optional[iceberg.Literal]{
+						Valid: true,
+						Val:   iceberg.NewLiteral(tt.micros),
+					})
+					require.True(t, expected.Valid)
+					assert.Equal(t, expected.Val, applied.Val)
+					if tt.wantBucket != nil {
+						assert.Equal(t, iceberg.Int32Literal(*tt.wantBucket), applied.Val)
+					}
 
 					var transformed iceberg.Optional[int32]
 					require.NotPanics(t, func() {
-						transformed = fn(tt.ts)
+						transformed = fn(tt.nanos)
 					})
 					require.True(t, transformed.Valid)
 					assert.Equal(t, applied.Val, iceberg.NewLiteral(transformed.Val))
@@ -660,7 +680,7 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 						Name: "ts",
 						Type: srcType,
 					})
-					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.ts).Bind(schema, true)
+					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.nanos).Bind(schema, true)
 					require.NoError(t, err)
 
 					projected, err := transform.Project("ts_bucket", bound.(iceberg.BoundPredicate))
