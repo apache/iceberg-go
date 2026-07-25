@@ -134,9 +134,10 @@ func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
 
 func TestSortOrderReturnsDefensiveCopies(t *testing.T) {
 	sourceIDs := []int{19, 20}
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
 	fields := []table.SortField{{
 		SourceIDs: sourceIDs,
-		Transform: iceberg.IdentityTransform{},
+		Transform: transform,
 		NullOrder: table.NullsFirst,
 		Direction: table.SortASC,
 	}}
@@ -144,14 +145,17 @@ func TestSortOrderReturnsDefensiveCopies(t *testing.T) {
 	require.NoError(t, err)
 
 	sourceIDs[0] = 99
+	transform.NumBuckets = 32
 	fields[0].Direction = table.SortDESC
 	for _, field := range sortOrder.Fields() {
 		field.SourceIDs[0] = 98
+		field.Transform.(*iceberg.BucketTransform).NumBuckets = 64
 	}
 
 	seen := 0
 	for _, field := range sortOrder.Fields() {
 		assert.Equal(t, []int{19, 20}, field.SourceIDs)
+		assert.Equal(t, 16, field.Transform.(*iceberg.BucketTransform).NumBuckets)
 		assert.Equal(t, table.SortASC, field.Direction)
 		seen++
 	}

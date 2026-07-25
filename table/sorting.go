@@ -341,6 +341,18 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 
 func cloneSortField(field SortField) SortField {
 	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *iceberg.BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *iceberg.TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
 
 	return field
 }
