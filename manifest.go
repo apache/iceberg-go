@@ -152,8 +152,19 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 		return b
 	}
 
-	copied := make([]FieldSummary, len(p))
-	for i, partition := range p {
+	copied := cloneFieldSummaries(p)
+	b.m.PartitionList = &copied
+
+	return b
+}
+
+func cloneFieldSummaries(partitions []FieldSummary) []FieldSummary {
+	if partitions == nil {
+		return nil
+	}
+
+	copied := make([]FieldSummary, len(partitions))
+	for i, partition := range partitions {
 		copiedPartition := partition
 		if partition.LowerBound != nil {
 			lowerBound := slices.Clone(*partition.LowerBound)
@@ -170,9 +181,8 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 
 		copied[i] = copiedPartition
 	}
-	b.m.PartitionList = &copied
 
-	return b
+	return copied
 }
 
 func (b *ManifestBuilder) KeyMetadata(km []byte) *ManifestBuilder {
@@ -381,7 +391,7 @@ func (m *manifestFile) KeyMetadata() []byte {
 		return nil
 	}
 
-	return *m.Key
+	return slices.Clone(*m.Key)
 }
 
 func (m *manifestFile) Partitions() []FieldSummary {
@@ -389,10 +399,18 @@ func (m *manifestFile) Partitions() []FieldSummary {
 		return nil
 	}
 
-	return *m.PartitionList
+	return cloneFieldSummaries(*m.PartitionList)
 }
 
-func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
+func (m *manifestFile) FirstRowID() *int64 {
+	if m.FirstRowIDValue == nil {
+		return nil
+	}
+
+	firstRowID := *m.FirstRowIDValue
+
+	return &firstRowID
+}
 
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
