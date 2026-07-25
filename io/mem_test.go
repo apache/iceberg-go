@@ -141,6 +141,29 @@ func TestMemIO_RemoveMissingReturnsNotExist(t *testing.T) {
 	require.ErrorIs(t, memIO.Remove("does-not-exist.txt"), fs.ErrNotExist)
 }
 
+func TestMemIO_FileRejectsInvalidOffsets(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	require.NoError(t, memIO.WriteFile("file.txt", []byte("abc")))
+
+	file, err := memIO.Open("file.txt")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, file.Close()) })
+
+	_, err = file.ReadAt(make([]byte, 1), -1)
+	require.ErrorIs(t, err, fs.ErrInvalid)
+
+	pos, err := file.Seek(1, io.SeekStart)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), pos)
+
+	_, err = file.Seek(0, 99)
+	require.ErrorIs(t, err, fs.ErrInvalid)
+
+	pos, err = file.Seek(0, io.SeekCurrent)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), pos)
+}
+
 func TestMemIO_WalkDir(t *testing.T) {
 	ctx := context.Background()
 
