@@ -181,7 +181,13 @@ func (s *Schema) FlatFields() (iter.Seq[NestedField], error) {
 		return nil, err
 	}
 
-	return maps.Values(fields), nil
+	return func(yield func(NestedField) bool) {
+		for field := range maps.Values(fields) {
+			if !yield(cloneField(field)) {
+				return
+			}
+		}
+	}, nil
 }
 
 func (s *Schema) lazyIDToField() (map[int]NestedField, error) {
@@ -267,8 +273,8 @@ func (s *Schema) AsStruct() StructType { return StructType{FieldList: cloneField
 func (s *Schema) asStructRef() StructType { return StructType{FieldList: s.fields} }
 
 func (s *Schema) NumFields() int          { return len(s.fields) }
-func (s *Schema) Field(i int) NestedField { return s.fields[i] }
-func (s *Schema) Fields() []NestedField   { return slices.Clone(s.fields) }
+func (s *Schema) Field(i int) NestedField { return cloneField(s.fields[i]) }
+func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
 func (s *Schema) FieldIDs() []int {
 	idx, _ := s.lazyNameToID()
 
@@ -325,11 +331,16 @@ func cloneFields(fields []NestedField) []NestedField {
 
 	cloned := make([]NestedField, len(fields))
 	for i, field := range fields {
-		cloned[i] = field
-		cloned[i].Type = cloneType(field.Type)
+		cloned[i] = cloneField(field)
 	}
 
 	return cloned
+}
+
+func cloneField(field NestedField) NestedField {
+	field.Type = cloneType(field.Type)
+
+	return field
 }
 
 func cloneType(t Type) Type {
@@ -409,6 +420,9 @@ func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool)
 func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()
 	f, ok := idx[id]
+	if ok {
+		f = cloneField(f)
+	}
 
 	return f, ok
 }

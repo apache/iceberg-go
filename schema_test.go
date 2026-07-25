@@ -318,6 +318,52 @@ func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
 	assert.Equal(t, "name", clonedValueType.FieldList[0].Name)
 }
 
+func TestSchemaFieldGettersCloneNestedTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "person",
+			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+	)
+
+	assertIndependent := func(t *testing.T, field iceberg.NestedField) {
+		t.Helper()
+		person, ok := field.Type.(*iceberg.StructType)
+		require.True(t, ok)
+		person.FieldList[0].Name = "hijacked"
+
+		actual, ok := schema.FindFieldByID(2)
+		require.True(t, ok)
+		assert.Equal(t, "name", actual.Name)
+	}
+
+	t.Run("Field", func(t *testing.T) {
+		assertIndependent(t, schema.Field(0))
+	})
+	t.Run("Fields", func(t *testing.T) {
+		assertIndependent(t, schema.Fields()[0])
+	})
+	t.Run("FindFieldByID", func(t *testing.T) {
+		field, ok := schema.FindFieldByID(1)
+		require.True(t, ok)
+		assertIndependent(t, field)
+	})
+	t.Run("FlatFields", func(t *testing.T) {
+		fields, err := schema.FlatFields()
+		require.NoError(t, err)
+		for field := range fields {
+			if field.ID == 1 {
+				assertIndependent(t, field)
+				return
+			}
+		}
+		t.Fatal("top-level field not found")
+	})
+}
+
 func TestSchemaIndexByIDVisitor(t *testing.T) {
 	index, err := iceberg.IndexByID(tableSchemaNested)
 	require.NoError(t, err)
