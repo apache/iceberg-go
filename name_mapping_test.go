@@ -185,17 +185,26 @@ func TestUpdateNameMapping(t *testing.T) {
 	})
 
 	t.Run("result does not alias the original", func(t *testing.T) {
-		fieldID, childID := 1, 2
+		fieldID, childID, anonymousChildID := 1, 2, 3
 		parentNames := make([]string, 2)
 		parentNames[0] = "parent"
-		original := iceberg.NameMapping{{
-			FieldID: &fieldID,
-			Names:   parentNames[:1],
-			Fields: []iceberg.MappedField{{
-				FieldID: &childID,
-				Names:   []string{"child"},
-			}},
-		}}
+		original := iceberg.NameMapping{
+			{
+				FieldID: &fieldID,
+				Names:   parentNames[:1],
+				Fields: []iceberg.MappedField{{
+					FieldID: &childID,
+					Names:   []string{"child"},
+				}},
+			},
+			{
+				Names: []string{"anonymous"},
+				Fields: []iceberg.MappedField{{
+					FieldID: &anonymousChildID,
+					Names:   []string{"anonymous-child"},
+				}},
+			},
+		}
 
 		result, err := iceberg.UpdateNameMapping(
 			original,
@@ -209,11 +218,17 @@ func TestUpdateNameMapping(t *testing.T) {
 		result[0].Names[0] = "changed-parent"
 		*result[0].Fields[0].FieldID = 20
 		result[0].Fields[0].Names[0] = "changed-child"
+		result[1].Names[0] = "changed-anonymous"
+		*result[1].Fields[0].FieldID = 30
+		result[1].Fields[0].Names[0] = "changed-anonymous-child"
 
 		assert.Equal(t, 1, *original[0].FieldID)
 		assert.Equal(t, []string{"parent"}, original[0].Names)
 		assert.Equal(t, 2, *original[0].Fields[0].FieldID)
 		assert.Equal(t, []string{"child"}, original[0].Fields[0].Names)
+		assert.Equal(t, []string{"anonymous"}, original[1].Names)
+		assert.Equal(t, 3, *original[1].Fields[0].FieldID)
+		assert.Equal(t, []string{"anonymous-child"}, original[1].Fields[0].Names)
 	})
 
 	t.Run("update mapping with updates and adds", func(t *testing.T) {
