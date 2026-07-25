@@ -492,13 +492,10 @@ func (m *metadata) checkCurrentVersionExists() error {
 }
 
 func (m *metadata) checkVersionSchemasExist() error {
-	schemaIDs := make(map[int]bool)
-	for _, schema := range m.SchemaList {
-		schemaIDs[schema.ID] = true
-	}
+	schemasByID := m.lazySchemasByID()
 
 	for _, version := range m.VersionList {
-		if !schemaIDs[version.SchemaID] {
+		if _, ok := schemasByID[version.SchemaID]; !ok {
 			return fmt.Errorf("%w: version %d references unknown schema-id %d",
 				ErrInvalidViewMetadata, version.VersionID, version.SchemaID)
 		}
