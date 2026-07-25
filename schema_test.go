@@ -318,7 +318,7 @@ func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
 	assert.Equal(t, "name", clonedValueType.FieldList[0].Name)
 }
 
-func TestSchemaFieldGettersCloneNestedTypes(t *testing.T) {
+func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{
 			ID:   1,
@@ -327,41 +327,54 @@ func TestSchemaFieldGettersCloneNestedTypes(t *testing.T) {
 				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
 			}},
 		},
+		iceberg.NestedField{
+			ID:             3,
+			Name:           "payload",
+			Type:           iceberg.PrimitiveTypes.Binary,
+			InitialDefault: iceberg.BinaryLiteral{1, 2},
+			WriteDefault:   map[string]any{"nested": []any{[]byte{3, 4}}},
+		},
 	)
 
-	assertIndependent := func(t *testing.T, field iceberg.NestedField) {
+	assertIndependent := func(t *testing.T, personField, payloadField iceberg.NestedField) {
 		t.Helper()
-		person, ok := field.Type.(*iceberg.StructType)
+		person, ok := personField.Type.(*iceberg.StructType)
 		require.True(t, ok)
 		person.FieldList[0].Name = "hijacked"
+		payloadField.InitialDefault.(iceberg.BinaryLiteral)[0] = 9
+		payloadField.WriteDefault.(map[string]any)["nested"].([]any)[0].([]byte)[0] = 9
 
 		actual, ok := schema.FindFieldByID(2)
 		require.True(t, ok)
 		assert.Equal(t, "name", actual.Name)
+		payload, ok := schema.FindFieldByID(3)
+		require.True(t, ok)
+		assert.Equal(t, iceberg.BinaryLiteral{1, 2}, payload.InitialDefault)
+		assert.Equal(t, map[string]any{"nested": []any{[]byte{3, 4}}}, payload.WriteDefault)
 	}
 
 	t.Run("Field", func(t *testing.T) {
-		assertIndependent(t, schema.Field(0))
+		assertIndependent(t, schema.Field(0), schema.Field(1))
 	})
 	t.Run("Fields", func(t *testing.T) {
-		assertIndependent(t, schema.Fields()[0])
+		fields := schema.Fields()
+		assertIndependent(t, fields[0], fields[1])
 	})
 	t.Run("FindFieldByID", func(t *testing.T) {
-		field, ok := schema.FindFieldByID(1)
+		person, ok := schema.FindFieldByID(1)
 		require.True(t, ok)
-		assertIndependent(t, field)
+		payload, ok := schema.FindFieldByID(3)
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
 	})
 	t.Run("FlatFields", func(t *testing.T) {
 		fields, err := schema.FlatFields()
 		require.NoError(t, err)
+		byID := make(map[int]iceberg.NestedField)
 		for field := range fields {
-			if field.ID == 1 {
-				assertIndependent(t, field)
-
-				return
-			}
+			byID[field.ID] = field
 		}
-		t.Fatal("top-level field not found")
+		assertIndependent(t, byID[1], byID[3])
 	})
 }
 

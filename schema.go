@@ -339,8 +339,37 @@ func cloneFields(fields []NestedField) []NestedField {
 
 func cloneField(field NestedField) NestedField {
 	field.Type = cloneType(field.Type)
+	field.InitialDefault = cloneDefault(field.InitialDefault)
+	field.WriteDefault = cloneDefault(field.WriteDefault)
 
 	return field
+}
+
+func cloneDefault(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return slices.Clone(value)
+	case BinaryLiteral:
+		return BinaryLiteral(slices.Clone([]byte(value)))
+	case FixedLiteral:
+		return FixedLiteral(slices.Clone([]byte(value)))
+	case []any:
+		cloned := make([]any, len(value))
+		for i, item := range value {
+			cloned[i] = cloneDefault(item)
+		}
+
+		return cloned
+	case map[string]any:
+		cloned := make(map[string]any, len(value))
+		for key, item := range value {
+			cloned[key] = cloneDefault(item)
+		}
+
+		return cloned
+	default:
+		return value
+	}
 }
 
 func cloneType(t Type) Type {
