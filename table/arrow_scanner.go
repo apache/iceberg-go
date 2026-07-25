@@ -1009,6 +1009,20 @@ func (as *arrowScan) processRecords(
 		out <- enumeratedRecord{Record: internal.Enumerated[arrow.RecordBatch]{
 			Value: prev, Index: idx, Last: true,
 		}, Task: task}
+	} else {
+		// The reader produced no batches (e.g. every row group was pruned by
+		// stats). The sequenced channel in createIterator still needs this
+		// task's Last record to release the following tasks' records, so emit
+		// an empty batch just like the dropFile path does; without it every
+		// record queued behind this task is silently discarded on close.
+		var emptySchema *arrow.Schema
+		emptySchema, err = SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
+		if err != nil {
+			return err
+		}
+		out <- enumeratedRecord{Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: idx, Last: true,
+		}, Task: task}
 	}
 
 	if recRdr.Err() != nil && recRdr.Err() != io.EOF {
