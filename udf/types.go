@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -47,6 +48,7 @@ type Type interface {
 	// canonicalTo writes the canonical string form, sealing the
 	// interface to the implementations in this package.
 	canonicalTo(sb *strings.Builder)
+	clone() Type
 }
 
 // PrimitiveType is a primitive or semi-structured UDF type, stored as the
@@ -93,6 +95,7 @@ func (p PrimitiveType) Equals(other Type) bool {
 }
 
 func (p PrimitiveType) canonicalTo(sb *strings.Builder) { sb.WriteString(p.name) }
+func (p PrimitiveType) clone() Type                     { return p }
 
 func (p PrimitiveType) MarshalJSON() ([]byte, error) { return json.Marshal(p.name) }
 
@@ -114,6 +117,8 @@ func (l ListType) canonicalTo(sb *strings.Builder) {
 	l.Element.canonicalTo(sb)
 	sb.WriteString(">")
 }
+
+func (l ListType) clone() Type { return ListType{Element: cloneType(l.Element)} }
 
 func (l ListType) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -142,6 +147,10 @@ func (m MapType) canonicalTo(sb *strings.Builder) {
 	sb.WriteString(",")
 	m.Value.canonicalTo(sb)
 	sb.WriteString(">")
+}
+
+func (m MapType) clone() Type {
+	return MapType{Key: cloneType(m.Key), Value: cloneType(m.Value)}
 }
 
 func (m MapType) MarshalJSON() ([]byte, error) {
@@ -193,6 +202,15 @@ func (s StructType) canonicalTo(sb *strings.Builder) {
 	sb.WriteString(">")
 }
 
+func (s StructType) clone() Type {
+	fields := slices.Clone(s.Fields)
+	for i := range fields {
+		fields[i].Type = cloneType(fields[i].Type)
+	}
+
+	return StructType{Fields: fields}
+}
+
 func (s StructType) MarshalJSON() ([]byte, error) {
 	fields := make([]struct {
 		Name string `json:"name"`
@@ -216,25 +234,11 @@ func canonicalString(t Type) string {
 }
 
 func cloneType(t Type) Type {
-	switch v := t.(type) {
-	case nil:
+	if t == nil {
 		return nil
-	case PrimitiveType:
-		return v
-	case ListType:
-		return ListType{Element: cloneType(v.Element)}
-	case MapType:
-		return MapType{Key: cloneType(v.Key), Value: cloneType(v.Value)}
-	case StructType:
-		fields := make([]StructField, len(v.Fields))
-		for i, field := range v.Fields {
-			fields[i] = StructField{Name: field.Name, Type: cloneType(field.Type)}
-		}
-
-		return StructType{Fields: fields}
-	default:
-		return v
 	}
+
+	return t.clone()
 }
 
 // validateType checks that t and all nested types are fully specified.

@@ -70,6 +70,24 @@ func TestDefinitionCopiesNestedTypes(t *testing.T) {
 	assert.Equal(t, "name", definition.ReturnType.(StructType).Fields[0].Name)
 }
 
+func TestNewDefinitionCopiesInputTypes(t *testing.T) {
+	stringType, err := PrimitiveTypeOf("string")
+	require.NoError(t, err)
+	fields := []StructField{{Name: "value", Type: stringType}}
+	structType := StructType{Fields: fields}
+	parameters := []Parameter{{Name: "values", Type: ListType{Element: structType}}}
+
+	definition, err := NewDefinition(FunctionTypeUDTF, parameters, structType)
+	require.NoError(t, err)
+	parameters[0].Name = "mutated"
+	fields[0].Name = "mutated"
+
+	assert.Equal(t, "values", definition.Parameters[0].Name)
+	parameterType := definition.Parameters[0].Type.(ListType).Element.(StructType)
+	assert.Equal(t, "value", parameterType.Fields[0].Name)
+	assert.Equal(t, "value", definition.ReturnType.(StructType).Fields[0].Name)
+}
+
 func TestUnknownRepresentationRawReturnsCopy(t *testing.T) {
 	meta, err := ParseMetadataString(unknownRepresentationJSON)
 	require.NoError(t, err)

@@ -80,6 +80,7 @@ type Representation interface {
 	// isRepresentation seals the interface to the implementations in
 	// this package.
 	isRepresentation()
+	clone() Representation
 }
 
 // SQLRepresentation stores the function body as a SQL expression in a
@@ -105,6 +106,7 @@ func NewSQLRepresentation(dialect, sql string) (SQLRepresentation, error) {
 
 func (SQLRepresentation) RepresentationType() string { return "sql" }
 func (SQLRepresentation) isRepresentation()          {}
+func (r SQLRepresentation) clone() Representation    { return r }
 
 func (r SQLRepresentation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -122,11 +124,16 @@ type UnknownRepresentation struct {
 	raw json.RawMessage
 }
 
-// Raw returns the representation's original JSON.
+// Raw returns a copy of the representation's original JSON.
 func (r UnknownRepresentation) Raw() json.RawMessage { return slices.Clone(r.raw) }
 
 func (r UnknownRepresentation) RepresentationType() string { return r.TypeName }
 func (UnknownRepresentation) isRepresentation()            {}
+func (r UnknownRepresentation) clone() Representation {
+	r.raw = slices.Clone(r.raw)
+
+	return r
+}
 
 func (r UnknownRepresentation) MarshalJSON() ([]byte, error) {
 	return slices.Clone(r.raw), nil
@@ -148,14 +155,10 @@ func representationsEqual(a, b Representation) bool {
 }
 
 func cloneRepresentations(representations []Representation) []Representation {
-	cloned := make([]Representation, len(representations))
+	cloned := slices.Clone(representations)
 	for i, repr := range representations {
-		switch r := repr.(type) {
-		case UnknownRepresentation:
-			r.raw = slices.Clone(r.raw)
-			cloned[i] = r
-		default:
-			cloned[i] = r
+		if repr != nil {
+			cloned[i] = repr.clone()
 		}
 	}
 
@@ -696,14 +699,14 @@ type Metadata interface {
 	// Location returns the function's base location, used to create
 	// metadata file locations. It may be empty.
 	Location() string
-	// Definitions returns the function's definitions, one per signature.
+	// Definitions returns deep copies of the function's definitions, one per signature.
 	Definitions() []*Definition
-	// DefinitionByID returns the definition with the given definition-id.
+	// DefinitionByID returns a deep copy of the definition with the given definition-id.
 	DefinitionByID(definitionID string) (*Definition, bool)
-	// DefinitionLog returns the history of definition version selections.
+	// DefinitionLog returns a deep copy of the definition version selection history.
 	DefinitionLog() []DefinitionLogEntry
-	// Properties returns the function's properties. Entries are treated
-	// as hints, not strict rules.
+	// Properties returns a copy of the function's properties. Entries are
+	// treated as hints, not strict rules.
 	Properties() iceberg.Properties
 	// Secure reports whether this is a secure function whose sensitive
 	// information engines should not leak to end users.
