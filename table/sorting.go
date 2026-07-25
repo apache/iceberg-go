@@ -235,7 +235,13 @@ func (s SortOrder) OrderID() int {
 }
 
 func (s SortOrder) Fields() iter.Seq2[int, SortField] {
-	return slices.All(s.fields)
+	return func(yield func(int, SortField) bool) {
+		for i, field := range s.fields {
+			if !yield(i, cloneSortField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (s SortOrder) Len() int {
@@ -325,7 +331,18 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		}
 	}
 
-	return SortOrder{orderID, fields}, nil
+	fieldCopies := make([]SortField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = cloneSortField(field)
+	}
+
+	return SortOrder{orderID, fieldCopies}, nil
+}
+
+func cloneSortField(field SortField) SortField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+
+	return field
 }
 
 func (s SortOrder) IsUnsorted() bool {
