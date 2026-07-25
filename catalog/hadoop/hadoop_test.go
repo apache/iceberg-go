@@ -1062,17 +1062,19 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesEmpty() {
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
-	parentDir := filepath.Join(s.warehouse, "a")
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child1"), 0o755))
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child2"), 0o755))
+	ctx := context.Background()
+	parent := table.Identifier{"a"}
+	expected := []table.Identifier{{"a", "child1"}, {"a", "child2"}}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, parent, nil))
+	for _, namespace := range expected {
+		s.Require().NoError(s.cat.CreateNamespace(ctx, namespace, nil))
+	}
 
-	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
+	namespaces, err := s.cat.ListNamespaces(ctx, parent)
 	s.Require().NoError(err)
-	s.Len(namespaces, 2)
-	s.Contains(namespaces, table.Identifier{"a", "child1"})
-	s.Contains(namespaces, table.Identifier{"a", "child2"})
+	s.ElementsMatch(expected, namespaces)
 	for _, namespace := range namespaces {
-		exists, err := s.cat.CheckNamespaceExists(context.Background(), namespace)
+		exists, err := s.cat.CheckNamespaceExists(ctx, namespace)
 		s.Require().NoError(err)
 		s.True(exists)
 	}
