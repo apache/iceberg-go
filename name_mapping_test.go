@@ -184,6 +184,38 @@ func TestUpdateNameMapping(t *testing.T) {
 		assert.Equal(t, originalMapping, result)
 	})
 
+	t.Run("result does not alias the original", func(t *testing.T) {
+		fieldID, childID := 1, 2
+		parentNames := make([]string, 2)
+		parentNames[0] = "parent"
+		original := iceberg.NameMapping{{
+			FieldID: &fieldID,
+			Names:   parentNames[:1],
+			Fields: []iceberg.MappedField{{
+				FieldID: &childID,
+				Names:   []string{"child"},
+			}},
+		}}
+
+		result, err := iceberg.UpdateNameMapping(
+			original,
+			map[int]iceberg.NestedField{1: {ID: 1, Name: "renamed-parent"}},
+			map[int][]iceberg.NestedField{},
+		)
+		require.NoError(t, err)
+		assert.Empty(t, parentNames[1])
+
+		*result[0].FieldID = 10
+		result[0].Names[0] = "changed-parent"
+		*result[0].Fields[0].FieldID = 20
+		result[0].Fields[0].Names[0] = "changed-child"
+
+		assert.Equal(t, 1, *original[0].FieldID)
+		assert.Equal(t, []string{"parent"}, original[0].Names)
+		assert.Equal(t, 2, *original[0].Fields[0].FieldID)
+		assert.Equal(t, []string{"child"}, original[0].Fields[0].Names)
+	})
+
 	t.Run("update mapping with updates and adds", func(t *testing.T) {
 		updates := map[int]iceberg.NestedField{
 			1: {ID: 1, Name: "foo_update", Type: &iceberg.StringType{}},

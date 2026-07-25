@@ -182,16 +182,20 @@ func (u *updateNameMappingVisitor) Fields(st []MappedField, fieldResults []Mappe
 
 func (u *updateNameMappingVisitor) Field(field MappedField, fieldResult []MappedField) MappedField {
 	if field.FieldID == nil {
-		return field
+		return MappedField{
+			Names:  slices.Clone(field.Names),
+			Fields: fieldResult,
+		}
 	}
 
-	fieldNames := field.Names
+	fieldID := *field.FieldID
+	fieldNames := slices.Clone(field.Names)
 	if update, exists := u.updates[*field.FieldID]; exists && !slices.Contains(fieldNames, update.Name) {
 		fieldNames = append(fieldNames, update.Name)
 	}
 
 	return MappedField{
-		FieldID: field.FieldID,
+		FieldID: &fieldID,
 		Names:   fieldNames,
 		Fields:  u.addNewFields(fieldResult, *field.FieldID),
 	}
