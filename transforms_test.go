@@ -122,6 +122,8 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.DayTransform{}, nil, "null"},
 		{iceberg.HourTransform{}, nil, "null"},
 		{iceberg.HourTransform{}, int32(420042), "2017-12-01-18"},
+		{iceberg.HourTransform{}, int32(4645896), "2500-01-01-00"},
+		{iceberg.HourTransform{}, int32(-4119936), "1500-01-01-00"},
 		{iceberg.YearTransform{}, int32(-1), "1969"},
 		{iceberg.MonthTransform{}, int32(-1), "1969-12"},
 		{iceberg.DayTransform{}, int32(-1), "1969-12-31"},

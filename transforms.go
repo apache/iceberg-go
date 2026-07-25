@@ -1097,7 +1097,8 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 func (HourTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
-		tm := epochTM.Add(time.Duration(v) * time.Hour)
+		seconds := int64(v) * int64(time.Hour/time.Second)
+		tm := time.Unix(seconds, 0).UTC()
 
 		return tm.Format("2006-01-02-15")
 	default:
