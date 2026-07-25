@@ -1065,10 +1065,12 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
 	ctx := context.Background()
 	parent := table.Identifier{"a"}
 	expected := []table.Identifier{{"a", "child1"}, {"a", "child2"}}
+	grandchild := table.Identifier{"a", "child1", "grandchild"}
 	s.Require().NoError(s.cat.CreateNamespace(ctx, parent, nil))
 	for _, namespace := range expected {
 		s.Require().NoError(s.cat.CreateNamespace(ctx, namespace, nil))
 	}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, grandchild, nil))
 
 	namespaces, err := s.cat.ListNamespaces(ctx, parent)
 	s.Require().NoError(err)
@@ -1078,6 +1080,14 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
 		s.Require().NoError(err)
 		s.True(exists)
 	}
+
+	namespaces, err = s.cat.ListNamespaces(ctx, expected[0])
+	s.Require().NoError(err)
+	s.Require().Equal([]table.Identifier{grandchild}, namespaces)
+
+	exists, err := s.cat.CheckNamespaceExists(ctx, namespaces[0])
+	s.Require().NoError(err)
+	s.True(exists)
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
