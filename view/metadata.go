@@ -435,7 +435,7 @@ func (m *metadata) validate() error {
 		return fmt.Errorf("%w: at least one schema is required", ErrInvalidViewMetadata)
 	}
 
-	if err := m.checkSchemaAndVersionIDs(); err != nil {
+	if err := m.checkSchemaAndVersionEntries(); err != nil {
 		return err
 	}
 
@@ -454,7 +454,7 @@ func (m *metadata) validate() error {
 	return nil
 }
 
-func (m *metadata) checkSchemaAndVersionIDs() error {
+func (m *metadata) checkSchemaAndVersionEntries() error {
 	schemaIDs := make(map[int]struct{}, len(m.SchemaList))
 	for i, schema := range m.SchemaList {
 		if schema == nil {

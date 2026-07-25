@@ -196,7 +196,7 @@ func TestValidMetadataDeserialization(t *testing.T) {
 	assert.Equal(t, int64(1), meta.CurrentVersionIDValue)
 }
 
-func TestRejectsNullAndDuplicateSchemaAndVersionEntries(t *testing.T) {
+func TestParseMetadataRejectsNullAndDuplicateEntries(t *testing.T) {
 	tests := []struct {
 		name       string
 		mutate     func(map[string]any)
@@ -242,9 +242,12 @@ func TestRejectsNullAndDuplicateSchemaAndVersionEntries(t *testing.T) {
 			encoded, err := json.Marshal(doc)
 			require.NoError(t, err)
 
-			_, err = ParseMetadataBytes(encoded)
-			require.ErrorIs(t, err, ErrInvalidViewMetadata)
-			assert.ErrorContains(t, err, tt.errMessage)
+			var parseErr error
+			require.NotPanics(t, func() {
+				_, parseErr = ParseMetadataBytes(encoded)
+			})
+			require.ErrorIs(t, parseErr, ErrInvalidViewMetadata)
+			assert.ErrorContains(t, parseErr, tt.errMessage)
 		})
 	}
 }
