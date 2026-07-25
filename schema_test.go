@@ -357,6 +357,7 @@ func TestSchemaFieldGettersCloneNestedTypes(t *testing.T) {
 		for field := range fields {
 			if field.ID == 1 {
 				assertIndependent(t, field)
+
 				return
 			}
 		}
