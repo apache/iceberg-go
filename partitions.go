@@ -487,6 +487,18 @@ func (ps *PartitionSpec) FieldsBySourceID(fieldID int) []PartitionField {
 
 func clonePartitionField(field PartitionField) PartitionField {
 	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
 
 	return field
 }
