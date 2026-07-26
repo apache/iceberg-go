@@ -37,7 +37,6 @@ package table_test
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"testing"
 
@@ -123,8 +122,8 @@ func TestScanSurvivesFullyPrunedTask(t *testing.T) {
 
 	// File A: only row group is fully pruned by the id >= 1000 filter.
 	// File B: matches the filter.
-	pathA := fmt.Sprintf("%s/data-a.parquet", dir)
-	pathB := fmt.Sprintf("%s/data-b.parquet", dir)
+	pathA := dir + "/data-a.parquet"
+	pathB := dir + "/data-b.parquet"
 	sizeA := writeParquet(pathA, []int32{1, 2, 3})
 	sizeB := writeParquet(pathB, []int32{1000, 1001, 1002})
 
