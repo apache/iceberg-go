@@ -21,7 +21,10 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -31,6 +34,10 @@ import (
 )
 
 func newReplaceFilesTestTable(t *testing.T) *table.Table {
+	return newReplaceFilesTestTableWithIO(t, iceio.LocalFS{})
+}
+
+func newReplaceFilesTestTableWithIO(t *testing.T, fileIO iceio.IO) *table.Table {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
@@ -49,10 +56,28 @@ func newReplaceFilesTestTable(t *testing.T) *table.Table {
 		table.Identifier{"db", "replace_files_test"},
 		meta, location+"/metadata/v1.metadata.json",
 		func(ctx context.Context) (iceio.IO, error) {
-			return iceio.LocalFS{}, nil
+			return fileIO, nil
 		},
 		&rowDeltaCatalog{metadata: meta},
 	)
+}
+
+type concurrentManifestReadIO struct {
+	iceio.LocalFS
+	enabled atomic.Bool
+	active  atomic.Int32
+	max     atomic.Int32
+}
+
+func (f *concurrentManifestReadIO) Open(name string) (iceio.File, error) {
+	if f.enabled.Load() && strings.HasSuffix(name, ".avro") {
+		active := f.active.Add(1)
+		for current := f.max.Load(); active > current && !f.max.CompareAndSwap(current, active); current = f.max.Load() {
+		}
+		time.Sleep(20 * time.Millisecond)
+		f.active.Add(-1)
+	}
+	return f.LocalFS.Open(name)
 }
 
 func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
@@ -125,6 +150,7 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 		[]iceberg.DataFile{newDataFile},
 		deleteFilesToRemove,
 		nil,
+		table.WithReplaceValidationConcurrency(4),
 	)
 	require.NoError(t, err)
 
@@ -137,6 +163,64 @@ func TestReplaceFiles_DataAndDeleteFiles(t *testing.T) {
 	snap := tbl.CurrentSnapshot()
 	require.NotNil(t, snap)
 	assert.Equal(t, table.OpOverwrite, snap.Summary.Operation)
+}
+
+func TestReplaceFilesReadsManifestsConcurrently(t *testing.T) {
+	fileIO := &concurrentManifestReadIO{}
+	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := make([]string, 4)
+	for i := range dataPaths {
+		dataPaths[i] = fmt.Sprintf("%s/data/data-%03d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPaths[i], arrowSc, fmt.Sprintf(`[{"id": %d, "data": "value"}]`, i))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPaths[i]}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	posDelPath := tbl.Location() + "/data/pos-del-concurrent.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": "%s", "pos": 0}]`, dataPaths[0]))
+	posDelBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(posDelBuilder.Build())
+	require.NoError(t, rd.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	var deleteFiles []iceberg.DataFile
+	deletePaths := make(map[string]struct{})
+	for _, task := range tasks {
+		for _, deleteFile := range task.DeleteFiles {
+			if _, exists := deletePaths[deleteFile.FilePath()]; exists {
+				continue
+			}
+			deletePaths[deleteFile.FilePath()] = struct{}{}
+			deleteFiles = append(deleteFiles, deleteFile)
+		}
+	}
+	require.NotEmpty(t, deleteFiles)
+
+	fileIO.enabled.Store(true)
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.ReplaceFiles(
+		t.Context(),
+		nil,
+		nil,
+		deleteFiles,
+		nil,
+		table.WithReplaceValidationConcurrency(4),
+	))
+	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
 }
 
 func TestReplaceFiles_DelegatesToReplaceDataFilesWhenNoDeleteFiles(t *testing.T) {

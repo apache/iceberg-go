@@ -583,9 +583,10 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
-	skipAutoNameMapping bool
-	skipDuplicateCheck  bool
-	rewriteSemantics    bool
+	skipAutoNameMapping      bool
+	skipDuplicateCheck       bool
+	rewriteSemantics         bool
+	replaceValidationWorkers int
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -624,6 +625,15 @@ func WithoutAutoNameMapping() WriteOption {
 func WithoutDuplicateCheck() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.skipDuplicateCheck = true
+	}
+}
+
+// WithReplaceValidationConcurrency bounds concurrent manifest reads.
+func WithReplaceValidationConcurrency(concurrency int) WriteOption {
+	return func(cfg *dataFileCfg) {
+		if concurrency > 0 {
+			cfg.replaceValidationWorkers = concurrency
+		}
 	}
 }
 
@@ -837,6 +847,81 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	return t.apply(updates, reqs)
 }
 
+type replaceValidationResult struct {
+	dataFiles   []iceberg.DataFile
+	deleteFiles []iceberg.DataFile
+}
+
+// validateReplaceFiles validates target paths with bounded manifest readers.
+func validateReplaceFiles(
+	ctx context.Context,
+	s *Snapshot,
+	fs io.IO,
+	dataPaths map[string]struct{},
+	deletePaths map[string]struct{},
+	addPaths map[string]struct{},
+	concurrency int,
+) ([]iceberg.DataFile, []iceberg.DataFile, error) {
+	manifests, err := s.Manifests(fs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(manifests) == 0 {
+		return nil, nil, nil
+	}
+	if concurrency <= 0 {
+		concurrency = runtime.GOMAXPROCS(0)
+	}
+
+	results := make([]replaceValidationResult, len(manifests))
+	workers, workerCtx := errgroup.WithContext(ctx)
+	workers.SetLimit(min(concurrency, len(manifests)))
+	var schedulingErr error
+	for i, manifest := range manifests {
+		if err := workerCtx.Err(); err != nil {
+			schedulingErr = err
+			break
+		}
+		i, manifest := i, manifest
+		workers.Go(func() error {
+			var result replaceValidationResult
+			for entry, err := range manifest.Entries(fs, false) {
+				if err != nil {
+					return err
+				}
+				file := entry.DataFile()
+				path := file.FilePath()
+				isData := file.ContentType() == iceberg.EntryContentData
+				if _, ok := dataPaths[path]; ok && isData {
+					result.dataFiles = append(result.dataFiles, file)
+				}
+				if _, ok := deletePaths[path]; ok && !isData {
+					result.deleteFiles = append(result.deleteFiles, file)
+				}
+				if _, ok := addPaths[path]; ok {
+					return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+				}
+			}
+			results[i] = result
+			return nil
+		})
+	}
+	if err := workers.Wait(); err != nil {
+		return nil, nil, err
+	}
+	if schedulingErr != nil {
+		return nil, nil, schedulingErr
+	}
+
+	var dataFiles []iceberg.DataFile
+	var deleteFiles []iceberg.DataFile
+	for _, result := range results {
+		dataFiles = append(dataFiles, result.dataFiles...)
+		deleteFiles = append(deleteFiles, result.deleteFiles...)
+	}
+	return dataFiles, deleteFiles, nil
+}
+
 // ReplaceFiles atomically replaces data files and removes associated delete files
 // in a single snapshot. This is the commit primitive for compaction: old data files
 // are replaced with new (compacted) data files, and delete files that are fully
@@ -897,25 +982,17 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return err
 	}
 
-	// Scan all entries (data + delete files) in a single pass to validate
-	// that all files to delete/remove actually exist in the table.
-	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
-	for df, err := range s.dataFiles(fs, nil) {
-		if err != nil {
-			return err
-		}
-		path := df.FilePath()
-		isData := df.ContentType() == iceberg.EntryContentData
-		if _, ok := setToDelete[path]; ok && isData {
-			markedDataForDeletion = append(markedDataForDeletion, df)
-		}
-		if _, ok := setDeleteFilesToRemove[path]; ok && !isData {
-			markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-		}
-		if _, ok := setToAdd[path]; ok {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
-		}
+	markedDataForDeletion, markedDeleteForRemoval, err := validateReplaceFiles(
+		ctx,
+		s,
+		fs,
+		setToDelete,
+		setDeleteFilesToRemove,
+		setToAdd,
+		cfg.replaceValidationWorkers,
+	)
+	if err != nil {
+		return err
 	}
 
 	if len(markedDataForDeletion) != len(setToDelete) {
