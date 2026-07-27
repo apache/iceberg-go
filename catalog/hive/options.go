@@ -41,6 +41,10 @@ const (
 	MetadataLocationKey         = "metadata_location"
 	PreviousMetadataLocationKey = "previous_metadata_location"
 	ExternalKey                 = "EXTERNAL"
+	StorageHandlerKey           = "storage_handler"
+	IcebergStorageHandler       = "org.apache.iceberg.mr.hive.HiveIcebergStorageHandler"
+	GCEnabledKey                = "gc.enabled"
+	ExternalTablePurgeKey       = "external.table.purge"
 
 	// Lock configuration property keys
 	LockCheckMinWaitTime = "lock-check-min-wait-time"
