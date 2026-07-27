@@ -322,6 +322,60 @@ func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
 	assert.Equal(t, serverExpiry.UnixMilli(), r.expiresAt.UnixMilli())
 }
 
+func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		expiresIn     time.Duration
+		wantRefreshed bool
+	}{
+		{
+			name:          "within buffer refreshses",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer - time.Minute,
+			wantRefreshed: true,
+		},
+		{
+			name:          "at buffer boundary : reuse the cache",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer,
+			wantRefreshed: false,
+		},
+		{
+			name:          "past buffer reuses cache",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer + time.Minute,
+			wantRefreshed: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var callCount atomic.Int32
+			now := time.Now()
+
+			r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+				callCount.Add(1)
+
+				return iceberg.Properties{}, nil
+			})
+			r.nowFunc = func() time.Time { return now }
+
+			r.cachedIO = iceio.LocalFS{}
+			r.expiresAt = now.Add(tc.expiresIn)
+
+			_, err := r.loadFS(context.Background())
+			require.NoError(t, err)
+
+			if tc.wantRefreshed {
+				assert.Equal(t, int32(1), callCount.Load(), "credentials within the expiry buffer must be proactively refreshed")
+			} else {
+				assert.Equal(t, int32(0), callCount.Load(), "credentials outside the expiry buffer must reuse the cache")
+			}
+		})
+	}
+}
+
 func TestResolveStorageCredentials(t *testing.T) {
 	t.Parallel()
 

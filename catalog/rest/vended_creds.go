@@ -35,7 +35,8 @@ const (
 	keyGcsOAuthExpiresAt  = "gcs.oauth2.token-expires-at"
 	keyExpirationTime     = "expiration-time"
 
-	defaultVendedCredentialsTTL = 60 * time.Minute
+	defaultVendedCredentialsTTL          = 60 * time.Minute
+	defaultVendedCredentialsExpiryBuffer = 5 * time.Minute
 )
 
 // resolveStorageCredentials finds the best-matching credential for the given
@@ -108,7 +109,8 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	}
 	defer v.mu.Release(1)
 
-	if v.cachedIO != nil && !v.now().After(v.expiresAt) {
+	// refresh credentials before they expire
+	if v.cachedIO != nil && !v.now().After(v.expiresAt.Add(-defaultVendedCredentialsExpiryBuffer)) {
 		return v.cachedIO, nil
 	}
 
