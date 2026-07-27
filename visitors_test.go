@@ -684,6 +684,18 @@ func TestSanitizeExpression(t *testing.T) {
 		assert.NotContains(t, string(raw), "\""+v+"\"", "in literal must not leak")
 	}
 
+	// NOT IN rides the same set-predicate branch as IN: it must keep its op and
+	// arity while masking every member.
+	notIn := iceberg.NotIn(iceberg.Reference("id"), int32(4), int32(5))
+	sanitized, err = iceberg.SanitizeExpression(notIn)
+	require.NoError(t, err)
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "not-in", "not-in predicate must not collapse or change op")
+	for _, v := range []string{"4", "5"} {
+		assert.NotContains(t, string(raw), "\""+v+"\"", "not-in literal must not leak")
+	}
+
 	// Unary predicates carry no literal and pass through unchanged; structure is
 	// preserved across and/or/not.
 	expr := iceberg.NewAnd(iceberg.IsNull(iceberg.Reference("name")), eq)

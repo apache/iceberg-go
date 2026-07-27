@@ -97,12 +97,15 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 }
 
 // buildScanReport assembles the ScanReport for a completed planning operation.
-// schema is the schema the scan planned against, threaded in from the planner so
-// the report describes exactly what was used rather than re-resolving it here.
-// Only the metrics that are actually measured are populated; unmeasured ones
-// (e.g. skipped-data-files, indexed-delete-files) are left unset and omitted.
-func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema *iceberg.Schema, planning time.Duration) metrics.ScanReport {
-	ids, names := scan.projectedFields(schema)
+// schema is the schema the scan planned against and projected is the projected
+// (column-selected) schema, both threaded in from the planner so the report
+// describes exactly what was used rather than re-resolving it here. projected may
+// be nil when the projection could not be resolved, in which case the report
+// simply carries no projected fields. Only the metrics that are actually measured
+// are populated; unmeasured ones (e.g. skipped-data-files, indexed-delete-files)
+// are left unset and omitted.
+func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected *iceberg.Schema, planning time.Duration) metrics.ScanReport {
+	ids, names := projectedFields(projected)
 
 	var snapshotID int64
 	if snap := scan.Snapshot(); snap != nil {
@@ -149,20 +152,22 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema *iceberg.S
 	}
 }
 
-// projectedFields resolves the scan's projection to the field ids and dotted
-// column names it reads, matching Java's TypeUtil.getProjectedIds +
-// Schema.findColumnName: nested fields are reported by id and full dotted path,
-// not just top-level columns. schema is the schema the scan planned against and
-// is used to resolve names; ids are returned sorted for deterministic output.
-// Ids not resolvable to a name in schema (e.g. reserved row-lineage columns) are
-// skipped so ids and names stay aligned.
-func (scan *Scan) projectedFields(schema *iceberg.Schema) ([]int, []string) {
-	projected, err := scan.Projection()
-	if err != nil {
+// projectedFields resolves the field ids and dotted column names the scan reads,
+// matching Java's TypeUtil.getProjectedIds + Schema.findColumnName: nested fields
+// are reported by id and full dotted path, not just top-level columns. It walks
+// the projected schema threaded in from the planner directly rather than
+// re-resolving scan.Projection(), so the report reflects exactly what planning
+// used and does not silently drop the projected fields if Projection() fails for
+// a reason planning never hit (e.g. the row-lineage version check). A nil schema
+// (projection unresolved) yields no projected fields. Ids are returned sorted for
+// deterministic output; an id not resolvable to a name in the schema (e.g. a
+// reserved row-lineage column) is skipped so ids and names stay aligned.
+func projectedFields(schema *iceberg.Schema) ([]int, []string) {
+	if schema == nil {
 		return nil, nil
 	}
 
-	idToField, err := iceberg.IndexByID(projected)
+	idToField, err := iceberg.IndexByID(schema)
 	if err != nil {
 		return nil, nil
 	}

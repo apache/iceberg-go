@@ -531,10 +531,13 @@ const sanitizedLiteralMask = "(redacted)"
 // (e.g. a metrics ScanReport shipped to a REST sink) without leaking the literal
 // values a user scanned with, mirroring the intent of Java's ExpressionUtil.sanitize.
 //
-// Unlike Java, which substitutes type-shaped placeholders (e.g. "(2-digit-int)"),
-// every literal is masked with the same marker; the goal here is to withhold the
-// values, not to preserve their shape. Set predicates (IN / NOT IN) keep their
-// arity so the operation is not misrepresented, but the members are masked.
+// The only guarantee is that no user value leaks: the exact placeholder text is
+// not part of the contract and may change. In particular, unlike Java — which
+// substitutes type-shaped placeholders (e.g. "(2-digit-int)") — every literal is
+// masked with the same marker, since the goal is to withhold the values, not to
+// preserve their shape or stay structurally comparable across clients. Set
+// predicates (IN / NOT IN) keep their arity so the operation is not
+// misrepresented, but the members are masked.
 func SanitizeExpression(expr BooleanExpression) (BooleanExpression, error) {
 	return VisitExpr(expr, sanitizeVisitor{})
 }

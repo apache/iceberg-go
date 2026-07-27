@@ -868,7 +868,11 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	// one would be pure overhead.
 	if scan.Snapshot() != nil {
 		if rep := scan.Reporter(); !metrics.IsNop(rep) {
-			rep.Report(ctx, scan.buildScanReport(&acc, schema, planningDuration))
+			// Resolve the projected schema best-effort for the report's projected
+			// fields. Report assembly must never fail a scan, so a projection error
+			// just yields a report that omits projected fields.
+			projected, _ := scan.Projection()
+			rep.Report(ctx, scan.buildScanReport(&acc, schema, projected, planningDuration))
 		}
 	}
 

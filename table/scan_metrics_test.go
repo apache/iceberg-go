@@ -18,11 +18,13 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +66,7 @@ func TestBuildScanReport(t *testing.T) {
 		totalDeleteFileSize:   512,
 	}
 
-	sr := scan.buildScanReport(acc, meta.CurrentSchema(), 5*time.Millisecond)
+	sr := scan.buildScanReport(acc, meta.CurrentSchema(), meta.CurrentSchema(), 5*time.Millisecond)
 
 	assert.Equal(t, "db.tbl", sr.TableName)
 	assert.Equal(t, meta.CurrentSchema().ID, sr.SchemaID)
@@ -104,7 +106,9 @@ func TestProjectedFieldsSelectedSubset(t *testing.T) {
 	meta := metricsTestMetadata(t)
 	scan := &Scan{metadata: meta, selectedFields: []string{"data"}, caseSensitive: true}
 
-	ids, names := scan.projectedFields(meta.CurrentSchema())
+	projected, err := scan.Projection()
+	require.NoError(t, err)
+	ids, names := projectedFields(projected)
 	assert.Equal(t, []int{2}, ids)
 	assert.Equal(t, []string{"data"}, names)
 }
@@ -128,7 +132,9 @@ func TestProjectedFieldsNested(t *testing.T) {
 
 	scan := &Scan{metadata: meta, selectedFields: []string{"location"}, caseSensitive: true}
 
-	ids, names := scan.projectedFields(meta.CurrentSchema())
+	projected, err := scan.Projection()
+	require.NoError(t, err)
+	ids, names := projectedFields(projected)
 	assert.Equal(t, []int{2, 3, 4}, ids)
 	assert.Equal(t, []string{"location", "location.lat", "location.lon"}, names)
 }
@@ -214,7 +220,7 @@ func TestBuildScanReportSetsFilter(t *testing.T) {
 		rowFilter:      iceberg.AlwaysFalse{},
 	}
 
-	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), time.Millisecond)
+	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), meta.CurrentSchema(), time.Millisecond)
 	assert.JSONEq(t, `false`, string(sr.Filter), "Filter must reflect the real row filter, not default to always-true")
 }
 
@@ -230,7 +236,7 @@ func TestBuildScanReportSanitizesFilter(t *testing.T) {
 		rowFilter:      iceberg.EqualTo(iceberg.Reference("data"), "secret-value"),
 	}
 
-	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), time.Millisecond)
+	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), meta.CurrentSchema(), time.Millisecond)
 	require.NotNil(t, sr.Filter)
 	assert.NotContains(t, string(sr.Filter), "secret-value", "literal must not leak into the report")
 	assert.Contains(t, string(sr.Filter), "data", "column reference is preserved")
@@ -250,6 +256,72 @@ func TestPlanFilesNoSnapshotEmitsNoReport(t *testing.T) {
 	require.Empty(t, tasks)
 
 	assert.Empty(t, rep.Reports(), "no snapshot means no scan report")
+}
+
+func TestPlanFilesEmitsReportForRealSnapshot(t *testing.T) {
+	// Positive sibling to TestPlanFilesNoSnapshotEmitsNoReport: planning against a
+	// real snapshot with a live reporter must emit exactly one ScanReport carrying
+	// the scanned snapshot id and non-zero counters. This is the only test that
+	// reaches the Snapshot() != nil emission gate and the snapshotID =
+	// snap.SnapshotID population; the no-snapshot sibling cannot exercise them.
+	spec := *iceberg.UnpartitionedSpec
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+
+	const (
+		snapshotID       = int64(1)
+		manifestPath     = "mem://default/table-location/metadata/data-manifest.avro"
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+
+	df := newTestDataFile(t, spec, "mem://default/table-location/data-1.parquet", nil)
+	entries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, int64Ptr(snapshotID), nil, nil, df),
+	}
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	rep := &metrics.InMemoryReporter{}
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil,
+		WithMetricsReporter(rep))
+
+	tasks, err := tbl.Scan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	reports := rep.Reports()
+	require.Len(t, reports, 1, "planning against a real snapshot must emit one report")
+	sr, ok := reports[0].(metrics.ScanReport)
+	require.True(t, ok, "reported metric must be a ScanReport")
+
+	assert.Equal(t, snapshotID, sr.SnapshotID, "report must carry the scanned snapshot id, not 0")
+	require.NotNil(t, sr.Metrics.ResultDataFiles)
+	assert.Equal(t, int64(1), sr.Metrics.ResultDataFiles.Value, "one data file was planned")
+	require.NotNil(t, sr.Metrics.TotalDataManifests)
+	assert.Equal(t, int64(1), sr.Metrics.TotalDataManifests.Value)
+	assert.Equal(t, int64(1), sr.Metrics.ScannedDataManifests.Value)
+	require.NotNil(t, sr.Metrics.TotalPlanningDuration)
+	assert.Equal(t, int64(1), sr.Metrics.TotalPlanningDuration.Count)
 }
 
 func TestPlanFilesNopReporterDoesNotPanic(t *testing.T) {
