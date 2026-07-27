@@ -25,6 +25,8 @@ import (
 
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -115,4 +117,31 @@ func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
 
 func (t *ViewTestSuite) TestLocation() {
 	t.Equal("s3://bucket/test/location", t.view.Location())
+}
+
+func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
+	var mockfs internal.MockFS
+	mockfs.Test(t)
+	mockfs.On("Create", mock.Anything).
+		Return(&internal.MockFile{Contents: bytes.NewReader(nil), ErrOnClose: true}, nil)
+	defer mockfs.AssertExpectations(t)
+
+	const scheme = "view-close-error"
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return &mockfs, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	createdView, err := CreateView(
+		t.Context(),
+		"test-catalog",
+		[]string{"ns", "test_view"},
+		newTestSchema(0),
+		"select 1",
+		[]string{"ns"},
+		scheme+"://bucket/test-view",
+		nil,
+	)
+	require.EqualError(t, err, "error on close")
+	require.Nil(t, createdView)
 }
