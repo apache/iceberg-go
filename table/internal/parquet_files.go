@@ -1099,8 +1099,8 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		}
 		for _, lf := range enumerateVariantLeaves([]string{f.Name}, vt.TypedValue()) {
 			byTyped[lf.typedPath] = &leafAgg{leaf: lf, parentID: parentID}
-			for _, vp := range lf.valuePaths {
-				residualParent[vp] = struct{}{}
+			if lf.ownResidual != "" {
+				residualParent[lf.ownResidual] = struct{}{}
 			}
 		}
 	}
@@ -1165,7 +1165,7 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		if e.invalid || e.agg == nil {
 			continue
 		}
-		if slices.ContainsFunc(e.leaf.valuePaths, func(vp string) bool { return residualBad[vp] }) {
+		if e.leaf.ownResidual != "" && residualBad[e.leaf.ownResidual] {
 			continue
 		}
 		lo, hi := e.agg.Min(), e.agg.Max()
