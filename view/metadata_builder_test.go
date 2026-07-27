@@ -325,7 +325,8 @@ func TestViewMetadataAndUpdates(t *testing.T) {
 	assert.Equal(t, *md.CurrentVersion(), *v3)
 	assert.Equal(t, props, md.Properties())
 	assert.Equal(t, "location", md.Location())
-	assert.Equal(t, []*iceberg.Schema{s1, s2}, md.Schemas())
+	assert.True(t, s1.Equals(md.Schemas()[0]))
+	assert.True(t, s2.Equals(md.Schemas()[1]))
 	assert.Equal(t, s2.ID, md.CurrentSchemaID())
 
 	// Updates
