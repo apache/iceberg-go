@@ -1156,6 +1156,28 @@ func TestPlanScopedIOExpiredCredentials(t *testing.T) {
 	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
 }
 
+// TestPlanScopedIOAlreadyExpiredCredentials checks creds that are already past
+// their expiry on the very first load fail loudly instead of yielding an IO.
+func TestPlanScopedIOAlreadyExpiredCredentials(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	creds := []StorageCredential{{
+		Prefix: "file:///bucket/",
+		Config: iceberg.Properties{
+			"s3.access-key-id":               "vended",
+			"s3.session-token-expires-at-ms": strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10),
+		},
+	}}
+
+	p, ok := planIOFromCredentials(creds, "file:///bucket/db/tbl/metadata/v1.json", nil).(*planScopedIO)
+	require.True(t, ok)
+	p.refresher.nowFunc = func() time.Time { return now }
+
+	_, err := p.Load(context.Background())
+	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
+}
+
 // TestPlanScopedIOCredentialsWithoutExpiry checks creds stating no expiry never
 // expire: the fallback TTL exists to trigger a re-fetch a plan-scoped IO can't do.
 func TestPlanScopedIOCredentialsWithoutExpiry(t *testing.T) {

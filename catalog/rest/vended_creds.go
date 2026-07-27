@@ -122,11 +122,17 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	switch {
 	case v.cachedIO == nil:
 		config = v.props
+		// Plan creds can already be past their expiry by the time we first use
+		// them, so check before building an IO we'd only hand back 403s from.
+		if v.fetchCreds == nil {
+			if exp, ok := parseCredentialExpiry(config); ok && v.now().After(exp) {
+				return nil, v.expiredError(exp)
+			}
+		}
 	case v.fetchCreds == nil:
 		// Expired with no endpoint to renew from (plan-scoped creds). Fail loudly
 		// rather than hand back an IO whose reads 403.
-		return nil, fmt.Errorf("%w: %s expired at %s",
-			ErrVendedCredentialsExpired, v.location, v.expiresAt.Format(time.RFC3339))
+		return nil, v.expiredError(v.expiresAt)
 	default:
 		freshCreds, err := v.fetchCreds(ctx, v.identifier)
 		if err != nil {
@@ -150,6 +156,11 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	v.expiresAt = v.expiresAtFromConfig(config)
 
 	return v.cachedIO, nil
+}
+
+func (v *vendedCredentialRefresher) expiredError(at time.Time) error {
+	return fmt.Errorf("%w: %s expired at %s",
+		ErrVendedCredentialsExpired, v.location, at.Format(time.RFC3339))
 }
 
 // expired reports whether the cached IO's credentials are past their expiry. A
