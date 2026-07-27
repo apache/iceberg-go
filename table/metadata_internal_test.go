@@ -423,6 +423,13 @@ func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
 	_, ok = sf.Transform.(iceberg.UnknownTransform)
 	assert.True(t, ok, "unknown sort transform should load")
 	assert.Equal(t, "custom_sort[7]", sf.Transform.String())
+
+	// Marshalling back must preserve the unknown transforms verbatim, proving
+	// no write-path guard strips or rewrites them.
+	out, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "custom_transform[42]")
+	assert.Contains(t, string(out), "custom_sort[7]")
 }
 
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {

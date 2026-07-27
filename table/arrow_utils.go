@@ -1715,6 +1715,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1837,7 +1841,34 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}

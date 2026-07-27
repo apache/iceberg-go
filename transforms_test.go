@@ -84,6 +84,14 @@ func TestParseTransform(t *testing.T) {
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
+		// A reserved name with a missing/negative/non-numeric arg is malformed,
+		// not a forward-compat unknown transform.
+		{"bucket empty brackets", "bucket[]"},
+		{"truncate empty brackets", "truncate[]"},
+		{"bucket negative", "bucket[-1]"},
+		{"truncate negative", "truncate[-1]"},
+		{"bucket non-numeric", "bucket[abc]"},
+		{"empty string", ""},
 	}
 
 	for _, tt := range errorTests {
@@ -105,10 +113,6 @@ func TestParseTransform(t *testing.T) {
 		{"foobar", "foobar"},
 		{"bucket no brackets", "bucket"},
 		{"truncate no brackets", "truncate"},
-		{"bucket no val", "bucket[]"},
-		{"truncate no val", "truncate[]"},
-		{"bucket neg", "bucket[-1]"},
-		{"truncate neg", "truncate[-1]"},
 		{"bucket extra suffix", "bucketx[5]"},
 		{"bucket extra token", "bucket_extra[5]"},
 		{"truncate extra suffix", "truncatefoo[10]"},
@@ -121,7 +125,7 @@ func TestParseTransform(t *testing.T) {
 			tr, err := iceberg.ParseTransform(tt.toparse)
 			require.NoError(t, err)
 			_, ok := tr.(iceberg.UnknownTransform)
-			assert.True(t, ok)
+			require.True(t, ok)
 			assert.Equal(t, tt.toparse, tr.String())
 
 			txt, err := tr.MarshalText()

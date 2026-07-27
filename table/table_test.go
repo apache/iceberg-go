@@ -832,6 +832,29 @@ func (t *TableWritingTestSuite) TestAddFilesToBucketPartitionedTableFails() {
 	t.ErrorContains(err, "cannot infer partition value from parquet metadata for a non-linear partition field: baz_bucket_3 with transform bucket[3]")
 }
 
+func (t *TableWritingTestSuite) TestAddFilesToUnknownTransformSpecFails() {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"default", "partitioned_table_unknown_fails_v" + strconv.Itoa(t.formatVersion)}
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: unknown, Name: "baz_custom"})
+
+	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
+	filePath := fmt.Sprintf("%s/partitioned_table/test-unknown.parquet", t.location)
+	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
+		`[{"foo": true, "bar": "bar_string", "baz": 1, "qux": "2024-03-07"}]`,
+	})
+	t.Require().NoError(err)
+	defer arrTable.Release()
+	t.writeParquet(mustFS(t.T(), tbl).(iceio.WriteFileIO), filePath, arrTable)
+
+	tx := tbl.NewTransaction()
+	err = tx.AddFiles(t.ctx, []string{filePath}, nil, false)
+	t.Require().ErrorIs(err, iceberg.ErrInvalidTransform)
+	t.ErrorContains(err, "custom_transform[42]")
+}
+
 func (t *TableWritingTestSuite) TestAddFilesToPartitionedTableFailsLowerAndUpperMismatch() {
 	ident := table.Identifier{"default", "partitioned_table_bucket_fails_v" + strconv.Itoa(t.formatVersion)}
 	spec := iceberg.NewPartitionSpec(

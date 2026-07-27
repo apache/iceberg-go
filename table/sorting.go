@@ -146,6 +146,10 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int           `json:"source-id"`
 		SourceIDs       []int         `json:"source-ids,omitempty"`

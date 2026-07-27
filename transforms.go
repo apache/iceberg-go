@@ -40,6 +40,10 @@ import (
 var (
 	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
 	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
+	// Catches reserved bucket/truncate names with a malformed argument
+	// (missing, negative, non-numeric) so they error instead of falling
+	// through as unknown transforms.
+	reservedWidthRegex = regexp.MustCompile(`^(bucket|truncate)\[.*\]$`)
 )
 
 // ParseTransform takes the string representation of a transform as
@@ -49,6 +53,10 @@ var (
 // this implementation doesn't recognize can still be read. A malformed known
 // transform (e.g. a bucket/truncate with a non-positive width) still errors.
 func ParseTransform(s string) (Transform, error) {
+	if s == "" {
+		return nil, fmt.Errorf("%w: empty transform", ErrInvalidTransform)
+	}
+
 	lower := strings.ToLower(s)
 
 	if matches := bucketTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
@@ -82,6 +90,12 @@ func ParseTransform(s string) (Transform, error) {
 		return DayTransform{}, nil
 	case "hour":
 		return HourTransform{}, nil
+	}
+
+	// A reserved bucket/truncate name that didn't parse above has a bad
+	// argument; reject it rather than treat it as a forward-compat unknown.
+	if reservedWidthRegex.MatchString(lower) {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 	}
 
 	// Unknown transform: v3 readers must load these and ignore them when

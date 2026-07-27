@@ -250,6 +250,9 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 		}
 
 		// Validate the transform
+		if _, ok := transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot add partition field with unknown transform: %s", iceberg.ErrInvalidTransform, transform)
+		}
 		outputType := boundTerm.Type()
 		if !transform.CanTransform(outputType) {
 			return fmt.Errorf("%s cannot transform %s values from %s", transform.String(), outputType.String(), boundTerm.Ref().Field().Name)

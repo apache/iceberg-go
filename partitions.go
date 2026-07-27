@@ -125,6 +125,10 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	_, hasSourceID := raw["source-id"]
 	_, hasSourceIDs := raw["source-ids"]
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int    `json:"source-id"`
 		SourceIDs       []int  `json:"source-ids,omitempty"`

@@ -170,6 +170,20 @@ func TestUpdateSpecAddField(t *testing.T) {
 		})
 	}
 
+	t.Run("add unknown transform field", func(t *testing.T) {
+		unknown, err := iceberg.ParseTransform("custom_transform[42]")
+		require.NoError(t, err)
+
+		txn = testPartitionedTable.NewTransaction()
+		updates, reqs, err := table.NewUpdateSpec(txn, true).
+			AddField("id", unknown, "id_custom").
+			BuildUpdates()
+		require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+		assert.ErrorContains(t, err, "custom_transform[42]")
+		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
+	})
+
 	t.Run("add duplicate partition field", func(t *testing.T) {
 		txn = testPartitionedTable.NewTransaction()
 		specUpdate := table.NewUpdateSpec(txn, true)
