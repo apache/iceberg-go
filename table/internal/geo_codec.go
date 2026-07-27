@@ -19,6 +19,7 @@ package internal
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"github.com/apache/iceberg-go"
@@ -160,15 +161,22 @@ func (a *geoBoundsAccumulator) layout() (geom.Layout, bool) {
 	hasZ := a.has[geoDimZ] && a.zGeoms == a.geoms
 	hasM := a.has[geoDimM] && a.mGeoms == a.geoms
 
+	return geoPointLayout(hasZ, hasM), true
+}
+
+// geoPointLayout selects the bound point layout implied by which optional
+// dimensions are present. X and Y are always assumed present; callers gate on
+// that before calling.
+func geoPointLayout(hasZ, hasM bool) geom.Layout {
 	switch {
 	case hasZ && hasM:
-		return geom.XYZM, true
+		return geom.XYZM
 	case hasZ:
-		return geom.XYZ, true
+		return geom.XYZ
 	case hasM:
-		return geom.XYM, true
+		return geom.XYM
 	default:
-		return geom.XY, true
+		return geom.XY
 	}
 }
 
@@ -266,3 +274,197 @@ func (g *geoStatsAgg) Update(interface{ HasMinMax() bool }) {}
 
 func (g *geoStatsAgg) MinAsBytes() ([]byte, error) { return g.lower, nil }
 func (g *geoStatsAgg) MaxAsBytes() ([]byte, error) { return g.upper, nil }
+
+// decodeGeoBound is the inverse of encodeGeoBound: it parses an Iceberg
+// geospatial single-value bound back into its per-dimension coordinates and the
+// layout it was written with. A 32-byte bound is XYM when its Z slot is NaN and
+// XYZM otherwise (see encodeGeoBound). ok is false when the length is not a
+// valid bound length (16, 24, or 32 bytes).
+func decodeGeoBound(data []byte) (vals [geoNumDims]float64, layout geom.Layout, ok bool) {
+	var n int
+	switch len(data) {
+	case 16:
+		n = 2
+	case 24:
+		n = 3
+	case 32:
+		n = 4
+	default:
+		return vals, geom.NoLayout, false
+	}
+
+	coords := make([]float64, n)
+	for i := range coords {
+		coords[i] = math.Float64frombits(binary.LittleEndian.Uint64(data[i*8:]))
+	}
+
+	vals[geoDimX], vals[geoDimY] = coords[0], coords[1]
+	switch len(data) {
+	case 16:
+		layout = geom.XY
+	case 24:
+		vals[geoDimZ], layout = coords[2], geom.XYZ
+	case 32:
+		if math.IsNaN(coords[2]) {
+			vals[geoDimM], layout = coords[3], geom.XYM
+		} else {
+			vals[geoDimZ], vals[geoDimM], layout = coords[2], coords[3], geom.XYZM
+		}
+	}
+
+	return vals, layout, true
+}
+
+// layoutHasZM reports which optional dimensions a bound layout carries.
+func layoutHasZM(l geom.Layout) (hasZ, hasM bool) {
+	switch l {
+	case geom.XYZ:
+		return true, false
+	case geom.XYM:
+		return false, true
+	case geom.XYZM:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// GeoBoundsAggregator combines the per-data-file geospatial bounds emitted by
+// geoBoundsAccumulator (the single-value serialization written into a
+// DataFile's lower/upper bounds; see Bounds) across multiple files into one
+// bounding box. It is the manifest-level analogue of the primitive min/max
+// aggregation the manifest writer already does per partition field, but geo
+// bounds are coordinate tuples with no total order, so they must never be
+// folded with a
+// scalar byte comparison: each bound is decoded to its coordinates and merged
+// dimension by dimension. The combined box is returned in the same
+// serialization, so it round-trips through a manifest bound exactly like a
+// per-file one.
+//
+// The aggregator is geometry-only: it folds each dimension with a scalar
+// min/max, which is correct for geometry's planar bounds but wrong for
+// geography. A geography box may cross the antimeridian, encoded as lower_x >
+// upper_x (spec Appendix D); scalar min/max would silently unwrap it (merging a
+// wrapped [170, -170] with [10, 20] yields [10, 20], dropping the wrapped
+// range), producing a box that prunes rows it should keep. Because the bound
+// bytes carry no type, callers must declare geography via NewGeoBoundsAggregator
+// so Add can reject it (see Add). iceberg-go itself emits no per-file bounds for
+// geography (see Bounds), so the common path — passing empty geography bounds
+// through — is a harmless no-op; only non-empty geography bounds (e.g. from files
+// written by another engine) are refused, until geodesic/antimeridian-aware
+// aggregation is added.
+type GeoBoundsAggregator struct {
+	min [geoNumDims]float64
+	max [geoNumDims]float64
+	has [geoNumDims]bool
+
+	// n counts the files added; zFiles and mFiles count how many carried a Z / M
+	// dimension. An optional dimension is only emitted when every file carried it
+	// (count == n) - the same omit-on-ambiguity rule geoBoundsAccumulator applies
+	// across geometries within a single file. Emitting a Z/M that some files lack
+	// would imply those files have a value in range and drive wrong-answer
+	// pruning.
+	n      int
+	zFiles int
+	mFiles int
+
+	// isGeography marks a geography column, whose bounds must not be folded with
+	// scalar min/max (see the type doc); Add refuses non-empty geography bounds.
+	isGeography bool
+}
+
+// NewGeoBoundsAggregator returns an aggregator for a single geo column. Pass
+// isGeography=true for geography columns so Add refuses their bounds rather than
+// mis-merging antimeridian-crossing boxes (see GeoBoundsAggregator). The
+// zero-value GeoBoundsAggregator is a valid geometry aggregator.
+func NewGeoBoundsAggregator(isGeography bool) *GeoBoundsAggregator {
+	return &GeoBoundsAggregator{isGeography: isGeography}
+}
+
+// Add merges one data file's lower and upper geo bounds into the aggregate. The
+// two bounds must share a layout, which they always do: a file's lower and upper
+// are written together by geoBoundsAccumulator. An empty pair (nil/empty lower
+// and upper) contributes nothing, so files without geo bounds - including every
+// geography file written by iceberg-go - can be passed through harmlessly. It
+// errors when a bound is a non-empty but invalid length, when lower and upper
+// disagree on layout, or when a non-empty bound is added to a geography
+// aggregator (scalar folding would mis-merge antimeridian-crossing boxes; see
+// GeoBoundsAggregator).
+func (g *GeoBoundsAggregator) Add(lower, upper []byte) error {
+	if len(lower) == 0 && len(upper) == 0 {
+		return nil
+	}
+
+	if g.isGeography {
+		return fmt.Errorf("%w: cannot aggregate geography geo bounds; "+
+			"scalar min/max folding mis-merges antimeridian-crossing boxes",
+			iceberg.ErrNotImplemented)
+	}
+
+	lo, loLayout, ok := decodeGeoBound(lower)
+	if !ok {
+		return fmt.Errorf("%w: geo lower bound must be 16, 24, or 32 bytes, got %d",
+			iceberg.ErrInvalidBinSerialization, len(lower))
+	}
+	hi, hiLayout, ok := decodeGeoBound(upper)
+	if !ok {
+		return fmt.Errorf("%w: geo upper bound must be 16, 24, or 32 bytes, got %d",
+			iceberg.ErrInvalidBinSerialization, len(upper))
+	}
+	if loLayout != hiLayout {
+		return fmt.Errorf("%w: geo lower/upper bounds have mismatched layouts (%v vs %v)",
+			iceberg.ErrInvalidBinSerialization, loLayout, hiLayout)
+	}
+
+	g.n++
+	g.update(geoDimX, lo[geoDimX], hi[geoDimX])
+	g.update(geoDimY, lo[geoDimY], hi[geoDimY])
+
+	if hasZ, hasM := layoutHasZM(loLayout); hasZ || hasM {
+		if hasZ {
+			g.zFiles++
+			g.update(geoDimZ, lo[geoDimZ], hi[geoDimZ])
+		}
+		if hasM {
+			g.mFiles++
+			g.update(geoDimM, lo[geoDimM], hi[geoDimM])
+		}
+	}
+
+	return nil
+}
+
+// update folds one file's per-dimension lower/upper into the running min/max.
+func (g *GeoBoundsAggregator) update(dim int, lo, hi float64) {
+	if math.IsNaN(lo) || math.IsNaN(hi) {
+		return
+	}
+
+	if !g.has[dim] {
+		g.min[dim], g.max[dim] = lo, hi
+		g.has[dim] = true
+
+		return
+	}
+
+	if lo < g.min[dim] {
+		g.min[dim] = lo
+	}
+	if hi > g.max[dim] {
+		g.max[dim] = hi
+	}
+}
+
+// Bounds returns the combined lower and upper bound points in the Iceberg
+// geospatial single-value serialization, or nil when no file contributed a
+// bounding box. An optional Z/M dimension is dropped unless every added file
+// carried it (see the field docs).
+func (g *GeoBoundsAggregator) Bounds() (lower, upper []byte) {
+	if g.n == 0 || g.isGeography || !g.has[geoDimX] || !g.has[geoDimY] {
+		return nil, nil
+	}
+
+	layout := geoPointLayout(g.has[geoDimZ] && g.zFiles == g.n, g.has[geoDimM] && g.mFiles == g.n)
+
+	return encodeGeoBound(g.min, layout), encodeGeoBound(g.max, layout)
+}
