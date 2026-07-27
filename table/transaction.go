@@ -36,7 +36,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
-	"github.com/apache/iceberg-go/table/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
@@ -2257,7 +2257,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	extSet := substrait.NewExtensionSet()
 
 	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
+	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
 
 	numWorkers := min(concurrency, len(tasks))
 	records := make(chan enumeratedRecord, numWorkers)
@@ -2288,7 +2288,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	go func() {
 		for i, t := range tasks {
-			taskChan <- internal.Enumerated[FileScanTask]{
+			taskChan <- tblutils.Enumerated[FileScanTask]{
 				Value: t, Index: i, Last: i == len(tasks)-1,
 			}
 		}
