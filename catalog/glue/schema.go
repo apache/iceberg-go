@@ -19,8 +19,6 @@ package glue
 
 import (
 	"fmt"
-	"maps"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -31,10 +29,23 @@ import (
 )
 
 func schemasToGlueColumns(metadata table.Metadata) []types.Column {
-	results := make(map[string]types.Column)
+	// preserve the current schema's logical column order and then,
+	// append columns from historical schemas that are not already present
+	var columns []types.Column
+	addedNames := make(map[string]struct{})
+
+	addColumnWithDedupe := func(field types.Column) {
+		name := aws.ToString(field.Name)
+		if _, ok := addedNames[name]; ok {
+			return
+		}
+
+		columns = append(columns, field)
+		addedNames[name] = struct{}{}
+	}
 
 	for _, field := range schemaToGlueColumns(metadata.CurrentSchema(), true) {
-		results[aws.ToString(field.Name)] = field
+		addColumnWithDedupe(field)
 	}
 
 	for _, schema := range metadata.Schemas() {
@@ -43,20 +54,9 @@ func schemasToGlueColumns(metadata table.Metadata) []types.Column {
 		}
 
 		for _, field := range schemaToGlueColumns(schema, false) {
-			if _, ok := results[aws.ToString(field.Name)]; !ok {
-				results[aws.ToString(field.Name)] = field
-			}
+			addColumnWithDedupe(field)
 		}
 	}
-
-	// Convert map values to slice and sort by icebergFieldIDKey
-	columns := slices.Collect(maps.Values(results))
-	slices.SortFunc(columns, func(a, b types.Column) int {
-		aID, _ := strconv.Atoi(a.Parameters[icebergFieldIDKey])
-		bID, _ := strconv.Atoi(b.Parameters[icebergFieldIDKey])
-
-		return aID - bID
-	})
 
 	return columns
 }
