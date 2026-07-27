@@ -53,6 +53,78 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
+func TestPartitionsMatchHandlesBinaryValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  map[int]any
+		right map[int]any
+		match bool
+	}{
+		{
+			name:  "equal binary values",
+			left:  map[int]any{1000: []byte{0xde, 0xad}},
+			right: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
+			match: true,
+		},
+		{
+			name:  "different binary values",
+			left:  map[int]any{1000: []byte{0xde, 0xad}},
+			right: map[int]any{1000: []byte{0xbe, 0xef}},
+		},
+		{
+			name:  "binary and string values differ",
+			left:  map[int]any{1000: []byte("value")},
+			right: map[int]any{1000: "value"},
+		},
+		{
+			name:  "comparable values still match",
+			left:  map[int]any{1000: int32(7), 1001: "region"},
+			right: map[int]any{1000: int32(7), 1001: "region"},
+			match: true,
+		},
+		{
+			name:  "different field IDs",
+			left:  map[int]any{1000: []byte{1}},
+			right: map[int]any{1001: []byte{1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				assert.Equal(t, tt.match, partitionsMatch(tt.left, tt.right))
+			})
+		})
+	}
+}
+
+func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
+	dataSeqNum := int64(1)
+	deleteSeqNum := int64(2)
+	dataFile := &mockDataFile{
+		path:      "data.parquet",
+		partition: map[int]any{1000: []byte{0xde, 0xad}},
+	}
+	matchingDelete := &mockDataFile{
+		path:      "matching-delete.parquet",
+		partition: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
+	}
+	nonMatchingDelete := &mockDataFile{
+		path:      "non-matching-delete.parquet",
+		partition: map[int]any{1000: []byte{0xbe, 0xef}},
+	}
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
+	deleteEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+	}
+
+	assert.Equal(t, []iceberg.DataFile{matchingDelete},
+		matchEqualityDeletesToData(dataEntry, deleteEntries))
+}
+
 func TestMinSequenceNum(t *testing.T) {
 	tests := []struct {
 		name      string
