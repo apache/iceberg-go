@@ -204,7 +204,8 @@ func (u *updateNameMappingVisitor) Field(field MappedField, fieldResult []Mapped
 func (u *updateNameMappingVisitor) removeReassignedNames(field MappedField, assignments map[string]int) *MappedField {
 	removedNames := make(map[string]struct{})
 	for _, name := range field.Names {
-		if assignedID, exists := assignments[name]; exists && assignedID != *field.FieldID {
+		assignedID, exists := assignments[name]
+		if exists && (field.FieldID == nil || assignedID != *field.FieldID) {
 			removedNames[name] = struct{}{}
 		}
 	}

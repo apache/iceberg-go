@@ -231,6 +231,44 @@ func TestUpdateNameMapping(t *testing.T) {
 		assert.Equal(t, []string{"anonymous-child"}, original[1].Fields[0].Names)
 	})
 
+	t.Run("update nested field under anonymous parent", func(t *testing.T) {
+		childID := 1
+		original := iceberg.NameMapping{{
+			Names: []string{"anonymous"},
+			Fields: []iceberg.MappedField{{
+				FieldID: &childID,
+				Names:   []string{"child"},
+			}},
+		}}
+
+		result, err := iceberg.UpdateNameMapping(
+			original,
+			map[int]iceberg.NestedField{1: {ID: 1, Name: "renamed-child"}},
+			map[int][]iceberg.NestedField{},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"child", "renamed-child"}, result[0].Fields[0].Names)
+	})
+
+	t.Run("remove reassigned name from anonymous field", func(t *testing.T) {
+		fieldID := 1
+		original := iceberg.NameMapping{
+			{Names: []string{"renamed"}},
+			{FieldID: &fieldID, Names: []string{"original"}},
+		}
+
+		result, err := iceberg.UpdateNameMapping(
+			original,
+			map[int]iceberg.NestedField{1: {ID: 1, Name: "renamed"}},
+			map[int][]iceberg.NestedField{},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, iceberg.NameMapping{{
+			FieldID: makeID(1),
+			Names:   []string{"original", "renamed"},
+		}}, result)
+	})
+
 	t.Run("update mapping with updates and adds", func(t *testing.T) {
 		updates := map[int]iceberg.NestedField{
 			1: {ID: 1, Name: "foo_update", Type: &iceberg.StringType{}},
