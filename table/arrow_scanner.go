@@ -451,6 +451,9 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 
 	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
 	posCol := tbl.Column(tbl.Schema().FieldIndices("pos")[0]).Data()
+	if posCol.NullN() > 0 {
+		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	}
 
 	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
 }

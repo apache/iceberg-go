@@ -324,6 +324,28 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	return writerProps
 }
 
+// ParquetRowGroupTargetSizeBytes returns the configured uncompressed row-group
+// size target. Iceberg Java rejects invalid and non-positive values rather than
+// silently falling back to the default.
+func ParquetRowGroupTargetSizeBytes(props iceberg.Properties) (int64, error) {
+	value, ok := props[ParquetRowGroupSizeBytesKey]
+	if !ok {
+		return ParquetRowGroupSizeBytesDefault, nil
+	}
+
+	size, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: invalid %s value %q: %v",
+			iceberg.ErrInvalidArgument, ParquetRowGroupSizeBytesKey, value, err)
+	}
+	if size <= 0 {
+		return 0, fmt.Errorf("%w: %s must be greater than 0, got %d",
+			iceberg.ErrInvalidArgument, ParquetRowGroupSizeBytesKey, size)
+	}
+
+	return size, nil
+}
+
 func (p parquetFormat) WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error) {
 	w, err := p.NewFileWriter(ctx, fs, partitionValues, info, batches[0].Schema())
 	if err != nil {
@@ -351,17 +373,18 @@ func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.Da
 // lifecycle. It writes Arrow record batches to a Parquet file and tracks bytes
 // written for rolling file decisions.
 type ParquetFileWriter struct {
-	pqWriter    *pqarrow.FileWriter
-	counter     *internal.CountingWriter
-	fileCloser  io.Closer
-	fs          iceio.WriteFileIO
-	format      parquetFormat
-	info        WriteFileInfo
-	partition   map[int]any
-	colMapping  map[string]int
-	geoCols     []geoColumn
-	geoAccs     map[int]*geoBoundsAccumulator
-	arrowSchema *arrow.Schema
+	pqWriter      *pqarrow.FileWriter
+	counter       *internal.CountingWriter
+	fileCloser    io.Closer
+	fs            iceio.WriteFileIO
+	format        parquetFormat
+	info          WriteFileInfo
+	partition     map[int]any
+	colMapping    map[string]int
+	geoCols       []geoColumn
+	geoAccs       map[int]*geoBoundsAccumulator
+	arrowSchema   *arrow.Schema
+	rowGroupBytes int64
 }
 
 // geoColumn locates a top-level geometry/geography column: its position in the
@@ -397,6 +420,15 @@ func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn 
 func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema,
 ) (FileWriter, error) {
+	rowGroupTargetSizeBytes := info.RowGroupBytes
+	if rowGroupTargetSizeBytes == 0 {
+		rowGroupTargetSizeBytes = ParquetRowGroupSizeBytesDefault
+	}
+	if rowGroupTargetSizeBytes < 0 {
+		return nil, fmt.Errorf("%w: row-group target size must be greater than 0, got %d",
+			iceberg.ErrInvalidArgument, rowGroupTargetSizeBytes)
+	}
+
 	fw, err := fs.Create(info.FileName)
 	if err != nil {
 		return nil, err
@@ -439,17 +471,18 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	return &ParquetFileWriter{
-		pqWriter:    writer,
-		counter:     counter,
-		fileCloser:  fw,
-		fs:          fs,
-		format:      p,
-		info:        info,
-		partition:   partitionValues,
-		colMapping:  colMapping,
-		geoCols:     geoCols,
-		geoAccs:     geoAccs,
-		arrowSchema: arrowSchema,
+		pqWriter:      writer,
+		counter:       counter,
+		fileCloser:    fw,
+		fs:            fs,
+		format:        p,
+		info:          info,
+		partition:     partitionValues,
+		colMapping:    colMapping,
+		geoCols:       geoCols,
+		geoAccs:       geoAccs,
+		arrowSchema:   arrowSchema,
+		rowGroupBytes: rowGroupTargetSizeBytes,
 	}, nil
 }
 
@@ -511,6 +544,16 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 	if err := w.accumulateGeoBounds(batch); err != nil {
 		return err
+	}
+
+	// Rotate before writing the next non-empty batch. Rotating immediately after
+	// crossing the target would leave an empty trailing row group when the file
+	// is closed without another write.
+	if batch.NumRows() > 0 &&
+		w.pqWriter.RowGroupTotalBytesWritten() >= w.rowGroupBytes {
+		if err := w.pqWriter.NewBufferedRowGroupChecked(); err != nil {
+			return err
+		}
 	}
 
 	return w.pqWriter.WriteBuffered(batch)

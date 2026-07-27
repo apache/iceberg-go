@@ -176,6 +176,13 @@ func TestPartitionSpecRejectsInvalidBucketTransform(t *testing.T) {
 	require.ErrorContains(t, err, "numBuckets > 0")
 }
 
+func TestPartitionSpecRejectsNegativeSpecID(t *testing.T) {
+	_, err := iceberg.NewPartitionSpecOpts(iceberg.WithSpecID(-1))
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	require.ErrorContains(t, err, "spec id must be non-negative: -1")
+}
+
 func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{

@@ -120,6 +120,7 @@ type WriteFileInfo struct {
 	FileName         string
 	StatsCols        map[int]StatisticsCollector
 	WriteProps       any
+	RowGroupBytes    int64
 	Content          iceberg.ManifestEntryContent
 	EqualityFieldIDs []int
 	SortOrderID      int
