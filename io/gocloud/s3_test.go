@@ -87,6 +87,24 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 		cfg.HTTPClient = http.DefaultClient
 		assert.Nil(t, shared.HTTPClient, "shared ctx config must stay unmutated")
 	})
+
+	// A partial key set (missing the secret) must not clobber the context creds.
+	t.Run("partial props creds fall through", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := resolveS3AWSConfig(ctxWith, map[string]string{io.S3AccessKeyID: "PARTIAL"})
+		require.NoError(t, err)
+		assert.Equal(t, "CTX", retrieve(t, cfg), "incomplete override must keep ctx creds")
+	})
+
+	// Explicit region overrides the context config's region, without mutating it.
+	t.Run("explicit region overrides ctx config", func(t *testing.T) {
+		t.Parallel()
+		shared := &aws.Config{Region: "ctx-region", Credentials: credentials.NewStaticCredentialsProvider("CTX", "s", "")}
+		cfg, err := resolveS3AWSConfig(utils.WithAwsConfig(context.Background(), shared), map[string]string{io.S3Region: "props-region"})
+		require.NoError(t, err)
+		assert.Equal(t, "props-region", cfg.Region)
+		assert.Equal(t, "ctx-region", shared.Region, "shared ctx config must not be mutated")
+	})
 }
 
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {

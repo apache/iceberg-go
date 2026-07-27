@@ -182,10 +182,21 @@ func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Conf
 		return nil, err
 	}
 
-	// Always copy so neither the credential override nor the caller's later
-	// mutations (e.g. HTTPClient) touch a shared context config.
+	// Always copy so overrides (and the caller's later HTTPClient assignment)
+	// never touch a shared context config.
 	cfg := *base
-	if props[io.S3AccessKeyID] != "" || props[io.S3SecretAccessKey] != "" {
+
+	// Explicit region overrides the context config; an unset region falls through.
+	if r := props[io.S3Region]; r != "" {
+		cfg.Region = r
+	} else if r := props[io.S3ClientRegion]; r != "" {
+		cfg.Region = r
+	}
+
+	// A complete explicit key pair overrides the credentials. A partial set
+	// (missing the access key or secret) falls through to the context/default
+	// chain rather than installing a provider with blank fields.
+	if props[io.S3AccessKeyID] != "" && props[io.S3SecretAccessKey] != "" {
 		cfg.Credentials = credentials.NewStaticCredentialsProvider(
 			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
 		)
