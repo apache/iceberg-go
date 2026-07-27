@@ -18,6 +18,8 @@
 package iceberg
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -478,6 +480,12 @@ type columnNameTranslator struct {
 	fileSchema *Schema
 }
 
+type defaultValueStruct []any
+
+func (s defaultValueStruct) Size() int            { return len(s) }
+func (s defaultValueStruct) Get(pos int) any      { return s[pos] }
+func (s defaultValueStruct) Set(pos int, val any) { s[pos] = val }
+
 func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
 func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
 func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
@@ -496,19 +504,7 @@ func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpressio
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
 }
 
-func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
-	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
-	if !found {
-		// in the case of schema evolution, the column might not be present
-		// in the file schema when reading older data
-		if pred.Op() == OpIsNull {
-			return AlwaysTrue{}
-		}
-
-		return AlwaysFalse{}
-	}
-
-	ref := Reference(fileColName)
+func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
 		return p.AsUnbound(ref)
@@ -519,4 +515,81 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
+}
+
+func initialDefaultLiteral(field NestedField) (Literal, error) {
+	switch field.Type.(type) {
+	case BinaryType, FixedType, GeographyType, GeometryType:
+		var data []byte
+		switch val := field.InitialDefault.(type) {
+		case []byte:
+			data = val
+		case string:
+			var err error
+			data, err = base64.StdEncoding.DecodeString(val)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("%w: invalid %s initial default %v",
+				ErrInvalidSchema, field.Type, field.InitialDefault)
+		}
+
+		switch field.Type.(type) {
+		case GeographyType, GeometryType:
+			return LiteralFromBytes(field.Type, data)
+		default:
+			return BinaryLiteral(data).To(field.Type)
+		}
+	case DecimalType:
+		if val, ok := field.InitialDefault.(Decimal); ok {
+			return DecimalLiteral(val).To(field.Type)
+		}
+	}
+
+	data, err := json.Marshal(field.InitialDefault)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeValue(data, field.Type)
+}
+
+func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
+	if !found {
+		// in the case of schema evolution, the column might not be present
+		// in the file schema when reading older data
+		field := pred.Ref().Field()
+		if field.InitialDefault == nil {
+			if pred.Op() == OpIsNull {
+				return AlwaysTrue{}
+			}
+
+			return AlwaysFalse{}
+		}
+
+		eval, err := ExpressionEvaluator(NewSchema(0, field),
+			unbindPredicate(pred, Reference(field.Name)), true)
+		if err != nil {
+			panic(err)
+		}
+
+		lit, err := initialDefaultLiteral(field)
+		if err != nil {
+			panic(err)
+		}
+
+		matches, err := eval(defaultValueStruct{lit.Any()})
+		if err != nil {
+			panic(err)
+		}
+		if matches {
+			return AlwaysTrue{}
+		}
+
+		return AlwaysFalse{}
+	}
+
+	return unbindPredicate(pred, Reference(fileColName))
 }

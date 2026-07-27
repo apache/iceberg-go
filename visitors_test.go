@@ -233,6 +233,119 @@ func TestAlwaysExprBinding(t *testing.T) {
 	}
 }
 
+func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
+	ref := iceberg.Reference("missing_col")
+	tests := []struct {
+		name     string
+		field    iceberg.NestedField
+		expr     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{
+			name: "matching equality",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.EqualTo(ref, int32(42)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "mismatching equality",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.EqualTo(ref, int32(7)),
+			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "matching set",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.IsIn(ref, int32(7), int32(42)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "is null with non-null default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "not null with non-null default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.NotNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching binary metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: "AQID",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching UUID metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.UUID,
+				InitialDefault: "f79c3e09-677c-4bbd-a479-512f87f77acf",
+			},
+			expr:     iceberg.EqualTo(ref, "f79c3e09-677c-4bbd-a479-512f87f77acf"),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching decimal metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.DecimalTypeOf(9, 2),
+				InitialDefault: "12.34",
+			},
+			expr:     iceberg.EqualTo(ref, "12.34"),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "is null without default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "equality without default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+			},
+			expr:     iceberg.EqualTo(ref, int32(42)),
+			expected: iceberg.AlwaysFalse{},
+		},
+	}
+
+	fileSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "existing_col", Type: iceberg.PrimitiveTypes.String},
+	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(iceberg.NewSchema(1, tt.field), tt.expr, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			assert.Truef(t, translated.Equals(tt.expected), "expected %s, got %s", tt.expected, translated)
+		})
+	}
+}
+
 func TestBoundBoolExprVisitor(t *testing.T) {
 	tests := []struct {
 		expr     iceberg.BooleanExpression
