@@ -491,6 +491,53 @@ func TestCompatModeTransferManagerNoAwsChunked(t *testing.T) {
 	assertNoAwsChunkedWriteHeaders(t, captured, "transfer-manager PutObject")
 }
 
+func TestCompatModeGetObjectStripsSignedHeaders(t *testing.T) {
+	t.Parallel()
+
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("hello"))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := aws.Config{
+		Region:      "auto",
+		Credentials: credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
+		HTTPClient:  srv.Client(),
+	}
+	client := s3.NewFromConfig(cfg, compatModeS3Options(srv.URL))
+
+	out, err := client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test-key"),
+	})
+	require.NoError(t, err)
+	_ = out.Body.Close()
+
+	require.NotNil(t, captured)
+
+	// SDK-internal headers must be stripped on reads too; otherwise GCS's S3 interop
+	// endpoint returns SignatureDoesNotMatch when loading table metadata (GetObject).
+	for _, h := range []string{"Amz-Sdk-Invocation-Id", "Amz-Sdk-Request"} {
+		assert.Emptyf(t, captured.Get(h),
+			"GetObject must not send SDK-internal header %s on the wire, got %q", h, captured.Get(h))
+	}
+	auth := captured.Get("Authorization")
+	require.NotEmpty(t, auth, "Authorization header must be set")
+	// None of these may appear in the signed set, or GCS rejects with SignatureDoesNotMatch.
+	for _, h := range []string{"amz-sdk-invocation-id", "amz-sdk-request", "accept-encoding"} {
+		assert.NotContainsf(t, auth, h,
+			"SignedHeaders in Authorization must not list %q on reads, got Authorization=%q", h, auth)
+	}
+
+	// Re-added as identity after signing: on the wire (no silent gzip) but not in the
+	// signature checked above.
+	assert.Equal(t, "identity", captured.Get("Accept-Encoding"),
+		"GetObject must keep Accept-Encoding: identity on the wire")
+}
+
 func TestS3CompatModeEnabled(t *testing.T) {
 	t.Parallel()
 

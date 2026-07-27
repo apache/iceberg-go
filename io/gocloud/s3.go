@@ -31,7 +31,6 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -274,30 +273,23 @@ func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
 	return nil
 }
 
-// SDK-internal headers that GCS's S3 interop endpoint doesn't expect in the SigV4 signed set
+// SDK-internal headers GCS's S3 interop endpoint rejects in the SigV4 signed set; removing
+// them before signing (all ops, reads included) avoids SignatureDoesNotMatch.
 var gcsIncompatibleSignedHeaders = []string{
 	"Amz-Sdk-Invocation-Id",
 	"Amz-Sdk-Request",
 	"Accept-Encoding",
 }
 
-// limits header stripping to write ops;
-// reads must keep Accept-Encoding: identity so responses aren't silently gzip-decompressed.
-var gcsStripSignedHeaderOps = map[string]struct{}{
-	"PutObject":             {},
-	"UploadPart":            {},
-	"CreateMultipartUpload": {},
-}
-
+// stripGCSIncompatibleSignedHeaders removes those headers before signing, then re-adds
+// Accept-Encoding: identity after signing so it's on the wire but unsigned (no gzip, GCS-safe).
 func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
-	m := smithymiddleware.FinalizeMiddlewareFunc(
+	strip := smithymiddleware.FinalizeMiddlewareFunc(
 		"iceberg-go/strip-gcs-incompatible-signed-headers",
 		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
-			if _, isWrite := gcsStripSignedHeaderOps[awsmiddleware.GetOperationName(ctx)]; isWrite {
-				if req, ok := in.Request.(*smithyhttp.Request); ok {
-					for _, h := range gcsIncompatibleSignedHeaders {
-						req.Header.Del(h)
-					}
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				for _, h := range gcsIncompatibleSignedHeaders {
+					req.Header.Del(h)
 				}
 			}
 
@@ -305,8 +297,26 @@ func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
 		},
 	)
 
-	if err := stack.Finalize.Insert(m, "Signing", smithymiddleware.Before); err != nil {
-		return stack.Finalize.Add(m, smithymiddleware.Before)
+	restore := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/restore-accept-encoding-identity",
+		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				req.Header.Set("Accept-Encoding", "identity")
+			}
+
+			return next.HandleFinalize(ctx, in)
+		},
+	)
+
+	if err := stack.Finalize.Insert(strip, "Signing", smithymiddleware.Before); err != nil {
+		if err := stack.Finalize.Add(strip, smithymiddleware.Before); err != nil {
+			return err
+		}
+	}
+	if err := stack.Finalize.Insert(restore, "Signing", smithymiddleware.After); err != nil {
+		if err := stack.Finalize.Add(restore, smithymiddleware.After); err != nil {
+			return err
+		}
 	}
 
 	return nil
