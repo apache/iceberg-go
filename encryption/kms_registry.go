@@ -30,9 +30,9 @@ import (
 // registered short name, not a fully-qualified class name.
 //
 // KMSTypeKey ("kms-type") is an iceberg-go-specific mechanism for wiring up
-// a KMS client at runtime. It is NOT a standardized Iceberg spec property
-// and has no cross-implementation meaning — it will not be recognized by,
-// or portable to, other Iceberg implementations (e.g. Java, PyIceberg).
+// a KMS client at runtime. It is not a standardized Iceberg spec property
+// and has no cross-implementation meaning. It will not be recognized by,
+// or portable to, other Iceberg implementations.
 const KMSTypeKey = "kms-type"
 
 // ErrKMSTypeNotFound is returned by [LoadKeyManagementClient] when the
