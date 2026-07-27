@@ -29,6 +29,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/apache/iceberg-go/internal"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with
@@ -447,11 +449,20 @@ func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool)
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
 // field rather than just the field name.
 func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
-	idx, _ := s.lazyIDToField()
-	f, ok := idx[id]
+	f, ok := s.FindFieldByIDRef(id, internal.SchemaRef{})
 	if ok {
 		f = cloneField(f)
 	}
+
+	return f, ok
+}
+
+// FindFieldByIDRef returns a schema-owned field without cloning it. It is limited
+// to internal callers that only read the result and need to avoid clone-on-read
+// overhead on hot paths.
+func (s *Schema) FindFieldByIDRef(id int, _ internal.SchemaRef) (NestedField, bool) {
+	idx, _ := s.lazyIDToField()
+	f, ok := idx[id]
 
 	return f, ok
 }

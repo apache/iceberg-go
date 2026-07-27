@@ -19,12 +19,14 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -376,6 +378,27 @@ func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 		}
 		assertIndependent(t, byID[1], byID[3])
 	})
+}
+
+func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
+	children := make([]iceberg.NestedField, 50)
+	for i := range children {
+		children[i] = iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("child_%d", i), Type: iceberg.PrimitiveTypes.String,
+		}
+	}
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "parent", Type: &iceberg.StructType{FieldList: children},
+	})
+	_, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
+	require.True(t, ok)
+
+	var field iceberg.NestedField
+	assert.Zero(t, testing.AllocsPerRun(100, func() {
+		field, ok = schema.FindFieldByIDRef(1, internal.SchemaRef{})
+	}))
+	require.True(t, ok)
+	assert.Equal(t, 1, field.ID)
 }
 
 func TestSchemaIndexByIDVisitor(t *testing.T) {
