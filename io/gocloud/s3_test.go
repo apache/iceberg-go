@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -38,6 +39,80 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
+	t.Parallel()
+
+	retrieve := func(t *testing.T, cfg *aws.Config) string {
+		t.Helper()
+		creds, err := cfg.Credentials.Retrieve(context.Background())
+		require.NoError(t, err)
+
+		return creds.AccessKeyID
+	}
+
+	ctxCfg := aws.Config{Credentials: credentials.NewStaticCredentialsProvider("CTX", "ctxsecret", "")}
+	ctxWith := utils.WithAwsConfig(context.Background(), &ctxCfg)
+
+	// Explicit s3.* creds win over an ambient context config, without mutating it.
+	t.Run("explicit props override ctx config", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := resolveS3AWSConfig(ctxWith, map[string]string{
+			io.S3AccessKeyID: "PROPS", io.S3SecretAccessKey: "propssecret",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "PROPS", retrieve(t, cfg))
+		assert.Equal(t, "CTX", retrieve(t, &ctxCfg), "shared ctx config must not be mutated")
+	})
+
+	// With no s3.* creds, the context config is used unchanged.
+	t.Run("ctx config used when no props creds", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := resolveS3AWSConfig(ctxWith, map[string]string{})
+		require.NoError(t, err)
+		assert.Equal(t, "CTX", retrieve(t, cfg))
+	})
+
+	// With no context config, creds come from the s3.* props.
+	t.Run("props creds used when no ctx config", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := resolveS3AWSConfig(context.Background(), map[string]string{
+			io.S3AccessKeyID: "PROPS", io.S3SecretAccessKey: "propssecret", io.S3Region: "us-east-1",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "PROPS", retrieve(t, cfg))
+	})
+
+	// The result is always a copy, so mutating it never touches the shared config.
+	t.Run("never mutates the shared ctx config", func(t *testing.T) {
+		t.Parallel()
+		shared := &aws.Config{Credentials: credentials.NewStaticCredentialsProvider("CTX", "ctxsecret", "")}
+		cfg, err := resolveS3AWSConfig(utils.WithAwsConfig(context.Background(), shared), map[string]string{})
+		require.NoError(t, err)
+		require.NotSame(t, shared, cfg)
+
+		cfg.HTTPClient = http.DefaultClient
+		assert.Nil(t, shared.HTTPClient, "shared ctx config must stay unmutated")
+	})
+
+	// A partial key set (missing the secret) must not clobber the context creds.
+	t.Run("partial props creds fall through", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := resolveS3AWSConfig(ctxWith, map[string]string{io.S3AccessKeyID: "PARTIAL"})
+		require.NoError(t, err)
+		assert.Equal(t, "CTX", retrieve(t, cfg), "incomplete override must keep ctx creds")
+	})
+
+	// Explicit region overrides the context config's region, without mutating it.
+	t.Run("explicit region overrides ctx config", func(t *testing.T) {
+		t.Parallel()
+		shared := &aws.Config{Region: "ctx-region", Credentials: credentials.NewStaticCredentialsProvider("CTX", "s", "")}
+		cfg, err := resolveS3AWSConfig(utils.WithAwsConfig(context.Background(), shared), map[string]string{io.S3Region: "props-region"})
+		require.NoError(t, err)
+		assert.Equal(t, "props-region", cfg.Region)
+		assert.Equal(t, "ctx-region", shared.Region, "shared ctx config must not be mutated")
+	})
+}
 
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	t.Parallel()

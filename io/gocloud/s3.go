@@ -57,7 +57,8 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 	if tok, ok := props["token"]; ok {
 		opts = append(opts, config.WithBearerAuthTokenProvider(
-			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
+			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}},
+		))
 	}
 
 	if region, ok := props[io.S3Region]; ok {
@@ -70,7 +71,8 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	token := props[io.S3SessionToken]
 	if accessKey != "" || secretAccessKey != "" || token != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken])))
+			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+		)))
 	}
 
 	if proxy, ok := props[io.S3ProxyURI]; ok {
@@ -170,18 +172,46 @@ func resolveUsePathStyle(endpoint string, props map[string]string) bool {
 	return usePathStyle
 }
 
-func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+// resolveS3AWSConfig returns the AWS config for the S3 FileIO, preferring an
+// ambient context config but letting explicit s3.* credentials override it.
+func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	var (
-		awscfg *aws.Config
-		err    error
+		base *aws.Config
+		err  error
 	)
 	if v := utils.GetAwsConfig(ctx); v != nil {
-		awscfg = v
-	} else {
-		awscfg, err = ParseAWSConfig(ctx, props)
-		if err != nil {
-			return nil, err
-		}
+		base = v
+	} else if base, err = ParseAWSConfig(ctx, props); err != nil {
+		return nil, err
+	}
+
+	// Always copy so overrides (and the caller's later HTTPClient assignment)
+	// never touch a shared context config.
+	cfg := *base
+
+	// Explicit region overrides the context config; an unset region falls through.
+	if r := props[io.S3Region]; r != "" {
+		cfg.Region = r
+	} else if r := props[io.S3ClientRegion]; r != "" {
+		cfg.Region = r
+	}
+
+	// A complete explicit key pair overrides the credentials. A partial set
+	// (missing the access key or secret) falls through to the context/default
+	// chain rather than installing a provider with blank fields.
+	if props[io.S3AccessKeyID] != "" && props[io.S3SecretAccessKey] != "" {
+		cfg.Credentials = credentials.NewStaticCredentialsProvider(
+			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+		)
+	}
+
+	return &cfg, nil
+}
+
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	awscfg, err := resolveS3AWSConfig(ctx, props)
+	if err != nil {
+		return nil, err
 	}
 
 	// Default HTTP client when not configured: use the SDK buildable client so
