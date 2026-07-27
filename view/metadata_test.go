@@ -196,6 +196,62 @@ func TestValidMetadataDeserialization(t *testing.T) {
 	assert.Equal(t, int64(1), meta.CurrentVersionIDValue)
 }
 
+func TestParseMetadataRejectsNullAndDuplicateEntries(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(map[string]any)
+		errMessage string
+	}{
+		{
+			name: "null schema",
+			mutate: func(doc map[string]any) {
+				doc["schemas"] = []any{nil}
+			},
+			errMessage: "schema at index 0 is null",
+		},
+		{
+			name: "duplicate schema ID",
+			mutate: func(doc map[string]any) {
+				schemas := doc["schemas"].([]any)
+				doc["schemas"] = append(schemas, schemas[0])
+			},
+			errMessage: "duplicate schema-id 0",
+		},
+		{
+			name: "null version",
+			mutate: func(doc map[string]any) {
+				doc["versions"] = []any{nil}
+			},
+			errMessage: "version at index 0 is null",
+		},
+		{
+			name: "duplicate version ID",
+			mutate: func(doc map[string]any) {
+				versions := doc["versions"].([]any)
+				doc["versions"] = append(versions, versions[0])
+			},
+			errMessage: "duplicate version-id 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &doc))
+			tt.mutate(doc)
+			encoded, err := json.Marshal(doc)
+			require.NoError(t, err)
+
+			var parseErr error
+			require.NotPanics(t, func() {
+				_, parseErr = ParseMetadataBytes(encoded)
+			})
+			require.ErrorIs(t, parseErr, ErrInvalidViewMetadata)
+			assert.ErrorContains(t, parseErr, tt.errMessage)
+		})
+	}
+}
+
 func TestMissingViewUUID(t *testing.T) {
 	invalidJSON := `{
 		"format-version": 1,
