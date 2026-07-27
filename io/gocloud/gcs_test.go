@@ -21,7 +21,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
@@ -131,4 +133,36 @@ func TestGCSCredentialsIgnoresUnknownCredType(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, creds)
+}
+
+// gcs.no-auth yields nil credentials so the client is built anonymously.
+func TestGCSCredentialsNoAuth(t *testing.T) {
+	creds, err := gcsCredentials(context.Background(), map[string]string{io.GCSNoAuth: "true"})
+	require.NoError(t, err)
+	assert.Nil(t, creds)
+}
+
+// A vended gcs.oauth2.token is turned into a static token source, not dropped.
+func TestGCSCredentialsFromOAuthToken(t *testing.T) {
+	exp := time.Now().Add(time.Hour).UnixMilli()
+	creds, err := gcsCredentials(context.Background(), map[string]string{
+		io.GCSOAuthToken:     "vended-token",
+		io.GCSOAuthExpiresAt: strconv.FormatInt(exp, 10),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, creds)
+	require.NotNil(t, creds.TokenSource)
+
+	tok, err := creds.TokenSource.Token()
+	require.NoError(t, err)
+	assert.Equal(t, "vended-token", tok.AccessToken)
+	assert.Equal(t, time.UnixMilli(exp), tok.Expiry)
+}
+
+// gcs.service.host is the standard endpoint key; gcs.endpoint is a fallback alias.
+func TestGCSEndpointPrefersServiceHost(t *testing.T) {
+	assert.Equal(t, "svc", gcsEndpoint(map[string]string{io.GCSServiceHost: "svc"}))
+	assert.Equal(t, "ep", gcsEndpoint(map[string]string{io.GCSEndpoint: "ep"}))
+	assert.Equal(t, "svc", gcsEndpoint(map[string]string{io.GCSServiceHost: "svc", io.GCSEndpoint: "ep"}))
+	assert.Empty(t, gcsEndpoint(map[string]string{}))
 }

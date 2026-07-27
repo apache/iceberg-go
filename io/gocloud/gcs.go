@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"cloud.google.com/go/storage"
 
@@ -30,6 +31,7 @@ import (
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/gcsblob"
 	"gocloud.dev/gcp"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 )
@@ -53,11 +55,21 @@ func resolveGCSCredType(props map[string]string) (string, bool) {
 	return v, true
 }
 
+// gcsEndpoint returns the endpoint override, preferring Iceberg's standard
+// gcs.service.host and falling back to gcs.endpoint.
+func gcsEndpoint(props map[string]string) string {
+	if v := props[io.GCSServiceHost]; v != "" {
+		return v
+	}
+
+	return props[io.GCSEndpoint]
+}
+
 // ParseGCSConfig parses non-credential GCS blob options; credentials are set on
 // the client by gcsCredentials, which supersedes any credential option here.
 func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 	var o []option.ClientOption
-	if url := props[io.GCSEndpoint]; url != "" {
+	if url := gcsEndpoint(props); url != "" {
 		o = append(o, option.WithEndpoint(url))
 	}
 	if v, ok := props[io.GCSUseJSONAPI]; ok {
@@ -74,6 +86,22 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
 func gcsCredentials(ctx context.Context, props map[string]string) (*google.Credentials, error) {
+	// Explicit no-auth wins over everything: use an anonymous client even when
+	// ADC is available.
+	if noAuth, err := strconv.ParseBool(props[io.GCSNoAuth]); err == nil && noAuth {
+		return nil, nil
+	}
+
+	// A vended OAuth2 access token (e.g. from a REST catalog) is used directly.
+	if tok := props[io.GCSOAuthToken]; tok != "" {
+		t := &oauth2.Token{AccessToken: tok}
+		if ms, err := strconv.ParseInt(props[io.GCSOAuthExpiresAt], 10, 64); err == nil {
+			t.Expiry = time.UnixMilli(ms)
+		}
+
+		return &google.Credentials{TokenSource: oauth2.StaticTokenSource(t)}, nil
+	}
+
 	credType := google.ServiceAccount
 	if v, ok := resolveGCSCredType(props); ok {
 		credType = google.CredentialsType(v)
