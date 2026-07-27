@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -310,6 +311,11 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 	for idx, field := range fields {
 		if field.Transform == nil {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d has no transform", ErrInvalidTransform, idx)
+		}
+		if marshaler, ok := field.Transform.(encoding.TextMarshaler); ok {
+			if _, err := marshaler.MarshalText(); err != nil {
+				return SortOrder{}, fmt.Errorf("%w: sort field at index %d: %w", ErrInvalidTransform, idx, err)
+			}
 		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)

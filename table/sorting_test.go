@@ -74,6 +74,28 @@ func TestNewSortOrderRejectsNilTransform(t *testing.T) {
 	assert.Contains(t, err.Error(), "has no transform")
 }
 
+func TestNewSortOrderRejectsInvalidParameterizedTransform(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"bucket", iceberg.BucketTransform{NumBuckets: 0}},
+		{"truncate", iceberg.TruncateTransform{Width: 0}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := table.NewSortOrder(1, []table.SortField{{
+				SourceIDs: []int{19},
+				Transform: tt.transform,
+				NullOrder: table.NullsFirst,
+				Direction: table.SortASC,
+			}})
+
+			require.ErrorIs(t, err, table.ErrInvalidTransform)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
 func TestNewSortOrderRejectsInvalidSourceIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
