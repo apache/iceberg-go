@@ -294,6 +294,12 @@ func hashHelperInt[T ~int32 | ~int64](v any) uint32 {
 	return murmur3.Sum32(b)
 }
 
+func hashTimestampNano(v any) uint32 {
+	micros := internal.FloorDiv(int64(v.(TimestampNano)), int64(time.Microsecond))
+
+	return hashHelperInt[int64](micros)
+}
+
 func (t BucketTransform) Equals(other Transform) bool {
 	rhs, ok := other.(BucketTransform)
 	if !ok {
@@ -333,7 +339,7 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	case TimestampLiteral:
 		hash = hashHelperInt[int64](int64(v))
 	case TimestampNsLiteral:
-		hash = hashHelperInt[int64](int64(v))
+		hash = hashTimestampNano(TimestampNano(v))
 	default:
 		return Optional[Literal]{}
 	}
@@ -367,7 +373,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	case TimestampTzType:
 		h = hashHelperInt[Timestamp]
 	case TimestampNsType, TimestampTzNsType:
-		h = hashHelperInt[TimestampNano]
+		h = hashTimestampNano
 	case DecimalType:
 		h = func(v any) uint32 {
 			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
