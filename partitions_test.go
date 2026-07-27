@@ -380,6 +380,21 @@ func TestPartitionType(t *testing.T) {
 	}
 	actual := spec.PartitionType(tableSchemaSimple)
 	assert.Truef(t, expected.Equals(actual), "expected: %s, got: %s", expected, actual)
+
+	droppedSourceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	expectedWithDroppedSources := &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 1000, Name: "str_truncate", Type: iceberg.UnknownType{}},
+			{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
+			{ID: 1002, Name: "bool_identity", Type: iceberg.UnknownType{}},
+			{ID: 1003, Name: "str_void", Type: iceberg.UnknownType{}},
+		},
+	}
+	actual = spec.PartitionType(droppedSourceSchema)
+	assert.Truef(t, expectedWithDroppedSources.Equals(actual),
+		"expected: %s, got: %s", expectedWithDroppedSources, actual)
 }
 
 type partitionRecord []any
@@ -437,8 +452,8 @@ func TestPartitionSpecToPathWithDroppedLeadingSourceColumn(t *testing.T) {
 		},
 	)
 
-	record := partitionRecord{int32(7), true}
-	assert.Equal(t, "bar=7/baz=true", spec.PartitionToPath(record, schema))
+	record := partitionRecord{nil, int32(7), true}
+	assert.Equal(t, "foo=null/bar=7/baz=true", spec.PartitionToPath(record, schema))
 }
 
 func TestGetPartitionFieldName(t *testing.T) {
