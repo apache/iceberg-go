@@ -135,8 +135,7 @@ type Catalog interface {
 	// RenameTable tells the catalog to rename a given table by the identifiers
 	// provided, and then loads and returns the destination table
 	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
-	// CheckTableExists reports whether the identifier is registered as a table in
-	// the catalog. It does not validate that the table metadata file is readable.
+	// CheckTableExists reports whether the table exists.
 	CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error)
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace

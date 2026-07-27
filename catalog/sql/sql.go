@@ -770,7 +770,7 @@ func (c *Catalog) checkIdentifierAvailable(
 	}
 
 	identifierName := strings.Join(identifier, ".")
-	if !c.isV0() && entry.IcebergType.String == ViewType {
+	if !c.isV0() && entry.IcebergType.Valid && entry.IcebergType.String == ViewType {
 		return fmt.Errorf("%w: %s", catalog.ErrViewAlreadyExists, identifierName)
 	}
 
@@ -846,9 +846,11 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil
 	})
 	if err != nil {
-		if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, tblIdent, ident); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
-			errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
-			err = collisionErr
+		if !errors.Is(err, catalog.ErrTableAlreadyExists) && !errors.Is(err, catalog.ErrViewAlreadyExists) {
+			if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, tblIdent, ident); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
+				errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
+				err = collisionErr
+			}
 		}
 		if cleanupErr := removeUncommittedMetadata(ctx, staged.MetadataLocation(), staged.FS); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
@@ -1597,9 +1599,11 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return nil
 	})
 	if err != nil {
-		if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, viewIdent, identifier); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
-			errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
-			err = collisionErr
+		if !errors.Is(err, catalog.ErrTableAlreadyExists) && !errors.Is(err, catalog.ErrViewAlreadyExists) {
+			if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, viewIdent, identifier); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
+				errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
+				err = collisionErr
+			}
 		}
 		loadFS := io.LoadFSFunc(c.props, metadataLocation)
 		if cleanupErr := removeUncommittedMetadata(ctx, metadataLocation, loadFS); cleanupErr != nil {

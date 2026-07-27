@@ -2192,6 +2192,8 @@ func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogS
 	close(start)
 
 	first, second := <-results, <-results
+	s.Require().NotEqual(first.err == nil, second.err == nil,
+		"expected exactly one concurrent create to succeed; table/view results: %v / %v", first.err, second.err)
 	if first.err != nil {
 		first, second = second, first
 	}
