@@ -189,8 +189,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-2.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 10)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -205,8 +205,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-3.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0, 4}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0, 4}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -221,8 +221,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-4.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0, 1, 2, 3, 4}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0, 1, 2, 3, 4}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -242,8 +242,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-5.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		puffinPath, offset, length := writeDVPuffinFixture(t, nil, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, nil, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -272,15 +272,15 @@ func TestDVScanEndToEnd(t *testing.T) {
 		dataPathB := filepath.Join(tmp, "data-6b.parquet")
 		dfA := writeIntParquetWithFieldID(t, fs, dataPathA, 0, 5)
 		dfB := writeIntParquetWithFieldID(t, fs, dataPathB, 10, 5)
-		puffinA, offA, lenA := writeDVPuffinFixture(t, []uint64{1, 3}, dataPathA)
-		puffinB, offB, lenB := writeDVPuffinFixture(t, []uint64{0, 2}, dataPathB)
+		puffinA, offA, lenA, cardA := writeDVPuffinFixture(t, []uint64{1, 3}, dataPathA)
+		puffinB, offB, lenB, cardB := writeDVPuffinFixture(t, []uint64{0, 2}, dataPathB)
 
 		tasks := []FileScanTask{
 			{File: dfA, DeletionVectorFiles: []iceberg.DataFile{
-				newDVMockDataFile(puffinA, dataPathA, offA, lenA),
+				newDVMockDataFile(puffinA, dataPathA, offA, lenA, cardA),
 			}},
 			{File: dfB, DeletionVectorFiles: []iceberg.DataFile{
-				newDVMockDataFile(puffinB, dataPathB, offB, lenB),
+				newDVMockDataFile(puffinB, dataPathB, offB, lenB, cardB),
 			}},
 		}
 		got := collectDVScanRows(t, tbl.Scan(), tasks)
@@ -302,8 +302,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-7.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{100}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{100}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -323,8 +323,8 @@ func TestDVScanEndToEnd(t *testing.T) {
 
 		dataPath := filepath.Join(tmp, "data-8.parquet")
 		df := writeIntParquetWithFieldID(t, fs, dataPath, 0, 5)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 100}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1, 100}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, card)
 
 		got := collectDVScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,

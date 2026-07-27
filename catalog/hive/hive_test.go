@@ -399,6 +399,74 @@ func TestHiveCreateNamespace(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestDefaultNamespaceLocation(t *testing.T) {
+	tests := []struct {
+		name      string
+		warehouse string
+		want      string
+	}{
+		{"s3 warehouse", "s3://warehouse", "s3://warehouse/db.db"},
+		{"trailing slash", "s3://warehouse/", "s3://warehouse/db.db"},
+		{"double trailing slash trims one", "s3://warehouse//", "s3://warehouse//db.db"},
+		{"file scheme", "file:///wh", "file:///wh/db.db"},
+		{"file root keeps scheme", "file:///", "file:///db.db"},
+		{"no warehouse stays empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, defaultNamespaceLocation(tt.warehouse, "db"))
+		})
+	}
+}
+
+func TestHiveCreateNamespaceDerivesLocationFromWarehouse(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == "s3://warehouse/new_database.db"
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{Warehouse: "s3://warehouse/"})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), nil)
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCreateNamespaceExplicitLocationWinsOverWarehouse(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == "s3://explicit"
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{Warehouse: "s3://warehouse"})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), map[string]string{"location": "s3://explicit"})
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestHiveCreateNamespaceNoWarehouseKeepsEmptyLocation(t *testing.T) {
+	assert := require.New(t)
+
+	mockClient := &mockHiveClient{}
+	mockClient.On("CreateDatabase", mock.Anything, mock.MatchedBy(func(db *hive_metastore.Database) bool {
+		return db.Name == "new_database" && db.LocationUri == ""
+	})).Return(nil).Once()
+
+	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	err := hiveCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("new_database"), nil)
+	assert.NoError(err)
+
+	mockClient.AssertExpectations(t)
+}
+
 func TestHiveCreateNamespaceAlreadyExists(t *testing.T) {
 	assert := require.New(t)
 
@@ -647,6 +715,75 @@ func TestHiveCommitTableValidatesRequirementsForMissingTable(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
+	ctx := context.Background()
+	oldLocation := "file://" + filepath.Join(t.TempDir(), "old-location")
+	newLocation := "file://" + filepath.Join(t.TempDir(), "new-location")
+	oldMetadataLocation := oldLocation + "/metadata/v1.metadata.json"
+	currentProps := iceberg.Properties{
+		"changed":    "old",
+		"removed":    "value",
+		GCEnabledKey: "false",
+	}
+	current, err := table.NewMetadata(
+		testSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		oldLocation, currentProps,
+	)
+	require.NoError(t, err)
+	require.NoError(t, cataloginternal.WriteTableMetadata(
+		current, iceio.LocalFS{}, oldMetadataLocation, table.MetadataCompressionCodecNone,
+	))
+
+	existing := constructHiveTable(
+		"test_database", "test_table", oldLocation, oldMetadataLocation, testSchema, currentProps,
+	)
+	existing.Parameters["hms-owned"] = "keep"
+	newSchema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
+	)
+	mockClient := &mockHiveClient{}
+	expectImmediateTableLock(mockClient, 1)
+	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
+		Return(existing, nil).Once()
+	var altered *hive_metastore.Table
+	mockClient.On("AlterTable", mock.Anything, "test_database", "test_table", mock.AnythingOfType("*hive_metastore.Table")).
+		Run(func(args mock.Arguments) {
+			altered = args.Get(3).(*hive_metastore.Table)
+		}).Return(nil).Once()
+	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
+
+	_, metadataLocation, err := cat.CommitTable(
+		ctx,
+		TableIdentifier("test_database", "test_table"),
+		nil,
+		[]table.Update{
+			table.NewAddSchemaUpdate(newSchema),
+			table.NewSetCurrentSchemaUpdate(newSchema.ID),
+			table.NewSetLocationUpdate(newLocation),
+			table.NewSetPropertiesUpdate(iceberg.Properties{
+				"changed":    "new",
+				"added":      "value",
+				GCEnabledKey: "true",
+			}),
+			table.NewRemovePropertiesUpdate([]string{"removed"}),
+		},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, altered)
+	require.Equal(t, metadataLocation, altered.Parameters[MetadataLocationKey])
+	require.Equal(t, oldMetadataLocation, altered.Parameters[PreviousMetadataLocationKey])
+	require.Equal(t, "new", altered.Parameters["changed"])
+	require.Equal(t, "value", altered.Parameters["added"])
+	require.NotContains(t, altered.Parameters, "removed")
+	require.Equal(t, "keep", altered.Parameters["hms-owned"])
+	require.Equal(t, "true", altered.Parameters[ExternalTablePurgeKey])
+	require.Equal(t, newLocation, altered.Sd.Location)
+	require.Equal(t, schemaToHiveColumns(newSchema), altered.Sd.Cols)
+	mockClient.AssertExpectations(t)
+}
+
 func TestHiveDropTableLockFailureIsRetryable(t *testing.T) {
 	mockClient := &mockHiveClient{}
 	mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).
@@ -770,7 +907,8 @@ func TestHivePurgeTableWithGCDisabled(t *testing.T) {
 	ctx := context.Background()
 	tableLocation := filepath.Join(t.TempDir(), "warehouse", "test_database", "test_table")
 	metadataLocation, dataFile := writeHivePurgeTableFilesWithProperties(
-		t, tableLocation, iceberg.Properties{"gc.enabled": "false"})
+		t, tableLocation, iceberg.Properties{"gc.enabled": "false"},
+	)
 	hiveTable := hivePurgeTable(metadataLocation, tableLocation)
 
 	mockClient := &mockHiveClient{}
@@ -939,7 +1077,8 @@ func TestConstructHiveTablePreservesReservedParameters(t *testing.T) {
 			MetadataLocationKey:          "s3://wrong-bucket/metadata.json",
 			PreviousMetadataLocationKey:  "s3://wrong-bucket/previous.metadata.json",
 			ExternalKey:                  "FALSE",
-			"storage_handler":            "wrong.StorageHandler",
+			StorageHandlerKey:            "wrong.StorageHandler",
+			GCEnabledKey:                 "false",
 			"write.metadata.compression": "gzip",
 		},
 	)
@@ -949,8 +1088,116 @@ func TestConstructHiveTablePreservesReservedParameters(t *testing.T) {
 	assert.Equal(metadataLocation, hiveTbl.Parameters[MetadataLocationKey])
 	assert.NotContains(hiveTbl.Parameters, PreviousMetadataLocationKey)
 	assert.Equal("TRUE", hiveTbl.Parameters[ExternalKey])
-	assert.Equal("org.apache.iceberg.mr.hive.HiveIcebergStorageHandler", hiveTbl.Parameters["storage_handler"])
+	assert.Equal(IcebergStorageHandler, hiveTbl.Parameters[StorageHandlerKey])
+	assert.Equal("false", hiveTbl.Parameters[ExternalTablePurgeKey])
 	assert.Equal("gzip", hiveTbl.Parameters["write.metadata.compression"])
+}
+
+func TestUpdateHiveTableForCommitSynchronizesMetadata(t *testing.T) {
+	currentProps := iceberg.Properties{
+		"changed":    "old",
+		"removed":    "value",
+		GCEnabledKey: "false",
+	}
+	existing := constructHiveTable(
+		"test_database",
+		"test_table",
+		"s3://bucket/old-location",
+		"s3://bucket/old-location/metadata/v1.metadata.json",
+		testSchema,
+		currentProps,
+	)
+	existing.Parameters["hms-owned"] = "keep"
+	existing.Sd.Parameters = map[string]string{"sd-owned": "keep"}
+	existing.Sd.SerdeInfo.Parameters = map[string]string{"serde-owned": "keep"}
+	originalParameters := maps.Clone(existing.Parameters)
+	originalStorageDescriptor := *existing.Sd
+	originalStorageDescriptor.Parameters = maps.Clone(existing.Sd.Parameters)
+	originalSerdeParameters := maps.Clone(existing.Sd.SerdeInfo.Parameters)
+
+	newSchema := iceberg.NewSchema(
+		1,
+		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
+	)
+	newProps := iceberg.Properties{
+		"changed":                   "new",
+		"added":                     "value",
+		GCEnabledKey:                "true",
+		TableTypeKey:                "HIVE",
+		MetadataLocationKey:         "s3://wrong/metadata.json",
+		PreviousMetadataLocationKey: "s3://wrong/previous.json",
+		ExternalKey:                 "FALSE",
+		StorageHandlerKey:           "wrong.StorageHandler",
+	}
+	current, err := table.NewMetadata(
+		testSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		"s3://bucket/old-location", currentProps,
+	)
+	require.NoError(t, err)
+	staged, err := table.NewMetadata(
+		newSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		"s3://bucket/new-location", newProps,
+	)
+	require.NoError(t, err)
+
+	updated := updateHiveTableForCommit(
+		existing,
+		current,
+		staged,
+		"s3://bucket/new-location/metadata/v2.metadata.json",
+	)
+
+	require.Equal(t, "new", updated.Parameters["changed"])
+	require.Equal(t, "value", updated.Parameters["added"])
+	require.NotContains(t, updated.Parameters, "removed")
+	require.Equal(t, "keep", updated.Parameters["hms-owned"])
+	require.Equal(t, TableTypeIceberg, updated.Parameters[TableTypeKey])
+	require.Equal(t, "TRUE", updated.Parameters[ExternalKey])
+	require.Equal(t, IcebergStorageHandler, updated.Parameters[StorageHandlerKey])
+	require.Equal(t, "true", updated.Parameters[ExternalTablePurgeKey])
+	require.Equal(t, "s3://bucket/old-location/metadata/v1.metadata.json", updated.Parameters[PreviousMetadataLocationKey])
+	require.Equal(t, "s3://bucket/new-location/metadata/v2.metadata.json", updated.Parameters[MetadataLocationKey])
+	require.Equal(t, "s3://bucket/new-location", updated.Sd.Location)
+	require.Equal(t, schemaToHiveColumns(newSchema), updated.Sd.Cols)
+	require.Equal(t, originalStorageDescriptor.InputFormat, updated.Sd.InputFormat)
+	require.Equal(t, originalStorageDescriptor.OutputFormat, updated.Sd.OutputFormat)
+	require.Equal(t, originalStorageDescriptor.SerdeInfo, updated.Sd.SerdeInfo)
+	require.NotSame(t, existing.Sd.SerdeInfo, updated.Sd.SerdeInfo)
+	require.Equal(t, originalStorageDescriptor.Parameters, updated.Sd.Parameters)
+	updated.Sd.Parameters["sd-owned"] = "updated"
+	require.Equal(t, "keep", existing.Sd.Parameters["sd-owned"])
+	updated.Sd.SerdeInfo.Parameters["serde-owned"] = "updated"
+	require.Equal(t, "keep", existing.Sd.SerdeInfo.Parameters["serde-owned"])
+
+	require.Equal(t, originalParameters, existing.Parameters)
+	require.Equal(t, originalStorageDescriptor, *existing.Sd)
+	require.Equal(t, originalSerdeParameters, existing.Sd.SerdeInfo.Parameters)
+}
+
+func TestUpdateHiveTableForCommitBuildsMissingStorageDescriptor(t *testing.T) {
+	current, err := table.NewMetadata(
+		testSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		"s3://bucket/old-location", nil,
+	)
+	require.NoError(t, err)
+	staged, err := table.NewMetadata(
+		testSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		"s3://bucket/new-location", nil,
+	)
+	require.NoError(t, err)
+	existing := &hive_metastore.Table{
+		DbName: "test_database", TableName: "test_table",
+		Parameters: map[string]string{MetadataLocationKey: "old-metadata.json"},
+	}
+
+	updated := updateHiveTableForCommit(existing, current, staged, "new-metadata.json")
+
+	require.Equal(t, buildIcebergStorageDescriptor(staged.Location(), staged.CurrentSchema()), updated.Sd)
+	require.Nil(t, existing.Sd)
+}
+
+func TestSchemaToHiveColumnsHandlesNilSchema(t *testing.T) {
+	require.Nil(t, schemaToHiveColumns(nil))
 }
 
 func TestConstructHiveViewTablePreservesReservedParameters(t *testing.T) {
@@ -990,7 +1237,8 @@ func TestHiveRegisterTableNoSuchNamespace(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("missing_db", "t"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1011,7 +1259,8 @@ func TestHiveRegisterTableConflictsWithView(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "test_table"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1034,7 +1283,8 @@ func TestHiveRegisterTableAlreadyExists(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "test_table"),
 		"s3://bucket/metadata/v1.metadata.json",
 	)
@@ -1055,7 +1305,8 @@ func TestHiveRegisterTableMetadataNotFound(t *testing.T) {
 
 	hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, err := hiveCatalog.RegisterTable(context.TODO(),
+	_, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "new_table"),
 		"s3://nonexistent-bucket/metadata/metadata.json",
 	)
@@ -1104,7 +1355,8 @@ func TestHiveRegisterTableSuccess(t *testing.T) {
 
 	// TODO: should we drop table here
 
-	tbl, err := hiveCatalog.RegisterTable(context.TODO(),
+	tbl, err := hiveCatalog.RegisterTable(
+		context.TODO(),
 		TableIdentifier("test_database", "reg_table"),
 		metaPath,
 	)

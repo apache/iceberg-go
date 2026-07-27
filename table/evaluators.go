@@ -717,7 +717,6 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 	}
 
 	return (&inclusiveMetricsEval{
-		st:                s.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              bound,
 	}).Eval, nil
@@ -732,7 +731,6 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 	}
 
 	return (&inclusiveMetricsEval{
-		st:                fileSchema.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              rewritten,
 	}).TestRowGroup, nil
@@ -740,8 +738,6 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 
 type inclusiveMetricsEval struct {
 	metricsEvaluator
-
-	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
 }
@@ -797,7 +793,6 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	// avoid race condition while maintaining existing state
 	ev := inclusiveMetricsEval{
-		st:                m.st,
 		includeEmptyFiles: m.includeEmptyFiles,
 		expr:              m.expr,
 	}
@@ -1251,7 +1246,6 @@ func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression
 	}
 
 	return (&strictMetricsEval{
-		st:                s.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              bound,
 	}).Eval, nil
@@ -1259,8 +1253,6 @@ func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression
 
 type strictMetricsEval struct {
 	metricsEvaluator
-
-	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
 }
@@ -1272,7 +1264,6 @@ func (m *strictMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	// avoid race condition while maintaining existing state
 	ev := strictMetricsEval{
-		st:                m.st,
 		includeEmptyFiles: m.includeEmptyFiles,
 		expr:              m.expr,
 	}

@@ -210,6 +210,9 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 
 func WithSpecID(id int) PartitionOption {
 	return func(p *PartitionSpec) error {
+		if id < 0 {
+			return fmt.Errorf("spec id must be non-negative: %d", id)
+		}
 		p.id = id
 
 		return nil

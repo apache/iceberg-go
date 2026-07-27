@@ -20,7 +20,10 @@ package table
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
+
+	"github.com/apache/iceberg-go"
 )
 
 const MainBranch = "main"
@@ -49,17 +52,63 @@ func (s *SnapshotRef) Equals(rhs SnapshotRef) bool {
 }
 
 func (s *SnapshotRef) UnmarshalJSON(b []byte) error {
-	type Alias SnapshotRef
-	aux := (*Alias)(s)
-
-	if err := json.Unmarshal(b, aux); err != nil {
+	aux := struct {
+		SnapshotID         *int64   `json:"snapshot-id"`
+		SnapshotRefType    *RefType `json:"type"`
+		MinSnapshotsToKeep *int     `json:"min-snapshots-to-keep,omitempty"`
+		MaxSnapshotAgeMs   *int64   `json:"max-snapshot-age-ms,omitempty"`
+		MaxRefAgeMs        *int64   `json:"max-ref-age-ms,omitempty"`
+	}{}
+	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
+	if aux.SnapshotID == nil {
+		return fmt.Errorf("%w: snapshot ref is missing required snapshot-id", iceberg.ErrInvalidArgument)
+	}
+	if aux.SnapshotRefType == nil {
+		return fmt.Errorf("%w: snapshot ref is missing required type", iceberg.ErrInvalidArgument)
+	}
+
+	ref := SnapshotRef{
+		SnapshotID:         *aux.SnapshotID,
+		SnapshotRefType:    *aux.SnapshotRefType,
+		MinSnapshotsToKeep: aux.MinSnapshotsToKeep,
+		MaxSnapshotAgeMs:   aux.MaxSnapshotAgeMs,
+		MaxRefAgeMs:        aux.MaxRefAgeMs,
+	}
+	if err := ref.validate(); err != nil {
+		return err
+	}
+
+	*s = ref
+
+	return nil
+}
+
+func (s SnapshotRef) validate() error {
 	switch s.SnapshotRefType {
 	case BranchRef, TagRef:
 	default:
 		return ErrInvalidRefType
+	}
+
+	if s.MinSnapshotsToKeep != nil && *s.MinSnapshotsToKeep <= 0 {
+		return fmt.Errorf("%w: min snapshots to keep must be greater than 0", iceberg.ErrInvalidArgument)
+	}
+	if s.MaxSnapshotAgeMs != nil && *s.MaxSnapshotAgeMs <= 0 {
+		return fmt.Errorf("%w: max snapshot age must be greater than 0 ms", iceberg.ErrInvalidArgument)
+	}
+	if s.MaxRefAgeMs != nil && *s.MaxRefAgeMs <= 0 {
+		return fmt.Errorf("%w: max reference age must be greater than 0 ms", iceberg.ErrInvalidArgument)
+	}
+	if s.SnapshotRefType == TagRef {
+		if s.MinSnapshotsToKeep != nil {
+			return fmt.Errorf("%w: tags do not support setting min snapshots to keep", iceberg.ErrInvalidArgument)
+		}
+		if s.MaxSnapshotAgeMs != nil {
+			return fmt.Errorf("%w: tags do not support setting max snapshot age", iceberg.ErrInvalidArgument)
+		}
 	}
 
 	return nil

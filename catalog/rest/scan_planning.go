@@ -699,11 +699,7 @@ func idempotencyHeaderValue(idempotencyKey *string) (string, error) {
 	return *idempotencyKey, nil
 }
 
-// --- Wire types (sketch) ----------------------------------------------------
-//
-// Content-file, delete-file, and residual decoding lands with the scan-task
-// decoder PR; these sketch the request/response envelopes so the client
-// surface compiles and reads.
+// --- Wire types -------------------------------------------------------------
 
 // PlanStatus is the status of a server-side plan.
 type PlanStatus string
@@ -729,19 +725,8 @@ type PlanningError struct {
 	Stack   []string `json:"stack,omitempty"`
 }
 
-// RESTFileScanTask is the REST FileScanTask wire payload. The REST prefix
-// avoids confusion with table.FileScanTask, the decoded domain type. The
-// scan-task decoder PR fills in the content-file and residual fields; the named
-// type is committed here so ScanTasks does not expose json.RawMessage.
-type RESTFileScanTask struct{}
-
-// RESTDeleteFile is the REST DeleteFile wire payload. The scan-task decoder PR
-// fills in the position/equality delete-file variants.
-type RESTDeleteFile struct{}
-
 // ScanTasks carries the task payload shared by completed planning responses and
-// fetchScanTasks responses. Task/delete payload decoding lands with the
-// scan-task decoder PR.
+// fetchScanTasks responses.
 type ScanTasks struct {
 	PlanTasks     []string           `json:"plan-tasks,omitempty"`
 	FileScanTasks []RESTFileScanTask `json:"file-scan-tasks,omitempty"`
@@ -786,14 +771,13 @@ type PlanTableScanRequest struct {
 
 // PlanTableScanResponse is the POST .../plan response. The spec models this as
 // a `status`-discriminated union; the flat struct carries every arm's fields
-// with omitempty so none are discarded. Task/delete payloads are filled in by
-// the scan-task decoder PR. Per the spec, plan-id is required for both completed
-// (CompletedPlanningWithIDResult) and submitted (AsyncPlanningResult) responses
-// here; the wire decoder must validate PlanID != nil at unmarshal rather than
-// rely on the omitempty pointer. A cancelled status is invalid for this endpoint
-// and must be treated as an error. A failed status decodes even when a
-// non-compliant server omits or malforms Error; callers must branch on Status
-// before dereferencing PlanID.
+// with omitempty so none are discarded. Per the spec, plan-id is required for
+// both completed (CompletedPlanningWithIDResult) and submitted
+// (AsyncPlanningResult) responses here; the wire decoder must validate
+// PlanID != nil at unmarshal rather than rely on the omitempty pointer. A
+// cancelled status is invalid for this endpoint and must be treated as an
+// error. A failed status decodes even when a non-compliant server omits or
+// malforms Error; callers must branch on Status before dereferencing PlanID.
 type PlanTableScanResponse struct {
 	Status PlanStatus     `json:"status"`
 	PlanID *string        `json:"plan-id,omitempty"`
@@ -903,8 +887,7 @@ type FetchScanTasksRequest struct {
 }
 
 // FetchScanTasksResponse is the POST .../tasks response. May itself return more
-// plan-tasks for further fanout. Task/delete payloads decoded by the
-// scan-task decoder PR.
+// plan-tasks for further fanout.
 type FetchScanTasksResponse struct {
 	ScanTasks
 }

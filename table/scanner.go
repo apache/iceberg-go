@@ -914,6 +914,14 @@ type FileScanTask struct {
 	EqualityDeleteFiles []iceberg.DataFile // equality delete files
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
+	// Residual is the portion of the scan filter that must still be evaluated
+	// for this task. Remote planners may simplify the original filter using
+	// file metadata; nil means the caller did not provide a task residual.
+	// ReadTasks currently applies the Scan's original row filter and does not
+	// consume this per-task value. Remote integration must preserve that original
+	// filter until per-task residual evaluation is wired; otherwise tasks read
+	// outside their originating Scan could under-filter rows.
+	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
 	// FirstRowID is the effective first_row_id for this file (from manifest entry, after inheritance).

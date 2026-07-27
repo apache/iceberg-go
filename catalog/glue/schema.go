@@ -120,7 +120,7 @@ func icebergTypeToGlueType(typ iceberg.Type) string {
 	case iceberg.DecimalType:
 		return fmt.Sprintf("decimal(%d,%d)", t.Precision(), t.Scale())
 	case iceberg.FixedType:
-		return fmt.Sprintf("binary(%d)", t.Len())
+		return "binary"
 	case *iceberg.StructType:
 		// For struct types, create a struct<field1:type1,field2:type2,...> representation
 		var fieldStrings []string

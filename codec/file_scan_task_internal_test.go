@@ -18,6 +18,7 @@
 package codec
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -46,6 +47,30 @@ func TestDecodeFileScanTaskInnerErrorCarriesMarker(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "codec: DecodeFileScanTask: file:",
 		"an inner (primary-file) decode error must carry the function + sub-path marker")
+}
+
+func TestDecodeFileScanTaskResidualExtension(t *testing.T) {
+	schema := iceberg.NewSchema(123,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+	payload := []byte(`{"type":"eq","term":"id","value":42}`)
+	extension := append([]byte(nil), fileScanTaskResidualMagic...)
+	extension = binary.AppendUvarint(extension, uint64(len(payload)))
+	extension = append(extension, payload...)
+
+	residual, err := decodeFileScanTaskResidual(extension, schema)
+	require.NoError(t, err)
+	require.True(t, residual.Equals(iceberg.EqualTo(iceberg.Reference("id"), int64(42))))
+
+	legacy, err := decodeFileScanTaskResidual(nil, schema)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+
+	_, err = decodeFileScanTaskResidual([]byte("unknown"), schema)
+	require.ErrorContains(t, err, "unknown trailing extension")
+
+	_, err = decodeFileScanTaskResidual(extension[:len(extension)-1], schema)
+	require.ErrorContains(t, err, "residual length")
 }
 
 func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
