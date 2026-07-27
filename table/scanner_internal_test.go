@@ -323,6 +323,92 @@ func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testin
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 }
 
+// TestFetchManifestCountersWithRealSnapshot verifies the scanned/skipped/total
+// manifest accounting against a real snapshot with a mix of data and delete
+// manifests. Partition-spec pruning skips a non-overlapping data manifest, so
+// the scanned and skipped counters are both exercised (an empty-metadata test
+// leaves every counter at zero and would not catch a swapped scanned/skipped or
+// data/delete branch).
+func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// Identity partition on the int32 "id" column; encode partition bounds as
+	// 4-byte little-endian int32 so the manifest evaluator can decode them.
+	enc := func(v int32) *[]byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, uint32(v))
+
+		return &b
+	}
+	match := enc(5)    // overlaps the id == 5 filter
+	noMatch := enc(10) // does not overlap
+
+	const (
+		snapshotID       = int64(1)
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+	specID := int32(spec.ID())
+
+	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
+		Build()
+	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
+		[]iceberg.ManifestFile{dataScanned, dataSkipped, deleteScanned}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return memIO, nil
+	}, nil)
+
+	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+
+	schema, err := scan.effectiveSchema()
+	require.NoError(t, err)
+
+	var acc scanMetricsAccumulator
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(context.Background(), schema, &acc)
+	require.NoError(t, err)
+
+	// Two data manifests, one delete manifest.
+	assert.Equal(t, int64(2), acc.totalDataManifests)
+	assert.Equal(t, int64(1), acc.totalDeleteManifests)
+	// The overlapping data and delete manifests are scanned; the non-overlapping
+	// data manifest is skipped. Delete manifests must land in the delete counters.
+	assert.Equal(t, int64(1), acc.scannedDataManifests)
+	assert.Equal(t, int64(1), acc.skippedDataManifests)
+	assert.Equal(t, int64(1), acc.scannedDeleteManifests)
+	assert.Equal(t, int64(0), acc.skippedDeleteManifests)
+	// Invariant: scanned + skipped == total, per content type.
+	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
+	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
+	assert.Len(t, filtered, 2, "only the overlapping manifests survive partition-spec filtering")
+}
+
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
 	schema := iceberg.NewSchema(
 		1,
