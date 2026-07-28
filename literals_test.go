@@ -1227,6 +1227,7 @@ func TestLiteralFromBytesFixedWidth(t *testing.T) {
 					require.ErrorContains(t, err, "fixed[4]")
 					require.ErrorContains(t, err, fmt.Sprintf("%d bytes", len(test.data)))
 				}
+
 				return
 			}
 
