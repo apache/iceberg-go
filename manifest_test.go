@@ -3333,6 +3333,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 		Build()
 
 	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
+	partitionData[1000] = []byte{0xff}
 	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
 
 	dataFile.Partition()[1000].([]byte)[0] = 0xff
