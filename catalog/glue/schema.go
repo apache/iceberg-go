@@ -19,7 +19,6 @@ package glue
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -106,14 +105,6 @@ func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Colum
 			columns[i].Comment = aws.String(comment)
 		}
 	}
-
-	// Convert map values to slice and sort by icebergFieldIDKey
-	slices.SortFunc(columns, func(a, b types.Column) int {
-		aID, _ := strconv.Atoi(a.Parameters[icebergFieldIDKey])
-		bID, _ := strconv.Atoi(b.Parameters[icebergFieldIDKey])
-
-		return aID - bID
-	})
 
 	return columns
 }
