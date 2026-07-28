@@ -32,6 +32,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPositionDeleteColumnIndices(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		fields  []arrow.Field
+		wantErr string
+	}{
+		{name: "valid", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}},
+		{name: "valid with row", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "row", Type: arrow.BinaryTypes.String}}},
+		{name: "missing file_path", fields: []arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "missing pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}}, wantErr: `exactly one "pos" column, found 0`},
+		{name: "missing both", fields: nil, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "duplicate pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "pos" column, found 2`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filePathIndex, posIndex, err := positionDeleteColumnIndices(arrow.NewSchema(test.fields, nil))
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, 0, filePathIndex)
+			assert.Equal(t, 1, posIndex)
+		})
+	}
+}
+
 func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	for _, tc := range []struct {
 		name                  string

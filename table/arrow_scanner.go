@@ -449,13 +449,40 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 	defer tbl.Release()
 
-	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
-	posCol := tbl.Column(tbl.Schema().FieldIndices("pos")[0]).Data()
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	if err != nil {
+		return nil, err
+	}
+	filePathCol := tbl.Column(filePathIndex).Data()
+	posCol := tbl.Column(posIndex).Data()
 	if posCol.NullN() > 0 {
 		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
 	}
 
 	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+}
+
+func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
+	requiredColumn := func(name string) (int, error) {
+		indices := schema.FieldIndices(name)
+		if len(indices) != 1 {
+			return 0, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
+				iceberg.ErrInvalidSchema, name, len(indices))
+		}
+
+		return indices[0], nil
+	}
+
+	filePathIndex, err := requiredColumn("file_path")
+	if err != nil {
+		return 0, 0, err
+	}
+	posIndex, err := requiredColumn("pos")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return filePathIndex, posIndex, nil
 }
 
 type set[T comparable] map[T]struct{}
