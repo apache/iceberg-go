@@ -193,13 +193,16 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return GeoLiteral{val: data, typ: typ}, nil
 	case FixedType:
-		if len(data) != t.Len() {
+		if len(data) < t.Len() {
 			// looks like some writers will write a prefix of the fixed length
 			// for lower/upper bounds instead of the full length. so let's pad
 			// it out to the full length if unpacking a fixed length literal
 			padded := make([]byte, t.Len())
 			copy(padded, data)
 			data = padded
+		} else if len(data) > t.Len() {
+			return nil, fmt.Errorf("%w: fixed[%d] value has %d bytes",
+				ErrInvalidBinSerialization, t.Len(), len(data))
 		}
 		var v FixedLiteral
 		err := v.UnmarshalBinary(data)
