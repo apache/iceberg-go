@@ -810,9 +810,7 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 		expr:              m.expr,
 	}
 
-	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
-	ev.nanCounts = file.NaNValueCounts()
-	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
 	result, err := iceberg.VisitExpr(m.expr, &ev)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
@@ -1323,9 +1321,7 @@ func (m *strictMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 		expr:              m.expr,
 	}
 
-	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
-	ev.nanCounts = file.NaNValueCounts()
-	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
 	result, err := iceberg.VisitExpr(m.expr, &ev)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
