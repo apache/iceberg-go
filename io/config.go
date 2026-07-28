@@ -32,15 +32,20 @@ const (
 	S3RemoteSigningEnabled   = "s3.remote-signing-enabled"
 	S3ForceVirtualAddressing = "s3.force-virtual-addressing"
 	S3ClientRegion           = "client.region"
+	S3CompatMode             = "s3.compat-mode"
 )
 
 // Constants for GCS configuration options
 const (
-	GCSEndpoint   = "gcs.endpoint"
-	GCSKeyPath    = "gcs.keypath"
-	GCSJSONKey    = "gcs.jsonkey"
-	GCSCredType   = "gcs.credtype"
-	GCSUseJSONAPI = "gcs.usejsonapi"
+	GCSEndpoint       = "gcs.endpoint"
+	GCSServiceHost    = "gcs.service.host"
+	GCSKeyPath        = "gcs.keypath"
+	GCSJSONKey        = "gcs.jsonkey"
+	GCSCredType       = "gcs.credtype"
+	GCSUseJSONAPI     = "gcs.usejsonapi"
+	GCSOAuthToken     = "gcs.oauth2.token"
+	GCSOAuthExpiresAt = "gcs.oauth2.token-expires-at"
+	GCSNoAuth         = "gcs.no-auth"
 )
 
 // Constants for Azure configuration options

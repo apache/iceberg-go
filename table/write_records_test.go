@@ -20,7 +20,9 @@ package table_test
 import (
 	"context"
 	"errors"
+	"iter"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -32,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 )
@@ -114,6 +117,94 @@ func (s *WriteRecordsTestSuite) TestBasicWrite() {
 	s.Equal(iceberg.ParquetFile, dataFiles[0].FileFormat())
 	s.Greater(dataFiles[0].FileSizeBytes(), int64(0))
 	s.Contains(dataFiles[0].FilePath(), loc)
+}
+
+func (s *WriteRecordsTestSuite) TestWriteRecordsResolvesProjJSONCRSFromTableProperties() {
+	const projjson = `{"type":"GeographicCRS","name":"Custom WGS 84"}`
+	loc := filepath.ToSlash(s.T().TempDir())
+	geom, err := iceberg.GeometryTypeOf("projjson:geo.crs")
+	s.Require().NoError(err)
+
+	iceSch := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: geom, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec()
+	meta, err := table.NewMetadata(iceSch, &spec, table.UnsortedSortOrder, loc, iceberg.Properties{
+		table.PropertyFormatVersion: "3",
+		"geo.crs":                   projjson,
+	})
+	s.Require().NoError(err)
+
+	tbl := table.New(
+		table.Identifier{"test", "write_records_projjson"},
+		meta,
+		filepath.Join(loc, "metadata", "v1.metadata.json"),
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		nil,
+	)
+
+	arrowSchema, err := table.SchemaToArrowSchemaWithOptions(iceSch, table.ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.Properties(),
+	})
+	s.Require().NoError(err)
+
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		rec, _, err := array.RecordFromJSON(s.mem, arrowSchema, strings.NewReader(`[
+			{"geom": "01010000000000000000003e400000000000002440"}
+		]`))
+		s.Require().NoError(err)
+		yield(rec, nil)
+	}
+
+	var dataFiles []iceberg.DataFile
+	for df, err := range table.WriteRecords(s.ctx, tbl, arrowSchema, records) {
+		s.Require().NoError(err)
+		dataFiles = append(dataFiles, df)
+	}
+	s.Require().Len(dataFiles, 1)
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	s.Require().NoError(err)
+
+	written, err := arrowRdr.ReadTable(s.ctx)
+	s.Require().NoError(err)
+	defer written.Release()
+
+	wkb, ok := written.Schema().Field(0).Type.(*geoarrow.WKBType)
+	s.Require().True(ok)
+	geoMeta := wkb.Metadata()
+	s.Equal(geoarrow.CRSTypePROJJSON, geoMeta.CRSType)
+	s.JSONEq(projjson, string(geoMeta.CRS))
+
+	// Read the written file through the table-aware scan path. This verifies
+	// that embedded GeoArrow PROJJSON metadata remains usable when the reader
+	// projects records using the table schema and properties.
+	scan := tbl.Scan()
+	readSchema, readRecords, err := scan.ReadTasks(s.ctx, []table.FileScanTask{{File: dataFiles[0]}})
+	s.Require().NoError(err)
+	readWKB, ok := readSchema.Field(0).Type.(*geoarrow.WKBType)
+	s.Require().True(ok)
+	readMeta := readWKB.Metadata()
+	s.Equal(geoarrow.CRSTypePROJJSON, readMeta.CRSType)
+	s.JSONEq(projjson, string(readMeta.CRS))
+
+	next, stop := iter.Pull2(readRecords)
+	defer stop()
+
+	readRecord, err, ok := next()
+	s.Require().True(ok)
+	s.Require().NoError(err)
+	defer readRecord.Release()
+	s.Equal(int64(1), readRecord.NumRows())
+
+	readGeom, ok := tbl.Schema().Field(0).Type.(iceberg.GeometryType)
+	s.Require().True(ok)
+	s.Equal("projjson:geo.crs", readGeom.CRS())
 }
 
 func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {

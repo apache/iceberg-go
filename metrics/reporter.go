@@ -34,7 +34,10 @@
 // instrumentation are layered on top in later work.
 package metrics
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // MetricsReport is the marker interface implemented by the concrete report
 // types (ScanReport and CommitReport). It is intentionally empty, mirroring the
@@ -66,6 +69,15 @@ type MetricsReport any
 // actual send on a background worker, and any error must be handled internally
 // (logged and swallowed), never propagated back to the caller. Report must be
 // safe for concurrent use by multiple goroutines.
+//
+// Reporter embeds [io.Closer] to mirror Java's Closeable MetricsReporter: a
+// stateful reporter (e.g. an HTTP-backed one holding a shared client or a
+// background dispatch worker) releases those resources in Close. Close is
+// called once, by the owner of the reporter, when the reporter is no longer
+// needed; Report must not be called after Close returns. Stateless reporters
+// return nil. Close lives on the interface deliberately — adding it after this
+// surface stabilizes would be a breaking change for external implementers.
 type Reporter interface {
 	Report(ctx context.Context, report MetricsReport)
+	io.Closer
 }

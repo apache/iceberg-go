@@ -161,9 +161,9 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	if cfg.fileSchema != nil {
 		checkSchema = cfg.fileSchema
 	}
-	err := checkArrowSchemaCompat(checkSchema, schema, false)
+	err := checkArrowSchemaCompatWithProperties(checkSchema, schema, false, tbl.Metadata().Properties())
 	if err != nil {
-		if downcastErr := checkArrowSchemaCompat(checkSchema, schema, true); downcastErr == nil {
+		if downcastErr := checkArrowSchemaCompatWithProperties(checkSchema, schema, true, tbl.Metadata().Properties()); downcastErr == nil {
 			err = nil
 		}
 	}

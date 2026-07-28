@@ -36,6 +36,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/auth/bearer"
+	smithymiddleware "github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/s3blob"
 )
@@ -54,7 +56,8 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 	if tok, ok := props["token"]; ok {
 		opts = append(opts, config.WithBearerAuthTokenProvider(
-			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}}))
+			&bearer.StaticTokenProvider{Token: bearer.Token{Value: tok}},
+		))
 	}
 
 	if region, ok := props[io.S3Region]; ok {
@@ -67,7 +70,8 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 	token := props[io.S3SessionToken]
 	if accessKey != "" || secretAccessKey != "" || token != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken])))
+			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+		)))
 	}
 
 	if proxy, ok := props[io.S3ProxyURI]; ok {
@@ -167,18 +171,46 @@ func resolveUsePathStyle(endpoint string, props map[string]string) bool {
 	return usePathStyle
 }
 
-func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+// resolveS3AWSConfig returns the AWS config for the S3 FileIO, preferring an
+// ambient context config but letting explicit s3.* credentials override it.
+func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
 	var (
-		awscfg *aws.Config
-		err    error
+		base *aws.Config
+		err  error
 	)
 	if v := utils.GetAwsConfig(ctx); v != nil {
-		awscfg = v
-	} else {
-		awscfg, err = ParseAWSConfig(ctx, props)
-		if err != nil {
-			return nil, err
-		}
+		base = v
+	} else if base, err = ParseAWSConfig(ctx, props); err != nil {
+		return nil, err
+	}
+
+	// Always copy so overrides (and the caller's later HTTPClient assignment)
+	// never touch a shared context config.
+	cfg := *base
+
+	// Explicit region overrides the context config; an unset region falls through.
+	if r := props[io.S3Region]; r != "" {
+		cfg.Region = r
+	} else if r := props[io.S3ClientRegion]; r != "" {
+		cfg.Region = r
+	}
+
+	// A complete explicit key pair overrides the credentials. A partial set
+	// (missing the access key or secret) falls through to the context/default
+	// chain rather than installing a provider with blank fields.
+	if props[io.S3AccessKeyID] != "" && props[io.S3SecretAccessKey] != "" {
+		cfg.Credentials = credentials.NewStaticCredentialsProvider(
+			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+		)
+	}
+
+	return &cfg, nil
+}
+
+func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
+	awscfg, err := resolveS3AWSConfig(ctx, props)
+	if err != nil {
+		return nil, err
 	}
 
 	// Default HTTP client when not configured: use the SDK buildable client so
@@ -193,9 +225,16 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 		endpoint = os.Getenv("AWS_S3_ENDPOINT")
 	}
 
+	compatMode := s3CompatModeEnabled(props)
+
 	client := s3.NewFromConfig(*awscfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
+		}
+		if compatMode {
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm)
+			o.APIOptions = append(o.APIOptions, stripGCSIncompatibleSignedHeaders)
 		}
 		o.UsePathStyle = resolveUsePathStyle(endpoint, props)
 		o.DisableLogOutputChecksumValidationSkipped = true
@@ -208,4 +247,87 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	}
 
 	return bucket, nil
+}
+
+func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
+	m := smithymiddleware.InitializeMiddlewareFunc(
+		"iceberg-go/strip-s3-input-checksum-algorithm",
+		func(ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
+			switch v := in.Parameters.(type) {
+			case *s3.PutObjectInput:
+				v.ChecksumAlgorithm = ""
+			case *s3.UploadPartInput:
+				v.ChecksumAlgorithm = ""
+			case *s3.CreateMultipartUploadInput:
+				v.ChecksumAlgorithm = ""
+			}
+
+			return next.HandleInitialize(ctx, in)
+		},
+	)
+
+	if err := stack.Initialize.Insert(m, "AWSChecksum:SetupInputContext", smithymiddleware.Before); err != nil {
+		return stack.Initialize.Add(m, smithymiddleware.Before)
+	}
+
+	return nil
+}
+
+// SDK-internal headers GCS's S3 interop endpoint rejects in the SigV4 signed set; removing
+// them before signing (all ops, reads included) avoids SignatureDoesNotMatch.
+var gcsIncompatibleSignedHeaders = []string{
+	"Amz-Sdk-Invocation-Id",
+	"Amz-Sdk-Request",
+	"Accept-Encoding",
+}
+
+// stripGCSIncompatibleSignedHeaders removes those headers before signing, then re-adds
+// Accept-Encoding: identity after signing so it's on the wire but unsigned (no gzip, GCS-safe).
+func stripGCSIncompatibleSignedHeaders(stack *smithymiddleware.Stack) error {
+	strip := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/strip-gcs-incompatible-signed-headers",
+		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				for _, h := range gcsIncompatibleSignedHeaders {
+					req.Header.Del(h)
+				}
+			}
+
+			return next.HandleFinalize(ctx, in)
+		},
+	)
+
+	restore := smithymiddleware.FinalizeMiddlewareFunc(
+		"iceberg-go/restore-accept-encoding-identity",
+		func(ctx context.Context, in smithymiddleware.FinalizeInput, next smithymiddleware.FinalizeHandler) (smithymiddleware.FinalizeOutput, smithymiddleware.Metadata, error) {
+			if req, ok := in.Request.(*smithyhttp.Request); ok {
+				req.Header.Set("Accept-Encoding", "identity")
+			}
+
+			return next.HandleFinalize(ctx, in)
+		},
+	)
+
+	if err := stack.Finalize.Insert(strip, "Signing", smithymiddleware.Before); err != nil {
+		if err := stack.Finalize.Add(strip, smithymiddleware.Before); err != nil {
+			return err
+		}
+	}
+	if err := stack.Finalize.Insert(restore, "Signing", smithymiddleware.After); err != nil {
+		if err := stack.Finalize.Add(restore, smithymiddleware.After); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func s3CompatModeEnabled(props map[string]string) bool {
+	if v, ok := props[io.S3CompatMode]; ok {
+		if enabled, err := strconv.ParseBool(v); err == nil {
+			return enabled
+		}
+	}
+
+	return false
 }

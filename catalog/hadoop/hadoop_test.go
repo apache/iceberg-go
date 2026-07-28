@@ -34,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -544,21 +545,43 @@ func (s *HadoopCatalogTestSuite) TestVersionPatternRejects() {
 	}
 }
 
-func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameAcceptsZeroUUIDVersion() {
-	file, ok := metadataFileFromName(
-		"/tmp/00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json",
-		"00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json",
-	)
-	s.True(ok)
-	s.Equal(0, file.version)
-	s.Equal("/tmp/00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", file.location)
+func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameAcceptsUUIDVersions() {
+	tests := []struct {
+		filename   string
+		version    int
+		compressed bool
+	}{
+		{"00000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 0, false},
+		{"99999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 99999, false},
+		{"100000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json", 100000, false},
+		{"1234567-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json", 1234567, true},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.filename, func() {
+			path := filepath.Join("metadata", tt.filename)
+			file, ok := metadataFileFromName(path, tt.filename)
+			s.True(ok)
+			s.Equal(tt.version, file.version)
+			s.Equal(tt.compressed, file.compressed)
+			s.Equal(path, file.location)
+		})
+	}
+}
+
+func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameRejectsShortUUIDVersion() {
+	filename := "9999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	_, ok := metadataFileFromName(filepath.Join("metadata", filename), filename)
+	s.False(ok)
 }
 
 func (s *HadoopCatalogTestSuite) TestMetadataFileFromNameRejectsOverflowVersion() {
-	_, ok := metadataFileFromName(
-		"/tmp/v99999999999999999999.metadata.json",
-		"v99999999999999999999.metadata.json",
-	)
+	hadoopName := "v99999999999999999999.metadata.json"
+	_, ok := metadataFileFromName(filepath.Join("metadata", hadoopName), hadoopName)
+	s.False(ok)
+
+	uuidName := "99999999999999999999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	_, ok = metadataFileFromName(filepath.Join("metadata", uuidName), uuidName)
 	s.False(ok)
 }
 
@@ -858,6 +881,21 @@ func (s *HadoopCatalogTestSuite) TestFindMetadataLocationUsesCanonicalPathForDup
 	s.Equal(filepath.Join(dir, "v3.metadata.json"), path)
 }
 
+func (s *HadoopCatalogTestSuite) TestFindMetadataLocationSelectsUUIDVersionBeyondPadding() {
+	ident := []string{"ns", "tbl"}
+	dir := s.cat.metadataDir(ident)
+	s.Require().NoError(os.MkdirAll(dir, 0o755))
+	previous := "99999-a1b2c3d4-e5f6-7890-abcd-ef1234567890.metadata.json"
+	latest := "100000-a1b2c3d4-e5f6-7890-abcd-ef1234567890.gz.metadata.json"
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, previous), nil, 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, latest), nil, 0o644))
+
+	path, version, err := s.cat.findMetadataLocation(ident)
+	s.Require().NoError(err)
+	s.Equal(100000, version)
+	s.Equal(filepath.Join(dir, latest), path)
+}
+
 // CreateNamespace tests
 
 func (s *HadoopCatalogTestSuite) TestCreateNamespace() {
@@ -1024,15 +1062,32 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesEmpty() {
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
-	parentDir := filepath.Join(s.warehouse, "a")
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child1"), 0o755))
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child2"), 0o755))
+	ctx := context.Background()
+	parent := table.Identifier{"a"}
+	expected := []table.Identifier{{"a", "child1"}, {"a", "child2"}}
+	grandchild := table.Identifier{"a", "child1", "grandchild"}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, parent, nil))
+	for _, namespace := range expected {
+		s.Require().NoError(s.cat.CreateNamespace(ctx, namespace, nil))
+	}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, grandchild, nil))
 
-	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
+	namespaces, err := s.cat.ListNamespaces(ctx, parent)
 	s.Require().NoError(err)
-	s.Len(namespaces, 2)
-	s.Contains(namespaces, table.Identifier{"child1"})
-	s.Contains(namespaces, table.Identifier{"child2"})
+	s.ElementsMatch(expected, namespaces)
+	for _, namespace := range namespaces {
+		exists, err := s.cat.CheckNamespaceExists(ctx, namespace)
+		s.Require().NoError(err)
+		s.True(exists)
+	}
+
+	namespaces, err = s.cat.ListNamespaces(ctx, expected[0])
+	s.Require().NoError(err)
+	s.Require().Equal([]table.Identifier{grandchild}, namespaces)
+
+	exists, err := s.cat.CheckNamespaceExists(ctx, namespaces[0])
+	s.Require().NoError(err)
+	s.True(exists)
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
@@ -1404,10 +1459,11 @@ func (s *HadoopCatalogTestSuite) TestListTablesDoesNotYieldTablesInChildNamespac
 
 func (s *HadoopCatalogTestSuite) TestDropTable() {
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
-	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	err = s.cat.DropTable(ctx, []string{"ns", "tbl"})
 	s.Require().NoError(err)
 
 	// Verify the table directory is completely removed.
@@ -1422,19 +1478,33 @@ func (s *HadoopCatalogTestSuite) TestDropTableNotExists() {
 
 func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
 	// Add a data file to confirm everything is purged.
 	dataDir := filepath.Join(s.warehouse, "ns", "tbl", "data")
 	s.Require().NoError(os.MkdirAll(dataDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(dataDir, "00000-0-0-00000.parquet"), []byte("data"), 0o644))
 
-	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	err = s.cat.DropTable(ctx, []string{"ns", "tbl"})
 	s.Require().NoError(err)
 
 	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
 	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTablePreservesDirectoryIfMetadataIsInvalid() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	markerPath := filepath.Join(s.warehouse, "ns", "tbl", "marker")
+	s.Require().NoError(os.WriteFile(markerPath, []byte("keep"), 0o644))
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().Error(err)
+	s.FileExists(markerPath)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
@@ -1492,6 +1562,22 @@ func (s *HadoopCatalogTestSuite) TestCreateTableAndLoad() {
 	s.Equal(created.Metadata().TableUUID(), loaded.Metadata().TableUUID())
 	s.Equal(created.Location(), loaded.Location())
 	s.Equal(len(created.Schema().Fields()), len(loaded.Schema().Fields()))
+}
+
+// TestCreateTableInvalidReporterDoesNotMutate pins that an invalid
+// metrics-reporter-impl fails at catalog construction, before any table op runs,
+// so a bad reporter can never turn a successful create into a reported failure
+// (ErrTableAlreadyExists on retry) or leave a cached error that wedges later ops.
+func (s *HadoopCatalogTestSuite) TestCreateTableInvalidReporterDoesNotMutate() {
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+
+	_, err := NewCatalog("test", s.warehouse, iceberg.Properties{
+		metrics.ReporterImplKey: "does-not-exist",
+	})
+	s.Require().Error(err)
+
+	// No table op ran, so nothing was written to disk.
+	s.NoDirExists(filepath.Join(s.warehouse, "ns", "tbl", "metadata"))
 }
 
 func (s *HadoopCatalogTestSuite) TestCreateTableGzipMetadata() {
@@ -2009,8 +2095,9 @@ func (s *HadoopCatalogTestSuite) TestTableOperationsRejectParentTraversalIdentif
 func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
 	// Dropping a table should not affect the parent namespace directory.
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
 	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
 

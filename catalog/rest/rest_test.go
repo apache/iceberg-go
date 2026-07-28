@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
@@ -581,6 +582,66 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 		{"accounting", "owned"},
 	}, tbls)
 	r.Require().NoError(lastErr)
+}
+
+func (r *RestCatalogSuite) TestListTablesPaginationCycle() {
+	const namespace = "accounting"
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+		if requestCount > 3 {
+			r.Fail("pagination continued after a repeated token")
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+
+			return
+		}
+
+		var name, nextPageToken string
+		switch req.URL.Query().Get("pageToken") {
+		case "":
+			name, nextPageToken = "first", "token-a"
+		case "token-a":
+			name, nextPageToken = "second", "token-b"
+		case "token-b":
+			name, nextPageToken = "third", "token-a"
+		default:
+			r.Fail("unexpected page token")
+			http.Error(w, "unexpected page token", http.StatusBadRequest)
+
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{map[string]any{
+				"namespace": []string{namespace},
+				"name":      name,
+			}},
+			"next-page-token": nextPageToken,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var identifiers []table.Identifier
+	var paginationErr error
+	for identifier, err := range cat.ListTables(context.Background(), catalog.ToIdentifier(namespace)) {
+		if err != nil {
+			paginationErr = err
+
+			break
+		}
+		identifiers = append(identifiers, identifier)
+	}
+
+	r.ErrorIs(paginationErr, rest.ErrRESTError)
+	r.ErrorContains(paginationErr, "pagination cycle: repeated page token")
+	r.Equal(3, requestCount)
+	r.Equal([]table.Identifier{
+		{"accounting", "first"},
+		{"accounting", "second"},
+		{"accounting", "third"},
+	}, identifiers)
 }
 
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
@@ -1252,6 +1313,59 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	r.Error(err)
 	r.Contains(err.Error(), "Table already exists")
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
+}
+
+// TestCreateTableInvalidReporterDoesNotHitServer pins that an invalid
+// metrics-reporter-impl fails CreateTable before the create POST is sent, so a
+// bad reporter can't turn a table the server already created into a reported
+// failure. The reporter is resolved at the top of CreateTable, so the server
+// endpoint is never hit.
+func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"}),
+	)
+	r.Require().NoError(err)
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	r.Require().Error(err)
+	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
+}
+
+// TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
+// the server via /v1/config cannot select — or, with an unregistered name, break
+// — the client's reporter. The client configured none, so the op must succeed and
+// fall back to the nop reporter; selection is resolved from client props only.
+func TestServerVendedReporterImplIgnored(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// A server-vended reporter impl the Go client does not recognize.
+			"overrides": map[string]any{metrics.ReporterImplKey: "does-not-exist"},
+			"endpoints": rest.AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(createTableRestExample))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Client does NOT configure a reporter.
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	tbl, err := cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	require.NoError(t, err, "an unregistered server-vended reporter must not fail the create")
+	assert.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
 }
 
 func (r *RestCatalogSuite) TestCheckTableExists204() {
@@ -2484,6 +2598,19 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.NoError(err)
 	r.Equal("metadata-location", createdView.MetadataLocation())
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
+}
+
+func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = ctlg.CreateView(
+		context.Background(),
+		table.Identifier{"ns", "view"},
+		nil,
+		iceberg.NewSchema(0),
+	)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
 }
 
 func (r *RestCatalogSuite) TestCreateView409() {

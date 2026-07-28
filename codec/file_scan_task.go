@@ -18,6 +18,10 @@
 package codec
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/apache/iceberg-go"
@@ -27,7 +31,8 @@ import (
 
 // EncodeFileScanTask encodes a FileScanTask for cross-process transport.
 // Each carried DataFile is encoded with [EncodeDataFile] and wrapped in
-// a small record that also carries the scan range and v3 row lineage.
+// a small record that also carries the scan range and v3 row lineage. A task
+// residual, when present, is appended as a framed JSON extension.
 // The (spec, schema, version) triple must match what [DecodeFileScanTask]
 // is given on the receiver.
 //
@@ -79,8 +84,31 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 		FirstRowID:          task.FirstRowID,
 		DataSequenceNumber:  task.DataSequenceNumber,
 	}
+	encodedTask, err := fileScanTaskSchema.Encode(&envelope)
+	if err != nil {
+		return nil, err
+	}
+	if task.Residual == nil {
+		return encodedTask, nil
+	}
 
-	return fileScanTaskSchema.Encode(&envelope)
+	encoded, err := json.Marshal(task.Residual)
+	if err != nil && schema != nil {
+		// Unbound timestamp predicates need the field type to choose timestamp
+		// versus timestamptz JSON. Bind only as a marshal fallback; already-bound
+		// expressions marshal directly and must not be rebound.
+		if bound, bindErr := iceberg.BindExpr(schema, task.Residual, true); bindErr == nil {
+			encoded, err = json.Marshal(bound)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: residual: %w", err)
+	}
+	encodedTask = append(encodedTask, fileScanTaskResidualMagic...)
+	encodedTask = binary.AppendUvarint(encodedTask, uint64(len(encoded)))
+	encodedTask = append(encodedTask, encoded...)
+
+	return encodedTask, nil
 }
 
 // DecodeFileScanTask reverses [EncodeFileScanTask]. The triple
@@ -90,7 +118,8 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: unsupported format version %d", version)
 	}
 	var envelope fileScanTaskEnvelope
-	if _, err := fileScanTaskSchema.Decode(data, &envelope); err != nil {
+	rest, err := fileScanTaskSchema.Decode(data, &envelope)
+	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: decode: %w", err)
 	}
 	if envelope.Start < 0 {
@@ -115,6 +144,10 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: deletion vector files: %w", err)
 	}
+	residual, err := decodeFileScanTaskResidual(rest, schema)
+	if err != nil {
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: residual: %w", err)
+	}
 
 	return table.FileScanTask{
 		File:                file,
@@ -123,6 +156,7 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 		DeletionVectorFiles: dv,
 		Start:               envelope.Start,
 		Length:              envelope.Length,
+		Residual:            residual,
 		FirstRowID:          envelope.FirstRowID,
 		DataSequenceNumber:  envelope.DataSequenceNumber,
 	}, nil
@@ -135,24 +169,25 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 // table.FileScanTask gains, loses, renames, retypes, or reorders a
 // field. That forces a deliberate decision about whether the change
 // must be carried by [EncodeFileScanTask] / [DecodeFileScanTask]; when
-// extending, update fileScanTaskEnvelope, the schema JSON below, the
-// encode/decode bodies, and this shape together.
+// extending, update the base envelope or extension framing, the encode/decode
+// bodies, and this shape together.
 type fileScanTaskShape struct {
 	File                iceberg.DataFile
 	DeleteFiles         []iceberg.DataFile
 	EqualityDeleteFiles []iceberg.DataFile
 	DeletionVectorFiles []iceberg.DataFile
 	Start, Length       int64
+	Residual            iceberg.BooleanExpression
 	FirstRowID          *int64
 	DataSequenceNumber  *int64
 }
 
 var _ = table.FileScanTask(fileScanTaskShape{})
 
-// fileScanTaskEnvelope is the avro on-wire shape. The DataFile payloads
+// fileScanTaskEnvelope is the base Avro on-wire shape. The DataFile payloads
 // (File and the three delete-file lists) are themselves [EncodeDataFile]
-// bytes; this struct only frames them along with the scan range and v3
-// lineage.
+// bytes; this struct frames them with the scan range and v3 lineage. Optional
+// extensions such as Residual are appended after this stable base envelope.
 type fileScanTaskEnvelope struct {
 	File                []byte   `avro:"file"`
 	DeleteFiles         [][]byte `avro:"delete_files"`
@@ -181,12 +216,38 @@ const fileScanTaskSchemaJSON = `{
 
 var fileScanTaskSchema *avro.Schema
 
+// Residuals are framed as an optional extension after the original Avro
+// envelope. Keeping the envelope schema byte-for-byte stable lets the new
+// decoder read legacy payloads and lets legacy decoders continue reading the
+// known prefix (they already ignored the bytes returned by Schema.Decode).
+var fileScanTaskResidualMagic = []byte{0xf5, 'r', 'e', 's', 1}
+
 func init() {
 	s, err := avro.Parse(fileScanTaskSchemaJSON)
 	if err != nil {
 		panic("codec: fileScanTaskSchema invalid: " + err.Error())
 	}
 	fileScanTaskSchema = s
+}
+
+func decodeFileScanTaskResidual(data []byte, schema *iceberg.Schema) (iceberg.BooleanExpression, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if !bytes.HasPrefix(data, fileScanTaskResidualMagic) {
+		return nil, errors.New("unknown trailing extension")
+	}
+	data = data[len(fileScanTaskResidualMagic):]
+	size, n := binary.Uvarint(data)
+	if n <= 0 {
+		return nil, errors.New("invalid residual length")
+	}
+	data = data[n:]
+	if size != uint64(len(data)) {
+		return nil, fmt.Errorf("residual length is %d, payload has %d bytes", size, len(data))
+	}
+
+	return iceberg.ParseExpr(data, schema)
 }
 
 // checkDataFileSpecID verifies a data file's SpecID matches the codec spec.

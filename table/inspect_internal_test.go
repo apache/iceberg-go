@@ -23,6 +23,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -96,7 +97,7 @@ func collectRecord(t *testing.T, rr array.RecordReader) arrow.RecordBatch {
 }
 
 func TestInspectHistorySchema(t *testing.T) {
-	sc := historySchema()
+	sc := HistorySchema()
 
 	require.Equal(t, []string{"made_current_at", "snapshot_id", "parent_id", "is_current_ancestor"},
 		testFieldNames(sc))
@@ -242,6 +243,198 @@ func TestInspectHistoryNoCurrentSnapshot(t *testing.T) {
 	require.EqualValues(t, 1, rec.NumRows())
 	isCurrentAncestor := rec.Column(3).(*array.Boolean)
 	require.False(t, isCurrentAncestor.Value(0), "no current snapshot means no ancestors")
+}
+
+// snapshotsTestTable builds a table with two snapshots: a root carrying a
+// summary (operation + properties) and a child with no summary at all, to
+// exercise both the populated and null operation/summary paths.
+func snapshotsTestTable() *Table {
+	const (
+		s1 = int64(101)
+		s2 = int64(102)
+	)
+	current := s2
+	lastPartitionID := 999
+
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		Loc:             "s3://test/snapshots",
+		LastUpdatedMS:   1200,
+		LastColumnId:    1,
+		SchemaList:      []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+		LastPartitionID: &lastPartitionID,
+		Props:           iceberg.Properties{},
+		SnapshotList: []Snapshot{
+			{
+				SnapshotID:   s1,
+				TimestampMs:  1100,
+				ManifestList: "/snap-101.avro",
+				Summary: &Summary{
+					Operation:  OpAppend,
+					Properties: iceberg.Properties{"added-records": "10", "total-records": "10"},
+				},
+			},
+			// s2 intentionally carries no summary and no manifest-list path.
+			{SnapshotID: s2, ParentSnapshotID: int64Ptr(s1), TimestampMs: 1200},
+		},
+		CurrentSnapshotID:  &current,
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, SnapshotRefType: BranchRef}},
+	}}
+
+	return New(Identifier{"snapshots"}, meta, "", nil, nil)
+}
+
+func TestInspectSnapshotsSchema(t *testing.T) {
+	sc := SnapshotsSchema()
+
+	require.Equal(t,
+		[]string{"committed_at", "snapshot_id", "parent_id", "operation", "manifest_list", "summary"},
+		testFieldNames(sc))
+
+	fields := sc.Fields()
+	for i := range fields {
+		require.Equal(t, i+1, fields[i].ID)
+	}
+
+	require.True(t, fields[0].Required, "committed_at is required")
+	require.True(t, fields[1].Required, "snapshot_id is required")
+	require.False(t, fields[2].Required, "parent_id is optional")
+	require.False(t, fields[3].Required, "operation is optional")
+	require.False(t, fields[4].Required, "manifest_list is optional")
+	require.False(t, fields[5].Required, "summary is optional")
+
+	m, ok := fields[5].Type.(*iceberg.MapType)
+	require.True(t, ok, "summary must be a map")
+	require.Equal(t, 7, m.KeyID)
+	require.Equal(t, 8, m.ValueID)
+	require.Equal(t, iceberg.PrimitiveTypes.String, m.KeyType)
+	require.Equal(t, iceberg.PrimitiveTypes.String, m.ValueType)
+}
+
+func TestInspectSnapshots(t *testing.T) {
+	tbl := snapshotsTestTable()
+
+	rr, err := tbl.Inspect().Snapshots(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+
+	// committed_at must be timestamptz: microsecond precision, UTC.
+	tsType, ok := rec.Schema().Field(0).Type.(*arrow.TimestampType)
+	require.True(t, ok, "committed_at must be an Arrow timestamp")
+	require.Equal(t, arrow.Microsecond, tsType.Unit)
+	require.Equal(t, "UTC", tsType.TimeZone)
+
+	committedAt := rec.Column(0).(*array.Timestamp)
+	snapshotID := rec.Column(1).(*array.Int64)
+	parentID := rec.Column(2).(*array.Int64)
+	operation := rec.Column(3).(*array.String)
+	manifestList := rec.Column(4).(*array.String)
+	summary := rec.Column(5).(*array.Map)
+
+	require.EqualValues(t, 1100*1000, committedAt.Value(0))
+	require.EqualValues(t, 1200*1000, committedAt.Value(1))
+
+	require.EqualValues(t, 101, snapshotID.Value(0))
+	require.EqualValues(t, 102, snapshotID.Value(1))
+
+	require.True(t, parentID.IsNull(0), "root snapshot has no parent")
+	require.False(t, parentID.IsNull(1))
+	require.EqualValues(t, 101, parentID.Value(1))
+
+	// s1 has a manifest-list path; s2 has none and must render null, not "".
+	require.False(t, manifestList.IsNull(0))
+	require.Equal(t, "/snap-101.avro", manifestList.Value(0))
+	require.True(t, manifestList.IsNull(1), "snapshot without a manifest list has null manifest_list")
+
+	// s1 has a summary; s2 does not.
+	require.False(t, operation.IsNull(0))
+	require.Equal(t, "append", operation.Value(0))
+	require.True(t, operation.IsNull(1), "snapshot without a summary has null operation")
+
+	// The summary map mirrors the stored summary: operation folded in with the
+	// extra properties.
+	require.False(t, summary.IsNull(0))
+	require.Equal(t,
+		map[string]string{"operation": "append", "added-records": "10", "total-records": "10"},
+		mapRow(t, summary, 0))
+	require.True(t, summary.IsNull(1), "snapshot without a summary has null summary")
+}
+
+// TestInspectSnapshotsEmpty covers a table with no snapshots.
+func TestInspectSnapshotsEmpty(t *testing.T) {
+	lastPartitionID := 999
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:      2,
+		UUID:               uuid.New(),
+		Loc:                "s3://test/empty",
+		LastUpdatedMS:      1000,
+		LastColumnId:       1,
+		SchemaList:         []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID:    0,
+		Specs:              []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:      0,
+		LastPartitionID:    &lastPartitionID,
+		Props:              iceberg.Properties{},
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       map[string]SnapshotRef{},
+	}}
+	tbl := New(Identifier{"empty"}, meta, "", nil, nil)
+
+	rr, err := tbl.Inspect().Snapshots(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 0, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+}
+
+// TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
+// through the supplied allocator, and that all buffers are released.
+func TestInspectAllocatorOption(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	// AssertSize runs after the releases below, on every exit path, so an early
+	// assertion failure cannot silently skip the leak check.
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	tbl := snapshotsTestTable()
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Snapshots(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+}
+
+// mapRow reads one row of a string->string Arrow map column into a Go map.
+func mapRow(t *testing.T, m *array.Map, row int) map[string]string {
+	t.Helper()
+	keys := m.Keys().(*array.String)
+	values := m.Items().(*array.String)
+	start, end := m.ValueOffsets(row)
+	out := make(map[string]string, end-start)
+	for j := start; j < end; j++ {
+		out[keys.Value(int(j))] = values.Value(int(j))
+	}
+
+	return out
 }
 
 // testFieldNames returns the top-level field names of an Iceberg schema in order.

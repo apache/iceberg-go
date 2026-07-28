@@ -90,7 +90,7 @@ type FileWriter interface {
 type FileFormat interface {
 	Open(context.Context, iceio.IO, string) (FileReader, error)
 	PathToIDMapping(*iceberg.Schema) (map[string]int, error)
-	DataFileStatsFromMeta(rdr Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) *DataFileStatistics
+	DataFileStatsFromMeta(rdr Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}, arrowSchema *arrow.Schema) *DataFileStatistics
 	GetWriteProperties(iceberg.Properties) any
 	WriteDataFile(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, batches []arrow.RecordBatch) (iceberg.DataFile, error)
 	NewFileWriter(ctx context.Context, fs iceio.WriteFileIO, partitionValues map[int]any, info WriteFileInfo, arrowSchema *arrow.Schema) (FileWriter, error)
@@ -120,6 +120,7 @@ type WriteFileInfo struct {
 	FileName         string
 	StatsCols        map[int]StatisticsCollector
 	WriteProps       any
+	RowGroupBytes    int64
 	Content          iceberg.ManifestEntryContent
 	EqualityFieldIDs []int
 	SortOrderID      int

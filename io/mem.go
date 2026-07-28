@@ -106,16 +106,29 @@ func (m *MemFS) WriteFile(name string, content []byte) error {
 }
 
 func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	type walkEntry struct {
+		path string
+		size int64
+	}
 
 	root = strings.TrimRight(root, "/")
+
+	m.mu.RLock()
+	var entries []walkEntry
 	for key, data := range m.files {
 		if !memPathInRoot(key, root) {
 			continue
 		}
-		info := &memFileInfo{name: filepath.Base(key), size: int64(len(data))}
-		if err := fn(key, fs.FileInfoToDirEntry(info), nil); err != nil {
+		entries = append(entries, walkEntry{
+			path: key,
+			size: int64(len(data)),
+		})
+	}
+	m.mu.RUnlock()
+
+	for _, entry := range entries {
+		info := &memFileInfo{name: filepath.Base(entry.path), size: entry.size}
+		if err := fn(entry.path, fs.FileInfoToDirEntry(info), nil); err != nil {
 			return err
 		}
 	}
@@ -152,6 +165,8 @@ func (f *memFile) Seek(offset int64, whence int) (int64, error) {
 		abs = f.pos + offset
 	case io.SeekEnd:
 		abs = int64(len(f.data)) + offset
+	default:
+		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
 	}
 	if abs < 0 {
 		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
@@ -162,6 +177,9 @@ func (f *memFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (f *memFile) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, &fs.PathError{Op: "readat", Path: f.name, Err: fs.ErrInvalid}
+	}
 	if off >= int64(len(f.data)) {
 		return 0, io.EOF
 	}

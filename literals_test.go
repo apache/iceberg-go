@@ -235,6 +235,35 @@ func TestTimestampNanoLiteralConversions(t *testing.T) {
 	}
 }
 
+func TestTimestampLiteralToNanosRejectsOverflow(t *testing.T) {
+	targets := []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	}
+
+	for _, target := range targets {
+		t.Run(target.String(), func(t *testing.T) {
+			for _, value := range []iceberg.TimestampLiteral{
+				iceberg.TimestampLiteral(math.MaxInt64/1000 + 1),
+				iceberg.TimestampLiteral(math.MinInt64/1000 - 1),
+			} {
+				actual, err := value.To(target)
+				assert.Nil(t, actual)
+				assert.ErrorIs(t, err, iceberg.ErrBadCast)
+			}
+
+			for _, value := range []iceberg.TimestampLiteral{
+				iceberg.TimestampLiteral(math.MaxInt64 / 1000),
+				iceberg.TimestampLiteral(math.MinInt64 / 1000),
+			} {
+				actual, err := value.To(target)
+				require.NoError(t, err)
+				assert.Equal(t, iceberg.TimestampNsLiteral(value*1000), actual)
+			}
+		})
+	}
+}
+
 func TestInt64Conversions(t *testing.T) {
 	tests := []struct {
 		from iceberg.Int64Literal

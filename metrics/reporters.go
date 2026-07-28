@@ -19,6 +19,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -52,6 +53,28 @@ var _ Reporter = NopReporter{}
 // Report implements [Reporter] and does nothing.
 func (NopReporter) Report(context.Context, MetricsReport) {}
 
+// Close implements [Reporter]. NopReporter holds no resources, so it is a no-op.
+func (NopReporter) Close() error { return nil }
+
+// nopAware is implemented by reporters that can report whether they discard
+// every report, letting callers skip assembling a report that would be thrown
+// away. It is unexported: it is a hint for [IsNop], not part of the [Reporter]
+// contract.
+type nopAware interface {
+	isNop() bool
+}
+
+func (NopReporter) isNop() bool { return true }
+
+// IsNop reports whether r is known to discard every report — a bare
+// [NopReporter] or a [Combine] of only nop reporters. A false result does not
+// guarantee the report is consumed; it only means r is not a recognized no-op.
+func IsNop(r Reporter) bool {
+	n, ok := r.(nopAware)
+
+	return ok && n.isNop()
+}
+
 // LoggingReporter is a [Reporter] that logs each report via an [slog.Logger]. It
 // is a convenient default for development and debugging.
 type LoggingReporter struct {
@@ -78,6 +101,10 @@ func (r *LoggingReporter) Report(ctx context.Context, report MetricsReport) {
 	}
 	logger.InfoContext(ctx, "iceberg metrics report", "report", report)
 }
+
+// Close implements [Reporter]. A LoggingReporter does not own the logger it
+// writes to, so there is nothing to release; it is a no-op.
+func (r *LoggingReporter) Close() error { return nil }
 
 // InMemoryReporter is a [Reporter] that retains every report it receives. It is
 // primarily intended for tests and inspection. It is safe for concurrent use.
@@ -112,6 +139,11 @@ func (r *InMemoryReporter) Reset() {
 	defer r.mu.Unlock()
 	r.reports = nil
 }
+
+// Close implements [Reporter]. InMemoryReporter retains reports in memory and
+// holds no external resources, so Close is a no-op; retained reports remain
+// readable via Reports.
+func (r *InMemoryReporter) Close() error { return nil }
 
 // Combine returns a [Reporter] that forwards each report to all of the given
 // reporters in order. nil reporters are skipped. A panic in one reporter must
@@ -161,6 +193,18 @@ type compositeReporter struct {
 
 var _ Reporter = (*compositeReporter)(nil)
 
+// isNop reports true only when every wrapped reporter is itself a nop, so
+// Combine(NopReporter{}) is recognized as a no-op by [IsNop].
+func (c *compositeReporter) isNop() bool {
+	for _, r := range c.reporters {
+		if n, ok := r.(nopAware); !ok || !n.isNop() {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (c *compositeReporter) Report(ctx context.Context, report MetricsReport) {
 	for _, r := range c.reporters {
 		func() {
@@ -182,4 +226,29 @@ func (c *compositeReporter) Report(ctx context.Context, report MetricsReport) {
 			r.Report(ctx, report)
 		}()
 	}
+}
+
+// Close closes every wrapped reporter, isolating each from the others so one
+// failing or panicking Close still lets the rest run — mirroring the fan-out
+// panic isolation in Report. It returns the joined non-nil errors (a recovered
+// panic is converted to an error), or nil if all children closed cleanly.
+func (c *compositeReporter) Close() error {
+	var errs []error
+	for _, r := range c.reporters {
+		errs = append(errs, closeIsolated(r))
+	}
+
+	return errors.Join(errs...)
+}
+
+// closeIsolated calls r.Close, converting a panic into an error so a single
+// misbehaving reporter cannot abort closing its peers.
+func closeIsolated(r Reporter) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = fmt.Errorf("metrics reporter %T panicked on Close: %v", r, v)
+		}
+	}()
+
+	return r.Close()
 }

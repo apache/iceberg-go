@@ -45,6 +45,11 @@ func TestValidateTableIdentifier(t *testing.T) {
 	}
 }
 
+func TestNamespaceFromEmptyIdentifier(t *testing.T) {
+	require.Nil(t, catalog.NamespaceFromIdent(nil))
+	require.Nil(t, catalog.NamespaceFromIdent(table.Identifier{}))
+}
+
 func TestValidateViewIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view"}))
 

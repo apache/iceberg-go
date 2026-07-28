@@ -80,6 +80,7 @@ type Representation interface {
 	// isRepresentation seals the interface to the implementations in
 	// this package.
 	isRepresentation()
+	clone() Representation
 }
 
 // SQLRepresentation stores the function body as a SQL expression in a
@@ -105,6 +106,7 @@ func NewSQLRepresentation(dialect, sql string) (SQLRepresentation, error) {
 
 func (SQLRepresentation) RepresentationType() string { return "sql" }
 func (SQLRepresentation) isRepresentation()          {}
+func (r SQLRepresentation) clone() Representation    { return r }
 
 func (r SQLRepresentation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -122,11 +124,16 @@ type UnknownRepresentation struct {
 	raw json.RawMessage
 }
 
-// Raw returns the representation's original JSON.
-func (r UnknownRepresentation) Raw() json.RawMessage { return r.raw }
+// Raw returns a copy of the representation's original JSON.
+func (r UnknownRepresentation) Raw() json.RawMessage { return slices.Clone(r.raw) }
 
 func (r UnknownRepresentation) RepresentationType() string { return r.TypeName }
 func (UnknownRepresentation) isRepresentation()            {}
+func (r UnknownRepresentation) clone() Representation {
+	r.raw = slices.Clone(r.raw)
+
+	return r
+}
 
 func (r UnknownRepresentation) MarshalJSON() ([]byte, error) {
 	return slices.Clone(r.raw), nil
@@ -145,6 +152,17 @@ func representationsEqual(a, b Representation) bool {
 	default:
 		return false
 	}
+}
+
+func cloneRepresentations(representations []Representation) []Representation {
+	cloned := slices.Clone(representations)
+	for i, repr := range representations {
+		if repr != nil {
+			cloned[i] = repr.clone()
+		}
+	}
+
+	return cloned
 }
 
 func unmarshalRepresentation(b json.RawMessage) (Representation, error) {
@@ -284,7 +302,7 @@ func (v *DefinitionVersion) Clone() *DefinitionVersion {
 	}
 
 	cloned := *v
-	cloned.Representations = slices.Clone(v.Representations)
+	cloned.Representations = cloneRepresentations(v.Representations)
 
 	return &cloned
 }
@@ -475,8 +493,12 @@ func (d *Definition) Clone() *Definition {
 	}
 
 	cloned := *d
-	// Type values are immutable, so sharing them across clones is safe.
-	cloned.Parameters = slices.Clone(d.Parameters)
+	cloned.Parameters = make([]Parameter, len(d.Parameters))
+	for i, parameter := range d.Parameters {
+		cloned.Parameters[i] = parameter
+		cloned.Parameters[i].Type = cloneType(parameter.Type)
+	}
+	cloned.ReturnType = cloneType(d.ReturnType)
 	cloned.Versions = cloneSlice(d.Versions)
 	if d.ReturnNullable != nil {
 		nullable := *d.ReturnNullable
@@ -677,14 +699,14 @@ type Metadata interface {
 	// Location returns the function's base location, used to create
 	// metadata file locations. It may be empty.
 	Location() string
-	// Definitions returns the function's definitions, one per signature.
+	// Definitions returns deep copies of the function's definitions, one per signature.
 	Definitions() []*Definition
-	// DefinitionByID returns the definition with the given definition-id.
+	// DefinitionByID returns a deep copy of the definition with the given definition-id.
 	DefinitionByID(definitionID string) (*Definition, bool)
-	// DefinitionLog returns the history of definition version selections.
+	// DefinitionLog returns a deep copy of the definition version selection history.
 	DefinitionLog() []DefinitionLogEntry
-	// Properties returns the function's properties. Entries are treated
-	// as hints, not strict rules.
+	// Properties returns a copy of the function's properties. Entries are
+	// treated as hints, not strict rules.
 	Properties() iceberg.Properties
 	// Secure reports whether this is a secure function whose sensitive
 	// information engines should not leak to end users.
@@ -733,19 +755,24 @@ type metadata struct {
 	lazyDefinitionsByID func() map[string]*Definition
 }
 
-func (m *metadata) FormatVersion() int                  { return m.FormatVersionValue }
-func (m *metadata) FunctionUUID() uuid.UUID             { return *m.UUID }
-func (m *metadata) Location() string                    { return m.Loc }
-func (m *metadata) Definitions() []*Definition          { return m.DefinitionList }
-func (m *metadata) DefinitionLog() []DefinitionLogEntry { return m.DefinitionLogList }
-func (m *metadata) Properties() iceberg.Properties      { return m.Props }
-func (m *metadata) Secure() bool                        { return m.SecureValue }
-func (m *metadata) Doc() string                         { return m.DocValue }
+func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
+func (m *metadata) FunctionUUID() uuid.UUID    { return *m.UUID }
+func (m *metadata) Location() string           { return m.Loc }
+func (m *metadata) Definitions() []*Definition { return cloneSlice(m.DefinitionList) }
+func (m *metadata) DefinitionLog() []DefinitionLogEntry {
+	return cloneDefinitionLog(m.DefinitionLogList)
+}
+func (m *metadata) Properties() iceberg.Properties { return maps.Clone(m.Props) }
+func (m *metadata) Secure() bool                   { return m.SecureValue }
+func (m *metadata) Doc() string                    { return m.DocValue }
 
 func (m *metadata) DefinitionByID(definitionID string) (*Definition, bool) {
 	def, ok := m.lazyDefinitionsByID()[definitionID]
+	if !ok {
+		return nil, false
+	}
 
-	return def, ok
+	return def.Clone(), true
 }
 
 func (m *metadata) Equals(other Metadata) bool {

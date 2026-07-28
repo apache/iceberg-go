@@ -73,7 +73,11 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 
 		return us
 	}
-	us.err = t.ensureInitialized()
+	// UpdateSpec reads exclusively from the committed table metadata
+	// (t.tbl.Metadata() / t.tbl.Schema()) rather than the transaction's
+	// metadata builder, but still routes its initialization check through the
+	// canonical txnMeta accessor for consistency.
+	_, us.err = t.txnMeta()
 	if us.err != nil {
 		return us
 	}
@@ -349,8 +353,14 @@ func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 }
 
 func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.PartitionField, error) {
+	transform, err := iceberg.ParseTransform(key.Transform)
+	if err != nil {
+		return iceberg.PartitionField{}, fmt.Errorf("%w: invalid partition transform %q: %w",
+			iceberg.ErrInvalidArgument, key.Transform, err)
+	}
+
 	if us.txn.tbl.Metadata().Version() == 2 {
-		sourceId, transform := key.SourceId, key.Transform
+		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
 		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
 			for _, field := range spec.Fields() {
@@ -358,7 +368,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			}
 		}
 		for _, field := range historicalFields {
-			if field.SourceID() == sourceId && field.Transform.String() == transform {
+			if field.SourceID() == sourceId && field.Transform.String() == transformName {
 				if len(name) > 0 && field.Name == name {
 					return iceberg.PartitionField{
 						SourceIDs: []int{sourceId},
@@ -371,7 +381,6 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		}
 	}
 	newFieldId := us.newFieldId()
-	transform, _ := iceberg.ParseTransform(key.Transform)
 	if name == "" {
 		tmpField := iceberg.PartitionField{
 			SourceIDs: []int{key.SourceId},

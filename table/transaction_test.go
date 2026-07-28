@@ -525,6 +525,9 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantSparkWriteGoRead() {
 	s.Require().NotEmpty(tasks)
 	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
 
+	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
+	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
+
 	scanMem := memory.DefaultAllocator
 	ctx := compute.WithAllocator(s.ctx, scanMem)
 	results, err := tbl.Scan().ToArrowTable(ctx)
@@ -747,6 +750,10 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantGoWriteSparkRead() {
 	s.Require().NotEmpty(tasks)
 	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
 
+	// Shredded child bounds are stored under the parent variant field id.
+	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
+	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
+
 	// Spark reads the Go-written shredded file back and reassembles values.
 	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
 		"SELECT id, to_json(payload) AS pj FROM default.go_shred_write ORDER BY id")
@@ -846,6 +853,8 @@ func (s *SparkIntegrationTestSuite) TestShreddedVariantPartitionedGoWriteSparkRe
 	s.Require().Len(tasks, nPart, "one file per partition")
 	for _, tsk := range tasks {
 		s.assertVariantFileShredded(tbl, tsk.File.FilePath())
+		s.Require().NotEmpty(tsk.File.LowerBoundValues()[3], "variant child lower bounds must be written")
+		s.Require().NotEmpty(tsk.File.UpperBoundValues()[3], "variant child upper bounds must be written")
 	}
 
 	// Spark reads the Go-written partitioned shredded files back and reassembles values.

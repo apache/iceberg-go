@@ -545,3 +545,82 @@ func readLEUint(b []byte) int {
 
 	return int(binary.LittleEndian.Uint32(buf[:]))
 }
+
+// writeFullyShreddedVariantFile writes rows that are EXACTLY {a,b} (both shredded),
+// so the residual payload.value is all-null and the child bounds survive.
+func writeFullyShreddedVariantFile(t *testing.T, path string, fieldID, nRows int) {
+	t.Helper()
+	shreddedType := extensions.NewShreddedVariantType(arrow.StructOf(
+		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "b", Type: arrow.BinaryTypes.String},
+	))
+	bldr := extensions.NewVariantBuilder(memory.DefaultAllocator, shreddedType)
+	defer bldr.Release()
+	for i := 0; i < nRows; i++ {
+		var b variant.Builder
+		require.NoError(t, b.Append(map[string]any{"a": int64(i), "b": "row-" + string(rune('A'+i%26))}))
+		v, err := b.Build()
+		require.NoError(t, err)
+		bldr.Append(v)
+	}
+	arr := bldr.NewArray()
+	defer arr.Release()
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{strconv.Itoa(fieldID)}),
+	}}, nil)
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(arr.Len()))
+	defer rec.Release()
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+	wr, err := pqarrow.NewFileWriter(arrowSchema, f, parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+}
+
+// TestShreddedVariantAddFilesBounds pins that AddFiles (which opens the file and
+// recomputes) emits correct shredded variant child bounds under the parent field id.
+func TestShreddedVariantAddFilesBounds(t *testing.T) {
+	location := filepath.ToSlash(t.TempDir())
+	dataDir := filepath.Join(location, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	dataPath := filepath.Join(dataDir, "shredded.parquet")
+	const nData = 5
+	writeFullyShreddedVariantFile(t, dataPath, 1, nData)
+
+	iceSchema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false})
+	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	tbl := table.New(table.Identifier{"db", "shredded_addfiles_bounds"}, meta, location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, &rowDeltaCatalog{metadata: meta})
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	// bound object keyed by normalized JSON path: min/max of a (0..4) and b (row-A..row-E).
+	buildObj := func(a int64, b string) []byte {
+		var bld variant.Builder
+		start := bld.Offset()
+		entries := []variant.FieldEntry{bld.NextField(start, "$['a']")}
+		require.NoError(t, bld.AppendInt(a))
+		entries = append(entries, bld.NextField(start, "$['b']"))
+		require.NoError(t, bld.AppendString(b))
+		require.NoError(t, bld.FinishObject(start, entries))
+		v, err := bld.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+
+	assert.Equal(t, buildObj(0, "row-A"), tasks[0].File.LowerBoundValues()[1], "AddFiles lower bound")
+	assert.Equal(t, buildObj(nData-1, "row-E"), tasks[0].File.UpperBoundValues()[1], "AddFiles upper bound")
+}

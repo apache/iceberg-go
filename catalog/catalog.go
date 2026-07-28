@@ -135,7 +135,7 @@ type Catalog interface {
 	// RenameTable tells the catalog to rename a given table by the identifiers
 	// provided, and then loads and returns the destination table
 	RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error)
-	// CheckTableExists returns if the table exists
+	// CheckTableExists reports whether the table exists.
 	CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error)
 	// ListNamespaces returns the list of available namespaces, optionally filtering by a
 	// parent namespace
@@ -193,6 +193,28 @@ type PurgeableTable interface {
 	PurgeTable(ctx context.Context, identifier table.Identifier) error
 }
 
+// Closer is an optional interface implemented by catalogs that hold releasable
+// resources — currently a metrics reporter, and in future a stateful (e.g.
+// HTTP-backed) one. It is not part of [Catalog] because adding a method to that
+// widely-implemented interface would break every external implementation; a
+// follow-up may promote it. Callers holding a [Catalog] from [Load] should
+// release it via a type assertion:
+//
+//	cat, err := catalog.Load(ctx, name, props)
+//	if err != nil {
+//	    return err
+//	}
+//	if closer, ok := cat.(catalog.Closer); ok {
+//	    defer closer.Close()
+//	}
+//
+// All built-in catalogs (REST, SQL, Glue, Hive, Hadoop) implement Closer. Close
+// releases the catalog's own resources; a catalog built on a caller-owned handle
+// (e.g. the SQL catalog's *sql.DB) does not close that handle.
+type Closer interface {
+	Close() error
+}
+
 func ToIdentifier(ident ...string) table.Identifier {
 	if len(ident) == 1 {
 		if ident[0] == "" {
@@ -220,6 +242,10 @@ func TableNameFromIdent(ident table.Identifier) string {
 }
 
 func NamespaceFromIdent(ident table.Identifier) table.Identifier {
+	if len(ident) == 0 {
+		return nil
+	}
+
 	return ident[:len(ident)-1]
 }
 

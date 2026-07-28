@@ -93,17 +93,29 @@ func (p Properties) GetInt64(key string, defVal int64) int64 {
 	return defVal
 }
 
-// PropUInt reads an unsigned-integer property by key. A missing key,
-// an unparseable value, or a negative value returns defVal — PropUInt
+// GetUInt64 reads an unsigned-integer property by key. A missing key,
+// an unparseable value, or a negative value returns defVal. GetUInt64
 // uses strconv.ParseUint, which rejects negatives rather than silently
 // wrapping them to a large positive number.
-func PropUInt(p Properties, key string, defVal uint) uint {
+func (p Properties) GetUInt64(key string, defVal uint64) uint64 {
 	v, ok := p[key]
 	if !ok {
 		return defVal
 	}
 	n, err := strconv.ParseUint(v, 10, 64)
 	if err != nil {
+		return defVal
+	}
+
+	return n
+}
+
+// PropUInt reads an unsigned-integer property by key, preserving the legacy
+// fallback behavior while avoiding truncation on platforms where uint is
+// narrower than uint64.
+func PropUInt(p Properties, key string, defVal uint) uint {
+	n := p.GetUInt64(key, uint64(defVal))
+	if uint64(uint(n)) != n {
 		return defVal
 	}
 
@@ -1108,11 +1120,12 @@ func PromoteType(fileType, readType Type) (Type, error) {
 		}
 	case DecimalType:
 		if rt, ok := readType.(DecimalType); ok {
-			if t.precision <= rt.precision && t.scale <= rt.scale {
+			// Only precision may widen; scale must stay the same (spec: widen precision only).
+			if t.scale == rt.scale && t.precision <= rt.precision {
 				return readType, nil
 			}
 
-			return nil, fmt.Errorf("%w: cannot reduce precision from %s to %s",
+			return nil, fmt.Errorf("%w: cannot promote %s to %s",
 				ErrResolve, fileType, readType)
 		}
 	case FixedType:

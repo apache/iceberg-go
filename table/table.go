@@ -27,6 +27,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -38,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
@@ -96,6 +98,12 @@ type Table struct {
 	cat              CatalogIO
 	fsF              FSysF
 	planner          ScanPlanner
+	reporter         metrics.Reporter
+	// reporterSet records whether a caller injected a reporter via
+	// WithMetricsReporter. It distinguishes an explicit reporter (including an
+	// explicit NopReporter opt-out) from the construction-time default, so
+	// Refresh knows whether it may overwrite reporter with the catalog default.
+	reporterSet bool
 }
 
 func (t Table) Equals(other Table) bool {
@@ -112,11 +120,20 @@ func (t Table) Schema() *iceberg.Schema                      { return t.metadata
 func (t Table) Spec() iceberg.PartitionSpec                  { return t.metadata.PartitionSpec() }
 func (t Table) SortOrder() SortOrder                         { return t.metadata.SortOrder() }
 func (t Table) Properties() iceberg.Properties               { return t.metadata.Properties() }
-func (t Table) NameMapping() iceberg.NameMapping             { return t.metadata.NameMapping() }
-func (t Table) Location() string                             { return t.metadata.Location() }
-func (t Table) CurrentSnapshot() *Snapshot                   { return t.metadata.CurrentSnapshot() }
-func (t Table) SnapshotByID(id int64) *Snapshot              { return t.metadata.SnapshotByID(id) }
-func (t Table) SnapshotByName(name string) *Snapshot         { return t.metadata.SnapshotByName(name) }
+
+// MetricsReporter returns the table's metrics reporter, never nil.
+func (t Table) MetricsReporter() metrics.Reporter {
+	if t.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return t.reporter
+}
+func (t Table) NameMapping() iceberg.NameMapping     { return t.metadata.NameMapping() }
+func (t Table) Location() string                     { return t.metadata.Location() }
+func (t Table) CurrentSnapshot() *Snapshot           { return t.metadata.CurrentSnapshot() }
+func (t Table) SnapshotByID(id int64) *Snapshot      { return t.metadata.SnapshotByID(id) }
+func (t Table) SnapshotByName(name string) *Snapshot { return t.metadata.SnapshotByName(name) }
 func (t Table) Schemas() map[int]*iceberg.Schema {
 	m := make(map[int]*iceberg.Schema)
 	for _, s := range t.metadata.Schemas() {
@@ -190,6 +207,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.planner = fresh.planner
+	// Only inherit the catalog-derived reporter when the caller hasn't set one
+	// of their own. Refresh runs inside commit retry loops, so unconditionally
+	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
+	// reporter to the catalog default mid-operation. reporterSet distinguishes an
+	// explicit reporter — including an explicit NopReporter opt-out — from the
+	// construction-time default.
+	if !t.reporterSet {
+		t.reporter = fresh.reporter
+	}
 
 	return nil
 }
@@ -433,7 +459,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		apply(&co)
 	}
 
-	cfg := readRetryConfig(t.metadata.Properties())
+	cfg, err := readRetryConfig(t.metadata.Properties())
+	if err != nil {
+		return nil, err
+	}
 
 	// Bound total retry time with a derived context so both the wait loop
 	// and the CommitTable call itself respect the deadline uniformly.
@@ -603,7 +632,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat), nil
+	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -705,20 +734,67 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	return result, orphanedPaths, nil
 }
 
+const (
+	maxRetryDurationMs = uint64(math.MaxInt64 / int64(time.Millisecond))
+	maxRetryCount      = uint64(math.MaxUint32)
+)
+
 type retryConfig struct {
 	numRetries     uint
-	minWaitMs      uint
-	maxWaitMs      uint
-	totalTimeoutMs uint
+	minWaitMs      uint64
+	maxWaitMs      uint64
+	totalTimeoutMs uint64
 }
 
-func readRetryConfig(props iceberg.Properties) retryConfig {
-	return retryConfig{
-		numRetries:     iceberg.PropUInt(props, CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      iceberg.PropUInt(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      iceberg.PropUInt(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: iceberg.PropUInt(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
+	numRetries := props.GetUInt64(CommitNumRetriesKey, CommitNumRetriesDefault)
+	if numRetries >= uint64(^uint(0)) || numRetries > maxRetryCount {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry property %q=%d: retry count exceeds the maximum of %d",
+			CommitNumRetriesKey, numRetries, maxRetryCount)
 	}
+
+	cfg := retryConfig{
+		numRetries:     uint(numRetries),
+		minWaitMs:      props.GetUInt64(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      props.GetUInt64(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: props.GetUInt64(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+	}
+
+	if cfg.minWaitMs == 0 {
+		cfg.minWaitMs = CommitMinRetryWaitMsDefault
+	}
+	if cfg.maxWaitMs == 0 {
+		cfg.maxWaitMs = CommitMaxRetryWaitMsDefault
+	}
+	if cfg.totalTimeoutMs == 0 {
+		cfg.totalTimeoutMs = CommitTotalRetryTimeoutMsDefault
+	}
+
+	for _, property := range []struct {
+		key   string
+		value uint64
+	}{
+		{CommitMinRetryWaitMsKey, cfg.minWaitMs},
+		{CommitMaxRetryWaitMsKey, cfg.maxWaitMs},
+		{CommitTotalRetryTimeoutMsKey, cfg.totalTimeoutMs},
+	} {
+		key, value := property.key, property.value
+		if value > maxRetryDurationMs {
+			return retryConfig{}, fmt.Errorf(
+				"invalid retry property %q=%d: exceeds maximum duration of %d milliseconds",
+				key, value, maxRetryDurationMs)
+		}
+	}
+
+	if cfg.minWaitMs > cfg.maxWaitMs {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry properties %q=%d and %q=%d: minimum wait exceeds maximum wait",
+			CommitMinRetryWaitMsKey, cfg.minWaitMs,
+			CommitMaxRetryWaitMsKey, cfg.maxWaitMs)
+	}
+
+	return cfg, nil
 }
 
 // backoffDuration computes wait time for the given 0-based retry attempt
@@ -729,34 +805,46 @@ func readRetryConfig(props iceberg.Properties) retryConfig {
 // concurrent Go writers. Backoff is client-local, so this does not
 // affect cross-client interop.
 //
-// Inputs are trusted: readRetryConfig is responsible for normalizing
-// user-supplied properties (negatives, zero, min > max).
-func backoffDuration(attempt, minMs, maxMs uint) time.Duration {
+// Inputs from readRetryConfig are validated. The defensive bounds below also
+// keep direct callers from reaching an invalid random bound or duration.
+func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs == 0 {
 		minMs = CommitMinRetryWaitMsDefault
 	}
 	if maxMs == 0 {
 		maxMs = CommitMaxRetryWaitMsDefault
 	}
+	if minMs > maxRetryDurationMs {
+		minMs = maxRetryDurationMs
+	}
+	if maxMs > maxRetryDurationMs {
+		maxMs = maxRetryDurationMs
+	}
 	if minMs > maxMs {
 		minMs = maxMs
 	}
-	// Cap the shift count so the signed int64 below does not overflow
-	// past its operand width; overflow would just be clamped to maxMs
-	// anyway, so keep the math obvious instead.
+	// Cap the shift count so the exponential calculation stays within the
+	// bounded duration range.
 	if attempt > 62 {
 		attempt = 62
 	}
 
-	ceiling := int64(minMs) << attempt
-	if ceiling <= 0 || ceiling > int64(maxMs) {
-		ceiling = int64(maxMs)
+	var ceiling uint64
+	if minMs > maxRetryDurationMs>>attempt {
+		ceiling = maxMs
+	} else {
+		ceiling = minMs << attempt
+		if ceiling > maxMs {
+			ceiling = maxMs
+		}
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
 	// writers don't all sample 0 and retry in lockstep.
-	//nolint:gosec // non-security randomness, jitter for retry spread
-	wait := int64(minMs) + rand.Int64N(ceiling-int64(minMs)+1)
+	// Both conversions are safe because minMs and ceiling-minMs+1 are bounded
+	// by maxRetryDurationMs, which fits in int64.
+	//nolint:gosec // non-security randomness; bounded int64 conversions are safe
+	wait := int64(minMs) + rand.Int64N(int64(ceiling-minMs+1))
 
 	return time.Duration(wait) * time.Millisecond
 }
@@ -896,6 +984,19 @@ func WithOptions(opts iceberg.Properties) ScanOption {
 	}
 }
 
+// WithReporter overrides the metrics reporter for a single scan, taking
+// precedence over the reporter inherited from the table. A nil reporter is
+// ignored.
+func WithReporter(r metrics.Reporter) ScanOption {
+	if r == nil {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.reporter = r
+	}
+}
+
 // WithRowLineage projects the row-lineage metadata columns (_row_id and
 // _last_updated_sequence_number) so that row identity and per-row update
 // sequence are preserved through rewrites and compactions. Requires a v3
@@ -921,6 +1022,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		caseSensitive:  true,
 		limit:          ScanNoLimit,
 		concurrency:    runtime.GOMAXPROCS(0),
+		reporter:       t.MetricsReporter(),
 	}
 
 	for _, opt := range opts {
@@ -930,28 +1032,70 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 	return s
 }
 
+// Option configures a [Table] at construction. Options are applied in order
+// after the core fields are set.
+type Option func(*Table)
+
+// noopTableOption is the shared no-op [Option], returned when an option has
+// nothing to apply (e.g. WithMetricsReporter(nil)). It mirrors noopOption on
+// the ScanOption side.
+func noopTableOption(*Table) {}
+
+// WithMetricsReporter sets the metrics reporter for the table; scans created
+// from the table inherit it. A nil reporter is ignored (the table keeps its
+// default no-op reporter).
+func WithMetricsReporter(r metrics.Reporter) Option {
+	if r == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = true
+	}
+}
+
+// withReporterState copies both the reporter and the reporterSet flag verbatim.
+// Unlike WithMetricsReporter it does not force reporterSet true, so a table
+// riding the catalog default (reporterSet == false) stays defaulted across a
+// New(...) rebuild instead of being frozen to its current reporter. Used by
+// doCommit and StagedTable to carry reporter state without breaking the Refresh
+// inheritance invariant — WithMetricsReporter cannot be used there because
+// MetricsReporter() is never nil, so it would always mark the table caller-set.
+func withReporterState(r metrics.Reporter, set bool) Option {
+	return func(t *Table) {
+		t.reporter = r
+		t.reporterSet = set
+	}
+}
+
 // New constructs a Table. If cat implements ScanPlanner — as rest.Catalog does
 // for servers that support remote scan planning — it is wired as the table's
 // planner so (*Scan).PlanFiles can delegate to it; catalogs that do not
 // implement ScanPlanner leave planner nil and planning stays local. This is the
-// concrete Catalog -> Table -> Scan wiring for #1178: no New signature change
-// and no catalog accessor are needed, because the catalog already satisfies
-// ScanPlanner.
-func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO) *Table {
+// concrete Catalog -> Table -> Scan wiring for #1178: the catalog already
+// satisfies ScanPlanner, so no catalog accessor is needed.
+func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, cat CatalogIO, opts ...Option) *Table {
 	// A catalog that supports server-side scan planning implements ScanPlanner.
 	var planner ScanPlanner
 	if p, ok := cat.(ScanPlanner); ok {
 		planner = p
 	}
 
-	return &Table{
+	t := &Table{
 		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
 		cat:              cat,
 		planner:          planner,
+		reporter:         metrics.NopReporter{},
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+
+	return t
 }
 
 func NewFromLocation(
@@ -960,6 +1104,7 @@ func NewFromLocation(
 	metalocation string,
 	fsysF FSysF,
 	cat CatalogIO,
+	opts ...Option,
 ) (_ *Table, err error) {
 	var meta Metadata
 
@@ -1012,7 +1157,7 @@ func NewFromLocation(
 		}
 	}
 
-	return New(ident, meta, metalocation, fsysF, cat), nil
+	return New(ident, meta, metalocation, fsysF, cat, opts...), nil
 }
 
 func metadataCompressionCodec(location string) string {

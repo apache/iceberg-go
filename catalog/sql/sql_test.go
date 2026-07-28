@@ -39,6 +39,7 @@ import (
 	"github.com/apache/iceberg-go/catalog/internal"
 	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	_ "github.com/apache/iceberg-go/io/gocloud"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -866,6 +867,106 @@ func (s *SqliteCatalogTestSuite) TestCreateTableDefaultSortOrder() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestMetricsReporterWiring() {
+	ctx := context.Background()
+
+	newCatMemory := func(extra iceberg.Properties) *sqlcat.Catalog {
+		props := iceberg.Properties{
+			"uri":             ":memory:",
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+			"type":            "sql",
+			"warehouse":       "file://" + s.warehouse,
+		}
+		maps.Copy(props, extra)
+		cat, err := catalog.Load(ctx, "default", props)
+		s.Require().NoError(err)
+
+		return cat.(*sqlcat.Catalog)
+	}
+
+	createTable := func(cat *sqlcat.Catalog) (*table.Table, table.Identifier) {
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+		tbl, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		return tbl, tblID
+	}
+
+	s.Run("configured reporter reaches created and loaded table", func() {
+		cat := newCatMemory(iceberg.Properties{metrics.ReporterImplKey: "logging"})
+		created, tblID := createTable(cat)
+		s.IsType(&metrics.LoggingReporter{}, created.MetricsReporter())
+
+		loaded, err := cat.LoadTable(ctx, tblID)
+		s.Require().NoError(err)
+		s.IsType(&metrics.LoggingReporter{}, loaded.MetricsReporter())
+
+		// Scans inherit the table's reporter.
+		s.IsType(&metrics.LoggingReporter{}, loaded.Scan().Reporter())
+	})
+
+	s.Run("default is the no-op reporter", func() {
+		cat := newCatMemory(nil)
+		created, _ := createTable(cat)
+		s.IsType(metrics.NopReporter{}, created.MetricsReporter())
+	})
+
+	s.Run("unknown reporter name fails table load", func() {
+		// Fully self-contained: provision a dedicated on-disk DB, create a
+		// table with a well-configured catalog, then reopen the same DB with a
+		// bad reporter name so the failure is isolated to LoadTable rather than
+		// leaning on shared suite fixtures.
+		dir, err := os.MkdirTemp(os.TempDir(), "test_sql_reporter_*")
+		s.Require().NoError(err)
+		s.T().Cleanup(func() { s.Require().NoError(os.RemoveAll(dir)) })
+
+		uri := "file://" + filepath.Join(dir, "sql-catalog.db")
+		warehouse := "file://" + dir
+		baseProps := iceberg.Properties{
+			"uri":             uri,
+			sqlcat.DriverKey:  sqliteshim.ShimName,
+			sqlcat.DialectKey: string(sqlcat.SQLite),
+			"type":            "sql",
+			"warehouse":       warehouse,
+		}
+
+		goodProps := maps.Clone(baseProps)
+		goodProps["init_catalog_tables"] = "true"
+		good, err := catalog.Load(ctx, "default", goodProps)
+		s.Require().NoError(err)
+
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(good.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+		_, err = good.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().NoError(err)
+
+		badProps := maps.Clone(baseProps)
+		badProps[metrics.ReporterImplKey] = "does-not-exist"
+		bad, err := catalog.Load(ctx, "default", badProps)
+		s.Require().NoError(err)
+
+		_, err = bad.LoadTable(ctx, tblID)
+		s.Require().Error(err)
+	})
+
+	s.Run("invalid reporter fails CreateTable before inserting the row", func() {
+		cat := newCatMemory(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"})
+		tblID := s.randomTableIdentifier()
+		s.Require().NoError(cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(tblID), nil))
+
+		_, err := cat.CreateTable(ctx, tblID, tableSchemaNested)
+		s.Require().Error(err)
+
+		// The row must not have been inserted, so the failure is a clean no-op
+		// and the caller can retry rather than hit ErrTableAlreadyExists.
+		exists, err := cat.CheckTableExists(ctx, tblID)
+		s.Require().NoError(err)
+		s.False(exists)
+	})
+}
+
 func (s *SqliteCatalogTestSuite) TestCreateV1Table() {
 	tests := []struct {
 		cat   *sqlcat.Catalog
@@ -944,7 +1045,7 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicatedTable() {
 		s.Require().NoError(err)
 
 		_, err = tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)
-		s.ErrorContains(err, "failed to create table")
+		s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 	}
 }
 
@@ -984,6 +1085,31 @@ func (s *SqliteCatalogTestSuite) TestCreateTableWithoutNamespace() {
 	for _, cat := range catalogs {
 		_, err := cat.CreateTable(context.Background(), tblName, tableSchemaNested)
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestTableOperationsRejectEmptyIdentifiers() {
+	ctx := context.Background()
+	valid := table.Identifier{"db", "table"}
+
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		for _, ident := range []table.Identifier{nil, {}, {"table"}} {
+			_, err := cat.CreateTable(ctx, ident, tableSchemaNested)
+			s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+			_, _, err = cat.CommitTable(ctx, ident, nil, nil)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.LoadTable(ctx, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			s.ErrorIs(cat.DropTable(ctx, ident), catalog.ErrNoSuchTable)
+			s.ErrorIs(cat.PurgeTable(ctx, ident), catalog.ErrNoSuchTable)
+			_, err = cat.RenameTable(ctx, ident, valid)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.RenameTable(ctx, valid, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+			_, err = cat.CheckTableExists(ctx, ident)
+			s.ErrorIs(err, catalog.ErrNoSuchTable)
+		}
 	}
 }
 
@@ -1090,6 +1216,177 @@ func (s *SqliteCatalogTestSuite) TestListNamespaces() {
 		s.Len(ns, 2)
 		s.Equal(ns1, ns[0])
 		s.Equal(ns2, ns[1])
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestDottedNamespaceComponentsRemainDistinct() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+	tag := databaseName()
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		dotted := table.Identifier{"company_." + tag, "sales"}
+		hierarchical := table.Identifier{"company_", tag, "sales"}
+		dottedChild := append(slices.Clone(dotted), "regional")
+		hierarchicalChild := append(slices.Clone(hierarchical), "regional")
+		s.Require().NoError(cat.CreateNamespace(ctx, dotted, iceberg.Properties{"kind": "dotted"}))
+		s.Require().NoError(cat.CreateNamespace(ctx, hierarchical, iceberg.Properties{"kind": "hierarchical"}))
+		s.Require().NoError(cat.CreateNamespace(ctx, dottedChild, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, hierarchicalChild, nil))
+
+		namespaces, err := cat.ListNamespaces(ctx, nil)
+		s.Require().NoError(err)
+		s.Contains(namespaces, dotted)
+		s.Contains(namespaces, hierarchical)
+		s.Contains(namespaces, dottedChild)
+		s.Contains(namespaces, hierarchicalChild)
+
+		dottedNamespaces, err := cat.ListNamespaces(ctx, dotted)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{dotted, dottedChild}, dottedNamespaces)
+		hierarchicalNamespaces, err := cat.ListNamespaces(ctx, hierarchical)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{hierarchical, hierarchicalChild}, hierarchicalNamespaces)
+
+		dottedProps, err := cat.LoadNamespaceProperties(ctx, dotted)
+		s.Require().NoError(err)
+		s.Equal("dotted", dottedProps["kind"])
+		hierarchicalProps, err := cat.LoadNamespaceProperties(ctx, hierarchical)
+		s.Require().NoError(err)
+		s.Equal("hierarchical", hierarchicalProps["kind"])
+
+		dottedTable := append(slices.Clone(dotted), "orders")
+		hierarchicalTable := append(slices.Clone(hierarchical), "orders")
+		dottedCreated, err := cat.CreateTable(ctx, dottedTable, tableSchemaNested)
+		s.Require().NoError(err)
+		hierarchicalCreated, err := cat.CreateTable(ctx, hierarchicalTable, tableSchemaNested)
+		s.Require().NoError(err)
+		s.NotEqual(dottedCreated.Location(), hierarchicalCreated.Location())
+		s.NotEqual(dottedCreated.MetadataLocation(), hierarchicalCreated.MetadataLocation())
+
+		var dottedTables []table.Identifier
+		for ident, listErr := range cat.ListTables(ctx, dotted) {
+			s.Require().NoError(listErr)
+			dottedTables = append(dottedTables, ident)
+		}
+		s.Equal([]table.Identifier{dottedTable}, dottedTables)
+		var hierarchicalTables []table.Identifier
+		for ident, listErr := range cat.ListTables(ctx, hierarchical) {
+			s.Require().NoError(listErr)
+			hierarchicalTables = append(hierarchicalTables, ident)
+		}
+		s.Equal([]table.Identifier{hierarchicalTable}, hierarchicalTables)
+
+		renamed := append(slices.Clone(hierarchical), "renamed_orders")
+		loaded, err := cat.RenameTable(ctx, dottedTable, renamed)
+		s.Require().NoError(err)
+		s.Equal(renamed, loaded.Identifier())
+		_, err = cat.LoadTable(ctx, dottedTable)
+		s.ErrorIs(err, catalog.ErrNoSuchTable)
+		_, err = cat.LoadTable(ctx, hierarchicalTable)
+		s.Require().NoError(err)
+
+		s.Require().NoError(cat.DropTable(ctx, renamed))
+		s.Require().NoError(cat.DropTable(ctx, hierarchicalTable))
+		s.Require().NoError(cat.DropNamespace(ctx, dottedChild))
+		s.Require().NoError(cat.DropNamespace(ctx, hierarchicalChild))
+		s.Require().NoError(cat.DropNamespace(ctx, dotted))
+		s.Require().NoError(cat.DropNamespace(ctx, hierarchical))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestDottedNamespaceUsesOwnLocationProperties() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+
+	for i, cat := range catalogs {
+		ctx := context.Background()
+		namespace := table.Identifier{"company." + databaseName(), "sales"}
+		location := "file://" + filepath.Join(s.warehouse, fmt.Sprintf("dotted-location-%d", i))
+		s.Require().NoError(cat.CreateNamespace(ctx, namespace, iceberg.Properties{"location": location}))
+
+		tableIdent := append(slices.Clone(namespace), "orders")
+		createdTable, err := cat.CreateTable(ctx, tableIdent, tableSchemaNested)
+		s.Require().NoError(err)
+		s.Equal(location+"/orders", createdTable.Location())
+
+		viewIdent := append(slices.Clone(namespace), "orders_view")
+		s.Require().NoError(cat.CreateView(ctx, viewIdent, tableSchemaNested, "SELECT * FROM orders", nil))
+		createdView, err := cat.LoadView(ctx, viewIdent)
+		s.Require().NoError(err)
+		s.Equal(location+"/orders_view", createdView.Location())
+
+		s.Require().NoError(cat.DropView(ctx, viewIdent))
+		s.Require().NoError(cat.DropTable(ctx, tableIdent))
+		s.Require().NoError(cat.DropNamespace(ctx, namespace))
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestLegacyNamespaceEncodingPrefixRemainsReadable() {
+	ctx := context.Background()
+	cat := s.getCatalogSqlite()
+	db := s.getDB()
+	defer db.Close()
+
+	legacyName := "__iceberg_namespace_v1__:legacy_" + databaseName()
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO "iceberg_namespace_properties" `+
+			`("catalog_name", "namespace", "property_key", "property_value") VALUES (?, ?, ?, ?)`,
+		cat.Name(), legacyName, "owner", "legacy")
+	s.Require().NoError(err)
+
+	namespaces, err := cat.ListNamespaces(ctx, nil)
+	s.Require().NoError(err)
+	s.Contains(namespaces, table.Identifier{legacyName})
+
+	legacyIdent := table.Identifier{legacyName}
+	exists, err := cat.CheckNamespaceExists(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.True(exists)
+	children, err := cat.ListNamespaces(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Contains(children, legacyIdent)
+	props, err := cat.LoadNamespaceProperties(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Equal("legacy", props["owner"])
+	_, err = cat.UpdateNamespaceProperties(ctx, legacyIdent, nil, iceberg.Properties{"owner": "updated"})
+	s.Require().NoError(err)
+	props, err = cat.LoadNamespaceProperties(ctx, legacyIdent)
+	s.Require().NoError(err)
+	s.Equal("updated", props["owner"])
+
+	tableIdent := append(slices.Clone(legacyIdent), "orders")
+	created, err := cat.CreateTable(ctx, tableIdent, tableSchemaNested)
+	s.Require().NoError(err)
+	loaded, err := cat.LoadTable(ctx, tableIdent)
+	s.Require().NoError(err)
+	s.Equal(created.MetadataLocation(), loaded.MetadataLocation())
+
+	s.Require().NoError(cat.DropTable(ctx, tableIdent))
+	s.Require().NoError(cat.DropNamespace(ctx, legacyIdent))
+}
+
+func (s *SqliteCatalogTestSuite) TestListNamespacesEscapesLikeWildcards() {
+	catalogs := []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()}
+	tag := databaseName()
+
+	for _, cat := range catalogs {
+		ctx := context.Background()
+		parent := table.Identifier{"sales%_!" + tag}
+		child := append(slices.Clone(parent), "regional")
+		// This namespace would match the unescaped SQL pattern for parent.
+		decoy := table.Identifier{"salesZZX" + tag, "regional"}
+
+		s.Require().NoError(cat.CreateNamespace(ctx, parent, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, child, nil))
+		s.Require().NoError(cat.CreateNamespace(ctx, decoy, nil))
+
+		namespaces, err := cat.ListNamespaces(ctx, parent)
+		s.Require().NoError(err)
+		s.ElementsMatch([]table.Identifier{parent, child}, namespaces)
+
+		s.Require().NoError(cat.DropNamespace(ctx, child))
+		s.Require().NoError(cat.DropNamespace(ctx, parent))
+		s.Require().NoError(cat.DropNamespace(ctx, decoy))
 	}
 }
 
@@ -1555,6 +1852,31 @@ func (s *SqliteCatalogTestSuite) TestDropNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestDropNamespaceRejectsViewOnlyNamespace() {
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+	viewID := append(slices.Clone(namespace), tableName())
+	viewSQL := "SELECT 1"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+
+	s.Require().NoError(cat.CreateNamespace(ctx, namespace, nil))
+	s.Require().NoError(cat.CreateView(ctx, viewID, schema, viewSQL, nil))
+
+	err := cat.DropNamespace(ctx, namespace)
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	s.ErrorContains(err, "catalog objects exist")
+
+	exists, err := cat.CheckNamespaceExists(ctx, namespace)
+	s.Require().NoError(err)
+	s.True(exists)
+	exists, err = cat.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
 func (s *SqliteCatalogTestSuite) TestDropNamespaceNotExist() {
 	tests := []struct {
 		cat       *sqlcat.Catalog
@@ -1585,7 +1907,102 @@ func (s *SqliteCatalogTestSuite) TestLoadEmptyNamespaceProperties() {
 		s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, nil))
 		props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
 		s.Require().NoError(err)
-		s.Equal(iceberg.Properties{"exists": "true"}, props)
+		s.Empty(props)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
+	tests := []struct {
+		cat       *sqlcat.Catalog
+		namespace table.Identifier
+	}{
+		{s.getCatalogMemory(), table.Identifier{databaseName()}},
+		{s.getCatalogSqlite(), strings.Split(hiearchicalNamespaceName(), ".")},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		err := tt.cat.CreateNamespace(ctx, tt.namespace, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+		s.ErrorContains(err, "cannot create namespace with reserved namespace property")
+		s.ErrorContains(err, `"exists"`)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+		s.Require().NoError(err)
+		s.False(exists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNamespacePropertiesCannotUpdateSentinel() {
+	tests := []struct {
+		name          string
+		cat           *sqlcat.Catalog
+		namespace     table.Identifier
+		createProps   iceberg.Properties
+		expectedProps iceberg.Properties
+	}{
+		{
+			name:          "memory with user props",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "memory sentinel only",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   nil,
+			expectedProps: nil,
+		},
+		{
+			name:          "sqlite with user props",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "sqlite sentinel only",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   nil,
+			expectedProps: nil,
+		},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, tt.createProps))
+
+			_, err := tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot remove reserved namespace property")
+			s.ErrorContains(err, `"exists"`)
+
+			_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot update reserved namespace property")
+
+			props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
+			s.Require().NoError(err)
+			if len(tt.expectedProps) == 0 {
+				s.Empty(props)
+			} else {
+				s.Equal(tt.expectedProps, props)
+			}
+
+			exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+			s.Require().NoError(err)
+			s.True(exists)
+		})
 	}
 }
 
@@ -1799,6 +2216,137 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
 	s.True(exists)
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+	s.Require().NoError(db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil))
+
+	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+	before, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+
+	_, err = db.CreateTable(ctx, identifier, tableSchemaNested)
+	s.ErrorIs(err, catalog.ErrViewAlreadyExists)
+
+	after, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+	s.Len(after, len(before))
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateViewConflictsWithTable() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+	_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+	s.Require().NoError(err)
+
+	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+	before, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+
+	err = db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
+
+	after, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+	s.Len(after, len(before))
+}
+
+func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogSentinel() {
+	ctx := context.Background()
+	sqlDB := s.getDB()
+	_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+	s.Require().NoError(err)
+	s.Require().NoError(sqlDB.Close())
+
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+	type createResult struct {
+		objectType string
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan createResult, 2)
+	go func() {
+		<-start
+		_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+		results <- createResult{objectType: sqlcat.TableType, err: err}
+	}()
+	go func() {
+		<-start
+		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+		results <- createResult{objectType: sqlcat.ViewType, err: err}
+	}()
+	close(start)
+
+	first, second := <-results, <-results
+	s.Require().NotEqual(first.err == nil, second.err == nil,
+		"expected exactly one concurrent create to succeed; table/view results: %v / %v", first.err, second.err)
+	if first.err != nil {
+		first, second = second, first
+	}
+	s.Require().NoError(first.err)
+	if first.objectType == sqlcat.TableType {
+		s.ErrorIs(second.err, catalog.ErrTableAlreadyExists)
+	} else {
+		s.ErrorIs(second.err, catalog.ErrViewAlreadyExists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+
+	sqlDB := s.getDB()
+	defer sqlDB.Close()
+	_, err := sqlDB.Exec(`
+		CREATE TRIGGER fail_catalog_insert
+		BEFORE INSERT ON iceberg_tables
+		BEGIN
+			SELECT RAISE(FAIL, 'forced insert failure');
+		END
+	`)
+	s.Require().NoError(err)
+
+	tests := []struct {
+		name   string
+		create func(table.Identifier) error
+	}{
+		{
+			name: "table",
+			create: func(identifier table.Identifier) error {
+				_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+
+				return err
+			},
+		},
+		{
+			name: "view",
+			create: func(identifier table.Identifier) error {
+				return db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			identifier := s.randomTableIdentifier()
+			s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+			s.Require().Error(tt.create(identifier))
+
+			metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+			entries, err := os.ReadDir(metadataDir)
+			s.Require().NoError(err)
+			s.Empty(entries)
+		})
+	}
 }
 
 func (s *SqliteCatalogTestSuite) TestDropView() {

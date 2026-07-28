@@ -210,6 +210,9 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 
 func WithSpecID(id int) PartitionOption {
 	return func(p *PartitionSpec) error {
+		if id < 0 {
+			return fmt.Errorf("spec id must be non-negative: %d", id)
+		}
 		p.id = id
 
 		return nil
@@ -291,6 +294,10 @@ func validateTransform(transform Transform) error {
 		return t.validateNumBuckets()
 	case *BucketTransform:
 		return t.validateNumBuckets()
+	case TruncateTransform:
+		return t.validateWidth()
+	case *TruncateTransform:
+		return t.validateWidth()
 	default:
 		return nil
 	}
@@ -367,10 +374,7 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	fieldCopies := make([]PartitionField, len(fields))
 	for i, field := range fields {
-		fieldCopies[i] = field
-		if field.SourceIDs != nil {
-			fieldCopies[i].SourceIDs = slices.Clone(field.SourceIDs)
-		}
+		fieldCopies[i] = clonePartitionField(field)
 	}
 	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
@@ -406,7 +410,13 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 
 // Fields returns an iterator over the partition fields in this spec.
 func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
-	return slices.All(ps.fields)
+	return func(yield func(int, PartitionField) bool) {
+		for i, field := range ps.fields {
+			if !yield(i, clonePartitionField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
@@ -422,15 +432,38 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	aux := struct {
-		ID     int              `json:"spec-id"`
-		Fields []PartitionField `json:"fields"`
-	}{ID: ps.id, Fields: ps.fields}
+		ID     int               `json:"spec-id"`
+		Fields []json.RawMessage `json:"fields"`
+	}{ID: ps.id}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	ps.id, ps.fields = aux.ID, aux.Fields
+	fields := make([]PartitionField, len(aux.Fields))
+	for i, rawField := range aux.Fields {
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(rawField, &keys); err != nil {
+			return err
+		}
+		if rawFieldID, ok := keys["field-id"]; ok {
+			var fieldID *int
+			if err := json.Unmarshal(rawFieldID, &fieldID); err != nil {
+				return fmt.Errorf("%w: invalid partition field ID: %w", ErrInvalidPartitionSpec, err)
+			}
+			if fieldID == nil {
+				return fmt.Errorf("%w: partition field ID cannot be null", ErrInvalidPartitionSpec)
+			}
+		}
+		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
+			return err
+		}
+	}
+
+	ps.id, ps.fields = aux.ID, fields
+	if err := ps.assignPartitionFieldIds(nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
 	ps.initialize()
 
 	return nil
@@ -445,9 +478,11 @@ func (ps *PartitionSpec) initialize() {
 	}
 }
 
-func (ps *PartitionSpec) ID() int                    { return ps.id }
-func (ps *PartitionSpec) NumFields() int             { return len(ps.fields) }
-func (ps *PartitionSpec) Field(i int) PartitionField { return ps.fields[i] }
+func (ps *PartitionSpec) ID() int        { return ps.id }
+func (ps *PartitionSpec) NumFields() int { return len(ps.fields) }
+func (ps *PartitionSpec) Field(i int) PartitionField {
+	return clonePartitionField(ps.fields[i])
+}
 
 func (ps PartitionSpec) IsUnpartitioned() bool {
 	if len(ps.fields) == 0 {
@@ -464,7 +499,35 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 }
 
 func (ps *PartitionSpec) FieldsBySourceID(fieldID int) []PartitionField {
-	return slices.Clone(ps.sourceIdToFields[fieldID])
+	fields := ps.sourceIdToFields[fieldID]
+	if fields == nil {
+		return nil
+	}
+
+	clones := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		clones[i] = clonePartitionField(field)
+	}
+
+	return clones
+}
+
+func clonePartitionField(field PartitionField) PartitionField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
+
+	return field
 }
 
 func (ps PartitionSpec) String() string {
@@ -503,20 +566,20 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
-type activePartitionField struct {
+type resolvedPartitionField struct {
 	field      PartitionField
 	resultType Type
 }
 
-func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartitionField {
-	fields := make([]activePartitionField, 0, len(ps.fields))
+func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedPartitionField {
+	fields := make([]resolvedPartitionField, 0, len(ps.fields))
 	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID())
-		if !ok {
-			continue
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
 		}
 
-		fields = append(fields, activePartitionField{
+		fields = append(fields, resolvedPartitionField{
 			field:      field,
 			resultType: field.Transform.ResultType(sourceType),
 		})
@@ -534,21 +597,16 @@ func (ps *PartitionSpec) activePartitionFields(schema *Schema) []activePartition
 //     have the result field and it may be null.
 //
 // There is a case where we can guarantee that a partition field in the first
-// and only parittion spec that uses a required source column will never be
+// and only partition spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
 //
-// Note: the result is compacted. A partition field whose source column is not
-// present in schema (for example, the column was dropped) is omitted rather
-// than retained, so the returned struct does NOT positionally correspond to a
-// manifest's partition FieldSummary list, which is ordered by the full
-// partition spec. It must therefore not be used to index positional partition
-// summaries; build a schema that keeps every spec field (with an UnknownType
-// placeholder for dropped sources) for that purpose — see manifestPartitionFields
-// in the table package.
+// If a source column is missing, UnknownType is passed to the transform. This
+// retains the field's position and lets transforms with fixed result types,
+// such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	activeFields := ps.activePartitionFields(schema)
-	nestedFields := make([]NestedField, 0, len(activeFields))
-	for _, field := range activeFields {
+	resolvedFields := ps.resolvedPartitionFields(schema)
+	nestedFields := make([]NestedField, 0, len(resolvedFields))
+	for _, field := range resolvedFields {
 		nestedFields = append(nestedFields, NestedField{
 			ID:       field.field.FieldID,
 			Name:     field.field.Name,
@@ -568,9 +626,9 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
 func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
-	activeFields := ps.activePartitionFields(sc)
+	resolvedFields := ps.resolvedPartitionFields(sc)
 
-	if len(activeFields) == 0 {
+	if len(resolvedFields) == 0 {
 		return ""
 	}
 
@@ -578,22 +636,22 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
 	var sb strings.Builder
 	estimatedSize := 0
-	for i := range activeFields {
-		estimatedSize += len(activeFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
+	for i := range resolvedFields {
+		estimatedSize += len(resolvedFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
-	for i := range activeFields {
+	for i := range resolvedFields {
 		if i > 0 {
 			sb.WriteByte('/')
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(activeFields[i].field.EscapedName())
+		sb.WriteString(resolvedFields[i].field.EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := activeFields[i].field.Transform.ToHumanStrType(activeFields[i].resultType, data.Get(i))
+		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 

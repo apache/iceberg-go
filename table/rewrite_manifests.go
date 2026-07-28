@@ -358,19 +358,24 @@ func manifestActiveFiles(fs iceio.IO, manifests []iceberg.ManifestFile) (int64, 
 // nothing on the transaction, so a following Commit is a true no-op; callers
 // can skip it either way.
 func (t *Transaction) RewriteManifests(ctx context.Context, opts ...RewriteManifestsOpt) (*RewriteManifestsResult, error) {
-	if t.meta.currentSnapshot() == nil {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+
+	if meta.currentSnapshot() == nil {
 		return &RewriteManifestsResult{NoOpReason: NoOpNoSnapshot}, nil
 	}
 
 	cfg := rewriteManifestsCfg{
-		targetSizeBytes: int64(t.meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault)),
+		targetSizeBytes: int64(meta.props.GetInt(ManifestTargetSizeBytesKey, ManifestTargetSizeBytesDefault)),
 	}
 	for _, o := range opts {
 		o(&cfg)
 	}
 
 	if cfg.specID != nil {
-		if _, err := t.meta.GetSpecByID(*cfg.specID); err != nil {
+		if _, err := meta.GetSpecByID(*cfg.specID); err != nil {
 			return nil, fmt.Errorf("cannot rewrite manifests: unknown partition spec id %d: %w", *cfg.specID, err)
 		}
 	}
