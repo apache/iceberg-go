@@ -114,6 +114,23 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 	})
 }
 
+func TestParseAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []map[string]string{
+		{io.S3AccessKeyID: "access"},
+		{io.S3SecretAccessKey: "secret"},
+		{io.S3SessionToken: "token"},
+		{io.S3AccessKeyID: "access", io.S3SessionToken: "token"},
+		{io.S3SecretAccessKey: "secret", io.S3SessionToken: "token"},
+	}
+
+	for _, props := range tests {
+		_, err := ParseAWSConfig(context.Background(), props)
+		require.ErrorContains(t, err, "s3.access-key-id and s3.secret-access-key must be configured together")
+	}
+}
+
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
 	t.Parallel()
 

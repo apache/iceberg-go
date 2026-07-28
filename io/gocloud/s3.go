@@ -68,9 +68,12 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 	accessKey, secretAccessKey := props[io.S3AccessKeyID], props[io.S3SecretAccessKey]
 	token := props[io.S3SessionToken]
-	if accessKey != "" || secretAccessKey != "" || token != "" {
+	if (accessKey == "") != (secretAccessKey == "") || (token != "" && accessKey == "") {
+		return nil, errors.New("s3.access-key-id and s3.secret-access-key must be configured together")
+	}
+	if accessKey != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+			accessKey, secretAccessKey, token,
 		)))
 	}
 

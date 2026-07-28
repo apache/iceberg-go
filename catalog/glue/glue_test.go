@@ -50,6 +50,23 @@ import (
 
 var errGluePurgeRemove = errors.New("glue purge remove failed")
 
+func TestLoadAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []iceberg.Properties{
+		{AccessKeyID: "access"},
+		{SecretAccessKey: "secret"},
+		{SessionToken: "token"},
+		{AccessKeyID: "access", SessionToken: "token"},
+		{SecretAccessKey: "secret", SessionToken: "token"},
+	}
+
+	for _, props := range tests {
+		_, err := toAwsConfig(context.Background(), props)
+		require.ErrorContains(t, err, "glue.access-key-id and glue.secret-access-key must be configured together")
+	}
+}
+
 type mockGlueClient struct {
 	mock.Mock
 }
