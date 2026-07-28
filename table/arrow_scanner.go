@@ -1024,7 +1024,7 @@ func (as *arrowScan) processRecords(
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Record: internal.Enumerated[arrow.RecordBatch]{
+		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: idx, Last: true,
 		}, Task: task}
 	}
