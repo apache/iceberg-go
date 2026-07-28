@@ -2218,6 +2218,41 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	s.True(exists)
 }
 
+func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
+	t.Parallel()
+
+	invalid := []table.Identifier{
+		nil,
+		{},
+		{"view"},
+		{"ns", ""},
+		{"ns", "."},
+		{"ns", ".."},
+		{"ns", "nested/view"},
+		{"ns", "view\nname"},
+	}
+
+	cat := &sqlcat.Catalog{}
+	for _, identifier := range invalid {
+		identifier := identifier
+		t.Run(fmt.Sprint(identifier), func(t *testing.T) {
+			t.Parallel()
+
+			err := cat.CreateView(context.Background(), identifier, nil, "", nil)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+
+			err = cat.DropView(context.Background(), identifier)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+
+			_, err = cat.CheckViewExists(context.Background(), identifier)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+
+			_, err = cat.LoadView(context.Background(), identifier)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+		})
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
 	ctx := context.Background()
 	db := s.getCatalogSqlite()
