@@ -307,6 +307,7 @@ func TestHiveListTablesHandlesObjectLoadingErrors(t *testing.T) {
 			gotErr = err
 		}
 		require.ErrorIs(t, gotErr, loadErr)
+		require.ErrorContains(t, gotErr, "failed to load table test_database.broken while listing")
 		mockClient.AssertNotCalled(t, "GetTable", mock.Anything, "test_database", "test_table")
 		mockClient.AssertExpectations(t)
 	})
@@ -1504,6 +1505,7 @@ func TestHiveListViewsHandlesObjectLoadingErrors(t *testing.T) {
 			gotErr = err
 		}
 		require.ErrorIs(t, gotErr, loadErr)
+		require.ErrorContains(t, gotErr, "failed to load view test_database.broken while listing")
 		mockClient.AssertNotCalled(t, "GetTable", mock.Anything, "test_database", "test_view")
 		mockClient.AssertExpectations(t)
 	})
