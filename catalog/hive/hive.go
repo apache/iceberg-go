@@ -293,7 +293,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 		}
 
-		return nil, fmt.Errorf("failed to register table %s.%s: %s", database, tableName, err)
+		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
 	}
 
 	return c.LoadTable(ctx, identifier)
