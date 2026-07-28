@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -1519,6 +1520,9 @@ func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 	if err := json.Unmarshal(b, &metadata); err != nil {
 		return nil, err
 	}
+	if err := requireLastUpdatedMS(metadata); err != nil {
+		return nil, err
+	}
 
 	type rawPartitionSpec struct {
 		ID     int                          `json:"spec-id"`
@@ -1638,7 +1642,6 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		LastUpdatedMS:      -1,
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -1646,6 +1649,15 @@ func initCommonMetadataForDeserialization() commonMetadata {
 		SortOrderList:      nil,
 		Specs:              nil,
 	}
+}
+
+func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
+	value, ok := fields["last-updated-ms"]
+	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
+	}
+
+	return nil
 }
 
 func (c *commonMetadata) Ref() SnapshotRef {
@@ -2222,9 +2234,6 @@ func (c *commonMetadata) constructRefs() {
 
 func (c *commonMetadata) validate() error {
 	switch {
-	case c.LastUpdatedMS == 0:
-		// last-updated-ms is required
-		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
 	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)

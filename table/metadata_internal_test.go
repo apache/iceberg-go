@@ -310,6 +310,69 @@ func TestMetadataV3Parsing(t *testing.T) {
 	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
 }
 
+func TestLastUpdatedMSPresence(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "v1", data: ExampleTableMetadataV1},
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &metadata))
+
+			for _, key := range []string{
+				"snapshots", "snapshot-log", "metadata-log", "current-snapshot-id",
+				"refs", "statistics", "partition-statistics",
+			} {
+				delete(metadata, key)
+			}
+
+			t.Run("missing", func(t *testing.T) {
+				delete(metadata, "last-updated-ms")
+				assertMissingLastUpdatedMS(t, metadata)
+			})
+
+			t.Run("null", func(t *testing.T) {
+				metadata["last-updated-ms"] = nil
+				assertMissingLastUpdatedMS(t, metadata)
+			})
+
+			t.Run("epoch", func(t *testing.T) {
+				metadata["last-updated-ms"] = float64(0)
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				parsed, err := ParseMetadataBytes(raw)
+				require.NoError(t, err)
+				assert.Zero(t, parsed.LastUpdatedMillis())
+			})
+
+			t.Run("negative", func(t *testing.T) {
+				metadata["last-updated-ms"] = float64(-1)
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				parsed, err := ParseMetadataBytes(raw)
+				require.NoError(t, err)
+				assert.Equal(t, int64(-1), parsed.LastUpdatedMillis())
+			})
+		})
+	}
+}
+
+func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
+	t.Helper()
+
+	raw, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(raw)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "missing last-updated-ms")
+}
+
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	base, err := builder.Build()
@@ -1403,6 +1466,7 @@ func TestTableMetadataV2MissingSchemas(t *testing.T) {
 func TestAssignMissingPartitionFieldIDsAcrossSpecs(t *testing.T) {
 	input := []byte(`{
 		"format-version": 2,
+		"last-updated-ms": 0,
 		"last-partition-id": 1003,
 		"partition-specs": [
 			{
