@@ -196,6 +196,62 @@ func TestValidMetadataDeserialization(t *testing.T) {
 	assert.Equal(t, int64(1), meta.CurrentVersionIDValue)
 }
 
+func TestParseMetadataRejectsNullAndDuplicateEntries(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(map[string]any)
+		errMessage string
+	}{
+		{
+			name: "null schema",
+			mutate: func(doc map[string]any) {
+				doc["schemas"] = []any{nil}
+			},
+			errMessage: "schema at index 0 is null",
+		},
+		{
+			name: "duplicate schema ID",
+			mutate: func(doc map[string]any) {
+				schemas := doc["schemas"].([]any)
+				doc["schemas"] = append(schemas, schemas[0])
+			},
+			errMessage: "duplicate schema-id 0",
+		},
+		{
+			name: "null version",
+			mutate: func(doc map[string]any) {
+				doc["versions"] = []any{nil}
+			},
+			errMessage: "version at index 0 is null",
+		},
+		{
+			name: "duplicate version ID",
+			mutate: func(doc map[string]any) {
+				versions := doc["versions"].([]any)
+				doc["versions"] = append(versions, versions[0])
+			},
+			errMessage: "duplicate version-id 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var doc map[string]any
+			require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &doc))
+			tt.mutate(doc)
+			encoded, err := json.Marshal(doc)
+			require.NoError(t, err)
+
+			var parseErr error
+			require.NotPanics(t, func() {
+				_, parseErr = ParseMetadataBytes(encoded)
+			})
+			require.ErrorIs(t, parseErr, ErrInvalidViewMetadata)
+			assert.ErrorContains(t, parseErr, tt.errMessage)
+		})
+	}
+}
+
 func TestMissingViewUUID(t *testing.T) {
 	invalidJSON := `{
 		"format-version": 1,
@@ -522,6 +578,92 @@ func TestCloneSlice(t *testing.T) {
 	assert.EqualValues(t, x, clonedX)
 	clonedX[0].foo[0] = 5
 	assert.NotEqualValues(t, x, clonedX)
+}
+
+func TestMetadataGettersReturnDefensiveCopies(t *testing.T) {
+	md, err := ParseMetadataString(exampleViewJSON)
+	require.NoError(t, err)
+
+	currentVersion := md.CurrentVersion()
+	currentVersion.Summary["summaryProp"] = "changed"
+	currentVersion.Representations[0].Sql = "select changed"
+	currentVersion.DefaultNamespace[0] = "changed"
+
+	versions := md.Versions()
+	versions[0].VersionID = 99
+
+	currentSchema := md.CurrentSchema()
+	currentSchema.ID = 99
+	currentSchema.IdentifierFieldIDs[0] = 99
+
+	schemas := md.Schemas()
+	schemas[0].ID = 98
+
+	schemasByID := md.SchemasByID()
+	schemasByID[0].ID = 97
+	delete(schemasByID, 0)
+
+	versionLog := md.VersionLog()
+	versionLog[0].VersionID = 99
+
+	props := md.Properties()
+	props["prop"] = "changed"
+
+	assert.Equal(t, int64(1), md.CurrentVersion().VersionID)
+	assert.Equal(t, "summaryVal", md.CurrentVersion().Summary["summaryProp"])
+	assert.Equal(t, "select * from ns.tbl", md.CurrentVersion().Representations[0].Sql)
+	assert.Equal(t, "accounting", md.CurrentVersion().DefaultNamespace[0])
+	assert.Equal(t, 0, md.CurrentSchema().ID)
+	assert.Equal(t, 0, md.CurrentSchema().IdentifierFieldIDs[0])
+	assert.Equal(t, 0, md.Schemas()[0].ID)
+	assert.Equal(t, 0, md.SchemasByID()[0].ID)
+	assert.Equal(t, int64(1), md.VersionLog()[0].VersionID)
+	assert.Equal(t, "value", md.Properties()["prop"])
+}
+
+func TestCloneSchemaCopiesNestedValues(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(1, []int{1},
+		iceberg.NestedField{
+			ID: 1, Name: "struct", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+				ID: 2, Name: "nested", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: []byte{1}, WriteDefault: iceberg.BinaryLiteral{2},
+			}}},
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "list", Type: &iceberg.ListType{
+				ElementID: 4, Element: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+					ID: 5, Name: "element", Type: iceberg.PrimitiveTypes.String,
+				}}},
+			},
+		},
+		iceberg.NestedField{
+			ID: 6, Name: "map", Type: &iceberg.MapType{
+				KeyID: 7, KeyType: iceberg.PrimitiveTypes.String, ValueID: 8,
+				ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{{
+					ID: 9, Name: "value", Type: iceberg.PrimitiveTypes.String,
+				}}},
+			},
+		},
+	)
+
+	cloned := cloneSchema(schema)
+	cloned.IdentifierFieldIDs[0] = 99
+	structField := cloned.Field(0).Type.(*iceberg.StructType)
+	structField.FieldList[0].Name = "changed"
+	structField.FieldList[0].InitialDefault.([]byte)[0] = 9
+	structField.FieldList[0].WriteDefault.(iceberg.BinaryLiteral)[0] = 9
+	listField := cloned.Field(1).Type.(*iceberg.ListType)
+	listField.Element.(*iceberg.StructType).FieldList[0].Name = "changed"
+	mapField := cloned.Field(2).Type.(*iceberg.MapType)
+	mapField.ValueType.(*iceberg.StructType).FieldList[0].Name = "changed"
+
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	originalStruct := schema.Field(0).Type.(*iceberg.StructType)
+	assert.Equal(t, "nested", originalStruct.FieldList[0].Name)
+	assert.Equal(t, []byte{1}, originalStruct.FieldList[0].InitialDefault)
+	assert.Equal(t, iceberg.BinaryLiteral{2}, originalStruct.FieldList[0].WriteDefault)
+	assert.Equal(t, "element", schema.Field(1).Type.(*iceberg.ListType).Element.(*iceberg.StructType).FieldList[0].Name)
+	assert.Equal(t, "value", schema.Field(2).Type.(*iceberg.MapType).ValueType.(*iceberg.StructType).FieldList[0].Name)
 }
 
 var exampleViewJSON = `{

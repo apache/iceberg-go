@@ -824,9 +824,11 @@ func (t TimestampLiteral) To(typ Type) (Literal, error) {
 		return t, nil
 	case TimestampTzType:
 		return t, nil
-	case TimestampNsType:
-		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
-	case TimestampTzNsType:
+	case TimestampNsType, TimestampTzNsType:
+		if t > math.MaxInt64/1000 || t < math.MinInt64/1000 {
+			return nil, fmt.Errorf("%w: timestamp %d is outside the nanosecond range", ErrBadCast, t)
+		}
+
 		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
 	case DateType:
 		return DateLiteral(Timestamp(t).ToDate()), nil

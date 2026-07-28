@@ -165,6 +165,8 @@ func (f *memFile) Seek(offset int64, whence int) (int64, error) {
 		abs = f.pos + offset
 	case io.SeekEnd:
 		abs = int64(len(f.data)) + offset
+	default:
+		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
 	}
 	if abs < 0 {
 		return 0, &fs.PathError{Op: "seek", Path: f.name, Err: fs.ErrInvalid}
@@ -175,6 +177,9 @@ func (f *memFile) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (f *memFile) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, &fs.PathError{Op: "readat", Path: f.name, Err: fs.ErrInvalid}
+	}
 	if off >= int64(len(f.data)) {
 		return 0, io.EOF
 	}

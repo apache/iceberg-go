@@ -31,8 +31,12 @@ func TestUDF(t *testing.T) {
 	location := "s3://bucket/functions/add_one/metadata/00001-x.metadata.json"
 
 	fn := New(ident, meta, location)
+	ident[0] = "mutated"
 
-	assert.Equal(t, ident, fn.Identifier())
+	assert.Equal(t, table.Identifier{"accounting", "add_one"}, fn.Identifier())
+	returnedIdent := fn.Identifier()
+	returnedIdent[0] = "mutated"
+	assert.Equal(t, table.Identifier{"accounting", "add_one"}, fn.Identifier())
 	assert.Equal(t, location, fn.MetadataLocation())
 	assert.True(t, meta.Equals(fn.Metadata()))
 	assert.Len(t, fn.Definitions(), 2)
@@ -45,10 +49,10 @@ func TestUDF(t *testing.T) {
 	differentIdent := New(table.Identifier{"accounting", "other"}, meta, location)
 	assert.False(t, fn.Equals(*differentIdent))
 
-	differentLocation := New(ident, meta, "s3://bucket/elsewhere")
+	differentLocation := New(table.Identifier{"accounting", "add_one"}, meta, "s3://bucket/elsewhere")
 	assert.False(t, fn.Equals(*differentLocation))
 
-	differentMetadata := New(ident, parseFixture(t, "udf-metadata-table.json"), location)
+	differentMetadata := New(table.Identifier{"accounting", "add_one"}, parseFixture(t, "udf-metadata-table.json"), location)
 	assert.False(t, fn.Equals(*differentMetadata))
 
 	require.NotNil(t, fn.Metadata())

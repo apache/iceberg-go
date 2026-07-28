@@ -237,6 +237,7 @@ type sealedFakeType struct{}
 func (sealedFakeType) String() string                  { return "fake" }
 func (sealedFakeType) Equals(Type) bool                { return false }
 func (sealedFakeType) canonicalTo(sb *strings.Builder) {}
+func (s sealedFakeType) clone() Type                   { return s }
 
 func TestValidateType(t *testing.T) {
 	intType := mustPrimitive(t, "int")

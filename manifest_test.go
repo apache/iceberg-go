@@ -480,6 +480,27 @@ var (
 	)
 )
 
+func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "dropped", Transform: IdentityTransform{},
+	})
+	schema := NewSchema(0)
+
+	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected one partition summary, got %d", len(summaries))
+	}
+	if !summaries[0].ContainsNull {
+		t.Fatal("expected the unknown partition field summary to contain null")
+	}
+	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
+		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
 type ManifestTestSuite struct {
 	suite.Suite
 
@@ -1983,6 +2004,42 @@ func (m *ManifestTestSuite) TestManifestBuilderKeyMetadataCopiesInput() {
 	m.Assert().Equal([]byte{0x00, 0x01, 0x02}, manifest.KeyMetadata())
 }
 
+func (m *ManifestTestSuite) TestManifestFileGettersReturnDefensiveCopies() {
+	containsNaN := true
+	lowerBound := []byte{0x00, 0x01}
+	upperBound := []byte{0x02, 0x03}
+	manifest := NewManifestFile(3, "file.avro", 1, 1, entrySnapshotID).
+		Partitions([]FieldSummary{{
+			ContainsNull: true,
+			ContainsNaN:  &containsNaN,
+			LowerBound:   &lowerBound,
+			UpperBound:   &upperBound,
+		}}).
+		KeyMetadata([]byte{0x04, 0x05}).
+		Build()
+	firstRowID := int64(10)
+	manifest.(*manifestFile).FirstRowIDValue = &firstRowID
+
+	keyMetadata := manifest.KeyMetadata()
+	keyMetadata[0] = 0xff
+	partitions := manifest.Partitions()
+	partitions[0].ContainsNull = false
+	*partitions[0].ContainsNaN = false
+	(*partitions[0].LowerBound)[0] = 0xff
+	(*partitions[0].UpperBound)[0] = 0xff
+	returnedFirstRowID := manifest.FirstRowID()
+	*returnedFirstRowID = 99
+
+	m.Equal([]byte{0x04, 0x05}, manifest.KeyMetadata())
+	currentPartitions := manifest.Partitions()
+	m.Require().Len(currentPartitions, 1)
+	m.True(currentPartitions[0].ContainsNull)
+	m.True(*currentPartitions[0].ContainsNaN)
+	m.Equal([]byte{0x00, 0x01}, *currentPartitions[0].LowerBound)
+	m.Equal([]byte{0x02, 0x03}, *currentPartitions[0].UpperBound)
+	m.Equal(int64(10), *manifest.FirstRowID())
+}
+
 // equalityIDsSchemaIsInt asserts equality_ids uses Avro "int", not "long".
 func (m *ManifestTestSuite) equalityIDsSchemaIsInt(sc *avro.Schema) {
 	m.T().Helper()
@@ -2243,9 +2300,11 @@ func TestAvroEncodePartitionDataUsesDeclaredDecimalFixedSize(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			converted, err := avroEncodePartitionData(
 				map[int]any{decimalFieldID: tt.value},
-				map[string]int{"price": decimalFieldID},
-				map[int]string{decimalFieldID: atype.Decimal},
-				map[int]int{decimalFieldID: internal.DecimalRequiredBytes(tt.precision)},
+				dataFileFieldMaps{
+					nameToID:      map[string]int{"price": decimalFieldID},
+					idToType:      map[int]string{decimalFieldID: atype.Decimal},
+					idToFixedSize: map[int]int{decimalFieldID: internal.DecimalRequiredBytes(tt.precision)},
+				},
 			)
 			if tt.wantErr {
 				if err == nil {

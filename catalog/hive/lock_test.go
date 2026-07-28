@@ -337,6 +337,8 @@ func TestCalculateBackoff(t *testing.T) {
 		{3, 800 * time.Millisecond}, // 100ms * 2^3 = 800ms
 		{4, 1 * time.Second},        // 100ms * 2^4 = 1.6s, capped at 1s
 		{10, 1 * time.Second},       // Capped at maxWait
+		{63, 1 * time.Second},       // Capped without overflowing time.Duration
+		{1000, 1 * time.Second},     // Large retry counts remain capped
 	}
 
 	for _, tt := range tests {
@@ -345,6 +347,10 @@ func TestCalculateBackoff(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+
+	maxDuration := time.Duration(1<<63 - 1)
+	assert.Equal(t, time.Duration(1)<<62, calculateBackoff(62, time.Nanosecond, maxDuration))
+	assert.Equal(t, maxDuration, calculateBackoff(63, time.Nanosecond, maxDuration))
 }
 
 func TestLockConfigurationParsing(t *testing.T) {

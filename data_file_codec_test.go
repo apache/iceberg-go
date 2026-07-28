@@ -66,6 +66,33 @@ func TestManifestEntrySchemaForCachesByPartitionAvroFingerprint(t *testing.T) {
 		"identical (partition type, version) inputs must reuse the cached schema")
 }
 
+func TestDataFileCodecWithDroppedPartitionSource(t *testing.T) {
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "dropped", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "bucketed", Transform: BucketTransform{NumBuckets: 8}},
+	)
+	schema := NewSchema(0)
+
+	builder, err := NewDataFileBuilder(
+		spec,
+		EntryContentData,
+		"s3://bucket/table/data.parquet",
+		ParquetFile,
+		map[int]any{1000: "historical-value", 1001: int32(3)},
+		nil,
+		nil,
+		1,
+		1024,
+	)
+	require.NoError(t, err)
+
+	encoded, err := builder.Build().(*dataFile).MarshalAvroEntry(spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+	require.NoError(t, err)
+	require.Equal(t, map[int]any{1000: nil, 1001: int32(3)}, decoded.Partition())
+}
+
 // TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes
 // guards against the cache-key collision that would occur if the cache
 // were keyed only by spec.ID(). Two tables can both use
