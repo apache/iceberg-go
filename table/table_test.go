@@ -841,7 +841,7 @@ func (t *TableWritingTestSuite) TestAddFilesToUnknownTransformSpecFails() {
 		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: unknown, Name: "baz_custom"})
 
 	tbl := t.createTable(ident, t.formatVersion, spec, t.tableSchema)
-	filePath := fmt.Sprintf("%s/partitioned_table/test-unknown.parquet", t.location)
+	filePath := t.location + "/partitioned_table/test-unknown.parquet"
 	arrTable, err := array.TableFromJSON(memory.DefaultAllocator, t.arrSchema, []string{
 		`[{"foo": true, "bar": "bar_string", "baz": 1, "qux": "2024-03-07"}]`,
 	})
