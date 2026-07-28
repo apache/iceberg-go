@@ -17,7 +17,23 @@
 
 package iceberg
 
-import "slices"
+import (
+	"math"
+	"slices"
+)
+
+// MaxStructFieldID is the largest field ID a user-supplied schema may assign.
+// Field IDs greater than this are reserved by the spec for metadata columns
+// (_row_id, _last_updated_sequence_number, _file, _pos, _deleted, _spec_id,
+// _partition, ...). Java: TypeUtil.MAX_STRUCT_FIELD_ID (Integer.MAX_VALUE - 200).
+const MaxStructFieldID = math.MaxInt32 - 200
+
+// IsReservedFieldID reports whether fieldID falls in the range the spec reserves
+// for metadata columns. User schemas must not assign IDs in this range; table
+// schema field IDs must not exceed MaxStructFieldID.
+func IsReservedFieldID(fieldID int) bool {
+	return fieldID > MaxStructFieldID
+}
 
 // Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107
 // and Integer.MAX_VALUE - 108 per the Iceberg spec (Metadata Columns / Row Lineage).

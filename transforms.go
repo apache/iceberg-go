@@ -252,6 +252,9 @@ func (t BucketTransform) validateNumBuckets() error {
 	if t.NumBuckets <= 0 {
 		return fmt.Errorf("%w: bucket transform requires numBuckets > 0", ErrInvalidArgument)
 	}
+	if t.NumBuckets > math.MaxInt32 {
+		return fmt.Errorf("%w: bucket transform requires numBuckets <= %d", ErrInvalidArgument, math.MaxInt32)
+	}
 
 	return nil
 }
@@ -289,6 +292,12 @@ func hashHelperInt[T ~int32 | ~int64](v any) uint32 {
 	binary.LittleEndian.PutUint64(b, val)
 
 	return murmur3.Sum32(b)
+}
+
+func hashTimestampNano(v any) uint32 {
+	micros := internal.FloorDiv(int64(v.(TimestampNano)), int64(time.Microsecond))
+
+	return hashHelperInt[int64](micros)
 }
 
 func (t BucketTransform) Equals(other Transform) bool {
@@ -330,7 +339,7 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	case TimestampLiteral:
 		hash = hashHelperInt[int64](int64(v))
 	case TimestampNsLiteral:
-		hash = hashHelperInt[int64](int64(v))
+		hash = hashTimestampNano(TimestampNano(v))
 	default:
 		return Optional[Literal]{}
 	}
@@ -364,7 +373,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 	case TimestampTzType:
 		h = hashHelperInt[Timestamp]
 	case TimestampNsType, TimestampTzNsType:
-		h = hashHelperInt[TimestampNano]
+		h = hashTimestampNano
 	case DecimalType:
 		h = func(v any) uint32 {
 			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
@@ -456,10 +465,25 @@ type TruncateTransform struct {
 }
 
 func (t TruncateTransform) MarshalText() ([]byte, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	return []byte(t.String()), nil
 }
 
 func (t TruncateTransform) String() string { return fmt.Sprintf("truncate[%d]", t.Width) }
+
+func (t TruncateTransform) validateWidth() error {
+	if t.Width <= 0 {
+		return fmt.Errorf("%w: truncate transform requires width > 0", ErrInvalidArgument)
+	}
+	if t.Width > math.MaxInt32 {
+		return fmt.Errorf("%w: truncate transform requires width <= %d", ErrInvalidArgument, math.MaxInt32)
+	}
+
+	return nil
+}
 
 func (TruncateTransform) CanTransform(t Type) bool {
 	switch t.(type) {
@@ -485,6 +509,10 @@ func (t TruncateTransform) Equals(other Transform) bool {
 }
 
 func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	switch src.(type) {
 	case Int32Type:
 		return func(v any) any {
@@ -606,6 +634,10 @@ func (t TruncateTransform) ToHumanStrType(_ Type, val any) string {
 }
 
 func (t TruncateTransform) Project(name string, pred BoundPredicate) (UnboundPredicate, error) {
+	if err := t.validateWidth(); err != nil {
+		return nil, err
+	}
+
 	if _, ok := pred.Term().(*BoundTransform); ok {
 		return projectTransformPredicate(t, name, pred)
 	}
@@ -1097,7 +1129,8 @@ func (HourTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 func (HourTransform) ToHumanStr(val any) string {
 	switch v := val.(type) {
 	case int32:
-		tm := epochTM.Add(time.Duration(v) * time.Hour)
+		seconds := int64(v) * int64(time.Hour/time.Second)
+		tm := time.Unix(seconds, 0).UTC()
 
 		return tm.Format("2006-01-02-15")
 	default:

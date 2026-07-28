@@ -610,9 +610,10 @@ func (s *FanoutWriterTestSuite) TestGetRecordPartitionsWithDroppedLeadingSourceC
 	partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
 	s.Require().NoError(err)
 	s.Require().Len(partitions, 1)
-	s.Equal(int32(7), partitions[0].partitionRec.Get(0))
-	s.Equal(true, partitions[0].partitionRec.Get(1))
-	s.Equal("bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
+	s.Nil(partitions[0].partitionRec.Get(0))
+	s.Equal(int32(7), partitions[0].partitionRec.Get(1))
+	s.Equal(true, partitions[0].partitionRec.Get(2))
+	s.Equal("foo=null/bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

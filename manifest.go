@@ -152,8 +152,19 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 		return b
 	}
 
-	copied := make([]FieldSummary, len(p))
-	for i, partition := range p {
+	copied := cloneFieldSummaries(p)
+	b.m.PartitionList = &copied
+
+	return b
+}
+
+func cloneFieldSummaries(partitions []FieldSummary) []FieldSummary {
+	if partitions == nil {
+		return nil
+	}
+
+	copied := make([]FieldSummary, len(partitions))
+	for i, partition := range partitions {
 		copiedPartition := partition
 		if partition.LowerBound != nil {
 			lowerBound := slices.Clone(*partition.LowerBound)
@@ -170,9 +181,8 @@ func (b *ManifestBuilder) Partitions(p []FieldSummary) *ManifestBuilder {
 
 		copied[i] = copiedPartition
 	}
-	b.m.PartitionList = &copied
 
-	return b
+	return copied
 }
 
 func (b *ManifestBuilder) KeyMetadata(km []byte) *ManifestBuilder {
@@ -381,7 +391,7 @@ func (m *manifestFile) KeyMetadata() []byte {
 		return nil
 	}
 
-	return *m.Key
+	return slices.Clone(*m.Key)
 }
 
 func (m *manifestFile) Partitions() []FieldSummary {
@@ -389,10 +399,18 @@ func (m *manifestFile) Partitions() []FieldSummary {
 		return nil
 	}
 
-	return *m.PartitionList
+	return cloneFieldSummaries(*m.PartitionList)
 }
 
-func (m *manifestFile) FirstRowID() *int64 { return m.FirstRowIDValue }
+func (m *manifestFile) FirstRowID() *int64 {
+	if m.FirstRowIDValue == nil {
+		return nil
+	}
+
+	firstRowID := *m.FirstRowIDValue
+
+	return &firstRowID
+}
 
 func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
@@ -448,6 +466,7 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	logicalTypes := make(map[int]string)
 	fixedSizes := make(map[int]int)
 	decimalScales := make(map[int]int)
+	unknownFieldIDs := make(map[int]struct{})
 
 	entryField := getField(root, "data_file")
 	partitionField := getField(entryField.Type, "partition")
@@ -468,6 +487,9 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 		if typ.Type == atype.Union {
 			typ = typ.Branches[len(typ.Branches)-1]
 		}
+		if typ.Type == atype.Null {
+			unknownFieldIDs[fid] = struct{}{}
+		}
 		if typ.LogicalType != "" {
 			logicalTypes[fid] = typ.LogicalType
 			if typ.LogicalType == atype.Decimal {
@@ -482,6 +504,7 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 		idToType:         logicalTypes,
 		idToFixedSize:    fixedSizes,
 		idToDecimalScale: decimalScales,
+		unknownFieldIDs:  unknownFieldIDs,
 	}
 }
 
@@ -1075,8 +1098,30 @@ type partitionFieldStats[T LiteralType] struct {
 	cmp Comparator[T]
 }
 
+// unknownPartitionFieldStats records null presence but omits bounds because
+// the dropped source type needed to encode and compare non-null values is lost.
+type unknownPartitionFieldStats struct {
+	containsNull bool
+}
+
+func (p *unknownPartitionFieldStats) toSummary() FieldSummary {
+	containsNaN := false
+
+	return FieldSummary{ContainsNull: p.containsNull, ContainsNaN: &containsNaN}
+}
+
+func (p *unknownPartitionFieldStats) update(any) error {
+	// Dropped-source values are normalized to Avro null when the entry is
+	// encoded, even if an in-memory data file still carries a historical value.
+	p.containsNull = true
+
+	return nil
+}
+
 func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
+	case UnknownType:
+		return &unknownPartitionFieldStats{}, nil
 	case BooleanType:
 		return &partitionFieldStats[bool]{cmp: getComparator[bool]()}, nil
 	case Int32Type:
@@ -1227,9 +1272,7 @@ type ManifestWriter struct {
 	schema  *Schema
 	content ManifestContent
 
-	partFieldNameToID map[string]int
-	partFieldIDToType map[int]string
-	partFieldIDToSize map[int]int
+	partFieldMaps dataFileFieldMaps
 
 	snapshotID    int64
 	addedFiles    int32
@@ -1279,18 +1322,16 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	fieldMaps := getFieldIDMap(fileSchema)
 
 	w := &ManifestWriter{
-		impl:              impl,
-		version:           version,
-		output:            out,
-		spec:              spec,
-		content:           ManifestContentData,
-		schema:            schema,
-		partFieldNameToID: fieldMaps.nameToID,
-		partFieldIDToType: fieldMaps.idToType,
-		partFieldIDToSize: fieldMaps.idToFixedSize,
-		snapshotID:        snapshotID,
-		minSeqNum:         -1,
-		partitions:        make([]map[int]any, 0),
+		impl:          impl,
+		version:       version,
+		output:        out,
+		spec:          spec,
+		content:       ManifestContentData,
+		schema:        schema,
+		partFieldMaps: fieldMaps,
+		snapshotID:    snapshotID,
+		minSeqNum:     -1,
+		partitions:    make([]map[int]any, 0),
 	}
 
 	for _, apply := range opts {
@@ -1422,7 +1463,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	entryToEncode := *entry
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
 		encodeDataFile := cloneDataFileAvroFields(dataFile)
-		encodePartition, err := avroEncodePartitionData(partition, w.partFieldNameToID, w.partFieldIDToType, w.partFieldIDToSize)
+		encodePartition, err := avroEncodePartitionData(partition, w.partFieldMaps)
 		if err != nil {
 			return err
 		}

@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -235,7 +236,13 @@ func (s SortOrder) OrderID() int {
 }
 
 func (s SortOrder) Fields() iter.Seq2[int, SortField] {
-	return slices.All(s.fields)
+	return func(yield func(int, SortField) bool) {
+		for i, field := range s.fields {
+			if !yield(i, cloneSortField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (s SortOrder) Len() int {
@@ -311,6 +318,11 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		if field.Transform == nil {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d has no transform", ErrInvalidTransform, idx)
 		}
+		if marshaler, ok := field.Transform.(encoding.TextMarshaler); ok {
+			if _, err := marshaler.MarshalText(); err != nil {
+				return SortOrder{}, fmt.Errorf("%w: sort field at index %d: %w", ErrInvalidTransform, idx, err)
+			}
+		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)
 		}
@@ -325,7 +337,30 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		}
 	}
 
-	return SortOrder{orderID, fields}, nil
+	fieldCopies := make([]SortField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = cloneSortField(field)
+	}
+
+	return SortOrder{orderID, fieldCopies}, nil
+}
+
+func cloneSortField(field SortField) SortField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *iceberg.BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *iceberg.TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
+
+	return field
 }
 
 func (s SortOrder) IsUnsorted() bool {
