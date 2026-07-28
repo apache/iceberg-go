@@ -54,6 +54,7 @@ func TestPositionDeleteColumnIndices(t *testing.T) {
 			if test.wantErr != "" {
 				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 				require.ErrorContains(t, err, test.wantErr)
+
 				return
 			}
 
