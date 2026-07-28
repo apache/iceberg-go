@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1215,6 +1216,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 
 func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 	tbl := buildV3TableWithRows(t, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	decimalDefault := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 
 	txn := tbl.NewTransaction()
 	require.NoError(t, txn.UpdateSchema(true, false).
@@ -1224,6 +1226,13 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 			"",
 			false,
 			iceberg.Int32Literal(42),
+		).
+		AddColumn(
+			[]string{"new_decimal"},
+			iceberg.DecimalTypeOf(9, 2),
+			"",
+			false,
+			iceberg.DecimalLiteral(decimalDefault),
 		).
 		Commit())
 	var err error
@@ -1280,4 +1289,29 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("matching decimal", func(t *testing.T) {
+		scan := tbl.Scan(
+			WithSelectedFields("id", "new_decimal"),
+			WithRowFilter(iceberg.EqualTo(
+				iceberg.Reference("new_decimal"),
+				decimalDefault,
+			)),
+		)
+		tasks, err := scan.PlanFiles(t.Context())
+		require.NoError(t, err)
+		require.Len(t, tasks, 1, "manifest planning must retain the old file")
+
+		result, err := scan.ToArrowTable(t.Context())
+		require.NoError(t, err)
+		defer result.Release()
+		require.Equal(t, int64(2), result.NumRows())
+
+		for _, chunk := range result.Column(1).Data().Chunks() {
+			defaults := chunk.(*array.Decimal128)
+			for i := range defaults.Len() {
+				require.Equal(t, decimal128.FromI64(1234), defaults.Value(i))
+			}
+		}
+	})
 }
