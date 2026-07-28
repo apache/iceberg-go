@@ -53,6 +53,7 @@ type Writer struct {
 	blobs     []BlobMetadata
 	props     map[string]string
 	done      bool
+	failed    error
 	createdBy string
 }
 
@@ -89,6 +90,9 @@ func NewWriter(w io.Writer) (*Writer, error) {
 // SetProperties merges the provided properties into the file-level properties
 // written to the footer. Can be called multiple times before Finish.
 func (w *Writer) AddProperties(props map[string]string) error {
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot set properties: writer previously failed: %w", w.failed)
+	}
 	if w.done {
 		return errors.New("puffin: cannot set properties: writer already finalized")
 	}
@@ -101,6 +105,9 @@ func (w *Writer) AddProperties(props map[string]string) error {
 
 // ClearProperties removes all file-level properties.
 func (w *Writer) ClearProperties() error {
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot clear properties: writer previously failed: %w", w.failed)
+	}
 	if w.done {
 		return errors.New("puffin: cannot clear properties: writer already finalized")
 	}
@@ -112,6 +119,9 @@ func (w *Writer) ClearProperties() error {
 // SetCreatedBy overrides the default "created-by" property written to the footer.
 // The default value is "iceberg-go". Example: "MyApp version 1.2.3".
 func (w *Writer) SetCreatedBy(createdBy string) error {
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot set created-by: writer previously failed: %w", w.failed)
+	}
 	if w.done {
 		return errors.New("puffin: cannot set created-by: writer already finalized")
 	}
@@ -127,6 +137,9 @@ func (w *Writer) SetCreatedBy(createdBy string) error {
 // Returns the complete BlobMetadata including the computed Offset and Length.
 // The input.Type is required; use constants like ApacheDataSketchesThetaV1.
 func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, error) {
+	if w.failed != nil {
+		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: writer previously failed: %w", w.failed)
+	}
 	if w.done {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: writer already finalized")
 	}
@@ -182,7 +195,7 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		Properties:     properties,
 	}
 
-	if err := writeAll(w.w, data); err != nil {
+	if err := w.write(data); err != nil {
 		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
 	}
 
@@ -199,6 +212,9 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 // Must be called exactly once after all blobs are written.
 // After Finish returns, no further operations are allowed on the writer.
 func (w *Writer) Finish() error {
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot finish: writer previously failed: %w", w.failed)
+	}
 	if w.done {
 		return errors.New("puffin: cannot finish: writer already finalized")
 	}
@@ -235,12 +251,12 @@ func (w *Writer) Finish() error {
 	}
 
 	// Write footer start magic
-	if err := writeAll(w.w, magic[:]); err != nil {
+	if err := w.write(magic[:]); err != nil {
 		return fmt.Errorf("puffin: write footer magic: %w", err)
 	}
 
 	// Write footer payload
-	if err := writeAll(w.w, payload); err != nil {
+	if err := w.write(payload); err != nil {
 		return fmt.Errorf("puffin: write footer payload: %w", err)
 	}
 
@@ -250,11 +266,21 @@ func (w *Writer) Finish() error {
 	binary.LittleEndian.PutUint32(trailer[4:8], 0) // flags = 0 (uncompressed)
 	copy(trailer[8:12], magic[:])
 
-	if err := writeAll(w.w, trailer[:]); err != nil {
+	if err := w.write(trailer[:]); err != nil {
 		return fmt.Errorf("puffin: write footer trailer: %w", err)
 	}
 
 	w.done = true
+
+	return nil
+}
+
+func (w *Writer) write(data []byte) error {
+	if err := writeAll(w.w, data); err != nil {
+		w.failed = err
+
+		return err
+	}
 
 	return nil
 }
