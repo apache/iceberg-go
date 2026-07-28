@@ -280,6 +280,38 @@ func TestHiveListTablesEmpty(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveListTablesHandlesObjectLoadingErrors(t *testing.T) {
+	t.Run("skips concurrently deleted tables", func(t *testing.T) {
+		mockClient := &mockHiveClient{}
+		mockClient.On("GetTables", mock.Anything, "test_database", "*").Return([]string{"deleted", "test_table"}, nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "deleted").Return(nil, errNoSuchObject).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "test_table").Return(testIcebergHiveTable1, nil).Once()
+
+		var tables []table.Identifier
+		for identifier, err := range NewCatalogWithClient(mockClient, nil).ListTables(context.Background(), DatabaseIdentifier("test_database")) {
+			require.NoError(t, err)
+			tables = append(tables, identifier)
+		}
+		require.Equal(t, []table.Identifier{TableIdentifier("test_database", "test_table")}, tables)
+		mockClient.AssertExpectations(t)
+	})
+
+	t.Run("propagates operational failures", func(t *testing.T) {
+		loadErr := errors.New("metastore unavailable")
+		mockClient := &mockHiveClient{}
+		mockClient.On("GetTables", mock.Anything, "test_database", "*").Return([]string{"broken", "test_table"}, nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "broken").Return(nil, loadErr).Once()
+
+		var gotErr error
+		for _, err := range NewCatalogWithClient(mockClient, nil).ListTables(context.Background(), DatabaseIdentifier("test_database")) {
+			gotErr = err
+		}
+		require.ErrorIs(t, gotErr, loadErr)
+		mockClient.AssertNotCalled(t, "GetTable", mock.Anything, "test_database", "test_table")
+		mockClient.AssertExpectations(t)
+	})
+}
+
 func TestHiveListNamespaces(t *testing.T) {
 	assert := require.New(t)
 
@@ -1441,6 +1473,40 @@ func TestHiveListViews(t *testing.T) {
 	assert.Equal(TableIdentifier("test_database", "test_view"), views[0])
 
 	mockClient.AssertExpectations(t)
+}
+
+func TestHiveListViewsHandlesObjectLoadingErrors(t *testing.T) {
+	t.Run("skips concurrently deleted views", func(t *testing.T) {
+		mockClient := &mockHiveClient{}
+		mockClient.On("GetTables", mock.Anything, "test_database", "*").Return([]string{"deleted", "test_view"}, nil).Once()
+		mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "deleted").Return(nil, errNoSuchObject).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "test_view").Return(testIcebergHiveView, nil).Once()
+
+		var views []table.Identifier
+		for identifier, err := range NewCatalogWithClient(mockClient, nil).ListViews(context.Background(), DatabaseIdentifier("test_database")) {
+			require.NoError(t, err)
+			views = append(views, identifier)
+		}
+		require.Equal(t, []table.Identifier{TableIdentifier("test_database", "test_view")}, views)
+		mockClient.AssertExpectations(t)
+	})
+
+	t.Run("propagates operational failures", func(t *testing.T) {
+		loadErr := errors.New("metastore unavailable")
+		mockClient := &mockHiveClient{}
+		mockClient.On("GetTables", mock.Anything, "test_database", "*").Return([]string{"broken", "test_view"}, nil).Once()
+		mockClient.On("GetDatabase", mock.Anything, "test_database").Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+		mockClient.On("GetTable", mock.Anything, "test_database", "broken").Return(nil, loadErr).Once()
+
+		var gotErr error
+		for _, err := range NewCatalogWithClient(mockClient, nil).ListViews(context.Background(), DatabaseIdentifier("test_database")) {
+			gotErr = err
+		}
+		require.ErrorIs(t, gotErr, loadErr)
+		mockClient.AssertNotCalled(t, "GetTable", mock.Anything, "test_database", "test_view")
+		mockClient.AssertExpectations(t)
+	})
 }
 
 func TestHiveLoadView(t *testing.T) {
