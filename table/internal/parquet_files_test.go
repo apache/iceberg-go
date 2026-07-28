@@ -1279,7 +1279,8 @@ func TestGetWritePropertiesDictionaryEnabledByDefault(t *testing.T) {
 		parquet.NewWriterProperties(writeProps...),
 	))
 
-	rgw := pw.AppendRowGroup()
+	rgw, err := pw.AppendRowGroupChecked()
+	require.NoError(t, err)
 	cw, err := rgw.NextColumn()
 	require.NoError(t, err)
 
@@ -1453,7 +1454,8 @@ func writeDictTestColumn(t *testing.T, tableProps iceberg.Properties, values []p
 		parquet.NewWriterProperties(writeProps...),
 	))
 
-	rgw := pw.AppendRowGroup()
+	rgw, err := pw.AppendRowGroupChecked()
+	require.NoError(t, err)
 	cw, err := rgw.NextColumn()
 	require.NoError(t, err)
 	_, err = cw.(*file.ByteArrayColumnChunkWriter).WriteBatch(values, nil, nil)
