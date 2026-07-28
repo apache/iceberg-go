@@ -592,6 +592,7 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 			output.Error(err)
 			osExit(1)
 		}
+
 		output.Text("Table " + cmd.Table.Identifier + " dropped successfully")
 	}
 }
