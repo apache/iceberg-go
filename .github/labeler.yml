@@ -18,12 +18,11 @@
 # Pull request labeler Github Action Configuration: https://github.com/marketplace/actions/labeler
 INFRA:
   - changed-files:
-    - any-glob-to-any-file: [
-        ".github/workflows/**/*",
-        ".github/labeler.yml",
-        ".asf.yaml",
-        ".gitattributes",
-        ".gitignore",
-        ".pre-commit-config.yaml",
-        "dev/**/*"
-      ]
+    - any-glob-to-any-file:
+        - ".github/workflows/**/*"
+        - ".github/labeler.yml"
+        - ".asf.yaml"
+        - ".gitattributes"
+        - ".gitignore"
+        - ".pre-commit-config.yaml"
+        - "dev/**/*"
