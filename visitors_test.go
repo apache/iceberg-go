@@ -291,9 +291,45 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 			name: "matching binary metadata default",
 			field: iceberg.NestedField{
 				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
-				InitialDefault: "AQID",
+				InitialDefault: "000102ff",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{0, 1, 2, 0xff}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching fixed metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: "010203",
 			},
 			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching native byte default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: []byte{1, 2, 3},
+			},
+			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching numeric date default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Date,
+				InitialDefault: iceberg.Date(1),
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Date(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching ISO date default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Date,
+				InitialDefault: "1970-01-02",
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Date(1)),
 			expected: iceberg.AlwaysTrue{},
 		},
 		{
@@ -345,6 +381,23 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 			assert.Truef(t, translated.Equals(tt.expected), "expected %s, got %s", tt.expected, translated)
 		})
 	}
+}
+
+func TestTranslateColumnNamesInitialDefaultErrorContext(t *testing.T) {
+	field := iceberg.NestedField{
+		ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+		InitialDefault: "GG",
+	}
+	bound, err := iceberg.BindExpr(
+		iceberg.NewSchema(1, field),
+		iceberg.EqualTo(iceberg.Reference("missing_col"), []byte{1}),
+		true,
+	)
+	require.NoError(t, err)
+
+	_, err = iceberg.TranslateColumnNames(bound, iceberg.NewSchema(1))
+	require.ErrorContains(t, err, `initial-default for column "missing_col" (id 2)`)
+	require.ErrorContains(t, err, "invalid hex")
 }
 
 func TestBoundBoolExprVisitor(t *testing.T) {

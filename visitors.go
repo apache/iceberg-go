@@ -18,7 +18,6 @@
 package iceberg
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -519,27 +518,9 @@ func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
 
 func initialDefaultLiteral(field NestedField) (Literal, error) {
 	switch field.Type.(type) {
-	case BinaryType, FixedType, GeographyType, GeometryType:
-		var data []byte
-		switch val := field.InitialDefault.(type) {
-		case []byte:
-			data = val
-		case string:
-			var err error
-			data, err = base64.StdEncoding.DecodeString(val)
-			if err != nil {
-				return nil, err
-			}
-		default:
-			return nil, fmt.Errorf("%w: invalid %s initial default %v",
-				ErrInvalidSchema, field.Type, field.InitialDefault)
-		}
-
-		switch field.Type.(type) {
-		case GeographyType, GeometryType:
-			return LiteralFromBytes(field.Type, data)
-		default:
-			return BinaryLiteral(data).To(field.Type)
+	case BinaryType, FixedType:
+		if val, ok := field.InitialDefault.([]byte); ok {
+			return BinaryLiteral(val).To(field.Type)
 		}
 	case DecimalType:
 		if val, ok := field.InitialDefault.(Decimal); ok {
@@ -569,20 +550,24 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 			return AlwaysFalse{}
 		}
 
+		withContext := func(err error) error {
+			return fmt.Errorf("initial-default for column %q (id %d): %w",
+				field.Name, field.ID, err)
+		}
 		eval, err := ExpressionEvaluator(NewSchema(0, field),
 			unbindPredicate(pred, Reference(field.Name)), true)
 		if err != nil {
-			panic(err)
+			panic(withContext(err))
 		}
 
 		lit, err := initialDefaultLiteral(field)
 		if err != nil {
-			panic(err)
+			panic(withContext(err))
 		}
 
 		matches, err := eval(defaultValueStruct{lit.Any()})
 		if err != nil {
-			panic(err)
+			panic(withContext(err))
 		}
 		if matches {
 			return AlwaysTrue{}
@@ -666,5 +651,6 @@ func sanitizeSetPredicate(op Operation, term UnboundTerm, count int) BooleanExpr
 	for i := range masks {
 		masks[i] = NewLiteral(fmt.Sprintf("%s-%d", sanitizedLiteralMask, i+1))
 	}
+
 	return SetPredicate(op, term, masks)
 }
