@@ -542,7 +542,10 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		// in the case of schema evolution, the column might not be present
 		// in the file schema when reading older data
 		field := pred.Ref().Field()
-		if field.InitialDefault == nil {
+		// A nested field can still be null when an optional parent is null, so
+		// its default is not a file-wide constant. Preserve the existing
+		// missing-column behavior until translation has row-level parent state.
+		if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
 			if pred.Op() == OpIsNull {
 				return AlwaysTrue{}
 			}
