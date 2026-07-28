@@ -318,6 +318,16 @@ func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 		}
 
 		return toPrimitiveSubstraitLiteral(types.Timestamp(lit))
+	case iceberg.TimestampNsLiteral:
+		if typ.Equals(iceberg.PrimitiveTypes.TimestampTzNs) {
+			return expr.NewPrecisionTimestampTzLiteral(
+				int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+			)
+		}
+
+		return expr.NewPrecisionTimestampLiteral(
+			int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+		)
 	case iceberg.DateLiteral:
 		return toPrimitiveSubstraitLiteral(types.Date(lit))
 	case iceberg.TimeLiteral:

@@ -137,6 +137,60 @@ func TestExprs(t *testing.T) {
 	}
 }
 
+func TestNanosecondTimestampLiterals(t *testing.T) {
+	tests := []struct {
+		name       string
+		fieldType  iceberg.Type
+		predicate  iceberg.BooleanExpression
+		wantValues []string
+		wantType   string
+	}{
+		{
+			name:       "timestamp equality",
+			fieldType:  iceberg.PrimitiveTypes.TimestampNs,
+			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(123456789)),
+			wantValues: []string{"1970-01-01 00:00:00.123456789"},
+			wantType:   "precision_timestamp<9>",
+		},
+		{
+			name:       "timestamp with timezone equality before epoch",
+			fieldType:  iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(-123456789)),
+			wantValues: []string{"1969-12-31T23:59:59.876543211Z"},
+			wantType:   "precision_timestamp_tz<9>",
+		},
+		{
+			name:       "timestamp in",
+			fieldType:  iceberg.PrimitiveTypes.TimestampNs,
+			predicate:  iceberg.IsIn(iceberg.Reference("ts"), iceberg.TimestampNano(1), iceberg.TimestampNano(1001)),
+			wantValues: []string{"1970-01-01 00:00:00.000000001", "1970-01-01 00:00:00.000001001"},
+			wantType:   "precision_timestamp<9>",
+		},
+		{
+			name:       "timestamp with timezone not in",
+			fieldType:  iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate:  iceberg.NotIn(iceberg.Reference("ts"), iceberg.TimestampNano(-1), iceberg.TimestampNano(1001)),
+			wantValues: []string{"1969-12-31T23:59:59.999999999Z", "1970-01-01T00:00:00.000001001Z"},
+			wantType:   "precision_timestamp_tz<9>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "ts", Type: tt.fieldType})
+			bound, err := iceberg.BindExpr(sc, tt.predicate, true)
+			require.NoError(t, err)
+
+			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			require.NoError(t, err)
+			for _, value := range tt.wantValues {
+				assert.Contains(t, converted.String(), value)
+			}
+			assert.Contains(t, converted.String(), tt.wantType)
+		})
+	}
+}
+
 func TestVariantSchemaConversionDoesNotPanic(t *testing.T) {
 	sc := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
