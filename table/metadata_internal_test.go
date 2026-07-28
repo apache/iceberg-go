@@ -564,6 +564,44 @@ func TestRejectInvalidSchemaEntries(t *testing.T) {
 	})
 }
 
+func TestRejectDuplicateSnapshotIDs(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+	snapshots := metadata["snapshots"].([]any)
+	current := snapshots[len(snapshots)-1].(map[string]any)
+
+	tests := []struct {
+		name      string
+		duplicate map[string]any
+	}{
+		{name: "identical snapshot", duplicate: maps.Clone(current)},
+		{
+			name: "different manifest list",
+			duplicate: func() map[string]any {
+				duplicate := maps.Clone(current)
+				duplicate["manifest-list"] = "s3://bucket/metadata/different.avro"
+
+				return duplicate
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invalid := maps.Clone(metadata)
+			invalid["snapshots"] = append(slices.Clone(snapshots), tt.duplicate)
+			data, err := json.Marshal(invalid)
+			require.NoError(t, err)
+
+			_, err = ParseMetadataBytes(data)
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+			assert.ErrorContains(t, err, "duplicate snapshot ID 3055729675574597004")
+		})
+	}
+}
+
 func TestSortOrderNotFound(t *testing.T) {
 	metadataSortOrderNotFound := `{
         "format-version": 2,
