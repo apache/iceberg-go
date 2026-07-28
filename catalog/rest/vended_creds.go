@@ -136,7 +136,11 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	default:
 		freshCreds, err := v.fetchCreds(ctx, v.identifier)
 		if err != nil {
-			return v.cachedIO, nil
+			if !v.expired() {
+				return v.cachedIO, nil
+			}
+
+			return nil, fmt.Errorf("refresh vended credentials for %s: %w", v.location, err)
 		}
 
 		config = maps.Clone(v.props)
@@ -145,11 +149,11 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 
 	newIO, err := iceio.LoadFS(ctx, config, v.location)
 	if err != nil {
-		if v.cachedIO != nil {
+		if v.cachedIO != nil && !v.expired() {
 			return v.cachedIO, nil
 		}
 
-		return nil, err
+		return nil, fmt.Errorf("load filesystem with refreshed credentials for %s: %w", v.location, err)
 	}
 
 	v.cachedIO = newIO
