@@ -162,6 +162,23 @@ func TestDefaultKeyExtractor(t *testing.T) {
 	}
 }
 
+func TestBlobFileIOOpenMissingReturnsPathError(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	name := "s3://my-bucket/missing.parquet"
+
+	_, err := fileIO.Open(name)
+	require.ErrorIs(t, err, fs.ErrNotExist)
+
+	var pathErr *fs.PathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.Equal(t, "open", pathErr.Op)
+	assert.Equal(t, name, pathErr.Path)
+}
+
 func testBlobFileIO(ctx context.Context, bucketName string, bucket *blob.Bucket, allowedSchemes ...string) *BlobFileIO {
 	if len(allowedSchemes) == 0 {
 		allowedSchemes = s3Schemes
