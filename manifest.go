@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
@@ -2288,7 +2289,45 @@ func (d *dataFile) FileFormat() FileFormat            { return d.Format }
 func (d *dataFile) Partition() map[int]any {
 	d.initPartitionData()
 
-	return d.fieldIDToPartitionData
+	return clonePartitionMap(d.fieldIDToPartitionData)
+}
+
+func clonePartitionMap(src map[int]any) map[int]any {
+	if src == nil {
+		return nil
+	}
+
+	out := maps.Clone(src)
+	for id, value := range out {
+		if bytes, ok := value.([]byte); ok {
+			out[id] = slices.Clone(bytes)
+		}
+	}
+
+	return out
+}
+
+func cloneByteMap(src map[int][]byte) map[int][]byte {
+	if src == nil {
+		return nil
+	}
+
+	out := make(map[int][]byte, len(src))
+	for id, value := range src {
+		out[id] = slices.Clone(value)
+	}
+
+	return out
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
 }
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
@@ -2298,43 +2337,43 @@ func (d *dataFile) SpecID() int32        { return d.specID }
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.colSizeMap
+	return maps.Clone(d.colSizeMap)
 }
 
 func (d *dataFile) ValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.valCntMap
+	return maps.Clone(d.valCntMap)
 }
 
 func (d *dataFile) NullValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.nullCntMap
+	return maps.Clone(d.nullCntMap)
 }
 
 func (d *dataFile) NaNValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.nanCntMap
+	return maps.Clone(d.nanCntMap)
 }
 
 func (d *dataFile) DistinctValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.distinctCntMap
+	return maps.Clone(d.distinctCntMap)
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
 	d.initColumnStatsData()
 
-	return d.lowerBoundMap
+	return cloneByteMap(d.lowerBoundMap)
 }
 
 func (d *dataFile) UpperBoundValues() map[int][]byte {
 	d.initColumnStatsData()
 
-	return d.upperBoundMap
+	return cloneByteMap(d.upperBoundMap)
 }
 
 func (d *dataFile) KeyMetadata() []byte {
@@ -2342,7 +2381,7 @@ func (d *dataFile) KeyMetadata() []byte {
 		return nil
 	}
 
-	return *d.Key
+	return slices.Clone(*d.Key)
 }
 
 func (d *dataFile) SplitOffsets() []int64 {
@@ -2350,7 +2389,7 @@ func (d *dataFile) SplitOffsets() []int64 {
 		return nil
 	}
 
-	return *d.Splits
+	return slices.Clone(*d.Splits)
 }
 
 func (d *dataFile) EqualityFieldIDs() []int {
@@ -2358,15 +2397,15 @@ func (d *dataFile) EqualityFieldIDs() []int {
 		return nil
 	}
 
-	return *d.EqualityIDs
+	return slices.Clone(*d.EqualityIDs)
 }
 
-func (d *dataFile) SortOrderID() *int { return d.SortOrder }
+func (d *dataFile) SortOrderID() *int { return clonePointer(d.SortOrder) }
 
-func (d *dataFile) FirstRowID() *int64          { return d.FirstRowIDField }
-func (d *dataFile) ReferencedDataFile() *string { return d.ReferencedDataFileField }
-func (d *dataFile) ContentSizeInBytes() *int64  { return d.ContentSizeInBytesField }
-func (d *dataFile) ContentOffset() *int64       { return d.ContentOffsetField }
+func (d *dataFile) FirstRowID() *int64          { return clonePointer(d.FirstRowIDField) }
+func (d *dataFile) ReferencedDataFile() *string { return clonePointer(d.ReferencedDataFileField) }
+func (d *dataFile) ContentSizeInBytes() *int64  { return clonePointer(d.ContentSizeInBytesField) }
+func (d *dataFile) ContentOffset() *int64       { return clonePointer(d.ContentOffsetField) }
 
 type ManifestEntryBuilder struct {
 	m *manifestEntry
@@ -2549,6 +2588,9 @@ func NewDataFileBuilder(
 	fieldNameToID := make(map[string]int)
 	for _, p := range spec.fields {
 		if pData, ok := fieldIDToPartitionData[p.FieldID]; ok {
+			if bytes, ok := pData.([]byte); ok {
+				pData = slices.Clone(bytes)
+			}
 			partitionData[p.Name] = pData
 			fieldNameToID[p.Name] = p.FieldID
 		}
@@ -2563,7 +2605,7 @@ func NewDataFileBuilder(
 			RecordCount:            recordCount,
 			FileSize:               fileSize,
 			specID:                 int32(spec.id),
-			fieldIDToPartitionData: fieldIDToPartitionData,
+			fieldIDToPartitionData: clonePartitionMap(fieldIDToPartitionData),
 			fieldNameToID:          fieldNameToID,
 			fieldIDToLogicalType:   fieldIDToLogicalType,
 		},
@@ -2621,35 +2663,38 @@ func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBui
 
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.LowerBounds = mapToAvroColMap(bounds)
+	b.d.LowerBounds = mapToAvroColMap(cloneByteMap(bounds))
 
 	return b
 }
 
 // UpperBoundValues sets the upper bound values for the data file.
 func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.UpperBounds = mapToAvroColMap(bounds)
+	b.d.UpperBounds = mapToAvroColMap(cloneByteMap(bounds))
 
 	return b
 }
 
 // KeyMetadata sets the key metadata for the data file.
 func (b *DataFileBuilder) KeyMetadata(key []byte) *DataFileBuilder {
-	b.d.Key = &key
+	cloned := slices.Clone(key)
+	b.d.Key = &cloned
 
 	return b
 }
 
 // SplitOffsets sets the split offsets for the data file.
 func (b *DataFileBuilder) SplitOffsets(offsets []int64) *DataFileBuilder {
-	b.d.Splits = &offsets
+	cloned := slices.Clone(offsets)
+	b.d.Splits = &cloned
 
 	return b
 }
 
 // EqualityFieldIDs sets the equality field ids for the data file.
 func (b *DataFileBuilder) EqualityFieldIDs(ids []int) *DataFileBuilder {
-	b.d.EqualityIDs = &ids
+	cloned := slices.Clone(ids)
+	b.d.EqualityIDs = &cloned
 
 	return b
 }

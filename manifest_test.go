@@ -3295,6 +3295,81 @@ func (m *ManifestTestSuite) TestManifestEntryPresentEmptyListSurvivesRewrite() {
 		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
 }
 
+func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation() {
+	partition := []byte{0x01, 0x02}
+	partitionData := map[int]any{1000: partition}
+	spec := NewPartitionSpec(PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{}})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		partitionData, nil, nil, 1, 10)
+	m.Require().NoError(err)
+
+	columnSizes := map[int]int64{1: 10}
+	valueCounts := map[int]int64{1: 2}
+	nullCounts := map[int]int64{1: 1}
+	nanCounts := map[int]int64{1: 0}
+	distinctCounts := map[int]int64{1: 2}
+	lower := map[int][]byte{1: {0x03, 0x04}}
+	upper := map[int][]byte{1: {0x05, 0x06}}
+	key := []byte{0x07, 0x08}
+	splits := []int64{10, 20}
+	equalityIDs := []int{1, 2}
+
+	dataFile := builder.
+		ColumnSizes(columnSizes).
+		ValueCounts(valueCounts).
+		NullValueCounts(nullCounts).
+		NaNValueCounts(nanCounts).
+		DistinctValueCounts(distinctCounts).
+		LowerBoundValues(lower).
+		UpperBoundValues(upper).
+		KeyMetadata(key).
+		SplitOffsets(splits).
+		EqualityFieldIDs(equalityIDs).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+
+	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
+	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
+
+	dataFile.Partition()[1000].([]byte)[0] = 0xff
+	dataFile.ColumnSizes()[1] = 99
+	dataFile.ValueCounts()[1] = 99
+	dataFile.NullValueCounts()[1] = 99
+	dataFile.NaNValueCounts()[1] = 99
+	dataFile.DistinctValueCounts()[1] = 99
+	dataFile.LowerBoundValues()[1][0] = 0xff
+	dataFile.UpperBoundValues()[1][0] = 0xff
+	dataFile.KeyMetadata()[0] = 0xff
+	dataFile.SplitOffsets()[0] = 99
+	dataFile.EqualityFieldIDs()[0] = 99
+	*dataFile.SortOrderID() = 99
+	*dataFile.FirstRowID() = 99
+	*dataFile.ReferencedDataFile() = "changed"
+	*dataFile.ContentOffset() = 99
+	*dataFile.ContentSizeInBytes() = 99
+
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, dataFile.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, dataFile.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, dataFile.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, dataFile.NaNValueCounts())
+	m.Equal(map[int]int64{1: 2}, dataFile.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, dataFile.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, dataFile.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, dataFile.KeyMetadata())
+	m.Equal([]int64{10, 20}, dataFile.SplitOffsets())
+	m.Equal([]int{1, 2}, dataFile.EqualityFieldIDs())
+	m.Equal(3, *dataFile.SortOrderID())
+	m.Equal(int64(4), *dataFile.FirstRowID())
+	m.Equal("data.parquet", *dataFile.ReferencedDataFile())
+	m.Equal(int64(5), *dataFile.ContentOffset())
+	m.Equal(int64(6), *dataFile.ContentSizeInBytes())
+}
+
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
 	// A v2 manifest list cannot reference v3 manifests because the v2 entry
 	// schema has no first_row_id column; this gives us a deterministic
