@@ -129,6 +129,16 @@ func TestParseAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
 		_, err := ParseAWSConfig(context.Background(), props)
 		require.ErrorContains(t, err, "s3.access-key-id and s3.secret-access-key must be configured together")
 	}
+
+	cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+		io.S3AccessKeyID: "access", io.S3SecretAccessKey: "secret", io.S3SessionToken: "token",
+	})
+	require.NoError(t, err)
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "access", creds.AccessKeyID)
+	require.Equal(t, "secret", creds.SecretAccessKey)
+	require.Equal(t, "token", creds.SessionToken)
 }
 
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {

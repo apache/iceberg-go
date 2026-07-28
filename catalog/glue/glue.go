@@ -123,10 +123,11 @@ func toAwsConfig(ctx context.Context, p iceberg.Properties) (aws.Config, error) 
 	}
 
 	key, secret, token := p[AccessKeyID], p[SecretAccessKey], p[SessionToken]
-	if (key == "") != (secret == "") || (token != "" && key == "") {
+	hasKey, hasSecret := key != "", secret != ""
+	if hasKey != hasSecret || (token != "" && !hasKey) {
 		return aws.Config{}, errors.New("glue.access-key-id and glue.secret-access-key must be configured together")
 	}
-	if key != "" {
+	if hasKey {
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(key, secret, token)))
 	}

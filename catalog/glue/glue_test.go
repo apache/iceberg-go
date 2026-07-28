@@ -65,6 +65,16 @@ func TestLoadAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
 		_, err := toAwsConfig(context.Background(), props)
 		require.ErrorContains(t, err, "glue.access-key-id and glue.secret-access-key must be configured together")
 	}
+
+	cfg, err := toAwsConfig(context.Background(), iceberg.Properties{
+		AccessKeyID: "access", SecretAccessKey: "secret", SessionToken: "token",
+	})
+	require.NoError(t, err)
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "access", creds.AccessKeyID)
+	require.Equal(t, "secret", creds.SecretAccessKey)
+	require.Equal(t, "token", creds.SessionToken)
 }
 
 type mockGlueClient struct {
