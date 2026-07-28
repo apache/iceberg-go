@@ -230,8 +230,7 @@ func (r *Reader) readFooter() error {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
 	}
 
-	var extra json.RawMessage
-	if err := decoder.Decode(&extra); err == nil {
+	if _, err := decoder.Token(); err == nil {
 		return errors.New("puffin: footer contains multiple JSON values")
 	} else if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("puffin: trailing data after footer JSON: %w", err)

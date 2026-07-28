@@ -601,6 +601,7 @@ func TestReaderRejectsTrailingFooterData(t *testing.T) {
 		{name: "single object", payload: `{"blobs":[]}`},
 		{name: "trailing whitespace", payload: "{\"blobs\":[]} \n\t"},
 		{name: "second JSON value", payload: `{"blobs":[]}{"blobs":[]}`, wantErr: "multiple JSON values"},
+		{name: "second scalar value", payload: `{"blobs":[]}42`, wantErr: "multiple JSON values"},
 		{name: "trailing garbage", payload: `{"blobs":[]}garbage`, wantErr: "trailing data"},
 	}
 
