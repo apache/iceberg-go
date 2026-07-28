@@ -201,8 +201,8 @@ func TestTimestampNanoLiteralConversions(t *testing.T) {
 		{
 			name:              "negative timestamp",
 			nanoLit:           iceberg.TimestampNsLiteral(-1234567890123456789),
-			expectedMicro:     iceberg.Timestamp(-1234567890123456),
-			expectedRoundTrip: iceberg.TimestampNano(-1234567890123456000),
+			expectedMicro:     iceberg.Timestamp(-1234567890123457),
+			expectedRoundTrip: iceberg.TimestampNano(-1234567890123457000),
 		},
 		{
 			name:              "maximum precision truncation",
@@ -232,6 +232,36 @@ func TestTimestampNanoLiteralConversions(t *testing.T) {
 			require.True(t, ok)
 			assert.Equal(t, tt.expectedRoundTrip, iceberg.TimestampNano(nanoValue))
 		})
+	}
+}
+
+func TestTimestampNanoToMicrosFloorsNegativeValues(t *testing.T) {
+	tests := []struct {
+		nanos  iceberg.TimestampNano
+		micros iceberg.Timestamp
+	}{
+		{nanos: -1001, micros: -2},
+		{nanos: -1000, micros: -1},
+		{nanos: -999, micros: -1},
+		{nanos: -1, micros: -1},
+		{nanos: 0, micros: 0},
+		{nanos: 1, micros: 0},
+		{nanos: 999, micros: 0},
+		{nanos: 1000, micros: 1},
+		{nanos: 1001, micros: 1},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.micros, tt.nanos.ToMicros())
+
+		for _, target := range []iceberg.Type{
+			iceberg.PrimitiveTypes.Timestamp,
+			iceberg.PrimitiveTypes.TimestampTz,
+		} {
+			converted, err := iceberg.TimestampNsLiteral(tt.nanos).To(target)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.TimestampLiteral(tt.micros), converted)
+		}
 	}
 }
 
