@@ -158,14 +158,16 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		if properties["cardinality"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a cardinality property")
 		}
-		// Reject non-numeric or negative values at write time too — otherwise
-		// a writer could emit "cardinality": "abc" or "-1" that the reader
-		// hard-rejects later. ParseUint covers both: "-1" fails as invalid
-		// syntax (the minus is rejected before any value is parsed), so
-		// non-numeric and negative collapse into one error path.
-		if _, err := strconv.ParseUint(properties["cardinality"], 10, 64); err != nil {
+		// Parse the same signed range used by deletion-vector readers and
+		// manifest record counts so every emitted value is readable.
+		cardinality, err := strconv.ParseInt(properties["cardinality"], 10, 64)
+		if err != nil {
 			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer: %w",
 				properties["cardinality"], err)
+		}
+		if cardinality < 0 {
+			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer",
+				properties["cardinality"])
 		}
 		if properties["referenced-data-file"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a referenced-data-file property")

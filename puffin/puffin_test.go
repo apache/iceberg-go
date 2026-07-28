@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go/puffin"
@@ -343,6 +344,28 @@ func TestWriterValidation(t *testing.T) {
 		_, err := w.AddBlob(puffin.BlobMetadataInput{
 			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
 			Properties: map[string]string{"cardinality": "-1", "referenced-data-file": "data/x.parquet"},
+		}, []byte("x"))
+		assert.ErrorContains(t, err, "not a valid non-negative integer")
+	})
+
+	t.Run("deletion vector maximum cardinality", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{
+				"cardinality": strconv.FormatInt(math.MaxInt64, 10), "referenced-data-file": "data/x.parquet",
+			},
+		}, []byte("x"))
+		require.NoError(t, err)
+	})
+
+	t.Run("deletion vector cardinality above signed range", func(t *testing.T) {
+		w, _ := newWriter()
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type: puffin.BlobTypeDeletionVector, SnapshotID: -1, SequenceNumber: -1, Fields: []int32{},
+			Properties: map[string]string{
+				"cardinality": "9223372036854775808", "referenced-data-file": "data/x.parquet",
+			},
 		}, []byte("x"))
 		assert.ErrorContains(t, err, "not a valid non-negative integer")
 	})
