@@ -74,6 +74,32 @@ func TestPartitionSpec(t *testing.T) {
 	assert.Equal(t, 1002, spec3.LastAssignedFieldID())
 }
 
+func TestPartitionSpecFieldGettersReturnCopies(t *testing.T) {
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1, 2}, FieldID: 1000, Name: "multi", Transform: transform,
+	})
+	transform.NumBuckets = 32
+
+	field := spec.Field(0)
+	field.SourceIDs[0] = 99
+	field.Transform.(*iceberg.BucketTransform).NumBuckets = 64
+
+	for _, iterField := range spec.Fields() {
+		iterField.SourceIDs[0] = 98
+		iterField.Transform.(*iceberg.BucketTransform).NumBuckets = 128
+	}
+
+	bySource := spec.FieldsBySourceID(1)
+	bySource[0].SourceIDs[0] = 97
+	bySource[0].Transform.(*iceberg.BucketTransform).NumBuckets = 256
+
+	assert.Equal(t, []int{1, 2}, spec.Field(0).SourceIDs)
+	assert.Equal(t, 16, spec.Field(0).Transform.(*iceberg.BucketTransform).NumBuckets)
+	assert.Len(t, spec.FieldsBySourceID(1), 1)
+	assert.Nil(t, spec.FieldsBySourceID(99))
+}
+
 func TestNewPartitionSpecIDCopiesFields(t *testing.T) {
 	sourceIDs := []int{1}
 	fields := make([]iceberg.PartitionField, 1)
@@ -183,6 +209,21 @@ func TestPartitionSpecRejectsNegativeSpecID(t *testing.T) {
 	require.ErrorContains(t, err, "spec id must be non-negative: -1")
 }
 
+func TestPartitionSpecRejectsInvalidTruncateTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+
+	_, err := iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "id_truncate", iceberg.TruncateTransform{Width: 0}, schema, nil),
+	)
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "width > 0")
+}
+
 func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
@@ -196,6 +237,21 @@ func TestPartitionSpec_MarshalTextRejectsInvalidBucketTransform(t *testing.T) {
 	_, err := json.Marshal(spec)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "numBuckets > 0")
+}
+
+func TestPartitionSpec_MarshalTextRejectsInvalidTruncateTransform(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(3,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "bad_truncate",
+			Transform: iceberg.TruncateTransform{Width: 0},
+		},
+	)
+
+	_, err := json.Marshal(spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "width > 0")
 }
 
 func TestUnpartitionedWithVoidField(t *testing.T) {
@@ -261,6 +317,65 @@ func TestSerializePartitionSpec(t *testing.T) {
 	assert.True(t, spec.Equals(outspec))
 }
 
+func TestDeserializePartitionSpecWithoutFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "transform": "identity", "name": "id"},
+			{"source-id": 2, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1000, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecWithPartiallyMissingFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "id"},
+			{"source-id": 2, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1000, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecAssignsAfterExistingFieldIDs(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "transform": "identity", "name": "id"},
+			{"source-id": 2, "field-id": 1001, "transform": "bucket[16]", "name": "data_bucket"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(data, &spec))
+	require.Equal(t, 1002, spec.Field(0).FieldID)
+	require.Equal(t, 1001, spec.Field(1).FieldID)
+}
+
+func TestDeserializePartitionSpecWithNullFieldID(t *testing.T) {
+	data := []byte(`{
+		"spec-id": 3,
+		"fields": [
+			{"source-id": 1, "field-id": null, "transform": "identity", "name": "id"}
+		]
+	}`)
+
+	var spec iceberg.PartitionSpec
+	err := json.Unmarshal(data, &spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	require.ErrorContains(t, err, "partition field ID cannot be null")
+}
+
 func TestPartitionType(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(3,
 		iceberg.PartitionField{
@@ -291,6 +406,21 @@ func TestPartitionType(t *testing.T) {
 	}
 	actual := spec.PartitionType(tableSchemaSimple)
 	assert.Truef(t, expected.Equals(actual), "expected: %s, got: %s", expected, actual)
+
+	droppedSourceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "int", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	expectedWithDroppedSources := &iceberg.StructType{
+		FieldList: []iceberg.NestedField{
+			{ID: 1000, Name: "str_truncate", Type: iceberg.UnknownType{}},
+			{ID: 1001, Name: "int_bucket", Type: iceberg.PrimitiveTypes.Int32},
+			{ID: 1002, Name: "bool_identity", Type: iceberg.UnknownType{}},
+			{ID: 1003, Name: "str_void", Type: iceberg.UnknownType{}},
+		},
+	}
+	actual = spec.PartitionType(droppedSourceSchema)
+	assert.Truef(t, expectedWithDroppedSources.Equals(actual),
+		"expected: %s, got: %s", expectedWithDroppedSources, actual)
 }
 
 type partitionRecord []any
@@ -348,8 +478,8 @@ func TestPartitionSpecToPathWithDroppedLeadingSourceColumn(t *testing.T) {
 		},
 	)
 
-	record := partitionRecord{int32(7), true}
-	assert.Equal(t, "bar=7/baz=true", spec.PartitionToPath(record, schema))
+	record := partitionRecord{nil, int32(7), true}
+	assert.Equal(t, "foo=null/bar=7/baz=true", spec.PartitionToPath(record, schema))
 }
 
 func TestGetPartitionFieldName(t *testing.T) {

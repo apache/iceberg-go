@@ -158,6 +158,41 @@ func TestAddBlobCopiesMetadataInputs(t *testing.T) {
 	assert.Equal(t, map[string]string{"ndv": "10"}, blobs[0].Properties)
 }
 
+func TestReaderReturnsMetadataCopies(t *testing.T) {
+	w, buf := newWriter()
+	require.NoError(t, w.AddProperties(map[string]string{"file": "original"}))
+	_, err := w.AddBlob(puffin.BlobMetadataInput{
+		Type:       puffin.BlobTypeDataSketchesTheta,
+		Fields:     []int32{1},
+		Properties: map[string]string{"blob": "original"},
+	}, []byte("sketch"))
+	require.NoError(t, err)
+	require.NoError(t, w.Finish())
+
+	r := newReader(t, buf)
+	blobs := r.Blobs()
+	blobs[0].Type = puffin.BlobTypeDeletionVector
+	blobs[0].Fields[0] = 2
+	blobs[0].Properties["blob"] = "changed"
+	r.Properties()["file"] = "changed"
+
+	blob, err := r.ReadBlob(0)
+	require.NoError(t, err)
+	blob.Metadata.Fields[0] = 3
+	blob.Metadata.Properties["blob"] = "changed again"
+
+	all, err := r.ReadAllBlobs()
+	require.NoError(t, err)
+	all[0].Metadata.Fields[0] = 4
+	all[0].Metadata.Properties["blob"] = "changed again"
+
+	actual := r.Blobs()[0]
+	assert.Equal(t, puffin.BlobTypeDataSketchesTheta, actual.Type)
+	assert.Equal(t, []int32{1}, actual.Fields)
+	assert.Equal(t, "original", actual.Properties["blob"])
+	assert.Equal(t, "original", r.Properties()["file"])
+}
+
 // TestEmptyFile verifies that a puffin file with no blobs is valid.
 // Empty files are valid per spec and used when no statistics exist yet.
 func TestEmptyFile(t *testing.T) {

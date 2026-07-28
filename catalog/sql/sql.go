@@ -225,12 +225,18 @@ func init() {
 
 var _ catalog.Catalog = (*Catalog)(nil)
 
+const namespaceExistsProperty = "exists"
+
 var (
-	minimalNamespaceProps = iceberg.Properties{"exists": "true"}
+	minimalNamespaceProps = iceberg.Properties{namespaceExistsProperty: "true"}
 
 	dialects  = map[SupportedDialect]schema.Dialect{}
 	dialectMx sync.Mutex
 )
+
+func isReservedNamespaceProperty(key string) bool {
+	return key == namespaceExistsProperty
+}
 
 func createDialect(d SupportedDialect) (schema.Dialect, error) {
 	switch d {
@@ -324,7 +330,6 @@ func retrySerializableWriteTx(ctx context.Context, run func() error) error {
 		if attempt == serializableWriteMaxAttempts-1 {
 			break
 		}
-
 		delay := serializableWriteRetryDelay << attempt
 		timer := time.NewTimer(delay)
 		select {
@@ -736,6 +741,56 @@ func checkValidNamespace(ident table.Identifier) error {
 	return nil
 }
 
+func removeUncommittedMetadata(ctx context.Context, metadataLocation string, loadFS table.FSysF) error {
+	fs, err := loadFS(context.WithoutCancel(ctx))
+	if err != nil {
+		return fmt.Errorf("failed to load filesystem while removing uncommitted metadata %s: %w", metadataLocation, err)
+	}
+
+	if err := fs.Remove(metadataLocation); err != nil {
+		return fmt.Errorf("failed to remove uncommitted metadata %s: %w", metadataLocation, err)
+	}
+
+	return nil
+}
+
+func (c *Catalog) checkIdentifierAvailable(
+	ctx context.Context, tx bun.Tx, namespace, name string, identifier table.Identifier,
+) error {
+	entry := &sqlIcebergTable{
+		CatalogName:    c.name,
+		TableNamespace: namespace,
+		TableName:      name,
+	}
+	query := tx.NewSelect().Model(entry).WherePK()
+	if c.isV0() {
+		query = query.ExcludeColumn("iceberg_type")
+	}
+
+	err := query.Scan(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("error checking identifier availability: %w", err)
+	}
+
+	identifierName := strings.Join(identifier, ".")
+	if !c.isV0() && entry.IcebergType.Valid && entry.IcebergType.String == ViewType {
+		return fmt.Errorf("%w: %s", catalog.ErrViewAlreadyExists, identifierName)
+	}
+
+	return fmt.Errorf("%w: %s", catalog.ErrTableAlreadyExists, identifierName)
+}
+
+func (c *Catalog) checkIdentifierAvailableInCatalog(
+	ctx context.Context, namespace, name string, identifier table.Identifier,
+) error {
+	return c.db.RunInTx(ctx, &sql.TxOptions{ReadOnly: true}, func(ctx context.Context, tx bun.Tx) error {
+		return c.checkIdentifierAvailable(ctx, tx, namespace, name, identifier)
+	})
+}
+
 func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *iceberg.Schema, opts ...catalog.CreateTableOpt) (*table.Table, error) {
 	// Resolve the reporter before any mutation: this method ends in LoadTable,
 	// which is where the reporter is otherwise first built, so a bad
@@ -776,6 +831,10 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 		}
 
+		if err := c.checkIdentifierAvailable(ctx, tx, ns, tblIdent, ident); err != nil {
+			return err
+		}
+
 		ins := tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
 			TableNamespace:   ns,
@@ -793,6 +852,16 @@ func (c *Catalog) CreateTable(ctx context.Context, ident table.Identifier, sc *i
 		return nil
 	})
 	if err != nil {
+		if !errors.Is(err, catalog.ErrTableAlreadyExists) && !errors.Is(err, catalog.ErrViewAlreadyExists) {
+			if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, tblIdent, ident); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
+				errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
+				err = collisionErr
+			}
+		}
+		if cleanupErr := removeUncommittedMetadata(ctx, staged.MetadataLocation(), staged.FS); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+
 		return nil, err
 	}
 
@@ -1129,26 +1198,49 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return c.LoadTable(ctx, to)
 }
 
+// CheckTableExists reports whether the identifier has a table row in the
+// catalog. It does not validate that the referenced metadata file is readable.
 func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identifier) (bool, error) {
 	if err := catalog.ValidateTableIdentifier(identifier); err != nil {
 		return false, err
 	}
 
-	_, err := c.LoadTable(ctx, identifier)
+	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
 	if err != nil {
-		if errors.Is(err, catalog.ErrNoSuchTable) {
-			return false, nil
-		}
-
 		return false, err
 	}
+	tableName := catalog.TableNameFromIdent(identifier)
 
-	return true, nil
+	return withReadTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) (bool, error) {
+		query := tx.NewSelect().Model(&sqlIcebergTable{
+			CatalogName:    c.name,
+			TableNamespace: ns,
+			TableName:      tableName,
+		}).WherePK()
+		if c.isV0() {
+			query = query.ExcludeColumn("iceberg_type")
+		} else {
+			query = query.Where("(iceberg_type = ? OR iceberg_type IS NULL)", TableType)
+		}
+
+		exists, err := query.Exists(ctx)
+		if err != nil {
+			return false, fmt.Errorf("error checking table existence: %w", err)
+		}
+
+		return exists, nil
+	})
 }
 
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
 	if err := checkValidNamespace(namespace); err != nil {
 		return err
+	}
+
+	for key := range props {
+		if isReservedNamespaceProperty(key) {
+			return fmt.Errorf("%w: cannot create namespace with reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
 	}
 
 	_, exists, err := c.resolveNamespaceKey(ctx, namespace)
@@ -1248,11 +1340,31 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 
 		result := make(iceberg.Properties)
 		for _, p := range props {
+			if isReservedNamespaceProperty(p.PropertyKey) {
+				continue
+			}
 			result[p.PropertyKey] = p.PropertyValue.String
 		}
 
 		return result, nil
 	})
+}
+
+func validateNamespacePropertyUpdates(removals []string, updates iceberg.Properties) error {
+	for key := range updates {
+		if isReservedNamespaceProperty(key) {
+			return fmt.Errorf("%w: cannot update reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
+	for _, key := range removals {
+		if isReservedNamespaceProperty(key) {
+			// Removing the marker would make a namespace without user properties disappear.
+			return fmt.Errorf("%w: cannot remove reserved namespace property %q", iceberg.ErrInvalidArgument, key)
+		}
+	}
+
+	return nil
 }
 
 func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) iter.Seq2[table.Identifier, error] {
@@ -1376,6 +1488,9 @@ func (c *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 	if err := checkValidNamespace(namespace); err != nil {
 		return summary, err
 	}
+	if err := validateNamespacePropertyUpdates(removals, updates); err != nil {
+		return summary, err
+	}
 
 	err := withSerializableWriteTx(ctx, c.db, func(ctx context.Context, tx bun.Tx) error {
 		nsToUpdate, exists, err := c.resolveNamespaceKeyInTx(ctx, tx, namespace)
@@ -1480,14 +1595,6 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 	}
 
-	exists, err = c.CheckViewExists(ctx, identifier)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return fmt.Errorf("%w: %s", catalog.ErrViewAlreadyExists, identifier)
-	}
-
 	loc, err := internal.ResolveTableLocationWithNamespace(
 		ctx, "", nsIdent, ns, viewIdent, c.props, c.LoadNamespaceProperties)
 	if err != nil {
@@ -1509,6 +1616,10 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 			return fmt.Errorf("%w: %s", catalog.ErrNoSuchNamespace, ns)
 		}
 
+		if err := c.checkIdentifierAvailable(ctx, tx, ns, viewIdent, identifier); err != nil {
+			return err
+		}
+
 		_, err = tx.NewInsert().Model(&sqlIcebergTable{
 			CatalogName:      c.name,
 			TableNamespace:   ns,
@@ -1522,6 +1633,18 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 
 		return nil
 	})
+	if err != nil {
+		if !errors.Is(err, catalog.ErrTableAlreadyExists) && !errors.Is(err, catalog.ErrViewAlreadyExists) {
+			if collisionErr := c.checkIdentifierAvailableInCatalog(ctx, ns, viewIdent, identifier); errors.Is(collisionErr, catalog.ErrTableAlreadyExists) ||
+				errors.Is(collisionErr, catalog.ErrViewAlreadyExists) {
+				err = collisionErr
+			}
+		}
+		loadFS := io.LoadFSFunc(c.props, metadataLocation)
+		if cleanupErr := removeUncommittedMetadata(ctx, metadataLocation, loadFS); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}
 
 	return err
 }

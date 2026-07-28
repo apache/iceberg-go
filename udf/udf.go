@@ -36,7 +36,7 @@ type UDF struct {
 // location.
 func New(ident table.Identifier, meta Metadata, metadataLocation string) *UDF {
 	return &UDF{
-		identifier:       ident,
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 	}
@@ -52,7 +52,7 @@ func (u UDF) Equals(other UDF) bool {
 		u.metadata.Equals(other.metadata)
 }
 
-func (u UDF) Identifier() table.Identifier   { return u.identifier }
+func (u UDF) Identifier() table.Identifier   { return slices.Clone(u.identifier) }
 func (u UDF) Metadata() Metadata             { return u.metadata }
 func (u UDF) MetadataLocation() string       { return u.metadataLocation }
 func (u UDF) Definitions() []*Definition     { return u.metadata.Definitions() }

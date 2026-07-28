@@ -53,6 +53,78 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
+func TestPartitionsMatchHandlesBinaryValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  map[int]any
+		right map[int]any
+		match bool
+	}{
+		{
+			name:  "equal binary values",
+			left:  map[int]any{1000: []byte{0xde, 0xad}},
+			right: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
+			match: true,
+		},
+		{
+			name:  "different binary values",
+			left:  map[int]any{1000: []byte{0xde, 0xad}},
+			right: map[int]any{1000: []byte{0xbe, 0xef}},
+		},
+		{
+			name:  "binary and string values differ",
+			left:  map[int]any{1000: []byte("value")},
+			right: map[int]any{1000: "value"},
+		},
+		{
+			name:  "comparable values still match",
+			left:  map[int]any{1000: int32(7), 1001: "region"},
+			right: map[int]any{1000: int32(7), 1001: "region"},
+			match: true,
+		},
+		{
+			name:  "different field IDs",
+			left:  map[int]any{1000: []byte{1}},
+			right: map[int]any{1001: []byte{1}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				assert.Equal(t, tt.match, partitionsMatch(tt.left, tt.right))
+			})
+		})
+	}
+}
+
+func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
+	dataSeqNum := int64(1)
+	deleteSeqNum := int64(2)
+	dataFile := &mockDataFile{
+		path:      "data.parquet",
+		partition: map[int]any{1000: []byte{0xde, 0xad}},
+	}
+	matchingDelete := &mockDataFile{
+		path:      "matching-delete.parquet",
+		partition: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
+	}
+	nonMatchingDelete := &mockDataFile{
+		path:      "non-matching-delete.parquet",
+		partition: map[int]any{1000: []byte{0xbe, 0xef}},
+	}
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
+	deleteEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+	}
+
+	assert.Equal(t, []iceberg.DataFile{matchingDelete},
+		matchEqualityDeletesToData(dataEntry, deleteEntries))
+}
+
 func TestMinSequenceNum(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -321,6 +393,92 @@ func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testin
 	_, err = scan.PlanFiles(context.Background())
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+}
+
+// TestFetchManifestCountersWithRealSnapshot verifies the scanned/skipped/total
+// manifest accounting against a real snapshot with a mix of data and delete
+// manifests. Partition-spec pruning skips a non-overlapping data manifest, so
+// the scanned and skipped counters are both exercised (an empty-metadata test
+// leaves every counter at zero and would not catch a swapped scanned/skipped or
+// data/delete branch).
+func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// Identity partition on the int32 "id" column; encode partition bounds as
+	// 4-byte little-endian int32 so the manifest evaluator can decode them.
+	enc := func(v int32) *[]byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, uint32(v))
+
+		return &b
+	}
+	match := enc(5)    // overlaps the id == 5 filter
+	noMatch := enc(10) // does not overlap
+
+	const (
+		snapshotID       = int64(1)
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+	specID := int32(spec.ID())
+
+	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
+		Build()
+	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
+		[]iceberg.ManifestFile{dataScanned, dataSkipped, deleteScanned}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return memIO, nil
+	}, nil)
+
+	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+
+	schema, err := scan.effectiveSchema()
+	require.NoError(t, err)
+
+	var acc scanMetricsAccumulator
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(context.Background(), schema, &acc)
+	require.NoError(t, err)
+
+	// Two data manifests, one delete manifest.
+	assert.Equal(t, int64(2), acc.totalDataManifests)
+	assert.Equal(t, int64(1), acc.totalDeleteManifests)
+	// The overlapping data and delete manifests are scanned; the non-overlapping
+	// data manifest is skipped. Delete manifests must land in the delete counters.
+	assert.Equal(t, int64(1), acc.scannedDataManifests)
+	assert.Equal(t, int64(1), acc.skippedDataManifests)
+	assert.Equal(t, int64(1), acc.scannedDeleteManifests)
+	assert.Equal(t, int64(0), acc.skippedDeleteManifests)
+	// Invariant: scanned + skipped == total, per content type.
+	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
+	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
+	assert.Len(t, filtered, 2, "only the overlapping manifests survive partition-spec filtering")
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
@@ -927,24 +1085,44 @@ func TestProjectionWithRowLineageRequiresV3(t *testing.T) {
 	assert.ErrorContains(t, err, "row lineage")
 }
 
-// TestProjectionV3SchemaAlreadyHasRowID covers the case where the user schema
-// already declares _row_id (a reserved field id, but legal in v3). The
-// projection helper must be idempotent and not panic on the duplicate ID.
+// TestProjectionV3SchemaAlreadyHasRowID covers a v3 table whose stored schema
+// already declares _row_id at its reserved field ID. NewMetadata now rejects
+// such user schemas, but tables loaded from a catalog (e.g. written by Java) can
+// legitimately carry the reserved ID, so the metadata is parsed directly here to
+// bypass the creation-time validator. The end-to-end projection must be
+// idempotent and not duplicate the reserved column.
 func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
-	schema := iceberg.NewSchema(
-		1,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.RowID(),
-	)
+	metadataJSON := `{
+		"format-version": 3,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+		"location": "s3://test-bucket/test_table",
+		"last-sequence-number": 0,
+		"last-updated-ms": 1602638573590,
+		"last-column-id": 2,
+		"next-row-id": 0,
+		"current-schema-id": 0,
+		"schemas": [
+			{
+				"type": "struct",
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "id", "required": true, "type": "long"},
+					{"id": 2, "name": "payload", "required": false, "type": "string"},
+					{"id": 2147483540, "name": "_row_id", "required": false, "type": "long"}
+				]
+			}
+		],
+		"default-spec-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"last-partition-id": 999,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
 
-	metadata, err := NewMetadata(
-		schema,
-		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
-		"s3://test-bucket/test_table",
-		iceberg.Properties{"format-version": "3"},
-	)
+	metadata, err := ParseMetadataString(metadataJSON)
 	require.NoError(t, err)
 	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
 
@@ -967,5 +1145,6 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 			}
 			seen[f.ID] = f.Name
 		}
+		assert.Contains(t, seen, iceberg.RowIDFieldID, "_row_id must survive projection")
 	})
 }

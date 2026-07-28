@@ -19,6 +19,7 @@ package rest
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strconv"
 	"strings"
@@ -28,6 +29,11 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/semaphore"
 )
+
+// ErrVendedCredentialsExpired is returned when a cached FileIO's vended creds
+// expired with no endpoint to renew them (as a scan plan's own creds), so the
+// caller sees this instead of undiagnosable storage 403s.
+var ErrVendedCredentialsExpired = fmt.Errorf("%w: vended storage credentials expired", ErrRESTError)
 
 const (
 	keyS3TokenExpiresAtMs = "s3.session-token-expires-at-ms"
@@ -109,15 +115,26 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	}
 	defer v.mu.Release(1)
 
-	// refresh credentials before they expire
-	if v.cachedIO != nil && !v.now().After(v.expiresAt.Add(-defaultVendedCredentialsExpiryBuffer)) {
+	if v.cachedIO != nil && !v.expired() {
 		return v.cachedIO, nil
 	}
 
 	var config iceberg.Properties
-	if v.cachedIO == nil {
+	switch {
+	case v.cachedIO == nil:
 		config = v.props
-	} else {
+		// Plan creds can already be past their expiry by the time we first use
+		// them, so check before building an IO we'd only hand back 403s from.
+		if v.fetchCreds == nil {
+			if exp, ok := parseCredentialExpiry(config); ok && v.now().After(exp) {
+				return nil, v.expiredError(exp)
+			}
+		}
+	case v.fetchCreds == nil:
+		// Expired with no endpoint to renew from (plan-scoped creds). Fail loudly
+		// rather than hand back an IO whose reads 403.
+		return nil, v.expiredError(v.expiresAt)
+	default:
 		freshCreds, err := v.fetchCreds(ctx, v.identifier)
 		if err != nil {
 			return v.cachedIO, nil
@@ -142,10 +159,42 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	return v.cachedIO, nil
 }
 
+func (v *vendedCredentialRefresher) expiredError(at time.Time) error {
+	return fmt.Errorf("%w: %s expired at %s",
+		ErrVendedCredentialsExpired, v.location, at.Format(time.RFC3339))
+}
+
+// expired reports whether the cached IO's credentials are past their expiry. A
+// zero expiresAt means "never expires" — see expiresAtFromConfig.
+func (v *vendedCredentialRefresher) expired() bool {
+	return !v.expiresAt.IsZero() && v.now().After(v.expiresAt)
+}
+
 func (v *vendedCredentialRefresher) expiresAtFromConfig(config iceberg.Properties) time.Time {
 	if exp, ok := parseCredentialExpiry(config); ok {
 		return exp
 	}
 
+	// No re-fetch to trigger, so the fallback TTL doesn't apply: never expires.
+	if v.fetchCreds == nil {
+		return time.Time{}
+	}
+
 	return v.now().Add(defaultVendedCredentialsTTL)
+}
+
+// close releases the cached IO. The refresher is unusable afterwards.
+func (v *vendedCredentialRefresher) close() error {
+	if err := v.mu.Acquire(context.Background(), 1); err != nil {
+		return err
+	}
+	defer v.mu.Release(1)
+
+	closer, ok := v.cachedIO.(interface{ Close() error })
+	v.cachedIO = nil
+	if ok {
+		return closer.Close()
+	}
+
+	return nil
 }
