@@ -40,18 +40,16 @@ import (
 var (
 	bucketTransformRegex   = regexp.MustCompile(`^bucket\[(\d+)\]$`)
 	truncateTransformRegex = regexp.MustCompile(`^truncate\[(\d+)\]$`)
-	// Catches reserved bucket/truncate names with a malformed argument
-	// (missing, negative, non-numeric) so they error instead of falling
-	// through as unknown transforms.
-	reservedWidthRegex = regexp.MustCompile(`^(bucket|truncate)\[.*\]$`)
 )
 
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
 // object. Strings that don't name a known transform yield an
 // UnknownTransform rather than an error, so that v3 tables using transforms
-// this implementation doesn't recognize can still be read. A malformed known
-// transform (e.g. a bucket/truncate with a non-positive width) still errors.
+// this implementation doesn't recognize can still be read. This mirrors Java's
+// Transforms.fromString: only a bucket/truncate whose width parses as a number
+// but is out of range (e.g. bucket[0]) is an error; anything else that doesn't
+// match the width pattern, like bucket[-1], is an unknown transform.
 func ParseTransform(s string) (Transform, error) {
 	if s == "" {
 		return nil, fmt.Errorf("%w: empty transform", ErrInvalidTransform)
@@ -90,12 +88,6 @@ func ParseTransform(s string) (Transform, error) {
 		return DayTransform{}, nil
 	case "hour":
 		return HourTransform{}, nil
-	}
-
-	// A reserved bucket/truncate name that didn't parse above has a bad
-	// argument; reject it rather than treat it as a forward-compat unknown.
-	if reservedWidthRegex.MatchString(lower) {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 	}
 
 	// Unknown transform: v3 readers must load these and ignore them when

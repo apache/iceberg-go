@@ -73,7 +73,8 @@ func TestParseTransform(t *testing.T) {
 		})
 	}
 
-	// Malformed known transforms (bucket/truncate with a bad width) still error.
+	// A bucket/truncate width that parses as a number but is out of range is an
+	// error, matching Java's Bucket.get/Truncate.get preconditions.
 	errorTests := []struct {
 		name    string
 		toparse string
@@ -84,13 +85,6 @@ func TestParseTransform(t *testing.T) {
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
-		// A reserved name with a missing/negative/non-numeric arg is malformed,
-		// not a forward-compat unknown transform.
-		{"bucket empty brackets", "bucket[]"},
-		{"truncate empty brackets", "truncate[]"},
-		{"bucket negative", "bucket[-1]"},
-		{"truncate negative", "truncate[-1]"},
-		{"bucket non-numeric", "bucket[abc]"},
 		{"empty string", ""},
 	}
 
@@ -118,6 +112,15 @@ func TestParseTransform(t *testing.T) {
 		{"truncate extra suffix", "truncatefoo[10]"},
 		{"truncate extra token", "truncate_garbage[4]"},
 		{"preserves original case", "Custom_V2[3]"},
+		// Java's width pattern is (\w+)\[(\d+)\], so a reserved name with a
+		// missing/negative/non-numeric width simply doesn't match and becomes an
+		// unknown transform rather than an error.
+		{"bucket empty brackets", "bucket[]"},
+		{"truncate empty brackets", "truncate[]"},
+		{"bucket negative", "bucket[-1]"},
+		{"truncate negative", "truncate[-1]"},
+		{"bucket non-numeric", "bucket[abc]"},
+		{"truncate non-numeric", "truncate[abc]"},
 	}
 
 	for _, tt := range unknownTests {
