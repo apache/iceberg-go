@@ -224,9 +224,17 @@ func (r *Reader) readFooter() error {
 	}
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
+	decoder := json.NewDecoder(payloadReader)
 	var footer Footer
-	if err := json.NewDecoder(payloadReader).Decode(&footer); err != nil {
+	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
+	}
+
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); err == nil {
+		return errors.New("puffin: footer contains multiple JSON values")
+	} else if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("puffin: trailing data after footer JSON: %w", err)
 	}
 
 	// Validate blob metadata

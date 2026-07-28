@@ -19,6 +19,7 @@ package puffin_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"math"
 	"os"
@@ -147,6 +148,15 @@ func validFileWithBlob() []byte {
 	w.Finish()
 
 	return buf.Bytes()
+}
+
+func fileWithFooterPayload(payload []byte) []byte {
+	data := append([]byte("PFA1PFA1"), payload...)
+	trailer := make([]byte, 12)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(payload)))
+	copy(trailer[8:], "PFA1")
+
+	return append(data, trailer...)
 }
 
 // --- Tests ---
@@ -578,6 +588,32 @@ func TestReaderInvalidFile(t *testing.T) {
 		_, err := puffin.NewReader(nil)
 		assert.ErrorContains(t, err, "nil")
 	})
+}
+
+func TestReaderRejectsTrailingFooterData(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload string
+		wantErr string
+	}{
+		{name: "single object", payload: `{"blobs":[]}`},
+		{name: "trailing whitespace", payload: "{\"blobs\":[]} \n\t"},
+		{name: "second JSON value", payload: `{"blobs":[]}{"blobs":[]}`, wantErr: "multiple JSON values"},
+		{name: "trailing garbage", payload: `{"blobs":[]}garbage`, wantErr: "trailing data"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(test.payload))))
+			if test.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, test.wantErr)
+			}
+		})
+	}
 }
 
 // TestReaderBlobAccess verifies blob access methods work correctly.
