@@ -62,6 +62,16 @@ type BoundBooleanExprVisitor[T any] interface {
 	VisitNotStartsWith(BoundTerm, Literal) T
 }
 
+// BoundBBoxExprVisitor is an optional extension for visitors that understand
+// geospatial bbox predicates. BBoxIntersects does not use the ordinary
+// Literal/Set[Literal] predicate payloads, and many existing bound visitors only
+// know how to evaluate or project scalar predicates. Keeping bbox handling in a
+// separate interface preserves those visitors while allowing VisitExpr to
+// dispatch to bbox-aware visitors when they explicitly opt in.
+type BoundBBoxExprVisitor[T any] interface {
+	VisitBBoxIntersects(BoundTerm, BBox) T
+}
+
 // VisitExpr is a convenience function to use a given visitor to visit all parts of
 // a boolean expression in-order. Values returned from the methods are passed to the
 // subsequent methods, effectively "bubbling up" the results.
@@ -140,6 +150,16 @@ func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisito
 		return visitor.VisitStartsWith(e.Term(), e.(BoundLiteralPredicate).Literal())
 	case OpNotStartsWith:
 		return visitor.VisitNotStartsWith(e.Term(), e.(BoundLiteralPredicate).Literal())
+	case OpBBoxIntersects:
+		// BBox handling is optional so existing bound visitors can remain
+		// focused on ordinary typed literals. Visitors that opt in advertise
+		// support through BoundBBoxExprVisitor.
+		bboxVisitor, ok := any(visitor).(BoundBBoxExprVisitor[T])
+		if !ok {
+			panic(fmt.Errorf("%w: visitor does not support bound predicate type: %s", ErrNotImplemented, e))
+		}
+
+		return bboxVisitor.VisitBBoxIntersects(e.Term(), e.(BoundBBoxPredicate).BBox())
 	}
 	panic(fmt.Errorf("%w: unhandled bound predicate type: %s", ErrNotImplemented, e))
 }
@@ -385,6 +405,12 @@ func (e *exprEvaluator) VisitNotStartsWith(term BoundTerm, lit Literal) bool {
 	return !e.VisitStartsWith(term, lit)
 }
 
+func (e *exprEvaluator) VisitBBoxIntersects(BoundTerm, BBox) bool {
+	// BBoxIntersects is currently supported only for metadata pruning; exact
+	// row-level evaluation would need geometry/geography decoding.
+	panic(fmt.Errorf("%w: row-level BBoxIntersects evaluation is not supported", ErrNotImplemented))
+}
+
 // RewriteNotExpr rewrites a boolean expression to remove "Not" nodes from the expression
 // tree. This is because Projections assume there are no "not" nodes.
 //
@@ -516,6 +542,8 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		return p.AsUnbound(ref, p.Literal())
 	case BoundSetPredicate:
 		return p.AsUnbound(ref, p.Literals().Members())
+	case BoundBBoxPredicate:
+		return p.AsUnbound(ref, p.BBox())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}

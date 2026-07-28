@@ -59,6 +59,8 @@ const (
 	OpNot // Not
 	OpAnd // And
 	OpOr  // Or
+	// geospatial ops
+	OpBBoxIntersects // BBoxIntersects
 )
 
 // Negate returns the inverse operation for a given op
@@ -852,6 +854,113 @@ func (blp *boundLiteralPredicate[T]) String() string {
 func (blp *boundLiteralPredicate[T]) Literal() Literal { return blp.lit }
 func (blp *boundLiteralPredicate[T]) AsUnbound(r Reference, l Literal) UnboundPredicate {
 	return &unboundLiteralPredicate{op: blp.op, term: r, lit: l}
+}
+
+// BBox represents a geospatial bounding box used for BBoxIntersects predicates.
+// It is interpreted in the CRS of the associated geometry or geography column.
+type BBox struct {
+	MinX, MinY, MaxX, MaxY float64
+}
+
+// BBoxPredicate constructs an unbound geospatial bounding-box predicate.
+//
+// Panics if the term is nil.
+func BBoxPredicate(t UnboundTerm, bbox BBox) UnboundPredicate {
+	if t == nil {
+		panic(fmt.Errorf("%w: cannot create bbox predicate with nil term",
+			ErrInvalidArgument))
+	}
+
+	return &unboundBBoxPredicate{term: t, bbox: bbox}
+}
+
+// unboundBBoxPredicate stores a BBoxIntersects predicate before schema binding,
+// preserving the unresolved term and query bounds until the term can be checked
+// against a geometry or geography column.
+type unboundBBoxPredicate struct {
+	term UnboundTerm
+	bbox BBox
+}
+
+func (ub *unboundBBoxPredicate) String() string {
+	return fmt.Sprintf("%s(term=%s, bbox=%+v)", ub.op(), ub.term, ub.bbox)
+}
+
+func (ub *unboundBBoxPredicate) Equals(other BooleanExpression) bool {
+	rhs, ok := other.(*unboundBBoxPredicate)
+	if !ok {
+		return false
+	}
+
+	return ub.term.Equals(rhs.term) && ub.bbox == rhs.bbox
+}
+
+func (*unboundBBoxPredicate) op() Operation { return OpBBoxIntersects }
+func (ub *unboundBBoxPredicate) Op() Operation {
+	return ub.op()
+}
+
+func (ub *unboundBBoxPredicate) Negate() BooleanExpression {
+	return NewNot(ub)
+}
+
+func (ub *unboundBBoxPredicate) Term() UnboundTerm { return ub.term }
+func (ub *unboundBBoxPredicate) Bind(schema *Schema, caseSensitive bool) (BooleanExpression, error) {
+	boundTerm, err := ub.term.Bind(schema, caseSensitive)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectTransformTerm(boundTerm); err != nil {
+		return nil, err
+	}
+
+	switch boundTerm.Type().(type) {
+	case GeometryType, GeographyType:
+		return &boundBBoxPredicate{term: boundTerm.(bound[[]byte]), bbox: ub.bbox}, nil
+	default:
+		return nil, fmt.Errorf("%w: BBoxIntersects must bind to geometry or geography type, not %s",
+			ErrType, boundTerm.Type())
+	}
+}
+
+// BoundBBoxPredicate represents a bound geospatial bounding-box predicate.
+type BoundBBoxPredicate interface {
+	BoundPredicate
+
+	BBox() BBox
+	AsUnbound(Reference, BBox) UnboundPredicate
+}
+
+var _ BoundBBoxPredicate = (*boundBBoxPredicate)(nil)
+var _ BooleanExpression = (*boundBBoxPredicate)(nil)
+var _ UnboundPredicate = (*unboundBBoxPredicate)(nil)
+
+type boundBBoxPredicate struct {
+	term bound[[]byte]
+	bbox BBox
+}
+
+func (bbp *boundBBoxPredicate) Equals(other BooleanExpression) bool {
+	rhs, ok := other.(*boundBBoxPredicate)
+	if !ok {
+		return false
+	}
+
+	return bbp.term.Equals(rhs.term) && bbp.bbox == rhs.bbox
+}
+
+func (*boundBBoxPredicate) Op() Operation { return OpBBoxIntersects }
+func (bbp *boundBBoxPredicate) Negate() BooleanExpression {
+	return NewNot(bbp)
+}
+func (bbp *boundBBoxPredicate) Term() BoundTerm     { return bbp.term }
+func (bbp *boundBBoxPredicate) Ref() BoundReference { return bbp.term.Ref() }
+func (bbp *boundBBoxPredicate) String() string {
+	return fmt.Sprintf("Bound%s(term=%s, bbox=%+v)", bbp.Op(), bbp.term, bbp.bbox)
+}
+func (bbp *boundBBoxPredicate) BBox() BBox { return bbp.bbox }
+func (bbp *boundBBoxPredicate) AsUnbound(r Reference, bbox BBox) UnboundPredicate {
+	return &unboundBBoxPredicate{term: r, bbox: bbox}
 }
 
 // SetPredicate creates a boolean expression representing a predicate that uses a set

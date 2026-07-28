@@ -23,14 +23,53 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	geoarrow "github.com/geoarrow/geoarrow-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
+	"github.com/twpayne/go-geom"
+	geomwkb "github.com/twpayne/go-geom/encoding/wkb"
 )
 
 const (
 	IntMinValue, IntMaxValue int32 = 30, 79
 )
+
+func geoPointWKB(t *testing.T, x, y float64) geoarrow.WKBBytes {
+	t.Helper()
+
+	data, err := geomwkb.Marshal(geom.NewPointFlat(geom.XY, []float64{x, y}), geomwkb.NDR)
+	require.NoError(t, err)
+
+	wkb := geoarrow.WKBBytes(data)
+	require.Equal(t, geoarrow.XY, wkb.Dimension())
+	require.Equal(t, geoarrow.PointID, wkb.GeometryType())
+
+	return wkb
+}
+
+func icebergGeoBoundsFromWKB(t *testing.T, values ...geoarrow.WKBBytes) (lower, upper []byte) {
+	t.Helper()
+
+	bounds := geom.NewBounds(geom.XY)
+	for _, value := range values {
+		g, err := geomwkb.Unmarshal([]byte(value))
+		require.NoError(t, err)
+
+		bounds.Extend(g)
+	}
+
+	encode := func(x, y float64) []byte {
+		// Iceberg stores geospatial bounds as little-endian X/Y float64 pairs.
+		coords := make([]byte, 16)
+		binary.LittleEndian.PutUint64(coords[0:8], math.Float64bits(x))
+		binary.LittleEndian.PutUint64(coords[8:16], math.Float64bits(y))
+
+		return coords
+	}
+
+	return encode(bounds.Min(0), bounds.Min(1)), encode(bounds.Max(0), bounds.Max(1))
+}
 
 func TestManifestEvaluator(t *testing.T) {
 	var (
@@ -2998,9 +3037,7 @@ func TestEvaluators(t *testing.T) {
 func TestGetCmpLiteralRejectsGeo(t *testing.T) {
 	// Little-endian float64 X,Y - a valid geospatial single-value bound that
 	// must never be routed into an ordering comparison.
-	coords := make([]byte, 16)
-	binary.LittleEndian.PutUint64(coords[0:8], math.Float64bits(1))
-	binary.LittleEndian.PutUint64(coords[8:16], math.Float64bits(2))
+	coords, _ := icebergGeoBoundsFromWKB(t, geoPointWKB(t, 1, 2))
 
 	lit, err := iceberg.LiteralFromBytes(iceberg.GeometryType{}, coords)
 	require.NoError(t, err)
@@ -3009,6 +3046,60 @@ func TestGetCmpLiteralRejectsGeo(t *testing.T) {
 	// coordinate bytes with bytes.Compare.
 	assert.PanicsWithError(t, "type error: geometry/geography has no ordering, cannot compare geometry bounds",
 		func() { getCmpLiteral(lit) })
+}
+
+func TestInclusiveMetricsBBoxIntersects(t *testing.T) {
+	lower, upper := icebergGeoBoundsFromWKB(t,
+		geoPointWKB(t, 10, 20),
+		geoPointWKB(t, 30, 40),
+	)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.GeometryType{}},
+	)
+	dataFile := &mockDataFile{
+		path:        "geo.parquet",
+		format:      iceberg.ParquetFile,
+		count:       10,
+		valueCounts: map[int]int64{1: 10},
+		nullCounts:  map[int]int64{1: 0},
+		lowerBounds: map[int][]byte{1: lower},
+		upperBounds: map[int][]byte{1: upper},
+	}
+
+	tests := []struct {
+		name     string
+		bbox     iceberg.BBox
+		expected bool
+	}{
+		{
+			name:     "disjoint",
+			bbox:     iceberg.BBox{MinX: -10, MinY: -10, MaxX: 0, MaxY: 0},
+			expected: rowsCannotMatch,
+		},
+		{
+			name:     "intersects",
+			bbox:     iceberg.BBox{MinX: 25, MinY: 35, MaxX: 35, MaxY: 45},
+			expected: rowsMightMatch,
+		},
+		{
+			name:     "default bbox has no special edge case",
+			bbox:     iceberg.BBox{MinX: 0, MinY: 0, MaxX: 0, MaxY: 0},
+			expected: rowsCannotMatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := newInclusiveMetricsEvaluator(schema,
+				iceberg.IntersectsWithBBox(iceberg.Reference("geom"), tt.bbox), true, true)
+			require.NoError(t, err)
+
+			shouldRead, err := eval(dataFile)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, shouldRead)
+		})
+	}
 }
 
 func TestLiteralToPhysBytes(t *testing.T) {

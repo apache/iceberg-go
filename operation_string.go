@@ -27,11 +27,12 @@ func _() {
 	_ = x[OpNot-16]
 	_ = x[OpAnd-17]
 	_ = x[OpOr-18]
+	_ = x[OpBBoxIntersects-19]
 }
 
-const _Operation_name = "TrueFalseIsNullNotNullIsNaNNotNaNLessThanLessThanEqualGreaterThanGreaterThanEqualEqualNotEqualStartsWithNotStartsWithInNotInNotAndOr"
+const _Operation_name = "TrueFalseIsNullNotNullIsNaNNotNaNLessThanLessThanEqualGreaterThanGreaterThanEqualEqualNotEqualStartsWithNotStartsWithInNotInNotAndOrBBoxIntersects"
 
-var _Operation_index = [...]uint8{0, 4, 9, 15, 22, 27, 33, 41, 54, 65, 81, 86, 94, 104, 117, 119, 124, 127, 130, 132}
+var _Operation_index = [...]uint8{0, 4, 9, 15, 22, 27, 33, 41, 54, 65, 81, 86, 94, 104, 117, 119, 124, 127, 130, 132, 146}
 
 func (i Operation) String() string {
 	if i < 0 || i >= Operation(len(_Operation_index)-1) {

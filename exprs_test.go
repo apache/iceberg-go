@@ -182,6 +182,27 @@ func TestUnaryExpr(t *testing.T) {
 	})
 }
 
+func TestBBoxPredicateBind(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.GeometryType{}},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	bbox := iceberg.BBox{MinX: 1, MinY: 2, MaxX: 3, MaxY: 4}
+	expr := iceberg.IntersectsWithBBox(iceberg.Reference("geom"), bbox)
+
+	bound, err := iceberg.BindExpr(schema, expr, true)
+	require.NoError(t, err)
+
+	pred, ok := bound.(iceberg.BoundBBoxPredicate)
+	require.True(t, ok)
+	assert.Equal(t, iceberg.OpBBoxIntersects, pred.Op())
+	assert.Equal(t, bbox, pred.BBox())
+
+	_, err = iceberg.BindExpr(schema, iceberg.IntersectsWithBBox(iceberg.Reference("name"), bbox), true)
+	require.ErrorContains(t, err, "BBoxIntersects must bind to geometry or geography type")
+}
+
 func TestRefBindingCaseSensitive(t *testing.T) {
 	ref1, ref2 := iceberg.Reference("foo"), iceberg.Reference("Foo")
 

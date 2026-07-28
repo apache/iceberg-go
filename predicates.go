@@ -138,3 +138,12 @@ func StartsWith(t UnboundTerm, v string) UnboundPredicate {
 func NotStartsWith(t UnboundTerm, v string) UnboundPredicate {
 	return LiteralPredicate(OpNotStartsWith, t, NewLiteral(v))
 }
+
+// IntersectsWithBBox constructs a geospatial predicate that matches geometry or
+// geography values whose bounding box intersects bbox. The bbox is interpreted
+// according to the CRS of the geometry or geography column.
+//
+// Will panic if t is nil.
+func IntersectsWithBBox(t UnboundTerm, bbox BBox) UnboundPredicate {
+	return BBoxPredicate(t, bbox)
+}

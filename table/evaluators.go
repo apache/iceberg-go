@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"slices"
@@ -317,6 +318,48 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 	panic(iceberg.ErrType)
 }
 
+// decodeGeoBoundXY decodes the first two coordinates from an Iceberg
+// geometry/geography bound. These bytes are Iceberg Appendix D single-value
+// bound bytes (little-endian float64 X, Y[, Z][, M]), not WKB or GeoArrow
+// bytes, so they must be decoded directly.
+func decodeGeoBoundXY(data []byte) (float64, float64, error) {
+	const bytesIn2Float64 = 16
+	if len(data) < bytesIn2Float64 {
+		return 0, 0, fmt.Errorf("%w: geometry/geography bound must contain at least X/Y coordinates, got %d bytes",
+			iceberg.ErrInvalidBinSerialization, len(data))
+	}
+
+	return math.Float64frombits(binary.LittleEndian.Uint64(data[:8])),
+		math.Float64frombits(binary.LittleEndian.Uint64(data[8:16])), nil
+}
+
+func geoBoundXY(lit iceberg.Literal) (float64, float64, error) {
+	geo, ok := lit.(iceberg.GeoLiteral)
+	if !ok {
+		return 0, 0, fmt.Errorf("%w: expected geometry/geography with an associated bgound, got %T",
+			iceberg.ErrType, lit)
+	}
+
+	return decodeGeoBoundXY(geo.Value())
+}
+
+func geoBoundsIntersect(lower, upper iceberg.Literal, query iceberg.BBox) (bool, error) {
+	minX, minY, err := geoBoundXY(lower)
+	if err != nil {
+		return false, err
+	}
+	maxX, maxY, err := geoBoundXY(upper)
+	if err != nil {
+		return false, err
+	}
+	// Two bboxes intersect only if their X ranges overlap and their Y ranges overlap
+	// Intersection compares each min to the query box’s max, and each max to the query box’s min.
+	return minX <= query.MaxX &&
+		maxX >= query.MinX &&
+		minY <= query.MaxY &&
+		maxY >= query.MinY, nil
+}
+
 func (m *manifestEvalVisitor) VisitEqual(term iceberg.BoundTerm, lit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
@@ -548,6 +591,35 @@ func (m *manifestEvalVisitor) VisitNotStartsWith(term iceberg.BoundTerm, lit ice
 		if upperBound[:lenPrefix] == prefix {
 			return rowsCannotMatch
 		}
+	}
+
+	return rowsMightMatch
+}
+
+func (m *manifestEvalVisitor) VisitBBoxIntersects(term iceberg.BoundTerm, bbox iceberg.BBox) bool {
+	pos := term.Ref().Pos()
+	field := m.partitionFields[pos]
+
+	if field.LowerBound == nil || field.UpperBound == nil {
+		return rowsMightMatch
+	}
+
+	lower, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.LowerBound)
+	if err != nil {
+		panic(err)
+	}
+
+	upper, err := iceberg.LiteralFromBytes(term.Ref().Type(), *field.UpperBound)
+	if err != nil {
+		panic(err)
+	}
+
+	intersects, err := geoBoundsIntersect(lower, upper, bbox)
+	if err != nil {
+		panic(err)
+	}
+	if !intersects {
+		return rowsCannotMatch
 	}
 
 	return rowsMightMatch
@@ -1232,6 +1304,38 @@ func (m *inclusiveMetricsEval) VisitNotStartsWith(t iceberg.BoundTerm, lit icebe
 	return rowsMightMatch
 }
 
+func (m *inclusiveMetricsEval) VisitBBoxIntersects(t iceberg.BoundTerm, bbox iceberg.BBox) bool {
+	field := t.Ref().Field()
+	fieldID := field.ID
+
+	lowerBoundBytes, upperBoundBytes := m.lowerBounds[fieldID], m.upperBounds[fieldID]
+	if lowerBoundBytes == nil || upperBoundBytes == nil {
+		return rowsMightMatch
+	}
+
+	lowerBound, err := iceberg.LiteralFromBytes(field.Type, lowerBoundBytes)
+	// If the lower bound is not valid in some way, the Visit can not resolve
+	// the intersection and thus will panic
+	if err != nil {
+		panic(err)
+	}
+
+	upperBound, err := iceberg.LiteralFromBytes(field.Type, upperBoundBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	intersects, err := geoBoundsIntersect(lowerBound, upperBound, bbox)
+	if err != nil {
+		panic(err)
+	}
+	if !intersects {
+		return rowsCannotMatch
+	}
+
+	return rowsMightMatch
+}
+
 func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression,
 	caseSensitive bool, includeEmptyFiles bool,
 ) (func(iceberg.DataFile) (bool, error), error) {
@@ -1583,6 +1687,13 @@ func (m *strictMetricsEval) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Litera
 	return rowsMightNotMatch
 }
 
+func (m *strictMetricsEval) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BBox) bool {
+	// A file-level geometry bbox intersecting the query bbox does not prove
+	// every row's geometry intersects it, so strict evaluation must stay
+	// conservative.
+	return rowsMightNotMatch
+}
+
 func (m *strictMetricsEval) mayContainNulls(field iceberg.NestedField) bool {
 	cnt, exists := m.nullCounts[field.ID]
 	if !exists {
@@ -1776,6 +1887,12 @@ func (c *bloomPredicateCollector) VisitStartsWith(_ iceberg.BoundTerm, _ iceberg
 }
 
 func (c *bloomPredicateCollector) VisitNotStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitBBoxIntersects(_ iceberg.BoundTerm, _ iceberg.BBox) []internal.RowGroupBloomPred {
+	// BBoxIntersects is evaluated from geometry bounds, not exact values, so
+	// there is no bloom-filter predicate to collect.
 	return nil
 }
 

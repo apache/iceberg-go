@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"log"
 	"log/slog"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -103,6 +105,14 @@ func mustDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, partiti
 	require.NoError(t, err)
 
 	return builder.Build()
+}
+
+func geoBoundXY(x, y float64) []byte {
+	out := make([]byte, 16)
+	binary.LittleEndian.PutUint64(out[:8], math.Float64bits(x))
+	binary.LittleEndian.PutUint64(out[8:], math.Float64bits(y))
+
+	return out
 }
 
 func (t *TableTestSuite) SetupSuite() {
@@ -1204,6 +1214,63 @@ func (t *TableWritingTestSuite) TestAddDataFiles() {
 	t.Require().NoError(err)
 	t.Equal(table.OpAppend, staged.CurrentSnapshot().Summary.Operation)
 	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
+}
+
+func TestScanBBoxPredicatePrunesAllDataFiles(t *testing.T) {
+	const geomFieldID = 1
+	geoSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: geomFieldID, Name: "geom", Type: iceberg.GeometryType{}},
+	)
+	location := filepath.ToSlash(strings.ReplaceAll(t.TempDir(), "#", ""))
+	meta, err := table.NewMetadata(geoSchema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder,
+		location, iceberg.Properties{table.PropertyFormatVersion: "3"})
+	require.NoError(t, err)
+	tbl := table.New(
+		table.Identifier{"default", "bbox_prunes_all_data_files_v3"},
+		meta,
+		fmt.Sprintf("%s/metadata/%05d-%s.metadata.json", location, 1, uuid.New().String()),
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&mockedCatalog{meta},
+	)
+
+	fixture := filepath.ToSlash(filepath.Join("testdata", "geo", "geospatial.parquet"))
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		fixture,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		mustFileSize(t, fixture),
+	)
+	require.NoError(t, err)
+	dataFile := builder.
+		LowerBoundValues(map[int][]byte{geomFieldID: geoBoundXY(20, 30)}).
+		UpperBoundValues(map[int][]byte{geomFieldID: geoBoundXY(40, 50)}).
+		FirstRowID(0).
+		Build()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{dataFile}, nil))
+
+	unfilteredScan, err := tx.Scan()
+	require.NoError(t, err)
+	unfilteredTasks, err := unfilteredScan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, unfilteredTasks, 1)
+
+	filteredScan, err := tx.Scan(table.WithRowFilter(iceberg.IntersectsWithBBox(
+		iceberg.Reference("geom"),
+		iceberg.BBox{MinX: -10, MinY: -10, MaxX: 0, MaxY: 0},
+	)))
+	require.NoError(t, err)
+	filteredTasks, err := filteredScan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, filteredTasks)
 }
 
 func (t *TableWritingTestSuite) TestAddDataFilesAutoNameMapping() {
