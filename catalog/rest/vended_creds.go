@@ -149,7 +149,10 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 
 	newIO, err := iceio.LoadFS(ctx, config, v.location)
 	if err != nil {
-		if v.cachedIO != nil && !v.expired() {
+		if v.cachedIO == nil {
+			return nil, err
+		}
+		if !v.expired() {
 			return v.cachedIO, nil
 		}
 

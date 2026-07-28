@@ -204,6 +204,7 @@ func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
 
 	got, err := r.loadFS(context.Background())
 	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "refreshed credentials")
 	assert.Nil(t, got)
 }
 
