@@ -128,7 +128,7 @@ func TestRunDropTable(t *testing.T) {
 	runDrop(context.Background(), &errOut, cat, cmd)
 
 	assert.True(t, cat.dropCalled)
-	assert.Equal(t, table.Identifier{"db", "events"}, cat.dropIdent)
+	assert.Equal(t, "Table db.events dropped successfully", errOut.lastText)
 	assert.NoError(t, errOut.lastErr)
 }
 
@@ -172,7 +172,7 @@ func TestRunDropTablePurgeSupported(t *testing.T) {
 	runDrop(context.Background(), &errOut, cat, cmd)
 
 	assert.True(t, cat.purgeCalled)
-	assert.Equal(t, table.Identifier{"db", "events"}, cat.purgeIdent)
+	assert.Equal(t, "Table db.events purged successfully", errOut.lastText)
 	assert.NoError(t, errOut.lastErr)
 }
 
