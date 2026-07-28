@@ -412,6 +412,54 @@ func TestTranslateColumnNamesInitialDefaultErrorContext(t *testing.T) {
 	require.ErrorContains(t, err, "invalid hex")
 }
 
+func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
+	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+				{
+					ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
+					InitialDefault: "US",
+				},
+			},
+		},
+	})
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			},
+		},
+	})
+
+	for _, expr := range []struct {
+		name        string
+		filter      iceberg.BooleanExpression
+		invalidFold iceberg.BooleanExpression
+	}{
+		{
+			name:        "matching default",
+			filter:      iceberg.EqualTo(iceberg.Reference("location.country"), "US"),
+			invalidFold: iceberg.AlwaysTrue{},
+		},
+		{
+			name:        "is null",
+			filter:      iceberg.IsNull(iceberg.Reference("location.country")),
+			invalidFold: iceberg.AlwaysFalse{},
+		},
+	} {
+		t.Run(expr.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(currentSchema, expr.filter, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			require.False(t, translated.Equals(expr.invalidFold),
+				"a nested default is not constant when its parent can be null")
+		})
+	}
+}
+
 func TestBoundBoolExprVisitor(t *testing.T) {
 	tests := []struct {
 		expr     iceberg.BooleanExpression
