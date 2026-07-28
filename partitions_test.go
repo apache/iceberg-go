@@ -647,10 +647,65 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
-		require.NoError(t, err)
-		assert.Zero(t, field.SourceID())
-		assert.Equal(t, 1003, field.FieldID)
-		assert.Equal(t, "void", field.Name)
-		assert.Equal(t, iceberg.VoidTransform{}, field.Transform)
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "requires source-id or source-ids")
 	})
+}
+
+func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		message string
+	}{
+		{
+			name:    "negative spec ID",
+			data:    `{"spec-id":-1,"fields":[]}`,
+			message: "spec ID must be non-negative",
+		},
+		{
+			name:    "zero source ID",
+			data:    `{"spec-id":0,"fields":[{"source-id":0,"field-id":1000,"name":"part","transform":"identity"}]}`,
+			message: "source ID must be positive",
+		},
+		{
+			name:    "empty source IDs",
+			data:    `{"spec-id":0,"fields":[{"source-ids":[],"field-id":1000,"name":"part","transform":"identity"}]}`,
+			message: "source ID must be positive",
+		},
+		{
+			name:    "empty name",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"","transform":"identity"}]}`,
+			message: "partition name cannot be empty",
+		},
+		{
+			name:    "duplicate names",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"part","transform":"identity"},{"source-id":2,"field-id":1001,"name":"part","transform":"identity"}]}`,
+			message: "duplicate partition name",
+		},
+		{
+			name:    "duplicate field IDs",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"identity"},{"source-id":2,"field-id":1000,"name":"second","transform":"identity"}]}`,
+			message: "duplicate field ID provided",
+		},
+		{
+			name:    "redundant fields",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"identity"},{"source-id":1,"field-id":1001,"name":"second","transform":"identity"}]}`,
+			message: "redundant partition field",
+		},
+		{
+			name:    "invalid bucket count",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"part","transform":"bucket[0]"}]}`,
+			message: "invalid transform syntax",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var spec iceberg.PartitionSpec
+			err := json.Unmarshal([]byte(tt.data), &spec)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
 }

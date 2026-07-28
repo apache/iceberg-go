@@ -121,6 +121,8 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		if _, ok := raw["source-ids"]; ok {
 			return errors.New("partition field cannot contain both source-id and source-ids")
 		}
+	} else if _, ok := raw["source-ids"]; !ok {
+		return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 	}
 
 	aux := struct {
@@ -143,10 +145,21 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	} else {
 		p.SourceIDs = []int{aux.SourceID}
 	}
+	for _, sourceID := range p.SourceIDs {
+		if sourceID <= 0 {
+			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+		}
+	}
+	if p.Name == "" {
+		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
+	}
 
 	var err error
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+	if err := validateTransform(p.Transform); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
 	return nil
@@ -439,6 +452,9 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
+	if aux.ID < 0 {
+		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, aux.ID)
+	}
 
 	fields := make([]PartitionField, len(aux.Fields))
 	for i, rawField := range aux.Fields {
@@ -459,12 +475,35 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 			return err
 		}
 	}
+	if err := validatePartitionFields(fields); err != nil {
+		return err
+	}
 
 	ps.id, ps.fields = aux.ID, fields
 	if err := ps.assignPartitionFieldIds(nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 	ps.initialize()
+
+	return nil
+}
+
+func validatePartitionFields(fields []PartitionField) error {
+	names := make(map[string]struct{}, len(fields))
+	definitions := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if _, ok := names[field.Name]; ok {
+			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
+		}
+		names[field.Name] = struct{}{}
+
+		definition := fmt.Sprintf("%v:%s", field.SourceIDs, field.Transform)
+		if _, ok := definitions[definition]; ok {
+			return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
+				ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+		}
+		definitions[definition] = struct{}{}
+	}
 
 	return nil
 }
