@@ -18,7 +18,9 @@
 package io
 
 import (
+	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,16 +30,54 @@ import (
 // the local file system.
 type LocalFS struct{}
 
+func localPath(name string) (string, error) {
+	if filepath.VolumeName(name) != "" {
+		return name, nil
+	}
+
+	parsed, err := url.Parse(name)
+	if err != nil {
+		return "", fmt.Errorf("invalid local file path %q: %w", name, err)
+	}
+	if parsed.Scheme == "" {
+		return name, nil
+	}
+	if !strings.EqualFold(parsed.Scheme, "file") {
+		return "", fmt.Errorf("unsupported local filesystem scheme %q", parsed.Scheme)
+	}
+	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+		return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
+	}
+	if parsed.Opaque != "" {
+		return parsed.Opaque, nil
+	}
+
+	return parsed.Path, nil
+}
+
 func (LocalFS) Open(name string) (File, error) {
-	return os.Open(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.Open(path)
 }
 
 func (LocalFS) ReadFile(name string) ([]byte, error) {
-	return os.ReadFile(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.ReadFile(path)
 }
 
 func (LocalFS) Create(name string) (FileWriter, error) {
-	filename := strings.TrimPrefix(name, "file://")
+	filename, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return nil, err
 	}
@@ -46,7 +86,10 @@ func (LocalFS) Create(name string) (FileWriter, error) {
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {
-	filename := strings.TrimPrefix(name, "file://")
+	filename, err := localPath(name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return err
 	}
@@ -55,42 +98,92 @@ func (LocalFS) WriteFile(name string, content []byte) error {
 }
 
 func (LocalFS) Remove(name string) error {
-	return os.Remove(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.Remove(path)
 }
 
 func (LocalFS) RemoveAll(name string) error {
-	return os.RemoveAll(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.RemoveAll(path)
 }
 
 func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	return filepath.WalkDir(strings.TrimPrefix(root, "file://"), fn)
+	path, err := localPath(root)
+	if err != nil {
+		return err
+	}
+
+	return filepath.WalkDir(path, fn)
 }
 
 func (LocalFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	return os.ReadDir(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.ReadDir(path)
 }
 
-func (LocalFS) MkdirAll(path string) error {
-	return os.MkdirAll(strings.TrimPrefix(path, "file://"), 0o755)
+func (LocalFS) MkdirAll(name string) error {
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.MkdirAll(path, 0o755)
 }
 
-func (LocalFS) Mkdir(path string) error {
-	return os.Mkdir(strings.TrimPrefix(path, "file://"), 0o755)
+func (LocalFS) Mkdir(name string) error {
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.Mkdir(path, 0o755)
 }
 
 func (LocalFS) Stat(name string) (fs.FileInfo, error) {
-	return os.Stat(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.Stat(path)
 }
 
 func (LocalFS) Rename(oldpath, newpath string) error {
-	return os.Rename(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
+	oldpath, err := localPath(oldpath)
+	if err != nil {
+		return err
+	}
+	newpath, err = localPath(newpath)
+	if err != nil {
+		return err
+	}
+
+	return os.Rename(oldpath, newpath)
 }
 
 func (LocalFS) RenameNoReplace(oldpath, newpath string) error {
-	oldpath = strings.TrimPrefix(oldpath, "file://")
-	newpath = strings.TrimPrefix(newpath, "file://")
+	oldpath, err := localPath(oldpath)
+	if err != nil {
+		return err
+	}
+	newpath, err = localPath(newpath)
+	if err != nil {
+		return err
+	}
 
-	if err := os.Link(oldpath, newpath); err != nil {
+	if err = os.Link(oldpath, newpath); err != nil {
 		return err
 	}
 

@@ -115,6 +115,27 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 	}
 }
 
+func TestLocalFSParsesFileURIs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+
+	for _, name := range []string{path, "file://" + filepath.ToSlash(path), "file:" + filepath.ToSlash(path), "file://localhost" + filepath.ToSlash(path)} {
+		content, err := (LocalFS{}).ReadFile(name)
+		require.NoError(t, err, name)
+		assert.Equal(t, []byte("metadata"), content)
+	}
+}
+
+func TestLocalFSRejectsUnsupportedFileURIAuthority(t *testing.T) {
+	t.Parallel()
+
+	_, err := (LocalFS{}).Open("file://remotehost/tmp/metadata.json")
+	require.ErrorContains(t, err, `unsupported file URI authority "remotehost"`)
+}
+
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
 }
