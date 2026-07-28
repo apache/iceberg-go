@@ -82,12 +82,12 @@ func TestEnumerateVariantLeavesNestedObject(t *testing.T) {
 	assert.Len(t, leaves, 3)
 
 	assert.Equal(t, "payload.typed_value.a.typed_value", got["$['a']"].typedPath)
-	assert.Equal(t, []string{"payload.value", "payload.typed_value.a.value"}, got["$['a']"].valuePaths)
+	assert.Equal(t, "payload.typed_value.a.value", got["$['a']"].ownResidual)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, got["$['a']"].icebergType)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, got["$['n']"].icebergType)
 	assert.Equal(t, "payload.typed_value.location.typed_value.latitude.typed_value", got["$['location']['latitude']"].typedPath)
-	// nested leaf carries the full ancestor residual chain: root, location, latitude.
-	assert.Equal(t, []string{"payload.value", "payload.typed_value.location.value", "payload.typed_value.location.typed_value.latitude.value"}, got["$['location']['latitude']"].valuePaths)
+	// nested leaf carries only its own residual value column, not ancestor residuals.
+	assert.Equal(t, "payload.typed_value.location.typed_value.latitude.value", got["$['location']['latitude']"].ownResidual)
 	assert.Equal(t, iceberg.PrimitiveTypes.Float64, got["$['location']['latitude']"].icebergType)
 }
 
@@ -97,7 +97,7 @@ func TestEnumerateVariantLeavesRootScalar(t *testing.T) {
 	require.Len(t, leaves, 1)
 	assert.Equal(t, "$", leaves[0].jsonPath)
 	assert.Equal(t, "payload.typed_value", leaves[0].typedPath)
-	assert.Equal(t, []string{"payload.value"}, leaves[0].valuePaths)
+	assert.Equal(t, "payload.value", leaves[0].ownResidual)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, leaves[0].icebergType)
 }
 
@@ -343,10 +343,10 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 	}
 	info := metadata.ChunkMetaInfo{NumValues: 2, DataPageOffset: 4, IndexPageOffset: -1, CompressedSize: 8, UncompressedSize: 8}
 
-	// locValStats is the ancestor (location) residual value column under test.
+	// locValStats is the ancestor (location) residual; latValStats is the leaf (latitude) residual.
 	// Column order (depth-first leaves): payload.metadata, payload.value,
 	// location.value, latitude.value, latitude.typed_value.
-	build := func(locValStats metadata.EncodedStatistics) *metadata.FileMetaData {
+	build := func(locValStats, latValStats metadata.EncodedStatistics) *metadata.FileMetaData {
 		fmb := metadata.NewFileMetadataBuilder(schema.NewSchema(root), parquet.NewWriterProperties(), nil)
 		set := func(rg *metadata.RowGroupMetaDataBuilder, st metadata.EncodedStatistics) {
 			c := rg.NextColumnChunk()
@@ -357,9 +357,9 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 		}
 		rg := fmb.AppendRowGroup()
 		set(rg, allNull())   // payload.metadata
-		set(rg, allNull())   // payload.value (root residual, benign)
-		set(rg, locValStats) // location.value (ancestor residual under test)
-		set(rg, allNull())   // latitude.value (leaf residual, benign)
+		set(rg, allNull())   // payload.value (root residual)
+		set(rg, locValStats) // location.value (ancestor residual)
+		set(rg, latValStats) // latitude.value (leaf residual)
 		set(rg, latMinMax()) // latitude.typed_value (produces the bound)
 		require.NoError(t, rg.Finish(40, 0))
 		fmd, err := fmb.Finish()
@@ -368,17 +368,21 @@ func TestCollectVariantBoundsNestedAncestorResidual(t *testing.T) {
 		return fmd
 	}
 
-	// location residual has non-null (non-object location) values: latitude bound must drop.
 	nonNull := metadata.EncodedStatistics{}
 	nonNull.SetNullCount(0)
-	lo, hi := parquetFormat{}.collectVariantBounds(build(nonNull), arrowSchema, colMapping, statsCols)
-	assert.NotContains(t, lo, 1, "latitude bound must drop when the location ancestor residual has non-null values")
-	assert.NotContains(t, hi, 1)
 
-	// location residual all-null: latitude bound kept.
-	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull()), arrowSchema, colMapping, statsCols)
-	assert.Contains(t, lo2, 1, "latitude bound kept when the location ancestor residual is all-null")
-	assert.Contains(t, hi2, 1)
+	// non-null ancestor residual keeps the bound; only the leaf's own residual drops it.
+	lo, hi := parquetFormat{}.collectVariantBounds(build(nonNull, allNull()), arrowSchema, colMapping, statsCols)
+	assert.Contains(t, lo, 1, "latitude bound kept when only the location ancestor residual is non-null")
+	assert.Contains(t, hi, 1)
+
+	lo2, hi2 := parquetFormat{}.collectVariantBounds(build(allNull(), nonNull), arrowSchema, colMapping, statsCols)
+	assert.NotContains(t, lo2, 1, "latitude bound dropped when the latitude leaf residual is non-null")
+	assert.NotContains(t, hi2, 1)
+
+	lo3, hi3 := parquetFormat{}.collectVariantBounds(build(allNull(), allNull()), arrowSchema, colMapping, statsCols)
+	assert.Contains(t, lo3, 1, "latitude bound kept when all residuals are all-null")
+	assert.Contains(t, hi3, 1)
 }
 
 func TestTruncateVariantBound(t *testing.T) {

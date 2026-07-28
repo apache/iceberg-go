@@ -283,14 +283,28 @@ func TestVendedCredsExpiresAtFromConfig(t *testing.T) {
 		assert.Equal(t, serverExpiry.UnixMilli(), got.UnixMilli())
 	})
 
-	t.Run("falls back to default 60m when no expiry key", func(t *testing.T) {
+	t.Run("refreshable creds fall back to default 60m when no expiry key", func(t *testing.T) {
 		t.Parallel()
+		r := &vendedCredentialRefresher{
+			mu:      semaphore.NewWeighted(1),
+			nowFunc: func() time.Time { return now },
+			fetchCreds: func(context.Context, []string) (iceberg.Properties, error) {
+				return nil, nil
+			},
+		}
+		got := r.expiresAtFromConfig(iceberg.Properties{})
+		assert.Equal(t, now.Add(60*time.Minute).UnixMilli(), got.UnixMilli())
+	})
+
+	t.Run("non-refreshable creds without expiry never expire", func(t *testing.T) {
+		t.Parallel()
+		// fetchCreds nil: no re-fetch to trigger, so no fallback TTL — zero time.
 		r := &vendedCredentialRefresher{
 			mu:      semaphore.NewWeighted(1),
 			nowFunc: func() time.Time { return now },
 		}
 		got := r.expiresAtFromConfig(iceberg.Properties{})
-		assert.Equal(t, now.Add(60*time.Minute).UnixMilli(), got.UnixMilli())
+		assert.True(t, got.IsZero())
 	})
 }
 

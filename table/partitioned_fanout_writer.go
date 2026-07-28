@@ -251,9 +251,10 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
 		}
+		partitionFieldsInfo[i].fieldID = partitionField.ID
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
-			return nil, fmt.Errorf("failed to find source field ID %d in schema", sourceField.SourceID())
+			continue
 		}
 		colIndices := record.Schema().FieldIndices(colName)
 		if len(colIndices) == 0 {
@@ -274,7 +275,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 	for row := range record.NumRows() {
 		for i := range partitionFields {
 			col := partitionColumns[i]
-			if !col.IsNull(int(row)) {
+			if col != nil && !col.IsNull(int(row)) {
 				fieldInfo := partitionFieldsInfo[i]
 				sourceField := fieldInfo.sourceField
 				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"slices"
@@ -531,6 +532,36 @@ func TestCurrentSchemaNotFound(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "current-schema-id 2 can't be found in any schema")
+}
+
+func TestRejectInvalidSchemaEntries(t *testing.T) {
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+
+	t.Run("null schema", func(t *testing.T) {
+		invalid := maps.Clone(metadata)
+		invalid["schemas"] = []any{nil}
+		data, err := json.Marshal(invalid)
+		require.NoError(t, err)
+
+		assert.NotPanics(t, func() {
+			_, err = ParseMetadataBytes(data)
+		})
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		assert.ErrorContains(t, err, "schema at index 0 is null")
+	})
+
+	t.Run("duplicate schema ID", func(t *testing.T) {
+		invalid := maps.Clone(metadata)
+		schemas := invalid["schemas"].([]any)
+		invalid["schemas"] = append(slices.Clone(schemas), schemas[0])
+		data, err := json.Marshal(invalid)
+		require.NoError(t, err)
+
+		_, err = ParseMetadataBytes(data)
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+		assert.ErrorContains(t, err, "duplicate schema ID 0")
+	})
 }
 
 func TestSortOrderNotFound(t *testing.T) {
@@ -1329,6 +1360,48 @@ func TestTableMetadataV2MissingSchemas(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2MissingSchemas.json")
 	require.ErrorContains(t, err, "invalid metadata: no valid schema configuration found in table metadata")
 	require.Nil(t, meta)
+}
+
+func TestAssignMissingPartitionFieldIDsAcrossSpecs(t *testing.T) {
+	input := []byte(`{
+		"format-version": 2,
+		"last-partition-id": 1003,
+		"partition-specs": [
+			{
+				"spec-id": 0,
+				"fields": [
+					{"source-id": 1, "field-id": 1000, "transform": "identity", "name": "id"},
+					{"source-id": 2, "transform": "identity", "name": "data"}
+				]
+			},
+			{
+				"spec-id": 1,
+				"fields": [
+					{"source-id": 3, "transform": "bucket[16]", "name": "category_bucket"}
+				]
+			}
+		]
+	}`)
+
+	normalized, err := assignMissingPartitionFieldIDs(input)
+	require.NoError(t, err)
+
+	var parsed struct {
+		LastPartitionID int `json:"last-partition-id"`
+		Specs           []struct {
+			ID     int `json:"spec-id"`
+			Fields []struct {
+				FieldID int `json:"field-id"`
+			} `json:"fields"`
+		} `json:"partition-specs"`
+	}
+	require.NoError(t, json.Unmarshal(normalized, &parsed))
+	require.Equal(t, 1005, parsed.LastPartitionID)
+	require.Equal(t, 0, parsed.Specs[0].ID)
+	require.Equal(t, 1, parsed.Specs[1].ID)
+	require.Equal(t, 1000, parsed.Specs[0].Fields[0].FieldID)
+	require.Equal(t, 1004, parsed.Specs[0].Fields[1].FieldID)
+	require.Equal(t, 1005, parsed.Specs[1].Fields[0].FieldID)
 }
 
 func TestTableDataV2NoSnapshots(t *testing.T) {
