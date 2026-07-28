@@ -56,8 +56,13 @@ func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context, worke
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, fanoutCtx := errgroup.WithContext(ctx)
+	fanoutBaseCtx, fanoutCancel := context.WithCancel(ctx)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(fanoutBaseCtx)
 	writerCtx, writerCancel := context.WithCancel(ctx)
+	cancel := func() {
+		fanoutCancel()
+		writerCancel()
+	}
 	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
@@ -66,7 +71,7 @@ func (p *positionDeletePartitionedFanoutWriter) Write(ctx context.Context, worke
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh, writerCancel)
+	return p.yieldDataFiles(fanoutWorkers, inputRecordsCh, outputDataFilesCh, cancel)
 }
 
 func (p *positionDeletePartitionedFanoutWriter) fanout(ctx context.Context, writerCtx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
@@ -143,10 +148,11 @@ func (p *positionDeletePartitionedFanoutWriter) partitionPath(partitionContext p
 	return spec.PartitionToPath(data, schema), nil
 }
 
-func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+func (p *positionDeletePartitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
 	return yieldDataFiles(
 		p.writerFactory,
 		fanoutWorkers,
+		inputRecordsCh,
 		outputDataFilesCh,
 		p.writerFactory.closeAll,
 		p.writerFactory.abortAll,

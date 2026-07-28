@@ -80,8 +80,13 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, fanoutCtx := errgroup.WithContext(ctx)
+	fanoutBaseCtx, fanoutCancel := context.WithCancel(ctx)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(fanoutBaseCtx)
 	writerCtx, writerCancel := context.WithCancel(ctx)
+	cancel := func() {
+		fanoutCancel()
+		writerCancel()
+	}
 	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
@@ -90,7 +95,7 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh, writerCancel)
+	return p.yieldDataFiles(fanoutWorkers, inputRecordsCh, outputDataFilesCh, cancel)
 }
 
 func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, error], fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
@@ -175,10 +180,11 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx c
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
 	return yieldDataFiles(
 		p.writerFactory,
 		fanoutWorkers,
+		inputRecordsCh,
 		outputDataFilesCh,
 		p.writerFactory.closeAll,
 		p.writerFactory.abortAll,
@@ -189,18 +195,22 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 func yieldDataFiles(
 	writerFactory *writerFactory,
 	fanoutWorkers *errgroup.Group,
+	inputRecordsCh chan arrow.RecordBatch,
 	outputDataFilesCh chan iceberg.DataFile,
 	closeAll func() error,
 	abortAll func(),
-	writerCancel context.CancelFunc,
+	cancel context.CancelFunc,
 ) iter.Seq2[iceberg.DataFile, error] {
 	// Use a channel to safely communicate the error from the goroutine
 	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
-		defer writerCancel()
+		defer cancel()
 		err := fanoutWorkers.Wait()
+		for record := range inputRecordsCh {
+			record.Release()
+		}
 		if err != nil {
 			abortAll()
 		} else {
@@ -215,6 +225,7 @@ func yieldDataFiles(
 			for range outputDataFilesCh {
 			}
 		}()
+		defer cancel()
 
 		// Yield data files as they arrive - no error yet since goroutine is still running
 		for f := range outputDataFilesCh {

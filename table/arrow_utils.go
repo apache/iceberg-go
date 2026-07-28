@@ -1866,12 +1866,13 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 func unpartitionedWrite(ctx context.Context, factory *writerFactory, records iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[iceberg.DataFile, error] {
 	outputCh := make(chan iceberg.DataFile, 1)
 	errCh := make(chan error, 1)
+	writerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1879,6 +1880,15 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 				writer.abortAndWait()
 
 				return
+			}
+			select {
+			case <-writerCtx.Done():
+				errCh <- context.Cause(writerCtx)
+				close(errCh)
+				writer.abortAndWait()
+
+				return
+			default:
 			}
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
@@ -1899,6 +1909,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			for range outputCh {
 			}
 		}()
+		defer cancel()
 		for df := range outputCh {
 			if !yield(df, nil) {
 				return
