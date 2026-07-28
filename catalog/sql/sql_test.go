@@ -2221,33 +2221,35 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 	t.Parallel()
 
-	invalid := []table.Identifier{
-		nil,
-		{},
-		{"view"},
-		{"ns", ""},
-		{"ns", "."},
-		{"ns", ".."},
-		{"ns", "nested/view"},
-		{"ns", "view\nname"},
+	invalid := []struct {
+		name       string
+		identifier table.Identifier
+	}{
+		{name: "nil", identifier: nil},
+		{name: "empty", identifier: table.Identifier{}},
+		{name: "missing namespace", identifier: table.Identifier{"view"}},
+		{name: "empty name", identifier: table.Identifier{"ns", ""}},
+		{name: "dot name", identifier: table.Identifier{"ns", "."}},
+		{name: "parent name", identifier: table.Identifier{"ns", ".."}},
+		{name: "path separator", identifier: table.Identifier{"ns", "nested/view"}},
+		{name: "control character", identifier: table.Identifier{"ns", "view\nname"}},
 	}
 
 	cat := &sqlcat.Catalog{}
-	for _, identifier := range invalid {
-		identifier := identifier
-		t.Run(fmt.Sprint(identifier), func(t *testing.T) {
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			err := cat.CreateView(context.Background(), identifier, nil, "", nil)
+			err := cat.CreateView(context.Background(), test.identifier, nil, "", nil)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
-			err = cat.DropView(context.Background(), identifier)
+			err = cat.DropView(context.Background(), test.identifier)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
-			_, err = cat.CheckViewExists(context.Background(), identifier)
+			_, err = cat.CheckViewExists(context.Background(), test.identifier)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
-			_, err = cat.LoadView(context.Background(), identifier)
+			_, err = cat.LoadView(context.Background(), test.identifier)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 		})
 	}
