@@ -136,6 +136,17 @@ func TestLocalFSRejectsUnsupportedFileURIAuthority(t *testing.T) {
 	require.ErrorContains(t, err, `unsupported file URI authority "remotehost"`)
 }
 
+func TestLocalFSPreservesPlainPathsWithRawPercent(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "discount:100%off.txt")
+	require.NoError(t, os.WriteFile(path, []byte("content"), 0o600))
+
+	content, err := (LocalFS{}).ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), content)
+}
+
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
 }

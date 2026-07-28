@@ -35,15 +35,19 @@ func localPath(name string) (string, error) {
 		return name, nil
 	}
 
+	schemeEnd := strings.IndexByte(name, ':')
+	firstSeparator := strings.IndexAny(name, `/\`)
+	if schemeEnd < 0 || (firstSeparator >= 0 && firstSeparator < schemeEnd) {
+		return name, nil
+	}
+	scheme := name[:schemeEnd]
+	if !strings.EqualFold(scheme, "file") {
+		return "", fmt.Errorf("unsupported local filesystem scheme %q", scheme)
+	}
+
 	parsed, err := url.Parse(name)
 	if err != nil {
 		return "", fmt.Errorf("invalid local file path %q: %w", name, err)
-	}
-	if parsed.Scheme == "" {
-		return name, nil
-	}
-	if !strings.EqualFold(parsed.Scheme, "file") {
-		return "", fmt.Errorf("unsupported local filesystem scheme %q", parsed.Scheme)
 	}
 	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
 		return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
