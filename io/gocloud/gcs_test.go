@@ -142,6 +142,19 @@ func TestGCSCredentialsNoAuth(t *testing.T) {
 	assert.Nil(t, creds)
 }
 
+func TestGCSCredentialsPropagatesADCError(t *testing.T) {
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "missing.json"))
+
+	creds, err := gcsCredentials(context.Background(), nil)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "gcs: loading application default credentials")
+	assert.Nil(t, creds)
+
+	creds, err = gcsCredentials(context.Background(), map[string]string{io.GCSNoAuth: "true"})
+	require.NoError(t, err)
+	assert.Nil(t, creds)
+}
+
 // A vended gcs.oauth2.token is turned into a static token source, not dropped.
 func TestGCSCredentialsFromOAuthToken(t *testing.T) {
 	exp := time.Now().Add(time.Hour).UnixMilli()

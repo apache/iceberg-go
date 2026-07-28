@@ -131,7 +131,10 @@ func gcsCredentials(ctx context.Context, props map[string]string) (*google.Crede
 		return parse(data, fmt.Sprintf("%s %q", io.GCSKeyPath, path))
 	}
 
-	creds, _ := gcp.DefaultCredentials(ctx)
+	creds, err := gcp.DefaultCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: loading application default credentials: %w", err)
+	}
 
 	return creds, nil
 }
