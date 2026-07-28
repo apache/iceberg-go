@@ -115,6 +115,7 @@ func (s *GCSIOTestSuite) TestGCSWarehouse() {
 		"type":            "sql",
 		"warehouse":       fmt.Sprintf("gs://%s/iceberg/", gcsBucketName),
 		io.GCSEndpoint:    fmt.Sprintf("http://%s/", gcsEndpoint),
+		io.GCSNoAuth:      "true",
 		io.GCSUseJSONAPI:  "true",
 	}
 
