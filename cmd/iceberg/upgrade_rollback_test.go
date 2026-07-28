@@ -713,7 +713,7 @@ func int64Ptr(v int64) *int64 {
 
 type errCapture struct {
 	textOutput
-	lastErr error
+	lastErr  error
 	lastText string
 }
 

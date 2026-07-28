@@ -31,14 +31,14 @@ import (
 )
 
 type mockCatalogForDrop struct {
-	catalogType    catalog.Type
-	dropCalled     bool
-	dropIdent      table.Identifier
-	dropErr        error
-	dropNamespaceCalled	bool
-	dropNamespaceIdent	table.Identifier
-	checkExists    bool
-	checkExistsErr error
+	catalogType         catalog.Type
+	dropCalled          bool
+	dropIdent           table.Identifier
+	dropErr             error
+	dropNamespaceCalled bool
+	dropNamespaceIdent  table.Identifier
+	checkExists         bool
+	checkExistsErr      error
 }
 
 func (m *mockCatalogForDrop) CatalogType() catalog.Type {
@@ -87,6 +87,7 @@ func (m *mockCatalogForDrop) CreateNamespace(ctx context.Context, namespace tabl
 func (m *mockCatalogForDrop) DropNamespace(ctx context.Context, namespace table.Identifier) error {
 	m.dropNamespaceCalled = true
 	m.dropNamespaceIdent = namespace
+
 	return nil
 }
 
@@ -132,6 +133,7 @@ func TestRunDropTable(t *testing.T) {
 	runDrop(context.Background(), &errOut, cat, cmd)
 
 	assert.True(t, cat.dropCalled)
+	assert.Equal(t, table.Identifier{"db", "events"}, cat.dropIdent)
 	assert.Equal(t, "Table db.events dropped successfully", errOut.lastText)
 	assert.NoError(t, errOut.lastErr)
 }
@@ -152,8 +154,8 @@ func TestRunDropNamespace(t *testing.T) {
 
 	assert.True(t, cat.dropNamespaceCalled)
 	assert.Equal(t, table.Identifier{"db"}, cat.dropNamespaceIdent)
-  	assert.Equal(t, "Namespace db dropped successfully", errOut.lastText)
-  	assert.NoError(t, errOut.lastErr)
+	assert.Equal(t, "Namespace db dropped successfully", errOut.lastText)
+	assert.NoError(t, errOut.lastErr)
 }
 
 func TestRunDropTablePurgeNotSupported(t *testing.T) {
@@ -196,6 +198,7 @@ func TestRunDropTablePurgeSupported(t *testing.T) {
 	runDrop(context.Background(), &errOut, cat, cmd)
 
 	assert.True(t, cat.purgeCalled)
+	assert.Equal(t, table.Identifier{"db", "events"}, cat.purgeIdent)
 	assert.Equal(t, "Table db.events purged successfully", errOut.lastText)
 	assert.NoError(t, errOut.lastErr)
 }

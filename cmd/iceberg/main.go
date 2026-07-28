@@ -563,6 +563,8 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		if err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
 
 		output.Text("Namespace " + cmd.Namespace.Identifier + " dropped successfully")
@@ -574,12 +576,14 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 			if !ok {
 				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
 				osExit(1)
+
 				return
 			}
 
 			if err := purger.PurgeTable(ctx, ident); err != nil {
 				output.Error(err)
 				osExit(1)
+
 				return
 			}
 
@@ -591,6 +595,8 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		if err := cat.DropTable(ctx, ident); err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
 
 		output.Text("Table " + cmd.Table.Identifier + " dropped successfully")
