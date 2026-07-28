@@ -931,6 +931,8 @@ type BoundBBoxPredicate interface {
 	AsUnbound(Reference, BBox) UnboundPredicate
 }
 
+// BoundBBoxPredicate is exported so callers can inspect bbox-specific state
+// without exposing the private concrete implementation.
 var _ BoundBBoxPredicate = (*boundBBoxPredicate)(nil)
 var _ BooleanExpression = (*boundBBoxPredicate)(nil)
 var _ UnboundPredicate = (*unboundBBoxPredicate)(nil)
