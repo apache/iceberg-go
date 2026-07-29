@@ -323,6 +323,35 @@ func TestReleaseLock(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestReleaseLockForCleanupUsesLiveBoundedContext(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lock := &HiveLock{client: mockClient, lockId: 1000}
+
+	mockClient.On("Unlock", mock.MatchedBy(func(cleanupCtx context.Context) bool {
+		_, hasDeadline := cleanupCtx.Deadline()
+
+		return cleanupCtx.Err() == nil && hasDeadline
+	}), int64(1000)).Return(nil).Once()
+
+	require.NoError(t, lock.releaseForCleanup(ctx))
+	mockClient.AssertExpectations(t)
+}
+
+func TestReleaseLockForCleanupWrapsFailure(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	unlockErr := errors.New("unlock failed")
+	lock := &HiveLock{client: mockClient, lockId: 1001}
+	mockClient.On("Unlock", mock.Anything, int64(1001)).Return(unlockErr).Once()
+
+	err := lock.releaseForCleanup(context.Background())
+
+	require.ErrorIs(t, err, unlockErr)
+	require.ErrorContains(t, err, "failed to release acquired lock 1001")
+	mockClient.AssertExpectations(t)
+}
+
 func TestCalculateBackoff(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := 1 * time.Second
