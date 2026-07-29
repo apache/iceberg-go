@@ -44,7 +44,7 @@ func (t View) Equals(other View) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t View) Identifier() table.Identifier     { return t.identifier }
+func (t View) Identifier() table.Identifier     { return slices.Clone(t.identifier) }
 func (t View) Metadata() Metadata               { return t.metadata }
 func (t View) MetadataLocation() string         { return t.metadataLocation }
 func (t View) CurrentVersion() *Version         { return t.metadata.CurrentVersion() }
@@ -56,7 +56,7 @@ func (t View) Schemas() map[int]*iceberg.Schema { return t.metadata.SchemasByID(
 
 func New(ident table.Identifier, meta Metadata, metadataLocation string) *View {
 	return &View{
-		identifier:       ident,
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 	}
