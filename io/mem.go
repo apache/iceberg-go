@@ -131,6 +131,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		if key == root {
 			addEntry(walkEntry{path: key, size: int64(len(data))})
+
 			continue
 		}
 
@@ -260,6 +261,7 @@ func (fi *memFileInfo) Mode() fs.FileMode {
 	if fi.isDir {
 		return fs.ModeDir
 	}
+
 	return 0
 }
 func (fi *memFileInfo) ModTime() time.Time { return time.Time{} }
