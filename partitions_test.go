@@ -709,3 +709,11 @@ func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
 		})
 	}
 }
+
+func TestPartitionSpecUnmarshalAllowsRepeatedVoidTransforms(t *testing.T) {
+	data := `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"void"},{"source-id":1,"field-id":1001,"name":"second","transform":"void"}]}`
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+	assert.Equal(t, 2, spec.NumFields())
+}

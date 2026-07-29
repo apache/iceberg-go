@@ -497,6 +497,10 @@ func validatePartitionFields(fields []PartitionField) error {
 		}
 		names[field.Name] = struct{}{}
 
+		if _, ok := field.Transform.(VoidTransform); ok {
+			continue
+		}
+
 		definition := fmt.Sprintf("%v:%s", field.SourceIDs, field.Transform)
 		if _, ok := definitions[definition]; ok {
 			return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
