@@ -155,3 +155,22 @@ func TestVariantSchemaConversionDoesNotPanic(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, expr)
 }
+
+// TestBBoxPredicateConvertsToTypedError ensures a geospatial bbox predicate that
+// somehow reaches substrait surfaces a wrapped, typed ErrNotImplemented rather
+// than a bare panic string. In normal scans a bbox predicate is dropped to
+// AlwaysTrue during column-name translation and never reaches ConvertExpr; this
+// pins the backstop so a caller can errors.Is the failure instead of matching on
+// panic text.
+func TestBBoxPredicateConvertsToTypedError(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.GeometryType{}},
+	)
+	bound, err := iceberg.BBoxIntersects(iceberg.Reference("geom"),
+		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(sc, true)
+	require.NoError(t, err)
+
+	_, _, err = substrait.ConvertExpr(sc, bound, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+}

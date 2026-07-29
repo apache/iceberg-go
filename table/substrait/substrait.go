@@ -443,3 +443,18 @@ func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg
 		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder),
 	)
 }
+
+// toSubstraitExpr implements the optional BoundGeospatialExprVisitor as a
+// backstop: bbox predicates are dropped to always-true during column-name
+// translation and never reach substrait, but if one ever did these panic with a
+// wrapped ErrNotImplemented (recovered into a typed, wrappable error by
+// iceberg.VisitExpr) rather than a bare string.
+var _ iceberg.BoundGeospatialExprVisitor[expr.Builder] = (*toSubstraitExpr)(nil)
+
+func (t *toSubstraitExpr) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) expr.Builder {
+	panic(fmt.Errorf("%w: geospatial bbox predicates cannot be converted to substrait", iceberg.ErrNotImplemented))
+}
+
+func (t *toSubstraitExpr) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) expr.Builder {
+	panic(fmt.Errorf("%w: geospatial bbox predicates cannot be converted to substrait", iceberg.ErrNotImplemented))
+}

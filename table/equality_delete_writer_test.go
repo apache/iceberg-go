@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -148,6 +149,77 @@ func TestWriteEqualityDeleteFilesParquetContent(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []int64{10, 20, 30}, vals)
+}
+
+func TestWriteEqualityDeleteFilesResolvesProjJSONCRSFromTableProperties(t *testing.T) {
+	const projjson = `{"type":"GeographicCRS","name":"Custom WGS 84"}`
+
+	// Exercise the public equality-delete writer path to ensure it threads
+	// table properties into Arrow schema conversion for projjson CRS fields.
+	location := filepath.ToSlash(t.TempDir())
+	geom, err := iceberg.GeometryTypeOf("projjson:geo.crs")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: geom, Required: false},
+	)
+	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location,
+		iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+			"geo.crs":                   projjson,
+		})
+	require.NoError(t, err)
+
+	tbl := table.New(
+		table.Identifier{"db", "eq_del_projjson_test"},
+		meta,
+		location+"/metadata/v1.metadata.json",
+		func(ctx context.Context) (iceio.IO, error) {
+			return iceio.LocalFS{}, nil
+		},
+		&rowDeltaCatalog{metadata: meta},
+	)
+
+	delArrowSc, err := table.SchemaToArrowSchemaWithOptions(iceSchema, table.ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.Properties(),
+	})
+	require.NoError(t, err)
+
+	records, release := makeEqDeleteRecords(t, delArrowSc, `[
+		{"geom": "01010000000000000000003e400000000000002440"}
+	]`)
+	defer release()
+
+	tx := tbl.NewTransaction()
+	deleteFiles, err := tx.WriteEqualityDeletes(t.Context(), []int{1}, records)
+	require.NoError(t, err)
+	require.Len(t, deleteFiles, 1)
+
+	df := deleteFiles[0]
+	assert.Equal(t, iceberg.EntryContentEqDeletes, df.ContentType())
+	assert.Equal(t, []int{1}, df.EqualityFieldIDs())
+	assert.EqualValues(t, 1, df.Count())
+
+	rdr, err := file.OpenParquetFile(df.FilePath(), false)
+	require.NoError(t, err)
+	defer rdr.Close()
+
+	arrowRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+
+	tblReader, err := arrowRdr.ReadTable(t.Context())
+	require.NoError(t, err)
+	defer tblReader.Release()
+
+	require.Equal(t, int64(1), tblReader.NumCols())
+	wkb, ok := tblReader.Schema().Field(0).Type.(*geoarrow.WKBType)
+	require.True(t, ok)
+
+	geoMeta := wkb.Metadata()
+	assert.Equal(t, geoarrow.CRSTypePROJJSON, geoMeta.CRSType)
+	assert.JSONEq(t, projjson, string(geoMeta.CRS))
 }
 
 func TestWriteEqualityDeleteFilesMultiColumnKey(t *testing.T) {

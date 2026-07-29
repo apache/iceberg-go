@@ -62,6 +62,21 @@ type BoundBooleanExprVisitor[T any] interface {
 	VisitNotStartsWith(BoundTerm, Literal) T
 }
 
+// BoundGeospatialExprVisitor is an optional extension a BoundBooleanExprVisitor
+// may implement to handle the geospatial bbox predicates (BBoxIntersects /
+// BBoxNotIntersects). It is deliberately kept out of BoundBooleanExprVisitor:
+// adding methods to that interface would break every existing implementation -
+// including external ones (query-engine adapters, downstream visitors) - which
+// would then fail to compile until they grew geo methods they may not care
+// about. This mirrors Java, which dispatches geospatial predicates outside its
+// BoundExpressionVisitor. VisitBoundPredicate routes a bbox predicate here only
+// when the visitor implements this interface; a visitor that does not is treated
+// as not supporting geospatial predicates.
+type BoundGeospatialExprVisitor[T any] interface {
+	VisitBBoxIntersects(BoundTerm, BoundingBox) T
+	VisitBBoxNotIntersects(BoundTerm, BoundingBox) T
+}
+
 // VisitExpr is a convenience function to use a given visitor to visit all parts of
 // a boolean expression in-order. Values returned from the methods are passed to the
 // subsequent methods, effectively "bubbling up" the results.
@@ -110,6 +125,12 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 // based on the type of operation in the predicate. This is a convenience function
 // for implementing the VisitBound method of a BoundBooleanExprVisitor by simply calling
 // iceberg.VisitBoundPredicate(pred, this).
+//
+// If the predicate is a geospatial bbox op (OpBBoxIntersects/OpBBoxNotIntersects)
+// and the visitor does not also implement BoundGeospatialExprVisitor[T], this
+// panics with an error wrapping ErrNotImplemented. When reached through VisitExpr
+// that panic is recovered into a returned error; a caller invoking this directly
+// must implement the extension or recover the panic itself.
 func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T]) T {
 	switch e.Op() {
 	case OpIn:
@@ -140,6 +161,23 @@ func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisito
 		return visitor.VisitStartsWith(e.Term(), e.(BoundLiteralPredicate).Literal())
 	case OpNotStartsWith:
 		return visitor.VisitNotStartsWith(e.Term(), e.(BoundLiteralPredicate).Literal())
+	case OpBBoxIntersects, OpBBoxNotIntersects:
+		// Geospatial predicates are dispatched through the optional
+		// BoundGeospatialExprVisitor extension so visitors that predate (or don't
+		// care about) geo support are not forced to implement them. A visitor that
+		// doesn't implement it doesn't support geo predicates; panic here is
+		// recovered into an error by VisitExpr.
+		gv, ok := visitor.(BoundGeospatialExprVisitor[T])
+		if !ok {
+			panic(fmt.Errorf("%w: visitor %T does not support geospatial bbox predicates",
+				ErrNotImplemented, visitor))
+		}
+		bbox := e.(BoundBBoxPredicate).BBox()
+		if e.Op() == OpBBoxIntersects {
+			return gv.VisitBBoxIntersects(e.Term(), bbox)
+		}
+
+		return gv.VisitBBoxNotIntersects(e.Term(), bbox)
 	}
 	panic(fmt.Errorf("%w: unhandled bound predicate type: %s", ErrNotImplemented, e))
 }
@@ -385,6 +423,29 @@ func (e *exprEvaluator) VisitNotStartsWith(term BoundTerm, lit Literal) bool {
 	return !e.VisitStartsWith(term, lit)
 }
 
+// VisitBBoxIntersects evaluates a geospatial bbox predicate at the row level.
+// Row-level geometric evaluation (parsing each row's WKB and testing its
+// bounding box) is a query-engine concern - the Iceberg spec only requires
+// bbox-based data skipping, which happens in the metrics/manifest evaluators.
+// Here the predicate conservatively keeps every row so it never drops a row that
+// an engine's own ST_Intersects would retain.
+func (e *exprEvaluator) VisitBBoxIntersects(BoundTerm, BoundingBox) bool {
+	return true
+}
+
+func (e *exprEvaluator) VisitBBoxNotIntersects(BoundTerm, BoundingBox) bool {
+	// Keep every row, for the same reason as VisitBBoxIntersects above: row-level
+	// geometric evaluation is a query-engine concern, and bounds alone cannot
+	// prove a row does not intersect. Must stay true - returning false here would
+	// silently drop rows an engine's own predicate would retain.
+	return true
+}
+
+// exprEvaluator handles geospatial predicates, so it implements the optional
+// BoundGeospatialExprVisitor. The assertion keeps that wiring compile-checked now
+// that the geo methods are no longer part of BoundBooleanExprVisitor.
+var _ BoundGeospatialExprVisitor[bool] = (*exprEvaluator)(nil)
+
 // RewriteNotExpr rewrites a boolean expression to remove "Not" nodes from the expression
 // tree. This is because Projections assume there are no "not" nodes.
 //
@@ -560,6 +621,20 @@ func (t *scanTranslator) syntheticName() string {
 }
 
 func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+	// A bbox predicate has no substrait/record-filter form; it is evaluated only
+	// during metrics-based file pruning, so the record filter must conservatively
+	// keep every row. It must be matched before the column-not-found early return,
+	// which would otherwise return AlwaysFalse and silently drop every row of a
+	// file that predates the geo column, and before the switch below, whose
+	// default panics on an unhandled predicate. Collapse it to always-true
+	// (mirrors exprEvaluator and sanitizeVisitor); this also keeps it out of
+	// substrait, where it would otherwise error. Match the exported
+	// BoundBBoxPredicate interface, not just the concrete type, so a future
+	// implementation is covered too.
+	if _, ok := pred.(BoundBBoxPredicate); ok {
+		return AlwaysTrue{}
+	}
+
 	var ref Reference
 	if ext, ok := pred.Term().(BoundExtract); ok {
 		ref = t.extractRef(ext)
@@ -585,4 +660,104 @@ func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
+}
+
+// sanitizedLiteralMask is the placeholder substituted for every literal value in
+// a sanitized expression. It carries no information about the original value.
+const sanitizedLiteralMask = "(redacted)"
+
+// SanitizeExpression returns a copy of expr with every predicate literal replaced
+// by an opaque placeholder while preserving the boolean structure, column
+// references, and operations. It lets a filter be emitted somewhere untrusted
+// (e.g. a metrics ScanReport shipped to a REST sink) without leaking the literal
+// values a user scanned with, mirroring the intent of Java's ExpressionUtil.sanitize.
+//
+// The only guarantee is that no user value leaks: the exact placeholder text is
+// not part of the contract and may change. In particular, unlike Java — which
+// substitutes type-shaped placeholders (e.g. "(2-digit-int)") — every literal is
+// masked with the same marker, since the goal is to withhold the values, not to
+// preserve their shape or stay structurally comparable across clients. Set
+// predicates (IN / NOT IN) keep their arity so the operation is not
+// misrepresented, but the members are masked.
+func SanitizeExpression(expr BooleanExpression) (BooleanExpression, error) {
+	return VisitExpr(expr, sanitizeVisitor{})
+}
+
+type sanitizeVisitor struct{}
+
+func (sanitizeVisitor) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
+func (sanitizeVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
+func (sanitizeVisitor) VisitNot(child BooleanExpression) BooleanExpression {
+	return NewNot(child)
+}
+
+func (sanitizeVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {
+	return NewAnd(left, right)
+}
+
+func (sanitizeVisitor) VisitOr(left, right BooleanExpression) BooleanExpression {
+	return NewOr(left, right)
+}
+
+func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+	switch p := pred.(type) {
+	case *unboundBBoxPredicate:
+		// A bbox predicate carries query-box coordinates, not a per-row user
+		// literal, and has no REST expression-JSON form (see MarshalJSON).
+		// Collapse it to always-true so the surrounding expression still
+		// sanitizes and serializes; nothing user-provided leaks.
+		return AlwaysTrue{}
+	case *unboundUnaryPredicate:
+		// No literal to mask; the op and term are safe to keep as-is.
+		return pred
+	case *unboundLiteralPredicate:
+		return sanitizeLiteralPredicate(p.op, p.term)
+	case *unboundSetPredicate:
+		return sanitizeSetPredicate(p.op, p.term, p.lits.Len())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
+
+func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
+	// A bbox predicate carries query-box coordinates, not a per-row user literal,
+	// and has no REST expression-JSON form (see MarshalJSON), so it cannot be
+	// rebuilt as a reference predicate like the cases below. Collapse it to
+	// always-true so the surrounding expression still sanitizes and serializes;
+	// nothing user-provided leaks. Matched before ref is taken and on the exported
+	// BoundBBoxPredicate interface (mirrors scanTranslator).
+	if _, ok := pred.(BoundBBoxPredicate); ok {
+		return AlwaysTrue{}
+	}
+
+	// Rebuild over the column name as an unbound reference: the sanitized form is
+	// only serialized or logged, and an unbound predicate with a masked string
+	// literal serializes without needing the field's type.
+	ref := Reference(pred.Term().Ref().Field().Name)
+	switch p := pred.(type) {
+	case BoundUnaryPredicate:
+		return UnaryPredicate(p.Op(), ref)
+	case BoundLiteralPredicate:
+		return sanitizeLiteralPredicate(p.Op(), ref)
+	case BoundSetPredicate:
+		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
+
+func sanitizeLiteralPredicate(op Operation, term UnboundTerm) BooleanExpression {
+	return LiteralPredicate(op, term, NewLiteral(sanitizedLiteralMask))
+}
+
+// sanitizeSetPredicate rebuilds a set predicate with count masked members. The
+// masks are made distinct so the set does not collapse (which would turn IN into
+// EQ); the suffix reveals only the number of values, never a value itself.
+func sanitizeSetPredicate(op Operation, term UnboundTerm, count int) BooleanExpression {
+	masks := make([]Literal, count)
+	for i := range masks {
+		masks[i] = NewLiteral(fmt.Sprintf("%s-%d", sanitizedLiteralMask, i+1))
+	}
+
+	return SetPredicate(op, term, masks)
 }

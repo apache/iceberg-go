@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -148,12 +147,17 @@ func formatLockIdentifiers(identifiers []tableLockIdentifier) string {
 }
 
 func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration {
-	wait := time.Duration(float64(minWait) * math.Pow(2, float64(attempt)))
-	if wait > maxWait {
-		wait = maxWait
+	if minWait >= maxWait {
+		return maxWait
+	}
+	if attempt <= 0 || minWait <= 0 {
+		return minWait
+	}
+	if attempt > 62 || minWait > maxWait>>attempt {
+		return maxWait
 	}
 
-	return wait
+	return minWait << attempt
 }
 
 func (l *HiveLock) Release(ctx context.Context) error {

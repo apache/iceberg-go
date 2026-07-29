@@ -195,6 +195,13 @@ func (bsp *boundSetPredicate[T]) MarshalJSON() ([]byte, error) {
 	return marshalSetPredicate(bsp.op, bsp.term, bsp.lits.Members())
 }
 
+// Geospatial bbox predicates have no representation in the REST expression JSON
+// grammar; they are used only for local scan planning. Report an error rather
+// than silently emitting an empty object. The sentinel lives in errors.go with
+// the other wrapped sentinels (see ErrBBoxNotSerializable).
+func (u *unboundBBoxPredicate) MarshalJSON() ([]byte, error) { return nil, ErrBBoxNotSerializable }
+func (b *boundBBoxPredicate) MarshalJSON() ([]byte, error)   { return nil, ErrBBoxNotSerializable }
+
 // predicateType returns the wire "type" string for a predicate operation.
 func predicateType(op Operation) (string, error) {
 	s, ok := opToJSON[op]

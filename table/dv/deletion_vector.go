@@ -132,22 +132,24 @@ func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 // ReadDV reads a deletion vector from a puffin file using the manifest entry metadata.
 // ContentOffset and ContentSizeInBytes must be set on the DataFile (required by v3 spec).
 //
-// When the puffin blob carries a `cardinality` property (spec-mandated for
-// deletion-vector-v1), its value is parsed and used to validate the decoded
-// bitmap — this catches truncated or partially-overwritten blobs whose CRC
-// still validates over the bytes that are present.
+// The decoded bitmap's cardinality is cross-validated against two independent
+// sources, so a truncated or partially-overwritten blob whose CRC still
+// validates over the bytes that are present is rejected:
 //
-// Java's BitmapPositionDeleteIndex validates against the manifest entry's
-// `record_count` field rather than the puffin blob property; the two are
-// always set to the same value by Java's writer, so this PR's behavior agrees
-// with Java for spec-conformant tables. A future change should cross-validate
-// both sources when they're independently available (tracked separately).
+//   - The manifest entry's record_count (dvFile.Count()). This is field 103, a
+//     required non-nullable long, so it is always available — zero means an
+//     empty deletion vector, not "unknown". Java's BitmapPositionDeleteIndex
+//     validates against this value, so it is our primary expected cardinality.
+//   - The puffin blob's spec-mandated `cardinality` property, when present.
 //
-// Blobs missing the spec-required cardinality property are accepted with a
-// slog warning rather than rejected — strict enforcement is deferred until
-// the Go DV writer guarantees the property is always present. The per-byte
-// CRC check in DeserializeDV still applies, so missing-property is degraded
-// integrity, not absent integrity.
+// When both sources are available they must agree; a disagreement (e.g. a
+// stale manifest record_count against a freshly written blob) is a writer bug
+// and fails fast. The bitmap is then validated against the manifest count.
+//
+// Blobs missing the spec-required cardinality property are still validated
+// against the manifest record_count and accepted with a slog warning rather
+// than rejected — the Go writer always emits the property, but third-party
+// writers may not, and the per-byte CRC check in DeserializeDV still applies.
 func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error) {
 	if dvFile.FileFormat() != iceberg.PuffinFile {
 		return nil, fmt.Errorf("expected PUFFIN format for deletion vector, got %s", dvFile.FileFormat())
@@ -179,21 +181,40 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 		return nil, fmt.Errorf("read DV blob at offset %d: %w", offset, err)
 	}
 
-	cardinality, ok, err := blobCardinality(reader.Blobs(), offset, size)
+	// Manifest record_count (field 103) is a required, non-nullable long, so it
+	// is always present for a DV data file: zero means an empty deletion
+	// vector, not "unknown". This is Java's primary expected cardinality.
+	manifestCardinality := dvFile.Count()
+
+	// The puffin blob independently declares its cardinality via the spec-
+	// mandated property; when present it is a second source to cross-check.
+	puffinCardinality, hasPuffinCardinality, err := blobCardinality(reader.Blobs(), offset, size)
 	if err != nil {
 		return nil, fmt.Errorf("DV file %s: %w", dvFile.FilePath(), err)
 	}
-	if !ok {
-		// Spec deviation: deletion-vector-v1 MUST carry a cardinality
-		// property. We tolerate the absence to keep reading from third-
-		// party writers that emit non-conformant files; flag so operators
-		// can identify affected tables.
-		slog.Warn("DV blob missing spec-required cardinality property; skipping cardinality validation",
-			"dv_file", dvFile.FilePath(), "offset", offset)
-		cardinality = -1
+
+	// When both sources are available they must agree. A disagreement means a
+	// writer set the manifest record_count and the blob property inconsistently
+	// (e.g. a stale record_count after an incremental merge against a freshly
+	// written blob) — fail fast rather than silently trusting one over the other.
+	if hasPuffinCardinality && manifestCardinality != puffinCardinality {
+		return nil, fmt.Errorf("DV file %s: manifest record_count %d disagrees with puffin cardinality property %d",
+			dvFile.FilePath(), manifestCardinality, puffinCardinality)
 	}
 
-	return DeserializeDV(blobData, cardinality)
+	if !hasPuffinCardinality {
+		// Spec deviation: deletion-vector-v1 MUST carry a cardinality property.
+		// The manifest record_count still bounds the decoded bitmap below, so
+		// this is degraded (not absent) validation; flag it so operators can
+		// spot non-conformant third-party writers.
+		slog.Warn("DV blob missing spec-required cardinality property; validating against manifest record_count only",
+			"dv_file", dvFile.FilePath(), "offset", offset)
+	}
+
+	// Validate the decoded bitmap against the manifest record_count (always
+	// present, including zero). When the puffin property is present it has
+	// already been confirmed to agree with this value above.
+	return DeserializeDV(blobData, manifestCardinality)
 }
 
 // blobCardinality returns the cardinality declared by the puffin blob at the

@@ -133,6 +133,13 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
 		}
 
+		// Reject row-lineage metadata columns (_row_id,
+		// _last_updated_sequence_number) if a caller adds them to a stored
+		// schema during evolution. Other spec-reserved IDs (e.g. position-delete
+		// file_path/pos) are intentionally permitted: internal writers build
+		// throwaway metadata from those schemas via AddSchema. User schemas are
+		// validated against the full reserved range separately, before
+		// reassignIDs, in NewMetadataWithUUID.
 		if iceberg.IsMetadataColumn(field.ID) {
 			return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
 				iceberg.ErrInvalidSchema, colName, field.ID)
@@ -169,6 +176,47 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 
 	if len(problems) != 0 {
 		return ErrIncompatibleSchema{fields: problems, formatVersion: formatVersion}
+	}
+
+	return nil
+}
+
+// validateNoReservedFieldIDs rejects user-supplied schemas that assign field IDs
+// in the range the spec reserves for metadata columns (_row_id,
+// _last_updated_sequence_number, _file, _pos, _deleted, ...). Field IDs must not
+// exceed iceberg.MaxStructFieldID. The walk is recursive: FlatFields yields every
+// leaf and nested field, so a reserved ID buried in a struct, list element, or
+// map key/value is caught too.
+//
+// This guards the table-creation path only. NewMetadataWithUUID calls it on the
+// user schema before reassignIDs, because reassignment overwrites every ID with
+// a fresh, non-reserved value and would otherwise mask a reserved ID the caller
+// supplied (see #1107). It intentionally covers the full reserved range, unlike
+// checkSchemaCompatibility, which permits internal writers to add position-delete
+// schemas (file_path/pos) via AddSchema.
+func validateNoReservedFieldIDs(sc *iceberg.Schema) error {
+	fieldsIt, err := sc.FlatFields()
+	if err != nil {
+		return fmt.Errorf("failed to enumerate schema fields: %w", err)
+	}
+
+	// Sort by ID so the reported field is deterministic when several are reserved.
+	for _, field := range slices.SortedFunc(fieldsIt, func(a, b iceberg.NestedField) int {
+		return cmp.Compare(a.ID, b.ID)
+	}) {
+		if !iceberg.IsReservedFieldID(field.ID) {
+			continue
+		}
+
+		// Report the schema's own name/path for the field, not the canonical
+		// metadata column name, so the caller can locate the offending field.
+		name, ok := sc.FindColumnName(field.ID)
+		if !ok {
+			name = field.Name
+		}
+
+		return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
+			iceberg.ErrInvalidSchema, name, field.ID)
 	}
 
 	return nil

@@ -74,6 +74,28 @@ func TestNewSortOrderRejectsNilTransform(t *testing.T) {
 	assert.Contains(t, err.Error(), "has no transform")
 }
 
+func TestNewSortOrderRejectsInvalidParameterizedTransform(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"bucket", iceberg.BucketTransform{NumBuckets: 0}},
+		{"truncate", iceberg.TruncateTransform{Width: 0}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := table.NewSortOrder(1, []table.SortField{{
+				SourceIDs: []int{19},
+				Transform: tt.transform,
+				NullOrder: table.NullsFirst,
+				Direction: table.SortASC,
+			}})
+
+			require.ErrorIs(t, err, table.ErrInvalidTransform)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
 func TestNewSortOrderRejectsInvalidSourceIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
@@ -130,6 +152,36 @@ func TestNewSortOrderAcceptsValidTransform(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, sortOrder.OrderID())
 	assert.Equal(t, 1, sortOrder.Len())
+}
+
+func TestSortOrderReturnsDefensiveCopies(t *testing.T) {
+	sourceIDs := []int{19, 20}
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
+	fields := []table.SortField{{
+		SourceIDs: sourceIDs,
+		Transform: transform,
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}}
+	sortOrder, err := table.NewSortOrder(1, fields)
+	require.NoError(t, err)
+
+	sourceIDs[0] = 99
+	transform.NumBuckets = 32
+	fields[0].Direction = table.SortDESC
+	for _, field := range sortOrder.Fields() {
+		field.SourceIDs[0] = 98
+		field.Transform.(*iceberg.BucketTransform).NumBuckets = 64
+	}
+
+	seen := 0
+	for _, field := range sortOrder.Fields() {
+		assert.Equal(t, []int{19, 20}, field.SourceIDs)
+		assert.Equal(t, 16, field.Transform.(*iceberg.BucketTransform).NumBuckets)
+		assert.Equal(t, table.SortASC, field.Direction)
+		seen++
+	}
+	assert.Equal(t, 1, seen)
 }
 
 func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
@@ -358,4 +410,34 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		assert.Contains(t, string(data), `"source-id"`)
 		assert.NotContains(t, string(data), `"source-ids"`)
 	})
+}
+
+func TestSortFieldMarshalAppliesDefaultsWithoutMutatingReceiver(t *testing.T) {
+	field := table.SortField{
+		SourceIDs: []int{1},
+		Transform: iceberg.IdentityTransform{},
+	}
+	expected := `{
+		"source-id": 1,
+		"transform": "identity",
+		"direction": "asc",
+		"null-order": "nulls-first"
+	}`
+
+	for _, tt := range []struct {
+		name  string
+		input any
+	}{
+		{"value", field},
+		{"pointer", &field},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.input)
+			require.NoError(t, err)
+			assert.JSONEq(t, expected, string(data))
+		})
+	}
+
+	assert.Empty(t, field.Direction)
+	assert.Empty(t, field.NullOrder)
 }

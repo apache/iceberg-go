@@ -50,8 +50,9 @@ const (
 	glueTableType   = "EXTERNAL_TABLE"
 
 	// property keys
-	PropsKeyLocation    = "location"
-	PropsKeyDescription = "Description"
+	PropsKeyLocation          = "location"
+	PropsKeyDescription       = "comment"
+	legacyPropsKeyDescription = "Description"
 
 	// glue table parameter keys
 	tableParamTableType                = "table_type"
@@ -685,6 +686,25 @@ func (c *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
+	// Glue has no conditional database delete, so a concurrent table creation can still race this check.
+	tables, err := c.glueSvc.GetTables(ctx, &glue.GetTablesInput{
+		CatalogId:    c.catalogId,
+		DatabaseName: aws.String(databaseName),
+		MaxResults:   aws.Int32(1),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list tables in namespace %s: %w", databaseName, err)
+	}
+	if len(tables.TableList) > 0 {
+		tableType := "non-Iceberg"
+		if strings.EqualFold(tables.TableList[0].Parameters[tableParamTableType], glueTypeIceberg) {
+			tableType = "Iceberg"
+		}
+
+		return fmt.Errorf("%w: cannot drop namespace %s because it still contains %s tables",
+			catalog.ErrNamespaceNotEmpty, databaseName, tableType)
+	}
+
 	params := &glue.DeleteDatabaseInput{CatalogId: c.catalogId, Name: aws.String(databaseName)}
 	_, err = c.glueSvc.DeleteDatabase(ctx, params)
 	if err != nil {
@@ -710,6 +730,12 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 	if database.Parameters != nil {
 		for k, v := range database.Parameters {
 			props[k] = v
+		}
+	}
+	if description, ok := props[legacyPropsKeyDescription]; ok {
+		delete(props, legacyPropsKeyDescription)
+		if _, hasComment := props[PropsKeyDescription]; !hasComment {
+			props[PropsKeyDescription] = description
 		}
 	}
 	if database.Description != nil {
@@ -947,6 +973,8 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 
 	maps.Copy(parameters, staged.Properties())
 	delete(parameters, tableParamPreviousMetadataLocation)
+	delete(parameters, PropsKeyDescription)
+	delete(parameters, legacyPropsKeyDescription)
 
 	if previousGlueTable != nil {
 		if previousMetadataLocation, ok := previousGlueTable.Parameters[tableParamMetadataLocation]; ok {
@@ -960,17 +988,22 @@ func constructParameters(staged *table.Table, previousGlueTable *types.Table) ma
 }
 
 func constructTableInput(tableName string, staged *table.Table, previousGlueTable *types.Table) *types.TableInput {
+	var existingColumns []types.Column
+	if previousGlueTable != nil && previousGlueTable.StorageDescriptor != nil {
+		existingColumns = previousGlueTable.StorageDescriptor.Columns
+	}
+
 	tableInput := &types.TableInput{
 		Name:       aws.String(tableName),
 		TableType:  aws.String(glueTableType),
 		Parameters: constructParameters(staged, previousGlueTable),
 		StorageDescriptor: &types.StorageDescriptor{
 			Location: aws.String(staged.Location()),
-			Columns:  schemasToGlueColumns(staged.Metadata()),
+			Columns:  schemasToGlueColumns(staged.Metadata(), existingColumns),
 		},
 	}
 
-	if comment, ok := staged.Properties()[PropsKeyDescription]; ok {
+	if comment, ok := descriptionProperty(staged.Properties()); ok {
 		tableInput.Description = aws.String(comment)
 	}
 
@@ -1005,11 +1038,14 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 		Name: aws.String(database),
 	}
 
+	if description, ok := descriptionProperty(props); ok {
+		databaseInput.Description = aws.String(description)
+	}
+
 	parameters := map[string]string{}
 	for k, v := range props {
 		switch k {
-		case PropsKeyDescription:
-			databaseInput.Description = aws.String(v)
+		case PropsKeyDescription, legacyPropsKeyDescription:
 		case PropsKeyLocation:
 			databaseInput.LocationUri = aws.String(v)
 		default:
@@ -1020,6 +1056,16 @@ func constructDatabaseInput(database string, props iceberg.Properties) *types.Da
 	databaseInput.Parameters = parameters
 
 	return databaseInput
+}
+
+func descriptionProperty(props iceberg.Properties) (string, bool) {
+	if description, ok := props[PropsKeyDescription]; ok {
+		return description, true
+	}
+
+	description, ok := props[legacyPropsKeyDescription]
+
+	return description, ok
 }
 
 // isConcurrentModificationException reports whether err is or wraps

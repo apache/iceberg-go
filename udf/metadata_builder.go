@@ -67,6 +67,9 @@ func NewDefinition(functionType FunctionType, params []Parameter, returnType Typ
 	// Keep parameters non-nil so a zero-parameter definition serializes as
 	// the required empty list rather than null.
 	parameters := slices.Clone(params)
+	for i := range parameters {
+		parameters[i].Type = cloneType(parameters[i].Type)
+	}
 	if parameters == nil {
 		parameters = []Parameter{}
 	}
@@ -74,7 +77,7 @@ func NewDefinition(functionType FunctionType, params []Parameter, returnType Typ
 	def := &Definition{
 		DefinitionID:     definitionID,
 		Parameters:       parameters,
-		ReturnType:       returnType,
+		ReturnType:       cloneType(returnType),
 		CurrentVersionID: -1,
 		FunctionType:     functionType,
 	}
@@ -127,7 +130,7 @@ func NewDefinitionVersion(representations []Representation, opts ...DefinitionVe
 	}
 
 	version := &DefinitionVersion{
-		Representations: slices.Clone(representations),
+		Representations: cloneRepresentations(representations),
 		TimestampMS:     time.Now().UnixMilli(),
 	}
 

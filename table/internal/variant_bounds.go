@@ -48,7 +48,7 @@ func isNaNLiteral(lit iceberg.Literal) bool {
 type variantLeaf struct {
 	jsonPath    string
 	typedPath   string
-	valuePaths  []string
+	ownResidual string
 	icebergType iceberg.PrimitiveType
 }
 
@@ -56,13 +56,13 @@ type variantLeaf struct {
 func enumerateVariantLeaves(variantColPath []string, tv arrow.Field) []variantLeaf {
 	var out []variantLeaf
 	rootValue := joinPath(append(cloneStrs(variantColPath), "value"))
-	walkVariantTyped(append(cloneStrs(variantColPath), "typed_value"), []string{rootValue}, nil, tv.Type, &out)
+	walkVariantTyped(append(cloneStrs(variantColPath), "typed_value"), rootValue, nil, tv.Type, &out)
 
 	return out
 }
 
-// walkVariantTyped collects primitive leaves from a shredded typed_value subtree, carrying every ancestor residual value path.
-func walkVariantTyped(typedPath []string, valuePaths []string, fields []string, dt arrow.DataType, out *[]variantLeaf) {
+// walkVariantTyped collects primitive leaves from a shredded typed_value subtree, carrying each leaf's own residual value path.
+func walkVariantTyped(typedPath []string, ownResidual string, fields []string, dt arrow.DataType, out *[]variantLeaf) {
 	switch dt.(type) {
 	case *arrow.StructType:
 		t := dt.(*arrow.StructType)
@@ -75,11 +75,11 @@ func walkVariantTyped(typedPath []string, valuePaths []string, fields []string, 
 			if !hasTyped {
 				continue
 			}
-			childValues := valuePaths
+			childResidual := ""
 			if _, hasVal := grp.FieldIdx("value"); hasVal {
-				childValues = append(cloneStrs(valuePaths), joinPath(append(cloneStrs(typedPath), f.Name, "value")))
+				childResidual = joinPath(append(cloneStrs(typedPath), f.Name, "value"))
 			}
-			walkVariantTyped(append(cloneStrs(typedPath), f.Name, "typed_value"), childValues,
+			walkVariantTyped(append(cloneStrs(typedPath), f.Name, "typed_value"), childResidual,
 				append(cloneStrs(fields), f.Name), grp.Field(tvIdx).Type, out)
 		}
 	case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType:
@@ -92,7 +92,7 @@ func walkVariantTyped(typedPath []string, valuePaths []string, fields []string, 
 		*out = append(*out, variantLeaf{
 			jsonPath:    iceberg.NormalizeVariantPath(fields),
 			typedPath:   joinPath(typedPath),
-			valuePaths:  cloneStrs(valuePaths),
+			ownResidual: ownResidual,
 			icebergType: it,
 		})
 	}

@@ -27,7 +27,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 
@@ -61,7 +61,7 @@ type defaultDataFileWriter struct {
 	fs               io.WriteFileIO
 	fileSchema       *iceberg.Schema
 	fileFormat       iceberg.FileFormat
-	format           internal.FileFormat
+	format           tblutils.FileFormat
 	props            iceberg.Properties
 	content          iceberg.ManifestEntryContent
 	meta             *MetadataBuilder
@@ -70,7 +70,7 @@ type defaultDataFileWriter struct {
 
 type dataFileWriterOption func(writer *defaultDataFileWriter)
 
-func withFormat(format internal.FileFormat) dataFileWriterOption {
+func withFormat(format tblutils.FileFormat) dataFileWriterOption {
 	return func(writer *defaultDataFileWriter) {
 		writer.format = format
 	}
@@ -111,7 +111,7 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		fs:         fs,
 		fileSchema: meta.CurrentSchema(),
 		fileFormat: fileFormat,
-		format:     internal.GetFileFormat(fileFormat),
+		format:     tblutils.GetFileFormat(fileFormat),
 		content:    iceberg.EntryContentData,
 		props:      props,
 		meta:       meta,
@@ -143,6 +143,7 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 				DowncastTimestamp: true,
 				IncludeFieldIDs:   true,
 				UseWriteDefault:   true,
+				TableProperties:   w.meta.props,
 			})
 		if err != nil {
 			return nil, err
@@ -164,12 +165,18 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 		return nil, err
 	}
 
-	return w.format.WriteDataFile(ctx, w.fs, partitionValues, internal.WriteFileInfo{
+	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(w.props)
+	if err != nil {
+		return nil, err
+	}
+
+	return w.format.WriteDataFile(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		Content:          w.content,
 		FileName:         filePath,
 		StatsCols:        statsCols,
 		WriteProps:       w.format.GetWriteProperties(w.props),
+		RowGroupBytes:    rowGroupTargetSizeBytes,
 		Spec:             *currentSpec,
 		EqualityFieldIDs: w.equalityFieldIDs,
 		SortOrderID:      task.SortOrderID,
@@ -249,7 +256,7 @@ func (w *concurrentDataFileWriter) writeFiles(ctx context.Context, rootLocation 
 		}
 	}
 
-	return internal.MapExec(ctx, config.EnvConfig.MaxWorkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
+	return tblutils.MapExec(ctx, config.EnvConfig.MaxWorkers, tasks, func(t WriteTask) (iceberg.DataFile, error) {
 		return fw.writeFile(ctx, partitionValues, t)
 	})
 }

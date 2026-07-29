@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -171,6 +172,18 @@ func (e *FooBoundExprVisitor) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Lite
 	return e.visitHistory
 }
 
+func (e *FooBoundExprVisitor) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) []string {
+	e.visitHistory = append(e.visitHistory, "BBOX_INTERSECTS")
+
+	return e.visitHistory
+}
+
+func (e *FooBoundExprVisitor) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) []string {
+	e.visitHistory = append(e.visitHistory, "BBOX_NOT_INTERSECTS")
+
+	return e.visitHistory
+}
+
 func TestBooleanExprVisitor(t *testing.T) {
 	expr := iceberg.NewAnd(
 		iceberg.NewOr(
@@ -273,6 +286,116 @@ func TestBoundBoolExprVisitor(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// noGeoBoundVisitor is a BoundBooleanExprVisitor that deliberately does NOT
+// implement BoundGeospatialExprVisitor. It models an external visitor written
+// before geo support: VisitBoundPredicate must reject a bbox predicate with an
+// ErrNotImplemented error rather than mis-dispatching it. The literal/set/unary
+// methods are stubs - a bbox expr panics before any of them is reached.
+type noGeoBoundVisitor struct {
+	ExampleVisitor
+}
+
+func (e *noGeoBoundVisitor) VisitBound(pred iceberg.BoundPredicate) []string {
+	return iceberg.VisitBoundPredicate(pred, e)
+}
+
+func (e *noGeoBoundVisitor) VisitUnbound(iceberg.UnboundPredicate) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIsNan(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotNan(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIsNull(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotNull(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitGreaterEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitGreater(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitLessEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitLess(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func geoVisitorSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false},
+	)
+}
+
+// TestVisitBoundPredicateDispatchesBBox drives a bound bbox predicate through the
+// type-assert-and-dispatch path in VisitBoundPredicate: a visitor implementing
+// BoundGeospatialExprVisitor must have VisitBBoxIntersects invoked. This guards
+// the extension wiring - a refactor breaking the BoundGeospatialExprVisitor[T]
+// assertion would be caught here.
+func TestVisitBoundPredicateDispatchesBBox(t *testing.T) {
+	bound, err := iceberg.BBoxIntersects(iceberg.Reference("geom"),
+		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(geoVisitorSchema(), true)
+	require.NoError(t, err)
+
+	visitor := FooBoundExprVisitor{ExampleVisitor: ExampleVisitor{visitHistory: []string{}}}
+	result, err := iceberg.VisitExpr(bound, &visitor)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"BBOX_INTERSECTS"}, result)
+}
+
+// TestVisitBoundPredicateBBoxWithoutGeoVisitor pins the load-bearing error path an
+// external caller hits: a BoundBooleanExprVisitor that does not implement
+// BoundGeospatialExprVisitor, handed a bbox predicate, surfaces an error wrapping
+// ErrNotImplemented (the panic recovered by VisitExpr) rather than mis-dispatching.
+func TestVisitBoundPredicateBBoxWithoutGeoVisitor(t *testing.T) {
+	bound, err := iceberg.BBoxIntersects(iceberg.Reference("geom"),
+		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(geoVisitorSchema(), true)
+	require.NoError(t, err)
+
+	visitor := noGeoBoundVisitor{ExampleVisitor: ExampleVisitor{visitHistory: []string{}}}
+	_, err = iceberg.VisitExpr(bound, &visitor)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
 
 type rowTester []any
@@ -651,5 +774,64 @@ func TestRewriteNot(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, out.Equals(tt.expected))
 		})
+	}
+}
+
+func TestSanitizeExpression(t *testing.T) {
+	// A literal predicate must keep its column and operation but never leak the
+	// literal a user scanned with.
+	eq := iceberg.EqualTo(iceberg.Reference("email"), "alice@example.com")
+	sanitized, err := iceberg.SanitizeExpression(eq)
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "alice@example.com", "literal must not leak")
+	assert.Contains(t, string(raw), "email", "column reference is preserved")
+	assert.Contains(t, string(raw), "(redacted)")
+
+	// IN keeps its arity (does not collapse to eq) while masking every member.
+	in := iceberg.IsIn(iceberg.Reference("id"), int32(1), int32(2), int32(3))
+	sanitized, err = iceberg.SanitizeExpression(in)
+	require.NoError(t, err)
+
+	raw, err = json.Marshal(in)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "\"in\"", "precondition: original is an in predicate")
+
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "\"in\"", "in predicate must not collapse to eq")
+	for _, v := range []string{"1", "2", "3"} {
+		assert.NotContains(t, string(raw), "\""+v+"\"", "in literal must not leak")
+	}
+
+	// NOT IN rides the same set-predicate branch as IN: it must keep its op and
+	// arity while masking every member.
+	notIn := iceberg.NotIn(iceberg.Reference("id"), int32(4), int32(5))
+	sanitized, err = iceberg.SanitizeExpression(notIn)
+	require.NoError(t, err)
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "not-in", "not-in predicate must not collapse or change op")
+	for _, v := range []string{"4", "5"} {
+		assert.NotContains(t, string(raw), "\""+v+"\"", "not-in literal must not leak")
+	}
+
+	// Unary predicates carry no literal and pass through unchanged; structure is
+	// preserved across and/or/not.
+	expr := iceberg.NewAnd(iceberg.IsNull(iceberg.Reference("name")), eq)
+	sanitized, err = iceberg.SanitizeExpression(expr)
+	require.NoError(t, err)
+	raw, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "is-null")
+	assert.NotContains(t, string(raw), "alice@example.com")
+
+	// Constant expressions are returned as-is.
+	for _, c := range []iceberg.BooleanExpression{iceberg.AlwaysTrue{}, iceberg.AlwaysFalse{}} {
+		got, err := iceberg.SanitizeExpression(c)
+		require.NoError(t, err)
+		assert.True(t, got.Equals(c))
 	}
 }

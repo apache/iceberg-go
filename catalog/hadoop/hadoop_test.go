@@ -1062,15 +1062,32 @@ func (s *HadoopCatalogTestSuite) TestListNamespacesEmpty() {
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesNested() {
-	parentDir := filepath.Join(s.warehouse, "a")
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child1"), 0o755))
-	s.Require().NoError(os.MkdirAll(filepath.Join(parentDir, "child2"), 0o755))
+	ctx := context.Background()
+	parent := table.Identifier{"a"}
+	expected := []table.Identifier{{"a", "child1"}, {"a", "child2"}}
+	grandchild := table.Identifier{"a", "child1", "grandchild"}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, parent, nil))
+	for _, namespace := range expected {
+		s.Require().NoError(s.cat.CreateNamespace(ctx, namespace, nil))
+	}
+	s.Require().NoError(s.cat.CreateNamespace(ctx, grandchild, nil))
 
-	namespaces, err := s.cat.ListNamespaces(context.Background(), []string{"a"})
+	namespaces, err := s.cat.ListNamespaces(ctx, parent)
 	s.Require().NoError(err)
-	s.Len(namespaces, 2)
-	s.Contains(namespaces, table.Identifier{"child1"})
-	s.Contains(namespaces, table.Identifier{"child2"})
+	s.ElementsMatch(expected, namespaces)
+	for _, namespace := range namespaces {
+		exists, err := s.cat.CheckNamespaceExists(ctx, namespace)
+		s.Require().NoError(err)
+		s.True(exists)
+	}
+
+	namespaces, err = s.cat.ListNamespaces(ctx, expected[0])
+	s.Require().NoError(err)
+	s.Require().Equal([]table.Identifier{grandchild}, namespaces)
+
+	exists, err := s.cat.CheckNamespaceExists(ctx, namespaces[0])
+	s.Require().NoError(err)
+	s.True(exists)
 }
 
 func (s *HadoopCatalogTestSuite) TestListNamespacesParentNotExists() {
@@ -1442,10 +1459,11 @@ func (s *HadoopCatalogTestSuite) TestListTablesDoesNotYieldTablesInChildNamespac
 
 func (s *HadoopCatalogTestSuite) TestDropTable() {
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
-	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	err = s.cat.DropTable(ctx, []string{"ns", "tbl"})
 	s.Require().NoError(err)
 
 	// Verify the table directory is completely removed.
@@ -1460,19 +1478,33 @@ func (s *HadoopCatalogTestSuite) TestDropTableNotExists() {
 
 func (s *HadoopCatalogTestSuite) TestDropTableVerifyCleanup() {
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
 	// Add a data file to confirm everything is purged.
 	dataDir := filepath.Join(s.warehouse, "ns", "tbl", "data")
 	s.Require().NoError(os.MkdirAll(dataDir, 0o755))
 	s.Require().NoError(os.WriteFile(filepath.Join(dataDir, "00000-0-0-00000.parquet"), []byte("data"), 0o644))
 
-	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	err = s.cat.DropTable(ctx, []string{"ns", "tbl"})
 	s.Require().NoError(err)
 
 	_, statErr := os.Stat(filepath.Join(s.warehouse, "ns", "tbl"))
 	s.True(os.IsNotExist(statErr))
+}
+
+func (s *HadoopCatalogTestSuite) TestDropTablePreservesDirectoryIfMetadataIsInvalid() {
+	ctx := context.Background()
+	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
+	s.createFakeTable([]string{"ns", "tbl"})
+
+	markerPath := filepath.Join(s.warehouse, "ns", "tbl", "marker")
+	s.Require().NoError(os.WriteFile(markerPath, []byte("keep"), 0o644))
+
+	err := s.cat.DropTable(ctx, []string{"ns", "tbl"})
+	s.Require().Error(err)
+	s.FileExists(markerPath)
 }
 
 func (s *HadoopCatalogTestSuite) TestDropTableShortIdentifier() {
@@ -2063,8 +2095,9 @@ func (s *HadoopCatalogTestSuite) TestTableOperationsRejectParentTraversalIdentif
 func (s *HadoopCatalogTestSuite) TestDropTableNamespacePreserved() {
 	// Dropping a table should not affect the parent namespace directory.
 	ctx := context.Background()
-	s.Require().NoError(os.Mkdir(filepath.Join(s.warehouse, "ns"), 0o755))
-	s.createFakeTable([]string{"ns", "tbl"})
+	s.Require().NoError(s.cat.CreateNamespace(ctx, []string{"ns"}, nil))
+	_, err := s.cat.CreateTable(ctx, []string{"ns", "tbl"}, s.testSchema())
+	s.Require().NoError(err)
 
 	s.Require().NoError(s.cat.DropTable(ctx, []string{"ns", "tbl"}))
 

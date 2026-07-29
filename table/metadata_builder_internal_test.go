@@ -23,6 +23,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -479,6 +480,21 @@ func TestSetRef(t *testing.T) {
 	require.Equal(t, snap.SnapshotID, int64(1))
 	require.True(t, snap.Equals(snapshot), "expected snapshot to match added snapshot")
 	require.Len(t, builder.snapshotLog, 1)
+}
+
+func TestSetRefRejectsInvalidTypeAndTagRetention(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	err := builder.SetSnapshotRef("invalid", 1, RefType("invalid"))
+	require.ErrorIs(t, err, ErrInvalidRefType)
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMinSnapshotsToKeep(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting min snapshots to keep")
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMaxSnapshotAgeMs(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting max snapshot age")
 }
 
 func TestAddPartitionSpecForV1RequiresSequentialIDs(t *testing.T) {
@@ -2057,22 +2073,6 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.ErrorContains(t, err, "must be optional")
 	})
 
-	t.Run("ReservedFieldIDRowID", func(t *testing.T) {
-		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
-		)
-		err := checkSchemaCompatibility(schema, 3)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "reserved metadata column ID")
-	})
-	t.Run("ReservedFieldIDLastUpdatedSeqNum", func(t *testing.T) {
-		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: iceberg.LastUpdatedSequenceNumberFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
-		)
-		err := checkSchemaCompatibility(schema, 3)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "reserved metadata column ID")
-	})
 	t.Run("InvalidUnknownMapValue", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true}, Required: false},
@@ -2080,6 +2080,147 @@ func TestUnknownTypeValidation(t *testing.T) {
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is used as map value")
 		require.ErrorContains(t, err, "must be optional")
+	})
+}
+
+// reservedNonLineageFieldID is a spec-reserved metadata column ID (_file) that
+// is not one of the row-lineage columns, exercising the full reserved range
+// rather than just iceberg.IsMetadataColumn.
+const reservedNonLineageFieldID = 2147483646
+
+func TestValidateNoReservedFieldIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		schema     *iceberg.Schema
+		wantColumn string // schema path the error must name
+		wantID     int
+	}{
+		{
+			name: "top-level row-lineage id with non-canonical name",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "user_id", Type: iceberg.PrimitiveTypes.Int64},
+			),
+			wantColumn: "user_id",
+			wantID:     iceberg.RowIDFieldID,
+		},
+		{
+			name: "top-level non-lineage reserved id",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: reservedNonLineageFieldID, Name: "bad", Type: iceberg.PrimitiveTypes.Int64},
+			),
+			wantColumn: "bad",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id inside struct child",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "outer", Required: true, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: reservedNonLineageFieldID, Name: "inner", Type: iceberg.PrimitiveTypes.Int64},
+					},
+				}},
+			),
+			wantColumn: "outer.inner",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on list element",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "arr", Required: true, Type: &iceberg.ListType{
+					ElementID: reservedNonLineageFieldID, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
+				}},
+			),
+			wantColumn: "arr.element",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on map key",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
+					KeyID: reservedNonLineageFieldID, KeyType: iceberg.PrimitiveTypes.String,
+					ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
+				}},
+			),
+			wantColumn: "m.key",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on map value",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
+					KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+					ValueID: reservedNonLineageFieldID, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
+				}},
+			),
+			wantColumn: "m.value",
+			wantID:     reservedNonLineageFieldID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNoReservedFieldIDs(tt.schema)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "reserved metadata column ID")
+			assert.Contains(t, err.Error(), tt.wantColumn, "error must report the schema path")
+			assert.Contains(t, err.Error(), strconv.Itoa(tt.wantID))
+		})
+	}
+
+	t.Run("boundary MaxStructFieldID is allowed", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.MaxStructFieldID, Name: "ok", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		require.NoError(t, validateNoReservedFieldIDs(schema))
+	})
+}
+
+// TestNewMetadataRejectsReservedFieldIDsBeforeReassignment guards the #1107
+// regression: reassignIDs would silently remap a user-supplied reserved ID to a
+// fresh value, so NewMetadata must reject it up front instead.
+func TestNewMetadataRejectsReservedFieldIDsBeforeReassignment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field iceberg.NestedField
+	}{
+		{"row_id", iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "user_id", Type: iceberg.PrimitiveTypes.Int64}},
+		{"last_updated_seq", iceberg.NestedField{ID: iceberg.LastUpdatedSequenceNumberFieldID, Name: "seq", Type: iceberg.PrimitiveTypes.Int64}},
+		{"non_lineage_reserved", iceberg.NestedField{ID: reservedNonLineageFieldID, Name: "f", Type: iceberg.PrimitiveTypes.Int64}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				tc.field,
+			)
+
+			_, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+				"s3://bucket/table", iceberg.Properties{"format-version": "3"})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "reserved metadata column ID")
+		})
+	}
+}
+
+// TestCheckSchemaCompatibilityReservedIDs locks in the deliberate asymmetry of
+// the AddSchema gate: it rejects row-lineage metadata columns, but must permit
+// the position-delete reserved IDs (file_path/pos), which internal writers add
+// via AddSchema. Broadening it to the full reserved range breaks those writers.
+func TestCheckSchemaCompatibilityReservedIDs(t *testing.T) {
+	t.Run("rejects row-lineage column", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "bad", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "reserved metadata column ID")
+	})
+
+	t.Run("permits position-delete reserved IDs", func(t *testing.T) {
+		schema := iceberg.NewSchema(0, iceberg.PositionalDeleteSchema.Fields()...)
+		require.NoError(t, checkSchemaCompatibility(schema, 2))
 	})
 }
 

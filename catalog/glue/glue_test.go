@@ -280,6 +280,110 @@ func TestGlueConstructParametersPreservesReservedParameters(t *testing.T) {
 	assert.Equal("value", params["custom"])
 }
 
+func TestGlueConstructDescriptionCompatibility(t *testing.T) {
+	tests := []struct {
+		name     string
+		props    iceberg.Properties
+		expected string
+	}{
+		{
+			name:     "canonical comment",
+			props:    iceberg.Properties{PropsKeyDescription: "canonical"},
+			expected: "canonical",
+		},
+		{
+			name:     "legacy description",
+			props:    iceberg.Properties{legacyPropsKeyDescription: "legacy"},
+			expected: "legacy",
+		},
+		{
+			name: "canonical comment wins",
+			props: iceberg.Properties{
+				PropsKeyDescription:       "canonical",
+				legacyPropsKeyDescription: "legacy",
+			},
+			expected: "canonical",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			databaseInput := constructDatabaseInput("test_namespace", tt.props)
+			require.Equal(t, tt.expected, aws.ToString(databaseInput.Description))
+			require.NotContains(t, databaseInput.Parameters, PropsKeyDescription)
+			require.NotContains(t, databaseInput.Parameters, legacyPropsKeyDescription)
+
+			metadata, err := table.NewMetadata(
+				testSchema,
+				iceberg.UnpartitionedSpec,
+				table.UnsortedSortOrder,
+				"s3://test-bucket/test_table",
+				tt.props,
+			)
+			require.NoError(t, err)
+			staged := table.New(
+				TableIdentifier("test_database", "test_table"),
+				metadata,
+				"s3://test-bucket/test_table/metadata/v1.metadata.json",
+				nil,
+				nil,
+			)
+
+			tableInput := constructTableInput("test_table", staged, nil)
+			require.Equal(t, tt.expected, aws.ToString(tableInput.Description))
+			require.NotContains(t, tableInput.Parameters, PropsKeyDescription)
+			require.NotContains(t, tableInput.Parameters, legacyPropsKeyDescription)
+		})
+	}
+}
+
+func TestGlueConstructTableInputPreservesExistingColumnComments(t *testing.T) {
+	metadata, err := table.NewMetadata(
+		testSchema,
+		nil,
+		table.UnsortedSortOrder,
+		"s3://test-bucket/test_table",
+		nil,
+	)
+	require.NoError(t, err)
+	staged := table.New(
+		TableIdentifier("test_database", "test_table"),
+		metadata,
+		"s3://test-bucket/test_table/metadata/v2.metadata.json",
+		nil,
+		nil,
+	)
+	previous := &types.Table{
+		StorageDescriptor: &types.StorageDescriptor{
+			Columns: []types.Column{
+				{
+					Name:       aws.String("foo"),
+					Comment:    aws.String("existing comment"),
+					Parameters: map[string]string{icebergFieldIDKey: "1"},
+				},
+			},
+		},
+	}
+
+	input := constructTableInput("test_table", staged, previous)
+	columns := make(map[string]types.Column, len(input.StorageDescriptor.Columns))
+	for _, column := range input.StorageDescriptor.Columns {
+		columns[aws.ToString(column.Name)] = column
+	}
+
+	require.Equal(t, "existing comment", aws.ToString(columns["foo"].Comment))
+	require.Nil(t, columns["bar"].Comment)
+	require.Nil(t, columns["baz"].Comment)
+
+	withoutStorageDescriptor := &types.Table{}
+	for _, previous := range []*types.Table{nil, withoutStorageDescriptor} {
+		input := constructTableInput("test_table", staged, previous)
+		for _, column := range input.StorageDescriptor.Columns {
+			require.Nil(t, column.Comment)
+		}
+	}
+}
+
 func TestGlueGetTableCaseInsensitive(t *testing.T) {
 	assert := require.New(t)
 
@@ -883,21 +987,74 @@ func TestGlueCreateNamespace(t *testing.T) {
 	}
 
 	props := map[string]string{
-		PropsKeyDescription: "Test Description",
-		PropsKeyLocation:    "s3://test-location",
+		"comment":        "Test Description",
+		PropsKeyLocation: "s3://test-location",
 	}
 
 	err := glueCatalog.CreateNamespace(context.TODO(), DatabaseIdentifier("test_namespace"), props)
 	assert.NoError(err)
 }
 
-func TestGlueDropNamespace(t *testing.T) {
-	assert := require.New(t)
+func TestGlueLoadNamespacePropertiesNormalizesDescription(t *testing.T) {
+	tests := []struct {
+		name        string
+		parameters  map[string]string
+		description *string
+		expected    iceberg.Properties
+	}{
+		{
+			name:       "legacy parameter",
+			parameters: map[string]string{legacyPropsKeyDescription: "legacy", "key": "value"},
+			expected:   iceberg.Properties{PropsKeyDescription: "legacy", "key": "value"},
+		},
+		{
+			name:       "canonical parameter",
+			parameters: map[string]string{PropsKeyDescription: "canonical", "key": "value"},
+			expected:   iceberg.Properties{PropsKeyDescription: "canonical", "key": "value"},
+		},
+		{
+			name: "native description wins",
+			parameters: map[string]string{
+				legacyPropsKeyDescription: "legacy",
+				PropsKeyDescription:       "parameter",
+				"key":                     "value",
+			},
+			description: aws.String("native"),
+			expected:    iceberg.Properties{PropsKeyDescription: "native", "key": "value"},
+		},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockGlueSvc := &mockGlueClient{}
+			mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+				Name: aws.String("test_namespace"),
+			}, mock.Anything).Return(&glue.GetDatabaseOutput{
+				Database: &types.Database{
+					Name:        aws.String("test_namespace"),
+					Parameters:  tt.parameters,
+					Description: tt.description,
+				},
+			}, nil).Once()
+
+			glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+			props, err := glueCatalog.LoadNamespaceProperties(
+				context.Background(), DatabaseIdentifier("test_namespace"))
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, props)
+			mockGlueSvc.AssertExpectations(t)
+		})
+	}
+}
+
+func TestGlueDropNamespace(t *testing.T) {
 	mockGlueSvc := &mockGlueClient{}
+	catalogID := aws.String("test_catalog")
 
 	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
-		Name: aws.String("test_namespace"),
+		CatalogId: catalogID,
+		Name:      aws.String("test_namespace"),
 	}, mock.Anything).Return(&glue.GetDatabaseOutput{
 		Database: &types.Database{
 			Name: aws.String("test_namespace"),
@@ -907,16 +1064,88 @@ func TestGlueDropNamespace(t *testing.T) {
 		},
 	}, nil).Once()
 
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		CatalogId:    catalogID,
+		DatabaseName: aws.String("test_namespace"),
+		MaxResults:   aws.Int32(1),
+	}, mock.Anything).Return(&glue.GetTablesOutput{}, nil).Once()
+
 	mockGlueSvc.On("DeleteDatabase", mock.Anything, &glue.DeleteDatabaseInput{
-		Name: aws.String("test_namespace"),
+		CatalogId: catalogID,
+		Name:      aws.String("test_namespace"),
 	}, mock.Anything).Return(&glue.DeleteDatabaseOutput{}, nil).Once()
 
 	glueCatalog := &Catalog{
-		glueSvc: mockGlueSvc,
+		glueSvc:   mockGlueSvc,
+		catalogId: catalogID,
 	}
 
 	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
-	assert.NoError(err)
+	require.NoError(t, err)
+	mockGlueSvc.AssertExpectations(t)
+}
+
+func TestGlueDropNamespaceNotEmpty(t *testing.T) {
+	tests := []struct {
+		name            string
+		tableType       string
+		expectedMessage string
+	}{
+		{name: "iceberg table", tableType: glueTypeIceberg, expectedMessage: "still contains Iceberg tables"},
+		{name: "non-Iceberg table", tableType: glueTableType, expectedMessage: "still contains non-Iceberg tables"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockGlueSvc := &mockGlueClient{}
+
+			mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+				Name: aws.String("test_namespace"),
+			}, mock.Anything).Return(&glue.GetDatabaseOutput{
+				Database: &types.Database{Name: aws.String("test_namespace")},
+			}, nil).Once()
+			mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+				DatabaseName: aws.String("test_namespace"),
+				MaxResults:   aws.Int32(1),
+			}, mock.Anything).Return(&glue.GetTablesOutput{
+				TableList: []types.Table{{
+					Name:       aws.String("test_table"),
+					Parameters: map[string]string{tableParamTableType: tt.tableType},
+				}},
+			}, nil).Once()
+
+			glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+			err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
+
+			require.ErrorIs(t, err, catalog.ErrNamespaceNotEmpty)
+			require.ErrorContains(t, err, tt.expectedMessage)
+			mockGlueSvc.AssertNotCalled(t, "DeleteDatabase", mock.Anything, mock.Anything, mock.Anything)
+			mockGlueSvc.AssertExpectations(t)
+		})
+	}
+}
+
+func TestGlueDropNamespaceGetTablesError(t *testing.T) {
+	mockGlueSvc := &mockGlueClient{}
+	errGetTables := errors.New("get tables failed")
+
+	mockGlueSvc.On("GetDatabase", mock.Anything, &glue.GetDatabaseInput{
+		Name: aws.String("test_namespace"),
+	}, mock.Anything).Return(&glue.GetDatabaseOutput{
+		Database: &types.Database{Name: aws.String("test_namespace")},
+	}, nil).Once()
+	mockGlueSvc.On("GetTables", mock.Anything, &glue.GetTablesInput{
+		DatabaseName: aws.String("test_namespace"),
+		MaxResults:   aws.Int32(1),
+	}, mock.Anything).Return(&glue.GetTablesOutput{}, errGetTables).Once()
+
+	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
+	err := glueCatalog.DropNamespace(context.TODO(), DatabaseIdentifier("test_namespace"))
+
+	require.ErrorIs(t, err, errGetTables)
+	require.ErrorContains(t, err, "failed to list tables in namespace test_namespace")
+	mockGlueSvc.AssertNotCalled(t, "DeleteDatabase", mock.Anything, mock.Anything, mock.Anything)
+	mockGlueSvc.AssertExpectations(t)
 }
 
 func TestGlueCheckNamespaceExists(t *testing.T) {
