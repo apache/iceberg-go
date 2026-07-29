@@ -933,9 +933,11 @@ type BoundBBoxPredicate interface {
 
 // BoundBBoxPredicate is exported so callers can inspect bbox-specific state
 // without exposing the private concrete implementation.
-var _ BoundBBoxPredicate = (*boundBBoxPredicate)(nil)
-var _ BooleanExpression = (*boundBBoxPredicate)(nil)
-var _ UnboundPredicate = (*unboundBBoxPredicate)(nil)
+var (
+	_ BoundBBoxPredicate = (*boundBBoxPredicate)(nil)
+	_ BooleanExpression  = (*boundBBoxPredicate)(nil)
+	_ UnboundPredicate   = (*unboundBBoxPredicate)(nil)
+)
 
 type boundBBoxPredicate struct {
 	term bound[[]byte]
