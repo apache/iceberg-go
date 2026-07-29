@@ -208,8 +208,9 @@ func yieldDataFiles(
 		defer close(outputDataFilesCh)
 		defer cancel()
 		err := fanoutWorkers.Wait()
-		// Wait includes the feeder, which closes inputRecordsCh. Any batches
-		// remaining here were retained by the feeder but never dequeued.
+		// Wait includes the feeder, which closes inputRecordsCh, so draining cannot
+		// block. Any remaining batches were retained by the feeder but never dequeued;
+		// workers release dequeued batches themselves.
 		for record := range inputRecordsCh {
 			record.Release()
 		}
@@ -223,8 +224,10 @@ func yieldDataFiles(
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
-		// LIFO defer order matters: cancel signals the producer first,
-		// then draining outputDataFilesCh lets in-flight sends complete.
+		// LIFO defer order matters: cancel signals the producer first
+		// (synchronous, instant), then the drain pulls outputDataFilesCh so
+		// any in-flight stream send can complete and the producer's
+		// closeAll / fanoutWorkers.Wait paths unblock.
 		defer func() {
 			for range outputDataFilesCh {
 			}

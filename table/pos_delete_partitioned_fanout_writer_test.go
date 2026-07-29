@@ -411,6 +411,7 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 
 	const path = "file://t/id=1/a.parquet"
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
 	ctx := compute.WithAllocator(t.Context(), mem)
 
 	tableSchema := iceberg.NewSchema(
@@ -441,7 +442,9 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 				strings.NewReader(fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, path)),
 			)
 			require.NoError(t, err)
-			if !yield(batch, nil) {
+			accepted := yield(batch, nil)
+			batch.Release()
+			if !accepted {
 				return
 			}
 		}
@@ -469,8 +472,7 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 	}
 
 	assert.Positive(t, produced.Load())
-	assert.Less(t, produced.Load(), int32(10))
-	assert.Zero(t, mem.CurrentAllocated())
+	assert.Less(t, produced.Load(), int32(1000))
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {

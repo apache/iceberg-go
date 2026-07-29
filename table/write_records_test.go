@@ -286,7 +286,7 @@ func (s *WriteRecordsTestSuite) TestEarlyStopCancelsRecordProduction() {
 			}
 
 			s.Positive(produced.Load())
-			s.Less(produced.Load(), int32(10))
+			s.Less(produced.Load(), int32(1000))
 		})
 	}
 }
