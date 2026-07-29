@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -766,6 +767,10 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
+	// closeSession releases transports owned by the catalog. Caller-provided
+	// transports are excluded when the session is constructed.
+	closeSession     func()
+	closeSessionOnce sync.Once
 
 	name string
 	// Retained catalog properties are reused for table/view IO and may carry
@@ -914,7 +919,7 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		return err
 	}
 
-	r.cl, _, err = r.createSession(ctx, ops)
+	r.cl, r.closeSession, err = r.createSession(ctx, ops)
 	if err != nil {
 		return err
 	}
@@ -1066,11 +1071,18 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
-// Close releases the catalog's metrics reporter. The REST catalog does not own
-// the lifetime of the HTTP client it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via a
-// [catalog.Closer] type assertion.
-func (r *Catalog) Close() error { return r.reporter.Close() }
+// Close releases transports created by the catalog and its metrics reporter.
+// Caller-provided transports remain caller-owned. Callers holding a
+// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+func (r *Catalog) Close() error {
+	r.closeSessionOnce.Do(func() {
+		if r.closeSession != nil {
+			r.closeSession()
+		}
+	})
+
+	return r.reporter.Close()
+}
 
 var _ catalog.Closer = (*Catalog)(nil)
 

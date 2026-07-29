@@ -1696,6 +1696,15 @@ func (t *closeTrackingTransport) CloseIdleConnections() {
 	t.closed.Store(true)
 }
 
+func TestCatalogCloseReleasesOwnedSessionOnce(t *testing.T) {
+	var calls atomic.Int32
+	cat := &Catalog{closeSession: func() { calls.Add(1) }}
+
+	require.NoError(t, cat.Close())
+	require.NoError(t, cat.Close())
+	assert.Equal(t, int32(1), calls.Load())
+}
+
 func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
