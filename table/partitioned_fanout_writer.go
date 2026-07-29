@@ -180,7 +180,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx c
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, cancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
 	return yieldDataFiles(
 		p.writerFactory,
 		fanoutWorkers,
@@ -188,7 +188,7 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 		outputDataFilesCh,
 		p.writerFactory.closeAll,
 		p.writerFactory.abortAll,
-		writerCancel,
+		cancel,
 	)
 }
 
