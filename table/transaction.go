@@ -2372,8 +2372,6 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, errors.New("transaction has already been committed")
 	}
 
-	t.committed = true
-
 	if len(meta.updates) > 0 {
 		t.reqs = append(t.reqs, AssertTableUUID(meta.uuid))
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, t.reqs,
@@ -2384,6 +2382,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			return tbl, err
 		}
 
+		t.committed = true
+
 		for _, u := range meta.updates {
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
 				err = errors.Join(err, perr)
@@ -2392,6 +2392,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 		return tbl, err
 	}
+
+	t.committed = true
 
 	return t.tbl, nil
 }

@@ -944,3 +944,32 @@ func TestDoCommit_RetryProgressesFreshMeta(t *testing.T) {
 	require.NotContains(t, wfs.files, cat.observedManifestLists[1],
 		"attempt-1 rebuild manifest list must be cleaned as orphan after success")
 }
+
+func TestTransactionCommit_MarksCommittedOnlyOnSuccess(t *testing.T) {
+	// first CommitTable : fails (non-ErrCommitFailed, so doCommit returns immediately), the second succeeds
+	cat := &sequentialCatalog{
+		errs: []error{errors.New("catalog unavailable")},
+	}
+	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	_, err := tx.Commit(t.Context())
+	require.Error(t, err, "first commit must surface the catalog failure")
+	assert.False(t, tx.committed, "failed commit must leave committed == false")
+
+	// transaction stays usable: further changes and a retry are both allowed
+	require.NoError(t, tx.SetProperties(map[string]string{"key2": "value2"}),
+		"apply must be allowed after a failed commit")
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err, "commit retry must be allowed after a transient failure")
+	require.NotNil(t, committed)
+	assert.True(t, tx.committed, "committed must be set only after a successful commit")
+
+	_, err = tx.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already been committed")
+}
