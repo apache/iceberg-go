@@ -180,7 +180,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx c
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, cancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh <-chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, cancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
 	return yieldDataFiles(
 		p.writerFactory,
 		fanoutWorkers,
@@ -195,7 +195,7 @@ func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, 
 func yieldDataFiles(
 	writerFactory *writerFactory,
 	fanoutWorkers *errgroup.Group,
-	inputRecordsCh chan arrow.RecordBatch,
+	inputRecordsCh <-chan arrow.RecordBatch,
 	outputDataFilesCh chan iceberg.DataFile,
 	closeAll func() error,
 	abortAll func(),
@@ -208,6 +208,8 @@ func yieldDataFiles(
 		defer close(outputDataFilesCh)
 		defer cancel()
 		err := fanoutWorkers.Wait()
+		// Wait includes the feeder, which closes inputRecordsCh. Any batches
+		// remaining here were retained by the feeder but never dequeued.
 		for record := range inputRecordsCh {
 			record.Release()
 		}
@@ -221,6 +223,8 @@ func yieldDataFiles(
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
+		// LIFO defer order matters: cancel signals the producer first,
+		// then draining outputDataFilesCh lets in-flight sends complete.
 		defer func() {
 			for range outputDataFilesCh {
 			}

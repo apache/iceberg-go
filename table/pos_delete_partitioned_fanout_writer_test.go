@@ -30,6 +30,9 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
@@ -404,7 +407,11 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 }
 
 func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t *testing.T) {
+	t.Parallel()
+
 	const path = "file://t/id=1/a.parquet"
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
 
 	tableSchema := iceberg.NewSchema(
 		0,
@@ -428,10 +435,12 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 	records := func(yield func(arrow.RecordBatch, error) bool) {
 		for range 1000 {
 			produced.Add(1)
-			batch := mustLoadRecordBatchFromJSON(
+			batch, _, err := array.RecordFromJSON(
+				mem,
 				PositionalDeleteArrowSchema,
-				fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, path),
+				strings.NewReader(fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, path)),
 			)
+			require.NoError(t, err)
 			if !yield(batch, nil) {
 				return
 			}
@@ -452,7 +461,7 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 		factory,
 	)
 
-	for dataFile, writeErr := range writer.Write(t.Context(), 1) {
+	for dataFile, writeErr := range writer.Write(ctx, 1) {
 		require.NoError(t, writeErr)
 		require.NotNil(t, dataFile)
 
@@ -460,7 +469,8 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 	}
 
 	assert.Positive(t, produced.Load())
-	assert.Less(t, produced.Load(), int32(1000))
+	assert.Less(t, produced.Load(), int32(10))
+	assert.Zero(t, mem.CurrentAllocated())
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {

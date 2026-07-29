@@ -1881,15 +1881,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 
 				return
 			}
-			select {
-			case <-writerCtx.Done():
-				errCh <- context.Cause(writerCtx)
-				close(errCh)
-				writer.abortAndWait()
 
-				return
-			default:
-			}
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
