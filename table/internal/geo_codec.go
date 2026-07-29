@@ -315,6 +315,42 @@ func decodeGeoBound(data []byte) (vals [geoNumDims]float64, layout geom.Layout, 
 	return vals, layout, true
 }
 
+// GeoBoundsXY decodes a geometry column's lower and upper geo bounds (Iceberg
+// single-value serialization; see encodeGeoBound) into their planar XY extents.
+// ok is false when either bound is missing, malformed, or carries a NaN X/Y
+// coordinate - all cases where the bound is unusable for pruning.
+func GeoBoundsXY(lower, upper []byte) (minX, minY, maxX, maxY float64, ok bool) {
+	lo, _, okLo := decodeGeoBound(lower)
+	hi, _, okHi := decodeGeoBound(upper)
+	if !okLo || !okHi {
+		return 0, 0, 0, 0, false
+	}
+	if math.IsNaN(lo[geoDimX]) || math.IsNaN(lo[geoDimY]) ||
+		math.IsNaN(hi[geoDimX]) || math.IsNaN(hi[geoDimY]) {
+		return 0, 0, 0, 0, false
+	}
+	// Reject inverted bounds (lower > upper). iceberg-go's own accumulator never
+	// emits them, but this is a trust-on-read decode path: a bound written by
+	// another engine with lo > hi would make BBoxIntersectsXY always report
+	// no-overlap and prune a file that should be kept. Treating it as unusable
+	// leaves the file unprunable, which is always safe.
+	if lo[geoDimX] > hi[geoDimX] || lo[geoDimY] > hi[geoDimY] {
+		return 0, 0, 0, 0, false
+	}
+
+	return lo[geoDimX], lo[geoDimY], hi[geoDimX], hi[geoDimY], true
+}
+
+// BBoxIntersectsXY reports whether two planar (XY) bounding boxes intersect.
+// Boxes touching only at an edge or corner count as intersecting (closed
+// intervals), matching Iceberg's inclusive bbox pruning: a box that might
+// contain a matching value must not be pruned. This is the geometry (planar)
+// rule; geography columns emit no bounds (see Bounds), so the antimeridian
+// wrap-around case never reaches pruning.
+func BBoxIntersectsXY(aMinX, aMinY, aMaxX, aMaxY, bMinX, bMinY, bMaxX, bMaxY float64) bool {
+	return aMinX <= bMaxX && aMaxX >= bMinX && aMinY <= bMaxY && aMaxY >= bMinY
+}
+
 // layoutHasZM reports which optional dimensions a bound layout carries.
 func layoutHasZM(l geom.Layout) (hasZ, hasM bool) {
 	switch l {
