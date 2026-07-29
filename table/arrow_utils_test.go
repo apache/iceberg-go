@@ -2555,3 +2555,200 @@ func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
 	}, nil)
 	require.True(t, targetSchema.Equal(rec2.Schema()), "Schema is not perfectly equal")
 }
+
+// Some writers tag a non-PROJJSON CRS as an SRID, while the Iceberg schema
+// resolves the same CRS as an authority code. Both describe the same WKB
+// payload, so projection must not attempt a value cast.
+func sridWKBType(t *testing.T, storage arrow.DataType, crs string, edges geoarrow.EdgeInterpolation) arrow.ExtensionType {
+	t.Helper()
+
+	meta := geoarrow.Metadata{
+		CRS:     jsonCRS(crs),
+		CRSType: geoarrow.CRSTypeSRID,
+		Edges:   edges,
+	}
+
+	switch storage.ID() {
+	case arrow.BINARY:
+		return geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(meta))
+	case arrow.LARGE_BINARY:
+		return geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))
+	default:
+		t.Fatalf("unsupported WKB storage type %s", storage)
+
+		return nil
+	}
+}
+
+func newExtensionArrayOverBinary(t *testing.T, mem memory.Allocator, dt arrow.ExtensionType, values [][]byte) arrow.Array {
+	t.Helper()
+
+	bldr := array.NewBinaryBuilder(mem, dt.StorageType().(arrow.BinaryDataType))
+	defer bldr.Release()
+
+	for _, v := range values {
+		if v == nil {
+			bldr.AppendNull()
+
+			continue
+		}
+		bldr.Append(v)
+	}
+
+	storage := bldr.NewArray()
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(dt, storage)
+}
+
+func binaryValueAt(t *testing.T, arr arrow.Array, i int) []byte {
+	t.Helper()
+
+	switch a := arr.(type) {
+	case *array.Binary:
+		return a.Value(i)
+	case *array.LargeBinary:
+		return a.Value(i)
+	default:
+		t.Fatalf("expected binary-like array, got %T", arr)
+
+		return nil
+	}
+}
+
+func singleColumnRecord(field arrow.Field, arr arrow.Array) arrow.RecordBatch {
+	sc := arrow.NewSchema([]arrow.Field{field}, nil)
+
+	return array.NewRecordBatch(sc, []arrow.Array{arr}, int64(arr.Len()))
+}
+
+func TestToRequestedSchemaGeoExtensionRewrap(t *testing.T) {
+	// POINT(1 2) and POINT(3 4) little-endian WKB.
+	point12 := []byte{
+		0x01, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+	}
+	point34 := []byte{
+		0x01, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
+	}
+	values := [][]byte{point12, nil, point34}
+
+	geography, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		icebergType   iceberg.Type
+		sourceStorage arrow.DataType
+		sourceEdges   geoarrow.EdgeInterpolation
+		useLargeTypes bool
+	}{
+		{
+			name:          "geometry_metadata_only",
+			icebergType:   iceberg.GeometryType{},
+			sourceStorage: arrow.BinaryTypes.Binary,
+		},
+		{
+			name:          "geometry_storage_width_mismatch",
+			icebergType:   iceberg.GeometryType{},
+			sourceStorage: arrow.BinaryTypes.Binary,
+			useLargeTypes: true,
+		},
+		{
+			name:          "geography_spherical_metadata_only",
+			icebergType:   geography,
+			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgeSpherical,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := sridWKBType(t, tt.sourceStorage, "OGC:CRS84", tt.sourceEdges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			sc := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			opts := table.SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: tt.useLargeTypes}
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, sc, sc, rec, opts)
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowTypeWithOptions(tt.icebergType, table.ArrowSchemaOptions{
+				IncludeFieldIDs: opts.IncludeFieldIDs,
+				UseLargeTypes:   opts.UseLargeTypes,
+			})
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			gotStorage := got.Storage()
+			require.Equal(t, len(values), gotStorage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, gotStorage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, gotStorage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, gotStorage, i))
+			}
+
+			if arrow.TypeEqual(tt.sourceStorage, got.DataType().(arrow.ExtensionType).StorageType()) {
+				srcBufs := source.(array.ExtensionArray).Storage().Data().Buffers()
+				gotBufs := gotStorage.Data().Buffers()
+				require.Equal(t, len(srcBufs), len(gotBufs))
+
+				for i := range srcBufs {
+					assert.Same(t, srcBufs[i], gotBufs[i], "buffer %d should be shared", i)
+				}
+			}
+		})
+	}
+}
+
+func TestToRequestedSchemaMismatchedExtensionNameNotRewrapped(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	sourceType := extensions.NewUUIDType()
+	bldr := array.NewExtensionBuilder(mem, sourceType)
+	defer bldr.Release()
+	bldr.AppendNull()
+
+	source := bldr.NewArray()
+	defer source.Release()
+
+	rec := singleColumnRecord(arrow.Field{
+		Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+	}, source)
+	defer rec.Release()
+
+	sc := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false,
+	})
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	_, err := table.ToRequestedSchema(ctx, sc, sc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "cast_extension")
+}
