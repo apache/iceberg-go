@@ -186,7 +186,8 @@ func TestMemIO_WalkDir(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{
+	assert.Equal(t, []string{
+		"mem://walkdir-bucket/a",
 		"mem://walkdir-bucket/a/1.txt",
 		"mem://walkdir-bucket/a/2.txt",
 	}, walked)
@@ -218,7 +219,8 @@ func TestMemIO_WalkDirDoesNotIncludeSiblingPrefixes(t *testing.T) {
 				return nil
 			})
 			require.NoError(t, err)
-			assert.ElementsMatch(t, []string{
+			assert.Equal(t, []string{
+				"mem://walkdir-boundary-bucket/table",
 				"mem://walkdir-boundary-bucket/table/data.parquet",
 			}, walked)
 		})
@@ -232,9 +234,12 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- memIO.WalkDir("mem://bucket/root", func(path string, _ fs.DirEntry, err error) error {
+		done <- memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			if d.IsDir() {
+				return nil
 			}
 
 			return memIO.Remove(path)
@@ -257,5 +262,32 @@ func TestMemIO_WalkDirCallbackCanRemoveFiles(t *testing.T) {
 
 		return nil
 	}))
-	assert.Empty(t, remaining)
+	assert.Equal(t, []string{"mem://bucket/root"}, remaining)
+}
+
+func TestMemIO_WalkDirEmitsDirectoriesLexicallyAndHonorsSkipDir(t *testing.T) {
+	memIO := icebergio.NewMemFS()
+	require.NoError(t, memIO.WriteFile("mem://bucket/root/b/file.txt", []byte("b")))
+	require.NoError(t, memIO.WriteFile("mem://bucket/root/a/nested/file.txt", []byte("a")))
+
+	var walked []string
+	err := memIO.WalkDir("mem://bucket/root", func(path string, d fs.DirEntry, err error) error {
+		require.NoError(t, err)
+		walked = append(walked, path)
+		if path == "mem://bucket/root/a" {
+			require.True(t, d.IsDir())
+
+			return fs.SkipDir
+		}
+
+		return nil
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"mem://bucket/root",
+		"mem://bucket/root/a",
+		"mem://bucket/root/b",
+		"mem://bucket/root/b/file.txt",
+	}, walked)
 }

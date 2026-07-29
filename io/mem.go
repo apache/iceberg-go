@@ -23,7 +23,9 @@ import (
 	"io"
 	"io/fs"
 	"net/url"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,28 +109,77 @@ func (m *MemFS) WriteFile(name string, content []byte) error {
 
 func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	type walkEntry struct {
-		path string
-		size int64
+		path  string
+		size  int64
+		isDir bool
 	}
 
 	root = strings.TrimRight(root, "/")
 
 	m.mu.RLock()
-	var entries []walkEntry
+	entriesByPath := make(map[string]walkEntry)
+	addEntry := func(entry walkEntry) {
+		current, exists := entriesByPath[entry.path]
+		if !exists || entry.isDir || !current.isDir {
+			entriesByPath[entry.path] = entry
+		}
+	}
 	for key, data := range m.files {
 		if !memPathInRoot(key, root) {
 			continue
 		}
-		entries = append(entries, walkEntry{
-			path: key,
-			size: int64(len(data)),
-		})
+
+		if key == root {
+			addEntry(walkEntry{path: key, size: int64(len(data))})
+			continue
+		}
+
+		addEntry(walkEntry{path: root, isDir: true})
+		relative := strings.TrimPrefix(key, root+"/")
+		parts := strings.Split(relative, "/")
+		for i := range parts {
+			entryPath := strings.Join(parts[:i+1], "/")
+			if root != "" {
+				entryPath = root + "/" + entryPath
+			}
+			entry := walkEntry{path: entryPath, isDir: i < len(parts)-1}
+			if !entry.isDir {
+				entry.size = int64(len(data))
+			}
+			addEntry(entry)
+		}
 	}
 	m.mu.RUnlock()
+	if len(entriesByPath) == 0 {
+		addEntry(walkEntry{path: root, isDir: true})
+	}
 
-	for _, entry := range entries {
-		info := &memFileInfo{name: filepath.Base(entry.path), size: entry.size}
-		if err := fn(entry.path, fs.FileInfoToDirEntry(info), nil); err != nil {
+	paths := make([]string, 0, len(entriesByPath))
+	for entryPath := range entriesByPath {
+		paths = append(paths, entryPath)
+	}
+	sort.Strings(paths)
+
+	var skipPrefix string
+	for _, entryPath := range paths {
+		if skipPrefix != "" && strings.HasPrefix(entryPath, skipPrefix) {
+			continue
+		}
+
+		entry := entriesByPath[entryPath]
+		info := &memFileInfo{name: path.Base(entry.path), size: entry.size, isDir: entry.isDir}
+		err := fn(entry.path, fs.FileInfoToDirEntry(info), nil)
+		switch err {
+		case nil:
+		case fs.SkipAll:
+			return nil
+		case fs.SkipDir:
+			if entry.isDir {
+				skipPrefix = entry.path + "/"
+			} else {
+				skipPrefix = path.Dir(entry.path) + "/"
+			}
+		default:
 			return err
 		}
 	}
@@ -198,15 +249,21 @@ func (f *memFile) Stat() (fs.FileInfo, error) {
 }
 
 type memFileInfo struct {
-	name string
-	size int64
+	name  string
+	size  int64
+	isDir bool
 }
 
-func (fi *memFileInfo) Name() string       { return fi.name }
-func (fi *memFileInfo) Size() int64        { return fi.size }
-func (fi *memFileInfo) Mode() fs.FileMode  { return 0 }
+func (fi *memFileInfo) Name() string { return fi.name }
+func (fi *memFileInfo) Size() int64  { return fi.size }
+func (fi *memFileInfo) Mode() fs.FileMode {
+	if fi.isDir {
+		return fs.ModeDir
+	}
+	return 0
+}
 func (fi *memFileInfo) ModTime() time.Time { return time.Time{} }
-func (fi *memFileInfo) IsDir() bool        { return false }
+func (fi *memFileInfo) IsDir() bool        { return fi.isDir }
 func (fi *memFileInfo) Sys() any           { return nil }
 
 type memWriter struct {
