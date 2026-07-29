@@ -473,6 +473,7 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 
 	assert.Positive(t, produced.Load())
 	assert.Less(t, produced.Load(), int32(1000))
+	require.Zero(t, mem.CurrentAlloc())
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
