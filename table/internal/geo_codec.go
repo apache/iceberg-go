@@ -24,6 +24,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/twpayne/go-geom"
+	"github.com/twpayne/go-geom/encoding/ewkb"
 	"github.com/twpayne/go-geom/encoding/wkb"
 )
 
@@ -75,9 +76,9 @@ func newGeoBoundsAccumulator(isGeography bool) *geoBoundsAccumulator {
 }
 
 // AddWKB unmarshals a single WKB value and extends the bounding box with its
-// coordinates.
+// coordinates. Both ISO WKB and EWKB values are accepted (see decodeWKB).
 func (a *geoBoundsAccumulator) AddWKB(data []byte) error {
-	g, err := wkb.Unmarshal(data)
+	g, err := decodeWKB(data)
 	if err != nil {
 		return err
 	}
@@ -85,6 +86,57 @@ func (a *geoBoundsAccumulator) AddWKB(data []byte) error {
 	a.extend(g)
 
 	return nil
+}
+
+// EWKB dimension and SRID flags, carried in the high bits of the WKB type word.
+const (
+	ewkbFlagZ    = 0x80000000
+	ewkbFlagM    = 0x40000000
+	ewkbFlagSRID = 0x20000000
+	ewkbFlags    = ewkbFlagZ | ewkbFlagM | ewkbFlagSRID
+)
+
+// WKB byte-order markers, the first byte of every WKB value.
+const (
+	wkbBigEndian    = 0
+	wkbLittleEndian = 1
+)
+
+// decodeWKB decodes a geospatial value for statistics purposes, accepting both
+// encodings found in the wild. Iceberg prescribes ISO WKB, which encodes the
+// dimension in the type value itself (PointZ = 1001); some writers instead emit
+// EWKB, which flags Z/M in the high bits of the type word and may embed an SRID
+// after it. Both yield the same coordinates, so bounds do not depend on the
+// encoding. Stored values are never rewritten - this decode is read-only.
+func decodeWKB(data []byte) (geom.T, error) {
+	if isEWKB(data) {
+		return ewkb.Unmarshal(data)
+	}
+
+	return wkb.Unmarshal(data)
+}
+
+// isEWKB reports whether data's type word carries EWKB flags. The two decoders
+// are not interchangeable: the ISO decoder rejects flagged type words, and the
+// EWKB decoder rejects the ISO dimension offsets (it reads 1001 as an unknown
+// type rather than PointZ), so the flags select which one applies. Values too
+// short to hold a type word are left to the ISO decoder to reject.
+func isEWKB(data []byte) bool {
+	if len(data) < 5 {
+		return false
+	}
+
+	var typeWord uint32
+	switch data[0] {
+	case wkbBigEndian:
+		typeWord = binary.BigEndian.Uint32(data[1:5])
+	case wkbLittleEndian:
+		typeWord = binary.LittleEndian.Uint32(data[1:5])
+	default:
+		return false
+	}
+
+	return typeWord&ewkbFlags != 0
 }
 
 // extend walks every coordinate of g, recursing into geometry collections,
