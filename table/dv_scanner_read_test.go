@@ -20,8 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,9 +46,6 @@ import (
 // magic 0xD1D33964][bitmap][4B BE CRC32] envelope so dv.DeserializeDV
 // accepts it. A Go-built payload suffices here; the cross-impl byte pin
 // against a Java-produced fixture is the job of #1041, not this test.
-//
-// TODO(#1041): replace the hand-built envelope with a dv.SerializeDV helper
-// once that PR exports one. Today the dv package only exports the read side.
 func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length, cardinality int64) {
 	t.Helper()
 
@@ -59,18 +54,8 @@ func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile s
 		bitmap.Set(p)
 	}
 
-	var bitmapBuf bytes.Buffer
-	require.NoError(t, bitmap.Serialize(&bitmapBuf))
-
-	// Length covers magic + bitmap, excludes CRC.
-	magicAndBitmap := make([]byte, 4+bitmapBuf.Len())
-	binary.LittleEndian.PutUint32(magicAndBitmap[:4], dv.DVMagicNumber)
-	copy(magicAndBitmap[4:], bitmapBuf.Bytes())
-
-	payload := make([]byte, 4+len(magicAndBitmap)+4)
-	binary.BigEndian.PutUint32(payload[:4], uint32(len(magicAndBitmap)))
-	copy(payload[4:4+len(magicAndBitmap)], magicAndBitmap)
-	binary.BigEndian.PutUint32(payload[4+len(magicAndBitmap):], crc32.ChecksumIEEE(magicAndBitmap))
+	payload, err := dv.SerializeDV(bitmap)
+	require.NoError(t, err)
 
 	var puffinBuf bytes.Buffer
 	w, err := puffin.NewWriter(&puffinBuf)
