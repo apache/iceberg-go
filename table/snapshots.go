@@ -530,12 +530,12 @@ func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary,
 	}
 
 	updateTotals := func(totalProp, addedProp, removedProp string) {
-		newTotal := previous.GetInt(totalProp, 0)
-		newTotal += sum.Properties.GetInt(addedProp, 0)
-		newTotal -= sum.Properties.GetInt(removedProp, 0)
+		newTotal := previous.GetInt64(totalProp, 0)
+		newTotal += sum.Properties.GetInt64(addedProp, 0)
+		newTotal -= sum.Properties.GetInt64(removedProp, 0)
 
 		if newTotal >= 0 {
-			sum.Properties[totalProp] = strconv.Itoa(newTotal)
+			sum.Properties[totalProp] = strconv.FormatInt(newTotal, 10)
 		}
 	}
 
