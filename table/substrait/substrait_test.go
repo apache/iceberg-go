@@ -142,6 +142,7 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 		name       string
 		fieldType  iceberg.Type
 		predicate  iceberg.BooleanExpression
+		wantExpr   string
 		wantValues []string
 		wantType   string
 	}{
@@ -149,6 +150,7 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 			name:       "timestamp equality",
 			fieldType:  iceberg.PrimitiveTypes.TimestampNs,
 			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(123456789)),
+			wantExpr:   "equal(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.123456789)) => boolean?",
 			wantValues: []string{"1970-01-01 00:00:00.123456789"},
 			wantType:   "precision_timestamp<9>",
 		},
@@ -156,6 +158,7 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 			name:       "timestamp with timezone equality before epoch",
 			fieldType:  iceberg.PrimitiveTypes.TimestampTzNs,
 			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(-123456789)),
+			wantExpr:   "equal(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.876543211Z)) => boolean?",
 			wantValues: []string{"1969-12-31T23:59:59.876543211Z"},
 			wantType:   "precision_timestamp_tz<9>",
 		},
@@ -173,6 +176,18 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 			wantValues: []string{"1969-12-31T23:59:59.999999999Z", "1970-01-01T00:00:00.000001001Z"},
 			wantType:   "precision_timestamp_tz<9>",
 		},
+		{
+			name:      "timestamp greater than",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.GreaterThan(iceberg.Reference("ts"), iceberg.TimestampNano(42)),
+			wantExpr:  "gt(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.000000042)) => boolean?",
+		},
+		{
+			name:      "timestamp with timezone less than",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.LessThan(iceberg.Reference("ts"), iceberg.TimestampNano(-42)),
+			wantExpr:  "lt(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.999999958Z)) => boolean?",
+		},
 	}
 
 	for _, tt := range tests {
@@ -183,10 +198,15 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 
 			_, converted, err := substrait.ConvertExpr(sc, bound, true)
 			require.NoError(t, err)
+			if tt.wantExpr != "" {
+				assert.Equal(t, tt.wantExpr, converted.String())
+			}
 			for _, value := range tt.wantValues {
 				assert.Contains(t, converted.String(), value)
 			}
-			assert.Contains(t, converted.String(), tt.wantType)
+			if tt.wantType != "" {
+				assert.Contains(t, converted.String(), tt.wantType)
+			}
 		})
 	}
 }
