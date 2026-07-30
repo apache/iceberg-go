@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
@@ -418,11 +420,7 @@ func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (Boolea
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
 	}
-	if _, ok := tok.(bool); ok {
-		var b bool
-		if err := json.Unmarshal(raw, &b); err != nil {
-			return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
-		}
+	if b, ok := tok.(bool); ok {
 		if b {
 			return AlwaysTrue{}, nil
 		}
@@ -492,8 +490,21 @@ func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (Boolea
 // without inspecting bytes by hand.
 func firstToken(raw json.RawMessage) (json.Token, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := tok.(bool); ok {
+		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("trailing data after boolean expression")
+			}
 
-	return dec.Token()
+			return nil, err
+		}
+	}
+
+	return tok, nil
 }
 
 func decodePredicate(op Operation, node exprNode, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
