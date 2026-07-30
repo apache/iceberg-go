@@ -183,7 +183,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	}
 
 	offset := *dvFile.ContentOffset()
-	blob, err := findBlobMetadata(reader.Blobs(), offset, size)
+	blob, err := findBlobMetadataByRange(reader.Blobs(), offset, size)
 	if err != nil {
 		return nil, fmt.Errorf("DV file %s: %w", dvFile.FilePath(), err)
 	}
@@ -198,7 +198,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 			dvFile.FilePath(), offset, dvReferencedDataFileProperty)
 	}
 	if referencedDataFile != *manifestReferencedDataFile {
-		return nil, fmt.Errorf("DV file %s: manifest referenced data file %q disagrees with puffin %s property %q",
+		return nil, fmt.Errorf("DV file %s: manifest referenced_data_file %q does not match puffin %s %q",
 			dvFile.FilePath(), *manifestReferencedDataFile, dvReferencedDataFileProperty, referencedDataFile)
 	}
 
@@ -243,9 +243,9 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	return DeserializeDV(blobData, manifestCardinality)
 }
 
-// findBlobMetadata returns the footer entry identified by the manifest's
-// content offset and size.
-func findBlobMetadata(blobs []puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
+// findBlobMetadataByRange returns the footer entry identified by the
+// manifest's content offset and size.
+func findBlobMetadataByRange(blobs []puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
 	for _, b := range blobs {
 		if b.Offset != offset {
 			continue

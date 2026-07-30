@@ -394,15 +394,25 @@ func TestReadDVMissingContentMetadata(t *testing.T) {
 }
 
 // Why: a deletion vector manifest entry must identify the data file it applies to.
-// Condition: ReferencedDataFile is nil even though offset and size are present.
+// Condition: ReferencedDataFile is nil or empty even though offset and size are present.
 // Assertion: ReadDV rejects the entry before opening the Puffin file.
 func TestReadDVMissingReferencedDataFile(t *testing.T) {
-	offset, size := int64(4), int64(50)
-	dvFile := newDVTestFile("missing.puffin", 5, &offset, &size)
-	dvFile.referencedDataFile = nil
+	for _, tt := range []struct {
+		name       string
+		referenced *string
+	}{
+		{name: "nil", referenced: nil},
+		{name: "empty", referenced: strPtr("")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			offset, size := int64(4), int64(50)
+			dvFile := newDVTestFile("missing.puffin", 5, &offset, &size)
+			dvFile.referencedDataFile = tt.referenced
 
-	_, err := ReadDV(iceio.LocalFS{}, dvFile)
-	assert.ErrorContains(t, err, "missing ReferencedDataFile")
+			_, err := ReadDV(iceio.LocalFS{}, dvFile)
+			assert.ErrorContains(t, err, "missing ReferencedDataFile")
+		})
+	}
 }
 
 // Why: negative or absurdly large blob sizes should be rejected before allocation.
@@ -444,7 +454,7 @@ func TestReadDVInvalidPuffin(t *testing.T) {
 // is a deletion vector for the manifest's referenced data file.
 // Condition: the matched blob has conflicting, missing, or non-DV identity metadata.
 // Assertion: ReadDV rejects each case before decoding the blob payload.
-func TestReadDVBlobIdentity(t *testing.T) {
+func TestReadDVValidatesBlobMetadata(t *testing.T) {
 	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
 
 	t.Run("mismatched referenced data file", func(t *testing.T) {
@@ -457,7 +467,7 @@ func TestReadDVBlobIdentity(t *testing.T) {
 
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "manifest referenced data file")
+		assert.ErrorContains(t, err, "manifest referenced_data_file")
 		assert.ErrorContains(t, err, "data-001.parquet")
 		assert.ErrorContains(t, err, "data-002.parquet")
 	})
