@@ -1716,11 +1716,14 @@ func sanitizeName(n string) string {
 	return b.String()
 }
 
-// SanitizeColumnNames returns a schema whose field names follow Java Iceberg's
-// Avro-compatible naming rules. Non-decimal Unicode numbers, supplementary
-// code points, and invalid name-start characters are escaped. It returns
-// [ErrInvalidSchema] for invalid UTF-8 names or when distinct names sanitize to
-// the same value.
+// SanitizeColumnNames returns a copy of sc whose field names are compatible
+// with Java Iceberg's Avro name sanitization. Characters outside the BMP are
+// escaped as UTF-16 surrogate pairs, and only Unicode decimal digits are
+// treated as digits; other numeric categories are escaped.
+//
+// Empty or invalid UTF-8 field names and names that collide after sanitization
+// return an error wrapping ErrInvalidSchema. Collision errors are reported here
+// before a downstream Avro schema builder encounters the duplicate field name.
 func SanitizeColumnNames(sc *Schema) (*Schema, error) {
 	result, err := Visit(sc, sanitizeColumnNameVisitor{})
 	if err != nil {

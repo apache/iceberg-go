@@ -1556,7 +1556,7 @@ func TestSanitizeColumnNamesMatchesJavaIceberg(t *testing.T) {
 		{name: "supplementary digit first", input: "𝟎field", want: "_xD835_xDFCEfield"},
 		{name: "supplementary digit later", input: "a𝟎field", want: "a_xD835_xDFCEfield"},
 		{name: "superscript number", input: "a²", want: "a_xB2"},
-		// Java's Character.isLetterOrDigit accepts Nd, but not Nl or No.
+		// Java Character.isLetterOrDigit excludes Unicode letter numbers (Nl).
 		{name: "letter number", input: "aⅡ", want: "a_x2161"},
 		{name: "combining mark", input: "e\u0301", want: "e_x301"},
 		{name: "emoji first", input: "😀field", want: "_xD83D_xDE00field"},
