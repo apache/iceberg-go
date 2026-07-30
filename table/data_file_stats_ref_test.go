@@ -119,3 +119,49 @@ func TestDataFileStatsFallsBackToPublicGetters(t *testing.T) {
 	assert.Equal(t, map[int][]byte{1: {3, 4}}, upperBounds)
 	assert.Equal(t, 5, file.getterCalls)
 }
+
+func BenchmarkInclusiveMetricsEvalDataFileStats(b *testing.B) {
+	lower, err := iceberg.Int64Literal(1).MarshalBinary()
+	require.NoError(b, err)
+	upper, err := iceberg.Int64Literal(10).MarshalBinary()
+	require.NoError(b, err)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		"s3://bucket/file.parquet", iceberg.ParquetFile, map[int]any{1000: int64(1)}, nil, nil, 10, 100)
+	require.NoError(b, err)
+	file := builder.
+		ValueCounts(map[int]int64{1: 10}).
+		NullValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(map[int][]byte{1: lower}).
+		UpperBoundValues(map[int][]byte{1: upper}).
+		Build()
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
+	})
+	eval, err := newInclusiveMetricsEvaluator(schema,
+		iceberg.LessThan(iceberg.Reference("id"), int64(20)), true, true)
+	require.NoError(b, err)
+
+	b.Run("borrowed stats", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			_, err := eval(file)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("public defensive copies", func(b *testing.B) {
+		wrapped := &publicStatsDataFile{DataFile: file}
+		b.ReportAllocs()
+		for range b.N {
+			_, err := eval(wrapped)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}

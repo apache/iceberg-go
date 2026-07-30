@@ -2540,6 +2540,9 @@ type DataFileBuilder struct {
 // before calling [DataFileBuilder.Build] to construct the object.
 // The fieldIDToFixedSize argument is retained for source compatibility and is
 // ignored; manifest schemas determine decimal fixed widths during encoding.
+// Byte-slice partition values are cloned. Other partition values must be the
+// immutable scalar or literal values produced by Iceberg's manifest decoder;
+// mutable caller-defined values are retained by reference.
 func NewDataFileBuilder(
 	spec PartitionSpec,
 	content ManifestEntryContent,

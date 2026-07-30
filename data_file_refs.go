@@ -21,7 +21,8 @@ import "github.com/apache/iceberg-go/internal"
 
 // DataFileStatsRef returns statistics maps owned by the data file. The token
 // restricts this zero-copy accessor to trusted in-module callers; the public
-// DataFile getters continue returning defensive copies.
+// DataFile getters continue returning defensive copies. Callers must treat the
+// returned maps and the byte slices stored in the bounds maps as read-only.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
