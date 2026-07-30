@@ -799,7 +799,7 @@ func (t TimestampNano) ToTime() time.Time {
 }
 
 func (t TimestampNano) ToMicros() Timestamp {
-	return Timestamp(int64(t) / 1000)
+	return Timestamp(internal.FloorDiv(int64(t), 1000))
 }
 
 func (t TimestampNano) ToDate() Date {
