@@ -180,6 +180,7 @@ type options struct {
 	audience          string
 	resource          string
 	transport         http.RoundTripper
+	transportFactory  func(*tls.Config) (http.RoundTripper, func())
 	headers           map[string]string
 
 	oauthTLSConfig *tls.Config

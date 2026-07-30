@@ -771,6 +771,7 @@ type Catalog struct {
 	// transports are excluded when the session is constructed.
 	closeSession     func()
 	closeSessionOnce sync.Once
+	closeErr         error
 
 	name string
 	// Retained catalog properties are reused for table/view IO and may carry
@@ -938,6 +939,12 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
+	} else if opts.transportFactory != nil {
+		var cleanup func()
+		baseTransport, cleanup = opts.transportFactory(opts.tlsConfig)
+		if cleanup != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanup)
+		}
 	} else {
 		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 		baseTransport = transport
@@ -1072,16 +1079,18 @@ func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
 // Close releases transports created by the catalog and its metrics reporter.
-// Caller-provided transports remain caller-owned. Callers holding a
-// [catalog.Catalog] can reach this via a [catalog.Closer] type assertion.
+// Caller-provided transports remain caller-owned. Close is safe to call more
+// than once. Callers holding a [catalog.Catalog] can reach this via a
+// [catalog.Closer] type assertion.
 func (r *Catalog) Close() error {
 	r.closeSessionOnce.Do(func() {
 		if r.closeSession != nil {
 			r.closeSession()
 		}
+		r.closeErr = r.reporter.Close()
 	})
 
-	return r.reporter.Close()
+	return r.closeErr
 }
 
 var _ catalog.Closer = (*Catalog)(nil)

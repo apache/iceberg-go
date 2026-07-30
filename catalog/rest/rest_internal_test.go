@@ -1697,12 +1697,57 @@ func (t *closeTrackingTransport) CloseIdleConnections() {
 }
 
 func TestCatalogCloseReleasesOwnedSessionOnce(t *testing.T) {
-	var calls atomic.Int32
-	cat := &Catalog{closeSession: func() { calls.Add(1) }}
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	var transports []*closeTrackingTransport
+	withTrackingTransport := func(o *options) {
+		o.transportFactory = func(*tls.Config) (http.RoundTripper, func()) {
+			transport := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+			transports = append(transports, transport)
+
+			return transport, transport.CloseIdleConnections
+		}
+	}
+
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, withTrackingTransport)
+	require.NoError(t, err)
+	require.Len(t, transports, 2)
+	assert.True(t, transports[0].closed.Load(), "bootstrap transport should be closed after config fetch")
+	assert.False(t, transports[1].closed.Load(), "catalog transport should remain open until Close")
 
 	require.NoError(t, cat.Close())
 	require.NoError(t, cat.Close())
-	assert.Equal(t, int32(1), calls.Load())
+	assert.True(t, transports[1].closed.Load())
+}
+
+func TestCatalogCloseDoesNotReleaseCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	require.NoError(t, cat.Close())
+	assert.False(t, base.closed.Load(), "user-provided transports must remain caller-owned")
 }
 
 func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
