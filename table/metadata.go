@@ -908,23 +908,6 @@ func (b *MetadataBuilder) SetSnapshotRef(
 			return fmt.Errorf("%w: invalid snapshot ref option: %w", iceberg.ErrInvalidArgument, err)
 		}
 	}
-
-	// preserve retention properties from an existing ref when not explicitly overridden by caller
-	if existingRef, ok := b.refs[name]; ok && existingRef.SnapshotRefType == refType {
-		if ref.MinSnapshotsToKeep == nil && existingRef.MinSnapshotsToKeep != nil {
-			v := *existingRef.MinSnapshotsToKeep
-			ref.MinSnapshotsToKeep = &v
-		}
-		if ref.MaxSnapshotAgeMs == nil && existingRef.MaxSnapshotAgeMs != nil {
-			v := *existingRef.MaxSnapshotAgeMs
-			ref.MaxSnapshotAgeMs = &v
-		}
-		if ref.MaxRefAgeMs == nil && existingRef.MaxRefAgeMs != nil {
-			v := *existingRef.MaxRefAgeMs
-			ref.MaxRefAgeMs = &v
-		}
-	}
-
 	if err := ref.validate(); err != nil {
 		return fmt.Errorf("%w: invalid snapshot ref: %w", iceberg.ErrInvalidArgument, err)
 	}
@@ -978,6 +961,24 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	b.refs[name] = ref
 
 	return nil
+}
+
+func (b *MetadataBuilder) NewRetainingSnapshotRefUpdate(name string, snapshotID int64, refType RefType) *setSnapshotRefUpdate {
+	var maxRefAgeMs, maxSnapshotAgeMs int64
+	var minSnapshotsToKeep int
+	if existing, ok := b.refs[name]; ok && existing.SnapshotRefType == refType {
+		if existing.MaxRefAgeMs != nil {
+			maxRefAgeMs = *existing.MaxRefAgeMs
+		}
+		if existing.MaxSnapshotAgeMs != nil {
+			maxSnapshotAgeMs = *existing.MaxSnapshotAgeMs
+		}
+		if existing.MinSnapshotsToKeep != nil {
+			minSnapshotsToKeep = *existing.MinSnapshotsToKeep
+		}
+	}
+
+	return NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep)
 }
 
 func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {

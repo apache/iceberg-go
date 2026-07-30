@@ -482,7 +482,7 @@ func TestSetRef(t *testing.T) {
 	require.Len(t, builder.snapshotLog, 1)
 }
 
-func TestSetSnapshotRefPreservesRetentionOnUpdate(t *testing.T) {
+func TestSetSnapshotRefUpdateApplyPreservesRetention(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
 	snapshot1 := Snapshot{
@@ -511,7 +511,6 @@ func TestSetSnapshotRefPreservesRetentionOnUpdate(t *testing.T) {
 		maxRefAgeMsIn = int64(604800000) // 7 days
 	)
 
-	// Configure retention policy on the branch when it is first created.
 	require.NoError(t, builder.AddSnapshot(&snapshot1))
 	require.NoError(t, builder.SetSnapshotRef(
 		MainBranch, 1, BranchRef,
@@ -519,60 +518,61 @@ func TestSetSnapshotRefPreservesRetentionOnUpdate(t *testing.T) {
 		WithMaxSnapshotAgeMs(maxSnapAgeMs),
 		WithMaxRefAgeMs(maxRefAgeMsIn),
 	))
-
-	ref := builder.refs[MainBranch]
-	require.NotNil(t, ref.MinSnapshotsToKeep)
-	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
-	require.NotNil(t, ref.MaxSnapshotAgeMs)
-	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
-	require.NotNil(t, ref.MaxRefAgeMs)
-	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
-
-	// Simulate a normal commit/rollback: only the snapshot pointer is updated,
-	// with no retention options. Retention must be preserved.
 	require.NoError(t, builder.AddSnapshot(&snapshot2))
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
 
-	ref = builder.refs[MainBranch]
-	require.Equal(t, int64(2), ref.SnapshotID, "snapshot pointer should advance")
-	require.NotNil(t, ref.MinSnapshotsToKeep, "min-snapshots-to-keep must not be wiped out on commit")
-	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
-	require.NotNil(t, ref.MaxSnapshotAgeMs, "max-snapshot-age-ms must not be wiped out on commit")
-	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
-	require.NotNil(t, ref.MaxRefAgeMs, "max-ref-age-ms must not be wiped out on commit")
-	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
+	// build the update the way the commit/rollback producers do.
+	upd := builder.NewRetainingSnapshotRefUpdate(MainBranch, 2, BranchRef)
 
-	// The emitted metadata update must also carry the preserved retention so
-	// REST catalogs receive the correct values.
-	last := builder.updates[len(builder.updates)-1].(*setSnapshotRefUpdate)
-	require.Equal(t, minKeep, last.MinSnapshotsToKeep)
-	require.Equal(t, maxSnapAgeMs, last.MaxSnapshotAgeMs)
-	require.Equal(t, maxRefAgeMsIn, last.MaxRefAgeMs)
-}
+	require.Equal(t, minKeep, upd.MinSnapshotsToKeep)
+	require.Equal(t, maxSnapAgeMs, upd.MaxSnapshotAgeMs)
+	require.Equal(t, maxRefAgeMsIn, upd.MaxRefAgeMs)
 
-func TestSetSnapshotRefOverridesRetentionWhenProvided(t *testing.T) {
-	builder := builderWithoutChanges(2)
-	schemaID := 0
-	snapshot := Snapshot{
-		SnapshotID:       1,
-		ParentSnapshotID: nil,
-		SequenceNumber:   0,
-		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
-		ManifestList:     "/snap-1.avro",
-		Summary:          &Summary{Operation: OpAppend},
-		SchemaID:         &schemaID,
-	}
-	require.NoError(t, builder.AddSnapshot(&snapshot))
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(5)))
-
-	// An explicitly provided option overrides the inherited value.
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(10)))
+	require.NoError(t, upd.Apply(&builder))
 	ref := builder.refs[MainBranch]
-	require.NotNil(t, ref.MinSnapshotsToKeep)
-	require.Equal(t, 10, *ref.MinSnapshotsToKeep)
+	require.Equal(t, int64(2), ref.SnapshotID, "snapshot pointer should advance")
+	require.NotNil(t, ref.MinSnapshotsToKeep, "min-snapshots-to-keep must not be wiped out")
+	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
+	require.NotNil(t, ref.MaxSnapshotAgeMs, "max-snapshot-age-ms must not be wiped out")
+	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
+	require.NotNil(t, ref.MaxRefAgeMs, "max-ref-age-ms must not be wiped out")
+	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
 }
 
-func TestSetSnapshotRefRetentionNotInheritedAcrossRefTypes(t *testing.T) {
+func TestSetSnapshotRefUpdateApplyClearsRetentionWhenAbsent(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	parentID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(5)))
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+
+	require.NoError(t, NewSetSnapshotRefUpdate(MainBranch, 2, BranchRef, 0, 0, 0).Apply(&builder))
+	ref := builder.refs[MainBranch]
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.Nil(t, ref.MinSnapshotsToKeep, "bare set-ref must clear retention (pure replace)")
+	require.Nil(t, ref.MaxSnapshotAgeMs)
+	require.Nil(t, ref.MaxRefAgeMs)
+}
+
+func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
 	snapshot := Snapshot{
@@ -585,13 +585,65 @@ func TestSetSnapshotRefRetentionNotInheritedAcrossRefTypes(t *testing.T) {
 		SchemaID:         &schemaID,
 	}
 	require.NoError(t, builder.AddSnapshot(&snapshot))
-	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(5)))
+	require.NoError(t, builder.SetSnapshotRef(
+		MainBranch, 1, BranchRef,
+		WithMinSnapshotsToKeep(5),
+		WithMaxSnapshotAgeMs(int64(172800000)),
+		WithMaxRefAgeMs(int64(604800000)),
+	))
 
-	// A tag with the same name must not inherit branch-only retention such as
-	// min-snapshots-to-keep, which tags do not support.
+	// The retaining helper must not carry retention across a type change.
+	upd := builder.NewRetainingSnapshotRefUpdate(MainBranch, 1, TagRef)
+	require.Zero(t, upd.MinSnapshotsToKeep)
+	require.Zero(t, upd.MaxSnapshotAgeMs)
+	require.Zero(t, upd.MaxRefAgeMs)
+
 	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
 	ref := builder.refs[MainBranch]
 	require.Equal(t, TagRef, ref.SnapshotRefType)
+	require.Nil(t, ref.MinSnapshotsToKeep)
+	require.Nil(t, ref.MaxSnapshotAgeMs)
+	require.Nil(t, ref.MaxRefAgeMs)
+}
+
+func TestNewRetainingSnapshotRefUpdateTagPreservesMaxRefAge(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	parentID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+
+	const maxRefAgeMsIn = int64(604800000)
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.NoError(t, builder.SetSnapshotRef("release", 1, TagRef, WithMaxRefAgeMs(maxRefAgeMsIn)))
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+
+	upd := builder.NewRetainingSnapshotRefUpdate("release", 2, TagRef)
+	require.Equal(t, maxRefAgeMsIn, upd.MaxRefAgeMs)
+	require.Zero(t, upd.MinSnapshotsToKeep)
+	require.Zero(t, upd.MaxSnapshotAgeMs)
+
+	require.NoError(t, upd.Apply(&builder))
+	ref := builder.refs["release"]
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.NotNil(t, ref.MaxRefAgeMs)
+	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
 	require.Nil(t, ref.MinSnapshotsToKeep)
 	require.Nil(t, ref.MaxSnapshotAgeMs)
 }
