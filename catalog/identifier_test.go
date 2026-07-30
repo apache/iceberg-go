@@ -45,6 +45,24 @@ func TestValidateTableIdentifier(t *testing.T) {
 	}
 }
 
+func TestValidateNamespaceIdentifier(t *testing.T) {
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace"}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"parent", "namespace"}))
+
+	for _, ident := range []table.Identifier{
+		nil,
+		{},
+		{""},
+		{"."},
+		{".."},
+		{"namespace/child"},
+		{"namespace\nchild"},
+		{"parent", ""},
+	} {
+		require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+	}
+}
+
 func TestNamespaceFromEmptyIdentifier(t *testing.T) {
 	require.Nil(t, catalog.NamespaceFromIdent(nil))
 	require.Nil(t, catalog.NamespaceFromIdent(table.Identifier{}))

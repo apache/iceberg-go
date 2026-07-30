@@ -255,6 +255,10 @@ func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 			notFoundErr, strings.Join(ident, "."))
 	}
 
+	return validateIdentifierComponents(ident, notFoundErr)
+}
+
+func validateIdentifierComponents(ident table.Identifier, notFoundErr error) error {
 	for _, part := range ident {
 		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
 			return fmt.Errorf("%w: invalid identifier component %q in %v",
@@ -270,6 +274,15 @@ func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 	}
 
 	return nil
+}
+
+// ValidateNamespaceIdentifier checks that an identifier contains at least one valid namespace level.
+func ValidateNamespaceIdentifier(ident table.Identifier) error {
+	if len(ident) < 1 {
+		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
+	}
+
+	return validateIdentifierComponents(ident, ErrNoSuchNamespace)
 }
 
 // ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
