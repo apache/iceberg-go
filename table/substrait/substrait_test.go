@@ -79,6 +79,60 @@ func TestRefTypes(t *testing.T) {
 	}
 }
 
+func TestNestedReferencesPreserveBoundPath(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+			{ID: 4, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "zip", Type: iceberg.PrimitiveTypes.String},
+			}}},
+		}}},
+	)
+
+	tests := []struct {
+		name      string
+		predicate iceberg.UnboundPredicate
+		expected  string
+	}{
+		{
+			name:      "customer.id",
+			predicate: iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)),
+			expected:  ".field(1).field(0)",
+		},
+		{
+			name:      "customer.address.zip",
+			predicate: iceberg.EqualTo(iceberg.Reference("customer.address.zip"), "12345"),
+			expected:  ".field(1).field(1).field(0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := tt.predicate.Bind(sc, true)
+			require.NoError(t, err)
+
+			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			require.NoError(t, err)
+			assert.Contains(t, converted.String(), tt.expected)
+		})
+	}
+}
+
+func TestNestedReferenceWithoutTopLevelLeafName(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		}}},
+	)
+	bound, err := iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)).Bind(sc, true)
+	require.NoError(t, err)
+
+	_, converted, err := substrait.ConvertExpr(sc, bound, true)
+	require.NoError(t, err)
+	assert.Contains(t, converted.String(), ".field(0).field(0)")
+}
+
 var (
 	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
 		[]int{2},
