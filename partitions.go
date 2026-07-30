@@ -164,7 +164,7 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	}
 	for _, sourceID := range p.SourceIDs {
 		_, isVoid := p.Transform.(VoidTransform)
-		if sourceID <= 0 && !(isVoid && !hasSourceID && !hasSourceIDs) {
+		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
 			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
 		}
 	}
