@@ -956,7 +956,7 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		if err != nil {
 			return nil, err
 		}
-		typedSet.Add(casted)
+		typedSet.Add(cloneBoundLiteral(casted))
 	}
 
 	switch typedSet.Len() {
@@ -1010,13 +1010,17 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 }
 
 func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits Set[Literal]) *boundSetPredicate[T] {
-	return &boundSetPredicate[T]{op: op, term: term.(bound[T]), lits: lits}
+	return &boundSetPredicate[T]{
+		op: op, term: term.(bound[T]), lits: lits,
+		literalView: readOnlyLiteralSet{Set: lits},
+	}
 }
 
 type boundSetPredicate[T LiteralType] struct {
-	op   Operation
-	term bound[T]
-	lits Set[Literal]
+	op          Operation
+	term        bound[T]
+	lits        Set[Literal]
+	literalView Set[Literal]
 }
 
 func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
@@ -1033,7 +1037,7 @@ func (bsp *boundSetPredicate[T]) Op() Operation { return bsp.op }
 func (bsp *boundSetPredicate[T]) Negate() BooleanExpression {
 	return &boundSetPredicate[T]{
 		op: bsp.op.Negate(), term: bsp.term,
-		lits: bsp.lits,
+		lits: bsp.lits, literalView: bsp.literalView,
 	}
 }
 func (bsp *boundSetPredicate[T]) Term() BoundTerm     { return bsp.term }
@@ -1057,7 +1061,7 @@ func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundP
 }
 
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
-	return bsp.lits
+	return bsp.literalView
 }
 
 type BoundTransform struct {

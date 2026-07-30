@@ -42,7 +42,9 @@ type BooleanExprVisitor[T any] interface {
 // BoundBooleanExprVisitor builds on BooleanExprVisitor by adding interface
 // methods for visiting bound expressions, because we do casting of literals
 // during binding you can assume that the BoundTerm and the Literal passed
-// to a method have the same type.
+// to a method have the same type. Sets passed to VisitIn and VisitNotIn are
+// borrowed read-only views; visitors must not call Add or retain and mutate
+// their literal values.
 type BoundBooleanExprVisitor[T any] interface {
 	BooleanExprVisitor[T]
 
@@ -134,9 +136,9 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T]) T {
 	switch e.Op() {
 	case OpIn:
-		return visitor.VisitIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitIn(e.Term(), boundSetLiteralsForVisit(e))
 	case OpNotIn:
-		return visitor.VisitNotIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitNotIn(e.Term(), boundSetLiteralsForVisit(e))
 	case OpIsNan:
 		return visitor.VisitIsNan(e.Term())
 	case OpNotNan:
@@ -590,7 +592,7 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 	case BoundLiteralPredicate:
 		return p.AsUnbound(ref, p.Literal())
 	case BoundSetPredicate:
-		return p.AsUnbound(ref, p.Literals().Members())
+		return p.AsUnbound(ref, boundSetLiteralsForVisit(p).Members())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
@@ -674,7 +676,7 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	case BoundLiteralPredicate:
 		return sanitizeLiteralPredicate(p.Op(), ref)
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+		return sanitizeSetPredicate(p.Op(), ref, boundSetLiteralsForVisit(p).Len())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
