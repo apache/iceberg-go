@@ -479,6 +479,57 @@ func TestTransactionApplyDedupesIdenticalNonRefRequirements(t *testing.T) {
 	require.Equal(t, 1, specAsserts)
 }
 
+func TestRollbackToSnapshotPreservesRetention(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	now := time.Now().UnixMilli()
+
+	const (
+		minKeep      = 5
+		maxSnapAgeMs = int64(172800000) // 2 days
+		maxRefAgeMs  = int64(604800000) // 7 days
+	)
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:     10,
+		SequenceNumber: 1,
+		ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		TimestampMs:    now,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(
+		MainBranch, 10, BranchRef,
+		WithMinSnapshotsToKeep(minKeep),
+		WithMaxSnapshotAgeMs(maxSnapAgeMs),
+		WithMaxRefAgeMs(maxRefAgeMs),
+	))
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       20,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   2,
+		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 1,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(
+		MainBranch, 20, BranchRef,
+		WithMinSnapshotsToKeep(minKeep),
+		WithMaxSnapshotAgeMs(maxSnapAgeMs),
+		WithMaxRefAgeMs(maxRefAgeMs),
+	))
+
+	require.NoError(t, txn.RollbackToSnapshot(10))
+
+	ref := txn.meta.refs[MainBranch]
+	require.Equal(t, int64(10), ref.SnapshotID, "rollback should move main to the ancestor")
+	require.NotNil(t, ref.MinSnapshotsToKeep, "min-snapshots-to-keep must survive rollback")
+	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
+	require.NotNil(t, ref.MaxSnapshotAgeMs, "max-snapshot-age-ms must survive rollback")
+	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
+	require.NotNil(t, ref.MaxRefAgeMs, "max-ref-age-ms must survive rollback")
+	require.Equal(t, maxRefAgeMs, *ref.MaxRefAgeMs)
+}
+
 func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {
 	t.Helper()
 

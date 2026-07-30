@@ -963,6 +963,24 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	return nil
 }
 
+func (b *MetadataBuilder) NewRetainingSnapshotRefUpdate(name string, snapshotID int64, refType RefType) *setSnapshotRefUpdate {
+	var maxRefAgeMs, maxSnapshotAgeMs int64
+	var minSnapshotsToKeep int
+	if existing, ok := b.refs[name]; ok && existing.SnapshotRefType == refType {
+		if existing.MaxRefAgeMs != nil {
+			maxRefAgeMs = *existing.MaxRefAgeMs
+		}
+		if existing.MaxSnapshotAgeMs != nil {
+			maxSnapshotAgeMs = *existing.MaxSnapshotAgeMs
+		}
+		if existing.MinSnapshotsToKeep != nil {
+			minSnapshotsToKeep = *existing.MinSnapshotsToKeep
+		}
+	}
+
+	return NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep)
+}
+
 func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	if _, found := b.refs[name]; !found {
 		return fmt.Errorf("%w: snapshot ref not found: %s", iceberg.ErrInvalidArgument, name)

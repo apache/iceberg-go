@@ -313,7 +313,7 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			snapshotID, cs.SnapshotID)
 	}
 
-	update := NewSetSnapshotRefUpdate(MainBranch, snapshotID, BranchRef, 0, 0, 0)
+	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
 	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
 
 	return t.apply([]Update{update}, []Requirement{req})
