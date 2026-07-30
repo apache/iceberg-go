@@ -546,10 +546,10 @@ type hasFieldToIDMap interface {
 	setFieldIDToDecimalScaleMap(map[int]int)
 }
 
-// ManifestFile is the interface which covers both V1 and V2 manifest files.
+// ManifestFile is the interface which covers manifest files for supported table versions.
 type ManifestFile interface {
 	// Version returns the version number of this manifest file.
-	// It should be 1 or 2.
+	// It should be 1, 2, or 3.
 	Version() int
 	// FilePath is the location URI of this manifest file.
 	FilePath() string
@@ -743,6 +743,9 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		if err != nil {
 			return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
 		}
+	}
+	if err := validateManifestFormatVersion(formatVersion); err != nil {
+		return nil, err
 	}
 	// The manifest's own metadata is authoritative for its version. A v2/v3
 	// manifest list may reference older manifests so a table can be upgraded
@@ -1015,6 +1018,9 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 
 			version = v
 		}
+		if err := validateManifestFormatVersion(version); err != nil {
+			return nil, err
+		}
 
 		if version == 1 {
 			return manifestFileV1Reader, nil
@@ -1031,6 +1037,14 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	}
 
 	return decodeManifests[*manifestFile](rd, version)
+}
+
+func validateManifestFormatVersion(version int) error {
+	if version < 1 || version > 3 {
+		return fmt.Errorf("unsupported manifest format version: %d", version)
+	}
+
+	return nil
 }
 
 type writerImpl interface {
