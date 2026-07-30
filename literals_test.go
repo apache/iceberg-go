@@ -1209,13 +1209,14 @@ func TestLiteralFromBytesFixedWidth(t *testing.T) {
 		data        []byte
 		want        iceberg.FixedLiteral
 		errContains string
+		oversized   bool
 	}{
 		{name: "exact", data: []byte{1, 2, 3, 4}, want: iceberg.FixedLiteral{1, 2, 3, 4}},
 		{name: "short", data: []byte{1, 2, 3}, want: iceberg.FixedLiteral{1, 2, 3, 0}},
 		{name: "zero length", data: []byte{}, want: iceberg.FixedLiteral{0, 0, 0, 0}},
 		{name: "nil", data: nil, errContains: "invalid binary serialization"},
-		{name: "one byte oversized", data: []byte{1, 2, 3, 4, 5}, errContains: "fixed[4] value has 5 bytes"},
-		{name: "large oversized", data: make([]byte, 100), errContains: "fixed[4] value has 100 bytes"},
+		{name: "one byte oversized", data: []byte{1, 2, 3, 4, 5}, errContains: "fixed[4] value has 5 bytes", oversized: true},
+		{name: "large oversized", data: make([]byte, 100), errContains: "fixed[4] value has 100 bytes", oversized: true},
 	}
 
 	for _, test := range tests {
@@ -1223,6 +1224,9 @@ func TestLiteralFromBytesFixedWidth(t *testing.T) {
 			literal, err := iceberg.LiteralFromBytes(iceberg.FixedTypeOf(4), test.data)
 			if test.errContains != "" {
 				require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+				if test.oversized {
+					require.ErrorIs(t, err, iceberg.ErrInvalidFixedLength)
+				}
 				require.ErrorContains(t, err, test.errContains)
 
 				return

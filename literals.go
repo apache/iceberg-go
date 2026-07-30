@@ -201,8 +201,8 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 			copy(padded, data)
 			data = padded
 		} else if len(data) > t.Len() {
-			return nil, fmt.Errorf("%w: fixed[%d] value has %d bytes",
-				ErrInvalidBinSerialization, t.Len(), len(data))
+			return nil, fmt.Errorf("%w: %w: fixed[%d] value has %d bytes",
+				ErrInvalidBinSerialization, ErrInvalidFixedLength, t.Len(), len(data))
 		}
 		var v FixedLiteral
 		err := v.UnmarshalBinary(data)
