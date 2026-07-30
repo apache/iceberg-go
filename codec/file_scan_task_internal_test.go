@@ -19,11 +19,36 @@ package codec
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateScanRange(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		start, length     int64
+		fileSize          int64
+		shouldReturnError bool
+	}{
+		{name: "full file", length: 100, fileSize: 100},
+		{name: "empty range at EOF", start: 100, fileSize: 100},
+		{name: "start after EOF", start: 101, fileSize: 100, shouldReturnError: true},
+		{name: "end after EOF", start: 99, length: 2, fileSize: 100, shouldReturnError: true},
+		{name: "overflowing end", start: math.MaxInt64, length: 1, fileSize: 100, shouldReturnError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScanRange(tt.start, tt.length, tt.fileSize)
+			if tt.shouldReturnError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestDecodeFileScanTaskInnerErrorCarriesMarker covers an inner decode path:
 // the outer Avro envelope decodes fine, but the framed primary-file blob is not
