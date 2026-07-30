@@ -2091,6 +2091,20 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Equal("[]", string(md["partition-spec"]))
 }
 
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID)
+	m.Require().NoError(err)
+
+	firstErr := writer.Close()
+	m.Require().EqualError(firstErr, "empty manifest file has been written")
+	m.ErrorContains(writer.Add(manifestEntryV2Records[0]), "closed manifest writer")
+	m.Equal(firstErr, writer.Close())
+
+	_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
+	m.Equal(firstErr, err)
+}
+
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
 	schema := NewSchema(
 		0,
