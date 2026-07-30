@@ -418,7 +418,11 @@ func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (Boolea
 	if err != nil {
 		return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
 	}
-	if b, ok := tok.(bool); ok {
+	if _, ok := tok.(bool); ok {
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return nil, fmt.Errorf("%w: cannot parse expression: %s", ErrInvalidArgument, err)
+		}
 		if b {
 			return AlwaysTrue{}, nil
 		}

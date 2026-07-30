@@ -393,6 +393,20 @@ func TestUnmarshalExpressionErrors(t *testing.T) {
 	}
 }
 
+func TestUnmarshalBooleanExpressionRejectsTrailingData(t *testing.T) {
+	for _, input := range []string{
+		`true false`,
+		`false null`,
+		`true{}`,
+		`false garbage`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			_, err := iceberg.ParseExpr([]byte(input), nil)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
 // TestExpressionTransformTermRoundTrip covers a residual filter whose term is a
 // partition transform, e.g. a Java server's bucket[100](id) <= 50.
 func TestExpressionTransformTermRoundTrip(t *testing.T) {
