@@ -255,6 +255,9 @@ func decodeFileScanTaskResidual(data []byte, schema *iceberg.Schema) (iceberg.Bo
 // carrying a different spec would silently mis-map or drop partition values and
 // still succeed. Every file in a FileScanTask must therefore share spec.ID().
 func checkDataFileSpecID(f iceberg.DataFile, spec iceberg.PartitionSpec) error {
+	if f == nil {
+		return fmt.Errorf("%w: data file is nil", iceberg.ErrInvalidArgument)
+	}
 	if int(f.SpecID()) != spec.ID() {
 		return fmt.Errorf("data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", f.SpecID(), spec.ID())
 	}

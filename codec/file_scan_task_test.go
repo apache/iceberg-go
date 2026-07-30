@@ -137,6 +137,30 @@ func TestEncodeFileScanTaskRejectsMismatchedPrimaryDataFileSpec(t *testing.T) {
 		"error must include the codec's spec id")
 }
 
+func TestEncodeFileScanTaskRejectsNilDataFiles(t *testing.T) {
+	spec, schema, task := fullyPopulatedFileScanTask(t, 2)
+	tests := []struct {
+		name   string
+		update func(*table.FileScanTask)
+		part   string
+	}{
+		{"primary file", func(task *table.FileScanTask) { task.File = nil }, "data file is nil"},
+		{"delete file", func(task *table.FileScanTask) { task.DeleteFiles = []iceberg.DataFile{nil} }, "delete files: entry 0"},
+		{"equality delete file", func(task *table.FileScanTask) { task.EqualityDeleteFiles = []iceberg.DataFile{nil} }, "equality delete files: entry 0"},
+		{"deletion vector file", func(task *table.FileScanTask) { task.DeletionVectorFiles = []iceberg.DataFile{nil} }, "deletion vector files: entry 0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := task
+			tt.update(&task)
+			_, err := codec.EncodeFileScanTask(task, spec, schema, 2)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, tt.part)
+		})
+	}
+}
+
 func TestDecodeFileScanTaskErrorCarriesMarker(t *testing.T) {
 	schema := iceberg.NewSchema(123,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
