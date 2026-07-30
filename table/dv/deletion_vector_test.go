@@ -139,20 +139,23 @@ func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte,
 // writer) is to assemble the bytes directly. The reader's validateBlobs does
 // not require the property, so this file loads cleanly.
 func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes []byte) (string, puffin.BlobMetadata) {
+	return writeRawPuffinBlob(t, dir, "raw-dv-no-cardinality.puffin", dvBlobBytes, puffin.BlobTypeDeletionVector, map[string]string{
+		"referenced-data-file": "s3://bucket/data/data-001.parquet",
+	})
+}
+
+func writeRawPuffinBlob(t *testing.T, dir, name string, blobBytes []byte, blobType puffin.BlobType, props map[string]string) (string, puffin.BlobMetadata) {
 	t.Helper()
 
 	const puffinMagic = "PFA1"
 	meta := puffin.BlobMetadata{
-		Type:           puffin.BlobTypeDeletionVector,
+		Type:           blobType,
 		Fields:         []int32{2147483546},
 		SnapshotID:     -1,
 		SequenceNumber: -1,
 		Offset:         int64(puffin.MagicSize),
-		Length:         int64(len(dvBlobBytes)),
-		Properties: map[string]string{
-			// No "cardinality" — that is the whole point of this fixture.
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-		},
+		Length:         int64(len(blobBytes)),
+		Properties:     props,
 	}
 
 	payload, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{meta}})
@@ -160,7 +163,7 @@ func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes
 
 	var buf bytes.Buffer
 	buf.WriteString(puffinMagic) // header magic
-	buf.Write(dvBlobBytes)       // blob at offset MagicSize
+	buf.Write(blobBytes)         // blob at offset MagicSize
 	buf.WriteString(puffinMagic) // footer start magic
 	buf.Write(payload)           // footer JSON payload
 
@@ -170,7 +173,7 @@ func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes
 	copy(trailer[8:12], puffinMagic)
 	buf.Write(trailer[:])
 
-	path := filepath.Join(dir, "raw-dv-no-cardinality.puffin")
+	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, buf.Bytes(), 0o644))
 
 	return path, meta
@@ -390,6 +393,18 @@ func TestReadDVMissingContentMetadata(t *testing.T) {
 	})
 }
 
+// Why: a deletion vector manifest entry must identify the data file it applies to.
+// Condition: ReferencedDataFile is nil even though offset and size are present.
+// Assertion: ReadDV rejects the entry before opening the Puffin file.
+func TestReadDVMissingReferencedDataFile(t *testing.T) {
+	offset, size := int64(4), int64(50)
+	dvFile := newDVTestFile("missing.puffin", 5, &offset, &size)
+	dvFile.referencedDataFile = nil
+
+	_, err := ReadDV(iceio.LocalFS{}, dvFile)
+	assert.ErrorContains(t, err, "missing ReferencedDataFile")
+}
+
 // Why: negative or absurdly large blob sizes should be rejected before allocation.
 // Condition: ContentSizeInBytes set to -1.
 // Assertion: returns an error containing "out of valid range".
@@ -425,9 +440,55 @@ func TestReadDVInvalidPuffin(t *testing.T) {
 	assert.ErrorContains(t, err, "create puffin reader")
 }
 
+// Why: offset, size, and cardinality cannot prove that the selected Puffin blob
+// is a deletion vector for the manifest's referenced data file.
+// Condition: the matched blob has conflicting, missing, or non-DV identity metadata.
+// Assertion: ReadDV rejects each case before decoding the blob payload.
+func TestReadDVBlobIdentity(t *testing.T) {
+	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
+
+	t.Run("mismatched referenced data file", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			"referenced-data-file": "s3://bucket/data/data-002.parquet",
+			"cardinality":          "5",
+		})
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "manifest referenced data file")
+		assert.ErrorContains(t, err, "data-001.parquet")
+		assert.ErrorContains(t, err, "data-002.parquet")
+	})
+
+	t.Run("missing puffin referenced data file", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writeRawPuffinBlob(t, dir, "raw-dv-no-reference.puffin", dvBlobBytes,
+			puffin.BlobTypeDeletionVector, map[string]string{"cardinality": "5"})
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		assert.ErrorContains(t, err, "missing referenced-data-file property")
+	})
+
+	t.Run("wrong blob type", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writeRawPuffinBlob(t, dir, "raw-wrong-type.puffin", dvBlobBytes,
+			puffin.BlobType("test-blob"), map[string]string{
+				"referenced-data-file": "s3://bucket/data/data-001.parquet",
+				"cardinality":          "5",
+			})
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		assert.ErrorContains(t, err, `has type "test-blob", expected "deletion-vector-v1"`)
+	})
+}
+
 // Why: manifest-provided blob ranges must point into the Puffin blob area, not arbitrary offsets.
 // Condition: valid Puffin file, but content offset is forced to 0, which points before the blob region.
-// Assertion: returns an error containing "read DV blob at offset 0".
+// Assertion: returns an error indicating that no footer blob matches the range.
 func TestReadDVInvalidBlobRange(t *testing.T) {
 	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
 
@@ -436,7 +497,7 @@ func TestReadDVInvalidBlobRange(t *testing.T) {
 
 	offset, size := int64(0), meta.Length
 	_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
-	assert.ErrorContains(t, err, "read DV blob at offset 0")
+	assert.ErrorContains(t, err, "no blob in puffin footer at offset 0")
 }
 
 // TestReadDVCardinalityValidation pins the spec-mandated check that the
