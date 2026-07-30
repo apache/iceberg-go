@@ -546,10 +546,10 @@ type hasFieldToIDMap interface {
 	setFieldIDToDecimalScaleMap(map[int]int)
 }
 
-// ManifestFile is the interface which covers manifest files for supported table versions.
+// ManifestFile is the interface for version 1, 2, and 3 manifest files.
 type ManifestFile interface {
 	// Version returns the version number of this manifest file.
-	// It should be 1, 2, or 3.
+	// It must be 1, 2, or 3.
 	Version() int
 	// FilePath is the location URI of this manifest file.
 	FilePath() string
