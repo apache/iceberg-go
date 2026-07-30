@@ -119,11 +119,11 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 
 	if _, ok := raw["source-id"]; ok {
 		if _, ok := raw["source-ids"]; ok {
-			return errors.New("partition field cannot contain both source-id and source-ids")
+			return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
 		}
-	} else if _, ok := raw["source-ids"]; !ok {
-		return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 	}
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
 
 	aux := struct {
 		SourceID        int    `json:"source-id"`
@@ -140,26 +140,36 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	p.FieldID = aux.FieldID
 	p.Name = aux.Name
 
-	if len(aux.SourceIDs) > 0 {
-		p.SourceIDs = aux.SourceIDs
-	} else {
-		p.SourceIDs = []int{aux.SourceID}
-	}
-	for _, sourceID := range p.SourceIDs {
-		if sourceID <= 0 {
-			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
-		}
-	}
-	if p.Name == "" {
-		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
-	}
-
 	var err error
 	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 	if err := validateTransform(p.Transform); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	if hasSourceIDs && len(aux.SourceIDs) == 0 {
+		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
+	}
+	if !hasSourceID && !hasSourceIDs {
+		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
+		}
+		// Preserve compatibility with historical source-less void tombstones.
+		p.SourceIDs = []int{0}
+	} else if len(aux.SourceIDs) > 0 {
+		p.SourceIDs = aux.SourceIDs
+	} else {
+		p.SourceIDs = []int{aux.SourceID}
+	}
+	for _, sourceID := range p.SourceIDs {
+		_, isVoid := p.Transform.(VoidTransform)
+		if sourceID <= 0 && !(isVoid && !hasSourceID && !hasSourceIDs) {
+			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+		}
+	}
+	if p.Name == "" {
+		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
 
 	return nil
@@ -496,6 +506,9 @@ func validatePartitionFields(fields []PartitionField) error {
 			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
 		}
 		names[field.Name] = struct{}{}
+		if _, isVoid := field.Transform.(VoidTransform); isVoid {
+			continue
+		}
 
 		if _, ok := field.Transform.(VoidTransform); ok {
 			continue

@@ -635,10 +635,11 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.Error(t, err)
-		assert.EqualError(t, err, "partition field cannot contain both source-id and source-ids")
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "partition field cannot contain both source-id and source-ids")
 	})
 
-	t.Run("unmarshal with no source id", func(t *testing.T) {
+	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
 		jsonData := `
 		{
 			"field-id": 1003,
@@ -646,9 +647,16 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 			"name": "void"
 		}`
 		var field iceberg.PartitionField
-		err := json.Unmarshal([]byte(jsonData), &field)
-		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-		assert.ErrorContains(t, err, "requires source-id or source-ids")
+		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
+		assert.Equal(t, 0, field.SourceID())
+	})
+
+	t.Run("unmarshal void with source id", func(t *testing.T) {
+		var field iceberg.PartitionField
+		require.NoError(t, json.Unmarshal([]byte(`{
+			"source-id": 1, "field-id": 1003, "transform": "void", "name": "void"
+		}`), &field))
+		assert.Equal(t, 1, field.SourceID())
 	})
 }
 
@@ -671,7 +679,7 @@ func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
 		{
 			name:    "empty source IDs",
 			data:    `{"spec-id":0,"fields":[{"source-ids":[],"field-id":1000,"name":"part","transform":"identity"}]}`,
-			message: "source ID must be positive",
+			message: "source-ids cannot be empty",
 		},
 		{
 			name:    "empty name",
