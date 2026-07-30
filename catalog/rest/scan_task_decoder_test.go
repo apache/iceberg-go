@@ -391,6 +391,28 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 			want: "must not carry equality-ids",
 		},
 		{
+			name: "non-Puffin position delete with content offset",
+			mutate: func(w *ScanTasks) {
+				w.DeleteFiles[0].ContentOffset = int64Ptr(10)
+			},
+			want: "only valid for Puffin deletion vectors",
+		},
+		{
+			name: "non-Puffin position delete with content size",
+			mutate: func(w *ScanTasks) {
+				w.DeleteFiles[0].ContentSizeInBytes = int64Ptr(20)
+			},
+			want: "only valid for Puffin deletion vectors",
+		},
+		{
+			name: "non-Puffin position delete with blob range",
+			mutate: func(w *ScanTasks) {
+				w.DeleteFiles[0].ContentOffset = int64Ptr(10)
+				w.DeleteFiles[0].ContentSizeInBytes = int64Ptr(20)
+			},
+			want: "only valid for Puffin deletion vectors",
+		},
+		{
 			name: "puffin missing blob range",
 			mutate: func(w *ScanTasks) {
 				w.DeleteFiles[0].FileFormat = "puffin"

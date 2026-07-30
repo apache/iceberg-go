@@ -343,6 +343,9 @@ func decodeRESTDeleteFile(
 		if len(wire.EqualityIDs) != 0 {
 			return nil, errors.New("position-deletes file must not carry equality-ids")
 		}
+		if format != iceberg.PuffinFile && (wire.ContentOffset != nil || wire.ContentSizeInBytes != nil) {
+			return nil, errors.New("content-offset and content-size-in-bytes are only valid for Puffin deletion vectors")
+		}
 		if wire.ContentOffset != nil {
 			if *wire.ContentOffset < 0 {
 				return nil, fmt.Errorf("content-offset must be non-negative: %d", *wire.ContentOffset)
