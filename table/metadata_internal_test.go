@@ -37,6 +37,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSnapshotIDFromUUIDClearsSignBit(t *testing.T) {
+	id := uuid.UUID{7: 0x80}
+	require.Equal(t, int64(0), snapshotIDFromUUID(id))
+
+	id[0] = 42
+	require.Equal(t, int64(42), snapshotIDFromUUID(id))
+}
+
 const ExampleTableMetadataV2 = `{
     "format-version": 2,
     "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
