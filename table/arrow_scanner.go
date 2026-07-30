@@ -463,6 +463,8 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
+	// Position-delete columns are resolved by their spec-defined names because
+	// Arrow schemas read from external files do not always retain Iceberg IDs.
 	requiredColumn := func(name string) (int, error) {
 		indices := schema.FieldIndices(name)
 		if len(indices) != 1 {
