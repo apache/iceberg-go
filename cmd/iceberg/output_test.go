@@ -28,6 +28,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_textOutput_DescribeTable(t *testing.T) {
@@ -150,6 +151,7 @@ read.split.target.size | 134217728
         {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
         {
             "type": "struct",
+			"schema-id": 1,
             "fields": [
                 {"id": 1, "name": "x", "required": true, "type": "long"}
             ]
@@ -201,7 +203,8 @@ read.split.target.size | 134217728
 			pterm.SetDefaultOutput(&buf)
 			pterm.DisableColor()
 
-			meta, _ := table.ParseMetadataBytes([]byte(tt.args.meta))
+			meta, err := table.ParseMetadataBytes([]byte(tt.args.meta))
+			require.NoError(t, err)
 			tbl := table.New([]string{"t"}, meta, "", nil, nil)
 			buf.Reset()
 
