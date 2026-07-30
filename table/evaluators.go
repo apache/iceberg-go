@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -74,7 +75,12 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 		partitionFilter: m.partitionFilter,
 	}
 
-	return iceberg.VisitExpr(ev.partitionFilter, &ev)
+	result, err := iceberg.VisitExpr(ev.partitionFilter, &ev)
+	if errors.Is(err, iceberg.ErrInvalidBinSerialization) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func removeBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, vals []iceberg.Literal, cmpToDelete int) []iceberg.Literal {
@@ -760,7 +766,12 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		}
 	}
 
-	return iceberg.VisitExpr(m.expr, m)
+	result, err := iceberg.VisitExpr(m.expr, m)
+	if errors.Is(err, iceberg.ErrInvalidBinSerialization) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
@@ -778,7 +789,12 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 	ev.nanCounts = file.NaNValueCounts()
 	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
 
-	return iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExpr(m.expr, &ev)
+	if errors.Is(err, iceberg.ErrInvalidBinSerialization) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *inclusiveMetricsEval) mayContainNull(fieldID int) bool {
@@ -1249,7 +1265,12 @@ func (m *strictMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 	ev.nanCounts = file.NaNValueCounts()
 	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
 
-	return iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExpr(m.expr, &ev)
+	if errors.Is(err, iceberg.ErrInvalidBinSerialization) {
+		return rowsMightNotMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
