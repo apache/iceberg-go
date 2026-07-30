@@ -428,7 +428,13 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) (e
 		return fmt.Errorf("%w: failed to acquire lock for %s.%s: %w", table.ErrCommitFailed, database, tableName, err)
 	}
 	defer func() {
-		err = errors.Join(err, lock.releaseForCleanup(ctx))
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after dropping %s.%s: %v", database, tableName, releaseErr)
+			}
+		}
 	}()
 
 	// Re-read after acquiring the lock so drop cannot act on table state that a
@@ -502,7 +508,13 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_
 			table.ErrCommitFailed, fromDB, fromTable, toDB, toTable, err)
 	}
 	defer func() {
-		err = errors.Join(err, lock.releaseForCleanup(ctx))
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after renaming %s.%s to %s.%s: %v", fromDB, fromTable, toDB, toTable, releaseErr)
+			}
+		}
 	}()
 
 	hiveTbl, err := c.getIcebergTable(ctx, fromDB, fromTable)
@@ -548,7 +560,13 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			table.ErrCommitFailed, database, tableName, err)
 	}
 	defer func() {
-		err = errors.Join(err, lock.releaseForCleanup(ctx))
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after committing %s.%s: %v", database, tableName, releaseErr)
+			}
+		}
 	}()
 
 	currentHiveTbl, err := c.client.GetTable(ctx, database, tableName)
