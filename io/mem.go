@@ -24,7 +24,6 @@ import (
 	"io/fs"
 	"net/url"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -77,7 +76,7 @@ func (m *MemFS) Open(name string) (File, error) {
 	cp := make([]byte, len(data))
 	copy(cp, data)
 
-	return &memFile{data: cp, name: filepath.Base(name)}, nil
+	return &memFile{data: cp, name: path.Base(name)}, nil
 }
 
 func (m *MemFS) Remove(name string) error {
@@ -120,7 +119,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	entriesByPath := make(map[string]walkEntry)
 	addEntry := func(entry walkEntry) {
 		current, exists := entriesByPath[entry.path]
-		if !exists || entry.isDir || !current.isDir {
+		if !exists || (!entry.isDir && current.isDir) {
 			entriesByPath[entry.path] = entry
 		}
 	}
@@ -152,14 +151,39 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 	}
 	m.mu.RUnlock()
 	if len(entriesByPath) == 0 {
-		addEntry(walkEntry{path: root, isDir: true})
+		err := fn(root, nil, &fs.PathError{Op: "lstat", Path: root, Err: fs.ErrNotExist})
+		if err == fs.SkipDir || err == fs.SkipAll {
+			return nil
+		}
+
+		return err
+	}
+	if rootEntry, ok := entriesByPath[root]; ok && !rootEntry.isDir {
+		entriesByPath = map[string]walkEntry{root: rootEntry}
 	}
 
 	paths := make([]string, 0, len(entriesByPath))
 	for entryPath := range entriesByPath {
 		paths = append(paths, entryPath)
 	}
-	sort.Strings(paths)
+	sort.Slice(paths, func(i, j int) bool {
+		if paths[i] == root {
+			return true
+		}
+		if paths[j] == root {
+			return false
+		}
+
+		left := strings.Split(strings.TrimPrefix(paths[i], root+"/"), "/")
+		right := strings.Split(strings.TrimPrefix(paths[j], root+"/"), "/")
+		for index := 0; index < min(len(left), len(right)); index++ {
+			if left[index] != right[index] {
+				return left[index] < right[index]
+			}
+		}
+
+		return len(left) < len(right)
+	})
 
 	var skipPrefix string
 	for _, entryPath := range paths {
