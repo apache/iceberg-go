@@ -58,6 +58,9 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 	if err := checkDataFileSpecID(task.File, spec); err != nil {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: %w", err)
 	}
+	if err := validateScanRange(task.Start, task.Length, task.File.FileSizeBytes()); err != nil {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: %w", err)
+	}
 	fileBytes, err := EncodeDataFile(task.File, spec, schema, version)
 	if err != nil {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: file: %w", err)
@@ -132,6 +135,9 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: file: %w", err)
 	}
+	if err := validateScanRange(envelope.Start, envelope.Length, file.FileSizeBytes()); err != nil {
+		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: %w", err)
+	}
 	del, err := decodeDataFileSlice(envelope.DeleteFiles, spec, schema, version)
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: delete files: %w", err)
@@ -160,6 +166,14 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 		FirstRowID:          envelope.FirstRowID,
 		DataSequenceNumber:  envelope.DataSequenceNumber,
 	}, nil
+}
+
+func validateScanRange(start, length, fileSize int64) error {
+	if start > fileSize || length > fileSize-start {
+		return fmt.Errorf("scan range start=%d length=%d exceeds file size %d", start, length, fileSize)
+	}
+
+	return nil
 }
 
 // fileScanTaskShape is a compile-time drift guard for FileScanTask.

@@ -110,3 +110,19 @@ func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
 		require.Contains(t, err.Error(), "length must be non-negative")
 	})
 }
+
+func TestDecodeFileScanTaskRejectsRangeBeyondFileSize(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		"data.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 100)
+	require.NoError(t, err)
+	file, err := EncodeDataFile(builder.Build(), spec, nil, 2)
+	require.NoError(t, err)
+	envelope, err := fileScanTaskSchema.Encode(&fileScanTaskEnvelope{
+		File: file, Start: 90, Length: 11,
+	})
+	require.NoError(t, err)
+
+	_, err = DecodeFileScanTask(envelope, spec, nil, 2)
+	require.ErrorContains(t, err, "scan range start=90 length=11 exceeds file size 100")
+}

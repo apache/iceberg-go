@@ -18,6 +18,7 @@
 package codec_test
 
 import (
+	"math"
 	"strconv"
 	"testing"
 
@@ -219,6 +220,37 @@ func TestEncodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
 		require.Contains(t, err.Error(), "codec: EncodeFileScanTask:")
 		require.Contains(t, err.Error(), "length must be non-negative")
 	})
+}
+
+func TestEncodeFileScanTaskValidatesRangeAgainstFileSize(t *testing.T) {
+	spec, schema, base := fullyPopulatedFileScanTask(t, 2)
+	fileSize := base.File.FileSizeBytes()
+	tests := []struct {
+		name        string
+		start       int64
+		length      int64
+		shouldError bool
+	}{
+		{"full file", 0, fileSize, false},
+		{"suffix ending at EOF", fileSize - 1, 1, false},
+		{"zero length at EOF", fileSize, 0, false},
+		{"start after EOF", fileSize + 1, 0, true},
+		{"range ends after EOF", fileSize - 1, 2, true},
+		{"overflowing range", math.MaxInt64, 1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := base
+			task.Start, task.Length = tt.start, tt.length
+			_, err := codec.EncodeFileScanTask(task, spec, schema, 2)
+			if tt.shouldError {
+				require.ErrorContains(t, err, "exceeds file size")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpec, *iceberg.Schema, table.FileScanTask) {
