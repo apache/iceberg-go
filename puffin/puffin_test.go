@@ -74,10 +74,12 @@ func defaultBlobInput() puffin.BlobMetadataInput {
 
 func TestWriterRejectsOperationsAfterPartialWriteFailure(t *testing.T) {
 	tests := []struct {
-		name     string
-		failCall int
+		name           string
+		failCall       int
+		failsDuringAdd bool
 	}{
-		{name: "blob", failCall: 2},
+		// NewWriter writes first, AddBlob writes second, and Finish writes calls 3-5.
+		{name: "blob", failCall: 2, failsDuringAdd: true},
 		{name: "footer magic", failCall: 3},
 		{name: "footer payload", failCall: 4},
 		{name: "footer trailer", failCall: 5},
@@ -91,7 +93,7 @@ func TestWriterRejectsOperationsAfterPartialWriteFailure(t *testing.T) {
 			require.NoError(t, err)
 
 			_, err = writer.AddBlob(defaultBlobInput(), []byte("first blob payload"))
-			if tt.failCall == 2 {
+			if tt.failsDuringAdd {
 				require.ErrorIs(t, err, writeErr)
 			} else {
 				require.NoError(t, err)
@@ -125,6 +127,9 @@ func TestWriterRejectsOperationsAfterShortWrite(t *testing.T) {
 	_, err = writer.AddBlob(defaultBlobInput(), []byte("second blob payload"))
 	assert.ErrorContains(t, err, "short write")
 	assert.ErrorContains(t, writer.Finish(), "short write")
+	assert.ErrorContains(t, writer.AddProperties(map[string]string{"key": "value"}), "short write")
+	assert.ErrorContains(t, writer.ClearProperties(), "short write")
+	assert.ErrorContains(t, writer.SetCreatedBy("test"), "short write")
 	assert.Equal(t, callsAfterFailure, output.calls)
 }
 
