@@ -114,13 +114,16 @@ func (w *PositionDeltaWriter) Reinsert(batch arrow.RecordBatch) error {
 		return fmt.Errorf("%w: writer is already closed", ErrInvalidOperation)
 	}
 
-	indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName)
-	if len(indices) == 0 {
+	rowIDIndex, found, err := rowIDColumnIndex(batch.Schema())
+	if err != nil {
+		return err
+	}
+	if !found {
 		return fmt.Errorf("%w: Reinsert batch must contain %s column",
 			iceberg.ErrInvalidArgument, iceberg.RowIDColumnName)
 	}
 
-	col := batch.Column(indices[0])
+	col := batch.Column(rowIDIndex)
 	if col.NullN() > 0 {
 		return fmt.Errorf("%w: Reinsert batch %s column must not contain null values",
 			iceberg.ErrInvalidArgument, iceberg.RowIDColumnName)
@@ -140,8 +143,12 @@ func (w *PositionDeltaWriter) Insert(batch arrow.RecordBatch) error {
 		return fmt.Errorf("%w: writer is already closed", ErrInvalidOperation)
 	}
 
-	if indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName); len(indices) > 0 {
-		if batch.Column(indices[0]).NullN() != int(batch.NumRows()) {
+	rowIDIndex, found, err := rowIDColumnIndex(batch.Schema())
+	if err != nil {
+		return err
+	}
+	if found {
+		if batch.Column(rowIDIndex).NullN() != int(batch.NumRows()) {
 			return fmt.Errorf("%w: Insert batch %s column must be all null (use Reinsert for preserved IDs)",
 				iceberg.ErrInvalidArgument, iceberg.RowIDColumnName)
 		}
@@ -245,7 +252,11 @@ func (w *PositionDeltaWriter) buildUnifiedIterator() iter.Seq2[arrow.RecordBatch
 // already has _row_id (validated to be all-null by Insert), it is returned
 // retained as-is.
 func appendNullRowIDColumn(alloc memory.Allocator, batch arrow.RecordBatch) (arrow.RecordBatch, error) {
-	if indices := batch.Schema().FieldIndices(iceberg.RowIDColumnName); len(indices) > 0 {
+	_, found, err := rowIDColumnIndex(batch.Schema())
+	if err != nil {
+		return nil, err
+	}
+	if found {
 		batch.Retain()
 
 		return batch, nil
@@ -277,4 +288,17 @@ func appendNullRowIDColumn(alloc memory.Allocator, batch arrow.RecordBatch) (arr
 	newSchema := arrow.NewSchema(fields, nil)
 
 	return array.NewRecordBatch(newSchema, cols, nrows), nil
+}
+
+func rowIDColumnIndex(schema *arrow.Schema) (int, bool, error) {
+	indices := schema.FieldIndices(iceberg.RowIDColumnName)
+	switch len(indices) {
+	case 0:
+		return 0, false, nil
+	case 1:
+		return indices[0], true, nil
+	default:
+		return 0, false, fmt.Errorf("%w: batch contains multiple %s columns",
+			iceberg.ErrInvalidArgument, iceberg.RowIDColumnName)
+	}
 }
