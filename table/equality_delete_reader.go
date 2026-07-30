@@ -217,11 +217,15 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 		colNames[i] = name
 		indices := tbl.Schema().FieldIndices(name)
-		if len(indices) == 0 {
+		switch len(indices) {
+		case 0:
 			return nil, nil, fmt.Errorf("equality delete column %q not found in delete file %s", name, dataFile.FilePath())
+		case 1:
+			colIndices[i] = indices[0]
+		default:
+			return nil, nil, fmt.Errorf("equality delete column %q is ambiguous in delete file %s: found %d columns",
+				name, dataFile.FilePath(), len(indices))
 		}
-
-		colIndices[i] = indices[0]
 	}
 
 	// Build the set of encoded delete keys by iterating aligned batches.

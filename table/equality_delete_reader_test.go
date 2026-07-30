@@ -26,6 +26,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -120,6 +122,55 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	}
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
+}
+
+func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
+	tbl := newEqDeleteReadTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/data.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "one"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	duplicateSchema := arrow.NewSchema([]arrow.Field{deleteSchema.Field(0), deleteSchema.Field(0)}, nil)
+	deletePath := tbl.Location() + "/data/delete.parquet"
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	first := builder.NewArray()
+	builder.Append(2)
+	second := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(duplicateSchema, []arrow.Array{first, second}, 1)
+	first.Release()
+	second.Release()
+	deleteTable := array.NewTableFromRecords(duplicateSchema, []arrow.RecordBatch{batch})
+	batch.Release()
+	file, err := iceio.LocalFS{}.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	deleteTable.Release()
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+	tx = tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rd.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, _, err = tbl.Scan().ToArrowRecords(t.Context())
+	require.ErrorContains(t, err, `equality delete column "id" is ambiguous`)
 }
 
 func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
