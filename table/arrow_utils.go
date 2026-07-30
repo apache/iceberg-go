@@ -1140,7 +1140,9 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 // false when the types are not such a pair. Arrow's compute layer has no
 // extension-to-extension cast kernel, and the values are already in the
 // extension's storage encoding, so only the storage array is cast and that only
-// when the storage types differ.
+// when the storage types differ. This is safe only because a shared extension
+// name implies the storage payload is interpretation-compatible: parameters may
+// differ, the encoded values do not.
 func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals arrow.Array) (arrow.Array, bool) {
 	tgtExt, ok := targetType.(arrow.ExtensionType)
 	if !ok {
@@ -1157,7 +1159,8 @@ func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals
 			vals.(array.ExtensionArray).Storage()), true
 	}
 
-	storage := retOrPanic(compute.CastArray(a.ctx, vals,
+	storage := retOrPanic(compute.CastArray(a.ctx,
+		vals.(array.ExtensionArray).Storage(),
 		compute.SafeCastOptions(tgtExt.StorageType())))
 	defer storage.Release()
 

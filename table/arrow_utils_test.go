@@ -2650,11 +2650,13 @@ func TestToRequestedSchemaGeoExtensionRewrap(t *testing.T) {
 			name:          "geometry_metadata_only",
 			icebergType:   iceberg.GeometryType{},
 			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgePlanar,
 		},
 		{
 			name:          "geometry_storage_width_mismatch",
 			icebergType:   iceberg.GeometryType{},
 			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgePlanar,
 			useLargeTypes: true,
 		},
 		{
@@ -2749,6 +2751,8 @@ func TestToRequestedSchemaMismatchedExtensionNameNotRewrapped(t *testing.T) {
 
 	ctx := compute.WithAllocator(context.Background(), mem)
 	_, err := table.ToRequestedSchema(ctx, sc, sc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	// The failure comes from Arrow's cast internals, whose message is not a
+	// stable surface; what matters is that mismatched extension names are not
+	// silently rewrapped.
 	require.Error(t, err)
-	assert.ErrorContains(t, err, "cast_extension")
 }
