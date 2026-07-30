@@ -18,7 +18,6 @@
 package table
 
 import (
-	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -1492,7 +1491,7 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		FormatVersion int `json:"format-version"`
 	}{}
 	if err := json.Unmarshal(b, &ver); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	var ret Metadata
@@ -1512,13 +1511,17 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	return ret, json.Unmarshal(normalized, ret)
+	if err := json.Unmarshal(normalized, ret); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	return ret, nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 	var metadata map[string]json.RawMessage
 	if err := json.Unmarshal(b, &metadata); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 	if err := requireLastUpdatedMS(metadata); err != nil {
 		return nil, err
@@ -1653,8 +1656,8 @@ func initCommonMetadataForDeserialization() commonMetadata {
 
 func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
 	value, ok := fields["last-updated-ms"]
-	if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
+	if !ok || string(value) == "null" {
+		return fmt.Errorf("%w: last-updated-ms is absent or null", ErrInvalidMetadata)
 	}
 
 	return nil

@@ -333,16 +333,19 @@ func TestLastUpdatedMSPresence(t *testing.T) {
 			}
 
 			t.Run("missing", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
 				delete(metadata, "last-updated-ms")
 				assertMissingLastUpdatedMS(t, metadata)
 			})
 
 			t.Run("null", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
 				metadata["last-updated-ms"] = nil
 				assertMissingLastUpdatedMS(t, metadata)
 			})
 
 			t.Run("epoch", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
 				metadata["last-updated-ms"] = float64(0)
 				raw, err := json.Marshal(metadata)
 				require.NoError(t, err)
@@ -352,12 +355,22 @@ func TestLastUpdatedMSPresence(t *testing.T) {
 			})
 
 			t.Run("negative", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
 				metadata["last-updated-ms"] = float64(-1)
 				raw, err := json.Marshal(metadata)
 				require.NoError(t, err)
 				parsed, err := ParseMetadataBytes(raw)
 				require.NoError(t, err)
 				assert.Equal(t, int64(-1), parsed.LastUpdatedMillis())
+			})
+
+			t.Run("wrong type", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				metadata["last-updated-ms"] = "2024-01-01"
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				_, err = ParseMetadataBytes(raw)
+				require.ErrorIs(t, err, ErrInvalidMetadata)
 			})
 		})
 	}
@@ -370,7 +383,7 @@ func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
 	require.NoError(t, err)
 	_, err = ParseMetadataBytes(raw)
 	require.ErrorIs(t, err, ErrInvalidMetadata)
-	assert.ErrorContains(t, err, "missing last-updated-ms")
+	assert.ErrorContains(t, err, "last-updated-ms is absent or null")
 }
 
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
