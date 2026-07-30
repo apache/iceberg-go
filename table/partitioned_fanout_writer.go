@@ -55,6 +55,7 @@ type partitionInfo struct {
 
 type partitionFieldInfo struct {
 	sourceField iceberg.PartitionField
+	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
 }
@@ -330,6 +331,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		partitionColumns[i] = record.Column(colIndices[0])
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
+			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
 		}
@@ -343,7 +345,14 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 				sourceField := fieldInfo.sourceField
 				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
+					return nil, fmt.Errorf(
+						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
+						fieldInfo.sourceName,
+						sourceField.SourceID(),
+						col.DataType(),
+						fieldInfo.sourceType,
+						err,
+					)
 				}
 
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
@@ -566,6 +575,12 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
 	case *array.FixedSizeBinary:
+		switch sourceType.(type) {
+		case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		default:
+			return nil, fmt.Errorf("%w: cannot convert Arrow %s to Iceberg type %v", iceberg.ErrInvalidSchema, arr.DataType(), sourceType)
+		}
+
 		return iceberg.NewLiteral(arr.Value(row)).To(sourceType)
 
 	default:
