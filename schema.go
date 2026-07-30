@@ -1668,16 +1668,18 @@ func validAvroName(n string) bool {
 	return true
 }
 
+const maxBMPRune rune = 0xFFFF
+
 func isAvroNameStart(r rune) bool {
-	return r <= '\uFFFF' && (r == '_' || unicode.IsLetter(r))
+	return r <= maxBMPRune && (r == '_' || unicode.IsLetter(r))
 }
 
 func isAvroNamePart(r rune) bool {
-	return r <= '\uFFFF' && (isAvroNameStart(r) || unicode.IsDigit(r))
+	return r <= maxBMPRune && (isAvroNameStart(r) || unicode.IsDigit(r))
 }
 
 func sanitize(r rune) string {
-	if r > '\uFFFF' {
+	if r > maxBMPRune {
 		high, low := utf16.EncodeRune(r)
 
 		return fmt.Sprintf("_x%X_x%X", high, low)
@@ -1696,7 +1698,7 @@ func sanitizeName(n string) string {
 	}
 
 	var b strings.Builder
-	b.Grow(len(n))
+	b.Grow(len(n) * 3)
 
 	for i, r := range n {
 		valid := isAvroNamePart(r)
@@ -1714,6 +1716,11 @@ func sanitizeName(n string) string {
 	return b.String()
 }
 
+// SanitizeColumnNames returns a schema whose field names follow Java Iceberg's
+// Avro-compatible naming rules. Non-decimal Unicode numbers, supplementary
+// code points, and invalid name-start characters are escaped. It returns
+// [ErrInvalidSchema] for invalid UTF-8 names or when distinct names sanitize to
+// the same value.
 func SanitizeColumnNames(sc *Schema) (*Schema, error) {
 	result, err := Visit(sc, sanitizeColumnNameVisitor{})
 	if err != nil {

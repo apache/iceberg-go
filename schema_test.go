@@ -1556,6 +1556,8 @@ func TestSanitizeColumnNamesMatchesJavaIceberg(t *testing.T) {
 		{name: "supplementary digit first", input: "𝟎field", want: "_xD835_xDFCEfield"},
 		{name: "supplementary digit later", input: "a𝟎field", want: "a_xD835_xDFCEfield"},
 		{name: "superscript number", input: "a²", want: "a_xB2"},
+		// Java's Character.isLetterOrDigit accepts Nd, but not Nl or No.
+		{name: "letter number", input: "aⅡ", want: "a_x2161"},
 		{name: "combining mark", input: "e\u0301", want: "e_x301"},
 		{name: "emoji first", input: "😀field", want: "_xD83D_xDE00field"},
 		{name: "emoji later", input: "a😀field", want: "a_xD83D_xDE00field"},
@@ -1565,6 +1567,8 @@ func TestSanitizeColumnNamesMatchesJavaIceberg(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: test.input, Type: iceberg.PrimitiveTypes.String})
 			sanitized, err := iceberg.SanitizeColumnNames(schema)
 			require.NoError(t, err)
