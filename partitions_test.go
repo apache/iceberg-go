@@ -635,10 +635,11 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.Error(t, err)
-		assert.EqualError(t, err, "partition field cannot contain both source-id and source-ids")
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "partition field cannot contain both source-id and source-ids")
 	})
 
-	t.Run("unmarshal with no source id", func(t *testing.T) {
+	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
 		jsonData := `
 		{
 			"field-id": 1003,
@@ -646,11 +647,81 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 			"name": "void"
 		}`
 		var field iceberg.PartitionField
-		err := json.Unmarshal([]byte(jsonData), &field)
-		require.NoError(t, err)
-		assert.Zero(t, field.SourceID())
-		assert.Equal(t, 1003, field.FieldID)
-		assert.Equal(t, "void", field.Name)
-		assert.Equal(t, iceberg.VoidTransform{}, field.Transform)
+		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
+		assert.Equal(t, 0, field.SourceID())
 	})
+
+	t.Run("unmarshal void with source id", func(t *testing.T) {
+		var field iceberg.PartitionField
+		require.NoError(t, json.Unmarshal([]byte(`{
+			"source-id": 1, "field-id": 1003, "transform": "void", "name": "void"
+		}`), &field))
+		assert.Equal(t, 1, field.SourceID())
+	})
+}
+
+func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		message string
+	}{
+		{
+			name:    "negative spec ID",
+			data:    `{"spec-id":-1,"fields":[]}`,
+			message: "spec ID must be non-negative",
+		},
+		{
+			name:    "zero source ID",
+			data:    `{"spec-id":0,"fields":[{"source-id":0,"field-id":1000,"name":"part","transform":"identity"}]}`,
+			message: "source ID must be positive",
+		},
+		{
+			name:    "empty source IDs",
+			data:    `{"spec-id":0,"fields":[{"source-ids":[],"field-id":1000,"name":"part","transform":"identity"}]}`,
+			message: "source-ids cannot be empty",
+		},
+		{
+			name:    "empty name",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"","transform":"identity"}]}`,
+			message: "partition name cannot be empty",
+		},
+		{
+			name:    "duplicate names",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"part","transform":"identity"},{"source-id":2,"field-id":1001,"name":"part","transform":"identity"}]}`,
+			message: "duplicate partition name",
+		},
+		{
+			name:    "duplicate field IDs",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"identity"},{"source-id":2,"field-id":1000,"name":"second","transform":"identity"}]}`,
+			message: "duplicate field ID provided",
+		},
+		{
+			name:    "redundant fields",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"identity"},{"source-id":1,"field-id":1001,"name":"second","transform":"identity"}]}`,
+			message: "redundant partition field",
+		},
+		{
+			name:    "invalid bucket count",
+			data:    `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"part","transform":"bucket[0]"}]}`,
+			message: "invalid transform syntax",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var spec iceberg.PartitionSpec
+			err := json.Unmarshal([]byte(tt.data), &spec)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestPartitionSpecUnmarshalAllowsRepeatedVoidTransforms(t *testing.T) {
+	data := `{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"first","transform":"void"},{"source-id":1,"field-id":1001,"name":"second","transform":"void"}]}`
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+	assert.Equal(t, 2, spec.NumFields())
 }

@@ -602,6 +602,25 @@ func TestRejectDuplicateSnapshotIDs(t *testing.T) {
 	}
 }
 
+func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+
+	specs := metadata["partition-specs"].([]any)
+	metadata["partition-specs"] = append(slices.Clone(specs), map[string]any{
+		"spec-id": json.Number("-1"),
+		"fields":  []any{},
+	})
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "spec ID must be non-negative")
+}
+
 func TestSortOrderNotFound(t *testing.T) {
 	metadataSortOrderNotFound := `{
         "format-version": 2,
