@@ -34,6 +34,7 @@ var (
 	ErrBadCast                 = errors.New("could not cast value")
 	ErrBadLiteral              = errors.New("invalid literal value")
 	ErrInvalidBinSerialization = errors.New("invalid binary serialization")
+	ErrInvalidFixedLength      = errors.New("invalid fixed literal length")
 	ErrResolve                 = errors.New("cannot resolve type")
 	// ErrBBoxNotSerializable is returned when marshaling a geospatial bbox
 	// predicate to REST expression JSON: bbox predicates exist only for local
