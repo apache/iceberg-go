@@ -743,7 +743,9 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
 	)
 	mockClient := &mockHiveClient{}
-	expectImmediateTableLock(mockClient, 1)
+	mockClient.On("Lock", mock.Anything, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Return(&hive_metastore.LockResponse{Lockid: 1, State: hive_metastore.LockState_ACQUIRED}, nil).Once()
+	mockClient.On("Unlock", mock.Anything, int64(1)).Return(errors.New("unlock failed")).Once()
 	mockClient.On("GetTable", mock.Anything, "test_database", "test_table").
 		Return(existing, nil).Once()
 	var altered *hive_metastore.Table
@@ -753,7 +755,7 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 		}).Return(nil).Once()
 	cat := NewCatalogWithClient(mockClient, iceberg.Properties{})
 
-	_, metadataLocation, err := cat.CommitTable(
+	metadata, metadataLocation, err := cat.CommitTable(
 		ctx,
 		TableIdentifier("test_database", "test_table"),
 		nil,
@@ -771,6 +773,7 @@ func TestHiveCommitTableSynchronizesHMSMetadata(t *testing.T) {
 	)
 
 	require.NoError(t, err)
+	require.NotNil(t, metadata)
 	require.NotNil(t, altered)
 	require.Equal(t, metadataLocation, altered.Parameters[MetadataLocationKey])
 	require.Equal(t, oldMetadataLocation, altered.Parameters[PreviousMetadataLocationKey])
