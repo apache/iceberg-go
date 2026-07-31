@@ -32,6 +32,69 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPositionDeleteColumnIndices(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		fields            []arrow.Field
+		wantFilePathIndex int
+		wantPosIndex      int
+		wantErr           string
+	}{
+		{name: "valid", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantPosIndex: 1},
+		{name: "valid with row", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "row", Type: arrow.BinaryTypes.String}}, wantPosIndex: 1},
+		{name: "valid reversed", fields: []arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "file_path", Type: arrow.BinaryTypes.String}}, wantFilePathIndex: 1},
+		{name: "missing file_path", fields: []arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "missing pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}}, wantErr: `exactly one "pos" column, found 0`},
+		{name: "missing both", fields: nil, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "duplicate pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "pos" column, found 2`},
+		{name: "duplicate file_path", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "file_path" column, found 2`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filePathIndex, posIndex, err := positionDeleteColumnIndices(arrow.NewSchema(test.fields, nil))
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, test.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantFilePathIndex, filePathIndex)
+			assert.Equal(t, test.wantPosIndex, posIndex)
+		})
+	}
+}
+
+func TestReadDeletesRejectsMissingFilePath(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deleteSchema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	deletePath := "mem://bucket/deletes/missing-file-path.parquet"
+	rec := mustLoadRecordBatchFromJSON(deleteSchema, `[{"pos": 1}]`)
+	defer rec.Release()
+	tbl := array.NewTableFromRecords(deleteSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	memFS := iceio.NewMemFS()
+	fw, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()))
+	require.NoError(t, fw.Close())
+
+	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+	assert.Contains(t, err.Error(), `exactly one "file_path" column, found 0`)
+}
+
 func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	for _, tc := range []struct {
 		name                  string
