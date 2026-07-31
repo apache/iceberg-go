@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -54,8 +55,53 @@ type partitionInfo struct {
 
 type partitionFieldInfo struct {
 	sourceField iceberg.PartitionField
+	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
+}
+
+type binaryPartitionKey string
+
+type nanPartitionKey struct {
+	bits int
+}
+
+func comparablePartitionKey(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return binaryPartitionKey(value)
+	case float32:
+		if math.IsNaN(float64(value)) {
+			return nanPartitionKey{bits: 32}
+		}
+	case float64:
+		if math.IsNaN(value) {
+			return nanPartitionKey{bits: 64}
+		}
+	}
+
+	return value
+}
+
+func partitionRecordsEqual(left, right partitionRecord) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if comparablePartitionKey(left[i]) != comparablePartitionKey(right[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func clonePartitionValue(value any) any {
+	if bytes, ok := value.([]byte); ok {
+		return slices.Clone(bytes)
+	}
+
+	return value
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -285,6 +331,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		partitionColumns[i] = record.Column(colIndices[0])
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
+			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
 		}
@@ -298,7 +345,14 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 				sourceField := fieldInfo.sourceField
 				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
+					return nil, fmt.Errorf(
+						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
+						fieldInfo.sourceName,
+						sourceField.SourceID(),
+						col.DataType(),
+						fieldInfo.sourceType,
+						err,
+					)
 				}
 
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
@@ -343,10 +397,11 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	// Navigate through all but the last partition field
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
-		val, ok := node.children[part]
+		key := comparablePartitionKey(part)
+		val, ok := node.children[key]
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[part] = newNode
+			node.children[key] = newNode
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
@@ -354,7 +409,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	}
 
 	// Last level stores the actual partitionInfo
-	lastKey := partitionRec[len(partitionRec)-1]
+	lastKey := comparablePartitionKey(partitionRec[len(partitionRec)-1])
 	partVal, ok := node.children[lastKey].(*partitionInfo)
 	if ok {
 		return partVal
@@ -366,8 +421,9 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	// Copy partitionRec values so they don't get overwritten
 	partRecCopy := make(partitionRecord, len(partitionRec))
 	for i := range partitionRec {
-		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
-		partRecCopy[i] = partitionRec[i]
+		value := clonePartitionValue(partitionRec[i])
+		partitionValues[fieldInfo[i].fieldID] = value
+		partRecCopy[i] = value
 	}
 
 	partVal = &partitionInfo{
@@ -518,6 +574,14 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	case *array.LargeBinary:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.FixedSizeBinary:
+		switch sourceType.(type) {
+		case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		default:
+			return nil, fmt.Errorf("%w: cannot convert Arrow %s to Iceberg type %v", iceberg.ErrInvalidSchema, arr.DataType(), sourceType)
+		}
+
+		return iceberg.NewLiteral(arr.Value(row)).To(sourceType)
 
 	default:
 		val := column.GetOneForMarshal(row)
