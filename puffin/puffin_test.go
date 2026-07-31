@@ -19,6 +19,7 @@ package puffin_test
 
 import (
 	"bytes"
+	"errors"
 	"math"
 	"os"
 	"path"
@@ -39,6 +40,25 @@ func newWriter() (*puffin.Writer, *bytes.Buffer) {
 	return w, buf
 }
 
+type partialFailWriter struct {
+	bytes.Buffer
+	failCall int
+	calls    int
+	err      error
+}
+
+func (w *partialFailWriter) Write(data []byte) (int, error) {
+	w.calls++
+	if w.calls == w.failCall {
+		partial := len(data) / 2
+		_, _ = w.Buffer.Write(data[:partial])
+
+		return partial, w.err
+	}
+
+	return w.Buffer.Write(data)
+}
+
 func newReader(t *testing.T, buf *bytes.Buffer) *puffin.Reader {
 	r, err := puffin.NewReader(bytes.NewReader(buf.Bytes()))
 	require.NoError(t, err)
@@ -51,6 +71,67 @@ func defaultBlobInput() puffin.BlobMetadataInput {
 		Type:   puffin.BlobTypeDataSketchesTheta,
 		Fields: []int32{},
 	}
+}
+
+func TestWriterRejectsOperationsAfterPartialWriteFailure(t *testing.T) {
+	tests := []struct {
+		name           string
+		failCall       int
+		failsDuringAdd bool
+	}{
+		// NewWriter writes first, AddBlob writes second, and Finish writes calls 3-5.
+		{name: "blob", failCall: 2, failsDuringAdd: true},
+		{name: "footer magic", failCall: 3},
+		{name: "footer payload", failCall: 4},
+		{name: "footer trailer", failCall: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writeErr := errors.New("injected partial write")
+			output := &partialFailWriter{failCall: tt.failCall, err: writeErr}
+			writer, err := puffin.NewWriter(output)
+			require.NoError(t, err)
+
+			_, err = writer.AddBlob(defaultBlobInput(), []byte("first blob payload"))
+			if tt.failsDuringAdd {
+				require.ErrorIs(t, err, writeErr)
+			} else {
+				require.NoError(t, err)
+				require.ErrorIs(t, writer.Finish(), writeErr)
+			}
+
+			callsAfterFailure := output.calls
+			bytesAfterFailure := output.Len()
+
+			_, err = writer.AddBlob(defaultBlobInput(), []byte("second blob payload"))
+			assert.ErrorIs(t, err, writeErr)
+			assert.ErrorIs(t, writer.Finish(), writeErr)
+			assert.ErrorIs(t, writer.AddProperties(map[string]string{"key": "value"}), writeErr)
+			assert.ErrorIs(t, writer.ClearProperties(), writeErr)
+			assert.ErrorIs(t, writer.SetCreatedBy("test"), writeErr)
+			assert.Equal(t, callsAfterFailure, output.calls)
+			assert.Equal(t, bytesAfterFailure, output.Len())
+		})
+	}
+}
+
+func TestWriterRejectsOperationsAfterShortWrite(t *testing.T) {
+	output := &partialFailWriter{failCall: 2}
+	writer, err := puffin.NewWriter(output)
+	require.NoError(t, err)
+
+	_, err = writer.AddBlob(defaultBlobInput(), []byte("first blob payload"))
+	require.ErrorContains(t, err, "short write")
+
+	callsAfterFailure := output.calls
+	_, err = writer.AddBlob(defaultBlobInput(), []byte("second blob payload"))
+	assert.ErrorContains(t, err, "short write")
+	assert.ErrorContains(t, writer.Finish(), "short write")
+	assert.ErrorContains(t, writer.AddProperties(map[string]string{"key": "value"}), "short write")
+	assert.ErrorContains(t, writer.ClearProperties(), "short write")
+	assert.ErrorContains(t, writer.SetCreatedBy("test"), "short write")
+	assert.Equal(t, callsAfterFailure, output.calls)
 }
 
 func validFile() []byte {
