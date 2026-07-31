@@ -1536,6 +1536,134 @@ func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	assert.ErrorContains(t, err, "field name cannot be empty")
 }
 
+func TestSanitizeColumnNamesMatchesJavaIceberg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "ASCII letter", input: "Field_9", want: "Field_9"},
+		{name: "underscore", input: "_field", want: "_field"},
+		{name: "ASCII digit first", input: "1field", want: "_1field"},
+		{name: "latin letter", input: "éclair", want: "éclair"},
+		{name: "CJK letters", input: "你好", want: "你好"},
+		{name: "extended latin letter", input: "Łacinka", want: "Łacinka"},
+		{name: "Unicode digit first", input: "١field", want: "_١field"},
+		{name: "Unicode digit later", input: "a١field", want: "a١field"},
+		{name: "supplementary letter", input: "𐐀field", want: "_xD801_xDC00field"},
+		{name: "supplementary digit first", input: "𝟎field", want: "_xD835_xDFCEfield"},
+		{name: "supplementary digit later", input: "a𝟎field", want: "a_xD835_xDFCEfield"},
+		{name: "superscript number", input: "a²", want: "a_xB2"},
+		// Java Character.isLetterOrDigit excludes Unicode letter numbers (Nl).
+		{name: "letter number", input: "aⅡ", want: "a_x2161"},
+		{name: "combining mark", input: "e\u0301", want: "e_x301"},
+		{name: "emoji first", input: "😀field", want: "_xD83D_xDE00field"},
+		{name: "emoji later", input: "a😀field", want: "a_xD83D_xDE00field"},
+		{name: "punctuation first", input: "-field", want: "_x2Dfield"},
+		{name: "punctuation later", input: "a-field", want: "a_x2Dfield"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: test.input, Type: iceberg.PrimitiveTypes.String})
+			sanitized, err := iceberg.SanitizeColumnNames(schema)
+			require.NoError(t, err)
+			got := sanitized.Field(0).Name
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestSanitizeColumnNamesRejectsCollisions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		fields []iceberg.NestedField
+		want   string
+	}{
+		{
+			name: "leading ASCII digit collides with underscored name",
+			fields: []iceberg.NestedField{
+				{ID: 1, Name: "1field", Type: iceberg.PrimitiveTypes.String},
+				{ID: 2, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
+			},
+			want: `fields 1 and 2 produce duplicate sanitized name "_1field"`,
+		},
+		{
+			name: "emoji escape collides with existing name",
+			fields: []iceberg.NestedField{
+				{ID: 3, Name: "😀", Type: iceberg.PrimitiveTypes.String},
+				{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
+			},
+			want: `fields 3 and 4 produce duplicate sanitized name "_xD83D_xDE00"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := iceberg.SanitizeColumnNames(iceberg.NewSchema(1, test.fields...))
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
+func TestSanitizeColumnNamesScopesCollisionChecksToStruct(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "😀", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+	)
+
+	sanitized, err := iceberg.SanitizeColumnNames(schema)
+	require.NoError(t, err)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(0).Type.(*iceberg.StructType).FieldList[0].Name)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(1).Type.(*iceberg.StructType).FieldList[0].Name)
+}
+
+func TestSanitizeColumnNamesRejectsNestedCollision(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "1field", Type: iceberg.PrimitiveTypes.String},
+			{ID: 3, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
+		}},
+	})
+
+	_, err := iceberg.SanitizeColumnNames(schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, `fields 2 and 3 produce duplicate sanitized name "_1field"`)
+}
+
+func TestSanitizeColumnNamesRejectsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 7, Name: string([]byte{0xff, 'a'}), Type: iceberg.PrimitiveTypes.String,
+	})
+
+	_, err := iceberg.SanitizeColumnNames(schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "field 7 name is not valid UTF-8")
+}
+
 func TestSchemaSelectCaseSensitiveSuccess(t *testing.T) {
 	selected, err := tableSchemaSimple.Select(true, "foo", "bar")
 	require.NoError(t, err)
