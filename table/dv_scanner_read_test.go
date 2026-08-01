@@ -354,18 +354,27 @@ func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
 
 	bitmap := dv.NewRoaringPositionBitmap()
 	bitmap.Set(1)
-	filter := filterByDeletionVector(ctx, bitmap, 2, (&rowPositionSource{}).cursor())
+	bitmap.Set(3)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
 
-	bldr := array.NewInt64Builder(mem)
-	defer bldr.Release()
-	bldr.AppendValues([]int64{0, 1, 2}, nil)
-	col := bldr.NewArray()
-	defer col.Release()
-	schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
-	batch := array.NewRecordBatch(schema, []arrow.Array{col}, 3)
+	mkBatch := func(values ...int64) arrow.RecordBatch {
+		bldr := array.NewInt64Builder(mem)
+		defer bldr.Release()
+		bldr.AppendValues(values, nil)
+		col := bldr.NewArray()
+		defer col.Release()
+		schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
 
-	out, err := filter(batch)
+		return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
+	}
+
+	withinCount, err := filter(mkBatch(0, 1, 2))
 	require.NoError(t, err)
-	defer out.Release()
-	assert.Equal(t, []int64{0, 2}, out.Column(0).(*array.Int64).Int64Values())
+	defer withinCount.Release()
+	assert.Equal(t, []int64{0, 2}, withinCount.Column(0).(*array.Int64).Int64Values())
+
+	beyondCount, err := filter(mkBatch(3, 4, 5))
+	require.NoError(t, err)
+	defer beyondCount.Release()
+	assert.Equal(t, []int64{4, 5}, beyondCount.Column(0).(*array.Int64).Int64Values())
 }

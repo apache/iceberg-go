@@ -530,6 +530,10 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *r
 	}
 }
 
+func deletionVectorKeepsRow(keepBits []byte, rowCount, pos int64) bool {
+	return pos >= rowCount || keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0
+}
+
 // filterByDeletionVector returns a pipeline step that drops rows present in
 // the bitmap by precomputing a bit-packed keep-mask covering the whole file
 // once and slicing the relevant range per batch into compute.FilterRecordBatch.
@@ -580,11 +584,7 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			defer bldr.Release()
 			bldr.Reserve(int(nrows))
 			for pos := currentIdx; pos < nextIdx; pos++ {
-				if pos >= rowCount {
-					bldr.Append(true)
-				} else {
-					bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
-				}
+				bldr.Append(deletionVectorKeepsRow(keepBits, rowCount, pos))
 			}
 			mask := bldr.NewBooleanArray()
 			defer mask.Release()
@@ -600,14 +600,7 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			// keepBits is sized for rowCount; a pos past it means row-group
 			// metadata and the manifest's File.Count() disagree. Keep the row
 			// rather than indexing out of bounds.
-			if pos >= rowCount {
-				bldr.Append(true)
-
-				continue
-			}
-			// Test keep bit at absolute position pos: byte pos/8, bit pos%8,
-			// LSB-first (the layout the fast path's array.NewBoolean reads).
-			bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
+			bldr.Append(deletionVectorKeepsRow(keepBits, rowCount, pos))
 		}
 		mask := bldr.NewBooleanArray()
 		defer mask.Release()
