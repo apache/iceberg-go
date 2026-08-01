@@ -377,4 +377,9 @@ func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
 	require.NoError(t, err)
 	defer beyondCount.Release()
 	assert.Equal(t, []int64{4, 5}, beyondCount.Column(0).(*array.Int64).Int64Values())
+
+	fullyBeyondCount, err := filter(mkBatch(6, 7))
+	require.NoError(t, err)
+	defer fullyBeyondCount.Release()
+	assert.Equal(t, []int64{6, 7}, fullyBeyondCount.Column(0).(*array.Int64).Int64Values())
 }

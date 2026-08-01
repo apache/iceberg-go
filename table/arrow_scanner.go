@@ -576,6 +576,11 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 
 				return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
 			}
+			if currentIdx >= rowCount {
+				r.Retain()
+
+				return r, nil
+			}
 
 			// A stale manifest count can be smaller than the rows emitted by
 			// the file. Preserve rows beyond the mask rather than slicing past
