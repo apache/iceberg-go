@@ -576,6 +576,13 @@ func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
 	)
 	_, ok := schema.FindFieldByID(1)
 	require.True(t, ok)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Contains(t, schema.NameMapping().String(), "old")
 
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"type": "struct",
@@ -587,9 +594,17 @@ func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
 	assert.Equal(t, 1, schema.NumFields())
 	_, ok = schema.FindFieldByID(1)
 	assert.False(t, ok)
+	_, ok = schema.FindColumnName(1)
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	assert.False(t, ok)
 	field, ok := schema.FindFieldByID(2)
 	require.True(t, ok)
 	assert.Equal(t, "new", field.Name)
+	assert.Contains(t, schema.NameMapping().String(), "new")
+	assert.NotContains(t, schema.NameMapping().String(), "old")
 }
 
 func TestUnmarshalSchemaPreservesExistingStateOnError(t *testing.T) {

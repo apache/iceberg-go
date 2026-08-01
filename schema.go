@@ -296,7 +296,14 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		decoded.IdentifierFieldIDs = []int{}
 	}
 
-	*s = decoded
+	s.ID = decoded.ID
+	s.IdentifierFieldIDs = decoded.IdentifierFieldIDs
+	s.fields = decoded.fields
+	s.idToName.Store(nil)
+	s.idToField.Store(nil)
+	s.nameToID.Store(nil)
+	s.nameToIDLower.Store(nil)
+	s.idToAccessor.Store(nil)
 	s.init()
 
 	return nil
