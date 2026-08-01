@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -369,6 +370,31 @@ func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
 		require.True(t, ok)
 		assertIndependent(t, person, payload)
 	})
+	t.Run("FindFieldByName", func(t *testing.T) {
+		person, ok := schema.FindFieldByName("person")
+		require.True(t, ok)
+		payload, ok := schema.FindFieldByName("payload")
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
+	})
+	t.Run("FindFieldByNameCaseInsensitive", func(t *testing.T) {
+		person, ok := schema.FindFieldByNameCaseInsensitive("PERSON")
+		require.True(t, ok)
+		payload, ok := schema.FindFieldByNameCaseInsensitive("PAYLOAD")
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
+	})
+	t.Run("FindTypeByID", func(t *testing.T) {
+		typ, ok := schema.FindTypeByID(1)
+		require.True(t, ok)
+		person, ok := typ.(*iceberg.StructType)
+		require.True(t, ok)
+		person.FieldList[0].Name = "hijacked"
+
+		actual, ok := schema.FindFieldByID(2)
+		require.True(t, ok)
+		assert.Equal(t, "name", actual.Name)
+	})
 	t.Run("FlatFields", func(t *testing.T) {
 		fields, err := schema.FlatFields()
 		require.NoError(t, err)
@@ -396,9 +422,17 @@ func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
 	var field iceberg.NestedField
 	assert.Zero(t, testing.AllocsPerRun(100, func() {
 		field, ok = schema.FindFieldByIDRef(1, internal.SchemaRef{})
+		runtime.KeepAlive(field)
 	}))
 	require.True(t, ok)
 	assert.Equal(t, 1, field.ID)
+
+	parent := field.Type.(*iceberg.StructType)
+	parent.FieldList[0].Name = "shared_child"
+	shared, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
+	require.True(t, ok)
+	sharedParent := shared.Type.(*iceberg.StructType)
+	assert.Equal(t, "shared_child", sharedParent.FieldList[0].Name)
 }
 
 func TestSchemaIndexByIDVisitor(t *testing.T) {

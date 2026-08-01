@@ -340,11 +340,15 @@ func cloneFields(fields []NestedField) []NestedField {
 }
 
 func cloneField(field NestedField) NestedField {
-	field.Type = cloneType(field.Type)
-	field.InitialDefault = cloneDefault(field.InitialDefault)
-	field.WriteDefault = cloneDefault(field.WriteDefault)
-
-	return field
+	return NestedField{
+		ID:             field.ID,
+		Name:           field.Name,
+		Type:           cloneType(field.Type),
+		Required:       field.Required,
+		Doc:            field.Doc,
+		InitialDefault: cloneDefault(field.InitialDefault),
+		WriteDefault:   cloneDefault(field.WriteDefault),
+	}
 }
 
 func cloneDefault(value any) any {
@@ -370,6 +374,9 @@ func cloneDefault(value any) any {
 
 		return cloned
 	default:
+		// Iceberg scalar defaults are value types (bool, numeric values,
+		// strings, UUIDs, and Decimals). Any mutable reference type must get
+		// an explicit deep-copy case above.
 		return value
 	}
 }
@@ -457,9 +464,10 @@ func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
 	return f, ok
 }
 
-// FindFieldByIDRef returns a schema-owned field without cloning it. It is limited
-// to internal callers that only read the result and need to avoid clone-on-read
-// overhead on hot paths.
+// FindFieldByIDRef returns a schema-owned field without cloning it. The returned
+// field is a value copy, but its Type and everything reachable from that Type
+// are shared with the schema and must be treated as read-only. This method is
+// limited to internal callers that need to avoid clone-on-read overhead.
 func (s *Schema) FindFieldByIDRef(id int, _ internal.SchemaRef) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()
 	f, ok := idx[id]
