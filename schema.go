@@ -277,10 +277,11 @@ func (s *Schema) FieldIDs() []int {
 
 func (s *Schema) UnmarshalJSON(b []byte) error {
 	type Alias Schema
+	var decoded Schema
 	aux := struct {
 		Fields []NestedField `json:"fields"`
 		*Alias
-	}{Alias: (*Alias)(s)}
+	}{Alias: (*Alias)(&decoded)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -290,12 +291,13 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	s.init()
-
-	s.fields = aux.Fields
-	if s.IdentifierFieldIDs == nil {
-		s.IdentifierFieldIDs = []int{}
+	decoded.fields = aux.Fields
+	if decoded.IdentifierFieldIDs == nil {
+		decoded.IdentifierFieldIDs = []int{}
 	}
+
+	*s = decoded
+	s.init()
 
 	return nil
 }

@@ -570,6 +570,50 @@ func TestUnmarshalSchema(t *testing.T) {
 	assert.True(t, tableSchemaSimple.Equals(&schema))
 }
 
+func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [{"id": 2, "name": "new", "type": "long", "required": true}]
+	}`), schema))
+
+	assert.Zero(t, schema.ID)
+	assert.Empty(t, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	_, ok = schema.FindFieldByID(1)
+	assert.False(t, ok)
+	field, ok := schema.FindFieldByID(2)
+	require.True(t, ok)
+	assert.Equal(t, "new", field.Name)
+}
+
+func TestUnmarshalSchemaPreservesExistingStateOnError(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	err := json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [
+			{"id": 2, "name": "first", "type": "long", "required": true},
+			{"id": 2, "name": "duplicate", "type": "string", "required": false}
+		]
+	}`), schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	assert.Equal(t, 7, schema.ID)
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	field, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+}
+
 func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
 	tests := []struct {
 		name     string
