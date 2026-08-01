@@ -870,14 +870,13 @@ func (m *metadata) init() {
 
 func (m *metadata) UnmarshalJSON(b []byte) error {
 	type Alias metadata
+	next := metadata{FormatVersionValue: -1}
 	// definition-log is shadowed to reject the required field being absent
 	// or null, which the default decoding cannot distinguish from empty.
 	aux := struct {
 		DefinitionLog json.RawMessage `json:"definition-log"`
 		*Alias
-	}{Alias: (*Alias)(m)}
-
-	m.FormatVersionValue = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -886,16 +885,20 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	if len(aux.DefinitionLog) == 0 {
 		return fmt.Errorf("%w: definition-log is required", ErrInvalidUDFMetadata)
 	}
-	if err := json.Unmarshal(aux.DefinitionLog, &m.DefinitionLogList); err != nil {
+	if err := json.Unmarshal(aux.DefinitionLog, &next.DefinitionLogList); err != nil {
 		return err
 	}
-	if m.DefinitionLogList == nil {
+	if next.DefinitionLogList == nil {
 		return fmt.Errorf("%w: definition-log is required", ErrInvalidUDFMetadata)
 	}
+	if err := next.validate(); err != nil {
+		return err
+	}
 
+	*m = next
 	m.init()
 
-	return m.validate()
+	return nil
 }
 
 // indexBy indexes a slice into a map, using a provided extractKey function.

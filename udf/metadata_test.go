@@ -749,6 +749,37 @@ func TestParseMetadataWithEmptyDefinitionLog(t *testing.T) {
 	assert.Empty(t, meta.DefinitionLog())
 }
 
+func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
+	first, err := json.Marshal(minimalMetadata(t))
+	require.NoError(t, err)
+
+	var meta metadata
+	require.NoError(t, json.Unmarshal(first, &meta))
+	_, ok := meta.DefinitionByID("int")
+	require.True(t, ok)
+
+	secondDoc := minimalMetadata(t)
+	secondDefinition := definition(t, secondDoc, 0)
+	secondDefinition["definition-id"] = "long"
+	secondDefinition["parameters"].([]any)[0].(map[string]any)["type"] = "long"
+	refs := secondDoc["definition-log"].([]any)[0].(map[string]any)["definition-versions"].([]any)
+	refs[0].(map[string]any)["definition-id"] = "long"
+	second, err := json.Marshal(secondDoc)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(second, &meta))
+
+	_, ok = meta.DefinitionByID("int")
+	assert.False(t, ok)
+	_, ok = meta.DefinitionByID("long")
+	assert.True(t, ok)
+
+	delete(secondDoc, "definitions")
+	missingDefinitions, err := json.Marshal(secondDoc)
+	require.NoError(t, err)
+	err = json.Unmarshal(missingDefinitions, &meta)
+	assert.ErrorContains(t, err, "at least one definition is required")
+}
+
 func TestOnNullInputValues(t *testing.T) {
 	for _, behavior := range []OnNullInput{OnNullInputCall, OnNullInputReturnNull} {
 		m := minimalMetadata(t)
