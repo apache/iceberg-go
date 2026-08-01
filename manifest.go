@@ -1573,6 +1573,10 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 }
 
 func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRowID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
+	if firstRowID < 0 {
+		return nil, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+
 	m := &ManifestListWriter{
 		version:          3,
 		out:              out,
@@ -1592,6 +1596,19 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 		"first-row-id":       []byte(strconv.FormatInt(firstRowID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
+}
+
+func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
+	if existingRows < 0 || addedRows < 0 {
+		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
+			ErrInvalidArgument, existingRows, addedRows)
+	}
+	if existingRows > math.MaxInt64-firstRowID || addedRows > math.MaxInt64-firstRowID-existingRows {
+		return 0, fmt.Errorf("%w: assigning %d existing and %d added rows from first row ID %d overflows int64",
+			ErrInvalidArgument, existingRows, addedRows, firstRowID)
+	}
+
+	return firstRowID + existingRows + addedRows, nil
 }
 
 func (m *ManifestListWriter) init(meta map[string][]byte) error {
@@ -1671,8 +1688,12 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 					if wrapped.FirstRowIDValue == nil {
 						if m.nextRowID != nil {
 							firstRowID := *m.nextRowID
+							nextRowID, err := advanceRowID(firstRowID, wrapped.ExistingRowsCount, wrapped.AddedRowsCount)
+							if err != nil {
+								return fmt.Errorf("manifest %q: %w", wrapped.Path, err)
+							}
 							wrapped.FirstRowIDValue = &firstRowID
-							*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+							*m.nextRowID = nextRowID
 						}
 					}
 				}
@@ -1784,6 +1805,10 @@ func WriteManifestV3(
 	snapshotID int64,
 	entries []ManifestEntry,
 ) (mf ManifestFile, nextFirstRowID int64, err error) {
+	if firstRowID < 0 {
+		return nil, 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+
 	cnt := &internal.CountingWriter{W: out}
 
 	w, err := NewManifestWriter(3, cnt, spec, schema, snapshotID)
@@ -1810,7 +1835,10 @@ func WriteManifestV3(
 	raw := mf.(*manifestFile)
 	v := firstRowID
 	raw.FirstRowIDValue = &v
-	nextFirstRowID = firstRowID + raw.AddedRowsCount + raw.ExistingRowsCount
+	nextFirstRowID, err = advanceRowID(firstRowID, raw.ExistingRowsCount, raw.AddedRowsCount)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	return raw, nextFirstRowID, nil
 }

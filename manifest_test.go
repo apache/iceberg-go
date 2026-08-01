@@ -1235,6 +1235,22 @@ func (m *ManifestTestSuite) TestWriteManifestV3() {
 		m.EqualValues(520, nextID) // 500 + 10 + 10
 	})
 
+	m.Run("rejects negative first row ID", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3("/manifest.avro", &buf, -1, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("rejects next row ID overflow", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3(
+			"/manifest.avro", &buf, math.MaxInt64-count, partitionSpec, testSchema, entrySnapshotID, entries,
+		)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+	})
+
 	m.Run("read inheritance from manifest", func() {
 		var buf bytes.Buffer
 		firstRowID := int64(500)
@@ -2428,6 +2444,37 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	m.EqualValues(int64(3800), *writer.NextRowID()-firstRowID)
 	err = writer.Close()
 	m.Require().NoError(err)
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() {
+	m.Run("negative first row ID", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, -1, nil)
+		m.Nil(writer)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("negative row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative.avro", 100, 1, snapshotID).AddedRows(-1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
 }
 
 func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
