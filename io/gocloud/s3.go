@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"time"
 
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -68,11 +69,10 @@ func ParseAWSConfig(ctx context.Context, props map[string]string) (*aws.Config, 
 
 	accessKey, secretAccessKey := props[io.S3AccessKeyID], props[io.S3SecretAccessKey]
 	token := props[io.S3SessionToken]
-	hasAccessKey, hasSecretAccessKey := accessKey != "", secretAccessKey != ""
-	if hasAccessKey != hasSecretAccessKey || (token != "" && !hasAccessKey) {
-		return nil, errors.New("s3.access-key-id and s3.secret-access-key must be configured together")
+	if err := internalaws.ValidateStaticCredentials(io.S3AccessKeyID, io.S3SecretAccessKey, io.S3SessionToken, accessKey, secretAccessKey, token); err != nil {
+		return nil, err
 	}
-	if hasAccessKey {
+	if accessKey != "" {
 		opts = append(opts, config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			accessKey, secretAccessKey, token,
 		)))
@@ -178,6 +178,13 @@ func resolveUsePathStyle(endpoint string, props map[string]string) bool {
 // resolveS3AWSConfig returns the AWS config for the S3 FileIO, preferring an
 // ambient context config but letting explicit s3.* credentials override it.
 func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Config, error) {
+	if err := internalaws.ValidateStaticCredentials(
+		io.S3AccessKeyID, io.S3SecretAccessKey, io.S3SessionToken,
+		props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],
+	); err != nil {
+		return nil, err
+	}
+
 	var (
 		base *aws.Config
 		err  error
@@ -199,9 +206,7 @@ func resolveS3AWSConfig(ctx context.Context, props map[string]string) (*aws.Conf
 		cfg.Region = r
 	}
 
-	// A complete explicit key pair overrides the credentials. A partial set
-	// (missing the access key or secret) falls through to the context/default
-	// chain rather than installing a provider with blank fields.
+	// A complete explicit key pair overrides the credentials.
 	if props[io.S3AccessKeyID] != "" && props[io.S3SecretAccessKey] != "" {
 		cfg.Credentials = credentials.NewStaticCredentialsProvider(
 			props[io.S3AccessKeyID], props[io.S3SecretAccessKey], props[io.S3SessionToken],

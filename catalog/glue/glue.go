@@ -32,6 +32,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/internal"
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
@@ -123,11 +124,10 @@ func toAwsConfig(ctx context.Context, p iceberg.Properties) (aws.Config, error) 
 	}
 
 	key, secret, token := p[AccessKeyID], p[SecretAccessKey], p[SessionToken]
-	hasKey, hasSecret := key != "", secret != ""
-	if hasKey != hasSecret || (token != "" && !hasKey) {
-		return aws.Config{}, errors.New("glue.access-key-id and glue.secret-access-key must be configured together")
+	if err := internalaws.ValidateStaticCredentials(AccessKeyID, SecretAccessKey, SessionToken, key, secret, token); err != nil {
+		return aws.Config{}, err
 	}
-	if hasKey {
+	if key != "" {
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(key, secret, token)))
 	}
