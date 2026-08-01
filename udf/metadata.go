@@ -204,24 +204,26 @@ type Parameter struct {
 
 func (p *Parameter) UnmarshalJSON(b []byte) error {
 	type Alias Parameter
+	next := Parameter{}
 	aux := struct {
 		Type json.RawMessage `json:"type"`
 		*Alias
-	}{Alias: (*Alias)(p)}
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
 	if len(aux.Type) == 0 {
-		return fmt.Errorf("%w: parameter %q requires a type", ErrInvalidUDFMetadata, p.Name)
+		return fmt.Errorf("%w: parameter %q requires a type", ErrInvalidUDFMetadata, next.Name)
 	}
 
 	typ, err := unmarshalType(aux.Type)
 	if err != nil {
 		return err
 	}
-	p.Type = typ
+	next.Type = typ
+	*p = next
 
 	return nil
 }
@@ -252,26 +254,25 @@ type DefinitionVersion struct {
 
 func (v *DefinitionVersion) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionVersion
+	next := DefinitionVersion{VersionID: -1, TimestampMS: -1}
 	aux := struct {
 		Representations []json.RawMessage `json:"representations"`
 		*Alias
-	}{Alias: (*Alias)(v)}
-
-	v.VersionID = -1
-	v.TimestampMS = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	v.Representations = make([]Representation, len(aux.Representations))
+	next.Representations = make([]Representation, len(aux.Representations))
 	for i, raw := range aux.Representations {
 		repr, err := unmarshalRepresentation(raw)
 		if err != nil {
 			return err
 		}
-		v.Representations[i] = repr
+		next.Representations[i] = repr
 	}
+	*v = next
 
 	return nil
 }
@@ -404,6 +405,7 @@ type Definition struct {
 
 func (d *Definition) UnmarshalJSON(b []byte) error {
 	type Alias Definition
+	next := Definition{CurrentVersionID: -1}
 	// definition-id and parameters are shadowed to distinguish a required
 	// field that is absent from one that is legitimately empty: a
 	// zero-parameter definition has "" as its definition-id and [] as its
@@ -413,9 +415,7 @@ func (d *Definition) UnmarshalJSON(b []byte) error {
 		Parameters   json.RawMessage `json:"parameters"`
 		ReturnType   json.RawMessage `json:"return-type"`
 		*Alias
-	}{Alias: (*Alias)(d)}
-
-	d.CurrentVersionID = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -424,27 +424,28 @@ func (d *Definition) UnmarshalJSON(b []byte) error {
 	if aux.DefinitionID == nil {
 		return fmt.Errorf("%w: definition is missing definition-id", ErrInvalidUDFMetadata)
 	}
-	d.DefinitionID = *aux.DefinitionID
+	next.DefinitionID = *aux.DefinitionID
 
 	if len(aux.Parameters) == 0 {
-		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, d.DefinitionID)
+		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
-	if err := json.Unmarshal(aux.Parameters, &d.Parameters); err != nil {
+	if err := json.Unmarshal(aux.Parameters, &next.Parameters); err != nil {
 		return err
 	}
-	if d.Parameters == nil {
-		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, d.DefinitionID)
+	if next.Parameters == nil {
+		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
 
 	if len(aux.ReturnType) == 0 {
-		return fmt.Errorf("%w: definition %q requires a return-type", ErrInvalidUDFMetadata, d.DefinitionID)
+		return fmt.Errorf("%w: definition %q requires a return-type", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
 
 	typ, err := unmarshalType(aux.ReturnType)
 	if err != nil {
 		return err
 	}
-	d.ReturnType = typ
+	next.ReturnType = typ
+	*d = next
 
 	return nil
 }
@@ -605,14 +606,13 @@ type DefinitionVersionRef struct {
 
 func (r *DefinitionVersionRef) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionVersionRef
+	next := DefinitionVersionRef{VersionID: -1}
 	// definition-id is shadowed to distinguish the required field being
 	// absent from the legitimately empty id of a zero-parameter definition.
 	aux := struct {
 		DefinitionID *string `json:"definition-id"`
 		*Alias
-	}{Alias: (*Alias)(r)}
-
-	r.VersionID = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -621,7 +621,8 @@ func (r *DefinitionVersionRef) UnmarshalJSON(b []byte) error {
 	if aux.DefinitionID == nil {
 		return fmt.Errorf("%w: definition-log reference is missing definition-id", ErrInvalidUDFMetadata)
 	}
-	r.DefinitionID = *aux.DefinitionID
+	next.DefinitionID = *aux.DefinitionID
+	*r = next
 
 	return nil
 }
@@ -639,11 +640,14 @@ type DefinitionLogEntry struct {
 
 func (e *DefinitionLogEntry) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionLogEntry
-	aux := (*Alias)(e)
+	next := DefinitionLogEntry{TimestampMS: -1}
 
-	e.TimestampMS = -1
+	if err := json.Unmarshal(b, (*Alias)(&next)); err != nil {
+		return err
+	}
+	*e = next
 
-	return json.Unmarshal(b, aux)
+	return nil
 }
 
 func (e DefinitionLogEntry) validate() error {
