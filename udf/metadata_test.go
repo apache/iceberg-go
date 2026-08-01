@@ -750,7 +750,10 @@ func TestParseMetadataWithEmptyDefinitionLog(t *testing.T) {
 }
 
 func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
-	first, err := json.Marshal(minimalMetadata(t))
+	firstDoc := minimalMetadata(t)
+	firstDoc["doc"] = "old documentation"
+	firstDoc["properties"] = map[string]any{"old": "value"}
+	first, err := json.Marshal(firstDoc)
 	require.NoError(t, err)
 
 	var meta metadata
@@ -768,6 +771,8 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(second, &meta))
 
+	assert.Empty(t, meta.Doc())
+	assert.Empty(t, meta.Properties())
 	_, ok = meta.DefinitionByID("int")
 	assert.False(t, ok)
 	_, ok = meta.DefinitionByID("long")
@@ -778,6 +783,8 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	require.NoError(t, err)
 	err = json.Unmarshal(missingDefinitions, &meta)
 	assert.ErrorContains(t, err, "at least one definition is required")
+	_, ok = meta.DefinitionByID("long")
+	assert.True(t, ok, "a failed decode must not partially replace valid metadata")
 }
 
 func TestOnNullInputValues(t *testing.T) {
