@@ -2475,6 +2475,16 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() 
 		m.Require().ErrorContains(err, "overflows int64")
 		m.EqualValues(math.MaxInt64, *writer.NextRowID())
 	})
+
+	m.Run("later validation failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 10, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorContains(err, "unassigned sequence number")
+		m.EqualValues(10, *writer.NextRowID())
+	})
 }
 
 func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {

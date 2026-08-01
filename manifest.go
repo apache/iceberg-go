@@ -1666,6 +1666,8 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 
 	case 2, 3:
 		for _, file := range files {
+			var assignedNextRowID *int64
+
 			// Per the Iceberg spec a v2 manifest list may reference v1 manifest
 			// files (and a v3 list may reference v1 or v2 manifests) so that a
 			// table can be upgraded without rewriting historical manifests. The
@@ -1693,7 +1695,7 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 								return fmt.Errorf("manifest %q: %w", wrapped.Path, err)
 							}
 							wrapped.FirstRowIDValue = &firstRowID
-							*m.nextRowID = nextRowID
+							assignedNextRowID = &nextRowID
 						}
 					}
 				}
@@ -1721,6 +1723,9 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 			if err := m.writer.Encode(wrapped); err != nil {
 				return err
+			}
+			if assignedNextRowID != nil {
+				*m.nextRowID = *assignedNextRowID
 			}
 		}
 	default:
