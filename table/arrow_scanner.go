@@ -560,16 +560,36 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			currentIdx := nextIdx
 			nextIdx += nrows
 
-			// Wrap (and slice) the shared keep-mask buffer for this batch.
-			// array.NewSlice on a Boolean array tracks the bit-level offset,
-			// so we don't need byte-aligned slicing — currentIdx can land
-			// anywhere within a byte.
-			full := array.NewBoolean(int(rowCount), buf, nil, 0)
-			defer full.Release()
-			sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
-			defer sliced.Release()
+			if nextIdx <= rowCount {
+				// Wrap (and slice) the shared keep-mask buffer for this batch.
+				// array.NewSlice on a Boolean array tracks the bit-level offset,
+				// so we don't need byte-aligned slicing — currentIdx can land
+				// anywhere within a byte.
+				full := array.NewBoolean(int(rowCount), buf, nil, 0)
+				defer full.Release()
+				sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
+				defer sliced.Release()
 
-			return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+				return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+			}
+
+			// A stale manifest count can be smaller than the rows emitted by
+			// the file. Preserve rows beyond the mask rather than slicing past
+			// its bounds and panicking.
+			bldr := array.NewBooleanBuilder(mem)
+			defer bldr.Release()
+			bldr.Reserve(int(nrows))
+			for pos := currentIdx; pos < nextIdx; pos++ {
+				if pos >= rowCount {
+					bldr.Append(true)
+				} else {
+					bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
+				}
+			}
+			mask := bldr.NewBooleanArray()
+			defer mask.Release()
+
+			return compute.FilterRecordBatch(ctx, r, mask, compute.DefaultFilterOptions())
 		}
 
 		bldr := array.NewBooleanBuilder(mem)
