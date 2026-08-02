@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -99,6 +100,7 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 	t.Run("partial props creds are rejected", func(t *testing.T) {
 		t.Parallel()
 		_, err := resolveS3AWSConfig(ctxWith, map[string]string{io.S3AccessKeyID: "PARTIAL"})
+		require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials)
 		require.ErrorContains(t, err, "s3.access-key-id and s3.secret-access-key must be configured together")
 	})
 
@@ -132,6 +134,7 @@ func TestParseAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := ParseAWSConfig(context.Background(), tt.props)
+			require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials)
 			require.ErrorContains(t, err, tt.err)
 		})
 	}
