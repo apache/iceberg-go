@@ -41,6 +41,13 @@ func localPath(name string) (string, error) {
 		return name, nil
 	}
 	scheme := name[:schemeEnd]
+	// A colon is valid in a native POSIX filename. Treat non-file names as
+	// URIs only when they have an authority delimiter, preserving paths such as
+	// "partition:2026/data.parquet" while still rejecting s3:// and similar
+	// locations passed directly to LocalFS.
+	if !strings.EqualFold(scheme, "file") && !strings.HasPrefix(name[schemeEnd+1:], "//") {
+		return name, nil
+	}
 	if !strings.EqualFold(scheme, "file") {
 		return "", fmt.Errorf("unsupported local filesystem scheme %q", scheme)
 	}

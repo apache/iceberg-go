@@ -147,6 +147,15 @@ func TestLocalFSPreservesPlainPathsWithRawPercent(t *testing.T) {
 	assert.Equal(t, []byte("content"), content)
 }
 
+func TestLocalFSPreservesRelativePathsWithColon(t *testing.T) {
+	t.Parallel()
+
+	path := "partition:2026/data.parquet"
+	got, err := localPath(path)
+	require.NoError(t, err)
+	assert.Equal(t, path, got)
+}
+
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
 }
