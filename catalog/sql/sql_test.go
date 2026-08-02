@@ -2506,6 +2506,13 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 
 		break
 	}
+
+	viewsIter = db.ListViews(context.Background(), []string{".."})
+	for _, err := range viewsIter {
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
 }
 
 func (s *SqliteCatalogTestSuite) TestLoadView() {

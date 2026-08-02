@@ -92,6 +92,23 @@ func TestValidateViewIdentifier(t *testing.T) {
 	require.NotErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchTable)
 }
 
+func TestValidateNamespaceIdentifier(t *testing.T) {
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace"}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"parent", "namespace"}))
+
+	for _, ident := range []table.Identifier{
+		nil,
+		{},
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "child/name"},
+		{"namespace", "child\nname"},
+	} {
+		require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+	}
+}
+
 func TestValidateFunctionIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function"}))
 

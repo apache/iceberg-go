@@ -1672,6 +1672,12 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
+	if len(namespace) > 0 {
+		if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
+			return nil, err
+		}
+	}
+
 	if c.isV0() {
 		return nil, nil
 	}
