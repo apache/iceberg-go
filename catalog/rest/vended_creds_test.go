@@ -46,12 +46,13 @@ func newTestRefresher(fetchCreds func(ctx context.Context, ident []string) (iceb
 func TestVendedCredsCachedIOReturnedWhenNotExpired(t *testing.T) {
 	t.Parallel()
 
+	refreshErr := errors.New("refresh unavailable")
 	var callCount atomic.Int32
 
 	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
 		callCount.Add(1)
 
-		return iceberg.Properties{}, nil
+		return nil, refreshErr
 	})
 
 	// Seed cached IO and set expiry in the future.
