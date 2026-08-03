@@ -90,10 +90,10 @@ func (a *geoBoundsAccumulator) AddWKB(data []byte) error {
 
 // EWKB dimension and SRID flags, carried in the high bits of the WKB type word.
 const (
-	ewkbFlagZ    = 0x80000000
-	ewkbFlagM    = 0x40000000
-	ewkbFlagSRID = 0x20000000
-	ewkbFlags    = ewkbFlagZ | ewkbFlagM | ewkbFlagSRID
+	ewkbFlagZ    uint32 = 0x80000000
+	ewkbFlagM    uint32 = 0x40000000
+	ewkbFlagSRID uint32 = 0x20000000
+	ewkbFlags           = ewkbFlagZ | ewkbFlagM | ewkbFlagSRID
 )
 
 // WKB byte-order markers, the first byte of every WKB value.
@@ -121,6 +121,11 @@ func decodeWKB(data []byte) (geom.T, error) {
 // EWKB decoder rejects the ISO dimension offsets (it reads 1001 as an unknown
 // type rather than PointZ), so the flags select which one applies. Values too
 // short to hold a type word are left to the ISO decoder to reject.
+//
+// A 2D EWKB value without an SRID carries no flags, so it is reported as ISO and
+// decoded by the ISO decoder. That is correct because the two encodings are
+// byte-identical for plain 2D geometries; do not tighten the heuristic to claim
+// such values as EWKB.
 func isEWKB(data []byte) bool {
 	if len(data) < 5 {
 		return false
