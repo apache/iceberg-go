@@ -163,3 +163,41 @@ func TestStandardEncryptionManager_MalformedKeyMetadataRejected(t *testing.T) {
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), encryption.EncryptionKeyMetadata("not json"))
 	require.Error(t, err)
 }
+
+func TestStandardEncryptionManager_ZeroBlockSizeRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(0))
+	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
+}
+
+func TestStandardEncryptionManager_NegativeBlockSizeRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(-1))
+	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
+}
+
+func TestStandardEncryptionManager_ZeroBlockSizeMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestStandardManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AAAAAA==","block-size":0,"plaintext-length":10}`)
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+}
+
+func TestStandardEncryptionManager_NegativePlaintextLengthMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestStandardManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AAAAAA==","block-size":16,"plaintext-length":-1}`)
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+}
+
+func TestStandardEncryptionManager_BadNoncePrefixLengthMetadataRejectedOnRead(t *testing.T) {
+	mgr, _ := newTestStandardManager(t)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AA==","block-size":16,"plaintext-length":10}`)
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+}

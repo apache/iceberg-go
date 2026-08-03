@@ -63,6 +63,17 @@ var (
 	// ErrUnsupportedKeyMetadataVersion is returned when key metadata was
 	// produced by a newer, incompatible encoding version.
 	ErrUnsupportedKeyMetadataVersion = errors.New("encryption: unsupported key metadata version")
+
+	// ErrInvalidBlockSize is returned when a configured or decoded block
+	// size is not positive.
+	ErrInvalidBlockSize = errors.New("encryption: block size must be positive")
+
+	// ErrInvalidKeyMetadata is returned by
+	// [StandardEncryptionManager.NewDecryptedInputFile] when decoded key
+	// metadata fails basic sanity checks (e.g. a negative plaintext length
+	// or a nonce prefix of the wrong size). Key metadata is untrusted input
+	// on a crypto read path, so it is validated rather than trusted blindly.
+	ErrInvalidKeyMetadata = errors.New("encryption: invalid key metadata")
 )
 
 // standardKeyMetadataVersion is the current encoding version written by
@@ -142,6 +153,9 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 	if keyID == "" {
 		return nil, ErrKeyIDRequired
 	}
+	if m.blockSize <= 0 {
+		return nil, fmt.Errorf("%w: got %d", ErrInvalidBlockSize, m.blockSize)
+	}
 
 	var (
 		plainDEK, wrappedDEK []byte
@@ -197,6 +211,15 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 	}
 	if meta.Version != standardKeyMetadataVersion {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedKeyMetadataVersion, meta.Version)
+	}
+	if meta.BlockSize <= 0 {
+		return nil, fmt.Errorf("%w: block-size must be positive, got %d", ErrInvalidKeyMetadata, meta.BlockSize)
+	}
+	if meta.PlaintextLength < 0 {
+		return nil, fmt.Errorf("%w: plaintext-length must be non-negative, got %d", ErrInvalidKeyMetadata, meta.PlaintextLength)
+	}
+	if len(meta.NoncePrefix) != 4 {
+		return nil, fmt.Errorf("%w: nonce-prefix must be 4 bytes, got %d", ErrInvalidKeyMetadata, len(meta.NoncePrefix))
 	}
 
 	plainDEK, err := m.kms.UnwrapKey(ctx, meta.KeyID, meta.WrappedKey)
