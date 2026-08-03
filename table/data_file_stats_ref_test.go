@@ -107,7 +107,7 @@ func TestDataFileStatsUsesBorrowedView(t *testing.T) {
 	allocs := testing.AllocsPerRun(100, func() {
 		measuredValueCounts, _, _, _, _ = dataFileStats(file)
 	})
-	assert.Zero(t, allocs)
+	assert.InDelta(t, 0.0, allocs, 0.5)
 	assert.Equal(t, map[int]int64{1: 2}, measuredValueCounts)
 }
 

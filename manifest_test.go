@@ -3372,7 +3372,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	m.Equal(int64(6), *dataFile.ContentSizeInBytes())
 }
 
-func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromExternalMutation() {
+func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGetterMutation() {
 	partition := []byte{0x01, 0x02}
 	lower := []byte{0x03, 0x04}
 	upper := []byte{0x05, 0x06}
@@ -3392,19 +3392,25 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromExternalMut
 	manifest, err := WriteManifest("/manifest.avro", &buf, 2, spec, schema, snapshotID,
 		[]ManifestEntry{NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile).SequenceNum(1).Build()})
 	m.Require().NoError(err)
-	entries, err := ReadManifest(manifest, bytes.NewReader(buf.Bytes()), false)
+	encoded := buf.Bytes()
+	entries, err := ReadManifest(manifest, bytes.NewReader(encoded), false)
 	m.Require().NoError(err)
 	m.Require().Len(entries, 1)
 	decoded := entries[0].DataFile()
 
-	partition[0], lower[0], upper[0] = 0xff, 0xff, 0xff
+	for i := range encoded {
+		encoded[i] = ^encoded[i]
+	}
 	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 
-	decoded.Partition()[1000].([]byte)[0] = 0xff
-	decoded.LowerBoundValues()[1][0] = 0xff
-	decoded.UpperBoundValues()[1][0] = 0xff
+	partitionResult := decoded.Partition()
+	lowerResult := decoded.LowerBoundValues()
+	upperResult := decoded.UpperBoundValues()
+	partitionResult[1000].([]byte)[0] = 0xff
+	lowerResult[1][0] = 0xff
+	upperResult[1][0] = 0xff
 	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
