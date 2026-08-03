@@ -1089,6 +1089,10 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	targetType := a.typeToArrowType(field.Type)
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
+		if out, ok := a.rewrapExtension(targetType, vals); ok {
+			return out
+		}
+
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
 			tt, tgtok := targetType.(*arrow.TimestampType)
@@ -1129,6 +1133,38 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	vals.Retain()
 
 	return vals
+}
+
+// rewrapExtension re-wraps vals in targetType when both are extension types
+// with the same extension name but differing extension parameters, returning
+// false when the types are not such a pair. Arrow's compute layer has no
+// extension-to-extension cast kernel, and the values are already in the
+// extension's storage encoding, so only the storage array is cast and that only
+// when the storage types differ. This is safe only because a shared extension
+// name implies the storage payload is interpretation-compatible: parameters may
+// differ, the encoded values do not.
+func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals arrow.Array) (arrow.Array, bool) {
+	tgtExt, ok := targetType.(arrow.ExtensionType)
+	if !ok {
+		return nil, false
+	}
+
+	srcExt, ok := vals.DataType().(arrow.ExtensionType)
+	if !ok || srcExt.ExtensionName() != tgtExt.ExtensionName() {
+		return nil, false
+	}
+
+	if arrow.TypeEqual(srcExt.StorageType(), tgtExt.StorageType()) {
+		return array.NewExtensionArrayWithStorage(tgtExt,
+			vals.(array.ExtensionArray).Storage()), true
+	}
+
+	storage := retOrPanic(compute.CastArray(a.ctx,
+		vals.(array.ExtensionArray).Storage(),
+		compute.SafeCastOptions(tgtExt.StorageType())))
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(tgtExt, storage), true
 }
 
 func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
