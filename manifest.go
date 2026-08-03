@@ -1599,6 +1599,10 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 }
 
 func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
+	if existingRows == -1 || addedRows == -1 {
+		return 0, fmt.Errorf("%w: cannot assign row-lineage IDs with unknown row counts: existing=%d added=%d",
+			ErrInvalidArgument, existingRows, addedRows)
+	}
 	if existingRows < 0 || addedRows < 0 {
 		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
 			ErrInvalidArgument, existingRows, addedRows)
