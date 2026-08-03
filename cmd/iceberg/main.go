@@ -652,8 +652,8 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 		if val, ok := props[get.PropName]; ok {
 			output.Text(val)
 		} else {
-			output.Error(errors.New("could not find property " + get.PropName + " on namespace " + get.Identifier))
-			os.Exit(1)
+			output.Error(fmt.Errorf("could not find property %s on %s %s", get.PropName, get.Type, get.Identifier))
+			osExit(1)
 		}
 	case cmd.Set != nil:
 		set := cmd.Set
