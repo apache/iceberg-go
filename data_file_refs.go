@@ -23,6 +23,11 @@ import "github.com/apache/iceberg-go/internal"
 // restricts this zero-copy accessor to trusted in-module callers; the public
 // DataFile getters continue returning defensive copies. Callers must treat the
 // returned maps and the byte slices stored in the bounds maps as read-only.
+//
+// This view intentionally contains only the maps consumed by metric
+// evaluators. Partition, column-size, and distinct-count accessors remain on
+// their defensive-copy paths until a measured hot path warrants another
+// borrowed contract.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,

@@ -3336,6 +3336,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	partitionData[1000] = []byte{0xff}
 	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
 
+	m.Equal([]byte{0x01, 0x02}, builder.d.PartitionData["part"])
 	dataFile.Partition()[1000].([]byte)[0] = 0xff
 	dataFile.ColumnSizes()[1] = 99
 	dataFile.ValueCounts()[1] = 99
@@ -3369,6 +3370,44 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	m.Equal("data.parquet", *dataFile.ReferencedDataFile())
 	m.Equal(int64(5), *dataFile.ContentOffset())
 	m.Equal(int64(6), *dataFile.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromExternalMutation() {
+	partition := []byte{0x01, 0x02}
+	lower := []byte{0x03, 0x04}
+	upper := []byte{0x05, 0x06}
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{},
+	})
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		map[int]any{1000: partition}, nil, nil, 1, 10)
+	m.Require().NoError(err)
+	dataFile := builder.
+		LowerBoundValues(map[int][]byte{1: lower}).
+		UpperBoundValues(map[int][]byte{1: upper}).
+		Build()
+
+	var buf bytes.Buffer
+	manifest, err := WriteManifest("/manifest.avro", &buf, 2, spec, schema, snapshotID,
+		[]ManifestEntry{NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile).SequenceNum(1).Build()})
+	m.Require().NoError(err)
+	entries, err := ReadManifest(manifest, bytes.NewReader(buf.Bytes()), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	decoded := entries[0].DataFile()
+
+	partition[0], lower[0], upper[0] = 0xff, 0xff, 0xff
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+
+	decoded.Partition()[1000].([]byte)[0] = 0xff
+	decoded.LowerBoundValues()[1][0] = 0xff
+	decoded.UpperBoundValues()[1][0] = 0xff
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {

@@ -2591,6 +2591,9 @@ func NewDataFileBuilder(
 	fieldNameToID := make(map[string]int)
 	for _, p := range spec.fields {
 		if pData, ok := fieldIDToPartitionData[p.FieldID]; ok {
+			if bytes, ok := pData.([]byte); ok {
+				pData = slices.Clone(bytes)
+			}
 			partitionData[p.Name] = pData
 			fieldNameToID[p.Name] = p.FieldID
 		}

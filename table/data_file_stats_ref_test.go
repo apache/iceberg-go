@@ -103,9 +103,12 @@ func TestDataFileStatsUsesBorrowedView(t *testing.T) {
 	assert.Equal(t, map[int][]byte{1: {1, 2}}, lowerBounds)
 	assert.Equal(t, map[int][]byte{1: {3, 4}}, upperBounds)
 
-	assert.Zero(t, testing.AllocsPerRun(100, func() {
-		dataFileStats(file)
-	}))
+	var measuredValueCounts map[int]int64
+	allocs := testing.AllocsPerRun(100, func() {
+		measuredValueCounts, _, _, _, _ = dataFileStats(file)
+	})
+	assert.Zero(t, allocs)
+	assert.Equal(t, map[int]int64{1: 2}, measuredValueCounts)
 }
 
 func TestDataFileStatsFallsBackToPublicGetters(t *testing.T) {
