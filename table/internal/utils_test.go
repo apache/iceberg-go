@@ -67,6 +67,7 @@ func TestMetricsModePairs(t *testing.T) {
 
 func TestTruncateUpperBoundString(t *testing.T) {
 	assert.Equal(t, "ab", internal.TruncateUpperBoundText("aaaa", 2))
+	assert.Equal(t, "\uE000", internal.TruncateUpperBoundText("\uD7FFx", 1))
 	// \u10FFFF\u10FFFF\x00
 	assert.Equal(t, "", internal.TruncateUpperBoundText("\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", 2))
 }
