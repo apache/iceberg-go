@@ -357,6 +357,27 @@ func TestUnmarshalInvalidSortTransform(t *testing.T) {
 	assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
+func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
+	field := table.SortField{
+		SourceIDs: []int{7},
+		Transform: iceberg.IdentityTransform{},
+		Direction: table.SortDESC,
+		NullOrder: table.NullsLast,
+	}
+
+	err := json.Unmarshal([]byte(`{
+		"source-id": 1,
+		"transform": "not-a-transform",
+		"direction": "asc",
+		"null-order": "nulls-first"
+	}`), &field)
+	require.Error(t, err)
+	assert.Equal(t, []int{7}, field.SourceIDs)
+	assert.Equal(t, iceberg.IdentityTransform{}, field.Transform)
+	assert.Equal(t, table.SortDESC, field.Direction)
+	assert.Equal(t, table.NullsLast, field.NullOrder)
+}
+
 func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 	t.Run("unmarshal with source-ids", func(t *testing.T) {
 		jsonData := `{"source-ids": [2, 3], "transform": "identity", "direction": "asc", "null-order": "nulls-first"}`

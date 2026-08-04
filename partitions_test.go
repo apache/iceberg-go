@@ -778,6 +778,27 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 	})
 }
 
+func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
+	field := iceberg.PartitionField{
+		SourceIDs: []int{7},
+		FieldID:   1007,
+		Name:      "old",
+		Transform: iceberg.IdentityTransform{},
+	}
+
+	err := json.Unmarshal([]byte(`{
+		"source-id": 1,
+		"field-id": 1000,
+		"transform": "not-a-transform",
+		"name": "new"
+	}`), &field)
+	require.Error(t, err)
+	assert.Equal(t, []int{7}, field.SourceIDs)
+	assert.Equal(t, 1007, field.FieldID)
+	assert.Equal(t, "old", field.Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, field.Transform)
+}
+
 func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
 	tests := []struct {
 		name    string
