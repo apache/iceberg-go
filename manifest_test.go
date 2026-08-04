@@ -514,6 +514,23 @@ type ManifestTestSuite struct {
 	v3ManifestEntries bytes.Buffer
 }
 
+type manifestFailingWriter struct {
+	err error
+}
+
+func (w manifestFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type manifestCloseErrorCodec struct {
+	ocf.Codec
+	err error
+}
+
+func (c manifestCloseErrorCodec) Close() error {
+	return c.err
+}
+
 func (m *ManifestTestSuite) writeManifestList() {
 	err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
 	m.Require().NoError(err)
@@ -2103,6 +2120,103 @@ func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
 
 	_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
 	m.Equal(firstErr, err)
+}
+
+func (m *ManifestTestSuite) TestManifestWriterSuccessfulCloseIsTerminal() {
+	var out bytes.Buffer
+	writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(manifestEntryV2Records[0]))
+
+	m.NoError(writer.Close())
+	m.NoError(writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseAfterConstructionFailure() {
+	writeErr := errors.New("write failed")
+
+	writer, err := NewManifestWriter(
+		2,
+		manifestFailingWriter{err: writeErr},
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().ErrorIs(err, writeErr)
+	m.Require().NotNil(writer)
+
+	var closeErr error
+	m.NotPanics(func() {
+		closeErr = writer.Close()
+	})
+	m.EqualError(closeErr, "empty manifest file has been written")
+
+	// Close returns the cached result after becoming terminal.
+	m.Equal(closeErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseJoinsUnderlyingError() {
+	writer, err := NewManifestWriter(
+		2,
+		io.Discard,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().NoError(err)
+
+	avroSchema := writer.writer.Schema()
+	m.Require().NoError(writer.writer.Close())
+
+	underlyingErr := errors.New("underlying close failed")
+	writer.writer, err = ocf.NewWriter(
+		io.Discard,
+		avroSchema,
+		ocf.WithCodec(manifestCloseErrorCodec{
+			Codec: ocf.DeflateCodec(flate.DefaultCompression),
+			err:   underlyingErr,
+		}),
+	)
+	m.Require().NoError(err)
+
+	firstErr := writer.Close()
+	m.Require().Error(firstErr)
+	m.ErrorIs(firstErr, underlyingErr)
+	m.EqualError(
+		firstErr,
+		"empty manifest file has been written\nunderlying close failed",
+	)
+
+	// Close returns the cached combined result after becoming terminal.
+	m.Equal(firstErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestWriteManifestEmptyErrorIsNotDuplicated() {
+	var out bytes.Buffer
+
+	_, err := WriteManifest(
+		"manifest.avro",
+		&out,
+		2,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.EqualError(err, "empty manifest file has been written")
+
+	out.Reset()
+
+	_, _, err = WriteManifestV3(
+		"manifest.avro",
+		&out,
+		0,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.EqualError(err, "empty manifest file has been written")
 }
 
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {

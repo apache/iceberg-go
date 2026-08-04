@@ -1368,7 +1368,19 @@ func (w *ManifestWriter) Close() error {
 		emptyErr = errors.New("empty manifest file has been written")
 	}
 
-	w.closeErr = errors.Join(emptyErr, w.writer.Close())
+	var writerErr error
+	if w.writer != nil {
+		writerErr = w.writer.Close()
+	}
+
+	switch {
+	case emptyErr == nil:
+		w.closeErr = writerErr
+	case writerErr == nil:
+		w.closeErr = emptyErr
+	default:
+		w.closeErr = errors.Join(emptyErr, writerErr)
+	}
 
 	return w.closeErr
 }
@@ -1756,7 +1768,11 @@ func WriteManifest(
 	if err != nil {
 		return nil, err
 	}
-	defer internal.CheckedClose(w, &err)
+	defer func() {
+		if !w.closed {
+			internal.CheckedClose(w, &err)
+		}
+	}()
 
 	for _, entry := range entries {
 		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
@@ -1793,7 +1809,11 @@ func WriteManifestV3(
 	if err != nil {
 		return nil, 0, err
 	}
-	defer internal.CheckedClose(w, &err)
+	defer func() {
+		if !w.closed {
+			internal.CheckedClose(w, &err)
+		}
+	}()
 
 	for _, entry := range entries {
 		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
