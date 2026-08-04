@@ -1026,6 +1026,23 @@ func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 	m.Empty(files) // the file has no entries, just headers
 }
 
+func (m *ManifestTestSuite) TestReadManifestListRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			fileSchema, err := internal.NewManifestFileSchema(2)
+			m.Require().NoError(err)
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, fileSchema,
+				ocf.WithMetadata(map[string][]byte{"format-version": []byte(strconv.Itoa(version))}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = ReadManifestList(&buf)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
+}
+
 // writeManifestNoFormatVersion writes a valid v1 manifest entry Avro file that
 // omits the "format-version" metadata key, simulating files produced by the Java
 // Iceberg library (format-version is optional for v1 per the Iceberg spec).
@@ -1077,6 +1094,34 @@ func (m *ManifestTestSuite) TestNewManifestReaderMissingFormatVersion() {
 	m.Require().NoError(err)
 	m.Equal(1, reader.Version())
 	m.NoError(reader.Close())
+}
+
+func (m *ManifestTestSuite) TestNewManifestReaderRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			spec := NewPartitionSpec()
+			partitionSchema, err := partitionTypeToAvroSchema(spec.PartitionType(testSchema))
+			m.Require().NoError(err)
+			entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 1)
+			m.Require().NoError(err)
+			schemaJSON, err := json.Marshal(testSchema)
+			m.Require().NoError(err)
+			var manifest bytes.Buffer
+			writer, err := ocf.NewWriter(&manifest, entrySchema, ocf.WithMetadata(map[string][]byte{
+				"format-version":    []byte(strconv.Itoa(version)),
+				"schema":            schemaJSON,
+				"schema-id":         []byte(strconv.Itoa(testSchema.ID)),
+				"partition-spec":    []byte("[]"),
+				"partition-spec-id": []byte("0"),
+				"content":           []byte("data"),
+			}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = NewManifestReader(&manifestFile{version: version}, &manifest)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
 }
 
 func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
