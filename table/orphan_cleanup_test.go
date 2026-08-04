@@ -213,6 +213,16 @@ func TestNormalizeFilePath(t *testing.T) {
 			input:    "s3a://bucket/path/file.txt",
 			expected: "s3://bucket/path/file.txt",
 		},
+		{
+			name:     "windows_file_uri",
+			input:    "file:///C:/warehouse/data/../file.parquet",
+			expected: "C:/warehouse/file.parquet",
+		},
+		{
+			name:     "unc_file_uri",
+			input:    "file://server/share/data/../file.parquet",
+			expected: "//server/share/file.parquet",
+		},
 	}
 
 	for _, tt := range tests {
@@ -259,6 +269,26 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			input:    `\\server\share\data\..\file.parquet`,
 			expected: "//server/share/file.parquet",
 		},
+		{
+			name:     "windows_drive_root",
+			input:    `C:\..\file.parquet`,
+			expected: "C:/file.parquet",
+		},
+		{
+			name:     "windows_drive_root_with_multiple_parent_segments",
+			input:    `C:\warehouse\..\..\file.parquet`,
+			expected: "C:/file.parquet",
+		},
+		{
+			name:     "windows_drive_relative_path",
+			input:    `C:foo\..\bar`,
+			expected: "C:bar",
+		},
+		{
+			name:     "unc_share_root",
+			input:    `\\server\share\..\file.parquet`,
+			expected: "//server/share/file.parquet",
+		},
 	}
 
 	for _, tt := range tests {
@@ -285,6 +315,26 @@ func TestIsFileOrphanMatchesWindowsDotSegments(t *testing.T) {
 	index := newReferencedFileIndex(referencedFiles, cfg)
 
 	isOrphan, err := isFileOrphan("C:/warehouse/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.False(t, isOrphan)
+}
+
+func TestIsFileOrphanClampsDotSegmentsAtWindowsDriveRoot(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{`C:\..\file.parquet`: true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("C:/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.False(t, isOrphan)
+}
+
+func TestIsFileOrphanClampsDotSegmentsAtUNCShareRoot(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{`\\server\share\..\file.parquet`: true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("//server/share/file.parquet", referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.False(t, isOrphan)
 }

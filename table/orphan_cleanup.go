@@ -748,10 +748,10 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 					pathStr = pathStr[1:]
 				}
 
-				return filepath.Clean(pathStr)
+				return normalizeNonURLPath(pathStr)
 			}
 			// Remote authority – keep it as //host/path
-			return filepath.Clean("//" + u.Host + u.Path)
+			return normalizeNonURLPath("//" + u.Host + u.Path)
 		}
 	}
 
@@ -822,12 +822,57 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 // all normalize to "dir/file" for consistent comparison.
 func normalizeNonURLPath(path string) string {
 	normalized := strings.ReplaceAll(path, "\\", "/")
-	cleaned := pathpkg.Clean(normalized)
-	if strings.HasPrefix(normalized, "//") && !strings.HasPrefix(cleaned, "//") {
-		return "/" + cleaned
+	volume, remainder, rooted := splitPortableVolume(normalized)
+	if volume == "" {
+		return pathpkg.Clean(normalized)
 	}
 
-	return cleaned
+	if rooted {
+		cleaned := pathpkg.Clean("/" + remainder)
+		return volume + "/" + strings.TrimPrefix(cleaned, "/")
+	}
+
+	if remainder == "" {
+		return volume
+	}
+
+	return volume + pathpkg.Clean(remainder)
+}
+
+func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		if len(path) >= 3 && path[2] == '/' {
+			return path[:2], path[3:], true
+		}
+
+		return path[:2], path[2:], false
+	}
+
+	if !strings.HasPrefix(path, "//") {
+		return "", path, false
+	}
+
+	unc := strings.TrimPrefix(path, "//")
+	serverEnd := strings.IndexByte(unc, '/')
+	if serverEnd <= 0 || serverEnd+1 >= len(unc) {
+		return "", path, false
+	}
+
+	shareStart := serverEnd + 1
+	shareEnd := strings.IndexByte(unc[shareStart:], '/')
+	if shareEnd < 0 {
+		return "//" + unc, "", true
+	}
+	if shareEnd == 0 {
+		return "", path, false
+	}
+
+	shareEnd += shareStart
+	return "//" + unc[:shareEnd], unc[shareEnd+1:], true
+}
+
+func isDriveLetter(r byte) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 // filePathKey returns the path component used to compare listed files with
