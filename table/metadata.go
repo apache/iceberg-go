@@ -45,22 +45,18 @@ const (
 )
 
 func generateSnapshotID() int64 {
-	var (
-		rndUUID = uuid.New()
-		out     [8]byte
-	)
+	return snapshotIDFromUUID(uuid.New())
+}
+
+func snapshotIDFromUUID(id uuid.UUID) int64 {
+	var out [8]byte
 
 	for i := range 8 {
-		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		lhs, rhs := id[i], id[i+8]
 		out[i] = lhs ^ rhs
 	}
 
-	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
-	if snapshotID < 0 {
-		snapshotID = -snapshotID
-	}
-
-	return snapshotID
+	return int64(binary.LittleEndian.Uint64(out[:]) & math.MaxInt64)
 }
 
 // Metadata for an iceberg table as specified in the Iceberg spec

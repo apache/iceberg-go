@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"path"
 	"slices"
@@ -36,6 +37,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSnapshotIDFromUUIDClearsSignBit(t *testing.T) {
+	for _, id := range []uuid.UUID{
+		{7: 0x80},
+		{15: 0x80},
+	} {
+		require.Zero(t, snapshotIDFromUUID(id))
+	}
+
+	require.Equal(t, int64(math.MaxInt64), snapshotIDFromUUID(uuid.UUID{
+		0: 0xff, 1: 0xff, 2: 0xff, 3: 0xff, 4: 0xff, 5: 0xff, 6: 0xff, 7: 0xff,
+	}))
+}
 
 const ExampleTableMetadataV2 = `{
     "format-version": 2,
