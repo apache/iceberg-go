@@ -830,6 +830,7 @@ func normalizeNonURLPath(path string) string {
 
 	if rooted {
 		cleaned := pathpkg.Clean("/" + remainder)
+
 		return volume + "/" + strings.TrimPrefix(cleaned, "/")
 	}
 
@@ -869,6 +870,7 @@ func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
 	}
 
 	shareEnd += shareStart
+
 	return "//" + unc[:shareEnd], unc[shareEnd+1:], true
 }
 
