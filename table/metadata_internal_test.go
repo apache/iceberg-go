@@ -382,6 +382,22 @@ func TestMetadataV2UnmarshalPreservesStateOnError(t *testing.T) {
 	assert.Len(t, metadata.SnapshotList, 2)
 }
 
+func TestMetadataV2UnmarshalRejectsMissingRequiredStateOnReuse(t *testing.T) {
+	var metadata metadataV2
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+
+	var reduced map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &reduced))
+	delete(reduced, "default-spec-id")
+	reducedData, err := json.Marshal(reduced)
+	require.NoError(t, err)
+
+	require.Error(t, json.Unmarshal(reducedData, &metadata))
+	assert.Equal(t, 0, metadata.DefaultSpecID)
+	assert.Equal(t, 1, metadata.CurrentSchemaID)
+	assert.Len(t, metadata.SnapshotList, 2)
+}
+
 func TestLastUpdatedMSPresence(t *testing.T) {
 	tests := []struct {
 		name string
