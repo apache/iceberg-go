@@ -324,6 +324,64 @@ func TestMetadataV3Parsing(t *testing.T) {
 	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
 }
 
+func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		target any
+	}{
+		{name: "v1", data: ExampleTableMetadataV1, target: &metadataV1{}},
+		{name: "v2", data: ExampleTableMetadataV2, target: &metadataV2{}},
+		{name: "v3", data: ExampleTableMetadataV3, target: &metadataV3{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
+
+			var reduced map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &reduced))
+			for _, key := range []string{
+				"properties", "current-snapshot-id", "snapshots", "snapshot-log", "metadata-log", "refs",
+			} {
+				delete(reduced, key)
+			}
+			reducedData, err := json.Marshal(reduced)
+			require.NoError(t, err)
+
+			require.NoError(t, json.Unmarshal(reducedData, tt.target))
+
+			var common *commonMetadata
+			switch metadata := tt.target.(type) {
+			case *metadataV1:
+				common = &metadata.commonMetadata
+			case *metadataV2:
+				common = &metadata.commonMetadata
+			case *metadataV3:
+				common = &metadata.commonMetadata
+			}
+			assert.Empty(t, common.Props)
+			assert.Empty(t, common.SnapshotList)
+			assert.Empty(t, common.SnapshotLog)
+			assert.Empty(t, common.MetadataLog)
+			assert.Empty(t, common.SnapshotRefs)
+			assert.Nil(t, common.CurrentSnapshotID)
+		})
+	}
+}
+
+func TestMetadataV2UnmarshalPreservesStateOnError(t *testing.T) {
+	var metadata metadataV2
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+
+	invalid := strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1)
+	require.Error(t, json.Unmarshal([]byte(invalid), &metadata))
+
+	assert.Equal(t, 1, metadata.CurrentSchemaID)
+	assert.Equal(t, "134217728", metadata.Props["read.split.target.size"])
+	assert.Len(t, metadata.SnapshotList, 2)
+}
+
 func TestLastUpdatedMSPresence(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1410,7 +1468,9 @@ func TestMetadataV1Validation(t *testing.T) {
 	}`
 
 	// Parse each test case
-	var meta1, meta2, meta3 metadataV1
+	meta1 := initMetadataV1Deser()
+	meta2 := initMetadataV1Deser()
+	meta3 := initMetadataV1Deser()
 
 	// Test case 1: Verify LastColumnId is -1 when not specified
 	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))
@@ -1450,6 +1510,7 @@ func TestMetadataV2Validation(t *testing.T) {
 		"current-schema-id": 0,
 		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"default-spec-id": 0,
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"properties": {},
         "default-sort-order-id": 0,
@@ -1469,13 +1530,16 @@ func TestMetadataV2Validation(t *testing.T) {
 		"last-column-id": 0,
 		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"default-spec-id": 0,
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"sort-orders": [],
 		"default-sort-order-id": 0
 	}`
 
 	// Parse each test case
-	var meta1, meta2, meta3 metadataV2
+	meta1 := initMetadataV2Deser()
+	meta2 := initMetadataV2Deser()
+	meta3 := initMetadataV2Deser()
 
 	// Test case 1: Verify LastColumnId is -1 when not specified
 	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))

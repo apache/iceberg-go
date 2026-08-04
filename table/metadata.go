@@ -2502,7 +2502,8 @@ func (m *metadataV1) preValidate() {
 
 func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	type Alias metadataV1
-	aux := (*Alias)(m)
+	next := initMetadataV1Deser()
+	aux := (*Alias)(next)
 
 	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
 	aux.LastColumnId = -1
@@ -2530,9 +2531,15 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		}
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV1) ToV2() metadataV2 {
@@ -2577,7 +2584,8 @@ func (m *metadataV2) Equals(other Metadata) bool {
 
 func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	type Alias metadataV2
-	aux := (*Alias)(m)
+	next := initMetadataV2Deser()
+	aux := (*Alias)(next)
 
 	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
 	aux.LastColumnId = -1
@@ -2594,9 +2602,15 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV2) validate() error {
@@ -2653,7 +2667,8 @@ func (m *metadataV3) Equals(other Metadata) bool {
 
 func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	type Alias metadataV3
-	aux := (*Alias)(m)
+	next := initMetadataV3Deser()
+	aux := (*Alias)(next)
 
 	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
 	aux.LastColumnId = -1
@@ -2662,9 +2677,15 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 // MarshalJSON serializes v3 metadata with the spec-mandated emission of
