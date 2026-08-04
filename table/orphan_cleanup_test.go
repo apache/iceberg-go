@@ -289,12 +289,34 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			input:    `\\server\share\..\file.parquet`,
 			expected: "//server/share/file.parquet",
 		},
+		{
+			name:     "forward_slash_unc_share_root",
+			input:    `//server/share/../file.parquet`,
+			expected: "//server/share/file.parquet",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := normalizeNonURLPath(tt.input)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
+	tests := map[string]string{
+		"windows_drive":          `C:\warehouse\data\..\file.parquet`,
+		"windows_drive_relative": `C:foo\..\bar`,
+		"unc":                    `\\server\share\data\..\file.parquet`,
+		"forward_slash_unc":      `//server/share/../file.parquet`,
+		"unix":                   "/warehouse/data/../file.parquet",
+	}
+
+	for name, input := range tests {
+		t.Run(name, func(t *testing.T) {
+			normalized := normalizeNonURLPath(input)
+			assert.Equal(t, normalized, normalizeNonURLPath(normalized))
 		})
 	}
 }
