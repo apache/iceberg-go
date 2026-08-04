@@ -749,6 +749,88 @@ func TestParseMetadataWithEmptyDefinitionLog(t *testing.T) {
 	assert.Empty(t, meta.DefinitionLog())
 }
 
+func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
+	firstDoc := minimalMetadata(t)
+	firstDoc["doc"] = "old documentation"
+	firstDoc["properties"] = map[string]any{"old": "value"}
+	first, err := json.Marshal(firstDoc)
+	require.NoError(t, err)
+
+	var meta metadata
+	require.NoError(t, json.Unmarshal(first, &meta))
+	_, ok := meta.DefinitionByID("int")
+	require.True(t, ok)
+
+	secondDoc := minimalMetadata(t)
+	secondDefinition := definition(t, secondDoc, 0)
+	secondDefinition["definition-id"] = "long"
+	secondDefinition["parameters"].([]any)[0].(map[string]any)["type"] = "long"
+	refs := secondDoc["definition-log"].([]any)[0].(map[string]any)["definition-versions"].([]any)
+	refs[0].(map[string]any)["definition-id"] = "long"
+	second, err := json.Marshal(secondDoc)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(second, &meta))
+
+	assert.Empty(t, meta.Doc())
+	assert.Empty(t, meta.Properties())
+	_, ok = meta.DefinitionByID("int")
+	assert.False(t, ok)
+	_, ok = meta.DefinitionByID("long")
+	assert.True(t, ok)
+
+	delete(secondDoc, "definitions")
+	missingDefinitions, err := json.Marshal(secondDoc)
+	require.NoError(t, err)
+	err = json.Unmarshal(missingDefinitions, &meta)
+	assert.ErrorContains(t, err, "at least one definition is required")
+	_, ok = meta.DefinitionByID("long")
+	assert.True(t, ok, "a failed decode must not partially replace valid metadata")
+}
+
+func TestUDFValuesUnmarshalReplaceReceiverState(t *testing.T) {
+	t.Run("parameter", func(t *testing.T) {
+		var parameter Parameter
+		require.NoError(t, json.Unmarshal([]byte(`{"name":"x","type":"int","doc":"old"}`), &parameter))
+		require.NoError(t, json.Unmarshal([]byte(`{"name":"y","type":"long"}`), &parameter))
+		assert.Equal(t, "y", parameter.Name)
+		assert.Equal(t, "long", parameter.Type.String())
+		assert.Empty(t, parameter.Doc)
+	})
+
+	t.Run("definition version", func(t *testing.T) {
+		var version DefinitionVersion
+		first := `{"version-id":1,"representations":[{"type":"sql","dialect":"trino","sql":"x"}],"deterministic":true,"on-null-input":"return-null","timestamp-ms":1}`
+		second := `{"version-id":2,"representations":[{"type":"sql","dialect":"spark","sql":"y"}],"timestamp-ms":2}`
+		require.NoError(t, json.Unmarshal([]byte(first), &version))
+		require.NoError(t, json.Unmarshal([]byte(second), &version))
+		assert.Equal(t, 2, version.VersionID)
+		assert.False(t, version.Deterministic)
+		assert.Empty(t, version.OnNullInput)
+	})
+
+	t.Run("definition", func(t *testing.T) {
+		firstDoc := definition(t, minimalMetadata(t), 0)
+		firstDoc["specific-name"] = "old_name"
+		firstDoc["doc"] = "old documentation"
+		first, err := json.Marshal(firstDoc)
+		require.NoError(t, err)
+		second, err := json.Marshal(definition(t, minimalMetadata(t), 0))
+		require.NoError(t, err)
+
+		var def Definition
+		require.NoError(t, json.Unmarshal(first, &def))
+		require.NoError(t, json.Unmarshal(second, &def))
+		assert.Empty(t, def.SpecificName)
+		assert.Empty(t, def.Doc)
+	})
+
+	t.Run("definition log entry", func(t *testing.T) {
+		entry := DefinitionLogEntry{DefinitionVersions: []DefinitionVersionRef{{DefinitionID: "int", VersionID: 1}}}
+		require.NoError(t, json.Unmarshal([]byte(`{"timestamp-ms":2}`), &entry))
+		assert.Empty(t, entry.DefinitionVersions)
+	})
+}
+
 func TestOnNullInputValues(t *testing.T) {
 	for _, behavior := range []OnNullInput{OnNullInputCall, OnNullInputReturnNull} {
 		m := minimalMetadata(t)
