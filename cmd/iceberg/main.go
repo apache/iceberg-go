@@ -462,11 +462,11 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		ns := cmd.Namespace
 		props := iceberg.Properties{}
 		if ns.Description != "" {
-			props["Description"] = ns.Description
+			props["comment"] = ns.Description
 		}
 
 		if ns.LocationURI != "" {
-			props["Location"] = ns.LocationURI
+			props["location"] = ns.LocationURI
 		}
 
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
