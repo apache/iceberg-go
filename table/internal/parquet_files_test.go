@@ -1386,6 +1386,16 @@ func TestGetWritePropertiesDictionaryEncodingRoundTrip(t *testing.T) {
 		assert.Zero(t, chunk.dictDataPages)
 		assert.Positive(t, chunk.plainDataPages)
 	})
+
+	t.Run("per-column opt-in under a global opt-out writes a dictionary", func(t *testing.T) {
+		chunk := writeDictTestColumn(t, iceberg.Properties{
+			internal.ParquetDictEnabledKey:                                            "false",
+			internal.ParquetDictEncodingColumnEnabledKeyPrefix + "." + dictTestColumn: "true",
+		}, values)
+		assert.True(t, chunk.hasDictPage)
+		assert.Positive(t, chunk.dictDataPages)
+		assert.Zero(t, chunk.plainDataPages)
+	})
 }
 
 // TestGetWritePropertiesDictionaryHighCardinalityFallback guards the risk that

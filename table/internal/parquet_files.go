@@ -331,6 +331,10 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
 
+	// The suffix is matched against the Parquet physical column path, not the
+	// Iceberg field name. These differ for nested fields (Iceberg `items.element`
+	// is `items.list.element` in Parquet), so a per-column override on one of
+	// those has no effect. Same for the bloom filter prefix above.
 	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
 	for key, val := range props {
 		colName, ok := strings.CutPrefix(key, prefix)
