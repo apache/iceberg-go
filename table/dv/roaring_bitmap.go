@@ -179,6 +179,9 @@ func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, erro
 		lastKey = key
 		hasLastKey = true
 	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("trailing data after bitmaps: %d bytes", r.Len())
+	}
 
 	return b, nil
 }
