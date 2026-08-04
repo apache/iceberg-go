@@ -671,6 +671,7 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	}
 
 	*m = next
+	m.init()
 
 	return nil
 }

@@ -166,6 +166,42 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	assert.Empty(t, metadata.VersionLogList)
 }
 
+func TestMetadataUnmarshalReplacesLookupCaches(t *testing.T) {
+	var metadata metadata
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &metadata))
+
+	// Prime every lookup cache before replacing the metadata.
+	assert.Equal(t, int64(1), metadata.CurrentVersion().VersionID)
+	assert.Equal(t, 0, metadata.CurrentSchema().ID)
+	assert.Contains(t, metadata.SchemasByID(), 0)
+
+	var replacement map[string]any
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &replacement))
+	replacement["current-version-id"] = int64(2)
+	replacement["versions"].([]any)[0].(map[string]any)["version-id"] = int64(2)
+	replacement["versions"].([]any)[0].(map[string]any)["schema-id"] = 2
+	replacement["schemas"].([]any)[0].(map[string]any)["schema-id"] = 2
+	replacement["version-log"].([]any)[0].(map[string]any)["version-id"] = int64(2)
+	replacementData, err := json.Marshal(replacement)
+	require.NoError(t, err)
+
+	require.NoError(t, json.Unmarshal(replacementData, &metadata))
+	assert.Equal(t, int64(2), metadata.CurrentVersion().VersionID)
+	assert.Equal(t, 2, metadata.CurrentSchema().ID)
+	assert.NotContains(t, metadata.SchemasByID(), 0)
+	assert.Contains(t, metadata.SchemasByID(), 2)
+
+	_, oldVersionExists := metadata.lazyVersionsByID()[1]
+	_, newVersionExists := metadata.lazyVersionsByID()[2]
+	assert.False(t, oldVersionExists)
+	assert.True(t, newVersionExists)
+
+	invalid := strings.Replace(string(replacementData), `"current-version-id":2`, `"current-version-id":99`, 1)
+	require.Error(t, json.Unmarshal([]byte(invalid), &metadata))
+	assert.Equal(t, int64(2), metadata.CurrentVersion().VersionID)
+	assert.Equal(t, 2, metadata.CurrentSchema().ID)
+}
+
 func TestValidMetadataDeserialization(t *testing.T) {
 	validJSON := `{
 		"view-uuid": "fa6506c3-7681-40c8-86dc-e36561f83385",
