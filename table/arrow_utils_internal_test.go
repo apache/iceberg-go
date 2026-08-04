@@ -579,6 +579,19 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 		assert.Equal(t, "srid:3857", got)
 	})
 
+	t.Run("already prefixed srid is not prefixed twice", func(t *testing.T) {
+		for _, crs := range []string{"srid:0", "srid:3857", "SRID:3857"} {
+			t.Run(crs, func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+					CRS:     stringCRS(crs),
+					CRSType: geoarrow.CRSTypeSRID,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, crs, got)
+			})
+		}
+	})
+
 	t.Run("rejects empty string CRS", func(t *testing.T) {
 		_, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRS: stringCRS("")})
 		require.Error(t, err)
