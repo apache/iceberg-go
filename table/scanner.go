@@ -864,7 +864,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			// fields. Report assembly must never fail a scan, so a projection error
 			// just yields a report that omits projected fields.
 			projected, _ := scan.Projection()
-			rep.Report(ctx, scan.buildScanReport(&acc, schema, projected, planningDuration))
+			safeReport(ctx, rep, scan.buildScanReport(&acc, schema, projected, planningDuration))
 		}
 	}
 

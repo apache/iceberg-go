@@ -110,6 +110,7 @@ func TestCommitEmitsCommitReport(t *testing.T) {
 // misattribute the earlier append's metrics to this commit.
 func TestMetadataOnlyCommitEmitsNoCommitReport(t *testing.T) {
 	registerCommitReportSink()
+	commitReportSink.Reset()
 
 	ctx := context.Background()
 	cat, err := catalog.Load(ctx, "default", iceberg.Properties{

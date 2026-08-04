@@ -47,6 +47,10 @@ func TestBuildCommitReport(t *testing.T) {
 				addedPosDeleteFilesKey: "1",
 				addedEqDeletesKey:      "3",
 				addedEqDeleteFilesKey:  "1",
+				manifestsCreatedKey:    "6",
+				manifestsReplacedKey:   "2",
+				manifestsKeptKey:       "4",
+				entriesProcessedKey:    "9",
 			},
 		},
 	}
@@ -67,8 +71,11 @@ func TestBuildCommitReport(t *testing.T) {
 	// Direct (same-name) mappings.
 	require.NotNil(t, m.AddedDataFiles)
 	assert.Equal(t, int64(4), m.AddedDataFiles.Value)
+	require.NotNil(t, m.TotalDataFiles)
 	assert.Equal(t, int64(10), m.TotalDataFiles.Value)
+	require.NotNil(t, m.AddedRecords)
 	assert.Equal(t, int64(12345), m.AddedRecords.Value)
+	require.NotNil(t, m.TotalRecords)
 	assert.Equal(t, int64(20000), m.TotalRecords.Value)
 
 	// Name-translated mappings (iceberg-go summary key -> Java report name).
@@ -79,20 +86,33 @@ func TestBuildCommitReport(t *testing.T) {
 	require.NotNil(t, m.AddedFilesSizeBytes, "added-files-size -> added-files-size-bytes")
 	assert.Equal(t, metrics.UnitBytes, m.AddedFilesSizeBytes.Unit)
 	assert.Equal(t, int64(4096000), m.AddedFilesSizeBytes.Value)
+	require.NotNil(t, m.RemovedFilesSizeBytes, "removed-files-size -> removed-files-size-bytes")
+	assert.Equal(t, int64(100), m.RemovedFilesSizeBytes.Value)
+	require.NotNil(t, m.TotalFilesSizeBytes)
 	assert.Equal(t, int64(5000000), m.TotalFilesSizeBytes.Value)
 	require.NotNil(t, m.AddedPositionalDeletes, "added-position-deletes -> added-positional-deletes")
 	assert.Equal(t, int64(2), m.AddedPositionalDeletes.Value)
 	require.NotNil(t, m.AddedPositionalDeleteFiles, "added-position-delete-files -> added-positional-delete-files")
 	assert.Equal(t, int64(1), m.AddedPositionalDeleteFiles.Value)
+	require.NotNil(t, m.AddedEqualityDeletes)
 	assert.Equal(t, int64(3), m.AddedEqualityDeletes.Value)
+	require.NotNil(t, m.AddedEqualityDeleteFiles)
 	assert.Equal(t, int64(1), m.AddedEqualityDeleteFiles.Value)
 
+	// Manifest metrics: entries-processed maps to manifest-entries-processed.
+	require.NotNil(t, m.ManifestsCreated)
+	assert.Equal(t, int64(6), m.ManifestsCreated.Value)
+	require.NotNil(t, m.ManifestsReplaced)
+	assert.Equal(t, int64(2), m.ManifestsReplaced.Value)
+	require.NotNil(t, m.ManifestsKept)
+	assert.Equal(t, int64(4), m.ManifestsKept.Value)
+	require.NotNil(t, m.ManifestEntriesProcessed, "entries-processed -> manifest-entries-processed")
+	assert.Equal(t, int64(9), m.ManifestEntriesProcessed.Value)
+
 	// Keys absent from the summary are omitted, not zeroed; metrics with no
-	// iceberg-go summary key (DVs, manifest counts) stay unset.
+	// iceberg-go summary key (DVs) stay unset.
 	assert.Nil(t, m.RemovedDeleteFiles)
 	assert.Nil(t, m.AddedDVs)
-	assert.Nil(t, m.ManifestsCreated)
-	assert.Nil(t, m.ManifestEntriesProcessed)
 }
 
 func TestBuildCommitReportNilSnapshot(t *testing.T) {

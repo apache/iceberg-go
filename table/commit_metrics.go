@@ -18,12 +18,28 @@
 package table
 
 import (
+	"context"
+	"log"
 	"strconv"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/metrics"
 )
+
+// safeReport forwards a report to rep, recovering from a panic in a misbehaving
+// third-party reporter so it can never fail a commit that has already durably
+// succeeded. The Reporter contract requires a reporter never affect the observed
+// operation; compositeReporter isolates each inner reporter this way, but a bare
+// non-composite reporter gets no such protection at the emit site.
+func safeReport(ctx context.Context, rep metrics.Reporter, report metrics.MetricsReport) {
+	defer func() {
+		if v := recover(); v != nil {
+			log.Printf("Warning: metrics reporter %T panicked; recovered: %v", rep, v)
+		}
+	}()
+	rep.Report(ctx, report)
+}
 
 // commitAddedSnapshot reports whether the commit produced a new snapshot.
 // Metadata-only commits (property or schema changes) carry no addSnapshotUpdate
@@ -66,15 +82,15 @@ func summaryCounter(props iceberg.Properties, key string, unit metrics.Unit) *me
 // and every other metric is read from the snapshot summary under its spec key
 // and emitted under Java's commit-report field name so dashboards line up
 // across implementations. Metrics whose summary key iceberg-go does not yet
-// populate (DVs, manifest counts) are absent and therefore omitted — exactly as
-// Java's counterFrom omits summary keys it does not find.
+// populate (DVs) are absent and therefore omitted — exactly as Java's
+// counterFrom omits summary keys it does not find.
 //
 // TODO: the report's Metadata map is left unset. Java's CommitReport carries a
 // metadata map (e.g. engine name/version and other commit context); iceberg-go
 // does not thread that context into the commit path yet, so it is omitted
 // rather than reported empty. Populate it in a follow-up once the context is
 // available.
-func buildCommitReport(tableName string, snap *Snapshot, attempts int, dur time.Duration) metrics.CommitReport {
+func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur time.Duration) metrics.CommitReport {
 	var (
 		snapshotID int64
 		seqNum     int64
@@ -100,7 +116,7 @@ func buildCommitReport(tableName string, snap *Snapshot, attempts int, dur time.
 		Operation:      operation,
 		Metrics: metrics.CommitMetricsResult{
 			TotalDuration: metrics.NewNanosTimerResult(1, dur.Nanoseconds()),
-			Attempts:      metrics.NewCounterResult(metrics.UnitCount, int64(attempts)),
+			Attempts:      metrics.NewCounterResult(metrics.UnitCount, attempts),
 
 			AddedDataFiles:   count(addedDataFilesKey),
 			RemovedDataFiles: count(deletedDataFilesKey),
@@ -131,6 +147,12 @@ func buildCommitReport(tableName string, snap *Snapshot, attempts int, dur time.
 			AddedEqualityDeletes:   count(addedEqDeletesKey),
 			RemovedEqualityDeletes: count(removedEqDeletesKey),
 			TotalEqualityDeletes:   count(totalEqDeletesKey),
+
+			ManifestsCreated:  count(manifestsCreatedKey),
+			ManifestsReplaced: count(manifestsReplacedKey),
+			ManifestsKept:     count(manifestsKeptKey),
+			// entries-processed in the summary maps to manifest-entries-processed.
+			ManifestEntriesProcessed: count(entriesProcessedKey),
 		},
 	}
 }
