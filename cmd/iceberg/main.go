@@ -358,7 +358,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		err error
 	)
 
-	switch catalog.Type(args.Catalog) {
+	switch catalog.Type(strings.ToLower(args.Catalog)) {
 	case catalog.REST:
 		opts := []rest.Option{}
 		if len(args.Token) > 0 {

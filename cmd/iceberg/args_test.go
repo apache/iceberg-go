@@ -18,6 +18,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,6 +382,33 @@ func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, string(out), "configuration error")
 	assert.Contains(t, string(out), path)
+}
+
+func TestCLIAcceptsUppercaseCatalogType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":["GET /v1/{prefix}/namespaces"]}`))
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespaces":[]}`))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cmd := exec.Command(os.Args[0], "list", "--catalog", "REST", "--uri", srv.URL)
+	cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+	out, err := cmd.CombinedOutput()
+
+	require.NoError(t, err, "output: %s", out)
 }
 
 func TestMergeConfAwsProfile(t *testing.T) {
