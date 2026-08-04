@@ -308,6 +308,7 @@ func TestHiveListTablesHandlesObjectLoadingErrors(t *testing.T) {
 			if err != nil {
 				require.Equal(t, table.Identifier{}, identifier)
 				gotErr = err
+
 				break
 			}
 		}
@@ -1531,6 +1532,7 @@ func TestHiveListViewsHandlesObjectLoadingErrors(t *testing.T) {
 			if err != nil {
 				require.Equal(t, table.Identifier{}, identifier)
 				gotErr = err
+
 				break
 			}
 		}
