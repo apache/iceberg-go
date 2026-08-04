@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -805,7 +806,7 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	normalizedURL := &url.URL{
 		Scheme: normalizedScheme,
 		Host:   normalizedAuthority,
-		Path:   filepath.Clean(parsedURL.Path),
+		Path:   pathpkg.Clean(parsedURL.Path),
 	}
 
 	return normalizedURL.String()
@@ -814,19 +815,19 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
 //
 // Handles file system paths by:
-// 1. Applying filepath.Clean() to resolve "..", ".", and redundant separators
-// 2. Converting Windows-style backslashes to forward slashes for consistency
+// 1. Converting Windows-style backslashes to forward slashes for consistency
+// 2. Applying slash-based path cleaning to resolve "..", ".", and redundant separators
 //
 // This ensures that paths like "dir/./file", "dir//file", and "dir\file" (on Windows)
 // all normalize to "dir/file" for consistent comparison.
-//
-// Uses filepath.ToSlash() equivalent logic to match Go's standard library approach.
 func normalizeNonURLPath(path string) string {
-	normalized := filepath.Clean(path)
-	// We use this because to handle Windows paths
-	// on all platforms.filepath.ToSlash() only convert the current OS separator, and
-	// we need cross-platform support.
-	return strings.ReplaceAll(normalized, "\\", "/")
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	cleaned := pathpkg.Clean(normalized)
+	if strings.HasPrefix(normalized, "//") && !strings.HasPrefix(cleaned, "//") {
+		return "/" + cleaned
+	}
+
+	return cleaned
 }
 
 // filePathKey returns the path component used to compare listed files with

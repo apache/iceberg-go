@@ -244,6 +244,21 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			input:    "./relative/path/../file.txt",
 			expected: "relative/file.txt",
 		},
+		{
+			name:     "windows_path_with_dot_segments",
+			input:    `C:\warehouse\data\..\file.parquet`,
+			expected: "C:/warehouse/file.parquet",
+		},
+		{
+			name:     "mixed_separators_with_dot_segments",
+			input:    `C:\warehouse/data\..\file.parquet`,
+			expected: "C:/warehouse/file.parquet",
+		},
+		{
+			name:     "unc_path",
+			input:    `\\server\share\data\..\file.parquet`,
+			expected: "//server/share/file.parquet",
+		},
 	}
 
 	for _, tt := range tests {
@@ -262,6 +277,16 @@ func TestIsFileOrphanDoesNotAliasWindowsDrivePaths(t *testing.T) {
 	isOrphan, err := isFileOrphan("D:/data/file.parquet", referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.True(t, isOrphan, "different Windows drives must not share a path key")
+}
+
+func TestIsFileOrphanMatchesWindowsDotSegments(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{`C:\warehouse\data\..\file.parquet`: true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("C:/warehouse/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.False(t, isOrphan)
 }
 
 func TestVersionHintLocation(t *testing.T) {
@@ -580,6 +605,11 @@ func TestNormalizeURLPath(t *testing.T) {
 			name:     "complex_path_cleaning",
 			input:    "s3://bucket/path/../other/./file.txt",
 			expected: "s3://bucket/other/file.txt",
+		},
+		{
+			name:     "slash_path_cleaning",
+			input:    "s3://bucket/path/data/../file.txt",
+			expected: "s3://bucket/path/file.txt",
 		},
 	}
 
