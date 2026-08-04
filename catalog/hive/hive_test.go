@@ -1370,6 +1370,37 @@ func TestHiveRegisterTableSuccess(t *testing.T) {
 	mockClient.AssertExpectations(t)
 }
 
+func TestHiveRegisterTablePreservesCreateError(t *testing.T) {
+	metaPath, err := filepath.Abs(filepath.Join("..", "..", "table", "testdata", "TableMetadataV2Valid.json"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name      string
+		createErr error
+	}{
+		{name: "metastore failure", createErr: errors.New("metastore unavailable")},
+		{name: "canceled context", createErr: context.Canceled},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mockClient := &mockHiveClient{}
+			mockClient.On("GetDatabase", mock.Anything, "test_database").
+				Return(&hive_metastore.Database{Name: "test_database"}, nil).Once()
+			mockClient.On("GetTable", mock.Anything, "test_database", "reg_table").
+				Return(nil, errNoSuchObject).Times(2)
+			mockClient.On("CreateTable", mock.Anything, mock.AnythingOfType("*hive_metastore.Table")).
+				Return(test.createErr).Once()
+
+			hiveCatalog := NewCatalogWithClient(mockClient, iceberg.Properties{})
+			_, err := hiveCatalog.RegisterTable(context.Background(), TableIdentifier("test_database", "reg_table"), metaPath)
+			require.ErrorContains(t, err, "failed to register table test_database.reg_table")
+			require.ErrorIs(t, err, test.createErr)
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
 func TestHiveCheckViewExists(t *testing.T) {
 	assert := require.New(t)
 
