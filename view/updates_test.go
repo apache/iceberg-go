@@ -131,3 +131,41 @@ func TestUpdatesUnmarshalJSONReplacesExistingSlice(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
 	assert.Empty(t, updates)
 }
+
+func TestPropertyUpdateConstructorsCopyInputs(t *testing.T) {
+	props := iceberg.Properties{"owner": "alice"}
+	set := NewSetPropertiesUpdate(props)
+	props["owner"] = "bob"
+	props["team"] = "iceberg"
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, set.Updates)
+
+	removals := []string{"old-property"}
+	remove := NewRemovePropertiesUpdate(removals)
+	removals[0] = "new-property"
+	assert.Equal(t, []string{"old-property"}, remove.Removals)
+}
+
+func TestMetadataBuilderPropertyChangesCopyInputs(t *testing.T) {
+	props := iceberg.Properties{"owner": "alice"}
+	removals := []string{"old-property"}
+
+	base, err := newTestBuilder().
+		SetLoc("location").
+		AddSchema(newTestSchema(0)).
+		AddVersion(newTestVersion(1, 0)).
+		SetCurrentVersionID(1).
+		Build()
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(base)
+	require.NoError(t, err)
+	result, err := builder.SetProperties(props).RemoveProperties(removals).Build()
+	require.NoError(t, err)
+
+	props["owner"] = "bob"
+	removals[0] = "new-property"
+
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, result.Properties())
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, result.Changes[0].(*setPropertiesUpdate).Updates)
+	assert.Equal(t, []string{"old-property"}, result.Changes[1].(*removePropertiesUpdate).Removals)
+}
