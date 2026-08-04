@@ -654,18 +654,25 @@ func (m *metadata) init() {
 
 func (m *metadata) UnmarshalJSON(b []byte) error {
 	type Alias metadata
-	aux := (*Alias)(m)
-
-	aux.FormatVersionValue = -1
-	aux.CurrentVersionIDValue = -1
+	next := metadata{
+		FormatVersionValue:    -1,
+		CurrentVersionIDValue: -1,
+	}
+	aux := (*Alias)(&next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
 
-	m.init()
+	next.init()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = next
+
+	return nil
 }
 
 // NewMetadata creates a new view metadata object using the provided version, schema, location, and props,

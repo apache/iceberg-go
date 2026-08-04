@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -141,6 +142,28 @@ func TestUnmarshalViewMetadata(t *testing.T) {
 	assert.Equal(t, []VersionLogEntry{{TimestampMS: 1000, VersionID: 1}}, md.VersionLog())
 	assert.Equal(t, []Representation{NewRepresentation("select * from ns.tbl", "trino")}, md.CurrentVersion().Representations)
 	assert.Equal(t, iceberg.Properties{"prop": "value"}, md.Properties())
+}
+
+func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
+	var metadata metadata
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &metadata))
+
+	var reduced map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &reduced))
+	delete(reduced, "properties")
+	delete(reduced, "version-log")
+	reducedData, err := json.Marshal(reduced)
+	require.NoError(t, err)
+
+	require.NoError(t, json.Unmarshal(reducedData, &metadata))
+	assert.Empty(t, metadata.Props)
+	assert.Empty(t, metadata.VersionLogList)
+
+	invalid := strings.Replace(exampleViewJSON, `"current-version-id": 1`, `"current-version-id": 99`, 1)
+	require.Error(t, json.Unmarshal([]byte(invalid), &metadata))
+	assert.Equal(t, int64(1), metadata.CurrentVersionIDValue)
+	assert.Empty(t, metadata.Props)
+	assert.Empty(t, metadata.VersionLogList)
 }
 
 func TestValidMetadataDeserialization(t *testing.T) {
