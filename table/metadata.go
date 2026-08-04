@@ -390,6 +390,42 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
+// currentSnapshotForRef returns the head snapshot for ref.
+// Empty or main refs return the current snapshot.
+// Unknown refs also fall back to the current snapshot.
+func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
+	if ref == "" || ref == MainBranch {
+		return b.currentSnapshot()
+	}
+
+	r, ok := b.refs[ref]
+	if !ok {
+		return b.currentSnapshot()
+	}
+
+	s, _ := b.SnapshotByID(r.SnapshotID)
+
+	return s
+}
+
+// currentSnapshotIDForRef returns the head snapshot ID for ref.
+// Empty or main refs return currentSnapshotID.
+// Unknown refs return nil so AssertRefSnapshotID asserts that the
+// branch does not yet exist.
+func (b *MetadataBuilder) currentSnapshotIDForRef(ref string) *int64 {
+	if ref == "" || ref == MainBranch {
+		return b.currentSnapshotID
+	}
+
+	if r, ok := b.refs[ref]; ok {
+		id := r.SnapshotID
+
+		return &id
+	}
+
+	return nil
+}
+
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err

@@ -585,7 +585,7 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 		commit = *commitUUID
 	}
 
-	if snap := txn.meta.currentSnapshot(); snap != nil {
+	if snap := txn.meta.currentSnapshotForRef(txn.branch); snap != nil {
 		parentSnapshot = snap.SnapshotID
 	}
 
@@ -1373,6 +1373,6 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			// determines the resulting ref rather than merging with the old one.
 			sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
 		}, []Requirement{
-			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
+			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotIDForRef(branch)),
 		}, nil
 }
