@@ -1271,6 +1271,12 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 
 		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
 		if err != nil {
+			// A concurrent writer can insert between the check above and here, and
+			// the driver's duplicate-key error is not what callers match on.
+			if _, exists, checkErr := c.resolveNamespaceKey(ctx, namespace); checkErr == nil && exists {
+				return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(namespace, "."))
+			}
+
 			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
 		}
 

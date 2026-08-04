@@ -21,13 +21,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1909,6 +1912,58 @@ func (s *SqliteCatalogTestSuite) TestLoadEmptyNamespaceProperties() {
 		s.Require().NoError(err)
 		s.Empty(props)
 	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
+	// Two callers creating the same namespace: exactly one succeeds and the other
+	// gets ErrNamespaceAlreadyExists, not the driver's duplicate-key error.
+	const writers = 8
+
+	// A busy timeout so the writers queue on the sqlite lock instead of failing
+	// with SQLITE_BUSY, which is a different contention problem to this one.
+	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":             s.catalogUri() + "?_pragma=" + url.QueryEscape("busy_timeout(10000)"),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+
+	cat := loaded.(*sqlcat.Catalog)
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- cat.CreateNamespace(ctx, namespace, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	created, alreadyExists := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, catalog.ErrNamespaceAlreadyExists):
+			alreadyExists++
+		default:
+			s.Failf("unexpected error", "want nil or ErrNamespaceAlreadyExists, got %v", err)
+		}
+	}
+
+	s.Equal(1, created)
+	s.Equal(writers-1, alreadyExists)
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
