@@ -60,10 +60,21 @@ func localPath(name string) (string, error) {
 		return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
 	}
 	if parsed.Opaque != "" {
-		return parsed.Opaque, nil
+		return filepath.FromSlash(parsed.Opaque), nil
 	}
 
-	return parsed.Path, nil
+	path := parsed.Path
+	if filepath.Separator == '\\' && isWindowsDrivePath(path) {
+		path = path[1:]
+	}
+
+	return filepath.FromSlash(path), nil
+}
+
+func isWindowsDrivePath(path string) bool {
+	return len(path) >= 3 && path[0] == '/' &&
+		((path[1] >= 'a' && path[1] <= 'z') || (path[1] >= 'A' && path[1] <= 'Z')) &&
+		path[2] == ':'
 }
 
 func (LocalFS) Open(name string) (File, error) {

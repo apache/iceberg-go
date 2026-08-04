@@ -19,10 +19,10 @@ package io
 
 import (
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,7 +73,7 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	lfs := LocalFS{}
 
 	var files []string
-	err := lfs.WalkDir("file://"+dir, func(path string, d fs.DirEntry, err error) error {
+	err := lfs.WalkDir(fileURI(dir), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -93,22 +93,25 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 	content := []byte("content")
 
 	for _, tt := range []struct {
-		name string
-		path string
+		name     string
+		path     string
+		readPath string
 	}{
 		{
-			name: "plain path",
-			path: filepath.Join(dir, "plain", "nested", "file.txt"),
+			name:     "plain path",
+			path:     filepath.Join(dir, "plain", "nested", "file.txt"),
+			readPath: filepath.Join(dir, "plain", "nested", "file.txt"),
 		},
 		{
-			name: "file scheme",
-			path: "file://" + filepath.Join(dir, "scheme", "nested", "file.txt"),
+			name:     "file scheme",
+			path:     fileURI(filepath.Join(dir, "scheme", "nested", "file.txt")),
+			readPath: filepath.Join(dir, "scheme", "nested", "file.txt"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
 
-			got, err := os.ReadFile(strings.TrimPrefix(tt.path, "file://"))
+			got, err := os.ReadFile(tt.readPath)
 			require.NoError(t, err)
 			assert.Equal(t, content, got)
 		})
@@ -122,7 +125,13 @@ func TestLocalFSParsesFileURIs(t *testing.T) {
 	path := filepath.Join(dir, "metadata.json")
 	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
 
-	for _, name := range []string{path, "file://" + filepath.ToSlash(path), "file:" + filepath.ToSlash(path), "file://localhost" + filepath.ToSlash(path)} {
+	for _, name := range []string{
+		path,
+		fileURI(path),
+		singleSlashFileURI(path),
+		"file:" + filepath.ToSlash(path),
+		localhostFileURI(path),
+	} {
 		content, err := (LocalFS{}).ReadFile(name)
 		require.NoError(t, err, name)
 		assert.Equal(t, []byte("metadata"), content)
@@ -158,6 +167,36 @@ func TestLocalFSPreservesRelativePathsWithColon(t *testing.T) {
 
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
+}
+
+func fileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	path = filepath.ToSlash(path)
+	if hasVolume {
+		path = "/" + path
+	}
+
+	return (&url.URL{Scheme: "file", Path: path}).String()
+}
+
+func singleSlashFileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	pathSlash := filepath.ToSlash(path)
+	if hasVolume {
+		return "file:/" + pathSlash
+	}
+
+	return "file:" + pathSlash
+}
+
+func localhostFileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	path = filepath.ToSlash(path)
+	if hasVolume {
+		path = "/" + path
+	}
+
+	return (&url.URL{Scheme: "file", Host: "localhost", Path: path}).String()
 }
 
 func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {
