@@ -570,6 +570,27 @@ func TestUnmarshalSchema(t *testing.T) {
 	assert.True(t, tableSchemaSimple.Equals(&schema))
 }
 
+func TestUnmarshalSchemaRejectsInvalidTopLevelShape(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{name: "missing type", data: `{"fields": []}`},
+		{name: "non-struct type", data: `{"type": "list", "fields": []}`},
+		{name: "missing fields", data: `{"type": "struct"}`},
+		{name: "null fields", data: `{"type": "struct", "fields": null}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(7,
+				iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String})
+			err := json.Unmarshal([]byte(tt.data), schema)
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Equal(t, 7, schema.ID)
+			assert.Equal(t, "old", schema.Field(0).Name)
+		})
+	}
+}
+
 func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
 	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
 		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},

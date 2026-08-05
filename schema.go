@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -279,19 +280,35 @@ func (s *Schema) UnmarshalJSON(b []byte) error {
 	type Alias Schema
 	var decoded Schema
 	aux := struct {
-		Fields []NestedField `json:"fields"`
+		Type   *string         `json:"type"`
+		Fields json.RawMessage `json:"fields"`
 		*Alias
 	}{Alias: (*Alias)(&decoded)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
+	if aux.Type == nil {
+		return fmt.Errorf("%w: schema type is required", ErrInvalidSchema)
+	}
+	if *aux.Type != "struct" {
+		return fmt.Errorf("%w: schema type must be struct, got %q", ErrInvalidSchema, *aux.Type)
+	}
+	fieldsJSON := bytes.TrimSpace(aux.Fields)
+	if len(fieldsJSON) == 0 || bytes.Equal(fieldsJSON, []byte("null")) {
+		return fmt.Errorf("%w: schema fields are required", ErrInvalidSchema)
+	}
 
-	if err := checkDuplicateFieldIDs(nil, aux.Fields); err != nil {
+	var fields []NestedField
+	if err := json.Unmarshal(fieldsJSON, &fields); err != nil {
+		return fmt.Errorf("%w: invalid schema fields: %w", ErrInvalidSchema, err)
+	}
+
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
 		return err
 	}
 
-	decoded.fields = aux.Fields
+	decoded.fields = fields
 	if decoded.IdentifierFieldIDs == nil {
 		decoded.IdentifierFieldIDs = []int{}
 	}
