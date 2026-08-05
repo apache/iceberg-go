@@ -202,6 +202,12 @@ func (t *Table) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if t.metadata != nil && fresh.metadata != nil {
+		if expected, actual := t.metadata.TableUUID(), fresh.metadata.TableUUID(); expected != actual {
+			return fmt.Errorf("%w: table UUID changed during refresh: expected %s, got %s",
+				ErrInvalidMetadata, expected, actual)
+		}
+	}
 
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
