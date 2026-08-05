@@ -95,6 +95,10 @@ func withEqualityFieldIDs(ids []int) dataFileWriterOption {
 }
 
 func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {
+	if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
+		return nil, err
+	}
+
 	locProvider, err := LoadLocationProvider(rootLocation, props)
 	if err != nil {
 		return nil, err

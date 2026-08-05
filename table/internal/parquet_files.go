@@ -354,6 +354,35 @@ func javaBool(val string) bool {
 	return strings.EqualFold(val, "true")
 }
 
+func ValidateParquetWriteProperties(props iceberg.Properties) error {
+	for _, key := range []string{
+		ParquetRowGroupSizeBytesKey,
+		ParquetRowGroupLimitKey,
+		ParquetPageSizeBytesKey,
+		ParquetPageRowLimitKey,
+		ParquetDictSizeBytesKey,
+		ParquetBloomFilterMaxBytesKey,
+	} {
+		value, ok := props[key]
+		if !ok {
+			continue
+		}
+
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument, key, value, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("%w: %s must be greater than 0, got %d", iceberg.ErrInvalidArgument, key, parsed)
+		}
+		if strconv.IntSize == 32 && parsed > int64(^uint(0)>>1) {
+			return fmt.Errorf("%w: %s value %d exceeds int range", iceberg.ErrInvalidArgument, key, parsed)
+		}
+	}
+
+	return nil
+}
+
 // ParquetRowGroupTargetSizeBytes returns the configured uncompressed row-group
 // size target. Iceberg Java rejects invalid and non-positive values rather than
 // silently falling back to the default.

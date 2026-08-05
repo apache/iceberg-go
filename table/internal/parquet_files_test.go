@@ -28,6 +28,7 @@ import (
 	iofs "io/fs"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1503,6 +1504,37 @@ func writeDictTestColumn(t *testing.T, tableProps iceberg.Properties, values []p
 	require.NoError(t, pageRdr.Err())
 
 	return summary
+}
+
+func TestValidateParquetWriteProperties(t *testing.T) {
+	keys := []string{
+		internal.ParquetRowGroupSizeBytesKey,
+		internal.ParquetRowGroupLimitKey,
+		internal.ParquetPageSizeBytesKey,
+		internal.ParquetPageRowLimitKey,
+		internal.ParquetDictSizeBytesKey,
+		internal.ParquetBloomFilterMaxBytesKey,
+	}
+
+	for _, key := range keys {
+		for _, value := range []string{"nope", "0", "-1"} {
+			t.Run(key+"/"+value, func(t *testing.T) {
+				err := internal.ValidateParquetWriteProperties(iceberg.Properties{key: value})
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			})
+		}
+
+		t.Run(key+"/valid", func(t *testing.T) {
+			require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{key: "1"}))
+		})
+	}
+
+	if strconv.IntSize == 32 {
+		err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+			internal.ParquetPageSizeBytesKey: "2147483648",
+		})
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
 }
 
 func TestGetWritePropertiesBloomFilter(t *testing.T) {

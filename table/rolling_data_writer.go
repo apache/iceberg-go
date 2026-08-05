@@ -152,6 +152,13 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 		return nil, err
 	}
+	if fileFormat == iceberg.ParquetFile {
+		if err := tblutils.ValidateParquetWriteProperties(meta.props); err != nil {
+			stopCount()
+
+			return nil, err
+		}
+	}
 
 	format := tblutils.GetFileFormat(fileFormat)
 
