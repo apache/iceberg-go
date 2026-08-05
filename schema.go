@@ -18,7 +18,6 @@
 package iceberg
 
 import (
-	"encoding/json"
 	"fmt"
 	"iter"
 	"maps"
@@ -29,6 +28,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/goccy/go-json"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with

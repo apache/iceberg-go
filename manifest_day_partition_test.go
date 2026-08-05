@@ -19,10 +19,10 @@ package iceberg
 
 import (
 	"bytes"
-	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
+	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/avro"

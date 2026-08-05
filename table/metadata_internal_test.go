@@ -19,7 +19,6 @@ package table
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"maps"
 	"math"
@@ -28,6 +27,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"

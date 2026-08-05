@@ -18,7 +18,6 @@
 package table
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -28,6 +27,8 @@ import (
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/davecgh/go-spew/spew"

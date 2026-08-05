@@ -19,11 +19,12 @@ package table
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"

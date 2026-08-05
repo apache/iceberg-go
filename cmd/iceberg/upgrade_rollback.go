@@ -19,12 +19,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"

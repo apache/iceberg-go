@@ -22,7 +22,6 @@ package udf
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +29,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 

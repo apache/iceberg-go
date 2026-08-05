@@ -18,12 +18,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
