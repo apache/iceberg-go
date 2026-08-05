@@ -1233,7 +1233,7 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 }
 
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
 		return err
 	}
 
@@ -1581,12 +1581,12 @@ func (c *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Iden
 
 // CreateView creates a new view in the catalog.
 func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, schema *iceberg.Schema, viewSQL string, props iceberg.Properties) error {
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return err
-	}
-
 	if c.isV0() {
 		return errViewsUnsupportedOnV0
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return err
 	}
 
 	nsIdent := catalog.NamespaceFromIdent(identifier)
@@ -1672,14 +1672,12 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) ([]table.Identifier, error) {
-	if len(namespace) > 0 {
-		if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
-			return nil, err
-		}
-	}
-
 	if c.isV0() {
 		return nil, nil
+	}
+
+	if err := checkValidNamespace(namespace); err != nil {
+		return nil, err
 	}
 
 	ns := namespaceToString(namespace)
@@ -1723,12 +1721,12 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 
 // DropView deletes a view from the catalog.
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return err
-	}
-
 	if c.isV0() {
 		return errViewsUnsupportedOnV0
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
@@ -1802,12 +1800,12 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 
 // CheckViewExists returns true if a view exists in the catalog.
 func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifier) (bool, error) {
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return false, err
-	}
-
 	if c.isV0() {
 		return false, nil
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return false, err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
@@ -1832,12 +1830,12 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 
 // LoadView loads a view from the catalog.
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return nil, err
-	}
-
 	if c.isV0() {
 		return nil, errViewsUnsupportedOnV0
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return nil, err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))

@@ -43,6 +43,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -2235,7 +2236,15 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 		{name: "control character", identifier: table.Identifier{"ns", "view\nname"}},
 	}
 
-	cat := &sqlcat.Catalog{}
+	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                   ":memory:",
+		sqlcat.DriverKey:        sqliteshim.ShimName,
+		sqlcat.DialectKey:       string(sqlcat.SQLite),
+		sqlcat.SchemaVersionKey: sqlcat.SchemaVersionV1,
+		"type":                  "sql",
+	})
+	require.NoError(t, err)
+	cat := loaded.(*sqlcat.Catalog)
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -2500,19 +2509,25 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 	}
 
 	viewsIter = db.ListViews(context.Background(), []string{"nonexistent"})
+	yielded := false
 	for _, err := range viewsIter {
+		yielded = true
 		s.Error(err)
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 
 		break
 	}
+	s.Require().True(yielded)
 
 	viewsIter = db.ListViews(context.Background(), []string{".."})
+	yielded = false
 	for _, err := range viewsIter {
+		yielded = true
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 
 		break
 	}
+	s.Require().True(yielded)
 }
 
 func (s *SqliteCatalogTestSuite) TestLoadView() {

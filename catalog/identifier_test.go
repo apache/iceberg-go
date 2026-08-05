@@ -95,17 +95,21 @@ func TestValidateViewIdentifier(t *testing.T) {
 func TestValidateNamespaceIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace"}))
 	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"parent", "namespace"}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", ""}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "."}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", ".."}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "child/name"}))
+	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "child\nname"}))
 
-	for _, ident := range []table.Identifier{
-		nil,
-		{},
-		{"namespace", ""},
-		{"namespace", "."},
-		{"namespace", ".."},
-		{"namespace", "child/name"},
-		{"namespace", "child\nname"},
-	} {
-		require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+	for _, ident := range []table.Identifier{nil, {}} {
+		t.Run("empty identifier", func(t *testing.T) {
+			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+		})
+	}
+	for _, ident := range []table.Identifier{{"\x00"}, {"parent", "child\x00"}} {
+		t.Run("null character", func(t *testing.T) {
+			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+		})
 	}
 }
 
