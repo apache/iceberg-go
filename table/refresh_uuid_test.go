@@ -88,6 +88,7 @@ func TestRefreshAcceptsMatchingTableUUID(t *testing.T) {
 	require.IsType(t, iceio.NewMemFS(), func() iceio.IO {
 		fs, err := tbl.FS(context.Background())
 		require.NoError(t, err)
+
 		return fs
 	}())
 	require.Equal(t, refreshUUIDPlanner{}, tbl.planner)
