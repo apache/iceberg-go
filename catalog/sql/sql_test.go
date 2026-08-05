@@ -2245,6 +2245,7 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 	})
 	require.NoError(t, err)
 	cat := loaded.(*sqlcat.Catalog)
+	require.NoError(t, cat.CreateSQLTables(context.Background()))
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -2262,6 +2263,21 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 		})
 	}
+
+	t.Run("list views rejects missing namespace", func(t *testing.T) {
+		t.Parallel()
+
+		yielded := false
+		var gotErr error
+		for _, err := range cat.ListViews(context.Background(), table.Identifier{".."}) {
+			yielded = true
+			gotErr = err
+			break
+		}
+
+		require.True(t, yielded)
+		require.ErrorIs(t, gotErr, catalog.ErrNoSuchNamespace)
+	})
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
