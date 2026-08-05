@@ -352,11 +352,6 @@ func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewGoAllocator()
 
-	bitmap := dv.NewRoaringPositionBitmap()
-	bitmap.Set(1)
-	bitmap.Set(3)
-	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
-
 	mkBatch := func(values ...int64) arrow.RecordBatch {
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
@@ -368,18 +363,46 @@ func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
 		return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
 	}
 
-	withinCount, err := filter(mkBatch(0, 1, 2))
+	bitmap := dv.NewRoaringPositionBitmap()
+	bitmap.Set(1)
+	bitmap.Set(3)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+
+	withinCount, err := filter(mkBatch(0, 1))
 	require.NoError(t, err)
 	defer withinCount.Release()
-	assert.Equal(t, []int64{0, 2}, withinCount.Column(0).(*array.Int64).Int64Values())
+	assert.Equal(t, []int64{0}, withinCount.Column(0).(*array.Int64).Int64Values())
 
-	beyondCount, err := filter(mkBatch(3, 4, 5))
+	boundaryCount, err := filter(mkBatch(2, 3))
 	require.NoError(t, err)
-	defer beyondCount.Release()
-	assert.Equal(t, []int64{4, 5}, beyondCount.Column(0).(*array.Int64).Int64Values())
+	defer boundaryCount.Release()
+	assert.Equal(t, []int64{2}, boundaryCount.Column(0).(*array.Int64).Int64Values())
 
-	fullyBeyondCount, err := filter(mkBatch(6, 7))
+	straddlingFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	straddlingPrefix, err := straddlingFilter(mkBatch(0, 1))
 	require.NoError(t, err)
-	defer fullyBeyondCount.Release()
-	assert.Equal(t, []int64{6, 7}, fullyBeyondCount.Column(0).(*array.Int64).Int64Values())
+	defer straddlingPrefix.Release()
+	assert.Equal(t, []int64{0}, straddlingPrefix.Column(0).(*array.Int64).Int64Values())
+
+	straddlingCount, err := straddlingFilter(mkBatch(2, 3, 4, 5))
+	require.NoError(t, err)
+	defer straddlingCount.Release()
+	assert.Equal(t, []int64{2, 4, 5}, straddlingCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	boundaryBatch, err := boundaryFilter(mkBatch(0, 1, 2, 3))
+	require.NoError(t, err)
+	defer boundaryBatch.Release()
+	assert.Equal(t, []int64{0, 2}, boundaryBatch.Column(0).(*array.Int64).Int64Values())
+
+	afterBoundary, err := boundaryFilter(mkBatch(4, 5))
+	require.NoError(t, err)
+	defer afterBoundary.Release()
+	assert.Equal(t, []int64{4, 5}, afterBoundary.Column(0).(*array.Int64).Int64Values())
+
+	zeroRowCountFilter := filterByDeletionVector(ctx, bitmap, 0, (&rowPositionSource{}).cursor())
+	zeroRowCount, err := zeroRowCountFilter(mkBatch(6, 7))
+	require.NoError(t, err)
+	defer zeroRowCount.Release()
+	assert.Equal(t, []int64{6, 7}, zeroRowCount.Column(0).(*array.Int64).Int64Values())
 }
