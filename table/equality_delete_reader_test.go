@@ -20,9 +20,12 @@ package table_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -128,11 +131,25 @@ func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 	// Append data file and equality delete in the SAME snapshot via RowDelta.
 	// The equality delete should NOT affect the data file in the same commit
 	// (sequence number rule: delete must be strictly greater).
-	dataPath := tbl.Location() + "/data/data-001.parquet"
-	writeParquetFile(t, dataPath, arrowSc, `[
-		{"id": 1, "data": "alpha"},
-		{"id": 2, "data": "beta"}
-	]`)
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		record, _, err := array.RecordFromJSON(
+			memory.DefaultAllocator,
+			arrowSc,
+			strings.NewReader(`[
+				{"id": 1, "data": "alpha"},
+				{"id": 2, "data": "beta"}
+			]`),
+		)
+		require.NoError(t, err)
+		yield(record, nil)
+	}
+
+	var dataFiles []iceberg.DataFile
+	for dataFile, err := range table.WriteRecords(t.Context(), tbl, arrowSc, records) {
+		require.NoError(t, err)
+		dataFiles = append(dataFiles, dataFile)
+	}
+	require.Len(t, dataFiles, 1)
 
 	eqDelPath := tbl.Location() + "/data/eq-del-001.parquet"
 	delArrowSc, err := table.SchemaToArrowSchema(
@@ -142,10 +159,6 @@ func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 
 	writeParquetFile(t, eqDelPath, delArrowSc, `[{"id": 2}]`)
 
-	// Build data file
-	tx := tbl.NewTransaction()
-	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
-
 	// Build equality delete file
 	eqDelBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
@@ -153,22 +166,19 @@ func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	eqDelBuilder.EqualityFieldIDs([]int{1})
 
-	// Commit both data and delete in the same RowDelta.
+	// Commit the data and delete in the same RowDelta so they receive the same
+	// sequence number.
+	tx := tbl.NewTransaction()
 	rd := tx.NewRowDelta(nil)
-	rd.AddRows(buildDataFile(t, dataPath))
+	rd.AddRows(dataFiles...)
 	rd.AddDeletes(eqDelBuilder.Build())
 	require.NoError(t, rd.Commit(t.Context()))
 
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	// Both rows should be visible — the equality delete in the same
-	// snapshot should not affect co-committed data files.
-	// Note: the AddFiles commit added 2 rows, and the RowDelta added
-	// a duplicate data file + eq delete. The data from AddFiles has
-	// sequence number from the first update; the RowDelta data has
-	// the same snapshot's sequence number. The equality delete also
-	// has the same sequence number, so it should not apply to either.
+	// Both rows should be visible because the equality delete in the same
+	// snapshot must not affect co-committed data files.
 	_, itr, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
 	require.NoError(t, err)
 
@@ -182,12 +192,7 @@ func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 		rec.Release()
 	}
 
-	// The AddFiles data (seq=1) should have id=2 deleted by the eq delete (seq=2).
-	// The RowDelta data (seq=2) should NOT have id=2 deleted (same seq).
-	// So we expect: from AddFiles: 1; from RowDelta: 1, 2 = total [1, 1, 2]
-	// Actually this depends on exact sequence number assignment. Let's just
-	// verify that at least some rows are visible.
-	assert.NotEmpty(t, ids, "at least some rows should be visible")
+	assert.ElementsMatch(t, []int64{1, 2}, ids)
 }
 
 func TestEqualityDeleteMultiColumnKey(t *testing.T) {
