@@ -100,8 +100,8 @@ func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string
 	// safe. Tests that exercise other bitmap sizes call
 	// writePuffinWithDVBlobAndProps directly with their own cardinality.
 	return writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-		"referenced-data-file": "s3://bucket/data/data-001.parquet",
-		"cardinality":          "5",
+		dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+		dvCardinalityProperty:        "5",
 	})
 }
 
@@ -109,6 +109,19 @@ func writePuffinWithDVBlob(t *testing.T, dir string, dvBlobBytes []byte) (string
 // caller-supplied blob properties — used by the cardinality-validation tests
 // to inject the spec-mandated `cardinality` property (or omit it).
 func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte, props map[string]string) (string, puffin.BlobMetadata) {
+	path, metas := writePuffinWithDVBlobs(t, dir, testPuffinBlobInput{
+		data:  dvBlobBytes,
+		props: props,
+	})
+	return path, metas[0]
+}
+
+type testPuffinBlobInput struct {
+	data  []byte
+	props map[string]string
+}
+
+func writePuffinWithDVBlobs(t *testing.T, dir string, blobs ...testPuffinBlobInput) (string, []puffin.BlobMetadata) {
 	t.Helper()
 
 	path := filepath.Join(dir, "test-dv.puffin")
@@ -119,17 +132,21 @@ func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte,
 	w, err := puffin.NewWriter(f)
 	require.NoError(t, err)
 
-	meta, err := w.AddBlob(puffin.BlobMetadataInput{
-		Type:           puffin.BlobTypeDeletionVector,
-		SnapshotID:     -1,
-		SequenceNumber: -1,
-		Fields:         []int32{2147483546},
-		Properties:     props,
-	}, dvBlobBytes)
-	require.NoError(t, err)
+	metas := make([]puffin.BlobMetadata, 0, len(blobs))
+	for _, blob := range blobs {
+		meta, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type:           puffin.BlobTypeDeletionVector,
+			SnapshotID:     -1,
+			SequenceNumber: -1,
+			Fields:         []int32{2147483546},
+			Properties:     blob.props,
+		}, blob.data)
+		require.NoError(t, err)
+		metas = append(metas, meta)
+	}
 	require.NoError(t, w.Finish())
 
-	return path, meta
+	return path, metas
 }
 
 // writeRawPuffinWithDVBlobNoCardinality hand-builds a Puffin file whose DV blob
@@ -140,7 +157,7 @@ func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte,
 // not require the property, so this file loads cleanly.
 func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes []byte) (string, puffin.BlobMetadata) {
 	return writeRawPuffinBlob(t, dir, "raw-dv-no-cardinality.puffin", dvBlobBytes, puffin.BlobTypeDeletionVector, map[string]string{
-		"referenced-data-file": "s3://bucket/data/data-001.parquet",
+		dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
 	})
 }
 
@@ -460,10 +477,37 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 	t.Run("mismatched referenced data file", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-002.parquet",
-			"cardinality":          "5",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-002.parquet",
+			dvCardinalityProperty:        "5",
 		})
 		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "manifest referenced_data_file")
+		assert.ErrorContains(t, err, "data-001.parquet")
+		assert.ErrorContains(t, err, "data-002.parquet")
+	})
+
+	t.Run("offset redirects to a different blob", func(t *testing.T) {
+		dir := t.TempDir()
+		path, metas := writePuffinWithDVBlobs(t, dir,
+			testPuffinBlobInput{
+				data: dvBlobBytes,
+				props: map[string]string{
+					dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+					dvCardinalityProperty:        "5",
+				},
+			},
+			testPuffinBlobInput{
+				data: dvBlobBytes,
+				props: map[string]string{
+					dvReferencedDataFileProperty: "s3://bucket/data/data-002.parquet",
+					dvCardinalityProperty:        "5",
+				},
+			},
+		)
+		offset, size := metas[1].Offset, metas[1].Length
 
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		require.Error(t, err)
@@ -475,19 +519,32 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 	t.Run("missing puffin referenced data file", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writeRawPuffinBlob(t, dir, "raw-dv-no-reference.puffin", dvBlobBytes,
-			puffin.BlobTypeDeletionVector, map[string]string{"cardinality": "5"})
+			puffin.BlobTypeDeletionVector, map[string]string{dvCardinalityProperty: "5"})
 		offset, size := meta.Offset, meta.Length
 
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
-		assert.ErrorContains(t, err, "missing referenced-data-file property")
+		assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
+	})
+
+	t.Run("empty puffin referenced data file", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writeRawPuffinBlob(t, dir, "raw-dv-empty-reference.puffin", dvBlobBytes,
+			puffin.BlobTypeDeletionVector, map[string]string{
+				dvReferencedDataFileProperty: "",
+				dvCardinalityProperty:        "5",
+			})
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
 	})
 
 	t.Run("wrong blob type", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writeRawPuffinBlob(t, dir, "raw-wrong-type.puffin", dvBlobBytes,
 			puffin.BlobType("test-blob"), map[string]string{
-				"referenced-data-file": "s3://bucket/data/data-001.parquet",
-				"cardinality":          "5",
+				dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+				dvCardinalityProperty:        "5",
 			})
 		offset, size := meta.Offset, meta.Length
 
@@ -521,8 +578,8 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 	t.Run("matching cardinality passes", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "5",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+			dvCardinalityProperty:        "5",
 		})
 		offset, size := meta.Offset, meta.Length
 		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
@@ -537,8 +594,8 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		emptyBlob := readDVTestData(t, "empty-position-index.bin")
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, emptyBlob, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "0",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+			dvCardinalityProperty:        "0",
 		})
 		offset, size := meta.Offset, meta.Length
 		bm, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
@@ -549,9 +606,9 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 	t.Run("manifest disagreeing with puffin property is rejected", func(t *testing.T) {
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
 			// Puffin says 99; the manifest entry below says 5.
-			"cardinality": "99",
+			dvCardinalityProperty: "99",
 		})
 		offset, size := meta.Offset, meta.Length
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
@@ -568,8 +625,8 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		// Must error rather than fall back to trusting the blob property.
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "5",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+			dvCardinalityProperty:        "5",
 		})
 		offset, size := meta.Offset, meta.Length
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 0, &offset, &size))
@@ -583,8 +640,8 @@ func TestReadDVCardinalityValidation(t *testing.T) {
 		// against the agreed-upon expected cardinality.
 		dir := t.TempDir()
 		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
-			"referenced-data-file": "s3://bucket/data/data-001.parquet",
-			"cardinality":          "99",
+			dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+			dvCardinalityProperty:        "99",
 		})
 		offset, size := meta.Offset, meta.Length
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 99, &offset, &size))

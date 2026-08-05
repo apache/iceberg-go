@@ -194,7 +194,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 
 	referencedDataFile, ok := blob.Properties[dvReferencedDataFileProperty]
 	if !ok || referencedDataFile == "" {
-		return nil, fmt.Errorf("DV file %s: blob at offset %d missing %s property",
+		return nil, fmt.Errorf("DV file %s: blob at offset %d missing or empty %s property",
 			dvFile.FilePath(), offset, dvReferencedDataFileProperty)
 	}
 	if referencedDataFile != *manifestReferencedDataFile {
