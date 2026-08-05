@@ -149,6 +149,14 @@ func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 // stale manifest record_count against a freshly written blob) is a writer bug
 // and fails fast. The bitmap is then validated against the manifest count.
 //
+// ReadDV also requires the selected blob to be a deletion-vector blob whose
+// referenced-data-file property matches the manifest. This is stricter than
+// clients that only use the manifest offset and size, but prevents a valid
+// Puffin blob for another data file from being applied here. A missing or
+// empty referenced-data-file property is fatal because it cannot establish
+// blob identity; a missing cardinality property is only warned about because
+// the manifest record_count still bounds the decoded bitmap.
+//
 // Blobs missing the spec-required cardinality property are still validated
 // against the manifest record_count and accepted with a slog warning rather
 // than rejected — the Go writer always emits the property, but third-party
