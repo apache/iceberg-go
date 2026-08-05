@@ -19,6 +19,7 @@ package table
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 // BlobType is the type of blob in a Puffin file
@@ -49,6 +50,9 @@ func (bt *BlobType) UnmarshalJSON(data []byte) error {
 	}
 
 	*bt = BlobType(s)
+	if s == "" {
+		return fmt.Errorf("invalid blob type: %s", s)
+	}
 
 	return nil
 }

@@ -54,3 +54,14 @@ func TestMetadataPreservesUnknownStatisticsBlobType(t *testing.T) {
 	assert.Equal(t, BlobType("vendor-sketch-v1"), stats[0].BlobMetadata[0].Type)
 	assert.False(t, stats[0].BlobMetadata[0].Type.IsKnown())
 }
+
+func TestBlobTypeRejectsNullAndEmptyValues(t *testing.T) {
+	for _, value := range []string{"null", `""`} {
+		t.Run(value, func(t *testing.T) {
+			var blob BlobMetadata
+			err := json.Unmarshal([]byte(`{"type":`+value+`}`), &blob)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid blob type")
+		})
+	}
+}
