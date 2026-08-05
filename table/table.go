@@ -327,23 +327,50 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	}
 
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
-	g := errgroup.Group{}
+	snapshots := t.metadata.Snapshots()
+	n := len(snapshots)
+	workCtx, cancel := context.WithCancel(ctx)
+	jobs := make(chan int)
+	ch := make(chan list, max(1, min(n, 16)))
+	workers := max(1, min(n, min(runtime.GOMAXPROCS(0), 16)))
+	g, groupCtx := errgroup.WithContext(workCtx)
 
-	n := len(t.metadata.Snapshots())
-	ch := make(chan list, n)
-
-	for i, sn := range t.metadata.Snapshots() {
+	for range workers {
 		g.Go(func() error {
-			manifests, err := sn.Manifests(fs)
-			if err != nil {
-				return err
+			for {
+				select {
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case i, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+
+					manifests, err := snapshots[i].Manifests(fs)
+					if err != nil {
+						return err
+					}
+
+					select {
+					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
+					case <-groupCtx.Done():
+						return groupCtx.Err()
+					}
+				}
 			}
-
-			ch <- list{Index: i, Value: manifests, Last: i == n-1}
-
-			return nil
 		})
 	}
+
+	go func() {
+		defer close(jobs)
+		for i := range snapshots {
+			select {
+			case jobs <- i:
+			case <-groupCtx.Done():
+				return
+			}
+		}
+	}()
 
 	errch := make(chan error, 1)
 	go func() {
@@ -373,6 +400,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 		}, list{Index: -1})
 
 	return func(yield func(iceberg.ManifestFile, error) bool) {
+		defer cancel()
 		defer func() {
 			// drain channels if we exited early
 			go func() {
