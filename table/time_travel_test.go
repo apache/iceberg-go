@@ -162,7 +162,7 @@ func TestSnapshotAsOfWithOutOfOrderSnapshotLog(t *testing.T) {
 	assert.Equal(t, int64(2000), snapshot.SnapshotID)
 }
 
-func TestSnapshotAsOfWithEqualTimestampsUsesLaterLogEntry(t *testing.T) {
+func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
 	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
 	snapshots := []Snapshot{
 		{SnapshotID: 1000, TimestampMs: baseTime + 1000, SequenceNumber: 1},
@@ -179,13 +179,13 @@ func TestSnapshotAsOfWithEqualTimestampsUsesLaterLogEntry(t *testing.T) {
 	tbl := Table{metadata: meta}
 	snapshot := tbl.SnapshotAsOf(baseTime+1000, true)
 	require.NotNil(t, snapshot)
-	assert.Equal(t, int64(2000), snapshot.SnapshotID)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
 
 	scan := tbl.Scan(WithSnapshotAsOf(baseTime + 1000))
 	snapshot, err = scan.ResolveSnapshot()
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
-	assert.Equal(t, int64(2000), snapshot.SnapshotID)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
 }
 
 func TestResolveSnapshotRejectsUnknownSnapshotLogEntry(t *testing.T) {

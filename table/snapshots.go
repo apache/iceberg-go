@@ -436,7 +436,7 @@ func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64,
 			eligible = entry.TimestampMs <= timestampMs
 		}
 
-		if eligible && (!found || entry.TimestampMs >= best.TimestampMs) {
+		if eligible && (!found || entry.TimestampMs > best.TimestampMs) {
 			best = entry
 			found = true
 		}
