@@ -1280,6 +1280,22 @@ func (m *ManifestTestSuite) TestWriteManifestV3() {
 		m.EqualValues(520, nextID) // 500 + 10 + 10
 	})
 
+	m.Run("rejects negative first row ID", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3("/manifest.avro", &buf, -1, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("rejects next row ID overflow", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3(
+			"/manifest.avro", &buf, math.MaxInt64-count, partitionSpec, testSchema, entrySnapshotID, entries,
+		)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+	})
+
 	m.Run("read inheritance from manifest", func() {
 		var buf bytes.Buffer
 		firstRowID := int64(500)
@@ -2475,6 +2491,82 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	m.Require().NoError(err)
 }
 
+func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() {
+	m.Run("negative first row ID", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, -1, nil)
+		m.Nil(writer)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("negative row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative.avro", 100, 1, snapshotID).AddedRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("negative existing row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative-existing.avro", 100, 1, snapshotID).ExistingRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("existing row count overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow-existing.avro", 100, 1, snapshotID).ExistingRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("later validation failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 10, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorContains(err, "unassigned sequence number")
+		m.EqualValues(10, *writer.NextRowID())
+	})
+
+	m.Run("batch failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		startRowID := int64(math.MaxInt64 - 5)
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, startRowID, nil)
+		m.Require().NoError(err)
+		manifests := []ManifestFile{
+			NewManifestFile(3, "valid.avro", 100, 1, snapshotID).AddedRows(5).Build(),
+			NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build(),
+		}
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(startRowID, *writer.NextRowID())
+	})
+}
+
 func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
 	// Assigned row-id delta = sum of (existing+added) for all data manifests in list.
 	var buf bytes.Buffer
@@ -3133,6 +3225,25 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
 	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
 	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListAssignsZeroForV1ManifestWithUnknownRowCounts() {
+	legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+	legacy.AddedRowsCount = -1
+	legacy.ExistingRowsCount = -1
+
+	var v1Buf bytes.Buffer
+	m.Require().NoError(WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
+	manifests, err := ReadManifestList(&v1Buf)
+	m.Require().NoError(err)
+	m.Require().Len(manifests, 1)
+
+	var v3Buf bytes.Buffer
+	writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.AddManifests(manifests))
+	m.EqualValues(1000, *writer.NextRowID())
+	m.Require().NoError(writer.Close())
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
