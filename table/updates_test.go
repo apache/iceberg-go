@@ -370,10 +370,10 @@ func TestUnmarshalUpdates(t *testing.T) {
 				{"action": "set-properties", "updates": {"key1": "value1"}},
 				{"action": "remove-properties", "removals": ["key2"]},
 				{"action": "remove-schemas", "schema-ids": [1,2,3,4]},
-				{"action": "remove-partition-specs", "schema-ids": [1,2,3]},
+				{"action": "remove-partition-specs", "spec-ids": [1,2,3]},
 				{"action": "remove-snapshots", "snapshot-ids": [1,2]},
 				{"action": "remove-snapshot-ref", "ref-name": "main"},
-				{"action": "set-default-sort-order", "order-id": 1},
+				{"action": "set-default-sort-order", "sort-order-id": 1},
 				{"action": "set-default-spec", "spec-id": 1},
 				{"action": "set-snapshot-ref", "ref-name": "main", "type": "branch", "snapshot-id": 1}
 			]`),
@@ -562,6 +562,53 @@ func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
 	assert.Empty(t, updates)
+}
+
+func TestUnmarshalUpdatesRejectsMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		action string
+		field  string
+	}{
+		{UpdateAssignUUID, "uuid"},
+		{UpdateUpgradeFormatVersion, "format-version"},
+		{UpdateAddSchema, "schema"},
+		{UpdateSetCurrentSchema, "schema-id"},
+		{UpdateAddSpec, "spec"},
+		{UpdateSetDefaultSpec, "spec-id"},
+		{UpdateAddSortOrder, "sort-order"},
+		{UpdateSetDefaultSortOrder, "sort-order-id"},
+		{UpdateAddSnapshot, "snapshot"},
+		{UpdateSetSnapshotRef, "ref-name"},
+		{UpdateRemoveSnapshots, "snapshot-ids"},
+		{UpdateRemoveSnapshotRef, "ref-name"},
+		{UpdateSetLocation, "location"},
+		{UpdateSetProperties, "updates"},
+		{UpdateRemoveProperties, "removals"},
+		{UpdateRemoveSpec, "spec-ids"},
+		{UpdateRemoveSchemas, "schema-ids"},
+		{UpdateSetStatistics, "snapshot-id"},
+		{UpdateRemoveStatistics, "snapshot-id"},
+		{UpdateSetPartitionStatistics, "partition-statistics"},
+		{UpdateRemovePartitionStatistics, "snapshot-id"},
+		{UpdateAddEncryptionKey, "encryption-key"},
+		{UpdateRemoveEncryptionKey, "key-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			var updates Updates
+			err := json.Unmarshal([]byte(fmt.Sprintf(`[{"action":%q}]`, tt.action)), &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+func TestUnmarshalUpdatesRejectsNullRequiredPayload(t *testing.T) {
+	var updates Updates
+	err := json.Unmarshal([]byte(`[{"action":"add-snapshot","snapshot":null}]`), &updates)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshot")
 }
 
 // baseMetaJSON is a minimal valid V2 metadata document used by the Apply tests below.
