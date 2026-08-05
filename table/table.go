@@ -487,7 +487,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		newLoc            string
 		timer             *time.Timer
 		orphanedManifests []string // manifest-list files orphaned by rebuilds
+		commitDuration    time.Duration
 	)
+
+	// attemptsUsed initializes to 1: the emit block below is reached only via the
+	// success break, which always runs at least one attempt. Deriving it from a
+	// 0-based counter risks emitting 0 if a second success exit is ever added.
+	var attemptsUsed int64 = 1
 
 	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
 	// files on exit. It defaults to true (clean on all safe exits) and is set to
@@ -514,6 +520,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	// numRetries counts retries; total attempts = 1 initial + numRetries.
 	totalAttempts := cfg.numRetries + 1
+
+	// commitStart brackets the commit loop itself (not FS resolution above or
+	// metadata cleanup below) so TotalDuration times only the CommitTable
+	// submission loop, matching Java's CommitReport.
+	commitStart := time.Now()
 
 	for attempt := range totalAttempts {
 		if attempt != 0 {
@@ -596,6 +607,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			attemptsUsed = int64(attempt) + 1
+			// Capture elapsed time at the commit boundary, before orphan
+			// cleanup and deleteOldMetadata below (both can do I/O).
+			commitDuration = time.Since(commitStart)
+
 			break
 		}
 
@@ -631,6 +647,29 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 	}
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
+
+	// Emit a commit report on success. Prefer the just-committed branch head
+	// over the table's current snapshot so commits to a non-default branch
+	// report the snapshot they actually created.
+	//
+	// Mirrors the scan path: building the report is skipped for a no-op
+	// reporter (the opt-in default), since a nop discards it and assembling one
+	// would be pure overhead. A metadata-only commit produces no snapshot and
+	// must be skipped too — its branch head is unchanged, so reporting it would
+	// attribute a prior snapshot's metrics to this commit.
+	if rep := t.MetricsReporter(); !metrics.IsNop(rep) && commitAddedSnapshot(updates) {
+		committed := newMeta.CurrentSnapshot()
+		if co.branch != "" {
+			// A nil lookup means the branch head could not be resolved (e.g. a
+			// fresh non-default branch); attributing CurrentSnapshot() would
+			// carry the wrong snapshot, so skip emission entirely.
+			committed = newMeta.SnapshotByName(co.branch)
+		}
+		if committed != nil {
+			safeReport(ctx, rep,
+				buildCommitReport(strings.Join(t.identifier, "."), committed, attemptsUsed, commitDuration))
+		}
+	}
 
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }

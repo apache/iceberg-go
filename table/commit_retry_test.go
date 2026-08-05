@@ -31,6 +31,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -523,6 +524,52 @@ func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
 		"committed manifest list must be the rebuilt path, not the original")
 	require.Contains(t, wfs.files, committedManifestList,
 		"live committed manifest list must be preserved by the cleanup defer")
+}
+
+// TestDoCommit_CommitReportRecordsRetryAttempts drives one retryable
+// ErrCommitFailed before success and asserts the emitted CommitReport records
+// Attempts == 2. This exercises the attempt-counting on the emit path, which no
+// other test does — every other commit test is a clean single-attempt success.
+func TestDoCommit_CommitReportRecordsRetryAttempts(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+
+	// Fail once with ErrCommitFailed (one retry), then succeed on the 2nd attempt.
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed},
+	}
+	sink := &metrics.InMemoryReporter{}
+	tbl = New(
+		Identifier{"db", "commit-report-retry"},
+		meta,
+		"mem://default/table-location/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil },
+		cat,
+		WithMetricsReporter(sink),
+	)
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	require.NoError(t, err, "doCommit must succeed on the second attempt")
+
+	var cr *metrics.CommitReport
+	for _, r := range sink.Reports() {
+		if c, ok := r.(metrics.CommitReport); ok {
+			cr = &c
+		}
+	}
+	require.NotNil(t, cr, "a successful commit must emit a CommitReport")
+	require.NotNil(t, cr.Metrics.Attempts)
+	assert.Equal(t, int64(2), cr.Metrics.Attempts.Value,
+		"one retry then success must record 2 attempts")
 }
 
 // TestDoCommit_OrphanNotCleanedOnUnknownError verifies that manifest-list
