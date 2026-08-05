@@ -523,6 +523,46 @@ func TestGeoBoundsAccumulatorEWKBMatchesISO(t *testing.T) {
 	}
 }
 
+func TestNormalizeWKB(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want []byte
+	}{
+		{
+			name: "little endian z",
+			in:   newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			want: newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "big endian z",
+			in:   newXDRWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			want: newXDRWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "embedded srid",
+			in:   newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes(),
+			want: newWKBBuilder(wkbPoint).f64(1, 2).bytes(),
+		},
+		{
+			name: "iso unchanged",
+			in:   newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			want: newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeWKB(tt.in)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+			if tt.name == "iso unchanged" {
+				require.Same(t, &tt.in[0], &got[0])
+			}
+		})
+	}
+}
+
 // TestGeoBoundsAccumulatorRejectsInvalidWKB verifies that malformed values still
 // error rather than panicking or silently contributing no coordinates.
 //
