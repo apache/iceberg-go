@@ -136,10 +136,6 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	default:
 		freshCreds, err := v.fetchCreds(ctx, v.identifier)
 		if err != nil {
-			if !v.expired() {
-				return v.cachedIO, nil
-			}
-
 			return nil, fmt.Errorf("refresh vended credentials for %s: %w", v.location, err)
 		}
 
@@ -151,9 +147,6 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	if err != nil {
 		if v.cachedIO == nil {
 			return nil, err
-		}
-		if !v.expired() {
-			return v.cachedIO, nil
 		}
 
 		return nil, fmt.Errorf("load filesystem with refreshed credentials for %s: %w", v.location, err)
