@@ -20,6 +20,7 @@ package sql_test
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1951,6 +1953,7 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
 	close(errs)
 
 	created, alreadyExists := 0, 0
+	var unexpected []error
 	for err := range errs {
 		switch {
 		case err == nil:
@@ -1958,12 +1961,101 @@ func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
 		case errors.Is(err, catalog.ErrNamespaceAlreadyExists):
 			alreadyExists++
 		default:
-			s.Failf("unexpected error", "want nil or ErrNamespaceAlreadyExists, got %v", err)
+			unexpected = append(unexpected, err)
 		}
 	}
 
+	s.Empty(unexpected, "want nil or ErrNamespaceAlreadyExists")
 	s.Equal(1, created)
 	s.Equal(writers-1, alreadyExists)
+}
+
+// plantingDriver wraps the sqlite driver and, once, inserts the namespace row
+// on the same connection just before the catalog's own insert.
+type plantingDriver struct {
+	base      driver.Driver
+	namespace string
+	planted   atomic.Bool
+}
+
+func (d *plantingDriver) Open(dsn string) (driver.Conn, error) {
+	conn, err := d.base.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	return &plantingConn{Conn: conn, drv: d}, nil
+}
+
+type plantingConn struct {
+	driver.Conn
+	drv *plantingDriver
+}
+
+func (c *plantingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	execer, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	// Same statement would be rolled back with the failing insert, so the plant
+	// goes in as its own statement first.
+	if strings.Contains(query, "iceberg_namespace_properties") && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "INSERT") && c.drv.planted.CompareAndSwap(false, true) {
+		if _, err := execer.ExecContext(ctx, "INSERT INTO iceberg_namespace_properties (catalog_name, namespace, property_key, property_value) VALUES (?, ?, ?, ?)",
+			[]driver.NamedValue{
+				{Ordinal: 1, Value: "default"},
+				{Ordinal: 2, Value: c.drv.namespace},
+				{Ordinal: 3, Value: "exists"},
+				{Ordinal: 4, Value: "true"},
+			}); err != nil {
+			return nil, err
+		}
+	}
+
+	return execer.ExecContext(ctx, query, args)
+}
+
+func (c *plantingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	queryer, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+
+	return queryer.QueryContext(ctx, query, args)
+}
+
+func (c *plantingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	return c.Conn.(driver.ConnBeginTx).BeginTx(ctx, opts)
+}
+
+func (c *plantingConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	return c.Conn.(driver.ConnPrepareContext).PrepareContext(ctx, query)
+}
+
+// The concurrent test above cannot tell whether a loser returned from the check
+// before the insert or from the recovery after it. This one only passes if the
+// insert ran and failed.
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceLosesInsertRace() {
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+
+	base, err := sql.Open(sqliteshim.ShimName, ":memory:")
+	s.Require().NoError(err)
+	s.Require().NoError(base.Close())
+
+	drvName := "sqlite-planting-" + namespace[0]
+	sql.Register(drvName, &plantingDriver{base: base.Driver(), namespace: namespace[0]})
+
+	sqldb, err := sql.Open(drvName, s.catalogUri())
+	s.Require().NoError(err)
+	defer sqldb.Close()
+	sqldb.SetMaxOpenConns(1)
+
+	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	s.Require().NoError(err)
+
+	err = cat.CreateNamespace(ctx, namespace, nil)
+	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+	s.Contains(err.Error(), namespace[0])
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
