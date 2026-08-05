@@ -113,6 +113,7 @@ func writePuffinWithDVBlobAndProps(t *testing.T, dir string, dvBlobBytes []byte,
 		data:  dvBlobBytes,
 		props: props,
 	})
+
 	return path, metas[0]
 }
 
