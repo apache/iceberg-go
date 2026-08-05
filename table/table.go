@@ -183,6 +183,12 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 // callers to receive the precise initialization error instead of hitting
 // panic/undefined behavior later.
 func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	for name, ref := range t.metadata.Refs() {
+		if name == branch && ref.SnapshotRefType != BranchRef {
+			return nil, fmt.Errorf("%w: %s is not a branch", iceberg.ErrInvalidArgument, branch)
+		}
+	}
+
 	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 	if err != nil {
 		return nil, err
