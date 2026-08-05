@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -454,20 +455,34 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 }
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
-	aux := struct {
-		ID     int               `json:"spec-id"`
-		Fields []json.RawMessage `json:"fields"`
-	}{ID: ps.id}
-
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	if aux.ID < 0 {
-		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, aux.ID)
+
+	rawID, ok := raw["spec-id"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+		return fmt.Errorf("%w: partition spec is missing required spec-id", ErrInvalidPartitionSpec)
+	}
+	var id int
+	if err := json.Unmarshal(rawID, &id); err != nil {
+		return fmt.Errorf("%w: invalid partition spec ID: %w", ErrInvalidPartitionSpec, err)
+	}
+	if id < 0 {
+		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, id)
 	}
 
-	fields := make([]PartitionField, len(aux.Fields))
-	for i, rawField := range aux.Fields {
+	rawFields, ok := raw["fields"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawFields), []byte("null")) {
+		return fmt.Errorf("%w: partition spec is missing required fields", ErrInvalidPartitionSpec)
+	}
+	var rawFieldList []json.RawMessage
+	if err := json.Unmarshal(rawFields, &rawFieldList); err != nil {
+		return fmt.Errorf("%w: invalid partition spec fields: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	fields := make([]PartitionField, len(rawFieldList))
+	for i, rawField := range rawFieldList {
 		var keys map[string]json.RawMessage
 		if err := json.Unmarshal(rawField, &keys); err != nil {
 			return err
@@ -489,11 +504,12 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	ps.id, ps.fields = aux.ID, fields
-	if err := ps.assignPartitionFieldIds(nil); err != nil {
+	decoded := PartitionSpec{id: id, fields: fields}
+	if err := decoded.assignPartitionFieldIds(nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
-	ps.initialize()
+	decoded.initialize()
+	*ps = decoded
 
 	return nil
 }
