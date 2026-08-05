@@ -672,9 +672,9 @@ func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
 			message: "spec ID must be non-negative",
 		},
 		{
-			name:    "zero source ID",
-			data:    `{"spec-id":0,"fields":[{"source-id":0,"field-id":1000,"name":"part","transform":"identity"}]}`,
-			message: "source ID must be positive",
+			name:    "negative source ID",
+			data:    `{"spec-id":0,"fields":[{"source-id":-1,"field-id":1000,"name":"part","transform":"identity"}]}`,
+			message: "source ID must be non-negative",
 		},
 		{
 			name:    "empty source IDs",
@@ -724,4 +724,19 @@ func TestPartitionSpecUnmarshalAllowsRepeatedVoidTransforms(t *testing.T) {
 	var spec iceberg.PartitionSpec
 	require.NoError(t, json.Unmarshal([]byte(data), &spec))
 	assert.Equal(t, 2, spec.NumFields())
+}
+
+// An unbound spec in a create-table request carries the client's ordinal
+// placeholder source IDs, which start at 0. Spark numbers the root struct's
+// fields by ordinal, so partitioning by the first column sends source-id 0.
+func TestPartitionSpecUnmarshalAcceptsZeroSourceID(t *testing.T) {
+	data := `{"spec-id":0,"fields":[{"source-id":0,"field-id":1000,"name":"my_ints","transform":"identity"}]}`
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+	assert.Equal(t, 0, spec.Field(0).SourceID())
+
+	roundTripped, err := json.Marshal(spec)
+	require.NoError(t, err)
+	assert.JSONEq(t, data, string(roundTripped))
 }
