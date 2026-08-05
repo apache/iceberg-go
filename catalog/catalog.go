@@ -282,7 +282,14 @@ func ValidateNamespaceIdentifier(ident table.Identifier) error {
 		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
 	}
 
-	return validateIdentifierComponents(ident, ErrNoSuchNamespace)
+	for _, part := range ident {
+		if strings.ContainsRune(part, '\x00') {
+			return fmt.Errorf("%w: invalid null character in namespace identifier component %q in %v",
+				ErrNoSuchNamespace, part, strings.Join(ident, "."))
+		}
+	}
+
+	return nil
 }
 
 // ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.

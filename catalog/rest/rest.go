@@ -1075,7 +1075,11 @@ func (r *Catalog) Close() error { return r.reporter.Close() }
 var _ catalog.Closer = (*Catalog)(nil)
 
 func checkValidNamespace(ident table.Identifier) error {
-	return catalog.ValidateNamespaceIdentifier(ident)
+	if len(ident) < 1 {
+		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
+	}
+
+	return nil
 }
 
 func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties, credsVended bool) (*table.Table, error) {
@@ -1734,7 +1738,7 @@ func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
 		return err
 	}
 
