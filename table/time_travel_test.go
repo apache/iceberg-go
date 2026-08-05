@@ -125,6 +125,61 @@ func TestSnapshotAsOf(t *testing.T) {
 	})
 }
 
+func TestSnapshotAsOfWithOutOfOrderSnapshotLog(t *testing.T) {
+	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
+	snapshots := []Snapshot{
+		{SnapshotID: 1000, TimestampMs: baseTime + 2000, SequenceNumber: 1},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000, SequenceNumber: 2},
+		{SnapshotID: 3000, TimestampMs: baseTime + 3000, SequenceNumber: 3},
+	}
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime + 2000},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000},
+		{SnapshotID: 3000, TimestampMs: baseTime + 3000},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	tbl := Table{
+		identifier: []string{"db", "table"},
+		metadata:   meta,
+	}
+
+	queryTime := baseTime + 2500
+	snapshot := tbl.SnapshotAsOf(queryTime, true)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+	scan := tbl.Scan(WithSnapshotAsOf(queryTime))
+	snapshot, err = scan.ResolveSnapshot()
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+	snapshot = tbl.SnapshotAsOf(baseTime+2000, false)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(2000), snapshot.SnapshotID)
+}
+
+func TestResolveSnapshotRejectsUnknownSnapshotLogEntry(t *testing.T) {
+	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
+	snapshots := []Snapshot{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000, SequenceNumber: 1},
+	}
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000},
+		{SnapshotID: 2000, TimestampMs: baseTime + 2000},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	scan := (Table{metadata: meta}).Scan(WithSnapshotAsOf(baseTime + 2500))
+	_, err = scan.ResolveSnapshot()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+}
+
 func TestTable_WithSnapshotAsOf(t *testing.T) {
 	baseTime := time.Now()
 
