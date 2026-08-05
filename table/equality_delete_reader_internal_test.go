@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -191,4 +192,30 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
+}
+
+func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	first := builder.NewArray()
+	builder.Append(2)
+	second := builder.NewArray()
+	builder.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	record := array.NewRecordBatch(schema, []arrow.Array{first, second}, 1)
+	first.Release()
+	second.Release()
+
+	process, err := processEqualityDeletesColumnar(context.Background(), []*equalityDeleteSet{{
+		keys:     make(set[string]),
+		colNames: []string{"id"},
+	}})
+	require.NoError(t, err)
+
+	_, err = process(record)
+	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
 }

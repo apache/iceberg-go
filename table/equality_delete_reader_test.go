@@ -154,6 +154,7 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	batch.Release()
 	file, err := iceio.LocalFS{}.Create(deletePath)
 	require.NoError(t, err)
+	defer file.Close()
 	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
 	deleteTable.Release()
@@ -170,7 +171,7 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	require.NoError(t, err)
 
 	_, _, err = tbl.Scan().ToArrowRecords(t.Context())
-	require.ErrorContains(t, err, `equality delete column "id" is ambiguous`)
+	require.ErrorIs(t, err, table.ErrAmbiguousEqualityColumn)
 }
 
 func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {

@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"unsafe"
@@ -35,6 +36,8 @@ import (
 	"github.com/apache/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
+
+var ErrAmbiguousEqualityColumn = errors.New("equality delete column is ambiguous")
 
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
@@ -223,8 +226,8 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		case 1:
 			colIndices[i] = indices[0]
 		default:
-			return nil, nil, fmt.Errorf("equality delete column %q is ambiguous in delete file %s: found %d columns",
-				name, dataFile.FilePath(), len(indices))
+			return nil, nil, fmt.Errorf("%w: %q in delete file %s: found %d columns",
+				ErrAmbiguousEqualityColumn, name, dataFile.FilePath(), len(indices))
 		}
 	}
 
@@ -554,6 +557,10 @@ func processEqualityDeletesColumnar(ctx context.Context, eqDeleteSets []*equalit
 				indices := r.Schema().FieldIndices(name)
 				if len(indices) == 0 {
 					return nil, fmt.Errorf("equality delete column %q not found in data record", name)
+				}
+				if len(indices) > 1 {
+					return nil, fmt.Errorf("%w: %q in data record: found %d columns",
+						ErrAmbiguousEqualityColumn, name, len(indices))
 				}
 
 				encoders[i] = makeColEncoder(r.Column(indices[0]))
