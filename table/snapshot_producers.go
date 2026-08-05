@@ -1153,6 +1153,25 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	return sp.commitManifests(newManifests, addedContent)
 }
 
+func closeManifestListOutput(
+	fs iceio.WriteFileIO,
+	path string,
+	out iceio.FileWriter,
+	writer *iceberg.ManifestListWriter,
+	removeOnError bool,
+) error {
+	var err error
+	if writer != nil {
+		err = errors.Join(err, writer.Close())
+	}
+	err = errors.Join(err, out.Close())
+	if removeOnError || err != nil {
+		err = errors.Join(err, fs.Remove(path))
+	}
+
+	return err
+}
+
 // commitManifests stages the snapshot for an already-built manifest set.
 // It is split out of commit so callers that must inspect the planned manifests
 // before anything is written (RewriteManifests detecting a no-op) can build the
@@ -1184,15 +1203,20 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 	if err != nil {
 		return nil, nil, err
 	}
-	defer internal.CheckedClose(out, &err)
+	closed := false
+	defer func() {
+		if !closed {
+			err = errors.Join(err, closeManifestListOutput(sp.io, manifestListFilePath, out, nil, true))
+		}
+	}()
 
+	var writer *iceberg.ManifestListWriter
 	if sp.txn.meta.formatVersion == 3 {
 		firstRowID = sp.txn.meta.NextRowID()
-		writer, err := iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
+		writer, err = iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
 		if err != nil {
 			return nil, nil, err
 		}
-		defer internal.CheckedClose(writer, &err)
 		if err = writer.AddManifests(newManifests); err != nil {
 			return nil, nil, err
 		}
@@ -1211,6 +1235,12 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			return nil, nil, err
 		}
 	}
+	if err = closeManifestListOutput(sp.io, manifestListFilePath, out, writer, false); err != nil {
+		closed = true
+
+		return nil, nil, err
+	}
+	closed = true
 
 	snapshot := Snapshot{
 		SnapshotID:       sp.snapshotID,
@@ -1297,7 +1327,12 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		if createErr != nil {
 			return nil, fmt.Errorf("rebuild manifest list: create file: %w", createErr)
 		}
-		defer internal.CheckedClose(out, &retErr)
+		closed := false
+		defer func() {
+			if !closed {
+				retErr = errors.Join(retErr, closeManifestListOutput(fio, manifestListPath, out, nil, true))
+			}
+		}()
 
 		var parentID *int64
 		if freshParent != nil {
@@ -1307,16 +1342,17 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 
 		firstRowID := int64(0)
 		var addedRows int64
+		var writer *iceberg.ManifestListWriter
 		if formatVersion == 3 {
 			// Derive firstRowID from the fresh metadata so the manifest-list
 			// first-row-id field is consistent with the catalog's nextRowID
 			// after concurrent writers have advanced it since attempt 0.
 			firstRowID = freshMeta.NextRowID()
-			writer, wrErr := iceberg.NewManifestListWriterV3(out, snapshotID, newSeq, firstRowID, parentID)
+			var wrErr error
+			writer, wrErr = iceberg.NewManifestListWriterV3(out, snapshotID, newSeq, firstRowID, parentID)
 			if wrErr != nil {
 				return nil, fmt.Errorf("rebuild manifest list: create v3 writer: %w", wrErr)
 			}
-			defer internal.CheckedClose(writer, &retErr)
 			if addErr := writer.AddManifests(combined); addErr != nil {
 				return nil, fmt.Errorf("rebuild manifest list: add manifests: %w", addErr)
 			}
@@ -1328,6 +1364,12 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 				return nil, fmt.Errorf("rebuild manifest list: write: %w", wErr)
 			}
 		}
+		if closeErr := closeManifestListOutput(fio, manifestListPath, out, writer, false); closeErr != nil {
+			closed = true
+
+			return nil, fmt.Errorf("rebuild manifest list: close: %w", closeErr)
+		}
+		closed = true
 
 		rebuilt := capturedSnapshot
 		rebuilt.ManifestList = manifestListPath

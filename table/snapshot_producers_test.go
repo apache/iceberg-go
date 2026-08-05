@@ -621,9 +621,10 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 
 // trackingWriteCloser wraps a bytes.Buffer and tracks if Close was called.
 type trackingWriteCloser struct {
-	buf     *bytes.Buffer
-	closed  bool
-	closeMu sync.Mutex
+	buf      *bytes.Buffer
+	closed   bool
+	closeErr error
+	closeMu  sync.Mutex
 }
 
 func newTrackingWriteCloser() *trackingWriteCloser {
@@ -639,7 +640,7 @@ func (t *trackingWriteCloser) Close() error {
 	defer t.closeMu.Unlock()
 	t.closed = true
 
-	return nil
+	return t.closeErr
 }
 
 func (t *trackingWriteCloser) ReadFrom(r io.Reader) (int64, error) {
@@ -717,6 +718,61 @@ func (t *trackingIO) GetWriterCount() int {
 	defer t.writersMu.Unlock()
 
 	return len(t.writers)
+}
+
+type closeErrorIO struct {
+	*trackingIO
+	closeErr  error
+	removeErr error
+	removes   []string
+}
+
+func newCloseErrorIO(closeErr, removeErr error) *closeErrorIO {
+	return &closeErrorIO{
+		trackingIO: newTrackingIO(),
+		closeErr:   closeErr,
+		removeErr:  removeErr,
+	}
+}
+
+func (c *closeErrorIO) Create(name string) (iceio.FileWriter, error) {
+	writer, err := c.trackingIO.Create(name)
+	if err == nil {
+		writer.(*trackingWriteCloser).closeErr = c.closeErr
+	}
+
+	return writer, err
+}
+
+func (c *closeErrorIO) Remove(name string) error {
+	c.removes = append(c.removes, name)
+	if c.removeErr != nil {
+		return c.removeErr
+	}
+
+	return c.trackingIO.Remove(name)
+}
+
+func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	removeErr := errors.New("manifest list cleanup failed")
+
+	for _, version := range []int{2, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			fs := newCloseErrorIO(closeErr, removeErr)
+			spec := iceberg.NewPartitionSpec()
+			txn := createTestTransaction(t, fs, spec)
+			txn.meta.formatVersion = version
+			sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+
+			updates, requirements, err := sp.commitManifests(nil, nil)
+			require.ErrorIs(t, err, closeErr)
+			require.ErrorIs(t, err, removeErr)
+			require.Nil(t, updates)
+			require.Nil(t, requirements)
+			require.Len(t, fs.removes, 1)
+		})
+	}
 }
 
 // TestManifestWriterClosesUnderlyingFile tests that when using newManifestWriter,
