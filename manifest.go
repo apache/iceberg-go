@@ -1599,9 +1599,14 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 }
 
 func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
-	if existingRows == -1 || addedRows == -1 {
-		return 0, fmt.Errorf("%w: cannot assign row-lineage IDs with unknown row counts: existing=%d added=%d",
-			ErrInvalidArgument, existingRows, addedRows)
+	if firstRowID < 0 {
+		return 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+	if existingRows == -1 {
+		existingRows = 0
+	}
+	if addedRows == -1 {
+		addedRows = 0
 	}
 	if existingRows < 0 || addedRows < 0 {
 		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
@@ -1646,9 +1651,17 @@ func (m *ManifestListWriter) NextRowID() *int64 {
 	return m.nextRowID
 }
 
-func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
+func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
 	if len(files) == 0 {
 		return nil
+	}
+	if m.version == 3 && m.nextRowID != nil {
+		batchStartRowID := *m.nextRowID
+		defer func() {
+			if err != nil {
+				*m.nextRowID = batchStartRowID
+			}
+		}()
 	}
 
 	switch m.version {
@@ -1846,7 +1859,7 @@ func WriteManifestV3(
 	raw.FirstRowIDValue = &v
 	nextFirstRowID, err = advanceRowID(firstRowID, raw.ExistingRowsCount, raw.AddedRowsCount)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("manifest %q: %w", filename, err)
 	}
 
 	return raw, nextFirstRowID, nil
