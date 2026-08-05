@@ -55,14 +55,26 @@ func TestValidateNamespaceIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace\nchild"}))
 	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"parent", ""}))
 
-	for _, ident := range []table.Identifier{nil, {}} {
-		t.Run("empty identifier", func(t *testing.T) {
-			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+	for _, tt := range []struct {
+		name  string
+		ident table.Identifier
+	}{
+		{name: "nil", ident: nil},
+		{name: "empty", ident: table.Identifier{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(tt.ident), catalog.ErrNoSuchNamespace)
 		})
 	}
-	for _, ident := range []table.Identifier{{"\x00"}, {"parent", "child\x00"}} {
-		t.Run("null character", func(t *testing.T) {
-			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
+	for _, tt := range []struct {
+		name  string
+		ident table.Identifier
+	}{
+		{name: "null character in first component", ident: table.Identifier{"\x00"}},
+		{name: "null character in nested component", ident: table.Identifier{"parent", "child\x00"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(tt.ident), catalog.ErrNoSuchNamespace)
 		})
 	}
 }

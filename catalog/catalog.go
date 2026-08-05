@@ -276,7 +276,10 @@ func validateIdentifierComponents(ident table.Identifier, notFoundErr error) err
 	return nil
 }
 
-// ValidateNamespaceIdentifier checks that an identifier contains at least one valid namespace level.
+// ValidateNamespaceIdentifier checks that an identifier contains at least one
+// namespace level and no null characters. Other namespace component rules are
+// intentionally left to the catalog implementation so existing namespaces
+// remain readable across clients.
 func ValidateNamespaceIdentifier(ident table.Identifier) error {
 	if len(ident) < 1 {
 		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
