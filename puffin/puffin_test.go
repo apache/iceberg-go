@@ -600,13 +600,15 @@ func TestReaderRejectsTrailingFooterData(t *testing.T) {
 	}{
 		{name: "single object", payload: `{"blobs":[]}`},
 		{name: "trailing whitespace", payload: "{\"blobs\":[]} \n\t"},
-		{name: "second JSON value", payload: `{"blobs":[]}{"blobs":[]}`, wantErr: "multiple JSON values"},
-		{name: "second scalar value", payload: `{"blobs":[]}42`, wantErr: "multiple JSON values"},
-		{name: "trailing garbage", payload: `{"blobs":[]}garbage`, wantErr: "trailing data"},
+		{name: "second JSON value", payload: `{"blobs":[]}{"blobs":[]}`, wantErr: "unexpected content after footer JSON"},
+		{name: "second scalar value", payload: `{"blobs":[]}42`, wantErr: "unexpected content after footer JSON"},
+		{name: "trailing garbage", payload: `{"blobs":[]}garbage`, wantErr: "unexpected content after footer JSON"},
+		{name: "trailing closing delimiter", payload: `{"blobs":[]} ]`, wantErr: "unexpected content after footer JSON"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := puffin.NewReader(bytes.NewReader(fileWithFooterPayload([]byte(test.payload))))
 			if test.wantErr == "" {
 				require.NoError(t, err)

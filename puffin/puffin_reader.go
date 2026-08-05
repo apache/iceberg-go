@@ -230,10 +230,11 @@ func (r *Reader) readFooter() error {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
 	}
 
-	if _, err := decoder.Token(); err == nil {
-		return errors.New("puffin: footer contains multiple JSON values")
-	} else if !errors.Is(err, io.EOF) {
-		return fmt.Errorf("puffin: trailing data after footer JSON: %w", err)
+	if decoder.More() {
+		return errors.New("puffin: unexpected content after footer JSON")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("puffin: unexpected content after footer JSON")
 	}
 
 	// Validate blob metadata
