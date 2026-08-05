@@ -1203,14 +1203,14 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 	if err != nil {
 		return nil, nil, err
 	}
+	var writer *iceberg.ManifestListWriter
 	closed := false
 	defer func() {
 		if !closed {
-			err = errors.Join(err, closeManifestListOutput(sp.io, manifestListFilePath, out, nil, true))
+			err = errors.Join(err, closeManifestListOutput(sp.io, manifestListFilePath, out, writer, true))
 		}
 	}()
 
-	var writer *iceberg.ManifestListWriter
 	if sp.txn.meta.formatVersion == 3 {
 		firstRowID = sp.txn.meta.NextRowID()
 		writer, err = iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
@@ -1327,10 +1327,11 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		if createErr != nil {
 			return nil, fmt.Errorf("rebuild manifest list: create file: %w", createErr)
 		}
+		var writer *iceberg.ManifestListWriter
 		closed := false
 		defer func() {
 			if !closed {
-				retErr = errors.Join(retErr, closeManifestListOutput(fio, manifestListPath, out, nil, true))
+				retErr = errors.Join(retErr, closeManifestListOutput(fio, manifestListPath, out, writer, true))
 			}
 		}()
 
@@ -1342,7 +1343,6 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 
 		firstRowID := int64(0)
 		var addedRows int64
-		var writer *iceberg.ManifestListWriter
 		if formatVersion == 3 {
 			// Derive firstRowID from the fresh metadata so the manifest-list
 			// first-row-id field is consistent with the catalog's nextRowID

@@ -764,13 +764,27 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 			txn := createTestTransaction(t, fs, spec)
 			txn.meta.formatVersion = version
 			sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+			manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
 
-			updates, requirements, err := sp.commitManifests(nil, nil)
+			updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
 			require.ErrorIs(t, err, closeErr)
 			require.ErrorIs(t, err, removeErr)
 			require.Nil(t, updates)
 			require.Nil(t, requirements)
 			require.Len(t, fs.removes, 1)
+
+			if version == 3 {
+				fs.writersMu.Lock()
+				var output []byte
+				for _, writer := range fs.writers {
+					output = append([]byte(nil), writer.buf.Bytes()...)
+				}
+				fs.writersMu.Unlock()
+
+				writtenManifests, readErr := iceberg.ReadManifestList(bytes.NewReader(output))
+				require.NoError(t, readErr)
+				require.Len(t, writtenManifests, 1, "manifest-list writer must flush before the output is closed")
+			}
 		})
 	}
 }
