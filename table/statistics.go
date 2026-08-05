@@ -19,7 +19,6 @@ package table
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // BlobType is the type of blob in a Puffin file
@@ -30,13 +29,17 @@ const (
 	BlobTypeDeletionVectorV1          BlobType = "deletion-vector-v1"
 )
 
-func (bt *BlobType) IsValid() bool {
-	switch *bt {
+func (bt BlobType) IsKnown() bool {
+	switch bt {
 	case BlobTypeApacheDatasketchesThetaV1, BlobTypeDeletionVectorV1:
 		return true
 	default:
 		return false
 	}
+}
+
+func (bt *BlobType) IsValid() bool {
+	return bt != nil && bt.IsKnown()
 }
 
 func (bt *BlobType) UnmarshalJSON(data []byte) error {
@@ -46,9 +49,6 @@ func (bt *BlobType) UnmarshalJSON(data []byte) error {
 	}
 
 	*bt = BlobType(s)
-	if !bt.IsValid() {
-		return fmt.Errorf("invalid blob type: %s", s)
-	}
 
 	return nil
 }
