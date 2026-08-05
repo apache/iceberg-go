@@ -331,6 +331,10 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	if ids == nil {
 		ids = []int{}
 	}
+	fields := s.fields
+	if fields == nil {
+		fields = []NestedField{}
+	}
 
 	type Alias Schema
 
@@ -341,7 +345,7 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		Type   string        `json:"type"`
 		Fields []NestedField `json:"fields"`
 		*Alias
-	}{Type: "struct", Fields: s.fields, Alias: &aliasCopy})
+	}{Type: "struct", Fields: fields, Alias: &aliasCopy})
 }
 
 func cloneFields(fields []NestedField) []NestedField {
