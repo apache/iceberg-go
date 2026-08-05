@@ -734,6 +734,73 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, nil))
 }
 
+func TestValidateAddedDataFilesMatchingFilterUsesFileMetrics(t *testing.T) {
+	tests := []struct {
+		name         string
+		lower, upper int64
+		wantConflict bool
+	}{
+		{name: "bounds cannot match", lower: 100, upper: 200, wantConflict: false},
+		{name: "bounds may match", lower: 1, upper: 10, wantConflict: true},
+		{name: "exact bound matches", lower: 5, upper: 5, wantConflict: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			baseID := int64(1)
+			concID := int64(2)
+			base := newConflictTestMetadata(t, &baseID)
+			mf := writeTestMetricsManifest(t, dir, base.CurrentSchema(), concID, tt.lower, tt.upper)
+			listPath := writeTestManifestList(t, dir, concID, []iceberg.ManifestFile{mf})
+			ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
+
+			err := validateAddedDataFilesMatchingFilter(ctx,
+				iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+			if tt.wantConflict {
+				require.ErrorIs(t, err, ErrConflictingDataFiles)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func writeTestMetricsManifest(t *testing.T, dir string, schema *iceberg.Schema, snapshotID, lower, upper int64) iceberg.ManifestFile {
+	t.Helper()
+	spec := *iceberg.UnpartitionedSpec
+	lowerBytes, err := iceberg.Int64Literal(lower).MarshalBinary()
+	require.NoError(t, err)
+	upperBytes, err := iceberg.Int64Literal(upper).MarshalBinary()
+	require.NoError(t, err)
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentData, filepath.Join(dir, "data.parquet"), iceberg.ParquetFile,
+		nil, nil, nil, 10, 1024,
+	)
+	require.NoError(t, err)
+	df := builder.
+		LowerBoundValues(map[int][]byte{1: lowerBytes}).
+		UpperBoundValues(map[int][]byte{1: upperBytes}).
+		Build()
+	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df).
+		SequenceNum(1).
+		Build()
+
+	manifestPath := filepath.Join(dir, "metrics-manifest.avro")
+	var buf bytes.Buffer
+	mf, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	fs := iceio.LocalFS{}
+	out, err := fs.Create(manifestPath)
+	require.NoError(t, err)
+	_, err = out.Write(buf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	return mf
+}
+
 func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	// Under snapshot isolation the validator is a no-op — it must not
 	// even attempt to enumerate concurrent snapshots.

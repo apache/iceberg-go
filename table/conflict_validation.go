@@ -358,7 +358,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 // predicate call this so that a concurrent append into the same
 // partition is rejected before the commit overwrites it.
 //
-// The check runs in two layers:
+// The check runs in three layers:
 //  1. A manifest-level partition-summary evaluator prunes manifests
 //     whose summaries cannot overlap the filter.
 //  2. Inside surviving manifests, every ADDED entry attributed to the
@@ -366,10 +366,8 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 //     evaluator on its partition tuple, so a manifest whose summary
 //     straddles the filter only triggers a conflict when at least
 //     one actual added file's partition value satisfies the filter.
-//
-// Per-file metric evaluation (a third pass in Java that refines
-// beyond partition for columns not in the spec) is TODO and tracked
-// under issue #830 follow-ups.
+//  3. The surviving files are evaluated against their column metrics so
+//     unpartitioned files whose bounds cannot match the filter are ignored.
 func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
 	if len(ctx.concurrent) == 0 {
 		return nil
@@ -394,6 +392,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
+	metricsEval, err := newInclusiveMetricsEvaluator(ctx.current.CurrentSchema(), filter, ctx.caseSensitive, false)
+	if err != nil {
+		return fmt.Errorf("failed to build metrics evaluator: %w", err)
+	}
 
 	for _, snap := range ctx.concurrent {
 		manifests, err := snap.Manifests(ctx.fs)
@@ -431,6 +433,13 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				matches, err := pEval(e.DataFile())
 				if err != nil {
 					return err
+				}
+				if !matches {
+					continue
+				}
+				matches, err = metricsEval(e.DataFile())
+				if err != nil {
+					return fmt.Errorf("evaluating metrics for data file %s: %w", e.DataFile().FilePath(), err)
 				}
 				if !matches {
 					continue
