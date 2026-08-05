@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +68,9 @@ func TestAllManifestsCompletesAfterErrorChannelCloses(t *testing.T) {
 
 func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
 	const snapshotCount = 64
+
+	previousMaxProcs := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(previousMaxProcs)
 
 	var trackingFS *manifestTrackingIO
 	tbl, _ := tableWithManifestListsUsingIO(t, snapshotCount, func(memFS *iceio.MemFS) iceio.IO {
