@@ -75,9 +75,8 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		return us
 	}
 	// Read table state from the transaction's staged metadata builder rather
-	// than the frozen table snapshot captured when the transaction began, so
-	// that columns and specs added earlier in the same transaction can be
-	// observed (e.g. add a column and partition by it in one transaction).
+	// than the frozen table snapshot captured when the transaction began.
+	// So, columns and specs added earlier in the same transaction can now be observed.
 	meta, err := t.txnMeta()
 	if err != nil {
 		us.err = err
