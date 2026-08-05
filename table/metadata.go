@@ -411,9 +411,9 @@ func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 }
 
 // currentSnapshotIDForRef returns the commit's AssertRefSnapshotID id (its only caller).
-// An unknown branch returns nil so the requirement proves the branch is absent — 
+// An unknown branch returns nil so the requirement proves the branch is absent —
 // unlike currentSnapshotForRef, whose parent lookup falls back to main's head
-// so a new branch can fork from it; 
+// so a new branch can fork from it;
 // the two must not be conflated or new-branch creates get a false OCC rejection.
 func (b *MetadataBuilder) currentSnapshotIDForRef(ref string) *int64 {
 	if ref == "" || ref == MainBranch {
