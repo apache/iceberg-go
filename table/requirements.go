@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,9 +90,29 @@ type assertTableUUIDWire struct {
 	UUID *uuid.UUID `json:"uuid"`
 }
 
+type nullableInt64 struct {
+	Set   bool
+	Value *int64
+}
+
+func (n *nullableInt64) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	n.Value = nil
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return nil
+	}
+
+	var value int64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	n.Value = &value
+	return nil
+}
+
 type assertRefSnapshotIDWire struct {
-	Ref        *string `json:"ref"`
-	SnapshotID *int64  `json:"snapshot-id"`
+	Ref        *string       `json:"ref"`
+	SnapshotID nullableInt64 `json:"snapshot-id"`
 }
 
 func requiredRequirementField(name string) error {
@@ -130,8 +151,11 @@ func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, e
 		if req.Ref == nil {
 			return nil, requiredRequirementField("ref")
 		}
+		if !req.SnapshotID.Set {
+			return nil, requiredRequirementField("snapshot-id")
+		}
 
-		return AssertRefSnapshotID(*req.Ref, req.SnapshotID), nil
+		return AssertRefSnapshotID(*req.Ref, req.SnapshotID.Value), nil
 
 	case reqAssertDefaultSpecID:
 		var req struct {

@@ -48,7 +48,7 @@ func TestParseRequirementBytes(t *testing.T) {
 		},
 		{
 			name:        "Should parse an assert ref snapshot id",
-			data:        []byte(`{"type": "assert-ref-snapshot-id", "ref": "branch"}`),
+			data:        []byte(`{"type": "assert-ref-snapshot-id", "ref": "branch", "snapshot-id": null}`),
 			expected:    table.AssertRefSnapshotID("branch", nil),
 			expectedErr: nil,
 		},
@@ -177,7 +177,8 @@ func TestParseRequirementRejectsMissingRequiredFields(t *testing.T) {
 		data string
 	}{
 		{name: "table uuid", data: `{"type":"assert-table-uuid"}`},
-		{name: "ref", data: `{"type":"assert-ref-snapshot-id"}`},
+		{name: "missing ref", data: `{"type":"assert-ref-snapshot-id"}`},
+		{name: "missing snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main"}`},
 		{name: "default spec id", data: `{"type":"assert-default-spec-id"}`},
 		{name: "current schema id", data: `{"type":"assert-current-schema-id"}`},
 		{name: "default sort order id", data: `{"type":"assert-default-sort-order-id"}`},
@@ -208,6 +209,12 @@ func TestParseRequirementRefRequiresRefButAllowsNullSnapshotID(t *testing.T) {
 	actual, err := table.ParseRequirementBytes([]byte(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}`))
 	require.NoError(t, err)
 	assert.Equal(t, table.AssertRefSnapshotID("main", nil), actual)
+}
+
+func TestParseRequirementRefAcceptsNumericSnapshotID(t *testing.T) {
+	actual, err := table.ParseRequirementBytes([]byte(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":42}`))
+	require.NoError(t, err)
+	assert.Equal(t, table.AssertRefSnapshotID("main", ptr(int64(42))), actual)
 }
 
 func TestAssertRefSnapshotIDValidate(t *testing.T) {
