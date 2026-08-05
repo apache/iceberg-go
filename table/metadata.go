@@ -390,9 +390,11 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
-// currentSnapshotForRef returns the head snapshot for ref.
-// Empty or main refs return the current snapshot.
-// Unknown refs also fall back to the current snapshot.
+// currentSnapshotForRef resolves the parent for createSnapshotProducer and mergeOverwrite.
+// An unknown branch falls back to currentSnapshot() so a new
+// branch forks from main — the opposite of currentSnapshotIDForRef,
+// which must return nil there so AssertRefSnapshotID can prove the branch is absent;
+// never derive one from the other. A present-but-dangling ref also yields nil.
 func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 	if ref == "" || ref == MainBranch {
 		return b.currentSnapshot()
@@ -408,10 +410,11 @@ func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 	return s
 }
 
-// currentSnapshotIDForRef returns the head snapshot ID for ref.
-// Empty or main refs return currentSnapshotID.
-// Unknown refs return nil so AssertRefSnapshotID asserts that the
-// branch does not yet exist.
+// currentSnapshotIDForRef returns the commit's AssertRefSnapshotID id (its only caller).
+// An unknown branch returns nil so the requirement proves the branch is absent — 
+// unlike currentSnapshotForRef, whose parent lookup falls back to main's head
+// so a new branch can fork from it; 
+// the two must not be conflated or new-branch creates get a false OCC rejection.
 func (b *MetadataBuilder) currentSnapshotIDForRef(ref string) *int64 {
 	if ref == "" || ref == MainBranch {
 		return b.currentSnapshotID

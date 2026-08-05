@@ -673,6 +673,20 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	return out
 }
 
+func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
+	if branch == "" || branch == MainBranch {
+		return meta.CurrentSnapshot()
+	}
+
+	for name, ref := range meta.Refs() {
+		if name == branch {
+			return meta.SnapshotByID(ref.SnapshotID)
+		}
+	}
+
+	return meta.CurrentSnapshot()
+}
+
 // rebuildSnapshotUpdates returns a new slice of updates where any
 // addSnapshotUpdate that carries a rebuildManifestList closure has its
 // snapshot regenerated to inherit all data files committed to the branch
@@ -689,12 +703,11 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 // list is rewritten to include the fresh parent's manifests so that the
 // rebuilt snapshot contains every committed file.
 func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int) (rebuilt []Update, orphanedPaths []string, err error) {
-	// Determine the fresh branch head to use as the rebuilt snapshot's parent.
+	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
+	// branch rebuilds with a nil parent and silently drops main's data.
 	var freshHead *Snapshot
-	if branch != "" && freshMeta != nil {
-		freshHead = freshMeta.SnapshotByName(branch)
-	} else if freshMeta != nil {
-		freshHead = freshMeta.CurrentSnapshot()
+	if freshMeta != nil {
+		freshHead = latestSnapshotForBranch(freshMeta, branch)
 	}
 
 	result := make([]Update, len(updates))
