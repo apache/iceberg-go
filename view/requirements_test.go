@@ -95,3 +95,16 @@ func TestParseRequirementListReplacesExistingSlice(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`[]`), &requirements))
 	assert.Empty(t, requirements)
 }
+
+func TestParseRequirementRejectsMissingUUID(t *testing.T) {
+	for _, data := range []string{
+		`{"type":"assert-view-uuid"}`,
+		`{"type":"assert-view-uuid","uuid":null}`,
+	} {
+		_, err := view.ParseRequirementBytes([]byte(data))
+		require.Error(t, err)
+
+		var requirements view.Requirements
+		require.Error(t, json.Unmarshal([]byte("["+data+"]"), &requirements))
+	}
+}
