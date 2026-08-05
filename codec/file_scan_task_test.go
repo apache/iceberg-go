@@ -236,7 +236,6 @@ func TestEncodeFileScanTaskValidatesRangeAgainstFileSize(t *testing.T) {
 		{"zero length at EOF", fileSize, 0, false},
 		{"start after EOF", fileSize + 1, 0, true},
 		{"range ends after EOF", fileSize - 1, 2, true},
-		{"overflowing range", math.MaxInt64, 1, true},
 	}
 
 	for _, tt := range tests {
@@ -251,6 +250,16 @@ func TestEncodeFileScanTaskValidatesRangeAgainstFileSize(t *testing.T) {
 			}
 		})
 	}
+
+	overflowFile := newScanTaskDataFileWithFileSize(t, spec,
+		"s3://bucket/ns/tbl/data/overflow.parquet", iceberg.EntryContentData,
+		iceberg.ParquetFile, "", 2, math.MaxInt64)
+	overflowTask := base
+	overflowTask.File = overflowFile
+	overflowTask.Start = math.MaxInt64 - 1
+	overflowTask.Length = 2
+	_, err := codec.EncodeFileScanTask(overflowTask, spec, schema, 2)
+	require.ErrorContains(t, err, "exceeds file size")
 }
 
 func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpec, *iceberg.Schema, table.FileScanTask) {
@@ -298,6 +307,10 @@ func fullyPopulatedFileScanTask(t *testing.T, version int) (iceberg.PartitionSpe
 }
 
 func newScanTaskDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, content iceberg.ManifestEntryContent, format iceberg.FileFormat, referencedDataFile string, version int) iceberg.DataFile {
+	return newScanTaskDataFileWithFileSize(t, spec, path, content, format, referencedDataFile, version, 1024*1024)
+}
+
+func newScanTaskDataFileWithFileSize(t *testing.T, spec iceberg.PartitionSpec, path string, content iceberg.ManifestEntryContent, format iceberg.FileFormat, referencedDataFile string, version int, fileSize int64) iceberg.DataFile {
 	t.Helper()
 	builder, err := iceberg.NewDataFileBuilder(
 		spec,
@@ -308,7 +321,7 @@ func newScanTaskDataFile(t *testing.T, spec iceberg.PartitionSpec, path string, 
 		map[int]string{},
 		map[int]int{},
 		1024,
-		1024*1024,
+		fileSize,
 	)
 	require.NoError(t, err)
 	builder.

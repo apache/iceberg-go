@@ -37,7 +37,7 @@ func TestValidateScanRange(t *testing.T) {
 		{name: "empty range at EOF", start: 100, fileSize: 100},
 		{name: "start after EOF", start: 101, fileSize: 100, shouldReturnError: true},
 		{name: "end after EOF", start: 99, length: 2, fileSize: 100, shouldReturnError: true},
-		{name: "overflowing end", start: math.MaxInt64, length: 1, fileSize: 100, shouldReturnError: true},
+		{name: "start plus length overflows", start: math.MaxInt64 - 1, length: 2, fileSize: math.MaxInt64, shouldReturnError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateScanRange(tt.start, tt.length, tt.fileSize)
