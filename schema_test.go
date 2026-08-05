@@ -570,6 +570,85 @@ func TestUnmarshalSchema(t *testing.T) {
 	assert.True(t, tableSchemaSimple.Equals(&schema))
 }
 
+func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [{"id": 2, "name": "new", "type": "long", "required": true}]
+	}`), schema))
+
+	assert.Zero(t, schema.ID)
+	assert.Empty(t, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	_, ok = schema.FindFieldByID(1)
+	assert.False(t, ok)
+	_, ok = schema.FindColumnName(1)
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	assert.False(t, ok)
+	field, ok := schema.FindFieldByID(2)
+	require.True(t, ok)
+	assert.Equal(t, "new", field.Name)
+	assert.Contains(t, schema.NameMapping().String(), "new")
+	assert.NotContains(t, schema.NameMapping().String(), "old")
+}
+
+func TestUnmarshalSchemaPreservesExistingStateOnError(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+	assert.False(t, schema.FieldHasOptionalParent(1))
+
+	err := json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [
+			{"id": 2, "name": "first", "type": "long", "required": true},
+			{"id": 2, "name": "duplicate", "type": "string", "required": false}
+		]
+	}`), schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	assert.Equal(t, 7, schema.ID)
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	field, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	field, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	field, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+	assert.False(t, schema.FieldHasOptionalParent(1))
+}
+
 func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
 	tests := []struct {
 		name     string
