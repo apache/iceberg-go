@@ -107,6 +107,11 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 			path:     fileURI(filepath.Join(dir, "scheme", "nested", "file.txt")),
 			readPath: filepath.Join(dir, "scheme", "nested", "file.txt"),
 		},
+		{
+			name:     "escaped file scheme",
+			path:     fileURI(filepath.Join(dir, "scheme with space", "nested", "file.txt")),
+			readPath: filepath.Join(dir, "scheme with space", "nested", "file.txt"),
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
@@ -131,6 +136,23 @@ func TestLocalFSParsesFileURIs(t *testing.T) {
 		singleSlashFileURI(path),
 		"file:" + filepath.ToSlash(path),
 		localhostFileURI(path),
+	} {
+		content, err := (LocalFS{}).ReadFile(name)
+		require.NoError(t, err, name)
+		assert.Equal(t, []byte("metadata"), content)
+	}
+}
+
+func TestLocalFSParsesEscapedFileURIsConsistently(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata with space%20.txt")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+
+	for _, name := range []string{
+		fileURI(path),
+		singleSlashFileURI(path),
 	} {
 		content, err := (LocalFS{}).ReadFile(name)
 		require.NoError(t, err, name)
@@ -183,10 +205,10 @@ func singleSlashFileURI(path string) string {
 	hasVolume := filepath.VolumeName(path) != ""
 	pathSlash := filepath.ToSlash(path)
 	if hasVolume {
-		return "file:/" + pathSlash
+		pathSlash = "/" + pathSlash
 	}
 
-	return "file:" + pathSlash
+	return "file:" + (&url.URL{Path: pathSlash}).EscapedPath()
 }
 
 func localhostFileURI(path string) string {

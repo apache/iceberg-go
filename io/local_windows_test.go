@@ -33,6 +33,7 @@ func TestLocalFSParsesWindowsDriveFileURIs(t *testing.T) {
 
 	pathSlash := filepath.ToSlash(path)
 	for _, name := range []string{
+		"file://" + pathSlash,
 		"file:///" + pathSlash,
 		"file:/" + pathSlash,
 		"file://localhost/" + pathSlash,

@@ -57,14 +57,23 @@ func localPath(name string) (string, error) {
 		return "", fmt.Errorf("invalid local file path %q: %w", name, err)
 	}
 	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
-		return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
-	}
-	if parsed.Opaque != "" {
-		return filepath.FromSlash(parsed.Opaque), nil
+		if filepath.Separator != '\\' || !isWindowsDriveHost(parsed.Host) {
+			return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
+		}
 	}
 
 	path := parsed.Path
-	if filepath.Separator == '\\' && isWindowsDrivePath(path) {
+	if parsed.Opaque != "" {
+		var err error
+		path, err = url.PathUnescape(parsed.Opaque)
+		if err != nil {
+			return "", fmt.Errorf("invalid local file path %q: %w", name, err)
+		}
+	}
+
+	if filepath.Separator == '\\' && isWindowsDriveHost(parsed.Host) {
+		path = parsed.Host + path
+	} else if filepath.Separator == '\\' && isWindowsDrivePath(path) {
 		path = path[1:]
 	}
 
@@ -75,6 +84,12 @@ func isWindowsDrivePath(path string) bool {
 	return len(path) >= 3 && path[0] == '/' &&
 		((path[1] >= 'a' && path[1] <= 'z') || (path[1] >= 'A' && path[1] <= 'Z')) &&
 		path[2] == ':'
+}
+
+func isWindowsDriveHost(host string) bool {
+	return len(host) == 2 &&
+		((host[0] >= 'a' && host[0] <= 'z') || (host[0] >= 'A' && host[0] <= 'Z')) &&
+		host[1] == ':'
 }
 
 func (LocalFS) Open(name string) (File, error) {
@@ -183,35 +198,35 @@ func (LocalFS) Stat(name string) (fs.FileInfo, error) {
 }
 
 func (LocalFS) Rename(oldpath, newpath string) error {
-	oldpath, err := localPath(oldpath)
+	src, err := localPath(oldpath)
 	if err != nil {
 		return err
 	}
-	newpath, err = localPath(newpath)
+	dst, err := localPath(newpath)
 	if err != nil {
 		return err
 	}
 
-	return os.Rename(oldpath, newpath)
+	return os.Rename(src, dst)
 }
 
 func (LocalFS) RenameNoReplace(oldpath, newpath string) error {
-	oldpath, err := localPath(oldpath)
+	src, err := localPath(oldpath)
 	if err != nil {
 		return err
 	}
-	newpath, err = localPath(newpath)
+	dst, err := localPath(newpath)
 	if err != nil {
 		return err
 	}
 
-	if err = os.Link(oldpath, newpath); err != nil {
+	if err = os.Link(src, dst); err != nil {
 		return err
 	}
 
 	// Publishing already succeeded once the hard link exists. Removing the
 	// source temp file is best-effort cleanup.
-	_ = os.Remove(oldpath)
+	_ = os.Remove(src)
 
 	return nil
 }
