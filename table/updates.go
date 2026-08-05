@@ -92,7 +92,7 @@ var requiredUpdateFields = map[string][]string{
 	UpdateRemoveProperties:          {"removals"},
 	UpdateRemoveSpec:                {"spec-ids"},
 	UpdateRemoveSchemas:             {"schema-ids"},
-	UpdateSetStatistics:             {"snapshot-id", "statistics"},
+	UpdateSetStatistics:             {"statistics"},
 	UpdateRemoveStatistics:          {"snapshot-id"},
 	UpdateSetPartitionStatistics:    {"partition-statistics"},
 	UpdateRemovePartitionStatistics: {"snapshot-id"},

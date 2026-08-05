@@ -586,7 +586,7 @@ func TestUnmarshalUpdatesRejectsMissingRequiredFields(t *testing.T) {
 		{UpdateRemoveProperties, "removals"},
 		{UpdateRemoveSpec, "spec-ids"},
 		{UpdateRemoveSchemas, "schema-ids"},
-		{UpdateSetStatistics, "snapshot-id"},
+		{UpdateSetStatistics, "statistics"},
 		{UpdateRemoveStatistics, "snapshot-id"},
 		{UpdateSetPartitionStatistics, "partition-statistics"},
 		{UpdateRemovePartitionStatistics, "snapshot-id"},
@@ -656,7 +656,6 @@ func TestAssignUUIDUpdate_ApplyRejectsNilUUID(t *testing.T) {
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "set-statistics",
-		"snapshot-id": 42,
 		"statistics": {
 			"snapshot-id": 42,
 			"statistics-path": "s3://bucket/stats.puffin",
@@ -672,7 +671,7 @@ func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 
 	u, ok := updates[0].(*setStatisticsUpdate)
 	require.True(t, ok)
-	assert.Equal(t, int64(42), u.SnapshotID)
+	assert.Zero(t, u.SnapshotID)
 	assert.Equal(t, "s3://bucket/stats.puffin", u.Statistics.StatisticsPath)
 }
 
