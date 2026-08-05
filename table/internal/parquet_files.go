@@ -50,24 +50,27 @@ import (
 )
 
 const (
-	ParquetRowGroupSizeBytesKey              = "write.parquet.row-group-size-bytes"
-	ParquetRowGroupSizeBytesDefault          = 128 * 1024 * 1024 // 128 MB
-	ParquetRowGroupLimitKey                  = "write.parquet.row-group-limit"
-	ParquetRowGroupLimitDefault              = 1048576
-	ParquetPageSizeBytesKey                  = "write.parquet.page-size-bytes"
-	ParquetPageSizeBytesDefault              = 1024 * 1024 // 1 MB
-	ParquetPageRowLimitKey                   = "write.parquet.page-row-limit"
-	ParquetPageRowLimitDefault               = 20000
-	ParquetDictSizeBytesKey                  = "write.parquet.dict-size-bytes"
-	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
-	ParquetPageVersionKey                    = "write.parquet.page-version"
-	ParquetPageVersionDefault                = "2"
-	ParquetCompressionKey                    = "write.parquet.compression-codec"
-	ParquetCompressionDefault                = "zstd"
-	ParquetCompressionLevelKey               = "write.parquet.compression-level"
-	ParquetCompressionLevelDefault           = -1
-	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
-	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
+	ParquetRowGroupSizeBytesKey       = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault   = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey           = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault       = 1048576
+	ParquetPageSizeBytesKey           = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault       = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey            = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault        = 20000
+	ParquetDictSizeBytesKey           = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault       = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey             = "write.parquet.page-version"
+	ParquetPageVersionDefault         = "2"
+	ParquetCompressionKey             = "write.parquet.compression-codec"
+	ParquetCompressionDefault         = "zstd"
+	ParquetCompressionLevelKey        = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault    = -1
+	ParquetBloomFilterMaxBytesKey     = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault = 1024 * 1024
+	// These bounds mirror Arrow's public bloom-filter writer-property constraint.
+	parquetBloomFilterMaxBytesMin            = 32
+	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
 
 	// Deliberately not namespaced under write.parquet: this is the parquet-mr key
@@ -374,6 +377,11 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 		}
 		if parsed <= 0 {
 			return fmt.Errorf("%w: %s must be greater than 0, got %d", iceberg.ErrInvalidArgument, key, parsed)
+		}
+		if key == ParquetBloomFilterMaxBytesKey &&
+			(parsed < parquetBloomFilterMaxBytesMin || parsed > parquetBloomFilterMaxBytesMax) {
+			return fmt.Errorf("%w: %s must be between %d and %d bytes, got %d",
+				iceberg.ErrInvalidArgument, key, parquetBloomFilterMaxBytesMin, parquetBloomFilterMaxBytesMax, parsed)
 		}
 		if strconv.IntSize == 32 && parsed > int64(^uint(0)>>1) {
 			return fmt.Errorf("%w: %s value %d exceeds int range", iceberg.ErrInvalidArgument, key, parsed)

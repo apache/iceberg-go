@@ -1513,7 +1513,6 @@ func TestValidateParquetWriteProperties(t *testing.T) {
 		internal.ParquetPageSizeBytesKey,
 		internal.ParquetPageRowLimitKey,
 		internal.ParquetDictSizeBytesKey,
-		internal.ParquetBloomFilterMaxBytesKey,
 	}
 
 	for _, key := range keys {
@@ -1526,6 +1525,27 @@ func TestValidateParquetWriteProperties(t *testing.T) {
 
 		t.Run(key+"/valid", func(t *testing.T) {
 			require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{key: "1"}))
+		})
+	}
+
+	for _, tt := range []struct {
+		value string
+		valid bool
+	}{
+		{value: "31", valid: false},
+		{value: "32", valid: true},
+		{value: "134217728", valid: true},
+		{value: "134217729", valid: false},
+	} {
+		t.Run(internal.ParquetBloomFilterMaxBytesKey+"/"+tt.value, func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetBloomFilterMaxBytesKey: tt.value,
+			})
+			if tt.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			}
 		})
 	}
 
