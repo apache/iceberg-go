@@ -2183,9 +2183,12 @@ func isWKT2CRSString(crs string) bool {
 	return false
 }
 
+// geoArrowCRSToIcebergCRS maps GeoArrow CRS metadata to an Iceberg CRS string.
+// Absent CRS metadata means the default CRS OGC:CRS84, matching the Parquet
+// geospatial spec and Iceberg's default geometry/geography types.
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
-		return "srid:0", nil
+		return iceberg.DefaultGeoCRS, nil
 	}
 
 	switch {
@@ -2199,8 +2202,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(crs, iceberg.DefaultGeoCRS) || strings.EqualFold(crs, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		switch meta.CRSType {
@@ -2217,6 +2220,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errWKT2CRSNotSupported
 		}
 		if meta.CRSType == geoarrow.CRSTypeSRID {
+			// Some writers store the identifier already prefixed; don't prefix twice.
+			if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+				return crs, nil
+			}
+
 			return "srid:" + crs, nil
 		}
 
@@ -2274,8 +2282,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 
 		authorityCode := authority + ":" + code
-		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(authorityCode, iceberg.DefaultGeoCRS) || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		return authorityCode, nil
@@ -2340,10 +2348,6 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
-		if id == "0" {
-			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
-		}
-
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
@@ -2382,7 +2386,7 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 
 	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
-		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+		raw, _ = json.Marshal(iceberg.DefaultGeoCRS) //nolint:errcheck // Marshalling a string can't fail
 	} else {
 		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}
