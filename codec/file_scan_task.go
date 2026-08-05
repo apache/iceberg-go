@@ -169,6 +169,8 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 }
 
 func validateScanRange(start, length, fileSize int64) error {
+	// Check the end as a subtraction after confirming start <= fileSize so
+	// start+length cannot overflow int64.
 	if start > fileSize || length > fileSize-start {
 		return fmt.Errorf("scan range start=%d length=%d exceeds file size %d", start, length, fileSize)
 	}

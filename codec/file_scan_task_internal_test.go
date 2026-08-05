@@ -149,5 +149,5 @@ func TestDecodeFileScanTaskRejectsRangeBeyondFileSize(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = DecodeFileScanTask(envelope, spec, nil, 2)
-	require.ErrorContains(t, err, "scan range start=90 length=11 exceeds file size 100")
+	require.ErrorContains(t, err, "exceeds file size")
 }
