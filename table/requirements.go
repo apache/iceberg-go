@@ -107,6 +107,7 @@ func (n *nullableInt64) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	n.Value = &value
+
 	return nil
 }
 
