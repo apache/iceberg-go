@@ -95,10 +95,6 @@ func withEqualityFieldIDs(ids []int) dataFileWriterOption {
 }
 
 func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBuilder, props iceberg.Properties, opts ...dataFileWriterOption) (*defaultDataFileWriter, error) {
-	if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
-		return nil, err
-	}
-
 	locProvider, err := LoadLocationProvider(rootLocation, props)
 	if err != nil {
 		return nil, err
@@ -108,6 +104,11 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		props.Get(WriteFormatDefaultKey, WriteFormatDefaultDefault))
 	if err != nil {
 		return nil, err
+	}
+	if fileFormat == iceberg.ParquetFile {
+		if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
+			return nil, err
+		}
 	}
 
 	w := defaultDataFileWriter{
@@ -169,9 +170,12 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 		return nil, err
 	}
 
-	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(w.props)
-	if err != nil {
-		return nil, err
+	var rowGroupTargetSizeBytes int64
+	if w.fileFormat == iceberg.ParquetFile {
+		rowGroupTargetSizeBytes, err = tblutils.ParquetRowGroupTargetSizeBytes(w.props)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
