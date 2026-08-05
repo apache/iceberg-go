@@ -206,6 +206,47 @@ func TestResolveSnapshotRejectsUnknownSnapshotLogEntry(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidMetadata)
 }
 
+func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	require.NoError(t, txn.meta.SetSnapshotRef("release", 20, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := Table{metadata: meta}
+
+	asOfTimestamp := time.Now().UnixMilli()
+	asOfScan := tbl.Scan(WithSnapshotAsOf(asOfTimestamp))
+	_, err = asOfScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	mainScan, err := asOfScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.NotSame(t, asOfScan, mainScan)
+	require.Nil(t, mainScan.snapshotID)
+	require.Equal(t, &asOfTimestamp, mainScan.asOfTimestamp)
+
+	snapshotID := int64(10)
+	snapshotScan := tbl.Scan(WithSnapshotID(snapshotID))
+	mainScan, err = snapshotScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.Equal(t, &snapshotID, mainScan.snapshotID)
+	require.Nil(t, mainScan.asOfTimestamp)
+
+	liveScan := tbl.Scan()
+	mainScan, err = liveScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.Nil(t, mainScan.snapshotID)
+	require.Nil(t, mainScan.asOfTimestamp)
+
+	branchScan, err := liveScan.UseRef("feature")
+	require.NoError(t, err)
+	require.Equal(t, int64(20), *branchScan.snapshotID)
+
+	tagScan, err := liveScan.UseRef("release")
+	require.NoError(t, err)
+	require.Equal(t, int64(20), *tagScan.snapshotID)
+}
+
 func TestTable_WithSnapshotAsOf(t *testing.T) {
 	baseTime := time.Now()
 

@@ -267,9 +267,19 @@ func (scan *Scan) Reporter() metrics.Reporter {
 }
 
 func (scan *Scan) UseRef(name string) (*Scan, error) {
+	if name == MainBranch {
+		out := *scan
+
+		return &out, nil
+	}
+
 	if scan.snapshotID != nil {
 		return nil, fmt.Errorf("%w: cannot override ref, already set snapshot id %d",
 			iceberg.ErrInvalidArgument, *scan.snapshotID)
+	}
+	if scan.asOfTimestamp != nil {
+		return nil, fmt.Errorf("%w: cannot override ref, already set as-of timestamp %d",
+			iceberg.ErrInvalidArgument, *scan.asOfTimestamp)
 	}
 
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
