@@ -107,13 +107,31 @@ const (
 // dimension in the type value itself (PointZ = 1001); some writers instead emit
 // EWKB, which flags Z/M in the high bits of the type word and may embed an SRID
 // after it. Both yield the same coordinates, so bounds do not depend on the
-// encoding. Stored values are never rewritten - this decode is read-only.
+// encoding.
 func decodeWKB(data []byte) (geom.T, error) {
 	if isEWKB(data) {
 		return ewkb.Unmarshal(data)
 	}
 
 	return wkb.Unmarshal(data)
+}
+
+func normalizeWKB(data []byte) ([]byte, error) {
+	if !isEWKB(data) {
+		return data, nil
+	}
+
+	g, err := ewkb.Unmarshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var order binary.ByteOrder = binary.LittleEndian
+	if data[0] == wkbBigEndian {
+		order = binary.BigEndian
+	}
+
+	return wkb.Marshal(g, order)
 }
 
 // isEWKB reports whether data's type word carries EWKB flags. The two decoders

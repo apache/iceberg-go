@@ -666,21 +666,29 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 
 // Write appends a record batch to the Parquet file.
 func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
-	if err := w.accumulateGeoBounds(batch); err != nil {
+	writeBatch, err := w.normalizeGeoBatch(batch)
+	if err != nil {
+		return err
+	}
+	if writeBatch != batch {
+		defer writeBatch.Release()
+	}
+
+	if err := w.accumulateGeoBounds(writeBatch); err != nil {
 		return err
 	}
 
 	// Rotate before writing the next non-empty batch. Rotating immediately after
 	// crossing the target would leave an empty trailing row group when the file
 	// is closed without another write.
-	if batch.NumRows() > 0 &&
+	if writeBatch.NumRows() > 0 &&
 		w.pqWriter.RowGroupTotalBytesWritten() >= w.rowGroupBytes {
 		if err := w.pqWriter.NewBufferedRowGroupChecked(); err != nil {
 			return err
 		}
 	}
 
-	return w.pqWriter.WriteBuffered(batch)
+	return w.pqWriter.WriteBuffered(writeBatch)
 }
 
 // wkbStorage is the subset of the binary Arrow arrays that back a geoarrow WKB
@@ -688,6 +696,89 @@ func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 type wkbStorage interface {
 	arrow.Array
 	Value(int) []byte
+}
+
+func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	columns := make(map[int]arrow.Array)
+	for _, gc := range w.geoCols {
+		if gc.colIdx >= int(batch.NumCols()) {
+			continue
+		}
+
+		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
+		if !ok {
+			continue
+		}
+
+		normalized, changed, err := normalizeWKBArray(ext)
+		if err != nil {
+			for _, col := range columns {
+				col.Release()
+			}
+
+			return nil, fmt.Errorf("normalizing geo values for field %d: %w", gc.fieldID, err)
+		}
+		if changed {
+			columns[gc.colIdx] = normalized
+		}
+	}
+
+	if len(columns) == 0 {
+		return batch, nil
+	}
+
+	resultColumns := slices.Clone(batch.Columns())
+	for idx, col := range columns {
+		resultColumns[idx] = col
+	}
+	result := array.NewRecordBatch(batch.Schema(), resultColumns, batch.NumRows())
+	for _, col := range columns {
+		col.Release()
+	}
+
+	return result, nil
+}
+
+func normalizeWKBArray(ext array.ExtensionArray) (arrow.Array, bool, error) {
+	storage, ok := ext.Storage().(wkbStorage)
+	if !ok {
+		return nil, false, nil
+	}
+
+	needsNormalization := false
+	for i := range storage.Len() {
+		if !storage.IsNull(i) && isEWKB(storage.Value(i)) {
+			needsNormalization = true
+
+			break
+		}
+	}
+	if !needsNormalization {
+		return nil, false, nil
+	}
+
+	builder := array.NewBinaryBuilder(memory.DefaultAllocator, storage.DataType().(arrow.BinaryDataType))
+	defer builder.Release()
+
+	for i := range storage.Len() {
+		if storage.IsNull(i) {
+			builder.AppendNull()
+
+			continue
+		}
+
+		value, err := normalizeWKB(storage.Value(i))
+		if err != nil {
+			return nil, false, err
+		}
+		builder.Append(value)
+	}
+
+	normalizedStorage := builder.NewArray()
+	normalized := array.NewExtensionArrayWithStorage(ext.ExtensionType(), normalizedStorage)
+	normalizedStorage.Release()
+
+	return normalized, true, nil
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values
