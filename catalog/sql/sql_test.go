@@ -2272,6 +2272,7 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 		for _, err := range cat.ListViews(context.Background(), table.Identifier{".."}) {
 			yielded = true
 			gotErr = err
+
 			break
 		}
 
