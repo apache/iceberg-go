@@ -68,8 +68,9 @@ func TestAllManifestsCompletesAfterErrorChannelCloses(t *testing.T) {
 
 func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
 	const snapshotCount = 64
+	const maxWorkers = 2
 
-	previousMaxProcs := runtime.GOMAXPROCS(2)
+	previousMaxProcs := runtime.GOMAXPROCS(maxWorkers)
 	defer runtime.GOMAXPROCS(previousMaxProcs)
 
 	var trackingFS *manifestTrackingIO
@@ -88,7 +89,7 @@ func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
 	maxOpen := trackingFS.maxOpen
 	trackingFS.mu.Unlock()
 	require.Greater(t, maxOpen, 1)
-	require.LessOrEqual(t, maxOpen, 16)
+	require.LessOrEqual(t, maxOpen, maxWorkers)
 }
 
 type manifestTrackingIO struct {
