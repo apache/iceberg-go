@@ -18,8 +18,9 @@
 package view_test
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"

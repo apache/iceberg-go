@@ -18,13 +18,14 @@
 package table
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
 	"slices"
 	"strings"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"

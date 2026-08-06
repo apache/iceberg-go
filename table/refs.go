@@ -18,10 +18,11 @@
 package table
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 )

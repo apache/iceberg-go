@@ -18,7 +18,6 @@
 package view
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -27,7 +26,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/view/internal"
-
+	"github.com/goccy/go-json"
 	"github.com/google/uuid"
 )
 

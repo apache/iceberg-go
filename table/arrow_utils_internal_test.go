@@ -20,10 +20,11 @@ package table
 import (
 	"bytes"
 	"cmp"
-	"encoding/json"
 	"math"
 	"slices"
 	"testing"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"

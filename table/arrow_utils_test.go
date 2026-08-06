@@ -22,10 +22,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"

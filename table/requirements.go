@@ -18,10 +18,11 @@
 package table
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/goccy/go-json"
 
 	"github.com/google/uuid"
 )

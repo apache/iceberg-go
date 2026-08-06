@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -30,6 +29,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"

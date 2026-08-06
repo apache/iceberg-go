@@ -18,7 +18,6 @@
 package iceberg
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -30,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/geoarrow/geoarrow-go"
+	"github.com/goccy/go-json"
 )
 
 var (

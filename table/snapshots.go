@@ -18,7 +18,6 @@
 package table
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -26,6 +25,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
