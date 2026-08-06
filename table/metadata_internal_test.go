@@ -711,6 +711,22 @@ func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
 	assert.ErrorContains(t, err, "spec ID must be non-negative")
 }
 
+func TestRejectsStoredPartitionSpecWithoutID(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+	specs := metadata["partition-specs"].([]any)
+	delete(specs[0].(map[string]any), "spec-id")
+
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "missing required spec-id")
+}
+
 func TestSortOrderNotFound(t *testing.T) {
 	metadataSortOrderNotFound := `{
         "format-version": 2,

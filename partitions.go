@@ -457,16 +457,17 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
-		return err
+		return fmt.Errorf("%w: invalid partition spec JSON: %w", ErrInvalidPartitionSpec, err)
 	}
 
-	rawID, ok := raw["spec-id"]
-	if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
-		return fmt.Errorf("%w: partition spec is missing required spec-id", ErrInvalidPartitionSpec)
-	}
-	var id int
-	if err := json.Unmarshal(rawID, &id); err != nil {
-		return fmt.Errorf("%w: invalid partition spec ID: %w", ErrInvalidPartitionSpec, err)
+	id := InitialPartitionSpecID
+	if rawID, ok := raw["spec-id"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec spec-id cannot be null", ErrInvalidPartitionSpec)
+		}
+		if err := json.Unmarshal(rawID, &id); err != nil {
+			return fmt.Errorf("%w: invalid partition spec ID: %w", ErrInvalidPartitionSpec, err)
+		}
 	}
 	if id < 0 {
 		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, id)
@@ -485,7 +486,7 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	for i, rawField := range rawFieldList {
 		var keys map[string]json.RawMessage
 		if err := json.Unmarshal(rawField, &keys); err != nil {
-			return err
+			return fmt.Errorf("%w: invalid partition field JSON: %w", ErrInvalidPartitionSpec, err)
 		}
 		if rawFieldID, ok := keys["field-id"]; ok {
 			var fieldID *int
@@ -497,7 +498,7 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 			}
 		}
 		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
-			return err
+			return fmt.Errorf("%w: invalid partition field: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
 	if err := validatePartitionFields(fields); err != nil {

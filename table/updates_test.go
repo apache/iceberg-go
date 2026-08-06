@@ -540,6 +540,15 @@ func TestUnmarshalUpdates(t *testing.T) {
 	}
 }
 
+func TestUnmarshalAddSpecWithoutIDUsesInitialSpecID(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[{"action":"add-spec","spec":{"fields":[]}}]`), &updates))
+	require.Len(t, updates, 1)
+	update := updates[0].(*addPartitionSpecUpdate)
+	require.NotNil(t, update.Spec)
+	assert.Equal(t, iceberg.InitialPartitionSpecID, update.Spec.ID())
+}
+
 func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 	var updates Updates
 	require.NoError(t, json.Unmarshal([]byte(`[
