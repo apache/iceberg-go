@@ -357,6 +357,10 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
 	u.addedNameToID[fullName] = sch.Field(0).ID
+	// Skipping TableRootID as findParentID already defaults unknown ids to it.
+	if parentID != TableRootID {
+		u.parentID[sch.Field(0).ID] = parentID
+	}
 
 	return nil
 }
@@ -785,6 +789,10 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 	}
 	u.adds[parentID] = append(u.adds[parentID], sch.Field(0))
 	u.addedNameToID[fullName] = sch.Field(0).ID
+	// Skipping TableRootID as findParentID already defaults unknown ids to it.
+	if parentID != TableRootID {
+		u.parentID[sch.Field(0).ID] = parentID
+	}
 
 	return nil
 }

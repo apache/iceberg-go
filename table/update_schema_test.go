@@ -742,6 +742,119 @@ func TestMoveColumn(t *testing.T) {
 	})
 }
 
+func addressFieldNames(t *testing.T, schema *iceberg.Schema) []string {
+	t.Helper()
+
+	address, ok := schema.FindFieldByName("address")
+	require.True(t, ok, "address field should exist")
+
+	st, ok := address.Type.(*iceberg.StructType)
+	require.True(t, ok, "address should be a struct")
+
+	names := make([]string, len(st.FieldList))
+	for i, f := range st.FieldList {
+		names[i] = f.Name
+	}
+
+	return names
+}
+
+func TestMoveAddedNestedColumn(t *testing.T) {
+	t.Run("move added nested column first", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveFirst([]string{"address", "code"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		assert.Equal(t, []string{"code", "city", "zip"}, addressFieldNames(t, newSchema))
+	})
+
+	t.Run("move added nested column before sibling", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveBefore([]string{"address", "code"}, []string{"address", "zip"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		assert.Equal(t, []string{"city", "code", "zip"}, addressFieldNames(t, newSchema))
+	})
+
+	t.Run("move added nested column after sibling", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveAfter([]string{"address", "code"}, []string{"address", "city"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		assert.Equal(t, []string{"city", "code", "zip"}, addressFieldNames(t, newSchema))
+	})
+
+	t.Run("moving added nested column does not disturb top-level order", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveFirst([]string{"address", "code"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		topLevel := make([]string, len(newSchema.Fields()))
+		for i, f := range newSchema.Fields() {
+			topLevel[i] = f.Name
+		}
+		assert.Equal(t, []string{"id", "name", "age", "address", "tags", "properties"}, topLevel)
+	})
+
+	t.Run("relative-to field in a different struct is rejected", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			AddColumn([]string{"address", "code"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			MoveBefore([]string{"address", "code"}, []string{"name"}).
+			Apply()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "not a child of the parent")
+	})
+
+	t.Run("move nested column added via union by name", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		incoming := iceberg.NewSchema(0,
+			iceberg.NestedField{Name: "address", Type: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{Name: "code", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			}, Required: false},
+		)
+
+		newSchema, err := NewUpdateSchema(txn, true, false).
+			UnionByNameWith(incoming).
+			MoveFirst([]string{"address", "code"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		assert.Equal(t, []string{"code", "city", "zip"}, addressFieldNames(t, newSchema))
+	})
+}
+
 func TestChainedOperations(t *testing.T) {
 	t.Run("test multiple operations in chain", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
