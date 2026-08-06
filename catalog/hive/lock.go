@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"time"
@@ -100,7 +101,11 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	// If not acquired immediately, wait and retry
 	for attempt := 0; attempt < opts.LockRetries; attempt++ {
 		// Wait before checking again
-		waitTime := calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime)
+		waitTime := applyJitter(
+			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),
+			opts.LockMinWaitTime,
+			opts.LockMaxWaitTime,
+		)
 
 		select {
 		case <-ctx.Done():
@@ -158,6 +163,75 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 	}
 
 	return minWait << attempt
+}
+
+// applyJitter spreads a backoff interval by adding a random amount on top of it,
+// bounded so the result never exceeds maxWait.
+//
+// calculateBackoff is a pure function of the attempt number and the configured
+// bounds, so every client waiting on the same table lock computes an identical
+// sequence of delays. Contention is the precondition for entering the retry loop
+// at all, which means those clients are waiting simultaneously by construction:
+// they re-check the lock in lockstep, and each round of CheckLock calls arrives
+// at the metastore as a burst. Spreading the wait decorrelates them.
+//
+// The jitter is added rather than subtracted so that the result is never shorter
+// than the interval calculateBackoff produced. That keeps the guarantee implied
+// by the lock-check-min-wait-time property: a caller who configures a minimum
+// wait never polls sooner than it.
+//
+// Once the backoff saturates at maxWait there is no headroom left to add into.
+// calculateBackoff reaches that point deliberately, so leaving it unjittered
+// would put contending clients back in lockstep for every retry after the
+// sequence tops out. The wait is therefore spread downwards instead. Drawing
+// below maxWait breaks no contract, because it is an upper bound on the polling
+// interval rather than a target.
+//
+// How far down it may draw is the subtle part. Flooring at half the interval is
+// wrong: the last attempt that did not saturate waited for its own full interval,
+// which is somewhere in [maxWait/2, maxWait), so a floor of maxWait/2 lets the
+// first saturated attempt wait less than the attempt before it did. That inverts
+// the one property callers rely on, which is that the wait between lock checks
+// only ever grows. The floor is therefore the last interval the doubling sequence
+// produced before it hit the cap, recovered by replaying the sequence. It is a
+// bound the schedule has already cleared, so honouring it keeps the guaranteed
+// minimum monotonic across the saturation boundary, and it can never fall below
+// minWait because minWait is where the sequence starts.
+func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+
+	// A caller that hands in an interval already past the cap is outside the
+	// contract; leave it exactly as given rather than silently reshaping it.
+	headroom := maxWait - d
+	if headroom < 0 {
+		return d
+	}
+
+	// Add up to another full interval, without exceeding the configured maximum.
+	extra := d
+	if headroom < extra {
+		extra = headroom
+	}
+	if extra > 0 {
+		return d + time.Duration(rand.Int64N(int64(extra)+1))
+	}
+
+	// Replay the doubling sequence and keep the largest interval that still fitted
+	// under the cap. The guard on scheduled keeps a non-positive or overflowing
+	// minWait from spinning here; in that case the half-interval floor stands.
+	floor := d / 2
+	for scheduled := minWait; scheduled > 0 && scheduled < maxWait; scheduled <<= 1 {
+		if scheduled > floor {
+			floor = scheduled
+		}
+	}
+	if floor >= d {
+		return d
+	}
+
+	return d - time.Duration(rand.Int64N(int64(d-floor)+1))
 }
 
 func (l *HiveLock) Release(ctx context.Context) error {
