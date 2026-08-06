@@ -133,6 +133,30 @@ func TestUnaryExpr(t *testing.T) {
 			assert.True(t, n1.Equals(iceberg.AlwaysFalse{}))
 			assert.True(t, n2.Equals(iceberg.AlwaysTrue{}))
 		})
+
+		t.Run("transform terms do not use source nullability", func(t *testing.T) {
+			voidID := iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+
+			isNull, err := iceberg.IsNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, isNull.Equals(iceberg.AlwaysTrue{}))
+
+			voidID = iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+			notNull, err := iceberg.NotNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, notNull.Equals(iceberg.AlwaysFalse{}))
+		})
+
+		t.Run("nested transforms are rejected", func(t *testing.T) {
+			nested := iceberg.NewUnboundTransform(
+				iceberg.BucketTransform{NumBuckets: 16},
+				iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 4}, iceberg.Reference("a")),
+			)
+
+			_, err := nested.Bind(sc, true)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.Contains(t, err.Error(), "direct reference")
+		})
 	})
 
 	t.Run("isnan notnan", func(t *testing.T) {
