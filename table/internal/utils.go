@@ -541,7 +541,7 @@ func TruncateUpperBoundText(s string, trunc int) string {
 		if next, ok := nextValidRune(result[i]); ok {
 			result[i] = next
 
-			return string(result)
+			return string(result[:i+1])
 		}
 	}
 
