@@ -1365,7 +1365,7 @@ func (w *ManifestWriter) Close() error {
 
 	var emptyErr error
 	if w.addedFiles+w.existingFiles+w.deletedFiles == 0 {
-		emptyErr = errors.New("empty manifest file has been written")
+		emptyErr = ErrEmptyManifest
 	}
 
 	var writerErr error
