@@ -490,6 +490,116 @@ func TestAddColumn(t *testing.T) {
 	})
 }
 
+// threeLevelStructSchema builds: id, outer{ inner{ leaf } }
+func threeLevelStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "outer", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "inner", Required: false, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 4, Name: "leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+					},
+				}},
+			},
+		}},
+	)
+}
+
+// listOfStructSchema builds: id, data list<struct{ a }>
+func listOfStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Required: false, Type: &iceberg.ListType{
+			ElementID:       3,
+			ElementRequired: false,
+			Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "a", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}},
+	)
+}
+
+// mapValueStructSchema builds: id, props map<string, struct{ x }>.
+func mapValueStructSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "props", Required: false, Type: &iceberg.MapType{
+			KeyID:         3,
+			KeyType:       iceberg.PrimitiveTypes.String,
+			ValueID:       4,
+			ValueRequired: false,
+			ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 5, Name: "x", Type: iceberg.PrimitiveTypes.String, Required: false},
+				},
+			},
+		}},
+	)
+}
+
+func txnForSchema(t *testing.T, schema *iceberg.Schema) *Transaction {
+	t.Helper()
+	meta, err := NewMetadata(schema, nil, UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	return New([]string{"id"}, meta, "", nil, nil).NewTransaction()
+}
+
+func TestAddColumnUnderDeletedAncestor(t *testing.T) {
+	cases := []struct {
+		name       string
+		schema     func() *iceberg.Schema
+		deletePath []string
+		addPath    []string
+		ancestor   string
+	}{
+		{
+			name:       "grandparent struct",
+			schema:     threeLevelStructSchema,
+			deletePath: []string{"outer"},
+			addPath:    []string{"outer", "inner", "new_leaf"},
+			ancestor:   "outer",
+		},
+		{
+			name:       "list element struct ancestor",
+			schema:     listOfStructSchema,
+			deletePath: []string{"data"},
+			addPath:    []string{"data", "b"},
+			ancestor:   "data",
+		},
+		{
+			name:       "map value struct ancestor",
+			schema:     mapValueStructSchema,
+			deletePath: []string{"props"},
+			addPath:    []string{"props", "y"},
+			ancestor:   "props",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name+" delete then add", func(t *testing.T) {
+			_, err := NewUpdateSchema(txnForSchema(t, tc.schema()), true, true).
+				DeleteColumn(tc.deletePath).
+				AddColumn(tc.addPath, iceberg.PrimitiveTypes.String, "", false, nil).
+				Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: "+tc.ancestor)
+		})
+
+		t.Run(tc.name+" add then delete", func(t *testing.T) {
+			_, err := NewUpdateSchema(txnForSchema(t, tc.schema()), true, true).
+				AddColumn(tc.addPath, iceberg.PrimitiveTypes.String, "", false, nil).
+				DeleteColumn(tc.deletePath).
+				Apply()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "field that has additions cannot be deleted: "+tc.ancestor)
+		})
+	}
+}
+
 func TestApplyChanges(t *testing.T) {
 	t.Run("test apply changes on schema", func(t *testing.T) {
 		deletes := map[int]struct{}{
@@ -2422,4 +2532,38 @@ func TestUnionByNameRejectsAddUnderDeletedParent(t *testing.T) {
 		Apply()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: addr")
+}
+
+func TestUnionByNameRejectsAddUnderDeletedAncestor(t *testing.T) {
+	extend := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "outer", Required: false, Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 3, Name: "inner", Required: false, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: 4, Name: "leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+						{ID: 5, Name: "new_leaf", Type: iceberg.PrimitiveTypes.String, Required: false},
+					},
+				}},
+			},
+		}},
+	)
+
+	t.Run("delete then union", func(t *testing.T) {
+		_, err := NewUpdateSchema(txnForSchema(t, threeLevelStructSchema()), true, true).
+			DeleteColumn([]string{"outer"}).
+			UnionByNameWith(extend).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot add to a column that will be deleted: outer")
+	})
+
+	t.Run("union then delete", func(t *testing.T) {
+		_, err := NewUpdateSchema(txnForSchema(t, threeLevelStructSchema()), true, true).
+			UnionByNameWith(extend).
+			DeleteColumn([]string{"outer"}).
+			Apply()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field that has additions cannot be deleted: outer")
+	})
 }
