@@ -103,6 +103,13 @@ func runRewriteWithCleanup(t *testing.T, tbl *table.Table, groups []table.Compac
 
 	result, err := tx.RewriteDataFiles(t.Context(), groups, rewriteOpts)
 	require.NoError(t, err)
+	if partialProgress {
+		require.NotNil(t, result.Table)
+		_, err := tx.Commit(t.Context())
+		require.Error(t, err, "partial progress is terminal and must not make the parent Commit idempotent")
+
+		return result, result.Table
+	}
 
 	out, err := tx.Commit(t.Context())
 	require.NoError(t, err)
@@ -241,6 +248,12 @@ func TestRewriteDataFiles_EmptyPlan(t *testing.T) {
 	assert.Equal(t, 0, result.AddedDataFiles)
 	assert.Equal(t, 0, result.RemovedDataFiles)
 	assert.Equal(t, int64(0), result.BytesBefore)
+
+	partialTx := tbl.NewTransaction()
+	partialResult, err := partialTx.RewriteDataFiles(t.Context(), nil,
+		table.RewriteDataFilesOptions{PartialProgress: true})
+	require.NoError(t, err)
+	assert.Same(t, tbl, partialResult.Table)
 }
 
 // TestExecuteCompactionGroup_TargetFileSizeForwarded verifies that
@@ -392,6 +405,14 @@ func TestRewriteDataFiles_EmptyGroupSkipped(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 0, result.RewrittenGroups)
+
+	tx = tbl.NewTransaction()
+	_, err = tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      -1,
+	})
+	require.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "MaxCommits")
 }
 
 func TestRewriteDataFiles_PartialProgress(t *testing.T) {
@@ -436,6 +457,8 @@ func TestRewriteDataFiles_PartialProgress(t *testing.T) {
 
 	assertRowCount(t, tbl, 6)
 	assert.Greater(t, result.RewrittenGroups, 0)
+	assert.Len(t, result.CompletedGroups, result.RewrittenGroups)
+	assert.Same(t, tbl, result.Table)
 	assert.Equal(t, 6, result.RemovedDataFiles)
 	assert.Equal(t, beforeSnapshots+result.RewrittenGroups, len(tbl.Metadata().Snapshots()))
 }

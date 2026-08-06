@@ -29,6 +29,10 @@ import (
 
 // RewriteResult summarizes a completed compaction.
 type RewriteResult struct {
+	// Table is the latest committed table when PartialProgress is enabled.
+	// It is nil for an atomic rewrite until the caller commits the transaction.
+	Table *Table
+
 	// RewrittenGroups is the number of compaction groups committed.
 	RewrittenGroups int
 
@@ -59,6 +63,21 @@ type RewriteResult struct {
 
 	// BytesAfter is the total size of output data files (measured from written files).
 	BytesAfter int64
+
+	// CompletedGroups contains the groups whose snapshots were committed in
+	// partial-progress mode.
+	CompletedGroups []CompactionGroupResult
+
+	// FailedGroups contains groups whose catalog commits failed. A partial
+	// rewrite can return both completed and failed groups.
+	FailedGroups []CompactionGroupFailure
+}
+
+// CompactionGroupFailure records a group that could not be committed during a
+// partial-progress rewrite.
+type CompactionGroupFailure struct {
+	PartitionKey string
+	Err          error
 }
 
 // CompactionTaskGroup is a set of scan tasks in the same partition that
@@ -127,16 +146,19 @@ type CompactionGroupResult struct {
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
 // [Transaction.RewriteDataFiles].
 type RewriteDataFilesOptions struct {
-	// PartialProgress, when true, stages each group as its own
-	// rewrite snapshot and commits it before moving to the next group.
-	// A mid-loop failure therefore leaves already-completed groups durable.
-	// When false (the default), every group lands in a single atomic rewrite
-	// snapshot.
-	//
-	// The parent transaction remains usable as the final table handle: after
-	// partial progress has committed, [Transaction.Commit] returns the latest
-	// table and rejects additional staged work.
+	// PartialProgress, when true, commits each non-empty group in its own
+	// catalog snapshot. When false (the default), every group is staged in a
+	// single atomic rewrite snapshot.
 	PartialProgress bool
+
+	// MaxCommits bounds the number of catalog commits in partial-progress mode.
+	// Zero uses the default of 10. It has no effect for atomic rewrites.
+	MaxCommits int
+
+	// MaxFailedCommits bounds catalog commit failures in partial-progress mode.
+	// Zero (the default) allows all group commits to fail. A negative value also
+	// means unlimited failures.
+	MaxFailedCommits int
 
 	// SnapshotProps are added to the rewrite snapshot's summary.
 	// In partial-progress mode the same properties land on every
@@ -221,7 +243,12 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 		return nil, err
 	}
 	if len(groups) == 0 {
-		return &RewriteResult{}, nil
+		result := &RewriteResult{}
+		if opts.PartialProgress {
+			result.Table = t.tbl
+		}
+
+		return result, nil
 	}
 
 	if opts.PartialProgress {
@@ -432,7 +459,7 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 // transaction. This is the durable mode: a later group can fail without
 // rolling back snapshots already committed for earlier groups.
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
-	result := &RewriteResult{}
+	result := &RewriteResult{Table: t.tbl}
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -441,9 +468,18 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		return nil, fmt.Errorf("%w: partial progress requires a fresh transaction",
 			ErrInvalidOperation)
 	}
+	maxCommits := opts.MaxCommits
+	if maxCommits == 0 {
+		maxCommits = 10
+	}
+	if maxCommits < 0 {
+		return nil, fmt.Errorf("%w: MaxCommits must be non-negative", ErrInvalidOperation)
+	}
+	maxFailedCommits := opts.MaxFailedCommits
 
 	props := maps.Clone(opts.SnapshotProps)
 	current := t.tbl
+	failedCommits := 0
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -452,6 +488,10 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 
 		if len(group.Tasks) == 0 {
 			continue
+		}
+		if result.RewrittenGroups >= maxCommits {
+			return result, fmt.Errorf("%w: partial rewrite reached MaxCommits=%d",
+				ErrInvalidOperation, maxCommits)
 		}
 
 		gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
@@ -480,18 +520,35 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 				current = next
 				t.tbl = next
 				t.committed = true
-				t.partialProgressCommitted = true
 				accumulateGroupMetrics(result, gr)
+				result.CompletedGroups = append(result.CompletedGroups, gr)
+				result.Table = next
+			} else {
+				failedCommits++
+				result.FailedGroups = append(result.FailedGroups, CompactionGroupFailure{
+					PartitionKey: group.PartitionKey,
+					Err:          err,
+				})
+				if maxFailedCommits > 0 && failedCommits >= maxFailedCommits {
+					return result, fmt.Errorf("commit compaction group %q: %w (maximum failed commits reached)",
+						group.PartitionKey, err)
+				}
 			}
 
-			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
+			continue
 		}
 
 		current = next
 		t.tbl = next
 		t.committed = true
-		t.partialProgressCommitted = true
 		accumulateGroupMetrics(result, gr)
+		result.CompletedGroups = append(result.CompletedGroups, gr)
+		result.Table = next
+	}
+
+	if len(result.FailedGroups) > 0 {
+		return result, fmt.Errorf("partial rewrite completed %d groups with %d failed commits",
+			result.RewrittenGroups, len(result.FailedGroups))
 	}
 
 	return result, nil
