@@ -72,6 +72,7 @@ func TestReadTasksUsesTaskResidual(t *testing.T) {
 
 	require.Equal(t, []int64{2, 3}, got)
 }
+
 func TestReadTasksAppliesDifferentResidualsPerTask(t *testing.T) {
 	ctx := context.Background()
 	tbl := newV3RowLineageTestTable(t)
