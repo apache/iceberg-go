@@ -186,6 +186,7 @@ func TestParseRequirementRejectsMissingRequiredFields(t *testing.T) {
 		{name: "table uuid", data: `{"type":"assert-table-uuid"}`, expectedField: "uuid"},
 		{name: "null table uuid", data: `{"type":"assert-table-uuid","uuid":null}`, expectedField: "uuid"},
 		{name: "missing ref", data: `{"type":"assert-ref-snapshot-id"}`, expectedField: "ref"},
+		{name: "null ref", data: `{"type":"assert-ref-snapshot-id","ref":null}`, expectedField: "ref"},
 		{name: "missing snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main"}`, expectedField: "snapshot-id"},
 		{name: "default spec id", data: `{"type":"assert-default-spec-id"}`, expectedField: "default-spec-id"},
 		{name: "null default spec id", data: `{"type":"assert-default-spec-id","default-spec-id":null}`, expectedField: "default-spec-id"},
