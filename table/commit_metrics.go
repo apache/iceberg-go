@@ -84,12 +84,6 @@ func summaryCounter(props iceberg.Properties, key string, unit metrics.Unit) *me
 // across implementations. Metrics whose summary key iceberg-go does not yet
 // populate (DVs) are absent and therefore omitted — exactly as Java's
 // counterFrom omits summary keys it does not find.
-//
-// TODO: the report's Metadata map is left unset. Java's CommitReport carries a
-// metadata map (e.g. engine name/version and other commit context); iceberg-go
-// does not thread that context into the commit path yet, so it is omitted
-// rather than reported empty. Populate it in a follow-up once the context is
-// available.
 func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur time.Duration) metrics.CommitReport {
 	var (
 		snapshotID int64
@@ -114,6 +108,7 @@ func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur tim
 		SnapshotID:     snapshotID,
 		SequenceNumber: seqNum,
 		Operation:      operation,
+		Metadata:       metrics.EnvironmentContext(),
 		Metrics: metrics.CommitMetricsResult{
 			TotalDuration: metrics.NewNanosTimerResult(1, dur.Nanoseconds()),
 			Attempts:      metrics.NewCounterResult(metrics.UnitCount, attempts),
