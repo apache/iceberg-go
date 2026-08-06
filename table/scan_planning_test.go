@@ -56,6 +56,43 @@ func TestScanPlanningRemoteStoresPlanIO(t *testing.T) {
 	assert.Equal(t, pio, scan.planIO)
 }
 
+func TestScanPlanningRemoteClosesPreviousPlanIO(t *testing.T) {
+	t.Parallel()
+
+	first := &countingPlanIO{}
+	second := &countingPlanIO{}
+	planner := &sequenceScanPlanner{
+		results: []ScanPlanningResult{{IO: first}, {IO: second}},
+	}
+	scan := &Scan{
+		planner:      planner,
+		planningMode: ScanPlanningRemote,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, first.closeCalls)
+	assert.Equal(t, 0, second.closeCalls)
+	assert.Same(t, second, scan.planIO)
+}
+
+func TestReadTasksClosesPlanIOWhenLoadFails(t *testing.T) {
+	want := errors.New("load plan io")
+	pio := &countingPlanIO{loadErr: want}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.planIO = pio
+
+	_, _, err = scan.ReadTasks(context.Background(), nil)
+	require.ErrorIs(t, err, want)
+	assert.Equal(t, 1, pio.closeCalls)
+	assert.Nil(t, scan.planIO)
+}
+
 func TestScanPlanningRemoteRejectsIncapablePlanner(t *testing.T) {
 	t.Parallel()
 
@@ -161,3 +198,30 @@ type fakePlanIO struct{}
 
 func (fakePlanIO) Load(context.Context) (icebergio.IO, error) { return nil, nil }
 func (fakePlanIO) Close() error                               { return nil }
+
+type countingPlanIO struct {
+	loadErr    error
+	closeCalls int
+}
+
+func (p *countingPlanIO) Load(context.Context) (icebergio.IO, error) {
+	return nil, p.loadErr
+}
+
+func (p *countingPlanIO) Close() error {
+	p.closeCalls++
+	return nil
+}
+
+type sequenceScanPlanner struct {
+	results []ScanPlanningResult
+	index   int
+}
+
+func (p *sequenceScanPlanner) SupportsRemoteScanPlanning() bool { return true }
+
+func (p *sequenceScanPlanner) PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error) {
+	result := p.results[p.index]
+	p.index++
+	return result, nil
+}

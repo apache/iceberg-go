@@ -878,7 +878,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 // table's default FileIO. It returns a nil slice (not an empty one) when there
 // is no snapshot or every manifest is pruned.
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
-	scan.planIO = nil
+	scan.closePlanIO()
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
@@ -956,6 +956,11 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
+
+	// A new remote plan supersedes any previous plan produced by this Scan.
+	// Release its scoped credentials before replacing the handle so repeated
+	// PlanFiles calls do not retain one PlanIO per plan.
+	scan.closePlanIO()
 
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
@@ -1045,7 +1050,13 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	// table's default FileIO and is closed once the returned iterator finishes.
 	var fs io.IO
 	if scan.planIO != nil {
-		fs, err = scan.planIO.Load(ctx)
+		planIO := scan.planIO
+		fs, err = planIO.Load(ctx)
+		if err != nil {
+			_ = planIO.Close()
+			scan.planIO = nil
+			return nil, nil, err
+		}
 	} else {
 		fs, err = scan.ioF(ctx)
 	}
@@ -1067,6 +1078,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		// No iterator to drive cleanup on a setup error, so close here.
 		if scan.planIO != nil {
 			_ = scan.planIO.Close()
+			scan.planIO = nil
 		}
 
 		return nil, nil, err
@@ -1077,6 +1089,17 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}
 
 	return outSchema, records, nil
+}
+
+// closePlanIO releases the scoped resources associated with the current
+// remote plan. It is safe to call when no remote plan has been installed.
+func (scan *Scan) closePlanIO() {
+	if scan.planIO == nil {
+		return
+	}
+
+	_ = scan.planIO.Close()
+	scan.planIO = nil
 }
 
 // closePlanIOAfter wraps an arrow record iterator so the plan-scoped IO is
