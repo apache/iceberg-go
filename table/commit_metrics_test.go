@@ -124,8 +124,9 @@ func TestBuildCommitReportIncludesEnvironmentContext(t *testing.T) {
 
 	cr := buildCommitReport("db.tbl", nil, 1, time.Millisecond)
 	assert.Equal(t, map[string]string{
-		"engine-name":    "iceberg-go-test",
-		"engine-version": "1.0",
+		"iceberg-version": iceberg.Version(),
+		"engine-name":     "iceberg-go-test",
+		"engine-version":  "1.0",
 	}, cr.Metadata)
 
 	cr.Metadata["engine-name"] = "changed"

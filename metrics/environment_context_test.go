@@ -20,6 +20,7 @@ package metrics
 import (
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -30,9 +31,20 @@ func TestEnvironmentContextCopiesValues(t *testing.T) {
 	context := EnvironmentContext()
 	context["engine"] = "changed"
 	assert.Equal(t, "go", EnvironmentContext()["engine"])
+	assert.Equal(t, iceberg.Version(), EnvironmentContext()["iceberg-version"])
 
 	SetEnvironmentProperty("version", "1")
 	assert.Equal(t, "1", EnvironmentContext()["version"])
 	RemoveEnvironmentProperty("version")
 	assert.NotContains(t, EnvironmentContext(), "version")
+}
+
+func TestEnvironmentContextKeepsIcebergVersion(t *testing.T) {
+	SetEnvironmentContext(map[string]string{"iceberg-version": "spoofed"})
+	t.Cleanup(func() { SetEnvironmentContext(nil) })
+
+	assert.Equal(t, iceberg.Version(), EnvironmentContext()["iceberg-version"])
+	SetEnvironmentProperty("iceberg-version", "spoofed-again")
+	RemoveEnvironmentProperty("iceberg-version")
+	assert.Equal(t, iceberg.Version(), EnvironmentContext()["iceberg-version"])
 }

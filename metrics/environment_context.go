@@ -20,7 +20,11 @@ package metrics
 import (
 	"maps"
 	"sync"
+
+	"github.com/apache/iceberg-go"
 )
+
+const icebergVersionKey = "iceberg-version"
 
 var environmentContext = struct {
 	sync.RWMutex
@@ -30,26 +34,37 @@ var environmentContext = struct {
 }
 
 // EnvironmentContext returns a snapshot of the process-wide metadata attached
-// to newly emitted reports. The returned map is independent of the stored
-// context and may be modified by the caller.
+// to newly emitted reports. Iceberg's own version is always present and cannot
+// be removed by caller-supplied properties. The returned map is independent of
+// the stored context and may be modified by the caller.
 func EnvironmentContext() map[string]string {
 	environmentContext.RLock()
 	defer environmentContext.RUnlock()
 
-	return maps.Clone(environmentContext.properties)
+	result := map[string]string{icebergVersionKey: iceberg.Version()}
+	maps.Copy(result, environmentContext.properties)
+	result[icebergVersionKey] = iceberg.Version()
+
+	return result
 }
 
-// SetEnvironmentContext replaces the process-wide report metadata. A copy is
-// retained, so later changes to properties do not affect future reports.
+// SetEnvironmentContext replaces the caller-supplied report metadata. A copy
+// is retained, so later changes to properties do not affect future reports.
+// The built-in Iceberg version metadata is restored automatically.
 func SetEnvironmentContext(properties map[string]string) {
 	environmentContext.Lock()
 	defer environmentContext.Unlock()
 
 	environmentContext.properties = maps.Clone(properties)
+	delete(environmentContext.properties, icebergVersionKey)
 }
 
 // SetEnvironmentProperty sets one process-wide report metadata entry.
 func SetEnvironmentProperty(key, value string) {
+	if key == icebergVersionKey {
+		return
+	}
+
 	environmentContext.Lock()
 	defer environmentContext.Unlock()
 
@@ -61,6 +76,10 @@ func SetEnvironmentProperty(key, value string) {
 
 // RemoveEnvironmentProperty removes one process-wide report metadata entry.
 func RemoveEnvironmentProperty(key string) {
+	if key == icebergVersionKey {
+		return
+	}
+
 	environmentContext.Lock()
 	defer environmentContext.Unlock()
 
