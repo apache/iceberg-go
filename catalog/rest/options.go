@@ -28,6 +28,11 @@ import (
 
 type Option func(*options)
 
+// TransportFactory creates a transport owned by the REST catalog and returns
+// the cleanup function to run when the catalog is closed. The TLS config is
+// the one configured with WithTLSConfig.
+type TransportFactory func(*tls.Config) (http.RoundTripper, func())
+
 func WithCredential(cred string) Option {
 	return func(o *options) {
 		o.credential = cred
@@ -162,6 +167,15 @@ func WithCustomTransport(transport http.RoundTripper) Option {
 	}
 }
 
+// WithTransportFactory configures a catalog-owned transport factory. The
+// returned cleanup function is called when the catalog is closed. Use
+// WithCustomTransport when the caller owns the transport instead.
+func WithTransportFactory(factory TransportFactory) Option {
+	return func(o *options) {
+		o.transportFactory = factory
+	}
+}
+
 type options struct {
 	awsConfig         aws.Config
 	awsConfigSet      bool
@@ -180,7 +194,7 @@ type options struct {
 	audience          string
 	resource          string
 	transport         http.RoundTripper
-	transportFactory  func(*tls.Config) (http.RoundTripper, func())
+	transportFactory  TransportFactory
 	headers           map[string]string
 
 	oauthTLSConfig *tls.Config

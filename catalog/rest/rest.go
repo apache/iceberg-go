@@ -1078,7 +1078,8 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
-// Close releases transports created by the catalog and its metrics reporter.
+// Close drains idle connections from transports created by the catalog and
+// closes its metrics reporter.
 // Caller-provided transports remain caller-owned. Close is safe to call more
 // than once. Callers holding a [catalog.Catalog] can reach this via a
 // [catalog.Closer] type assertion.

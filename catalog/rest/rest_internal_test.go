@@ -1710,16 +1710,12 @@ func TestCatalogCloseReleasesOwnedSessionOnce(t *testing.T) {
 	})
 
 	var transports []*closeTrackingTransport
-	withTrackingTransport := func(o *options) {
-		o.transportFactory = func(*tls.Config) (http.RoundTripper, func()) {
-			transport := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
-			transports = append(transports, transport)
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithTransportFactory(func(*tls.Config) (http.RoundTripper, func()) {
+		transport := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+		transports = append(transports, transport)
 
-			return transport, transport.CloseIdleConnections
-		}
-	}
-
-	cat, err := NewCatalog(context.Background(), "rest", srv.URL, withTrackingTransport)
+		return transport, transport.CloseIdleConnections
+	}))
 	require.NoError(t, err)
 	require.Len(t, transports, 2)
 	assert.True(t, transports[0].closed.Load(), "bootstrap transport should be closed after config fetch")

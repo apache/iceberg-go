@@ -194,8 +194,8 @@ type PurgeableTable interface {
 }
 
 // Closer is an optional interface implemented by catalogs that hold releasable
-// resources — currently a metrics reporter, and in future a stateful (e.g.
-// HTTP-backed) one. It is not part of [Catalog] because adding a method to that
+// resources — currently a metrics reporter and stateful resources (e.g.
+// HTTP-backed clients). It is not part of [Catalog] because adding a method to that
 // widely-implemented interface would break every external implementation; a
 // follow-up may promote it. Callers holding a [Catalog] from [Load] should
 // release it via a type assertion:
