@@ -278,14 +278,14 @@ func (e *exprEvaluator) VisitNotIn(term BoundTerm, literals Set[Literal]) bool {
 func (e *exprEvaluator) VisitIsNan(term BoundTerm) bool {
 	switch term.Type().(type) {
 	case Float32Type:
-		v := term.(bound[float32]).eval(e.st)
+		v := typedTermEval[float32](e.st, term)
 		if !v.Valid {
 			break
 		}
 
 		return math.IsNaN(float64(v.Val))
 	case Float64Type:
-		v := term.(bound[float64]).eval(e.st)
+		v := typedTermEval[float64](e.st, term)
 		if !v.Valid {
 			break
 		}
@@ -325,8 +325,23 @@ func nullsFirstCmp[T LiteralType](cmp Comparator[T], v1, v2 Optional[T]) int {
 	return cmp(v1.Val, v2.Val)
 }
 
+func typedTermEval[T LiteralType](st StructLike, term BoundTerm) Optional[T] {
+	v := term.evalToLiteral(st)
+	if !v.Valid {
+		return Optional[T]{}
+	}
+
+	lit, ok := v.Val.(TypedLiteral[T])
+	if !ok {
+		panic(fmt.Errorf("%w: term %s evaluated to literal type %s, expected %s",
+			ErrType, term, v.Val.Type(), NewLiteral(*new(T)).Type()))
+	}
+
+	return Optional[T]{Valid: true, Val: lit.Value()}
+}
+
 func typedCmp[T LiteralType](st StructLike, term BoundTerm, lit Literal) int {
-	v := term.(bound[T]).eval(st)
+	v := typedTermEval[T](st, term)
 	var l Optional[T]
 
 	rhs := lit.(TypedLiteral[T])
@@ -403,13 +418,13 @@ func (e *exprEvaluator) VisitStartsWith(term BoundTerm, lit Literal) bool {
 
 	switch lit.(type) {
 	case TypedLiteral[string]:
-		val := term.(bound[string]).eval(e.st)
+		val := typedTermEval[string](e.st, term)
 		if !val.Valid {
 			return false
 		}
 		prefix, value = lit.(StringLiteral).Value(), val.Val
 	case TypedLiteral[[]byte]:
-		val := term.(bound[[]byte]).eval(e.st)
+		val := typedTermEval[[]byte](e.st, term)
 		if !val.Valid {
 			return false
 		}
@@ -668,13 +683,14 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	// only serialized or logged, and an unbound predicate with a masked string
 	// literal serializes without needing the field's type.
 	ref := Reference(pred.Term().Ref().Field().Name)
+	term := unboundTermForBound(pred.Term(), ref)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
-		return UnaryPredicate(p.Op(), ref)
+		return UnaryPredicate(p.Op(), term)
 	case BoundLiteralPredicate:
-		return sanitizeLiteralPredicate(p.Op(), ref)
+		return sanitizeLiteralPredicate(p.Op(), term)
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+		return sanitizeSetPredicate(p.Op(), term, p.Literals().Len())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
