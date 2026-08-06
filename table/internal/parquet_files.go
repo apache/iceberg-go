@@ -376,6 +376,7 @@ type ParquetFileWriter struct {
 	pqWriter      *pqarrow.FileWriter
 	counter       *internal.CountingWriter
 	fileCloser    io.Closer
+	mem           memory.Allocator
 	fs            iceio.WriteFileIO
 	format        parquetFormat
 	info          WriteFileInfo
@@ -474,6 +475,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		pqWriter:      writer,
 		counter:       counter,
 		fileCloser:    fw,
+		mem:           mem,
 		fs:            fs,
 		format:        p,
 		info:          info,
@@ -586,7 +588,7 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 			continue
 		}
 
-		normalized, changed, err := normalizeWKBArray(ext)
+		normalized, changed, err := normalizeWKBArray(ext, w.mem)
 		if err != nil {
 			for _, col := range columns {
 				col.Release()
@@ -615,7 +617,7 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 	return result, nil
 }
 
-func normalizeWKBArray(ext array.ExtensionArray) (arrow.Array, bool, error) {
+func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {
 	storage, ok := ext.Storage().(wkbStorage)
 	if !ok {
 		return nil, false, nil
@@ -633,7 +635,7 @@ func normalizeWKBArray(ext array.ExtensionArray) (arrow.Array, bool, error) {
 		return nil, false, nil
 	}
 
-	builder := array.NewBinaryBuilder(memory.DefaultAllocator, storage.DataType().(arrow.BinaryDataType))
+	builder := array.NewBinaryBuilder(mem, storage.DataType().(arrow.BinaryDataType))
 	defer builder.Release()
 
 	for i := range storage.Len() {

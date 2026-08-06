@@ -39,7 +39,7 @@ func TestNormalizeWKBArray(t *testing.T) {
 	storage.Release()
 	defer ext.Release()
 
-	normalized, changed, err := normalizeWKBArray(ext)
+	normalized, changed, err := normalizeWKBArray(ext, memory.DefaultAllocator)
 	require.NoError(t, err)
 	require.True(t, changed)
 	defer normalized.Release()
@@ -48,4 +48,24 @@ func TestNormalizeWKBArray(t *testing.T) {
 	require.Equal(t, newWKBBuilder(wkbPoint).f64(1, 2).bytes(), []byte(arr.Value(0)))
 	require.Equal(t, newWKBBuilder(wkbPointZ).f64(3, 4, 5).bytes(), []byte(arr.Value(1)))
 	require.True(t, arr.IsNull(2))
+}
+
+func TestNormalizeWKBArrayUsesProvidedAllocator(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	builder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	builder.Append(newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes())
+	storage := builder.NewArray()
+	builder.Release()
+	ext := array.NewExtensionArrayWithStorage(typeDef, storage).(array.ExtensionArray)
+	storage.Release()
+	defer ext.Release()
+
+	normalized, changed, err := normalizeWKBArray(ext, mem)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotZero(t, mem.CurrentAlloc())
+	normalized.Release()
 }
