@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
@@ -608,9 +609,10 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 	return result, nil
 }
 
-// normalizeNestedArray walks an Arrow array without changing its container
-// buffers. That keeps parent validity, offsets, and slices intact while
-// replacing only nested WKB values that use EWKB encoding.
+// normalizeNestedArray walks an Arrow array and replaces only nested WKB values
+// that use EWKB encoding. Changed nested containers are rebuilt from their
+// logical values with offset zero, so materialized children cannot be sliced a
+// second time by an enclosing Arrow container.
 func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
 	if ext, ok := arr.(array.ExtensionArray); ok {
 		if _, ok := ext.ExtensionType().(*geoarrow.WKBType); !ok {
@@ -622,55 +624,25 @@ func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, b
 
 	switch nested := arr.(type) {
 	case *array.Struct:
-		children := slices.Clone(nested.Data().Children())
-		changedChildren := make([]arrow.Array, 0, len(children))
-		for idx := range children {
-			normalized, changed, err := normalizeNestedArray(nested.Field(idx), mem)
-			if err != nil {
-				for _, changedChild := range changedChildren {
-					changedChild.Release()
-				}
-
-				return nil, false, err
-			}
-			if changed {
-				children[idx] = normalized.Data()
-				changedChildren = append(changedChildren, normalized)
-			}
-		}
-		if len(changedChildren) == 0 {
-			return nil, false, nil
-		}
-		defer func() {
-			for _, changedChild := range changedChildren {
-				changedChild.Release()
-			}
-		}()
-
-		data := array.NewData(nested.DataType(), nested.Len(), nested.Data().Buffers(),
-			children, nested.Data().NullN(), nested.Data().Offset())
-		result := array.NewStructData(data)
-		data.Release()
-
-		return result, true, nil
+		return normalizeStruct(nested, mem)
 
 	case *array.Map:
-		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewMapData(data)
 		})
 
 	case *array.List:
-		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewListData(data)
 		})
 
 	case *array.LargeList:
-		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewLargeListData(data)
 		})
 
 	case *array.FixedSizeList:
-		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewFixedSizeListData(data)
 		})
 	}
@@ -678,22 +650,152 @@ func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, b
 	return nil, false, nil
 }
 
-func normalizeListChild(data arrow.ArrayData, values arrow.Array, mem memory.Allocator,
+func normalizeStruct(nested *array.Struct, mem memory.Allocator) (arrow.Array, bool, error) {
+	children := make([]arrow.ArrayData, nested.NumField())
+	changedChildren := make([]arrow.Array, 0, len(children))
+	for idx := range children {
+		field := nested.Field(idx)
+		children[idx] = field.Data()
+		normalized, changed, err := normalizeNestedArray(field, mem)
+		if err != nil {
+			for _, changedChild := range changedChildren {
+				changedChild.Release()
+			}
+
+			return nil, false, err
+		}
+		if changed {
+			children[idx] = normalized.Data()
+			changedChildren = append(changedChildren, normalized)
+		}
+	}
+	if len(changedChildren) == 0 {
+		return nil, false, nil
+	}
+	defer func() {
+		for _, changedChild := range changedChildren {
+			changedChild.Release()
+		}
+	}()
+
+	validity, nulls := rebasedValidity(nested, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(nested.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	} else {
+		buffers[0] = validity
+	}
+	data := array.NewData(nested.DataType(), nested.Len(), buffers, children, nulls, 0)
+	result := array.NewStructData(data)
+	data.Release()
+
+	return result, true, nil
+}
+
+func normalizeListChild(list array.ListLike, mem memory.Allocator,
 	newArray func(arrow.ArrayData) arrow.Array,
 ) (arrow.Array, bool, error) {
+	if list.Len() == 0 {
+		return nil, false, nil
+	}
+
+	start, _ := list.ValueOffsets(0)
+	_, end := list.ValueOffsets(list.Len() - 1)
+	if start == end {
+		return nil, false, nil
+	}
+
+	values := array.NewSlice(list.ListValues(), start, end)
+	defer values.Release()
 	normalized, changed, err := normalizeNestedArray(values, mem)
 	if err != nil || !changed {
 		return nil, false, err
 	}
 	defer normalized.Release()
 
-	children := slices.Clone(data.Children())
+	children := slices.Clone(list.Data().Children())
 	children[0] = normalized.Data()
-	newData := array.NewData(data.DataType(), data.Len(), data.Buffers(), children, data.NullN(), data.Offset())
+
+	validity, nulls := rebasedValidity(list, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(list.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	}
+	buffers[0] = validity
+	if list.DataType().ID() != arrow.FIXED_SIZE_LIST {
+		offsets, err := rebasedListOffsets(list, start, mem)
+		if err != nil {
+			return nil, false, err
+		}
+		defer offsets.Release()
+		if len(buffers) < 2 {
+			return nil, false, errors.New("list array has no offsets buffer")
+		}
+		buffers[1] = offsets
+	}
+
+	newData := array.NewData(list.DataType(), list.Len(), buffers, children, nulls, 0)
 	result := newArray(newData)
 	newData.Release()
 
 	return result, true, nil
+}
+
+func rebasedValidity(arr arrow.Array, mem memory.Allocator) (*memory.Buffer, int) {
+	nulls := arr.NullN()
+	if nulls == 0 {
+		return nil, 0
+	}
+
+	data := mem.Allocate(int(bitutil.BytesForBits(int64(arr.Len()))))
+	for i := range data {
+		data[i] = 0
+	}
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsValid(i) {
+			bitutil.SetBit(data, i)
+		}
+	}
+
+	return memory.NewBufferWithAllocator(data, mem), nulls
+}
+
+func rebasedListOffsets(list array.ListLike, first int64, mem memory.Allocator) (*memory.Buffer, error) {
+	var (
+		data []byte
+		set  func(int, int64)
+	)
+	switch list.DataType().ID() {
+	case arrow.LIST, arrow.MAP:
+		data = mem.Allocate((list.Len() + 1) * 4)
+		offsets := arrow.Int32Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = int32(value)
+		}
+	case arrow.LARGE_LIST:
+		data = mem.Allocate((list.Len() + 1) * 8)
+		offsets := arrow.Int64Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = value
+		}
+	default:
+		return nil, fmt.Errorf("unsupported list type %s", list.DataType())
+	}
+
+	buffer := memory.NewBufferWithAllocator(data, mem)
+	for i := 0; i < list.Len(); i++ {
+		start, end := list.ValueOffsets(i)
+		set(i, start-first)
+		set(i+1, end-first)
+	}
+
+	return buffer, nil
 }
 
 func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {

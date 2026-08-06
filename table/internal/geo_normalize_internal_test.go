@@ -126,7 +126,8 @@ func TestNormalizeNestedArray(t *testing.T) {
 }
 
 func TestNormalizeNestedArrayPreservesSliceAndNulls(t *testing.T) {
-	mem := memory.DefaultAllocator
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
 	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
 	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
 	iso := newWKBBuilder(wkbPoint).f64(3, 4).bytes()
@@ -134,13 +135,13 @@ func TestNormalizeNestedArrayPreservesSliceAndNulls(t *testing.T) {
 	builder := array.NewListBuilder(mem, arrow.BinaryTypes.Binary)
 	values := builder.ValueBuilder().(*array.BinaryBuilder)
 	builder.Append(true)
-	values.Append(ewkb)
+	values.Append(iso)
 	builder.AppendNull()
 	builder.Append(true)
-	values.Append(iso)
+	values.Append(ewkb)
 	raw := builder.NewArray()
 	builder.Release()
-	geo := newGeoWKBArray(t, mem, typeDef, ewkb, iso)
+	geo := newGeoWKBArray(t, mem, typeDef, iso, ewkb)
 	data := array.NewData(arrow.ListOf(typeDef), raw.Len(), raw.Data().Buffers(),
 		[]arrow.ArrayData{geo.Data()}, raw.Data().NullN(), raw.Data().Offset())
 	base := array.NewListData(data)
@@ -156,10 +157,86 @@ func TestNormalizeNestedArrayPreservesSliceAndNulls(t *testing.T) {
 	require.True(t, changed)
 	defer normalized.Release()
 
-	require.Equal(t, sliced.Data().Offset(), normalized.Data().Offset())
+	require.Zero(t, normalized.Data().Offset())
 	require.True(t, normalized.IsNull(0))
 	require.True(t, normalized.IsValid(1))
+	storage := normalized.(*array.List).ListValues().(array.ExtensionArray).Storage().(wkbStorage)
+	require.Equal(t, newWKBBuilder(wkbPoint).f64(1, 2).bytes(), storage.Value(0))
 	assertNoEWKB(t, normalized)
+}
+
+func TestNormalizeNestedArrayIgnoresValuesOutsideListSlice(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	malformedEWKB := newWKBBuilder(wkbPoint | ewkbFlagSRID).u32(4326).bytes()
+	iso := newWKBBuilder(wkbPoint).f64(3, 4).bytes()
+
+	builder := array.NewListBuilder(mem, arrow.BinaryTypes.Binary)
+	values := builder.ValueBuilder().(*array.BinaryBuilder)
+	builder.Append(true)
+	values.Append(malformedEWKB)
+	builder.Append(true)
+	values.Append(iso)
+	raw := builder.NewArray()
+	builder.Release()
+	geo := newGeoWKBArray(t, mem, typeDef, malformedEWKB, iso)
+	data := array.NewData(arrow.ListOf(typeDef), raw.Len(), raw.Data().Buffers(),
+		[]arrow.ArrayData{geo.Data()}, raw.Data().NullN(), raw.Data().Offset())
+	base := array.NewListData(data)
+	data.Release()
+	raw.Release()
+	geo.Release()
+	defer base.Release()
+
+	sliced := array.NewSlice(base, 1, 2)
+	defer sliced.Release()
+	normalized, changed, err := normalizeNestedArray(sliced, mem)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Nil(t, normalized)
+}
+
+func TestNormalizeNestedArrayPreservesStructSlice(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
+	iso := newWKBBuilder(wkbPoint).f64(3, 4).bytes()
+	geo := newGeoWKBArray(t, mem, typeDef, iso, ewkb, iso)
+	valuesBuilder := array.NewInt32Builder(mem)
+	valuesBuilder.AppendValues([]int32{1, 2, 3}, nil)
+	values := valuesBuilder.NewArray()
+	valuesBuilder.Release()
+
+	input, err := array.NewStructArrayWithFields(
+		[]arrow.Array{geo, values},
+		[]arrow.Field{
+			{Name: "geom", Type: typeDef, Nullable: true},
+			{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		},
+	)
+	require.NoError(t, err)
+	geo.Release()
+	values.Release()
+	defer input.Release()
+
+	sliced := array.NewSlice(input, 1, 3)
+	defer sliced.Release()
+	normalized, changed, err := normalizeNestedArray(sliced, mem)
+	require.NoError(t, err)
+	require.True(t, changed)
+	defer normalized.Release()
+
+	result := normalized.(*array.Struct)
+	require.Equal(t, 2, result.Len())
+	require.Zero(t, result.Data().Offset())
+	require.True(t, result.IsValid(0))
+	require.True(t, result.IsValid(1))
+	storage := result.Field(0).(array.ExtensionArray).Storage().(wkbStorage)
+	require.Equal(t, newWKBBuilder(wkbPoint).f64(1, 2).bytes(), storage.Value(0))
+	require.Equal(t, iso, storage.Value(1))
+	assertNoEWKB(t, result)
 }
 
 func TestNormalizeNestedArrayReusesUnchangedChildren(t *testing.T) {
