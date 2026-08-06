@@ -702,26 +702,17 @@ type wkbStorage interface {
 
 func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
 	columns := make(map[int]arrow.Array)
-	for _, gc := range w.geoCols {
-		if gc.colIdx >= int(batch.NumCols()) {
-			continue
-		}
-
-		ext, ok := batch.Column(gc.colIdx).(array.ExtensionArray)
-		if !ok {
-			continue
-		}
-
-		normalized, changed, err := normalizeWKBArray(ext, w.mem)
+	for idx := range int(batch.NumCols()) {
+		normalized, changed, err := normalizeNestedArray(batch.Column(idx), w.mem)
 		if err != nil {
 			for _, col := range columns {
 				col.Release()
 			}
 
-			return nil, fmt.Errorf("normalizing geo values for field %d: %w", gc.fieldID, err)
+			return nil, fmt.Errorf("normalizing geo values for column %d: %w", idx, err)
 		}
 		if changed {
-			columns[gc.colIdx] = normalized
+			columns[idx] = normalized
 		}
 	}
 
@@ -739,6 +730,92 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 	}
 
 	return result, nil
+}
+
+// normalizeNestedArray walks an Arrow array without changing its container
+// buffers. That keeps parent validity, offsets, and slices intact while
+// replacing only nested WKB values that use EWKB encoding.
+func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
+	if ext, ok := arr.(array.ExtensionArray); ok {
+		if _, ok := ext.ExtensionType().(*geoarrow.WKBType); !ok {
+			return nil, false, nil
+		}
+
+		return normalizeWKBArray(ext, mem)
+	}
+
+	switch nested := arr.(type) {
+	case *array.Struct:
+		children := slices.Clone(nested.Data().Children())
+		changedChildren := make([]arrow.Array, 0, len(children))
+		for idx := range children {
+			normalized, changed, err := normalizeNestedArray(nested.Field(idx), mem)
+			if err != nil {
+				for _, changedChild := range changedChildren {
+					changedChild.Release()
+				}
+
+				return nil, false, err
+			}
+			if changed {
+				children[idx] = normalized.Data()
+				changedChildren = append(changedChildren, normalized)
+			}
+		}
+		if len(changedChildren) == 0 {
+			return nil, false, nil
+		}
+		defer func() {
+			for _, changedChild := range changedChildren {
+				changedChild.Release()
+			}
+		}()
+
+		data := array.NewData(nested.DataType(), nested.Len(), nested.Data().Buffers(),
+			children, nested.Data().NullN(), nested.Data().Offset())
+		result := array.NewStructData(data)
+		data.Release()
+		return result, true, nil
+
+	case *array.Map:
+		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewMapData(data)
+		})
+
+	case *array.List:
+		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewListData(data)
+		})
+
+	case *array.LargeList:
+		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewLargeListData(data)
+		})
+
+	case *array.FixedSizeList:
+		return normalizeListChild(nested.Data(), nested.ListValues(), mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewFixedSizeListData(data)
+		})
+	}
+
+	return nil, false, nil
+}
+
+func normalizeListChild(data arrow.ArrayData, values arrow.Array, mem memory.Allocator,
+	newArray func(arrow.ArrayData) arrow.Array,
+) (arrow.Array, bool, error) {
+	normalized, changed, err := normalizeNestedArray(values, mem)
+	if err != nil || !changed {
+		return nil, false, err
+	}
+	defer normalized.Release()
+
+	children := slices.Clone(data.Children())
+	children[0] = normalized.Data()
+	newData := array.NewData(data.DataType(), data.Len(), data.Buffers(), children, data.NullN(), data.Offset())
+	result := newArray(newData)
+	newData.Release()
+	return result, true, nil
 }
 
 func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {
