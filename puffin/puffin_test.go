@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go/puffin"
+	"github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,6 +155,24 @@ func fileWithFooterPayload(payload []byte) []byte {
 	data := append([]byte("PFA1PFA1"), payload...)
 	trailer := make([]byte, 12)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(payload)))
+	copy(trailer[8:], "PFA1")
+
+	return append(data, trailer...)
+}
+
+func fileWithCompressedFooterPayload(t *testing.T, payload []byte) []byte {
+	t.Helper()
+
+	var compressed bytes.Buffer
+	writer := lz4.NewWriter(&compressed)
+	_, err := writer.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	data := append([]byte("PFA1PFA1"), compressed.Bytes()...)
+	trailer := make([]byte, 12)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
 	copy(trailer[8:], "PFA1")
 
 	return append(data, trailer...)
@@ -617,6 +636,15 @@ func TestReaderRejectsTrailingFooterData(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
+	data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[],"properties":{"source":"lz4"}}`))
+
+	r, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, "lz4", r.Properties()["source"])
+	assert.Empty(t, r.Blobs())
 }
 
 // TestReaderBlobAccess verifies blob access methods work correctly.

@@ -27,6 +27,8 @@ import (
 	"maps"
 	"slices"
 	"sort"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 // ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.
@@ -180,11 +182,6 @@ func (r *Reader) readFooter() error {
 	payloadSize := int64(binary.LittleEndian.Uint32(trailer[0:4]))
 	flags := binary.LittleEndian.Uint32(trailer[4:8])
 
-	// Check for compressed footer (unsupported)
-	if flags&FooterFlagCompressed != 0 {
-		return errors.New("puffin: compressed footer not supported")
-	}
-
 	// Check for unknown flags
 	if flags&^uint32(FooterFlagCompressed) != 0 {
 		return fmt.Errorf("puffin: unknown footer flags set: 0x%x", flags)
@@ -224,7 +221,19 @@ func (r *Reader) readFooter() error {
 	}
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
-	decoder := json.NewDecoder(payloadReader)
+	payload, err := io.ReadAll(payloadReader)
+	if err != nil {
+		return fmt.Errorf("puffin: read footer payload: %w", err)
+	}
+	if flags&FooterFlagCompressed != 0 {
+		decoder := lz4.NewReader(bytes.NewReader(payload))
+		payload, err = io.ReadAll(decoder)
+		if err != nil {
+			return fmt.Errorf("puffin: decompress footer payload: %w", err)
+		}
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	var footer Footer
 	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
