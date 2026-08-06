@@ -58,14 +58,15 @@ import (
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
 type RewriteFiles struct {
-	txn                 *Transaction
-	dataFilesToDelete   []iceberg.DataFile
-	dataFilesToAdd      []iceberg.DataFile
-	deleteFilesToAdd    []rewriteDeleteFileAddition
-	deleteFilesToRemove []iceberg.DataFile
-	snapshotProps       iceberg.Properties
-	err                 error
-	committed           bool
+	txn                     *Transaction
+	dataFilesToDelete       []iceberg.DataFile
+	dataFilesToAdd          []iceberg.DataFile
+	deleteFilesToAdd        []rewriteDeleteFileAddition
+	deleteFilesToRemove     []iceberg.DataFile
+	autoDeleteFilesToRemove []iceberg.DataFile
+	snapshotProps           iceberg.Properties
+	err                     error
+	committed               bool
 }
 
 type rewriteDeleteFileAddition struct {
@@ -114,6 +115,31 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 		r.deleteFilesToRemove = append(r.deleteFilesToRemove, df)
 	default:
 		r.err = fmt.Errorf("%w: DeleteFile got unsupported content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
+	}
+
+	return r
+}
+
+// removeAutomaticDeleteFile queues a delete file that became removable as a
+// consequence of rewriting data files. These files are removed in the same
+// snapshot, but they are not considered source files for an explicit delete
+// file rewrite.
+func (r *RewriteFiles) removeAutomaticDeleteFile(df iceberg.DataFile) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
+	if df == nil {
+		r.err = fmt.Errorf("%w: automatic delete removal got nil data file", ErrInvalidOperation)
+
+		return r
+	}
+
+	switch df.ContentType() {
+	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		r.autoDeleteFilesToRemove = append(r.autoDeleteFilesToRemove, df)
+	default:
+		r.err = fmt.Errorf("%w: automatic delete removal got unsupported content type %s (%s)",
 			ErrInvalidOperation, df.ContentType(), df.FilePath())
 	}
 
@@ -221,9 +247,10 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 }
 
 // Apply is a bulk shortcut that routes three slices onto this builder:
-// every entry in deletes and safeDeletes is queued via
+// every entry in deletes is queued via
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
-// content type), and every entry in adds via [RewriteFiles.AddFile].
+// content type), every entry in adds via [RewriteFiles.AddFile], and every
+// entry in safeDeletes as an automatic delete-file removal.
 //
 // Deprecated: use [RewriteFiles.ApplyResult], which also carries
 // SafeDeletionVectors. Apply has no slot for them, so a coordinator wiring
@@ -241,7 +268,7 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 		r.AddFile(df)
 	}
 	for _, df := range safeDeletes {
-		r.DeleteFile(df)
+		r.removeAutomaticDeleteFile(df)
 	}
 
 	return r
@@ -249,8 +276,8 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
 // routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
-// and SafeDeletionVectors (DeleteFile). Prefer it over [RewriteFiles.Apply],
-// which cannot carry SafeDeletionVectors.
+// and SafeDeletionVectors as automatic delete-file removals. Prefer it over
+// [RewriteFiles.Apply], which cannot carry SafeDeletionVectors.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -266,13 +293,12 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 	for _, df := range gr.NewDataFiles {
 		r.AddFile(df)
 	}
-	// DVs route through DeleteFile like any pos-delete; ReplaceFiles then
-	// re-identifies them by referenced data file.
+	// DVs are automatic removals keyed by their referenced data file.
 	for _, df := range gr.SafePosDeletes {
-		r.DeleteFile(df)
+		r.removeAutomaticDeleteFile(df)
 	}
 	for _, df := range gr.SafeDeletionVectors {
-		r.DeleteFile(df)
+		r.removeAutomaticDeleteFile(df)
 	}
 
 	return r
@@ -298,7 +324,8 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return r.err
 	}
 	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 &&
-		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 {
+		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 &&
+		len(r.autoDeleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
 	}
 	// Adds-without-deletes would route through ReplaceFiles →
@@ -312,7 +339,8 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	}
 
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
-		r.deleteFilesToRemove, r.deleteFilesToAdd, r.snapshotProps, withRewriteSemantics()); err != nil {
+		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
+		r.snapshotProps, withRewriteSemantics()); err != nil {
 		return err
 	}
 
