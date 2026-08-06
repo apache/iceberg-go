@@ -41,6 +41,7 @@ import (
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
@@ -203,9 +204,8 @@ func (t *Table) Refresh(ctx context.Context) error {
 		return err
 	}
 	if t.metadata != nil && fresh.metadata != nil {
-		if expected, actual := t.metadata.TableUUID(), fresh.metadata.TableUUID(); expected != actual {
-			return fmt.Errorf("%w: table UUID changed during refresh: expected %s, got %s",
-				ErrInvalidMetadata, expected, actual)
+		if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+			return err
 		}
 	}
 
@@ -224,6 +224,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func validateTableUUID(identifier Identifier, expected, actual uuid.UUID) error {
+	if expected == uuid.Nil || actual == uuid.Nil || expected == actual {
+		return nil
+	}
+
+	return fmt.Errorf("%w: table %s UUID changed during refresh or commit: expected %s, got %s; load a new table handle",
+		ErrInvalidMetadata, strings.Join(identifier, "."), expected, actual)
 }
 
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
@@ -558,6 +567,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			fresh, refreshErr := t.cat.LoadTable(retryCtx, slices.Clone(t.identifier))
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
+			}
+			if t.metadata != nil && fresh.metadata != nil {
+				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+					return nil, err
+				}
 			}
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)

@@ -18,6 +18,7 @@ package table
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -29,6 +30,35 @@ import (
 
 type refreshUUIDCatalog struct {
 	fresh *Table
+}
+
+type refreshUUIDMetadataOverride struct {
+	Metadata
+	id uuid.UUID
+}
+
+func (m *refreshUUIDMetadataOverride) TableUUID() uuid.UUID { return m.id }
+
+type changingUUIDRetryCatalog struct {
+	initial  Metadata
+	fresh    Metadata
+	attempts atomic.Int32
+}
+
+func (c *changingUUIDRetryCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	meta := c.initial
+	if c.attempts.Load() > 0 {
+		meta = c.fresh
+	}
+
+	return New(ident, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+}
+
+func (c *changingUUIDRetryCatalog) CommitTable(context.Context, Identifier, []Requirement, []Update) (Metadata, string, error) {
+	c.attempts.Add(1)
+
+	return nil, "", ErrCommitFailed
 }
 
 func (c *refreshUUIDCatalog) LoadTable(context.Context, Identifier) (*Table, error) {
@@ -55,12 +85,23 @@ func refreshUUIDMetadata(t *testing.T, id uuid.UUID, location string) Metadata {
 		iceberg.UnpartitionedSpec,
 		UnsortedSortOrder,
 		location,
-		nil,
+		iceberg.Properties{
+			CommitNumRetriesKey:     "1",
+			CommitMinRetryWaitMsKey: "1",
+			CommitMaxRetryWaitMsKey: "1",
+		},
 		id,
 	)
 	require.NoError(t, err)
 
 	return meta
+}
+
+func refreshUUIDMetadataWithOverride(t *testing.T, id uuid.UUID, location string) Metadata {
+	return &refreshUUIDMetadataOverride{
+		Metadata: refreshUUIDMetadata(t, uuid.New(), location),
+		id:       id,
+	}
 }
 
 func TestRefreshAcceptsMatchingTableUUID(t *testing.T) {
@@ -126,4 +167,51 @@ func TestRefreshRejectsChangedTableUUIDWithoutMutation(t *testing.T) {
 	fs, err := tbl.FS(context.Background())
 	require.NoError(t, err)
 	require.IsType(t, iceio.LocalFS{}, fs)
+}
+
+func TestRefreshAllowsMissingTableUUIDOnEitherSide(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		original uuid.UUID
+		fresh    uuid.UUID
+	}{
+		{name: "original missing", original: uuid.Nil, fresh: uuid.New()},
+		{name: "fresh missing", original: uuid.New(), fresh: uuid.Nil},
+		{name: "both missing", original: uuid.Nil, fresh: uuid.Nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fresh := New(
+				Identifier{"db", "table"},
+				refreshUUIDMetadataWithOverride(t, tt.fresh, "fresh-location"),
+				"fresh-metadata.json",
+				func(context.Context) (iceio.IO, error) { return iceio.NewMemFS(), nil },
+				nil,
+			)
+			tbl := New(
+				Identifier{"db", "table"},
+				refreshUUIDMetadataWithOverride(t, tt.original, "original-location"),
+				"original-metadata.json",
+				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+				&refreshUUIDCatalog{fresh: fresh},
+			)
+
+			require.NoError(t, tbl.Refresh(context.Background()))
+			require.Same(t, fresh.metadata, tbl.metadata)
+		})
+	}
+}
+
+func TestCommitRetryRejectsChangedTableUUIDBeforeRetryCommit(t *testing.T) {
+	original := refreshUUIDMetadataWithOverride(t, uuid.New(), "original-location")
+	fresh := refreshUUIDMetadataWithOverride(t, uuid.New(), "fresh-location")
+	cat := &changingUUIDRetryCatalog{initial: original, fresh: fresh}
+	tbl := New(
+		Identifier{"db", "table"}, original, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat,
+	)
+
+	_, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	require.ErrorContains(t, err, "load a new table handle")
+	require.Equal(t, int32(1), cat.attempts.Load(), "changed UUID must stop the retry before a second catalog commit")
 }
