@@ -57,16 +57,11 @@ import (
 // [RewriteFiles.Commit] drains it. The builder is single-use; once
 // Commit has been called, a second call returns an error regardless
 // of whether the first call succeeded.
-//
-// Adding new delete files (e.g., rewriting position deletes into
-// deletion vectors) is not yet supported; [RewriteFiles.AddDataFile]
-// rejects pos/eq-delete inputs at insertion time. Add the support to
-// the underlying [Transaction.ReplaceFiles] before lifting that
-// restriction.
 type RewriteFiles struct {
 	txn                 *Transaction
 	dataFilesToDelete   []iceberg.DataFile
 	dataFilesToAdd      []iceberg.DataFile
+	deleteFilesToAdd    []iceberg.DataFile
 	deleteFilesToRemove []iceberg.DataFile
 	snapshotProps       iceberg.Properties
 	err                 error
@@ -120,12 +115,8 @@ func (r *RewriteFiles) DeleteFile(df iceberg.DataFile) *RewriteFiles {
 	return r
 }
 
-// AddDataFile queues a new data file. Adding delete files is not yet
-// supported by the underlying snapshot machinery; a pos/eq-delete here
-// stages an error that is returned from the next [RewriteFiles.Commit]
-// call. The error names the offending file path so callers driving the
-// builder via [RewriteFiles.Apply] can identify it without tracking
-// queue order.
+// AddDataFile queues a new data file. Use [RewriteFiles.AddDeleteFile] for
+// positional deletes, equality deletes, or deletion vectors.
 func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -147,10 +138,56 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 	return r
 }
 
+// AddDeleteFile queues a new positional delete, equality delete, or deletion
+// vector for this rewrite. The file is added in the same snapshot as any data
+// replacements and delete-file removals staged on the builder.
+func (r *RewriteFiles) AddDeleteFile(df iceberg.DataFile) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
+	if df == nil {
+		r.err = fmt.Errorf("%w: AddDeleteFile got nil data file", ErrInvalidOperation)
+
+		return r
+	}
+
+	switch df.ContentType() {
+	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		r.deleteFilesToAdd = append(r.deleteFilesToAdd, df)
+	default:
+		r.err = fmt.Errorf("%w: AddDeleteFile only supports delete files; got content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
+	}
+
+	return r
+}
+
+// AddFile queues a file according to its content type. It is useful for
+// coordinators that carry data and delete files in one result slice.
+func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
+	if df == nil {
+		r.err = fmt.Errorf("%w: AddFile got nil data file", ErrInvalidOperation)
+
+		return r
+	}
+
+	switch df.ContentType() {
+	case iceberg.EntryContentData:
+		return r.AddDataFile(df)
+	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		return r.AddDeleteFile(df)
+	default:
+		r.err = fmt.Errorf("%w: AddFile got unsupported content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
+
+		return r
+	}
+}
+
 // Apply is a bulk shortcut that routes three slices onto this builder:
 // every entry in deletes and safeDeletes is queued via
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
-// content type), and every entry in adds via [RewriteFiles.AddDataFile].
+// content type), and every entry in adds via [RewriteFiles.AddFile].
 //
 // Deprecated: use [RewriteFiles.ApplyResult], which also carries
 // SafeDeletionVectors. Apply has no slot for them, so a coordinator wiring
@@ -165,7 +202,7 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 		r.DeleteFile(df)
 	}
 	for _, df := range adds {
-		r.AddDataFile(df)
+		r.AddFile(df)
 	}
 	for _, df := range safeDeletes {
 		r.DeleteFile(df)
@@ -175,7 +212,7 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 }
 
 // ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
-// routing OldDataFiles (DeleteFile), NewDataFiles (AddDataFile), SafePosDeletes
+// routing OldDataFiles (DeleteFile), NewDataFiles (AddFile), SafePosDeletes
 // and SafeDeletionVectors (DeleteFile). Prefer it over [RewriteFiles.Apply],
 // which cannot carry SafeDeletionVectors.
 //
@@ -191,7 +228,7 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 		r.DeleteFile(df)
 	}
 	for _, df := range gr.NewDataFiles {
-		r.AddDataFile(df)
+		r.AddFile(df)
 	}
 	// DVs route through DeleteFile like any pos-delete; ReplaceFiles then
 	// re-identifies them by referenced data file.
@@ -211,7 +248,7 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // Commit is single-shot: any second call returns an error regardless
 // of whether the first call succeeded, and neither re-stages the
 // rewrite nor re-registers the conflict validator. Returns an error
-// if any file passed to [RewriteFiles.AddDataFile] or
+// if any file passed to [RewriteFiles.AddFile], [RewriteFiles.AddDataFile], or
 // [RewriteFiles.DeleteFile] had an unsupported content type, if the
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
@@ -224,7 +261,8 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	if r.err != nil {
 		return r.err
 	}
-	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 {
+	if len(r.dataFilesToDelete) == 0 && len(r.dataFilesToAdd) == 0 &&
+		len(r.deleteFilesToAdd) == 0 && len(r.deleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: rewrite must have at least one file change", ErrInvalidOperation)
 	}
 	// Adds-without-deletes would route through ReplaceFiles →
@@ -237,7 +275,8 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
-	if err := r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, withRewriteSemantics()); err != nil {
+	if err := r.txn.ReplaceFilesWithDeleteFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
+		r.deleteFilesToRemove, r.deleteFilesToAdd, r.snapshotProps, withRewriteSemantics()); err != nil {
 		return err
 	}
 
