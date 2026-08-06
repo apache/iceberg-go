@@ -184,9 +184,15 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 // panic/undefined behavior later.
 func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
 	for name, ref := range t.metadata.Refs() {
-		if name == branch && ref.SnapshotRefType != BranchRef {
-			return nil, fmt.Errorf("%w: %s is not a branch", iceberg.ErrInvalidArgument, branch)
+		if name != branch {
+			continue
 		}
+		if ref.SnapshotRefType != BranchRef {
+			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
+				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+		}
+
+		break
 	}
 
 	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
@@ -561,6 +567,9 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+				return nil, err
+			}
 
 			// Rebuild snapshot manifest lists to inherit all files committed
 			// by concurrent writers since the snapshot was originally built.
@@ -573,6 +582,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
+		}
+
+		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+			return nil, err
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -708,7 +721,11 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
 			newID := head.SnapshotID
-			out[i] = AssertRefSnapshotID(branch, &newID)
+			if a.requireBranch {
+				out[i] = assertBranchRefSnapshotID(branch, &newID)
+			} else {
+				out[i] = AssertRefSnapshotID(branch, &newID)
+			}
 
 			continue
 		}
@@ -716,6 +733,16 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	}
 
 	return out
+}
+
+func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
+	for _, req := range reqs {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.requireBranch && ref.Ref == branch {
+			return ref.Validate(meta)
+		}
+	}
+
+	return nil
 }
 
 // rebuildSnapshotUpdates returns a new slice of updates where any

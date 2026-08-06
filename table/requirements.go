@@ -155,8 +155,9 @@ func (a *assertTableUuid) Validate(meta Metadata) error {
 
 type assertRefSnapshotID struct {
 	baseRequirement
-	Ref        string `json:"ref"`
-	SnapshotID *int64 `json:"snapshot-id"`
+	Ref           string `json:"ref"`
+	SnapshotID    *int64 `json:"snapshot-id"`
+	requireBranch bool
 }
 
 // AssertRefSnapshotID creates a requirement which ensures that the table branch
@@ -167,6 +168,15 @@ func AssertRefSnapshotID(ref string, id *int64) Requirement {
 		baseRequirement: baseRequirement{Type: reqAssertRefSnapshotID},
 		Ref:             ref,
 		SnapshotID:      id,
+	}
+}
+
+func assertBranchRefSnapshotID(ref string, id *int64) Requirement {
+	return &assertRefSnapshotID{
+		baseRequirement: baseRequirement{Type: reqAssertRefSnapshotID},
+		Ref:             ref,
+		SnapshotID:      id,
+		requireBranch:   true,
 	}
 }
 
@@ -185,6 +195,10 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	}
 
 	if r != nil {
+		if a.requireBranch && r.SnapshotRefType != BranchRef {
+			return fmt.Errorf("requirement failed: ref %q is a %s; tags cannot be transaction targets", a.Ref, r.SnapshotRefType)
+		}
+
 		if a.SnapshotID == nil {
 			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
 		}

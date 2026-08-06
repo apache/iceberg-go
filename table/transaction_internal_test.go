@@ -113,6 +113,32 @@ func TestNewTransactionOnBranchRejectsTags(t *testing.T) {
 
 	legacyTransaction := tbl.NewTransactionOnBranch("release")
 	require.ErrorIs(t, legacyTransaction.initErr, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, legacyTransaction.SetProperties(iceberg.Properties{"k": "v"}), "tags cannot be transaction targets")
+}
+
+func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
+	seed := newTransactionWithSnapshotRefs(t)
+	baseMeta, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	head := baseMeta.SnapshotByName(MainBranch)
+	require.NotNil(t, head)
+	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.SetSnapshotRef(MainBranch, head.SnapshotID, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	cat := &headTrackingCatalog{metadata: tagMeta}
+	tbl := New(Identifier{"db", "tag-race"}, baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"k": "v"}))
+
+	_, err = txn.Commit(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load())
 }
 
 func TestNewTransactionOnBranchAllowsBranchesAndNewRefs(t *testing.T) {

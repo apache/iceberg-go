@@ -240,6 +240,37 @@ func requirementSemanticKey(r Requirement) (string, error) {
 	return string(data), nil
 }
 
+func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	out := slices.Clone(reqs)
+	for i, req := range out {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.Ref == branch {
+			if ref.requireBranch {
+				return out
+			}
+
+			out[i] = assertBranchRefSnapshotID(branch, ref.SnapshotID)
+
+			return out
+		}
+	}
+
+	var snapshotID *int64
+	for name, ref := range base.Refs() {
+		if name == branch {
+			id := ref.SnapshotID
+			snapshotID = &id
+
+			break
+		}
+	}
+
+	return append(out, assertBranchRefSnapshotID(branch, snapshotID))
+}
+
 // addValidator appends a conflict validator under t.mx. Producers
 // that register validators from outside doCommit (RowDelta, RewriteFiles)
 // must use this helper rather than mutating t.validators directly —
@@ -2373,7 +2404,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	}
 
 	if len(meta.updates) > 0 {
-		reqs := append(slices.Clone(t.reqs), AssertTableUUID(meta.uuid))
+		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
