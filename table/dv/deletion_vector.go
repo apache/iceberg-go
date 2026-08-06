@@ -20,6 +20,7 @@ package dv
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
@@ -39,6 +40,8 @@ const (
 	dvCardinalityProperty        = "cardinality"
 	dvReferencedDataFileProperty = "referenced-data-file"
 )
+
+var ErrInvalidDeletionVector = errors.New("invalid deletion vector")
 
 const (
 	// DVMagicNumber is the magic number for deletion vectors.
@@ -151,11 +154,13 @@ func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 //
 // ReadDV also requires the selected blob to be a deletion-vector blob whose
 // referenced-data-file property matches the manifest. This is stricter than
-// clients that only use the manifest offset and size, but prevents a valid
-// Puffin blob for another data file from being applied here. A missing or
-// empty referenced-data-file property is fatal because it cannot establish
-// blob identity; a missing cardinality property is only warned about because
-// the manifest record_count still bounds the decoded bitmap.
+// Java's DVUtil.readDV and PyIceberg, which read by offset and size without
+// validating blob type or referenced-data-file, but prevents a valid Puffin
+// blob for another data file from being applied here. A missing or empty
+// referenced-data-file property is fatal because it cannot establish blob
+// identity; a missing cardinality property is only warned about because the
+// manifest record_count still bounds the decoded bitmap. The compression
+// codec is also rejected because deletion-vector-v1 stores raw bytes here.
 //
 // Blobs missing the spec-required cardinality property are still validated
 // against the manifest record_count and accepted with a slog warning rather
@@ -171,7 +176,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	}
 	manifestReferencedDataFile := dvFile.ReferencedDataFile()
 	if manifestReferencedDataFile == nil || *manifestReferencedDataFile == "" {
-		return nil, fmt.Errorf("DV file %s missing ReferencedDataFile", dvFile.FilePath())
+		return nil, fmt.Errorf("%w: DV file %s missing or empty %s property", ErrInvalidDeletionVector, dvFile.FilePath(), dvReferencedDataFileProperty)
 	}
 
 	size := *dvFile.ContentSizeInBytes()
@@ -193,20 +198,24 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	offset := *dvFile.ContentOffset()
 	blob, err := findBlobMetadataByRange(reader.Blobs(), offset, size)
 	if err != nil {
-		return nil, fmt.Errorf("DV file %s: %w", dvFile.FilePath(), err)
+		return nil, fmt.Errorf("%w: DV file %s: %w", ErrInvalidDeletionVector, dvFile.FilePath(), err)
 	}
 	if blob.Type != puffin.BlobTypeDeletionVector {
-		return nil, fmt.Errorf("DV file %s: blob at offset %d has type %q, expected %q",
+		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d has type %q, expected %q", ErrInvalidDeletionVector,
 			dvFile.FilePath(), offset, blob.Type, puffin.BlobTypeDeletionVector)
+	}
+	if blob.CompressionCodec != nil && *blob.CompressionCodec != "" {
+		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d uses unsupported compression codec %q",
+			ErrInvalidDeletionVector, dvFile.FilePath(), offset, *blob.CompressionCodec)
 	}
 
 	referencedDataFile, ok := blob.Properties[dvReferencedDataFileProperty]
 	if !ok || referencedDataFile == "" {
-		return nil, fmt.Errorf("DV file %s: blob at offset %d missing or empty %s property",
+		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d missing or empty %s property", ErrInvalidDeletionVector,
 			dvFile.FilePath(), offset, dvReferencedDataFileProperty)
 	}
 	if referencedDataFile != *manifestReferencedDataFile {
-		return nil, fmt.Errorf("DV file %s: manifest referenced_data_file %q does not match puffin %s %q",
+		return nil, fmt.Errorf("%w: DV file %s: manifest referenced_data_file %q does not match puffin %s %q", ErrInvalidDeletionVector,
 			dvFile.FilePath(), *manifestReferencedDataFile, dvReferencedDataFileProperty, referencedDataFile)
 	}
 
@@ -252,7 +261,8 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 }
 
 // findBlobMetadataByRange returns the footer entry identified by the
-// manifest's content offset and size.
+// manifest's content offset and size. On error it returns a zero-value
+// puffin.BlobMetadata; callers must check the error before reading the value.
 func findBlobMetadataByRange(blobs []puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
 	for _, b := range blobs {
 		if b.Offset != offset {

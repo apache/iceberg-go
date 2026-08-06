@@ -162,18 +162,23 @@ func writeRawPuffinWithDVBlobNoCardinality(t *testing.T, dir string, dvBlobBytes
 	})
 }
 
-func writeRawPuffinBlob(t *testing.T, dir, name string, blobBytes []byte, blobType puffin.BlobType, props map[string]string) (string, puffin.BlobMetadata) {
+func writeRawPuffinBlob(t *testing.T, dir, name string, blobBytes []byte, blobType puffin.BlobType, props map[string]string, compressionCodec ...string) (string, puffin.BlobMetadata) {
 	t.Helper()
 
 	const puffinMagic = "PFA1"
+	var codec *string
+	if len(compressionCodec) > 0 {
+		codec = &compressionCodec[0]
+	}
 	meta := puffin.BlobMetadata{
-		Type:           blobType,
-		Fields:         []int32{2147483546},
-		SnapshotID:     -1,
-		SequenceNumber: -1,
-		Offset:         int64(puffin.MagicSize),
-		Length:         int64(len(blobBytes)),
-		Properties:     props,
+		Type:             blobType,
+		Fields:           []int32{2147483546},
+		SnapshotID:       -1,
+		SequenceNumber:   -1,
+		Offset:           int64(puffin.MagicSize),
+		Length:           int64(len(blobBytes)),
+		Properties:       props,
+		CompressionCodec: codec,
 	}
 
 	payload, err := json.Marshal(puffin.Footer{Blobs: []puffin.BlobMetadata{meta}})
@@ -428,7 +433,7 @@ func TestReadDVMissingReferencedDataFile(t *testing.T) {
 			dvFile.referencedDataFile = tt.referenced
 
 			_, err := ReadDV(iceio.LocalFS{}, dvFile)
-			assert.ErrorContains(t, err, "missing ReferencedDataFile")
+			assert.ErrorContains(t, err, "missing or empty referenced-data-file property")
 		})
 	}
 }
@@ -551,6 +556,35 @@ func TestReadDVValidatesBlobMetadata(t *testing.T) {
 
 		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
 		assert.ErrorContains(t, err, `has type "test-blob", expected "deletion-vector-v1"`)
+	})
+
+	t.Run("exact path comparison does not normalize URI schemes", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writePuffinWithDVBlobAndProps(t, dir, dvBlobBytes, map[string]string{
+			dvReferencedDataFileProperty: "s3a://bucket/data/data-001.parquet",
+			dvCardinalityProperty:        "5",
+		})
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.ErrorIs(t, err, ErrInvalidDeletionVector)
+		assert.ErrorContains(t, err, "manifest referenced_data_file")
+		assert.ErrorContains(t, err, "s3://bucket/data/data-001.parquet")
+		assert.ErrorContains(t, err, "s3a://bucket/data/data-001.parquet")
+	})
+
+	t.Run("compression codec is rejected", func(t *testing.T) {
+		dir := t.TempDir()
+		path, meta := writeRawPuffinBlob(t, dir, "raw-dv-compressed.puffin", dvBlobBytes,
+			puffin.BlobTypeDeletionVector, map[string]string{
+				dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+				dvCardinalityProperty:        "5",
+			}, "zstd")
+		offset, size := meta.Offset, meta.Length
+
+		_, err := ReadDV(iceio.LocalFS{}, newDVTestFile(path, 5, &offset, &size))
+		require.ErrorIs(t, err, ErrInvalidDeletionVector)
+		assert.ErrorContains(t, err, "unsupported compression codec")
 	})
 }
 
