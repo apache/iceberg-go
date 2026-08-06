@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -47,6 +48,120 @@ type equalityDeleteSet struct {
 	keys     set[string]
 	fieldIDs []int
 	colNames []string
+}
+
+type arrowFieldRef struct {
+	path []int
+}
+
+func resolveArrowField(schema *arrow.Schema, fieldID int, fieldName, filePath string) (arrowFieldRef, error) {
+	type candidate struct {
+		ref           arrowFieldRef
+		pathName      string
+		hasIDMetadata bool
+	}
+
+	var (
+		idMatches   []candidate
+		nameMatches []candidate
+		pathMatches []candidate
+	)
+	targetName := fieldName
+	if dot := strings.LastIndexByte(targetName, '.'); dot >= 0 {
+		targetName = targetName[dot+1:]
+	}
+
+	var visit func([]arrow.Field, []int, string)
+	visit = func(fields []arrow.Field, parentPath []int, parentName string) {
+		for i, field := range fields {
+			path := append(append([]int(nil), parentPath...), i)
+			pathName := field.Name
+			if parentName != "" {
+				pathName = parentName + "." + field.Name
+			}
+			fieldIDValue := getFieldID(field)
+			fieldHasIDMetadata := fieldIDValue != nil
+
+			if fieldIDValue != nil && *fieldIDValue == fieldID {
+				idMatches = append(idMatches, candidate{ref: arrowFieldRef{path: path}, pathName: pathName, hasIDMetadata: fieldHasIDMetadata})
+			}
+			if field.Name == targetName {
+				match := candidate{ref: arrowFieldRef{path: path}, pathName: pathName, hasIDMetadata: fieldHasIDMetadata}
+				nameMatches = append(nameMatches, match)
+				if pathName == fieldName {
+					pathMatches = append(pathMatches, match)
+				}
+			}
+
+			if nested, ok := field.Type.(*arrow.StructType); ok {
+				visit(nested.Fields(), path, pathName)
+			}
+		}
+	}
+	visit(schema.Fields(), nil, "")
+
+	location := filePath
+	if location == "" {
+		location = "data record"
+	}
+
+	if fieldID > 0 {
+		switch len(idMatches) {
+		case 1:
+			return idMatches[0].ref, nil
+		case 0:
+		default:
+			return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields",
+				ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(idMatches))
+		}
+	}
+	if len(pathMatches) == 1 {
+		if pathMatches[0].hasIDMetadata {
+			return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+		}
+
+		return pathMatches[0].ref, nil
+	}
+	if len(pathMatches) > 1 {
+		return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields named %q",
+			ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(pathMatches), fieldName)
+	}
+	if len(nameMatches) == 1 {
+		if nameMatches[0].hasIDMetadata {
+			return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+		}
+
+		return nameMatches[0].ref, nil
+	}
+	if len(nameMatches) > 1 {
+		for _, match := range nameMatches {
+			if match.hasIDMetadata {
+				return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+			}
+		}
+
+		return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields named %q",
+			ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(nameMatches), targetName)
+	}
+
+	return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+}
+
+func arrowArrayAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, error) {
+	if len(ref.path) == 0 || ref.path[0] >= int(record.NumCols()) {
+		return nil, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, filePath)
+	}
+
+	result := record.Column(ref.path[0])
+	for _, index := range ref.path[1:] {
+		structArray, ok := result.(*array.Struct)
+		if !ok || index >= structArray.NumField() {
+			return nil, fmt.Errorf("equality field ID %d (%s) has unsupported nested path in %s", fieldID, fieldName, filePath)
+		}
+		result = structArray.Field(index)
+	}
+
+	return result, nil
 }
 
 // readAllEqualityDeleteFiles reads all unique equality delete files from
@@ -210,7 +325,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 	// Resolve column names from field IDs.
 	colNames := make([]string, len(fieldIDs))
-	colIndices := make([]int, len(fieldIDs))
+	fieldRefs := make([]arrowFieldRef, len(fieldIDs))
 
 	for i, fid := range fieldIDs {
 		name, ok := tableSchema.FindColumnName(fid)
@@ -218,17 +333,13 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 			return nil, nil, fmt.Errorf("equality delete field ID %d not found in table schema", fid)
 		}
 
-		colNames[i] = name
-		indices := tbl.Schema().FieldIndices(name)
-		switch len(indices) {
-		case 0:
-			return nil, nil, fmt.Errorf("equality delete column %q not found in delete file %s", name, dataFile.FilePath())
-		case 1:
-			colIndices[i] = indices[0]
-		default:
-			return nil, nil, fmt.Errorf("%w: %q in delete file %s: found %d columns",
-				ErrAmbiguousEqualityColumn, name, dataFile.FilePath(), len(indices))
+		ref, err := resolveArrowField(tbl.Schema(), fid, name, dataFile.FilePath())
+		if err != nil {
+			return nil, nil, err
 		}
+
+		colNames[i] = name
+		fieldRefs[i] = ref
 	}
 
 	// Build the set of encoded delete keys by iterating aligned batches.
@@ -241,9 +352,13 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 	for tr.Next() {
 		rec := tr.RecordBatch()
-		encoders := make([]colEncoder, len(colIndices))
-		for i, idx := range colIndices {
-			encoders[i] = makeColEncoder(rec.Column(idx))
+		encoders := make([]colEncoder, len(fieldRefs))
+		for i, ref := range fieldRefs {
+			column, err := arrowArrayAtField(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
+			if err != nil {
+				return nil, nil, err
+			}
+			encoders[i] = makeColEncoder(column)
 		}
 
 		numRows := int(rec.NumRows())
@@ -357,7 +472,7 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 // rows whose equality key columns match any entry in the delete sets.
 // Each set is applied independently (they may have different field IDs).
 func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
-	return processEqualityDeletesColumnar(ctx, eqDeleteSets)
+	return processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, "")
 }
 
 // colEncoder writes the value at row idx to buf. Resolved once per column
@@ -534,6 +649,10 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 // processEqualityDeletesColumnar resolves typed column encoders once per
 // batch, then iterates rows without per-row type switches.
 func processEqualityDeletesColumnar(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
+	return processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, "")
+}
+
+func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, dataFilePath string) (recProcessFn, error) {
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
@@ -554,16 +673,20 @@ func processEqualityDeletesColumnar(ctx context.Context, eqDeleteSets []*equalit
 		for _, eqDel := range eqDeleteSets {
 			encoders := make([]colEncoder, len(eqDel.colNames))
 			for i, name := range eqDel.colNames {
-				indices := r.Schema().FieldIndices(name)
-				if len(indices) == 0 {
-					return nil, fmt.Errorf("equality delete column %q not found in data record", name)
-				}
-				if len(indices) > 1 {
-					return nil, fmt.Errorf("%w: %q in data record: found %d columns",
-						ErrAmbiguousEqualityColumn, name, len(indices))
+				fieldID := 0
+				if i < len(eqDel.fieldIDs) {
+					fieldID = eqDel.fieldIDs[i]
 				}
 
-				encoders[i] = makeColEncoder(r.Column(indices[0]))
+				ref, err := resolveArrowField(r.Schema(), fieldID, name, dataFilePath)
+				if err != nil {
+					return nil, err
+				}
+				column, err := arrowArrayAtField(r, ref, fieldID, name, dataFilePath)
+				if err != nil {
+					return nil, err
+				}
+				encoders[i] = makeColEncoder(column)
 			}
 
 			for row := 0; row < numRows; row++ {

@@ -212,10 +212,42 @@ func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
 
 	process, err := processEqualityDeletesColumnar(context.Background(), []*equalityDeleteSet{{
 		keys:     make(set[string]),
+		fieldIDs: []int{1},
 		colNames: []string{"id"},
 	}})
 	require.NoError(t, err)
 
 	_, err = process(record)
 	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
+}
+
+func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {
+	schema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+		},
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+		},
+		{
+			Name: "record",
+			Type: arrow.StructOf(arrow.Field{
+				Name:     "value",
+				Type:     arrow.PrimitiveTypes.Int64,
+				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "3"}),
+			}),
+		},
+	}, nil)
+
+	ref, err := resolveArrowField(schema, 2, "id", "data.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []int{1}, ref.path)
+
+	ref, err = resolveArrowField(schema, 3, "record.value", "data.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []int{2, 0}, ref.path)
 }
