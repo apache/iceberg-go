@@ -766,23 +766,60 @@ func TestValidateAddedDataFilesMatchingFilterUsesFileMetrics(t *testing.T) {
 	}
 }
 
+func TestValidateAddedDataFilesMatchingFilterWithMissingBounds(t *testing.T) {
+	dir := t.TempDir()
+	baseID := int64(1)
+	concID := int64(2)
+	base := newConflictTestMetadata(t, &baseID)
+	mf := writeTestMetricsManifestWithoutBounds(t, dir, base.CurrentSchema(), concID)
+	listPath := writeTestManifestList(t, dir, concID, []iceberg.ManifestFile{mf})
+	ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
+
+	err := validateAddedDataFilesMatchingFilter(ctx,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+	require.ErrorIs(t, err, ErrConflictingDataFiles,
+		"missing bounds must not make a data file look non-conflicting")
+}
+
 func writeTestMetricsManifest(t *testing.T, dir string, schema *iceberg.Schema, snapshotID, lower, upper int64) iceberg.ManifestFile {
 	t.Helper()
-	spec := *iceberg.UnpartitionedSpec
 	lowerBytes, err := iceberg.Int64Literal(lower).MarshalBinary()
 	require.NoError(t, err)
 	upperBytes, err := iceberg.Int64Literal(upper).MarshalBinary()
 	require.NoError(t, err)
+
+	return writeTestMetricsManifestWithValues(t, dir, schema, snapshotID,
+		map[int][]byte{1: lowerBytes}, map[int][]byte{1: upperBytes})
+}
+
+func writeTestMetricsManifestWithoutBounds(t *testing.T, dir string, schema *iceberg.Schema, snapshotID int64) iceberg.ManifestFile {
+	t.Helper()
+
+	return writeTestMetricsManifestWithValues(t, dir, schema, snapshotID, nil, nil)
+}
+
+func writeTestMetricsManifestWithValues(
+	t *testing.T,
+	dir string,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	lowerBounds, upperBounds map[int][]byte,
+) iceberg.ManifestFile {
+	t.Helper()
+	spec := *iceberg.UnpartitionedSpec
 
 	builder, err := iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentData, filepath.Join(dir, "data.parquet"), iceberg.ParquetFile,
 		nil, nil, nil, 10, 1024,
 	)
 	require.NoError(t, err)
-	df := builder.
-		LowerBoundValues(map[int][]byte{1: lowerBytes}).
-		UpperBoundValues(map[int][]byte{1: upperBytes}).
-		Build()
+	if lowerBounds != nil {
+		builder = builder.LowerBoundValues(lowerBounds)
+	}
+	if upperBounds != nil {
+		builder = builder.UpperBoundValues(upperBounds)
+	}
+	df := builder.Build()
 	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df).
 		SequenceNum(1).
 		Build()

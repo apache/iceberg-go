@@ -367,7 +367,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 //     straddles the filter only triggers a conflict when at least
 //     one actual added file's partition value satisfies the filter.
 //  3. The surviving files are evaluated against their column metrics so
-//     unpartitioned files whose bounds cannot match the filter are ignored.
+//     files whose bounds cannot match the filter are ignored.
 func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
 	if len(ctx.concurrent) == 0 {
 		return nil
@@ -392,6 +392,10 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
+	// Eval copies each file's metrics into fresh evaluator state, so this
+	// evaluator can be reused across concurrent manifests.
+	// includeEmptyFiles=false is intentional: an empty file has no rows that
+	// can match the filter and must not create a conflict.
 	metricsEval, err := newInclusiveMetricsEvaluator(ctx.current.CurrentSchema(), filter, ctx.caseSensitive, false)
 	if err != nil {
 		return fmt.Errorf("failed to build metrics evaluator: %w", err)
