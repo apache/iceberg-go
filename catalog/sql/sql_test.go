@@ -2207,12 +2207,15 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	nsName := databaseName()
 	viewName := tableName()
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+	nestedNamespace := table.Identifier{nsName, "child"}
+	s.Require().NoError(db.CreateNamespace(context.Background(), nestedNamespace, nil))
 
 	viewSQL := "SELECT * FROM test_table"
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), append(nestedNamespace, viewName), schema, viewSQL, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
@@ -2220,8 +2223,6 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 }
 
 func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
-	t.Parallel()
-
 	invalid := []struct {
 		name       string
 		identifier table.Identifier
@@ -2246,10 +2247,12 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 	require.NoError(t, err)
 	cat := loaded.(*sqlcat.Catalog)
 	require.NoError(t, cat.CreateSQLTables(context.Background()))
+	for _, err := range cat.ListViews(context.Background(), nil) {
+		require.NoError(t, err, "ListViews with a nil namespace must not reject the root namespace")
+	}
+
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
 			err := cat.CreateView(context.Background(), test.identifier, nil, "", nil)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
@@ -2265,8 +2268,6 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 	}
 
 	t.Run("list views rejects missing namespace", func(t *testing.T) {
-		t.Parallel()
-
 		yielded := false
 		var gotErr error
 		for _, err := range cat.ListViews(context.Background(), table.Identifier{".."}) {

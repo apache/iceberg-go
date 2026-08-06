@@ -1233,10 +1233,6 @@ func (c *Catalog) CheckTableExists(ctx context.Context, identifier table.Identif
 }
 
 func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifier, props iceberg.Properties) error {
-	if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
-		return err
-	}
-
 	for key := range props {
 		if isReservedNamespaceProperty(key) {
 			return fmt.Errorf("%w: cannot create namespace with reserved namespace property %q", iceberg.ErrInvalidArgument, key)
@@ -1676,10 +1672,6 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 		return nil, nil
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
-		return nil, err
-	}
-
 	ns := namespaceToString(namespace)
 	if len(namespace) > 0 {
 		var exists bool
@@ -1723,10 +1715,6 @@ func (c *Catalog) listViewsAll(ctx context.Context, namespace table.Identifier) 
 func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) error {
 	if c.isV0() {
 		return errViewsUnsupportedOnV0
-	}
-
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))

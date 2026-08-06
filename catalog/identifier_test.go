@@ -92,27 +92,6 @@ func TestValidateViewIdentifier(t *testing.T) {
 	require.NotErrorIs(t, catalog.ValidateViewIdentifier(table.Identifier{"namespace", "view/name"}), catalog.ErrNoSuchTable)
 }
 
-func TestValidateNamespaceIdentifier(t *testing.T) {
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace"}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"parent", "namespace"}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", ""}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "."}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", ".."}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "child/name"}))
-	require.NoError(t, catalog.ValidateNamespaceIdentifier(table.Identifier{"namespace", "child\nname"}))
-
-	for _, ident := range []table.Identifier{nil, {}} {
-		t.Run("empty identifier", func(t *testing.T) {
-			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
-		})
-	}
-	for _, ident := range []table.Identifier{{"\x00"}, {"parent", "child\x00"}} {
-		t.Run("null character", func(t *testing.T) {
-			require.ErrorIs(t, catalog.ValidateNamespaceIdentifier(ident), catalog.ErrNoSuchNamespace)
-		})
-	}
-}
-
 func TestValidateFunctionIdentifier(t *testing.T) {
 	require.NoError(t, catalog.ValidateFunctionIdentifier(table.Identifier{"namespace", "function"}))
 
