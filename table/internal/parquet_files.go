@@ -651,6 +651,7 @@ func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, b
 			children, nested.Data().NullN(), nested.Data().Offset())
 		result := array.NewStructData(data)
 		data.Release()
+
 		return result, true, nil
 
 	case *array.Map:
@@ -691,6 +692,7 @@ func normalizeListChild(data arrow.ArrayData, values arrow.Array, mem memory.All
 	newData := array.NewData(data.DataType(), data.Len(), data.Buffers(), children, data.NullN(), data.Offset())
 	result := newArray(newData)
 	newData.Release()
+
 	return result, true, nil
 }
 
