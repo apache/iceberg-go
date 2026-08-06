@@ -526,6 +526,24 @@ func TestPartitionSpecToPathWithDroppedLeadingSourceColumn(t *testing.T) {
 	assert.Equal(t, "foo=null/bar=7/baz=true", spec.PartitionToPath(record, schema))
 }
 
+// An unknown transform renders the partition value, so two different values
+// must not collapse to the same path -- that path string is the writer key.
+func TestPartitionSpecToPathUnknownTransform(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpecID(3, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: unknown, Name: "custom",
+	})
+
+	assert.Equal(t, "custom=1", spec.PartitionToPath(partitionRecord{int32(1)}, schema))
+	assert.Equal(t, "custom=2", spec.PartitionToPath(partitionRecord{int32(2)}, schema))
+	assert.Equal(t, "custom=null", spec.PartitionToPath(partitionRecord{nil}, schema))
+}
+
 func TestGetPartitionFieldName(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "str", Type: iceberg.PrimitiveTypes.String},
@@ -581,6 +599,25 @@ func TestGetPartitionFieldName(t *testing.T) {
 			assert.Equal(t, test.expectedName, name)
 		})
 	}
+}
+
+// Generating a name would embed the transform's brackets, so an unknown
+// transform needs an explicit one.
+func TestGetPartitionFieldNameUnknownTransform(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true})
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	_, err = iceberg.GeneratePartitionFieldName(schema,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: unknown})
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+
+	name, err := iceberg.GeneratePartitionFieldName(schema,
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Transform: unknown, Name: "custom"})
+	require.NoError(t, err)
+	assert.Equal(t, "custom", name)
 }
 
 func TestPartitionFieldUnmarshalJSON(t *testing.T) {

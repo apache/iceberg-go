@@ -254,14 +254,22 @@ type UnknownTransform struct {
 	name string
 }
 
+// MarshalText rejects the zero value. UnknownTransform{} is a legal composite
+// literal outside this package, and an empty name would serialize to
+// "transform": "" -- metadata that can't be read back.
 func (t UnknownTransform) MarshalText() ([]byte, error) {
+	if t.name == "" {
+		return nil, fmt.Errorf("%w: unknown transform has no name", ErrInvalidTransform)
+	}
+
 	return []byte(t.name), nil
 }
 
 func (t UnknownTransform) String() string { return t.name }
 
-// CanTransform assumes an unknown transform could apply to any type -- the
-// real applicability isn't known.
+// CanTransform always returns true: compatibility with a source type is
+// unverifiable for an unknown transform, not verified. Callers such as
+// SortOrder.CheckCompatibility therefore accept any source type here.
 func (UnknownTransform) CanTransform(Type) bool { return true }
 
 // ResultType is unknown, so report string, matching the Java reference.
@@ -280,9 +288,17 @@ func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
 	return Optional[Literal]{}
 }
 
-func (t UnknownTransform) ToHumanStr(any) string { return t.name }
+// ToHumanStr renders the value, not the transform name. Java's
+// Transform#toHumanString default does the same and UnknownTransform doesn't
+// override it. Returning the name would be constant for a spec field, which
+// collapses distinct partitions into one PartitionToPath key.
+func (UnknownTransform) ToHumanStr(val any) string {
+	return IdentityTransform{}.ToHumanStr(val)
+}
 
-func (t UnknownTransform) ToHumanStrType(Type, any) string { return t.name }
+func (UnknownTransform) ToHumanStrType(typ Type, val any) string {
+	return IdentityTransform{}.ToHumanStrType(typ, val)
+}
 
 // Project returns nil so scans don't prune on an unknown partition field.
 func (UnknownTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {

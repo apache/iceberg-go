@@ -54,6 +54,13 @@ type transformKey struct {
 	Transform string
 }
 
+// NewUpdateSpec starts a partition spec evolution.
+//
+// If the table's current spec contains an unknown transform, the returned
+// UpdateSpec carries an error and no evolution is possible -- including
+// renaming or dropping an unrelated field. That matches Java's
+// BaseUpdatePartitionSpec, which rejects at construction rather than at commit.
+// Loading such a table is still fine; only evolving its spec is blocked.
 func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	us := &UpdateSpec{
 		txn:                   t,

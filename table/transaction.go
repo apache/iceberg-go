@@ -729,6 +729,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	if currentSpec == nil {
 		return nil, errors.New("could not get current partition spec: no current partition spec found")
 	}
+	// The spec forbids committing files against a spec with an unknown
+	// transform, whoever computed the partition tuple.
+	if err := checkNoUnknownTransform(currentSpec); err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
 
 	expectedSpecID := int32(currentSpec.ID())
 	setToAdd := make(map[string]struct{}, len(dataFiles))

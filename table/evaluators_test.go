@@ -834,6 +834,24 @@ func (p *ProjectionTestSuite) unknownSpec() iceberg.PartitionSpec {
 	)
 }
 
+// Both fields partition the same column: the bucket field still prunes, the
+// unknown one contributes nothing.
+func (p *ProjectionTestSuite) bucketAndUnknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.BucketTransform{NumBuckets: 4}, Name: "id_bucket",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
@@ -1175,6 +1193,17 @@ func (p *ProjectionTestSuite) TestUnknownTransformProjection() {
 	expr, err := project(iceberg.LessThan(iceberg.Reference("id"), int64(5)))
 	p.Require().NoError(err)
 	p.Equal(iceberg.AlwaysTrue{}, expr)
+}
+
+// An unknown field alongside a usable one must not disable the usable one's
+// pruning, and must not add a term of its own.
+func (p *ProjectionTestSuite) TestMixedSpecUnknownTransformProjection() {
+	spec := p.bucketAndUnknownSpec()
+	project := newInclusiveProjection(p.schema(), spec, true)
+
+	expr, err := project(iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.True(expr.Equals(iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(3))))
 }
 
 func (p *ProjectionTestSuite) TestProjectEmptySpec() {

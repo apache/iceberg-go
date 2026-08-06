@@ -253,9 +253,11 @@ func (s SortOrder) Len() int {
 	return len(s.fields)
 }
 
-// Field returns the sort field at index i.
+// Field returns a copy of the sort field at index i, like Fields does, so a
+// caller can't reach the sort order's internals through SortField.SourceIDs.
+// It panics if i is out of range.
 func (s SortOrder) Field(i int) SortField {
-	return s.fields[i]
+	return cloneSortField(s.fields[i])
 }
 
 func (s SortOrder) MarshalJSON() ([]byte, error) {

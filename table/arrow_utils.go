@@ -1858,6 +1858,26 @@ func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
 	return nil
 }
 
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
 	spec, err := meta.CurrentSpec()
 	if err == nil {
@@ -2007,6 +2027,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}

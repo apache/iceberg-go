@@ -61,9 +61,6 @@ var testNonPartitionedTable = table.New([]string{"non_partitioned"}, testMetadat
 
 var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartitioned, "", nil, nil)
 
-// Evolving a spec whose base already contains an unknown transform is rejected
-// up front with a clear error, matching Java's BaseUpdatePartitionSpec. Loading
-// the table is fine; only the update is blocked.
 func TestNewUpdateSpecRejectsUnknownTransformInBaseSpec(t *testing.T) {
 	unknown, err := iceberg.ParseTransform("custom_transform[42]")
 	require.NoError(t, err)

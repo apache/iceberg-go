@@ -135,11 +135,46 @@ func TestParseTransform(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.toparse, string(txt))
 
+			// Human rendering is of the value, never the transform name.
 			u := tr.(iceberg.UnknownTransform)
-			assert.Equal(t, tt.toparse, u.ToHumanStr(nil))
-			assert.Equal(t, tt.toparse, u.ToHumanStrType(iceberg.StringType{}, nil))
+			assert.Equal(t, "null", u.ToHumanStr(nil))
+			assert.Equal(t, "abc", u.ToHumanStrType(iceberg.StringType{}, "abc"))
 		})
 	}
+}
+
+func TestUnknownTransformEquals(t *testing.T) {
+	custom, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	same, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	assert.True(t, custom.Equals(same))
+
+	other, err := iceberg.ParseTransform("other_transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(other))
+
+	// Names compare byte-for-byte, matching Java's UnknownTransform.
+	upper, err := iceberg.ParseTransform("Custom_Transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(upper))
+
+	assert.False(t, custom.Equals(iceberg.IdentityTransform{}))
+}
+
+// The zero value is constructible outside the package; it must not serialize
+// to "transform": "".
+func TestUnknownTransformRejectsEmptyName(t *testing.T) {
+	_, err := iceberg.UnknownTransform{}.MarshalText()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	_, err = iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "custom", iceberg.UnknownTransform{}, schema, nil),
+	)
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
 func TestToHumanString(t *testing.T) {
