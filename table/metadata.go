@@ -1855,6 +1855,10 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
 	return maps.Clone(c.Props)
 }
 
