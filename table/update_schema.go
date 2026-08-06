@@ -320,6 +320,10 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		}
 
 		parentID = parentField.ID
+
+		if u.isDeleted(parentID) {
+			return fmt.Errorf("cannot add to a column that will be deleted: %s", parentFullPath)
+		}
 	}
 
 	name := path[len(path)-1]
@@ -746,6 +750,10 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 
 		parentID = parentField.ID
+
+		if u.isDeleted(parentID) {
+			return fmt.Errorf("cannot add to a column that will be deleted: %s", parentFullPath)
+		}
 	}
 
 	name := path[len(path)-1]
