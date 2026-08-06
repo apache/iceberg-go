@@ -232,6 +232,14 @@ func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
 	require.Equal(t, &snapshotID, mainScan.snapshotID)
 	require.Nil(t, mainScan.asOfTimestamp)
 
+	conflictingScan := tbl.Scan(WithSnapshotAsOf(asOfTimestamp), WithSnapshotID(snapshotID))
+	_, err = conflictingScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	mainScan, err = conflictingScan.UseRef(MainBranch)
+	require.NoError(t, err, "UseRef(main) should remain a no-op clone for a conflicting scan")
+	require.NotSame(t, conflictingScan, mainScan)
+	require.ErrorIs(t, mainScan.selectorErr, iceberg.ErrInvalidArgument)
+
 	liveScan := tbl.Scan()
 	mainScan, err = liveScan.UseRef(MainBranch)
 	require.NoError(t, err)
@@ -328,15 +336,29 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 		assert.Contains(t, recordsErr.Error(), "no snapshot found for timestamp")
 	})
 
-	t.Run("WithSnapshotID clears conflicting WithSnapshotAsOf option", func(t *testing.T) {
+	t.Run("WithSnapshotID records conflicting WithSnapshotAsOf option", func(t *testing.T) {
 		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
-		// WithSnapshotID should clear any previous asOfTimestamp
 		scan := table.Scan(WithSnapshotAsOf(timestamp), WithSnapshotID(9999))
 		require.NotNil(t, scan)
 
-		// Should use snapshot ID, not timestamp
-		assert.Equal(t, &[]int64{9999}[0], scan.snapshotID)
+		assert.ErrorIs(t, scan.selectorErr, iceberg.ErrInvalidArgument)
+		assert.Nil(t, scan.snapshotID)
+		assert.Equal(t, &timestamp, scan.asOfTimestamp)
+		_, err := scan.ResolveSnapshot()
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
+
+	t.Run("WithSnapshotAsOf records conflicting WithSnapshotID option", func(t *testing.T) {
+		snapshotID := int64(9999)
+		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
+		scan := table.Scan(WithSnapshotID(snapshotID), WithSnapshotAsOf(timestamp))
+		require.NotNil(t, scan)
+
+		assert.ErrorIs(t, scan.selectorErr, iceberg.ErrInvalidArgument)
+		assert.Equal(t, &snapshotID, scan.snapshotID)
 		assert.Nil(t, scan.asOfTimestamp)
+		_, err := scan.Projection()
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 }
 

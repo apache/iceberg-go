@@ -239,6 +239,7 @@ type Scan struct {
 	caseSensitive  bool
 	snapshotID     *int64
 	asOfTimestamp  *int64
+	selectorErr    error
 	options        iceberg.Properties
 	limit          int64
 
@@ -266,11 +267,18 @@ func (scan *Scan) Reporter() metrics.Reporter {
 	return scan.reporter
 }
 
+// UseRef selects a named snapshot reference. UseRef(MainBranch) is an
+// intentional no-op that returns a clone, so it remains valid even when the
+// scan already has an explicit snapshot or as-of selector. Any conflicting
+// selectors recorded by scan options are still surfaced by scan execution.
 func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if name == MainBranch {
 		out := *scan
 
 		return &out, nil
+	}
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
 	}
 
 	if scan.snapshotID != nil {
@@ -296,6 +304,10 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 // the table's current snapshot; explicit snapshot IDs and as-of timestamps
 // must resolve to an existing snapshot.
 func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
@@ -332,6 +344,10 @@ func (scan *Scan) Snapshot() *Snapshot {
 }
 
 func (scan *Scan) Projection() (*iceberg.Schema, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
 	curSchema, err := scan.effectiveSchema()
 	if err != nil {
 		return nil, err
@@ -386,6 +402,10 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 }
 
 func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
 	curSchema := scan.metadata.CurrentSchema()
 	if scan.snapshotID == nil && scan.asOfTimestamp == nil {
 		// Live scans intentionally use the table's current schema. A schema-only
@@ -817,6 +837,10 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
 	if scan.asOfTimestamp != nil {
 		snapshot, err := scan.ResolveSnapshot()
 		if err != nil {
@@ -1026,6 +1050,10 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // scan's projection, row filters, and positional delete handling. This is useful when
 // the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if scan.selectorErr != nil {
+		return nil, nil, scan.selectorErr
+	}
+
 	var (
 		boundFilter iceberg.BooleanExpression
 		err         error
