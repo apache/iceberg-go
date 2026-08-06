@@ -139,42 +139,34 @@ func TestExprs(t *testing.T) {
 
 func TestNanosecondTimestampLiterals(t *testing.T) {
 	tests := []struct {
-		name       string
-		fieldType  iceberg.Type
-		predicate  iceberg.BooleanExpression
-		wantExpr   string
-		wantValues []string
-		wantType   string
+		name      string
+		fieldType iceberg.Type
+		predicate iceberg.BooleanExpression
+		wantExpr  string
 	}{
 		{
-			name:       "timestamp equality",
-			fieldType:  iceberg.PrimitiveTypes.TimestampNs,
-			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(123456789)),
-			wantExpr:   "equal(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.123456789)) => boolean?",
-			wantValues: []string{"1970-01-01 00:00:00.123456789"},
-			wantType:   "precision_timestamp<9>",
+			name:      "timestamp equality",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(123456789)),
+			wantExpr:  "equal(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.123456789)) => boolean?",
 		},
 		{
-			name:       "timestamp with timezone equality before epoch",
-			fieldType:  iceberg.PrimitiveTypes.TimestampTzNs,
-			predicate:  iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(-123456789)),
-			wantExpr:   "equal(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.876543211Z)) => boolean?",
-			wantValues: []string{"1969-12-31T23:59:59.876543211Z"},
-			wantType:   "precision_timestamp_tz<9>",
+			name:      "timestamp with timezone equality before epoch",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(-123456789)),
+			wantExpr:  "equal(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.876543211Z)) => boolean?",
 		},
 		{
-			name:       "timestamp in",
-			fieldType:  iceberg.PrimitiveTypes.TimestampNs,
-			predicate:  iceberg.IsIn(iceberg.Reference("ts"), iceberg.TimestampNano(1), iceberg.TimestampNano(1001)),
-			wantValues: []string{"1970-01-01 00:00:00.000000001", "1970-01-01 00:00:00.000001001"},
-			wantType:   "precision_timestamp<9>",
+			name:      "timestamp in",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.IsIn(iceberg.Reference("ts"), iceberg.TimestampNano(1), iceberg.TimestampNano(1001)),
+			wantExpr:  "is_in(.field(0) => precision_timestamp?<9>, list<precision_timestamp<9>>([precision_timestamp<9>(1970-01-01 00:00:00.000000001) precision_timestamp<9>(1970-01-01 00:00:00.000001001)])) => boolean?",
 		},
 		{
-			name:       "timestamp with timezone not in",
-			fieldType:  iceberg.PrimitiveTypes.TimestampTzNs,
-			predicate:  iceberg.NotIn(iceberg.Reference("ts"), iceberg.TimestampNano(-1), iceberg.TimestampNano(1001)),
-			wantValues: []string{"1969-12-31T23:59:59.999999999Z", "1970-01-01T00:00:00.000001001Z"},
-			wantType:   "precision_timestamp_tz<9>",
+			name:      "timestamp with timezone not in",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.NotIn(iceberg.Reference("ts"), iceberg.TimestampNano(-1), iceberg.TimestampNano(1001)),
+			wantExpr:  "not(is_in(.field(0) => precision_timestamp_tz?<9>, list<precision_timestamp_tz<9>>([precision_timestamp_tz<9>(1969-12-31T23:59:59.999999999Z) precision_timestamp_tz<9>(1970-01-01T00:00:00.000001001Z)])) => boolean?) => boolean?",
 		},
 		{
 			name:      "timestamp greater than",
@@ -198,15 +190,7 @@ func TestNanosecondTimestampLiterals(t *testing.T) {
 
 			_, converted, err := substrait.ConvertExpr(sc, bound, true)
 			require.NoError(t, err)
-			if tt.wantExpr != "" {
-				assert.Equal(t, tt.wantExpr, converted.String())
-			}
-			for _, value := range tt.wantValues {
-				assert.Contains(t, converted.String(), value)
-			}
-			if tt.wantType != "" {
-				assert.Contains(t, converted.String(), tt.wantType)
-			}
+			assert.Equal(t, tt.wantExpr, converted.String())
 		})
 	}
 }
