@@ -61,7 +61,7 @@ type RewriteFiles struct {
 	txn                 *Transaction
 	dataFilesToDelete   []iceberg.DataFile
 	dataFilesToAdd      []iceberg.DataFile
-	deleteFilesToAdd    []iceberg.DataFile
+	deleteFilesToAdd    []DeleteFileAddition
 	deleteFilesToRemove []iceberg.DataFile
 	snapshotProps       iceberg.Properties
 	err                 error
@@ -139,27 +139,40 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 }
 
 // AddDeleteFile queues a new positional delete, equality delete, or deletion
-// vector for this rewrite. The file is added in the same snapshot as any data
-// replacements and delete-file removals staged on the builder.
-func (r *RewriteFiles) AddDeleteFile(df iceberg.DataFile) *RewriteFiles {
+// vector for this rewrite. DataSequenceNumber must be the maximum data
+// sequence number of the delete files being replaced.
+func (r *RewriteFiles) AddDeleteFile(addition DeleteFileAddition) *RewriteFiles {
 	if r.err != nil {
 		return r
 	}
+	df := addition.File
 	if df == nil {
 		r.err = fmt.Errorf("%w: AddDeleteFile got nil data file", ErrInvalidOperation)
+
+		return r
+	}
+	if addition.DataSequenceNumber < 0 {
+		r.err = fmt.Errorf("%w: AddDeleteFile got invalid data sequence number %d for %s",
+			ErrInvalidOperation, addition.DataSequenceNumber, df.FilePath())
 
 		return r
 	}
 
 	switch df.ContentType() {
 	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		r.deleteFilesToAdd = append(r.deleteFilesToAdd, df)
+		r.deleteFilesToAdd = append(r.deleteFilesToAdd, addition)
 	default:
 		r.err = fmt.Errorf("%w: AddDeleteFile only supports delete files; got content type %s (%s)",
 			ErrInvalidOperation, df.ContentType(), df.FilePath())
 	}
 
 	return r
+}
+
+// AddDeleteFileWithDataSequenceNumber is a convenience form of
+// [RewriteFiles.AddDeleteFile].
+func (r *RewriteFiles) AddDeleteFileWithDataSequenceNumber(df iceberg.DataFile, seq int64) *RewriteFiles {
+	return r.AddDeleteFile(DeleteFileAddition{File: df, DataSequenceNumber: seq})
 }
 
 // AddFile queues a file according to its content type. It is useful for
@@ -175,7 +188,10 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 	case iceberg.EntryContentData:
 		return r.AddDataFile(df)
 	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		return r.AddDeleteFile(df)
+		r.err = fmt.Errorf("%w: AddFile cannot add delete files without a data sequence number; use AddDeleteFile",
+			ErrInvalidOperation)
+
+		return r
 	default:
 		r.err = fmt.Errorf("%w: AddFile got unsupported content type %s (%s)",
 			ErrInvalidOperation, df.ContentType(), df.FilePath())
