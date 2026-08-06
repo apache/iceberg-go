@@ -710,7 +710,7 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 	}
 }
 
-func (as *arrowScan) projectedFieldIDs() (set[int], error) {
+func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression) (set[int], error) {
 	idset := set[int]{}
 	// Collect leaf field IDs for column pruning.
 	// For nested types (map, list, struct), we recursively descend to find
@@ -719,8 +719,8 @@ func (as *arrowScan) projectedFieldIDs() (set[int], error) {
 		collectLeafIDs(field.Type, field.ID, idset)
 	}
 
-	if as.boundRowFilter != nil {
-		extracted, err := iceberg.ExtractFieldIDs(as.boundRowFilter)
+	if rowFilter != nil {
+		extracted, err := iceberg.ExtractFieldIDs(rowFilter)
 		if err != nil {
 			return nil, err
 		}
@@ -739,8 +739,8 @@ type enumeratedRecord struct {
 	Err    error
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (*iceberg.Schema, []int, tblutils.FileReader, error) {
-	ids, err := as.projectedFieldIDs()
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, rowFilter iceberg.BooleanExpression) (*iceberg.Schema, []int, tblutils.FileReader, error) {
+	ids, err := as.projectedFieldIDs(rowFilter)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -776,12 +776,12 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile) (
 	return iceSchema, colIndices, rdr, nil
 }
 
-func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema) (recProcessFn, bool, error) {
-	if as.boundRowFilter == nil || as.boundRowFilter.Equals(iceberg.AlwaysTrue{}) {
+func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {
+	if rowFilter == nil || rowFilter.Equals(iceberg.AlwaysTrue{}) {
 		return nil, false, nil
 	}
 
-	translatedFilter, err := iceberg.TranslateColumnNames(as.boundRowFilter, fileSchema)
+	translatedFilter, err := iceberg.TranslateColumnNames(rowFilter, fileSchema)
 	if err != nil {
 		return nil, false, err
 	}
@@ -807,6 +807,53 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 	}
 
 	return nil, false, nil
+}
+
+type filterBindingState struct {
+	hasBound   bool
+	hasUnbound bool
+}
+
+type filterBindingVisitor struct{}
+
+func (filterBindingVisitor) VisitTrue() filterBindingState  { return filterBindingState{} }
+func (filterBindingVisitor) VisitFalse() filterBindingState { return filterBindingState{} }
+func (filterBindingVisitor) VisitNot(child filterBindingState) filterBindingState {
+	return child
+}
+func (filterBindingVisitor) VisitAnd(left, right filterBindingState) filterBindingState {
+	return filterBindingState{
+		hasBound:   left.hasBound || right.hasBound,
+		hasUnbound: left.hasUnbound || right.hasUnbound,
+	}
+}
+func (filterBindingVisitor) VisitOr(left, right filterBindingState) filterBindingState {
+	return filterBindingVisitor{}.VisitAnd(left, right)
+}
+func (filterBindingVisitor) VisitUnbound(iceberg.UnboundPredicate) filterBindingState {
+	return filterBindingState{hasUnbound: true}
+}
+func (filterBindingVisitor) VisitBound(iceberg.BoundPredicate) filterBindingState {
+	return filterBindingState{hasBound: true}
+}
+
+func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+	if filter == nil {
+		return nil, nil
+	}
+
+	state, err := iceberg.VisitExpr(filter, filterBindingVisitor{})
+	if err != nil {
+		return nil, err
+	}
+	if state.hasBound && state.hasUnbound {
+		return nil, fmt.Errorf("%w: scan task residual mixes bound and unbound predicates", iceberg.ErrInvalidArgument)
+	}
+	if !state.hasUnbound {
+		return filter, nil
+	}
+
+	return iceberg.BindExpr(schema, filter, caseSensitive)
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow
@@ -987,6 +1034,7 @@ func (as *arrowScan) processRecords(
 	ctx context.Context,
 	task tblutils.Enumerated[FileScanTask],
 	fileSchema *iceberg.Schema,
+	rowFilter iceberg.BooleanExpression,
 	rdr tblutils.FileReader,
 	columns []int,
 	pipeline []recProcessFn,
@@ -997,6 +1045,9 @@ func (as *arrowScan) processRecords(
 		testRowGroups any
 		recRdr        array.RecordReader
 	)
+	if rowFilter == nil {
+		rowFilter = iceberg.AlwaysTrue{}
+	}
 
 	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
 	// longer cover contiguous file positions. Steps that key on the original
@@ -1006,12 +1057,12 @@ func (as *arrowScan) processRecords(
 	// stays enabled.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile:
-		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, as.boundRowFilter, false)
+		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, rowFilter, false)
 		if err != nil {
 			return err
 		}
 
-		bloomPreds, err := newBloomFilterPredicates(as.boundRowFilter)
+		bloomPreds, err := newBloomFilterPredicates(rowFilter)
 		if err != nil {
 			return err
 		}
@@ -1098,7 +1149,16 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		dropFile   bool
 	)
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
+	rowFilter := as.boundRowFilter
+	rowFilter, err = bindTaskFilter(as.metadata.CurrentSchema(), task.Value.Residual, as.caseSensitive)
+	if task.Value.Residual == nil {
+		rowFilter = as.boundRowFilter
+	}
+	if err != nil {
+		return err
+	}
+
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, rowFilter)
 	if err != nil {
 		return err
 	}
@@ -1175,7 +1235,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		pipeline = append(pipeline, eqFn)
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
+	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, rowFilter)
 	if err != nil {
 		return err
 	}
@@ -1206,7 +1266,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, posSource, out)
+	err = as.processRecords(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, out)
 
 	return err
 }
@@ -1226,7 +1286,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		dropFile   bool
 	)
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, as.boundRowFilter)
 	if err != nil {
 		return err
 	}
@@ -1252,7 +1312,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema)
+	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, as.boundRowFilter)
 	if err != nil {
 		return err
 	}
@@ -1280,7 +1340,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rdr, colIndices, pipeline, posSource, out)
+	err = as.processRecords(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, out)
 
 	return err
 }
