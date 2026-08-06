@@ -211,6 +211,47 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 		"_last_updated_sequence_number must report the original creation snapshot's sequence number, not the rewrite's")
 }
 
+// TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis verifies that the
+// rewrite path can prune a non-matching row group without renumbering rows in
+// the group that survives. The row filter is still applied after lineage
+// synthesis, while Parquet statistics can skip the first group entirely.
+func TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV3RowLineageTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{
+		table.ParquetRowGroupLimitKey: "5",
+	}))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, parquetRowGroupCount(t, tbl), "fixture must have two row groups")
+
+	// Delete ids 1..5, which occupy the first row group. The survivor filter
+	// can therefore skip that group by statistics while the second group's
+	// rows retain their original IDs.
+	tbl, err = tbl.Delete(ctx, iceberg.LessThanEqual(iceberg.Reference("id"), int64(5)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{
+		6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+	}, readRowIDsByID(t, ctx, tbl))
+}
+
 // TestCoWRewriteRowIDNextRowIDAccounting verifies that row-id accounting remains
 // correct after a CoW rewrite. The overcounting (where next-row-id advances by
 // the full manifest row count including preserved survivors) is intentional and

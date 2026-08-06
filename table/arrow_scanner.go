@@ -681,9 +681,13 @@ type arrowScan struct {
 	scanSchema      *iceberg.Schema
 	projectedSchema *iceberg.Schema
 	boundRowFilter  iceberg.BooleanExpression
-	caseSensitive   bool
-	rowLimit        int64
-	options         iceberg.Properties
+	// rowGroupFilter is used only for Parquet statistics and bloom-filter
+	// pruning. It lets callers keep boundRowFilter as AlwaysTrue while they
+	// must evaluate the real row filter after position-dependent enrichment.
+	rowGroupFilter iceberg.BooleanExpression
+	caseSensitive  bool
+	rowLimit       int64
+	options        iceberg.Properties
 
 	useLargeTypes bool
 	concurrency   int
