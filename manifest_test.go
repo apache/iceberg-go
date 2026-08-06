@@ -3336,7 +3336,7 @@ func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation()
 	partitionData[1000] = []byte{0xff}
 	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
 
-	m.Equal([]byte{0x01, 0x02}, builder.d.PartitionData["part"])
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
 	dataFile.Partition()[1000].([]byte)[0] = 0xff
 	dataFile.ColumnSizes()[1] = 99
 	dataFile.ValueCounts()[1] = 99
@@ -3384,12 +3384,24 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 		map[int]any{1000: partition}, nil, nil, 1, 10)
 	m.Require().NoError(err)
 	dataFile := builder.
+		ColumnSizes(map[int]int64{1: 10}).
+		ValueCounts(map[int]int64{1: 2}).
+		NullValueCounts(map[int]int64{1: 1}).
+		NaNValueCounts(map[int]int64{1: 0}).
 		LowerBoundValues(map[int][]byte{1: lower}).
 		UpperBoundValues(map[int][]byte{1: upper}).
+		KeyMetadata([]byte{0x07, 0x08}).
+		SplitOffsets([]int64{10, 20}).
+		EqualityFieldIDs([]int{1, 2}).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
 		Build()
 
 	var buf bytes.Buffer
-	manifest, err := WriteManifest("/manifest.avro", &buf, 2, spec, schema, snapshotID,
+	manifest, err := WriteManifest("/manifest.avro", &buf, 3, spec, schema, snapshotID,
 		[]ManifestEntry{NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile).SequenceNum(1).Build()})
 	m.Require().NoError(err)
 	encoded := buf.Bytes()
@@ -3402,18 +3414,70 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 		encoded[i] = ^encoded[i]
 	}
 	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
 
 	partitionResult := decoded.Partition()
+	columnSizesResult := decoded.ColumnSizes()
+	valueCountsResult := decoded.ValueCounts()
+	nullCountsResult := decoded.NullValueCounts()
+	nanCountsResult := decoded.NaNValueCounts()
 	lowerResult := decoded.LowerBoundValues()
 	upperResult := decoded.UpperBoundValues()
+	keyResult := decoded.KeyMetadata()
+	splitsResult := decoded.SplitOffsets()
+	equalityIDsResult := decoded.EqualityFieldIDs()
 	partitionResult[1000].([]byte)[0] = 0xff
+	columnSizesResult[1] = 99
+	valueCountsResult[1] = 99
+	nullCountsResult[1] = 99
+	nanCountsResult[1] = 99
 	lowerResult[1][0] = 0xff
 	upperResult[1][0] = 0xff
+	keyResult[0] = 0xff
+	splitsResult[0] = 99
+	equalityIDsResult[0] = 99
+	*decoded.SortOrderID() = 99
+	*decoded.FirstRowID() = 99
+	*decoded.ReferencedDataFile() = "changed"
+	*decoded.ContentOffset() = 99
+	*decoded.ContentSizeInBytes() = 99
 	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDataFileCloneHelpersPreserveNilAndEmptyState() {
+	m.Nil(clonePartitionMap(nil))
+	m.NotNil(clonePartitionMap(map[int]any{}))
+	m.Nil(cloneByteMap(nil))
+	m.NotNil(cloneByteMap(map[int][]byte{}))
+	m.Nil(mapToAvroColMapClonedBytes(nil))
+	m.NotNil(mapToAvroColMapClonedBytes(map[int][]byte{}))
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {

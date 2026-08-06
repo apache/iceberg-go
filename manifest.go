@@ -2297,6 +2297,9 @@ func clonePartitionMap(src map[int]any) map[int]any {
 		return nil
 	}
 
+	// Manifest decoding produces immutable scalar/literal values and []byte
+	// for binary and fixed values. Clone the latter explicitly; arbitrary
+	// caller-defined mutable values are not recursively copied.
 	out := maps.Clone(src)
 	for id, value := range out {
 		if bytes, ok := value.([]byte); ok {
@@ -2318,6 +2321,19 @@ func cloneByteMap(src map[int][]byte) map[int][]byte {
 	}
 
 	return out
+}
+
+func mapToAvroColMapClonedBytes(m map[int][]byte) *[]colMap[int, []byte] {
+	if m == nil {
+		return nil
+	}
+
+	out := make([]colMap[int, []byte], 0, len(m))
+	for k, v := range m {
+		out = append(out, colMap[int, []byte]{Key: k, Value: slices.Clone(v)})
+	}
+
+	return &out
 }
 
 func clonePointer[T any](value *T) *T {
@@ -2610,7 +2626,7 @@ func NewDataFileBuilder(
 			specID:                 int32(spec.id),
 			fieldIDToPartitionData: clonePartitionMap(fieldIDToPartitionData),
 			fieldNameToID:          fieldNameToID,
-			fieldIDToLogicalType:   fieldIDToLogicalType,
+			fieldIDToLogicalType:   maps.Clone(fieldIDToLogicalType),
 		},
 	}, nil
 }
@@ -2666,14 +2682,14 @@ func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBui
 
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.LowerBounds = mapToAvroColMap(cloneByteMap(bounds))
+	b.d.LowerBounds = mapToAvroColMapClonedBytes(bounds)
 
 	return b
 }
 
 // UpperBoundValues sets the upper bound values for the data file.
 func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.UpperBounds = mapToAvroColMap(cloneByteMap(bounds))
+	b.d.UpperBounds = mapToAvroColMapClonedBytes(bounds)
 
 	return b
 }

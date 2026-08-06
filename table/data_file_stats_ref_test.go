@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"testing"
 
 	iceberg "github.com/apache/iceberg-go"
@@ -29,6 +30,10 @@ import (
 type publicStatsDataFile struct {
 	iceberg.DataFile
 	getterCalls int
+}
+
+type plainStatsDataFile struct {
+	iceberg.DataFile
 }
 
 type publicPartitionDataFile struct {
@@ -151,50 +156,83 @@ func TestDataFilePartitionFallsBackToPublicGetter(t *testing.T) {
 	assert.Equal(t, map[int]any{1000: "partition"}, dataFilePartition(file))
 }
 
-func BenchmarkInclusiveMetricsEvalDataFileStats(b *testing.B) {
-	lower, err := iceberg.Int64Literal(1).MarshalBinary()
-	require.NoError(b, err)
-	upper, err := iceberg.Int64Literal(10).MarshalBinary()
-	require.NoError(b, err)
-
+func TestGetPartitionRecordClonesBinaryValues(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+		SourceIDs: []int{1}, FieldID: 1000, Name: "payload_part", Transform: iceberg.IdentityTransform{},
 	})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Binary})
 	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
-		"s3://bucket/file.parquet", iceberg.ParquetFile, map[int]any{1000: int64(1)}, nil, nil, 10, 100)
-	require.NoError(b, err)
-	file := builder.
-		ValueCounts(map[int]int64{1: 10}).
-		NullValueCounts(map[int]int64{1: 0}).
-		LowerBoundValues(map[int][]byte{1: lower}).
-		UpperBoundValues(map[int][]byte{1: upper}).
-		Build()
-	schema := iceberg.NewSchema(1, iceberg.NestedField{
-		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
-	})
-	eval, err := newInclusiveMetricsEvaluator(schema,
-		iceberg.LessThan(iceberg.Reference("id"), int64(20)), true, true)
-	require.NoError(b, err)
+		"s3://bucket/file.parquet", iceberg.ParquetFile, map[int]any{1000: []byte{1, 2}}, nil, nil, 1, 10)
+	require.NoError(t, err)
+	file := builder.Build()
 
-	b.Run("borrowed stats", func(b *testing.B) {
-		b.ReportAllocs()
-		for range b.N {
-			_, err := eval(file)
-			if err != nil {
-				b.Fatal(err)
+	record := GetPartitionRecord(file, spec.PartitionType(schema))
+	value := record.Get(0).([]byte)
+	value[0] = 99
+
+	assert.Equal(t, []byte{1, 2}, file.Partition()[1000])
+}
+
+func BenchmarkInclusiveMetricsEvalDataFileStats(b *testing.B) {
+	for _, columnCount := range []int{1, 50, 500} {
+		b.Run(fmt.Sprintf("%d columns", columnCount), func(b *testing.B) {
+			lower, err := iceberg.Int64Literal(1).MarshalBinary()
+			require.NoError(b, err)
+			upper, err := iceberg.Int64Literal(10).MarshalBinary()
+			require.NoError(b, err)
+
+			fields := make([]iceberg.NestedField, columnCount)
+			valueCounts := make(map[int]int64, columnCount)
+			nullCounts := make(map[int]int64, columnCount)
+			nanCounts := make(map[int]int64, columnCount)
+			lowerBounds := make(map[int][]byte, columnCount)
+			upperBounds := make(map[int][]byte, columnCount)
+			for i := range fields {
+				fieldID := i + 1
+				fields[i] = iceberg.NestedField{ID: fieldID, Name: fmt.Sprintf("id%d", i), Type: iceberg.PrimitiveTypes.Int64}
+				valueCounts[fieldID] = 10
+				nullCounts[fieldID] = 0
+				nanCounts[fieldID] = 0
+				lowerBounds[fieldID] = lower
+				upperBounds[fieldID] = upper
 			}
-		}
-	})
-	b.Run("public defensive copies", func(b *testing.B) {
-		wrapped := &publicStatsDataFile{DataFile: file}
-		b.ReportAllocs()
-		for range b.N {
-			_, err := eval(wrapped)
-			if err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
+
+			builder, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+				"s3://bucket/file.parquet", iceberg.ParquetFile, nil, nil, nil, 10, 100)
+			require.NoError(b, err)
+			file := builder.
+				ValueCounts(valueCounts).
+				NullValueCounts(nullCounts).
+				NaNValueCounts(nanCounts).
+				LowerBoundValues(lowerBounds).
+				UpperBoundValues(upperBounds).
+				Build()
+			schema := iceberg.NewSchema(1, fields...)
+			eval, err := newInclusiveMetricsEvaluator(schema,
+				iceberg.LessThan(iceberg.Reference("id0"), int64(20)), true, true)
+			require.NoError(b, err)
+
+			b.Run("borrowed stats", func(b *testing.B) {
+				b.ReportAllocs()
+				for range b.N {
+					_, err := eval(file)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+			b.Run("public defensive copies", func(b *testing.B) {
+				wrapped := &plainStatsDataFile{DataFile: file}
+				b.ReportAllocs()
+				for range b.N {
+					_, err := eval(wrapped)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
 }
 
 func BenchmarkGetPartitionRecordDataFilePartition(b *testing.B) {

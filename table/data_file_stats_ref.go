@@ -36,6 +36,10 @@ type dataFilePartitionRefer interface {
 	DataFilePartitionRef(internal.DataFileRef) map[int]any
 }
 
+// dataFileStats returns borrowed metadata for the concrete manifest data file
+// and falls back to the public defensive-copying getters for other DataFile
+// implementations. Borrowed maps are used only while evaluating one file and
+// must never escape or be mutated.
 func dataFileStats(file iceberg.DataFile) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
@@ -51,6 +55,10 @@ func dataFileStats(file iceberg.DataFile) (
 		file.LowerBoundValues(), file.UpperBoundValues()
 }
 
+// dataFilePartition returns a borrowed partition map for the concrete
+// manifest data file and falls back to the public getter for other DataFile
+// implementations. Callers must use the map only for the current planning
+// operation; exported results must clone mutable values before returning them.
 func dataFilePartition(file iceberg.DataFile) map[int]any {
 	if ref, ok := file.(dataFilePartitionRefer); ok {
 		return ref.DataFilePartitionRef(internal.DataFileRef{})

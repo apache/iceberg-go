@@ -173,7 +173,12 @@ func (m *manifestEntries) addDVEntry(e iceberg.ManifestEntry) {
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
-		out[i] = partitionData[f.ID]
+		value := partitionData[f.ID]
+		if bytes, ok := value.([]byte); ok {
+			out[i] = slices.Clone(bytes)
+		} else {
+			out[i] = value
+		}
 	}
 
 	return out

@@ -23,11 +23,16 @@ import "github.com/apache/iceberg-go/internal"
 // restricts this zero-copy accessor to trusted in-module callers; the public
 // DataFile getters continue returning defensive copies. The returned maps and
 // every byte slice reachable through the bounds maps alias the DataFile and
-// must not be mutated or retained beyond the current evaluation.
+// must not be mutated or retained beyond the current evaluation. Values are
+// the immutable scalar values produced by the manifest decoder; callers must
+// not introduce mutable values through this borrowed view.
 //
 // This view intentionally contains only the maps consumed by metric
-// evaluators. Partition has a separate borrowed accessor because partition
-// records are built once per file during scan planning.
+// evaluators. ColumnSizes and DistinctValueCounts are excluded because the
+// evaluator does not read them, and cloning those maps would add work to the
+// hot path without changing its result. Partition has a separate borrowed
+// accessor because partition records are built once per file during scan
+// planning.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
