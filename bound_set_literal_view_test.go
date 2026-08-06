@@ -27,7 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestBoundSetPredicateLiteralViewClonesMutableMembers(t *testing.T) {
+func TestBoundSetPredicateLiteralsCloneMutableMembers(t *testing.T) {
 	t.Parallel()
 
 	geometry, err := iceberg.GeometryTypeOf("srid:4326")
@@ -85,7 +85,7 @@ func TestBoundSetPredicateLiteralViewClonesMutableMembers(t *testing.T) {
 				value[0] ^= 0xff
 			}
 			for _, expected := range expectedLiterals {
-				assert.True(t, literals.Contains(expected))
+				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expected))
 			}
 
 			assert.True(t, literals.All(func(literal iceberg.Literal) bool {
@@ -99,7 +99,7 @@ func TestBoundSetPredicateLiteralViewClonesMutableMembers(t *testing.T) {
 				return true
 			}))
 			for _, expected := range expectedLiterals {
-				assert.True(t, literals.Contains(expected))
+				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expected))
 			}
 		})
 	}

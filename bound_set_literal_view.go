@@ -22,22 +22,6 @@ import (
 	"slices"
 )
 
-type readOnlyLiteralSet struct {
-	Set[Literal]
-}
-
-func (readOnlyLiteralSet) Add(...Literal) {
-	panic(fmt.Errorf("%w: cannot add to read-only literal set", ErrInvalidArgument))
-}
-
-func (s readOnlyLiteralSet) Equals(other Set[Literal]) bool {
-	if rhs, ok := other.(readOnlyLiteralSet); ok {
-		other = rhs.Set
-	}
-
-	return s.Set.Equals(other)
-}
-
 func cloneBoundLiteral(lit Literal) Literal {
 	switch lit := lit.(type) {
 	case BinaryLiteral:
@@ -53,19 +37,13 @@ func cloneBoundLiteral(lit Literal) Literal {
 	}
 }
 
-func (s readOnlyLiteralSet) Members() []Literal {
-	members := s.Set.Members()
-	for i, literal := range members {
-		members[i] = cloneBoundLiteral(literal)
+func cloneBoundLiteralSet(lits Set[Literal]) Set[Literal] {
+	cloned := newLiteralSet()
+	for _, literal := range lits.Members() {
+		cloned.Add(cloneBoundLiteral(literal))
 	}
 
-	return members
-}
-
-func (s readOnlyLiteralSet) All(fn func(Literal) bool) bool {
-	return s.Set.All(func(literal Literal) bool {
-		return fn(cloneBoundLiteral(literal))
-	})
+	return cloned
 }
 
 type boundSetLiteralRef interface {

@@ -38,6 +38,7 @@ type containsBoundSetVisitor struct {
 
 func (v *containsBoundSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
 	v.found = literals.Contains(v.needle)
+	literals.Add(iceberg.NewLiteral("visitor-injected"))
 
 	return nil
 }
@@ -492,9 +493,7 @@ func TestInNotInSimplifications(t *testing.T) {
 
 		bsp := bound.(iceberg.BoundSetPredicate)
 		literals := bsp.Literals()
-		assert.PanicsWithError(t, "invalid argument: cannot add to read-only literal set", func() {
-			literals.Add(iceberg.NewLiteral("injected"))
-		})
+		literals.Add(iceberg.NewLiteral("injected"))
 
 		assert.Equal(t, 2, bsp.Literals().Len())
 		assert.False(t, bsp.Literals().Contains(iceberg.NewLiteral("injected")))
@@ -570,17 +569,16 @@ func TestInNotInSimplifications(t *testing.T) {
 		}
 	})
 
-	t.Run("access bound literals without allocating", func(t *testing.T) {
+	t.Run("bound predicate visitors receive detached literals", func(t *testing.T) {
 		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
 		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
 		require.NoError(t, err)
 		predicate := bound.(iceberg.BoundPredicate)
 		visitor := &containsBoundSetVisitor{needle: iceberg.NewLiteral("hello")}
 
-		assert.Zero(t, testing.AllocsPerRun(100, func() {
-			iceberg.VisitBoundPredicate(predicate, visitor)
-		}))
+		iceberg.VisitBoundPredicate(predicate, visitor)
 		assert.True(t, visitor.found)
+		assert.Equal(t, 2, predicate.(iceberg.BoundSetPredicate).Literals().Len())
 	})
 
 	t.Run("bind dedup to eq", func(t *testing.T) {

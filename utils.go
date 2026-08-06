@@ -160,9 +160,6 @@ func (l literalSet) Members() []Literal {
 }
 
 func (l literalSet) Equals(other Set[Literal]) bool {
-	if rhs, ok := other.(readOnlyLiteralSet); ok {
-		other = rhs.Set
-	}
 	rhs, ok := other.(literalSet)
 	if !ok {
 		return false
