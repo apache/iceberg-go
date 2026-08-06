@@ -201,7 +201,7 @@ func TestNormalizeFilePath(t *testing.T) {
 		{
 			name:     "windows_path",
 			input:    "C:\\Windows\\path\\file.txt",
-			expected: "C:/Windows/path/file.txt",
+			expected: "c:/windows/path/file.txt",
 		},
 		{
 			name:     "s3_url",
@@ -216,7 +216,7 @@ func TestNormalizeFilePath(t *testing.T) {
 		{
 			name:     "windows_file_uri",
 			input:    "file:///C:/warehouse/data/../file.parquet",
-			expected: "C:/warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
 		},
 		{
 			name:     "unc_file_uri",
@@ -247,7 +247,7 @@ func TestNormalizeNonURLPath(t *testing.T) {
 		{
 			name:     "windows_path",
 			input:    "C:\\Windows\\path\\file.txt",
-			expected: "C:/Windows/path/file.txt",
+			expected: "c:/windows/path/file.txt",
 		},
 		{
 			name:     "relative_path",
@@ -257,12 +257,12 @@ func TestNormalizeNonURLPath(t *testing.T) {
 		{
 			name:     "windows_path_with_dot_segments",
 			input:    `C:\warehouse\data\..\file.parquet`,
-			expected: "C:/warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
 		},
 		{
 			name:     "mixed_separators_with_dot_segments",
 			input:    `C:\warehouse/data\..\file.parquet`,
-			expected: "C:/warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
 		},
 		{
 			name:     "unc_path",
@@ -272,17 +272,17 @@ func TestNormalizeNonURLPath(t *testing.T) {
 		{
 			name:     "windows_drive_root",
 			input:    `C:\..\file.parquet`,
-			expected: "C:/file.parquet",
+			expected: "c:/file.parquet",
 		},
 		{
 			name:     "windows_drive_root_with_multiple_parent_segments",
 			input:    `C:\warehouse\..\..\file.parquet`,
-			expected: "C:/file.parquet",
+			expected: "c:/file.parquet",
 		},
 		{
 			name:     "windows_drive_relative_path",
 			input:    `C:foo\..\bar`,
-			expected: "C:bar",
+			expected: "c:bar",
 		},
 		{
 			name:     "unc_share_root",
@@ -337,6 +337,16 @@ func TestIsFileOrphanMatchesWindowsDotSegments(t *testing.T) {
 	index := newReferencedFileIndex(referencedFiles, cfg)
 
 	isOrphan, err := isFileOrphan("C:/warehouse/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.False(t, isOrphan)
+}
+
+func TestIsFileOrphanMatchesWindowsCaseInsensitivePaths(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{`C:\Warehouse\Data\file.parquet`: true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan(`c:\warehouse\data\FILE.PARQUET`, referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.False(t, isOrphan)
 }
@@ -676,12 +686,22 @@ func TestNormalizeURLPath(t *testing.T) {
 		{
 			name:     "complex_path_cleaning",
 			input:    "s3://bucket/path/../other/./file.txt",
-			expected: "s3://bucket/other/file.txt",
+			expected: "s3://bucket/path/../other/./file.txt",
 		},
 		{
 			name:     "slash_path_cleaning",
 			input:    "s3://bucket/path/data/../file.txt",
-			expected: "s3://bucket/path/file.txt",
+			expected: "s3://bucket/path/data/../file.txt",
+		},
+		{
+			name:     "escaped_separator_is_opaque",
+			input:    "s3://bucket/path%2Ffile.txt",
+			expected: "s3://bucket/path%2Ffile.txt",
+		},
+		{
+			name:     "duplicate_slashes_are_opaque",
+			input:    "s3://bucket/path//file.txt",
+			expected: "s3://bucket/path//file.txt",
 		},
 	}
 
@@ -699,6 +719,16 @@ func TestNormalizeURLPath_InvalidURL(t *testing.T) {
 	result := normalizeURLPath("not-a-valid-url", cfg)
 	expected := normalizeNonURLPath("not-a-valid-url")
 	assert.Equal(t, expected, result)
+}
+
+func TestIsFileOrphanPreservesRemoteObjectKeySpelling(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"s3://bucket/path%2Ffile.txt": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("s3://bucket/path/file.txt", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.True(t, isOrphan)
 }
 
 func TestOrphanCleanup_EdgeCases(t *testing.T) {
