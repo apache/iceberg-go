@@ -70,6 +70,13 @@ const (
 	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
 
+	// Deliberately not namespaced under write.parquet: this is the parquet-mr key
+	// Iceberg Java reads straight from the table properties, so a table carrying
+	// it gets the same dictionary behavior from either implementation.
+	ParquetDictEnabledKey                     = "parquet.enable.dictionary"
+	ParquetDictEnabledDefault                 = true
+	ParquetDictEncodingColumnEnabledKeyPrefix = "write.parquet.dict-encoding-enabled.column"
+
 	ParquetShredVariantsKey     = "write.parquet.shred-variants"
 	ParquetShredVariantsDefault = false
 	// Rows buffered per file to infer shredding (held per open partition writer).
@@ -260,7 +267,6 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 
 	writerProps := []parquet.WriterProperty{
-		parquet.WithDictionaryDefault(false),
 		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
 			ParquetRowGroupLimitDefault))),
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
@@ -314,14 +320,38 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		if !ok || colName == "" {
 			continue
 		}
-		// EqualFold matches Java's Boolean.parseBoolean: only "true"
-		// (case-insensitive) is true; anything else, including "1" or
-		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
-		enabled := strings.EqualFold(val, "true")
-		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
+		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, javaBool(val)))
+	}
+
+	// Dictionary encoding is on unless parquet.enable.dictionary disables it;
+	// write.parquet.dict-encoding-enabled.column.<col-name> overrides per column.
+	dictEnabled := ParquetDictEnabledDefault
+	if val, ok := props[ParquetDictEnabledKey]; ok {
+		dictEnabled = javaBool(val)
+	}
+	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
+
+	// The suffix is matched against the Parquet physical column path, not the
+	// Iceberg field name. These differ for nested fields (Iceberg `items.element`
+	// is `items.list.element` in Parquet), so a per-column override on one of
+	// those has no effect. Same for the bloom filter prefix above.
+	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
 	return writerProps
+}
+
+// javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses
+// for these properties: only "true" (case-insensitive) is true; anything else,
+// including "1" and "yes", is false. strconv.ParseBool differs ("1" → true).
+func javaBool(val string) bool {
+	return strings.EqualFold(val, "true")
 }
 
 // ParquetRowGroupTargetSizeBytes returns the configured uncompressed row-group
