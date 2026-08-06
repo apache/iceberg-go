@@ -32,6 +32,10 @@ type dataFileStatsRefer interface {
 	)
 }
 
+type dataFilePartitionRefer interface {
+	DataFilePartitionRef(internal.DataFileRef) map[int]any
+}
+
 func dataFileStats(file iceberg.DataFile) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
@@ -45,4 +49,12 @@ func dataFileStats(file iceberg.DataFile) (
 
 	return file.ValueCounts(), file.NullValueCounts(), file.NaNValueCounts(),
 		file.LowerBoundValues(), file.UpperBoundValues()
+}
+
+func dataFilePartition(file iceberg.DataFile) map[int]any {
+	if ref, ok := file.(dataFilePartitionRefer); ok {
+		return ref.DataFilePartitionRef(internal.DataFileRef{})
+	}
+
+	return file.Partition()
 }

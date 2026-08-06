@@ -26,9 +26,8 @@ import "github.com/apache/iceberg-go/internal"
 // must not be mutated or retained beyond the current evaluation.
 //
 // This view intentionally contains only the maps consumed by metric
-// evaluators. Partition, column-size, and distinct-count accessors remain on
-// their defensive-copy paths until a measured hot path warrants another
-// borrowed contract.
+// evaluators. Partition has a separate borrowed accessor because partition
+// records are built once per file during scan planning.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
@@ -39,4 +38,15 @@ func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	d.initColumnStatsData()
 
 	return d.valCntMap, d.nullCntMap, d.nanCntMap, d.lowerBoundMap, d.upperBoundMap
+}
+
+// DataFilePartitionRef returns the data file's partition map without copying.
+// The token restricts this zero-copy accessor to trusted in-module callers;
+// the public Partition getter continues returning a defensive copy. The
+// returned map and all mutable values reachable through it alias the DataFile
+// and must not be mutated or retained beyond the current planning operation.
+func (d *dataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
+	d.initPartitionData()
+
+	return d.fieldIDToPartitionData
 }

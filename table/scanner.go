@@ -182,7 +182,7 @@ func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.Struct
 // GetPartitionRecord converts a DataFile's partition map into a positional
 // record ordered by the fields of the given partition struct type.
 func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
-	return newPartitionRecord(dataFile.Partition(), partitionType)
+	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
@@ -562,7 +562,7 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 // atomically adds new rows alongside deletes for old rows.
 func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
 	dataSeqNum := dataEntry.SequenceNum()
-	dataPartition := dataEntry.DataFile().Partition()
+	dataPartition := dataFilePartition(dataEntry.DataFile())
 
 	out := make([]iceberg.DataFile, 0)
 	for _, del := range eqDeleteEntries {
@@ -575,7 +575,7 @@ func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries
 		// For partitioned tables, equality deletes must share the same
 		// partition as the data file. Unpartitioned deletes (nil/empty
 		// partition) apply globally.
-		delPartition := del.DataFile().Partition()
+		delPartition := dataFilePartition(del.DataFile())
 		if len(delPartition) > 0 && len(dataPartition) > 0 {
 			if !partitionsMatch(dataPartition, delPartition) {
 				continue
