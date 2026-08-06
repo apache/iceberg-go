@@ -22,7 +22,7 @@ import (
 	"fmt"
 )
 
-// BlobType is the type of blob in a Puffin file
+// BlobType is the type of blob in a Puffin file.
 type BlobType string
 
 const (
@@ -30,6 +30,9 @@ const (
 	BlobTypeDeletionVectorV1          BlobType = "deletion-vector-v1"
 )
 
+// IsKnown reports whether bt is one of the standard blob types understood by
+// this package. Unknown non-empty wire values may still be preserved for
+// forward compatibility.
 func (bt BlobType) IsKnown() bool {
 	switch bt {
 	case BlobTypeApacheDatasketchesThetaV1, BlobTypeDeletionVectorV1:
@@ -39,6 +42,9 @@ func (bt BlobType) IsKnown() bool {
 	}
 }
 
+// IsValid reports whether bt is non-nil and names a standard blob type.
+// Unknown non-empty values can be decoded and preserved, but are not valid for
+// operations that require a known blob type.
 func (bt *BlobType) IsValid() bool {
 	return bt != nil && bt.IsKnown()
 }

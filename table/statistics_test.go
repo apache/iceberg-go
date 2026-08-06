@@ -53,6 +53,7 @@ func TestMetadataPreservesUnknownStatisticsBlobType(t *testing.T) {
 	require.Len(t, stats[0].BlobMetadata, 1)
 	assert.Equal(t, BlobType("vendor-sketch-v1"), stats[0].BlobMetadata[0].Type)
 	assert.False(t, stats[0].BlobMetadata[0].Type.IsKnown())
+	assert.False(t, stats[0].BlobMetadata[0].Type.IsValid())
 }
 
 func TestBlobTypeRejectsNullAndEmptyValues(t *testing.T) {
