@@ -738,7 +738,7 @@ func normalizeFilePath(path string) string {
 }
 
 func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
-	if strings.HasPrefix(path, "file:") {
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
 		if u, err := url.Parse(path); err == nil {
 			host := strings.ToLower(u.Host)
 			if host == "" || host == "localhost" {
@@ -764,7 +764,7 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 }
 
 func versionHintLocation(tableLocation string) string {
-	if strings.Contains(tableLocation, "://") || strings.HasPrefix(tableLocation, "file:") {
+	if strings.Contains(tableLocation, "://") || strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
 		if joined, err := url.JoinPath(tableLocation, "metadata", "version-hint.text"); err == nil {
 			return joined
 		}
@@ -803,11 +803,14 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 
 	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
 	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
-	normalizedURL := &url.URL{
-		Scheme: normalizedScheme,
-		Host:   normalizedAuthority,
-		Path:   pathpkg.Clean(parsedURL.Path),
-	}
+
+	// Object-store paths are opaque keys. Keep their spelling exactly as
+	// supplied: escaped separators, duplicate slashes, and dot segments can
+	// all be meaningful parts of a key. Only the explicitly configured scheme
+	// and authority equivalences are normalized here.
+	normalizedURL := *parsedURL
+	normalizedURL.Scheme = normalizedScheme
+	normalizedURL.Host = normalizedAuthority
 
 	return normalizedURL.String()
 }
@@ -824,20 +827,37 @@ func normalizeNonURLPath(path string) string {
 	normalized := strings.ReplaceAll(path, "\\", "/")
 	volume, remainder, rooted := splitPortableVolume(normalized)
 	if volume == "" {
-		return pathpkg.Clean(normalized)
+		return normalizeWindowsLocalPathCase(pathpkg.Clean(normalized))
 	}
 
 	if rooted {
 		cleaned := pathpkg.Clean("/" + remainder)
 
-		return volume + "/" + strings.TrimPrefix(cleaned, "/")
+		return normalizeWindowsLocalPathCase(volume + "/" + strings.TrimPrefix(cleaned, "/"))
 	}
 
 	if remainder == "" {
-		return volume
+		return normalizeWindowsLocalPathCase(volume)
 	}
 
-	return volume + pathpkg.Clean(remainder)
+	return normalizeWindowsLocalPathCase(volume + pathpkg.Clean(remainder))
+}
+
+func normalizeWindowsLocalPathCase(path string) string {
+	if isWindowsLocalPath(path) {
+		return strings.ToLower(path)
+	}
+
+	return path
+}
+
+func isWindowsLocalPath(path string) bool {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		return true
+	}
+
+	volume, _, rooted := splitPortableVolume(path)
+	return rooted && strings.HasPrefix(volume, "//")
 }
 
 func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
@@ -885,6 +905,12 @@ func filePathKey(file string) string {
 	// remain part of the comparison key.
 	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
 		if parsedURL, err := url.Parse(file); err == nil {
+			if parsedURL.Scheme != "" && !strings.EqualFold(parsedURL.Scheme, "file") {
+				// Keep remote object-key spelling, including escaped separators,
+				// when grouping candidates for prefix-mismatch checks.
+				return parsedURL.EscapedPath()
+			}
+
 			return normalizeNonURLPath(parsedURL.Path)
 		}
 	}
