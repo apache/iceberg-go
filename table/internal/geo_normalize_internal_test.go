@@ -18,6 +18,8 @@
 package internal
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -68,4 +70,275 @@ func TestNormalizeWKBArrayUsesProvidedAllocator(t *testing.T) {
 	require.True(t, changed)
 	require.NotZero(t, mem.CurrentAlloc())
 	normalized.Release()
+}
+
+func TestNormalizeNestedArray(t *testing.T) {
+	mem := memory.DefaultAllocator
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
+	iso := newWKBBuilder(wkbPoint).f64(3, 4).bytes()
+
+	geo := newGeoWKBArray(t, mem, typeDef, ewkb, iso)
+	structArray, err := array.NewStructArrayWithFields(
+		[]arrow.Array{geo},
+		[]arrow.Field{{Name: "geom", Type: typeDef, Nullable: true}},
+	)
+	require.NoError(t, err)
+	geo.Release()
+
+	listArray := newGeoListArray(t, mem, typeDef, false, ewkb, iso)
+	largeListArray := newGeoListArray(t, mem, typeDef, true, ewkb, iso)
+	fixedListArray := newGeoFixedSizeListArray(t, mem, typeDef, ewkb, iso)
+	mapArray := newGeoMapArray(t, mem, typeDef, ewkb, iso)
+	deepArray, err := array.NewStructArrayWithFields(
+		[]arrow.Array{listArray},
+		[]arrow.Field{{Name: "nested", Type: listArray.DataType(), Nullable: true}},
+	)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		arr  arrow.Array
+	}{
+		{name: "struct", arr: structArray},
+		{name: "list", arr: listArray},
+		{name: "large list", arr: largeListArray},
+		{name: "fixed size list", arr: fixedListArray},
+		{name: "map", arr: mapArray},
+		{name: "deep nesting", arr: deepArray},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, changed, err := normalizeNestedArray(tt.arr, mem)
+			require.NoError(t, err)
+			require.True(t, changed)
+			defer normalized.Release()
+			assertNoEWKB(t, normalized)
+		})
+	}
+
+	structArray.Release()
+	listArray.Release()
+	largeListArray.Release()
+	fixedListArray.Release()
+	mapArray.Release()
+	deepArray.Release()
+}
+
+func TestNormalizeNestedArrayPreservesSliceAndNulls(t *testing.T) {
+	mem := memory.DefaultAllocator
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
+	iso := newWKBBuilder(wkbPoint).f64(3, 4).bytes()
+
+	builder := array.NewListBuilder(mem, arrow.BinaryTypes.Binary)
+	values := builder.ValueBuilder().(*array.BinaryBuilder)
+	builder.Append(true)
+	values.Append(ewkb)
+	builder.AppendNull()
+	builder.Append(true)
+	values.Append(iso)
+	raw := builder.NewArray()
+	builder.Release()
+	geo := newGeoWKBArray(t, mem, typeDef, ewkb, iso)
+	data := array.NewData(arrow.ListOf(typeDef), raw.Len(), raw.Data().Buffers(),
+		[]arrow.ArrayData{geo.Data()}, raw.Data().NullN(), raw.Data().Offset())
+	base := array.NewListData(data)
+	data.Release()
+	raw.Release()
+	geo.Release()
+	defer base.Release()
+
+	sliced := array.NewSlice(base, 1, 3)
+	defer sliced.Release()
+	normalized, changed, err := normalizeNestedArray(sliced, mem)
+	require.NoError(t, err)
+	require.True(t, changed)
+	defer normalized.Release()
+
+	require.Equal(t, sliced.Data().Offset(), normalized.Data().Offset())
+	require.True(t, normalized.IsNull(0))
+	require.True(t, normalized.IsValid(1))
+	assertNoEWKB(t, normalized)
+}
+
+func TestNormalizeNestedArrayReusesUnchangedChildren(t *testing.T) {
+	mem := memory.DefaultAllocator
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
+	geo := newGeoWKBArray(t, mem, typeDef, ewkb)
+	intsBuilder := array.NewInt32Builder(mem)
+	intsBuilder.AppendValues([]int32{1}, nil)
+	ints := intsBuilder.NewArray()
+	intsBuilder.Release()
+
+	input, err := array.NewStructArrayWithFields(
+		[]arrow.Array{geo, ints},
+		[]arrow.Field{
+			{Name: "geom", Type: typeDef, Nullable: true},
+			{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		},
+	)
+	require.NoError(t, err)
+	geo.Release()
+	ints.Release()
+	defer input.Release()
+
+	normalized, changed, err := normalizeNestedArray(input, mem)
+	require.NoError(t, err)
+	require.True(t, changed)
+	defer normalized.Release()
+
+	result := normalized.(*array.Struct)
+	require.Same(t, input.Field(1).Data(), result.Field(1).Data())
+	assertNoEWKB(t, result)
+}
+
+func TestNormalizeGeoBatchNormalizesNestedEWKB(t *testing.T) {
+	mem := memory.DefaultAllocator
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	ewkb := newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes()
+	list := newGeoListArray(t, mem, typeDef, false, ewkb)
+	defer list.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{Name: "nested", Type: list.DataType(), Nullable: true}}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{list}, int64(list.Len()))
+	defer batch.Release()
+
+	writer := &ParquetFileWriter{mem: mem}
+	normalized, err := writer.normalizeGeoBatch(batch)
+	require.NoError(t, err)
+	require.NotSame(t, batch, normalized)
+	defer normalized.Release()
+	assertNoEWKB(t, normalized.Column(0))
+}
+
+func newGeoWKBArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBType, values ...[]byte) arrow.Array {
+	builder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	for _, value := range values {
+		if value == nil {
+			builder.AppendNull()
+		} else {
+			builder.Append(value)
+		}
+	}
+	storage := builder.NewArray()
+	builder.Release()
+	ext := array.NewExtensionArrayWithStorage(typeDef, storage)
+	storage.Release()
+	return ext
+}
+
+func newGeoListArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBType, large bool, values ...[]byte) arrow.Array {
+	if large {
+		builder := array.NewLargeListBuilder(mem, arrow.BinaryTypes.Binary)
+		items := builder.ValueBuilder().(*array.BinaryBuilder)
+		for _, value := range values {
+			builder.Append(true)
+			items.Append(value)
+		}
+		raw := builder.NewArray()
+		builder.Release()
+		return replaceListValues(t, raw, typeDef, values, true)
+	}
+
+	builder := array.NewListBuilder(mem, arrow.BinaryTypes.Binary)
+	items := builder.ValueBuilder().(*array.BinaryBuilder)
+	for _, value := range values {
+		builder.Append(true)
+		items.Append(value)
+	}
+	raw := builder.NewArray()
+	builder.Release()
+	return replaceListValues(t, raw, typeDef, values, false)
+}
+
+func newGeoFixedSizeListArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBType, values ...[]byte) arrow.Array {
+	builder := array.NewFixedSizeListBuilder(mem, 1, arrow.BinaryTypes.Binary)
+	items := builder.ValueBuilder().(*array.BinaryBuilder)
+	for _, value := range values {
+		builder.Append(true)
+		items.Append(value)
+	}
+	raw := builder.NewArray()
+	builder.Release()
+	return replaceListValues(t, raw, typeDef, values, false)
+}
+
+func newGeoMapArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBType, values ...[]byte) arrow.Array {
+	builder := array.NewMapBuilder(mem, arrow.BinaryTypes.String, arrow.BinaryTypes.Binary, false)
+	keys := builder.KeyBuilder().(*array.StringBuilder)
+	items := builder.ItemBuilder().(*array.BinaryBuilder)
+	for idx, value := range values {
+		builder.Append(true)
+		keys.Append(fmt.Sprintf("key-%d", idx))
+		items.Append(value)
+	}
+	raw := builder.NewMapArray()
+	builder.Release()
+	geo := newGeoWKBArray(t, mem, typeDef, values...)
+	entryData := raw.Data().Children()[0]
+	entryChildren := slices.Clone(entryData.Children())
+	entryChildren[1] = geo.Data()
+	newEntryData := array.NewData(entryData.DataType(), entryData.Len(), entryData.Buffers(),
+		entryChildren, entryData.NullN(), entryData.Offset())
+	mapData := array.NewData(raw.DataType(), raw.Len(), raw.Data().Buffers(),
+		[]arrow.ArrayData{newEntryData}, raw.Data().NullN(), raw.Data().Offset())
+	result := array.NewMapData(mapData)
+	mapData.Release()
+	newEntryData.Release()
+	geo.Release()
+	raw.Release()
+	return result
+}
+
+func replaceListValues(t *testing.T, raw arrow.Array, typeDef *geoarrow.WKBType, values [][]byte, large bool) arrow.Array {
+	t.Helper()
+	mem := memory.DefaultAllocator
+	geo := newGeoWKBArray(t, mem, typeDef, values...)
+	var listType arrow.DataType
+	var newArray func(arrow.ArrayData) arrow.Array
+	if large {
+		listType = arrow.LargeListOf(typeDef)
+		newArray = func(data arrow.ArrayData) arrow.Array { return array.NewLargeListData(data) }
+	} else if _, ok := raw.(*array.FixedSizeList); ok {
+		listType = arrow.FixedSizeListOf(1, typeDef)
+		newArray = func(data arrow.ArrayData) arrow.Array { return array.NewFixedSizeListData(data) }
+	} else {
+		listType = arrow.ListOf(typeDef)
+		newArray = func(data arrow.ArrayData) arrow.Array { return array.NewListData(data) }
+	}
+	data := array.NewData(listType, raw.Len(), raw.Data().Buffers(),
+		[]arrow.ArrayData{geo.Data()}, raw.Data().NullN(), raw.Data().Offset())
+	result := newArray(data)
+	data.Release()
+	geo.Release()
+	raw.Release()
+	return result
+}
+
+func assertNoEWKB(t *testing.T, arr arrow.Array) {
+	t.Helper()
+	switch nested := arr.(type) {
+	case array.ExtensionArray:
+		storage := nested.Storage().(wkbStorage)
+		for idx := range storage.Len() {
+			if storage.IsNull(idx) {
+				continue
+			}
+			require.False(t, isEWKB(storage.Value(idx)))
+		}
+	case *array.Struct:
+		for idx := range nested.NumField() {
+			assertNoEWKB(t, nested.Field(idx))
+		}
+	case *array.Map:
+		assertNoEWKB(t, nested.ListValues())
+	case *array.List:
+		assertNoEWKB(t, nested.ListValues())
+	case *array.LargeList:
+		assertNoEWKB(t, nested.ListValues())
+	case *array.FixedSizeList:
+		assertNoEWKB(t, nested.ListValues())
+	}
 }
