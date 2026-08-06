@@ -45,22 +45,18 @@ const (
 )
 
 func generateSnapshotID() int64 {
-	var (
-		rndUUID = uuid.New()
-		out     [8]byte
-	)
+	return snapshotIDFromUUID(uuid.New())
+}
+
+func snapshotIDFromUUID(id uuid.UUID) int64 {
+	var out [8]byte
 
 	for i := range 8 {
-		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		lhs, rhs := id[i], id[i+8]
 		out[i] = lhs ^ rhs
 	}
 
-	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
-	if snapshotID < 0 {
-		snapshotID = -snapshotID
-	}
-
-	return snapshotID
+	return int64(binary.LittleEndian.Uint64(out[:]) & math.MaxInt64)
 }
 
 // Metadata for an iceberg table as specified in the Iceberg spec
@@ -963,6 +959,24 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	return nil
 }
 
+func (b *MetadataBuilder) NewRetainingSnapshotRefUpdate(name string, snapshotID int64, refType RefType) *setSnapshotRefUpdate {
+	var maxRefAgeMs, maxSnapshotAgeMs int64
+	var minSnapshotsToKeep int
+	if existing, ok := b.refs[name]; ok && existing.SnapshotRefType == refType {
+		if existing.MaxRefAgeMs != nil {
+			maxRefAgeMs = *existing.MaxRefAgeMs
+		}
+		if existing.MaxSnapshotAgeMs != nil {
+			maxSnapshotAgeMs = *existing.MaxSnapshotAgeMs
+		}
+		if existing.MinSnapshotsToKeep != nil {
+			minSnapshotsToKeep = *existing.MinSnapshotsToKeep
+		}
+	}
+
+	return NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep)
+}
+
 func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	if _, found := b.refs[name]; !found {
 		return fmt.Errorf("%w: snapshot ref not found: %s", iceberg.ErrInvalidArgument, name)
@@ -1491,7 +1505,7 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		FormatVersion int `json:"format-version"`
 	}{}
 	if err := json.Unmarshal(b, &ver); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	var ret Metadata
@@ -1511,12 +1525,19 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, err
 	}
 
-	return ret, json.Unmarshal(normalized, ret)
+	if err := json.Unmarshal(normalized, ret); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	return ret, nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 	var metadata map[string]json.RawMessage
 	if err := json.Unmarshal(b, &metadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+	if err := requireLastUpdatedMS(metadata); err != nil {
 		return nil, err
 	}
 
@@ -1638,7 +1659,6 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		LastUpdatedMS:      -1,
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -1646,6 +1666,15 @@ func initCommonMetadataForDeserialization() commonMetadata {
 		SortOrderList:      nil,
 		Specs:              nil,
 	}
+}
+
+func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
+	value, ok := fields["last-updated-ms"]
+	if !ok || string(value) == "null" {
+		return fmt.Errorf("%w: last-updated-ms is absent or null", ErrInvalidMetadata)
+	}
+
+	return nil
 }
 
 func (c *commonMetadata) Ref() SnapshotRef {
@@ -2222,9 +2251,6 @@ func (c *commonMetadata) constructRefs() {
 
 func (c *commonMetadata) validate() error {
 	switch {
-	case c.LastUpdatedMS == 0:
-		// last-updated-ms is required
-		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
 	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
@@ -2264,6 +2290,10 @@ func (c *commonMetadata) validate() error {
 		return err
 	}
 
+	if err := c.checkSnapshots(); err != nil {
+		return err
+	}
+
 	c.constructRefs()
 
 	if err := c.checkMainRefMatchesCurrentSnapshot(); err != nil {
@@ -2272,6 +2302,18 @@ func (c *commonMetadata) validate() error {
 
 	if err := c.checkRefsExist(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) checkSnapshots() error {
+	seen := make(map[int64]struct{}, len(c.SnapshotList))
+	for _, snapshot := range c.SnapshotList {
+		if _, ok := seen[snapshot.SnapshotID]; ok {
+			return fmt.Errorf("%w: duplicate snapshot ID %d", ErrInvalidMetadata, snapshot.SnapshotID)
+		}
+		seen[snapshot.SnapshotID] = struct{}{}
 	}
 
 	return nil

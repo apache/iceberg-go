@@ -331,6 +331,23 @@ func TestDeserializeDVWrapsBitmapDecodeError(t *testing.T) {
 	assert.ErrorContains(t, err, "deserialize deletion vector bitmap")
 }
 
+// Why: a valid DV length and CRC must not hide extra bytes after the framed
+// roaring bitmap.
+// Condition: append bytes to a valid inner bitmap, then rebuild the envelope
+// so its length and CRC both match the malformed payload.
+// Assertion: returns a contextual bitmap error containing "trailing data".
+func TestDeserializeDVRejectsTrailingBitmapData(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	bm.Set(7)
+	var bitmap bytes.Buffer
+	require.NoError(t, bm.Serialize(&bitmap))
+	bitmap.Write([]byte{0xde, 0xad})
+
+	_, err := DeserializeDV(wrapDVPayloadForTest(bitmap.Bytes()), -1)
+	assert.ErrorContains(t, err, "deserialize deletion vector bitmap")
+	assert.ErrorContains(t, err, "trailing data")
+}
+
 // Why: manifest metadata and DV content should agree on the number of deleted rows.
 // Condition: valid DV blob with 5 positions, but expected cardinality is set to 999.
 // Assertion: returns an error containing "cardinality mismatch".

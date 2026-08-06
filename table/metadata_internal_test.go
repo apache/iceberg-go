@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"path"
 	"slices"
@@ -36,6 +37,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSnapshotIDFromUUIDClearsSignBit(t *testing.T) {
+	for _, id := range []uuid.UUID{
+		{7: 0x80},
+		{15: 0x80},
+	} {
+		require.Zero(t, snapshotIDFromUUID(id))
+	}
+
+	require.Equal(t, int64(math.MaxInt64), snapshotIDFromUUID(uuid.UUID{
+		0: 0xff, 1: 0xff, 2: 0xff, 3: 0xff, 4: 0xff, 5: 0xff, 6: 0xff, 7: 0xff,
+	}))
+}
 
 const ExampleTableMetadataV2 = `{
     "format-version": 2,
@@ -310,6 +324,82 @@ func TestMetadataV3Parsing(t *testing.T) {
 	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
 }
 
+func TestLastUpdatedMSPresence(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "v1", data: ExampleTableMetadataV1},
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &metadata))
+
+			for _, key := range []string{
+				"snapshots", "snapshot-log", "metadata-log", "current-snapshot-id",
+				"refs", "statistics", "partition-statistics",
+			} {
+				delete(metadata, key)
+			}
+
+			t.Run("missing", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				delete(metadata, "last-updated-ms")
+				assertMissingLastUpdatedMS(t, metadata)
+			})
+
+			t.Run("null", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				metadata["last-updated-ms"] = nil
+				assertMissingLastUpdatedMS(t, metadata)
+			})
+
+			t.Run("epoch", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				metadata["last-updated-ms"] = float64(0)
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				parsed, err := ParseMetadataBytes(raw)
+				require.NoError(t, err)
+				assert.Zero(t, parsed.LastUpdatedMillis())
+			})
+
+			t.Run("negative", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				metadata["last-updated-ms"] = float64(-1)
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				parsed, err := ParseMetadataBytes(raw)
+				require.NoError(t, err)
+				assert.Equal(t, int64(-1), parsed.LastUpdatedMillis())
+			})
+
+			t.Run("wrong type", func(t *testing.T) {
+				metadata := maps.Clone(metadata)
+				metadata["last-updated-ms"] = "2024-01-01"
+				raw, err := json.Marshal(metadata)
+				require.NoError(t, err)
+				_, err = ParseMetadataBytes(raw)
+				require.ErrorIs(t, err, ErrInvalidMetadata)
+			})
+		})
+	}
+}
+
+func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
+	t.Helper()
+
+	raw, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	_, err = ParseMetadataBytes(raw)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "last-updated-ms is absent or null")
+}
+
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	base, err := builder.Build()
@@ -562,6 +652,63 @@ func TestRejectInvalidSchemaEntries(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidMetadata)
 		assert.ErrorContains(t, err, "duplicate schema ID 0")
 	})
+}
+
+func TestRejectDuplicateSnapshotIDs(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+	snapshots := metadata["snapshots"].([]any)
+	current := snapshots[len(snapshots)-1].(map[string]any)
+
+	tests := []struct {
+		name      string
+		duplicate map[string]any
+	}{
+		{name: "identical snapshot", duplicate: maps.Clone(current)},
+		{
+			name: "different manifest list",
+			duplicate: func() map[string]any {
+				duplicate := maps.Clone(current)
+				duplicate["manifest-list"] = "s3://bucket/metadata/different.avro"
+
+				return duplicate
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			invalid := maps.Clone(metadata)
+			invalid["snapshots"] = append(slices.Clone(snapshots), tt.duplicate)
+			data, err := json.Marshal(invalid)
+			require.NoError(t, err)
+
+			_, err = ParseMetadataBytes(data)
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+			assert.ErrorContains(t, err, "duplicate snapshot ID 3055729675574597004")
+		})
+	}
+}
+
+func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+
+	specs := metadata["partition-specs"].([]any)
+	metadata["partition-specs"] = append(slices.Clone(specs), map[string]any{
+		"spec-id": json.Number("-1"),
+		"fields":  []any{},
+	})
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "spec ID must be non-negative")
 }
 
 func TestSortOrderNotFound(t *testing.T) {
@@ -1365,6 +1512,7 @@ func TestTableMetadataV2MissingSchemas(t *testing.T) {
 func TestAssignMissingPartitionFieldIDsAcrossSpecs(t *testing.T) {
 	input := []byte(`{
 		"format-version": 2,
+		"last-updated-ms": 0,
 		"last-partition-id": 1003,
 		"partition-specs": [
 			{

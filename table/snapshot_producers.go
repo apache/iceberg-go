@@ -1365,11 +1365,13 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 
 	return []Update{
 			addSnap,
-			// Use 0 (not -1) for the optional fields so they are omitted by
-			// `omitempty` in JSON marshalling. -1 is a sentinel meaning
-			// "no limit" internally, but strict catalogs such as AWS S3 Tables
-			// reject a payload that explicitly contains negative values.
-			NewSetSnapshotRefUpdate(branch, sp.snapshotID, BranchRef, 0, 0, 0),
+			// Carry over the branch's existing retention settings so advancing
+			// the ref on commit does not silently discard them. The update
+			// encodes exactly the current ref's retention (settings the branch
+			// lacks stay 0 and are dropped by the `omitempty` tags); the catalog
+			// applies a set-snapshot-ref as a pure replace, so this fully
+			// determines the resulting ref rather than merging with the old one.
+			sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
 		}, []Requirement{
 			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
 		}, nil

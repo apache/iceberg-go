@@ -237,6 +237,341 @@ func TestGeoBoundsAccumulatorInvalidWKB(t *testing.T) {
 	assert.Error(t, acc.AddWKB([]byte{0x01, 0x02, 0x03}))
 }
 
+// WKB type words used by the EWKB tests below. ISO WKB encodes the dimension in
+// the type value itself (PointZ = 1001), while EWKB sets flags in the high bits
+// of the type word (ewkbFlagZ etc., shared with geo_codec.go) and optionally
+// embeds an SRID after it.
+const (
+	wkbPoint               = 1
+	wkbLineString          = 2
+	wkbGeometryCollection  = 7
+	wkbPointZ              = 1001
+	wkbPointM              = 2001
+	wkbPointZM             = 3001
+	wkbLineStringZ         = 1002
+	wkbGeometryCollectionZ = 1007
+)
+
+// wkbBuilder assembles a WKB value byte by byte: the byte-order marker, then
+// uint32 headers and float64 coordinates in that byte order.
+type wkbBuilder struct {
+	buf   []byte
+	order binary.AppendByteOrder
+}
+
+// newWKBBuilder builds a little-endian (NDR) value.
+func newWKBBuilder(typeWord uint32) *wkbBuilder {
+	return (&wkbBuilder{buf: []byte{wkbLittleEndian}, order: binary.LittleEndian}).u32(typeWord)
+}
+
+// newXDRWKBBuilder builds a big-endian (XDR) value.
+func newXDRWKBBuilder(typeWord uint32) *wkbBuilder {
+	return (&wkbBuilder{buf: []byte{wkbBigEndian}, order: binary.BigEndian}).u32(typeWord)
+}
+
+func (b *wkbBuilder) u32(v uint32) *wkbBuilder {
+	b.buf = b.order.AppendUint32(b.buf, v)
+
+	return b
+}
+
+func (b *wkbBuilder) f64(vals ...float64) *wkbBuilder {
+	for _, v := range vals {
+		b.buf = b.order.AppendUint64(b.buf, math.Float64bits(v))
+	}
+
+	return b
+}
+
+// nested appends complete WKB values, each carrying its own byte-order marker,
+// as the sub-geometries of a collection.
+func (b *wkbBuilder) nested(vals ...[]byte) *wkbBuilder {
+	for _, v := range vals {
+		b.buf = append(b.buf, v...)
+	}
+
+	return b
+}
+
+func (b *wkbBuilder) bytes() []byte { return b.buf }
+
+// assertCoords compares bound coordinates treating NaN as equal to NaN, which
+// assert.Equal does not (the XYM bound carries NaN in its Z slot).
+func assertCoords(t *testing.T, want, got []float64) {
+	t.Helper()
+	require.Len(t, got, len(want))
+	for i := range want {
+		if math.IsNaN(want[i]) {
+			assert.True(t, math.IsNaN(got[i]), "coord %d: want NaN, got %v", i, got[i])
+
+			continue
+		}
+		assert.Equal(t, want[i], got[i], "coord %d", i)
+	}
+}
+
+// TestGeoBoundsAccumulatorEWKB verifies that bounds are computed from both ISO
+// WKB (as Iceberg prescribes) and EWKB-flagged values, which some writers emit:
+// dimension flags in the high bits of the type word, with an optional embedded
+// SRID that is irrelevant to the bounding box.
+func TestGeoBoundsAccumulatorEWKB(t *testing.T) {
+	tests := []struct {
+		name       string
+		wkb        []byte
+		wantLower  []float64
+		wantUpper  []float64
+		wantLength int
+	}{
+		{
+			name:       "iso point xy",
+			wkb:        newWKBBuilder(wkbPoint).f64(1, 2).bytes(),
+			wantLower:  []float64{1, 2},
+			wantUpper:  []float64{1, 2},
+			wantLength: 16,
+		},
+		{
+			name:       "iso point z",
+			wkb:        newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{1, 2, 3},
+			wantLength: 24,
+		},
+		{
+			name:       "ewkb point z",
+			wkb:        newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{1, 2, 3},
+			wantLength: 24,
+		},
+		{
+			name:       "ewkb point z with srid",
+			wkb:        newWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagSRID).u32(4326).f64(1, 2, 3).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{1, 2, 3},
+			wantLength: 24,
+		},
+		{
+			name:       "ewkb point xy with srid",
+			wkb:        newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes(),
+			wantLower:  []float64{1, 2},
+			wantUpper:  []float64{1, 2},
+			wantLength: 16,
+		},
+		{
+			name:       "iso point m",
+			wkb:        newWKBBuilder(wkbPointM).f64(1, 2, 100).bytes(),
+			wantLower:  []float64{1, 2, math.NaN(), 100},
+			wantUpper:  []float64{1, 2, math.NaN(), 100},
+			wantLength: 32,
+		},
+		{
+			name:       "ewkb point m",
+			wkb:        newWKBBuilder(wkbPoint|ewkbFlagM).f64(1, 2, 100).bytes(),
+			wantLower:  []float64{1, 2, math.NaN(), 100},
+			wantUpper:  []float64{1, 2, math.NaN(), 100},
+			wantLength: 32,
+		},
+		{
+			name:       "iso point zm",
+			wkb:        newWKBBuilder(wkbPointZM).f64(1, 2, 3, 100).bytes(),
+			wantLower:  []float64{1, 2, 3, 100},
+			wantUpper:  []float64{1, 2, 3, 100},
+			wantLength: 32,
+		},
+		{
+			name:       "ewkb point zm",
+			wkb:        newWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagM).f64(1, 2, 3, 100).bytes(),
+			wantLower:  []float64{1, 2, 3, 100},
+			wantUpper:  []float64{1, 2, 3, 100},
+			wantLength: 32,
+		},
+		{
+			name:       "ewkb linestring z",
+			wkb:        newWKBBuilder(wkbLineString|ewkbFlagZ).u32(2).f64(1, 2, 3, 4, 5, 6).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{4, 5, 6},
+			wantLength: 24,
+		},
+		{
+			name:       "ewkb point z big endian",
+			wkb:        newXDRWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{1, 2, 3},
+			wantLength: 24,
+		},
+		{
+			name:       "ewkb linestring z with srid",
+			wkb:        newWKBBuilder(wkbLineString|ewkbFlagZ|ewkbFlagSRID).u32(4326).u32(2).f64(1, 2, 3, 4, 5, 6).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{4, 5, 6},
+			wantLength: 24,
+		},
+		{
+			// A collection is the only value whose sub-geometries are decoded
+			// recursively, and Trino and PostGIS both emit these; each sub-geometry
+			// repeats the byte-order marker and the flagged type word.
+			name: "ewkb geometry collection z",
+			wkb: newWKBBuilder(wkbGeometryCollection|ewkbFlagZ).u32(2).nested(
+				newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+				newWKBBuilder(wkbLineString|ewkbFlagZ).u32(2).f64(4, 5, 6, 7, 8, 9).bytes(),
+			).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{7, 8, 9},
+			wantLength: 24,
+		},
+		{
+			name: "ewkb geometry collection z with srid",
+			wkb: newWKBBuilder(wkbGeometryCollection|ewkbFlagZ|ewkbFlagSRID).u32(4326).u32(2).nested(
+				newWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagSRID).u32(4326).f64(1, 2, 3).bytes(),
+				newWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagSRID).u32(4326).f64(7, 8, 9).bytes(),
+			).bytes(),
+			wantLower:  []float64{1, 2, 3},
+			wantUpper:  []float64{7, 8, 9},
+			wantLength: 24,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acc := newGeoBoundsAccumulator(false)
+			require.NoError(t, acc.AddWKB(tt.wkb))
+
+			lower, upper := acc.Bounds()
+			require.Len(t, lower, tt.wantLength)
+			require.Len(t, upper, tt.wantLength)
+
+			assertCoords(t, tt.wantLower, decodeBound(t, lower))
+			assertCoords(t, tt.wantUpper, decodeBound(t, upper))
+		})
+	}
+}
+
+// TestGeoBoundsAccumulatorEWKBMatchesISO verifies that the two encodings of the
+// same coordinates produce byte-identical bounds, so a file's statistics do not
+// depend on which encoding its writer used.
+func TestGeoBoundsAccumulatorEWKBMatchesISO(t *testing.T) {
+	tests := []struct {
+		name     string
+		iso      []byte
+		ewkb     []byte
+		geograph bool
+	}{
+		{
+			name: "point xy",
+			iso:  newWKBBuilder(wkbPoint).f64(1, 2).bytes(),
+			ewkb: newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes(),
+		},
+		{
+			name: "point z",
+			iso:  newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			ewkb: newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "point m",
+			iso:  newWKBBuilder(wkbPointM).f64(1, 2, 100).bytes(),
+			ewkb: newWKBBuilder(wkbPoint|ewkbFlagM).f64(1, 2, 100).bytes(),
+		},
+		{
+			name: "point zm",
+			iso:  newWKBBuilder(wkbPointZM).f64(1, 2, 3, 100).bytes(),
+			ewkb: newWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagM).f64(1, 2, 3, 100).bytes(),
+		},
+		{
+			name: "point z big endian",
+			iso:  newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			ewkb: newXDRWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "linestring z",
+			iso:  newWKBBuilder(wkbLineStringZ).u32(2).f64(1, 2, 3, 4, 5, 6).bytes(),
+			ewkb: newWKBBuilder(wkbLineString|ewkbFlagZ).u32(2).f64(1, 2, 3, 4, 5, 6).bytes(),
+		},
+		{
+			// Geography emits no bounds for either encoding, but the value must
+			// still decode: a decode error aborts the whole file rewrite.
+			name:     "geography point z",
+			iso:      newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			ewkb:     newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			geograph: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isoAcc := newGeoBoundsAccumulator(tt.geograph)
+			require.NoError(t, isoAcc.AddWKB(tt.iso))
+			isoLower, isoUpper := isoAcc.Bounds()
+
+			ewkbAcc := newGeoBoundsAccumulator(tt.geograph)
+			require.NoError(t, ewkbAcc.AddWKB(tt.ewkb))
+			ewkbLower, ewkbUpper := ewkbAcc.Bounds()
+
+			// Both accumulators must have consumed coordinates. Bounds alone cannot
+			// show this for geography, where the comparison is nil against nil and
+			// would stay green if the decode returned an empty geometry.
+			assert.Positive(t, isoAcc.geoms, "ISO value contributed no geometry")
+			assert.Positive(t, ewkbAcc.geoms, "EWKB value contributed no geometry")
+			assert.Equal(t, isoAcc.min, ewkbAcc.min, "accumulated minimums must match")
+			assert.Equal(t, isoAcc.max, ewkbAcc.max, "accumulated maximums must match")
+
+			assert.Equal(t, isoLower, ewkbLower)
+			assert.Equal(t, isoUpper, ewkbUpper)
+			if tt.geograph {
+				assert.Nil(t, ewkbLower, "geography bounds must be omitted")
+			}
+		})
+	}
+}
+
+// TestGeoBoundsAccumulatorRejectsInvalidWKB verifies that malformed values still
+// error rather than panicking or silently contributing no coordinates.
+//
+// The two collection cases pin the boundary of the encoding heuristic: isEWKB
+// sniffs only the outer type word, so a collection whose sub-geometries use the
+// other encoding reaches the wrong decoder. Mixing encodings within one value is
+// unsupported, and the failure mode is an error that aborts the file rather than
+// bounds computed from a partial decode.
+func TestGeoBoundsAccumulatorRejectsInvalidWKB(t *testing.T) {
+	tests := []struct {
+		name string
+		wkb  []byte
+	}{
+		{name: "empty", wkb: nil},
+		{name: "byte order only", wkb: []byte{wkbLittleEndian}},
+		{name: "unknown byte order", wkb: []byte{0x07, 0x01, 0x00, 0x00, 0x00}},
+		{name: "truncated type word", wkb: []byte{wkbLittleEndian, 0x01, 0x00}},
+		{name: "unknown iso type", wkb: newWKBBuilder(42).f64(1, 2).bytes()},
+		{name: "unknown iso dimension", wkb: newWKBBuilder(9001).f64(1, 2).bytes()},
+		{name: "unknown ewkb type", wkb: newWKBBuilder(42|ewkbFlagZ).f64(1, 2, 3).bytes()},
+		{name: "truncated coords", wkb: newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2).bytes()},
+		{name: "missing srid", wkb: newWKBBuilder(wkbPoint | ewkbFlagSRID).bytes()},
+		{
+			name: "ewkb collection with iso sub-geometry",
+			wkb: newWKBBuilder(wkbGeometryCollection | ewkbFlagZ).u32(1).nested(
+				newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			).bytes(),
+		},
+		{
+			name: "iso collection with ewkb sub-geometry",
+			wkb: newWKBBuilder(wkbGeometryCollectionZ).u32(1).nested(
+				newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			).bytes(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acc := newGeoBoundsAccumulator(false)
+			require.Error(t, acc.AddWKB(tt.wkb))
+
+			lower, upper := acc.Bounds()
+			assert.Zero(t, acc.geoms, "a rejected value must contribute no geometry")
+			assert.Nil(t, lower)
+			assert.Nil(t, upper)
+		})
+	}
+}
+
 // TestEncodeGeoBoundRoundTrip pins the exact byte layout of the single-value
 // serialization for each dimensionality.
 func TestEncodeGeoBoundRoundTrip(t *testing.T) {
@@ -422,4 +757,61 @@ func TestNewGeoBoundsAggregatorGeometry(t *testing.T) {
 	lower, upper := agg.Bounds()
 	assert.Equal(t, []float64{1, 5}, decodeBound(t, lower))
 	assert.Equal(t, []float64{30, 20}, decodeBound(t, upper))
+}
+
+func TestGeoBoundsXY(t *testing.T) {
+	minX, minY, maxX, maxY, ok := GeoBoundsXY(encGeo(5, 10), encGeo(30, 40))
+	require.True(t, ok)
+	assert.Equal(t, [4]float64{5, 10, 30, 40}, [4]float64{minX, minY, maxX, maxY})
+
+	// Higher-dimension bounds still yield their XY extents.
+	minX, minY, maxX, maxY, ok = GeoBoundsXY(encGeoZ(1, 2, 3), encGeoZ(4, 5, 6))
+	require.True(t, ok)
+	assert.Equal(t, [4]float64{1, 2, 4, 5}, [4]float64{minX, minY, maxX, maxY})
+
+	// Missing or malformed bounds are unusable for pruning.
+	_, _, _, _, ok = GeoBoundsXY(nil, encGeo(1, 2))
+	assert.False(t, ok, "missing lower bound")
+	_, _, _, _, ok = GeoBoundsXY(encGeo(1, 2), []byte{0x01})
+	assert.False(t, ok, "malformed upper bound")
+
+	// A NaN X/Y coordinate cannot bound anything.
+	var nan [geoNumDims]float64
+	nan[geoDimX], nan[geoDimY] = math.NaN(), 2
+	_, _, _, _, ok = GeoBoundsXY(encodeGeoBound(nan, geom.XY), encGeo(3, 4))
+	assert.False(t, ok, "NaN coordinate")
+
+	// Inverted bounds (lower > upper) from an untrusted writer are unusable:
+	// treating them as valid would make BBoxIntersectsXY always report no-overlap
+	// and prune a file that should be kept.
+	_, _, _, _, ok = GeoBoundsXY(encGeo(30, 10), encGeo(5, 40))
+	assert.False(t, ok, "inverted X bound must be rejected")
+	_, _, _, _, ok = GeoBoundsXY(encGeo(5, 40), encGeo(30, 10))
+	assert.False(t, ok, "inverted Y bound must be rejected")
+}
+
+func TestBBoxIntersectsXY(t *testing.T) {
+	// file box [0,0]-[10,10]
+	tests := []struct {
+		name                       string
+		qMinX, qMinY, qMaxX, qMaxY float64
+		want                       bool
+	}{
+		{"overlapping", 5, 5, 15, 15, true},
+		{"contained", 2, 2, 3, 3, true},
+		{"touching edge", 10, 0, 20, 10, true},
+		{"touching corner", 10, 10, 20, 20, true},
+		{"disjoint right", 11, 0, 20, 10, false},
+		{"disjoint above", 0, 11, 10, 20, false},
+		{"disjoint diagonal", 20, 20, 30, 30, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want,
+				BBoxIntersectsXY(0, 0, 10, 10, tt.qMinX, tt.qMinY, tt.qMaxX, tt.qMaxY))
+			// intersection is symmetric
+			assert.Equal(t, tt.want,
+				BBoxIntersectsXY(tt.qMinX, tt.qMinY, tt.qMaxX, tt.qMaxY, 0, 0, 10, 10))
+		})
+	}
 }

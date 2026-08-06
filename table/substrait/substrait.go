@@ -51,9 +51,10 @@ func NewExtensionSet() exprs.ExtensionIDSet {
 	return exprs.NewExtensionSetDefault(expr.NewEmptyExtensionRegistry(collection))
 }
 
-// ConvertExpr binds the provided expression to the given schema and converts it to a
-// substrait expression so that it can be utilized for computation.
-func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensitive bool) (*expr.ExtensionRegistry, expr.Expression, error) {
+// ConvertExpr converts a bound expression to a Substrait expression so that it can
+// be utilized for computation. Case sensitivity is applied when binding; the third
+// argument is retained for API compatibility.
+func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, _ bool) (*expr.ExtensionRegistry, expr.Expression, error) {
 	base, err := ConvertSchema(schema)
 	if err != nil {
 		return nil, nil, err
@@ -62,10 +63,7 @@ func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensit
 	reg := expr.NewEmptyExtensionRegistry(collection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: types.NewRecordTypeFromStruct(base.Struct)}
-	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{
-		bldr: bldr, schema: schema,
-		caseSensitive: caseSensitive,
-	})
+	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,9 +211,7 @@ var (
 )
 
 type toSubstraitExpr struct {
-	schema        *iceberg.Schema
-	bldr          expr.ExprBuilder
-	caseSensitive bool
+	bldr expr.ExprBuilder
 }
 
 func (t *toSubstraitExpr) VisitTrue() expr.Builder {
@@ -348,12 +344,7 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 }
 
 func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
-	updatedRef, err := iceberg.Reference(ref.Field().Name).Bind(t.schema, t.caseSensitive)
-	if err != nil {
-		panic(err)
-	}
-
-	path := updatedRef.Ref().PosPath()
+	path := ref.PosPath()
 	out := expr.NewStructFieldRef(int32(path[0]))
 	if len(path) == 1 {
 		return out
@@ -442,4 +433,19 @@ func (t *toSubstraitExpr) VisitNotStartsWith(term iceberg.BoundTerm, lit iceberg
 	return t.bldr.ScalarFunc(notID).Args(
 		t.makeLitFunc(startsWithID, term, lit).(expr.FuncArgBuilder),
 	)
+}
+
+// toSubstraitExpr implements the optional BoundGeospatialExprVisitor as a
+// backstop: bbox predicates are dropped to always-true during column-name
+// translation and never reach substrait, but if one ever did these panic with a
+// wrapped ErrNotImplemented (recovered into a typed, wrappable error by
+// iceberg.VisitExpr) rather than a bare string.
+var _ iceberg.BoundGeospatialExprVisitor[expr.Builder] = (*toSubstraitExpr)(nil)
+
+func (t *toSubstraitExpr) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) expr.Builder {
+	panic(fmt.Errorf("%w: geospatial bbox predicates cannot be converted to substrait", iceberg.ErrNotImplemented))
+}
+
+func (t *toSubstraitExpr) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) expr.Builder {
+	panic(fmt.Errorf("%w: geospatial bbox predicates cannot be converted to substrait", iceberg.ErrNotImplemented))
 }

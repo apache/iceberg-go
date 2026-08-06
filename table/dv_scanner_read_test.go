@@ -20,8 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,9 +46,6 @@ import (
 // magic 0xD1D33964][bitmap][4B BE CRC32] envelope so dv.DeserializeDV
 // accepts it. A Go-built payload suffices here; the cross-impl byte pin
 // against a Java-produced fixture is the job of #1041, not this test.
-//
-// TODO(#1041): replace the hand-built envelope with a dv.SerializeDV helper
-// once that PR exports one. Today the dv package only exports the read side.
 func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length, cardinality int64) {
 	t.Helper()
 
@@ -59,18 +54,8 @@ func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile s
 		bitmap.Set(p)
 	}
 
-	var bitmapBuf bytes.Buffer
-	require.NoError(t, bitmap.Serialize(&bitmapBuf))
-
-	// Length covers magic + bitmap, excludes CRC.
-	magicAndBitmap := make([]byte, 4+bitmapBuf.Len())
-	binary.LittleEndian.PutUint32(magicAndBitmap[:4], dv.DVMagicNumber)
-	copy(magicAndBitmap[4:], bitmapBuf.Bytes())
-
-	payload := make([]byte, 4+len(magicAndBitmap)+4)
-	binary.BigEndian.PutUint32(payload[:4], uint32(len(magicAndBitmap)))
-	copy(payload[4:4+len(magicAndBitmap)], magicAndBitmap)
-	binary.BigEndian.PutUint32(payload[4+len(magicAndBitmap):], crc32.ChecksumIEEE(magicAndBitmap))
+	payload, err := dv.SerializeDV(bitmap)
+	require.NoError(t, err)
 
 	var puffinBuf bytes.Buffer
 	w, err := puffin.NewWriter(&puffinBuf)
@@ -361,4 +346,63 @@ func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
 	require.NoError(t, err)
 	defer out.Release()
 	assert.Equal(t, []int64{0, 1, 2}, out.Column(0).(*array.Int64).Int64Values())
+}
+
+func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewGoAllocator()
+
+	mkBatch := func(values ...int64) arrow.RecordBatch {
+		bldr := array.NewInt64Builder(mem)
+		defer bldr.Release()
+		bldr.AppendValues(values, nil)
+		col := bldr.NewArray()
+		defer col.Release()
+		schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+
+		return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
+	}
+
+	bitmap := dv.NewRoaringPositionBitmap()
+	bitmap.Set(1)
+	bitmap.Set(3)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+
+	withinCount, err := filter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer withinCount.Release()
+	assert.Equal(t, []int64{0}, withinCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryCount, err := filter(mkBatch(2, 3))
+	require.NoError(t, err)
+	defer boundaryCount.Release()
+	assert.Equal(t, []int64{2}, boundaryCount.Column(0).(*array.Int64).Int64Values())
+
+	straddlingFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	straddlingPrefix, err := straddlingFilter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer straddlingPrefix.Release()
+	assert.Equal(t, []int64{0}, straddlingPrefix.Column(0).(*array.Int64).Int64Values())
+
+	straddlingCount, err := straddlingFilter(mkBatch(2, 3, 4, 5))
+	require.NoError(t, err)
+	defer straddlingCount.Release()
+	assert.Equal(t, []int64{2, 4, 5}, straddlingCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	boundaryBatch, err := boundaryFilter(mkBatch(0, 1, 2, 3))
+	require.NoError(t, err)
+	defer boundaryBatch.Release()
+	assert.Equal(t, []int64{0, 2}, boundaryBatch.Column(0).(*array.Int64).Int64Values())
+
+	afterBoundary, err := boundaryFilter(mkBatch(4, 5))
+	require.NoError(t, err)
+	defer afterBoundary.Release()
+	assert.Equal(t, []int64{4, 5}, afterBoundary.Column(0).(*array.Int64).Int64Values())
+
+	zeroRowCountFilter := filterByDeletionVector(ctx, bitmap, 0, (&rowPositionSource{}).cursor())
+	zeroRowCount, err := zeroRowCountFilter(mkBatch(6, 7))
+	require.NoError(t, err)
+	defer zeroRowCount.Release()
+	assert.Equal(t, []int64{6, 7}, zeroRowCount.Column(0).(*array.Int64).Int64Values())
 }

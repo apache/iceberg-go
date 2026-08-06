@@ -119,9 +119,11 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 
 	if _, ok := raw["source-id"]; ok {
 		if _, ok := raw["source-ids"]; ok {
-			return errors.New("partition field cannot contain both source-id and source-ids")
+			return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
 		}
 	}
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
 
 	aux := struct {
 		SourceID        int    `json:"source-id"`
@@ -138,15 +140,36 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	p.FieldID = aux.FieldID
 	p.Name = aux.Name
 
-	if len(aux.SourceIDs) > 0 {
+	var err error
+	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+	if err := validateTransform(p.Transform); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	if hasSourceIDs && len(aux.SourceIDs) == 0 {
+		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
+	}
+	if !hasSourceID && !hasSourceIDs {
+		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
+		}
+		// Preserve compatibility with historical source-less void tombstones.
+		p.SourceIDs = []int{0}
+	} else if len(aux.SourceIDs) > 0 {
 		p.SourceIDs = aux.SourceIDs
 	} else {
 		p.SourceIDs = []int{aux.SourceID}
 	}
-
-	var err error
-	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
-		return err
+	for _, sourceID := range p.SourceIDs {
+		_, isVoid := p.Transform.(VoidTransform)
+		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
+			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+		}
+	}
+	if p.Name == "" {
+		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
 
 	return nil
@@ -439,6 +462,9 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
+	if aux.ID < 0 {
+		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, aux.ID)
+	}
 
 	fields := make([]PartitionField, len(aux.Fields))
 	for i, rawField := range aux.Fields {
@@ -459,12 +485,38 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 			return err
 		}
 	}
+	if err := validatePartitionFields(fields); err != nil {
+		return err
+	}
 
 	ps.id, ps.fields = aux.ID, fields
 	if err := ps.assignPartitionFieldIds(nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 	ps.initialize()
+
+	return nil
+}
+
+func validatePartitionFields(fields []PartitionField) error {
+	names := make(map[string]struct{}, len(fields))
+	definitions := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		if _, ok := names[field.Name]; ok {
+			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
+		}
+		names[field.Name] = struct{}{}
+		if _, isVoid := field.Transform.(VoidTransform); isVoid {
+			continue
+		}
+
+		definition := fmt.Sprintf("%v:%s", field.SourceIDs, field.Transform)
+		if _, ok := definitions[definition]; ok {
+			return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
+				ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+		}
+		definitions[definition] = struct{}{}
+	}
 
 	return nil
 }
