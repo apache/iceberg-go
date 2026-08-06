@@ -757,6 +757,23 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.ErrorContains(t, err, "partition field cannot contain both source-id and source-ids")
 	})
 
+	t.Run("unmarshal rejects empty source-ids", func(t *testing.T) {
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(`{
+			"source-ids": [],
+			"field-id": 1002,
+			"transform": "identity",
+			"name": "identity"
+		}`), &field)
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "source-ids cannot be empty")
+	})
+
+	t.Run("unmarshal rejects malformed JSON", func(t *testing.T) {
+		var field iceberg.PartitionField
+		require.Error(t, json.Unmarshal([]byte(`{"source-id":`), &field))
+	})
+
 	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
 		jsonData := `
 		{
@@ -779,13 +796,6 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 }
 
 func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
-	initial := iceberg.PartitionField{
-		SourceIDs: []int{7},
-		FieldID:   1007,
-		Name:      "old",
-		Transform: iceberg.IdentityTransform{},
-	}
-
 	for _, test := range []struct {
 		name string
 		data string
@@ -808,11 +818,38 @@ func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			initial := iceberg.PartitionField{
+				SourceIDs: []int{7},
+				FieldID:   1007,
+				Name:      "old",
+				Transform: iceberg.IdentityTransform{},
+			}
 			field := initial
 			require.Error(t, json.Unmarshal([]byte(test.data), &field))
 			assert.Equal(t, initial, field)
 		})
 	}
+}
+
+func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "old field",
+		Transform: iceberg.IdentityTransform{},
+	})
+	field := spec.Field(0)
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"source-id": 2,
+		"field-id": 1001,
+		"transform": "identity",
+		"name": "new field"
+	}`), &field))
+
+	assert.Equal(t, []int{2}, field.SourceIDs)
+	assert.Equal(t, "new field", field.Name)
+	assert.Equal(t, "new+field", field.EscapedName())
 }
 
 func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {

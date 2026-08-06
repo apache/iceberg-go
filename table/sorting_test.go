@@ -358,13 +358,6 @@ func TestUnmarshalInvalidSortTransform(t *testing.T) {
 }
 
 func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
-	initial := table.SortField{
-		SourceIDs: []int{7},
-		Transform: iceberg.IdentityTransform{},
-		Direction: table.SortDESC,
-		NullOrder: table.NullsLast,
-	}
-
 	for _, test := range []struct {
 		name string
 		data string
@@ -387,6 +380,12 @@ func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			initial := table.SortField{
+				SourceIDs: []int{7},
+				Transform: iceberg.IdentityTransform{},
+				Direction: table.SortDESC,
+				NullOrder: table.NullsLast,
+			}
 			field := initial
 			require.Error(t, json.Unmarshal([]byte(test.data), &field))
 			assert.Equal(t, initial, field)
@@ -410,6 +409,11 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot contain both source-id and source-ids")
+	})
+
+	t.Run("unmarshal rejects malformed JSON", func(t *testing.T) {
+		var field table.SortField
+		require.Error(t, json.Unmarshal([]byte(`{"source-id":`), &field))
 	})
 
 	t.Run("unmarshal rejects missing/invalid source ids", func(t *testing.T) {
