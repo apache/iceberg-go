@@ -27,6 +27,8 @@ import (
 	"maps"
 	"slices"
 	"sort"
+
+	"github.com/pierrec/lz4/v4"
 )
 
 // ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.
@@ -179,11 +181,6 @@ func (r *Reader) readFooter() error {
 	// Extract payload size and flags
 	payloadSize := int64(binary.LittleEndian.Uint32(trailer[0:4]))
 	flags := binary.LittleEndian.Uint32(trailer[4:8])
-
-	// Check for compressed footer (unsupported)
-	if flags&FooterFlagCompressed != 0 {
-		return errors.New("puffin: compressed footer not supported")
-	}
 
 	// Check for unknown flags
 	if flags&^uint32(FooterFlagCompressed) != 0 {
