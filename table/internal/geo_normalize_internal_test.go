@@ -240,6 +240,7 @@ func newGeoListArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBTy
 		}
 		raw := builder.NewArray()
 		builder.Release()
+
 		return replaceListValues(t, raw, typeDef, values, true)
 	}
 
@@ -251,6 +252,7 @@ func newGeoListArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBTy
 	}
 	raw := builder.NewArray()
 	builder.Release()
+
 	return replaceListValues(t, raw, typeDef, values, false)
 }
 
@@ -263,6 +265,7 @@ func newGeoFixedSizeListArray(t *testing.T, mem memory.Allocator, typeDef *geoar
 	}
 	raw := builder.NewArray()
 	builder.Release()
+
 	return replaceListValues(t, raw, typeDef, values, false)
 }
 
@@ -290,6 +293,7 @@ func newGeoMapArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBTyp
 	newEntryData.Release()
 	geo.Release()
 	raw.Release()
+
 	return result
 }
 
@@ -315,6 +319,7 @@ func replaceListValues(t *testing.T, raw arrow.Array, typeDef *geoarrow.WKBType,
 	data.Release()
 	geo.Release()
 	raw.Release()
+
 	return result
 }
 
