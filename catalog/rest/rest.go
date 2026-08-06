@@ -1075,11 +1075,7 @@ func (r *Catalog) Close() error { return r.reporter.Close() }
 var _ catalog.Closer = (*Catalog)(nil)
 
 func checkValidNamespace(ident table.Identifier) error {
-	if len(ident) < 1 {
-		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
-	}
-
-	return nil
+	return catalog.ValidateNamespaceIdentifier(ident)
 }
 
 func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties, credsVended bool) (*table.Table, error) {
@@ -1795,6 +1791,12 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 }
 
 func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+	if len(parent) != 0 {
+		if err := catalog.ValidateNamespaceIdentifier(parent); err != nil {
+			return nil, "", err
+		}
+	}
+
 	// Unsupported listing yields an empty result rather than an error.
 	if !r.endpoints.allowed(endpointListNamespaces) {
 		return nil, "", nil
