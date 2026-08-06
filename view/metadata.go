@@ -671,6 +671,7 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	}
 
 	*m = next
+	// init() rebinds the lazy-index closures to m after the value copy.
 	m.init()
 
 	return nil

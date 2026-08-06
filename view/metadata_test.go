@@ -159,11 +159,40 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	assert.Empty(t, metadata.Props)
 	assert.Empty(t, metadata.VersionLogList)
 
+	beforeFailure, err := json.Marshal(&metadata)
+	require.NoError(t, err)
 	invalid := strings.Replace(exampleViewJSON, `"current-version-id": 1`, `"current-version-id": 99`, 1)
 	require.Error(t, json.Unmarshal([]byte(invalid), &metadata))
-	assert.Equal(t, int64(1), metadata.CurrentVersionIDValue)
-	assert.Empty(t, metadata.Props)
-	assert.Empty(t, metadata.VersionLogList)
+	afterFailure, err := json.Marshal(&metadata)
+	require.NoError(t, err)
+	assert.Equal(t, beforeFailure, afterFailure)
+}
+
+func TestMetadataUnmarshalDoesNotMutateInputAndRoundTripsAfterReuse(t *testing.T) {
+	input := []byte(exampleViewJSON)
+	originalInput := append([]byte(nil), input...)
+
+	var md metadata
+	require.NoError(t, json.Unmarshal(input, &md))
+	assert.Equal(t, originalInput, input)
+
+	var replacement map[string]any
+	require.NoError(t, json.Unmarshal([]byte(exampleViewJSON), &replacement))
+	replacement["current-version-id"] = int64(2)
+	replacement["versions"].([]any)[0].(map[string]any)["version-id"] = int64(2)
+	replacement["versions"].([]any)[0].(map[string]any)["schema-id"] = 2
+	replacement["schemas"].([]any)[0].(map[string]any)["schema-id"] = 2
+	replacementData, err := json.Marshal(replacement)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(replacementData, &md))
+
+	encoded, err := json.Marshal(&md)
+	require.NoError(t, err)
+	var roundTripped metadata
+	require.NoError(t, json.Unmarshal(encoded, &roundTripped))
+	reencoded, err := json.Marshal(&roundTripped)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(encoded), string(reencoded))
 }
 
 func TestMetadataUnmarshalReplacesLookupCaches(t *testing.T) {
