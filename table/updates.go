@@ -132,10 +132,17 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		updates = make(Updates, 0, len(rawUpdates))
 	}
 	for _, raw := range rawUpdates {
-		var base baseUpdate
-		if err := json.Unmarshal(raw, &base); err != nil {
+		var baseWire struct {
+			Action *string `json:"action"`
+		}
+		if err := json.Unmarshal(raw, &baseWire); err != nil {
 			return err
 		}
+		if baseWire.Action == nil {
+			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+		}
+
+		base := baseUpdate{ActionName: *baseWire.Action}
 
 		var upd Update
 		switch base.ActionName {
