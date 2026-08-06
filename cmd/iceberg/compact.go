@@ -164,9 +164,11 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 		os.Exit(1)
 	}
 
-	if _, err := tx.Commit(ctx); err != nil {
-		output.Error(fmt.Errorf("commit failed: %w", err))
-		os.Exit(1)
+	if !cfg.partialProgress {
+		if _, err := tx.Commit(ctx); err != nil {
+			output.Error(fmt.Errorf("commit failed: %w", err))
+			os.Exit(1)
+		}
 	}
 
 	totalRemovedDeletes := result.RemovedPositionDeleteFiles + result.RemovedEqualityDeleteFiles
