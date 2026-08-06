@@ -338,18 +338,41 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			initialData := []byte(tt.data)
-			if tt.name == "v1" {
-				var initial map[string]any
-				require.NoError(t, json.Unmarshal(initialData, &initial))
-				initial["properties"] = map[string]any{"seed": "value"}
-				initial["current-snapshot-id"] = int64(1925)
-				initial["snapshot-log"] = []any{map[string]any{"snapshot-id": int64(1925), "timestamp-ms": int64(1)}}
-				initial["metadata-log"] = []any{map[string]any{"metadata-file": "s3://bucket/old.json", "timestamp-ms": int64(1)}}
-				initial["refs"] = map[string]any{"main": map[string]any{"snapshot-id": int64(1925), "type": "branch"}}
-				var err error
-				initialData, err = json.Marshal(initial)
+			var initial map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(initialData, &initial))
+			setJSON := func(key string, value any) {
+				encoded, err := json.Marshal(value)
 				require.NoError(t, err)
+				initial[key] = encoded
 			}
+			snapshotID := int64(1925)
+			if tt.name != "v1" {
+				snapshotID = 3055729675574597004
+			}
+			setJSON("properties", map[string]any{"seed": "value"})
+			setJSON("current-snapshot-id", snapshotID)
+			setJSON("snapshot-log", []any{map[string]any{"snapshot-id": snapshotID, "timestamp-ms": int64(1)}})
+			setJSON("metadata-log", []any{map[string]any{"metadata-file": "s3://bucket/old.json", "timestamp-ms": int64(1)}})
+			setJSON("refs", map[string]any{"main": map[string]any{"snapshot-id": snapshotID, "type": "branch"}})
+			setJSON("last-partition-id", int64(1000))
+			setJSON("statistics", []any{map[string]any{
+				"snapshot-id": snapshotID, "statistics-path": "s3://bucket/stats.puffin",
+				"file-size-in-bytes": int64(1), "file-footer-size-in-bytes": int64(1), "blob-metadata": []any{},
+			}})
+			setJSON("partition-statistics", []any{map[string]any{
+				"snapshot-id": snapshotID, "statistics-path": "s3://bucket/partition-stats.parquet", "file-size-in-bytes": int64(1),
+			}})
+			if tt.name == "v2" || tt.name == "v3" {
+				setJSON("last-sequence-number", int64(34))
+			}
+			if tt.name == "v3" {
+				setJSON("encryption-keys", []any{map[string]any{
+					"key-id": "key-1", "encrypted-key-metadata": "YWJj",
+				}})
+			}
+			var err error
+			initialData, err = json.Marshal(initial)
+			require.NoError(t, err)
 
 			require.NoError(t, json.Unmarshal(initialData, tt.target))
 
@@ -360,14 +383,28 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			require.NotEmpty(t, common.MetadataLog)
 			require.NotEmpty(t, common.SnapshotRefs)
 			require.NotNil(t, common.CurrentSnapshotID)
+			require.NotNil(t, common.LastPartitionID)
+			require.NotEmpty(t, common.StatisticsList)
+			require.NotEmpty(t, common.PartitionStatsList)
+			switch metadata := tt.target.(type) {
+			case *metadataV2:
+				require.Equal(t, int64(34), metadata.LastSeqNum)
+			case *metadataV3:
+				require.Equal(t, int64(34), metadata.LastSeqNum)
+			}
+			if tt.name == "v3" {
+				require.NotEmpty(t, common.EncryptionKeyList)
+			}
 
 			var reduced map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(tt.data), &reduced))
 			for _, key := range []string{
 				"properties", "current-snapshot-id", "snapshots", "snapshot-log", "metadata-log", "refs",
+				"statistics", "partition-statistics", "encryption-keys", "last-sequence-number",
 			} {
 				delete(reduced, key)
 			}
+			reduced["last-partition-id"] = json.RawMessage("1001")
 			reducedData, err := json.Marshal(reduced)
 			require.NoError(t, err)
 
@@ -380,6 +417,16 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			assert.Empty(t, common.MetadataLog)
 			assert.Empty(t, common.SnapshotRefs)
 			assert.Nil(t, common.CurrentSnapshotID)
+			assert.Equal(t, 1001, *common.LastPartitionID)
+			assert.Empty(t, common.StatisticsList)
+			assert.Empty(t, common.PartitionStatsList)
+			assert.Empty(t, common.EncryptionKeyList)
+			switch metadata := tt.target.(type) {
+			case *metadataV2:
+				assert.Equal(t, int64(-1), metadata.LastSeqNum)
+			case *metadataV3:
+				assert.Equal(t, int64(-1), metadata.LastSeqNum)
+			}
 		})
 	}
 }
