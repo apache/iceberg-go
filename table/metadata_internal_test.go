@@ -337,7 +337,29 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
+			initialData := []byte(tt.data)
+			if tt.name == "v1" {
+				var initial map[string]any
+				require.NoError(t, json.Unmarshal(initialData, &initial))
+				initial["properties"] = map[string]any{"seed": "value"}
+				initial["current-snapshot-id"] = int64(1925)
+				initial["snapshot-log"] = []any{map[string]any{"snapshot-id": int64(1925), "timestamp-ms": int64(1)}}
+				initial["metadata-log"] = []any{map[string]any{"metadata-file": "s3://bucket/old.json", "timestamp-ms": int64(1)}}
+				initial["refs"] = map[string]any{"main": map[string]any{"snapshot-id": int64(1925), "type": "branch"}}
+				var err error
+				initialData, err = json.Marshal(initial)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, json.Unmarshal(initialData, tt.target))
+
+			common := metadataCommon(tt.target)
+			require.NotEmpty(t, common.Props)
+			require.NotEmpty(t, common.SnapshotList)
+			require.NotEmpty(t, common.SnapshotLog)
+			require.NotEmpty(t, common.MetadataLog)
+			require.NotEmpty(t, common.SnapshotRefs)
+			require.NotNil(t, common.CurrentSnapshotID)
 
 			var reduced map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(tt.data), &reduced))
@@ -351,15 +373,7 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 
 			require.NoError(t, json.Unmarshal(reducedData, tt.target))
 
-			var common *commonMetadata
-			switch metadata := tt.target.(type) {
-			case *metadataV1:
-				common = &metadata.commonMetadata
-			case *metadataV2:
-				common = &metadata.commonMetadata
-			case *metadataV3:
-				common = &metadata.commonMetadata
-			}
+			common = metadataCommon(tt.target)
 			assert.Empty(t, common.Props)
 			assert.Empty(t, common.SnapshotList)
 			assert.Empty(t, common.SnapshotLog)
@@ -370,16 +384,59 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 	}
 }
 
-func TestMetadataV2UnmarshalPreservesStateOnError(t *testing.T) {
-	var metadata metadataV2
-	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+func metadataCommon(target any) *commonMetadata {
+	switch metadata := target.(type) {
+	case *metadataV1:
+		return &metadata.commonMetadata
+	case *metadataV2:
+		return &metadata.commonMetadata
+	case *metadataV3:
+		return &metadata.commonMetadata
+	default:
+		panic("unsupported metadata type")
+	}
+}
 
-	invalid := strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1)
-	require.Error(t, json.Unmarshal([]byte(invalid), &metadata))
+func TestMetadataUnmarshalPreservesStateOnError(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		invalid string
+		target  any
+	}{
+		{
+			name:    "v1",
+			data:    ExampleTableMetadataV1,
+			invalid: strings.Replace(ExampleTableMetadataV1, `"id": 2, "name": "y"`, `"id": 1, "name": "y"`, 1),
+			target:  &metadataV1{},
+		},
+		{
+			name:    "v2",
+			data:    ExampleTableMetadataV2,
+			invalid: strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			target:  &metadataV2{},
+		},
+		{
+			name:    "v3",
+			data:    ExampleTableMetadataV3,
+			invalid: strings.Replace(ExampleTableMetadataV3, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			target:  &metadataV3{},
+		},
+	}
 
-	assert.Equal(t, 1, metadata.CurrentSchemaID)
-	assert.Equal(t, "134217728", metadata.Props["read.split.target.size"])
-	assert.Len(t, metadata.SnapshotList, 2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
+			before, err := json.Marshal(tt.target)
+			require.NoError(t, err)
+
+			require.Error(t, json.Unmarshal([]byte(tt.invalid), tt.target))
+
+			after, err := json.Marshal(tt.target)
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+		})
+	}
 }
 
 func TestMetadataV2UnmarshalRejectsMissingRequiredStateOnReuse(t *testing.T) {

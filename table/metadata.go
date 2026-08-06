@@ -1512,11 +1512,11 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	var ret Metadata
 	switch ver.FormatVersion {
 	case 1:
-		ret = initMetadataV1Deser()
+		ret = &metadataV1{}
 	case 2:
-		ret = initMetadataV2Deser()
+		ret = &metadataV2{}
 	case 3:
-		ret = initMetadataV3Deser()
+		ret = &metadataV3{}
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -1692,6 +1692,7 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
+		// Negative sentinels distinguish omitted required fields from explicit zero values.
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -2505,9 +2506,6 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	next := initMetadataV1Deser()
 	aux := (*Alias)(next)
 
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
-
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
@@ -2586,9 +2584,6 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	type Alias metadataV2
 	next := initMetadataV2Deser()
 	aux := (*Alias)(next)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
@@ -2669,9 +2664,6 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	type Alias metadataV3
 	next := initMetadataV3Deser()
 	aux := (*Alias)(next)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
