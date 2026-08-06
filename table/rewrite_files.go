@@ -61,11 +61,16 @@ type RewriteFiles struct {
 	txn                 *Transaction
 	dataFilesToDelete   []iceberg.DataFile
 	dataFilesToAdd      []iceberg.DataFile
-	deleteFilesToAdd    []DeleteFileAddition
+	deleteFilesToAdd    []rewriteDeleteFileAddition
 	deleteFilesToRemove []iceberg.DataFile
 	snapshotProps       iceberg.Properties
 	err                 error
 	committed           bool
+}
+
+type rewriteDeleteFileAddition struct {
+	file               iceberg.DataFile
+	dataSequenceNumber *int64
 }
 
 // NewRewrite returns a [RewriteFiles] builder bound to this transaction.
@@ -139,28 +144,21 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 }
 
 // AddDeleteFile queues a new positional delete, equality delete, or deletion
-// vector for this rewrite. DataSequenceNumber must be the maximum data
-// sequence number of the delete files being replaced.
-func (r *RewriteFiles) AddDeleteFile(addition DeleteFileAddition) *RewriteFiles {
+// vector for this rewrite. When existing delete files are replaced, the new
+// file inherits the maximum data sequence number of those files.
+func (r *RewriteFiles) AddDeleteFile(df iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
 	}
-	df := addition.File
 	if df == nil {
 		r.err = fmt.Errorf("%w: AddDeleteFile got nil data file", ErrInvalidOperation)
-
-		return r
-	}
-	if addition.DataSequenceNumber < 0 {
-		r.err = fmt.Errorf("%w: AddDeleteFile got invalid data sequence number %d for %s",
-			ErrInvalidOperation, addition.DataSequenceNumber, df.FilePath())
 
 		return r
 	}
 
 	switch df.ContentType() {
 	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		r.deleteFilesToAdd = append(r.deleteFilesToAdd, addition)
+		r.deleteFilesToAdd = append(r.deleteFilesToAdd, rewriteDeleteFileAddition{file: df})
 	default:
 		r.err = fmt.Errorf("%w: AddDeleteFile only supports delete files; got content type %s (%s)",
 			ErrInvalidOperation, df.ContentType(), df.FilePath())
@@ -172,7 +170,32 @@ func (r *RewriteFiles) AddDeleteFile(addition DeleteFileAddition) *RewriteFiles 
 // AddDeleteFileWithDataSequenceNumber is a convenience form of
 // [RewriteFiles.AddDeleteFile].
 func (r *RewriteFiles) AddDeleteFileWithDataSequenceNumber(df iceberg.DataFile, seq int64) *RewriteFiles {
-	return r.AddDeleteFile(DeleteFileAddition{File: df, DataSequenceNumber: seq})
+	if r.err != nil {
+		return r
+	}
+	if df == nil {
+		return r.AddDeleteFile(df)
+	}
+	if seq < 0 {
+		r.err = fmt.Errorf("%w: AddDeleteFile got invalid data sequence number %d for %s",
+			ErrInvalidOperation, seq, df.FilePath())
+
+		return r
+	}
+
+	switch df.ContentType() {
+	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		seqCopy := seq
+		r.deleteFilesToAdd = append(r.deleteFilesToAdd, rewriteDeleteFileAddition{
+			file:               df,
+			dataSequenceNumber: &seqCopy,
+		})
+	default:
+		r.err = fmt.Errorf("%w: AddDeleteFile only supports delete files; got content type %s (%s)",
+			ErrInvalidOperation, df.ContentType(), df.FilePath())
+	}
+
+	return r
 }
 
 // AddFile queues a file according to its content type. It is useful for
@@ -188,10 +211,7 @@ func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
 	case iceberg.EntryContentData:
 		return r.AddDataFile(df)
 	case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
-		r.err = fmt.Errorf("%w: AddFile cannot add delete files without a data sequence number; use AddDeleteFile",
-			ErrInvalidOperation)
-
-		return r
+		return r.AddDeleteFile(df)
 	default:
 		r.err = fmt.Errorf("%w: AddFile got unsupported content type %s (%s)",
 			ErrInvalidOperation, df.ContentType(), df.FilePath())
@@ -291,7 +311,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
-	if err := r.txn.ReplaceFilesWithDeleteFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
+	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.deleteFilesToAdd, r.snapshotProps, withRewriteSemantics()); err != nil {
 		return err
 	}

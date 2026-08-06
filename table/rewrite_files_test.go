@@ -199,10 +199,7 @@ func TestRewriteFiles_RejectsAddOnlyDeleteFile(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 	deleteFile := newPosDeleteFile(t, tbl.Location()+"/data/pos-delete.parquet")
 	tx := tbl.NewTransaction()
-	rewrite := tx.NewRewrite(nil).AddDeleteFile(table.DeleteFileAddition{
-		File:               deleteFile,
-		DataSequenceNumber: 1,
-	})
+	rewrite := tx.NewRewrite(nil).AddDeleteFile(deleteFile)
 	err := rewrite.Commit(t.Context())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
