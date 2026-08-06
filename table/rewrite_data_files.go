@@ -80,6 +80,34 @@ type CompactionGroupFailure struct {
 	Err          error
 }
 
+// RewriteDataFiles runs a compaction rewrite as a table-level action. Atomic
+// rewrites are committed before this method returns. Partial-progress rewrites
+// commit each group as they run and return the latest table through
+// [RewriteResult.Table].
+//
+// Use [Transaction.RewriteDataFiles] when the rewrite must be staged alongside
+// other updates in one transaction. Partial progress is terminal and should
+// normally be invoked through this action so callers do not accidentally try
+// to commit the parent transaction again.
+func (t Table) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+	txn, err := t.NewTransactionOnBranchWithError(MainBranch)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := txn.RewriteDataFiles(ctx, groups, opts)
+	if err != nil || opts.PartialProgress {
+		return result, err
+	}
+
+	committed, err := txn.Commit(ctx)
+	if result != nil && err == nil {
+		result.Table = committed
+	}
+
+	return result, err
+}
+
 // CompactionTaskGroup is a set of scan tasks in the same partition that
 // should be compacted together. This bridges the compaction planner
 // (table/compaction package) and the executor, avoiding a circular
