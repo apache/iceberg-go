@@ -21,8 +21,9 @@ import "github.com/apache/iceberg-go/internal"
 
 // DataFileStatsRef returns statistics maps owned by the data file. The token
 // restricts this zero-copy accessor to trusted in-module callers; the public
-// DataFile getters continue returning defensive copies. Callers must treat the
-// returned maps and the byte slices stored in the bounds maps as read-only.
+// DataFile getters continue returning defensive copies. The returned maps and
+// every byte slice reachable through the bounds maps alias the DataFile and
+// must not be mutated or retained beyond the current evaluation.
 //
 // This view intentionally contains only the maps consumed by metric
 // evaluators. Partition, column-size, and distinct-count accessors remain on
