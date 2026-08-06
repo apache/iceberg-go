@@ -173,6 +173,18 @@ func TestGCSCredentialsPropagatesADCError(t *testing.T) {
 		assert.Nil(t, creds)
 	})
 
+	t.Run("no-auth skips default credentials", func(t *testing.T) {
+		called := false
+		creds, err := gcsCredentialsWithDefault(context.Background(), map[string]string{io.GCSNoAuth: "true"},
+			func(context.Context) (*google.Credentials, error) {
+				called = true
+				return nil, errors.New("default credentials should not be requested")
+			})
+		require.NoError(t, err)
+		assert.Nil(t, creds)
+		assert.False(t, called)
+	})
+
 	creds, err := gcsCredentials(context.Background(), map[string]string{io.GCSNoAuth: "true"})
 	require.NoError(t, err)
 	assert.Nil(t, creds)
