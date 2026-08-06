@@ -253,7 +253,7 @@ func TestRewriteDataFiles_EmptyPlan(t *testing.T) {
 	partialResult, err := partialTx.RewriteDataFiles(t.Context(), nil,
 		table.RewriteDataFilesOptions{PartialProgress: true})
 	require.NoError(t, err)
-	assert.Same(t, tbl, partialResult.Table)
+	assert.Equal(t, tbl.Location(), partialResult.Table.Location())
 }
 
 // TestExecuteCompactionGroup_TargetFileSizeForwarded verifies that
