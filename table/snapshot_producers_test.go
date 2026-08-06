@@ -228,6 +228,18 @@ func writeTestManifestFile(
 	snapshotID int64,
 	index int,
 ) iceberg.ManifestFile {
+	return writeTestManifestFileWithVersion(t, fs, spec, schema, snapshotID, index, 2)
+}
+
+func writeTestManifestFileWithVersion(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	index int,
+	version int,
+) iceberg.ManifestFile {
 	t.Helper()
 
 	df := newTestDataFile(t, spec, "file://data-"+strconv.Itoa(index)+".parquet", nil)
@@ -237,7 +249,7 @@ func writeTestManifestFile(
 
 	path := "table-location/metadata/source-" + strconv.Itoa(index) + ".avro"
 	var buf bytes.Buffer
-	manifestFile, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+	manifestFile, err := iceberg.WriteManifest(path, &buf, version, spec, schema, snapshotID, entries)
 	require.NoError(t, err, "write manifest")
 	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
 
@@ -757,14 +769,20 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 	closeErr := errors.New("manifest list close failed")
 	removeErr := errors.New("manifest list cleanup failed")
 
-	for _, version := range []int{2, 3} {
+	for _, version := range []int{1, 2, 3} {
 		t.Run(strconv.Itoa(version), func(t *testing.T) {
 			fs := newCloseErrorIO(closeErr, removeErr)
 			spec := iceberg.NewPartitionSpec()
 			txn := createTestTransaction(t, fs, spec)
 			txn.meta.formatVersion = version
 			sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
-			manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
+			manifestVersion := version
+			if manifestVersion == 3 {
+				manifestVersion = 2
+			}
+			manifest := writeTestManifestFileWithVersion(
+				t, fs, spec, simpleSchema(), sp.snapshotID, 1, manifestVersion,
+			)
 
 			updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
 			require.ErrorIs(t, err, closeErr)
@@ -775,12 +793,14 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 
 			if version == 3 {
 				fs.writersMu.Lock()
+				writerCount := len(fs.writers)
 				var output []byte
 				for _, writer := range fs.writers {
 					output = append([]byte(nil), writer.buf.Bytes()...)
 				}
 				fs.writersMu.Unlock()
 
+				require.Equal(t, 1, writerCount)
 				writtenManifests, readErr := iceberg.ReadManifestList(bytes.NewReader(output))
 				require.NoError(t, readErr)
 				require.Len(t, writtenManifests, 1, "manifest-list writer must flush before the output is closed")
@@ -793,14 +813,20 @@ func TestRebuildManifestListCloseFailureReturnsNoSnapshot(t *testing.T) {
 	closeErr := errors.New("manifest list close failed")
 	removeErr := errors.New("manifest list cleanup failed")
 
-	for _, version := range []int{2, 3} {
+	for _, version := range []int{1, 2, 3} {
 		t.Run(strconv.Itoa(version), func(t *testing.T) {
 			initialIO := newTrackingIO()
 			spec := iceberg.NewPartitionSpec()
 			txn := createTestTransaction(t, initialIO, spec)
 			txn.meta.formatVersion = version
 			sp := newFastAppendFilesProducer(OpAppend, txn, initialIO, nil, nil)
-			manifest := writeTestManifestFile(t, initialIO, spec, simpleSchema(), sp.snapshotID, 1)
+			manifestVersion := version
+			if manifestVersion == 3 {
+				manifestVersion = 2
+			}
+			manifest := writeTestManifestFileWithVersion(
+				t, initialIO, spec, simpleSchema(), sp.snapshotID, 1, manifestVersion,
+			)
 
 			updates, _, err := sp.commitManifests(
 				[]iceberg.ManifestFile{manifest},

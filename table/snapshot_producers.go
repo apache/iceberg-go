@@ -1198,6 +1198,11 @@ func writeManifestListFile(
 		return 0, err
 	}
 	if version == 3 && writer.NextRowID() != nil {
+		// addedRows counts ALL rows in new manifests (existing + added), even
+		// for rewrites where survivors preserve old _row_id values. This
+		// "wastes" ID space but doesn't violate uniqueness: actual row IDs come
+		// from the explicit Parquet column, not the global counter. Java's
+		// ManifestListWriter.V3Writer uses the same accounting.
 		addedRows = *writer.NextRowID() - firstRowID
 	}
 
