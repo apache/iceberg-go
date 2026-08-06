@@ -195,6 +195,37 @@ func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
 		"error must name the offending file path")
 }
 
+func TestRewriteFiles_AddsDeleteFile(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/seed.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "seed"}]`)
+	seedTx := tbl.NewTransaction()
+	require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = seedTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteFile := newPosDeleteFile(t, tbl.Location()+"/data/pos-delete.parquet")
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil).AddDeleteFile(deleteFile)
+	require.NoError(t, rewrite.Commit(t.Context()))
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	snap := committed.CurrentSnapshot()
+	require.NotNil(t, snap)
+	assert.Equal(t, table.OpReplace, snap.Summary.Operation)
+	assert.Equal(t, "1", snap.Summary.Properties["added-position-delete-files"])
+
+	tasks, err := committed.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Len(t, tasks[0].DeleteFiles, 1)
+	assert.Equal(t, deleteFile.FilePath(), tasks[0].DeleteFiles[0].FilePath())
+}
+
 func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 

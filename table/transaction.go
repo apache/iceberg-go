@@ -1092,6 +1092,70 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	return setToAdd, nil
 }
 
+// validateDeleteFilesToAdd performs metadata-only validation for delete files
+// supplied to a rewrite. Delete files may use an older partition spec, so the
+// partition values are checked against the spec carried by each file rather
+// than only against the table's current spec.
+func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []iceberg.DataFile, operation string) (map[string]struct{}, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	if len(deleteFiles) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	if meta.formatVersion < 2 {
+		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
+	}
+
+	setToAdd := make(map[string]struct{}, len(deleteFiles))
+	for i, df := range deleteFiles {
+		if df == nil {
+			return nil, fmt.Errorf("nil delete file at index %d for %s", i, operation)
+		}
+		path := df.FilePath()
+		if path == "" {
+			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
+		}
+		if _, ok := setToAdd[path]; ok {
+			return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
+		}
+		setToAdd[path] = struct{}{}
+
+		switch df.ContentType() {
+		case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		default:
+			return nil, fmt.Errorf("adding non-delete file %s has content type %s for %s", path, df.ContentType(), operation)
+		}
+
+		spec, err := meta.GetSpecByID(int(df.SpecID()))
+		if err != nil {
+			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+		}
+		if spec == nil {
+			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
+		}
+		if err := validateDataFilePartitionData(df, spec); err != nil {
+			return nil, fmt.Errorf("delete file %s has invalid partition data for %s: %w", path, operation, err)
+		}
+
+		if df.ContentType() == iceberg.EntryContentEqDeletes {
+			eqIDs := df.EqualityFieldIDs()
+			if len(eqIDs) == 0 {
+				return nil, fmt.Errorf("equality delete file must have non-empty EqualityFieldIDs: %s", path)
+			}
+			if _, err := validateEqualityFieldIDs(meta.CurrentSchema(), eqIDs); err != nil {
+				return nil, fmt.Errorf("invalid equality delete file %s: %w", path, err)
+			}
+		}
+		if IsDeletionVector(df) && df.ReferencedDataFile() == nil {
+			return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
+		}
+	}
+
+	return setToAdd, nil
+}
+
 // WriteOption is an option for methods that operate on pre-built DataFile objects.
 type WriteOption func(*dataFileCfg)
 
@@ -1389,12 +1453,24 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 // are replaced with new (compacted) data files, and delete files that are fully
 // applied are removed.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, snapshotProps, opts...)
+}
+
+// ReplaceFilesWithDeleteFiles atomically replaces data files, adds new delete
+// files, and removes superseded delete files in one snapshot. It is intended
+// for rewrites that change delete-file representation, such as rewriting
+// position deletes into deletion vectors.
+func (t *Transaction) ReplaceFilesWithDeleteFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, deleteFilesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, deleteFilesToAdd, snapshotProps, opts...)
+}
+
+func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, deleteFilesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
 	}
 	// Delegate data file replacement to existing logic.
-	if len(deleteFilesToRemove) == 0 {
+	if len(deleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
 		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
 	}
 
@@ -1406,6 +1482,15 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
+	}
+	setDeleteFilesToAdd, err := t.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
+	if err != nil {
+		return err
+	}
+	for path := range setDeleteFilesToAdd {
+		if _, ok := setToAdd[path]; ok {
+			return fmt.Errorf("data and delete file paths must be unique for ReplaceFiles: %s", path)
+		}
 	}
 
 	setToDelete := make(map[string]struct{}, len(dataFilesToDelete))
@@ -1491,6 +1576,9 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
+		if _, ok := setDeleteFilesToAdd[path]; ok {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		}
 	}
 
 	if len(markedDataForDeletion) != len(setToDelete) {
@@ -1528,6 +1616,9 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	}
 	for _, df := range dataFilesToAdd {
 		updater.appendDataFile(df)
+	}
+	for _, df := range deleteFilesToAdd {
+		updater.appendDeleteFile(df)
 	}
 	for _, df := range markedDeleteForRemoval {
 		updater.removeDeleteFile(df)
