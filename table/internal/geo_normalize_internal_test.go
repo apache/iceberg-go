@@ -226,6 +226,7 @@ func newGeoWKBArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBTyp
 	builder.Release()
 	ext := array.NewExtensionArrayWithStorage(typeDef, storage)
 	storage.Release()
+
 	return ext
 }
 
