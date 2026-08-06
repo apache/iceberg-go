@@ -789,6 +789,82 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 	}
 }
 
+func TestRebuildManifestListCloseFailureReturnsNoSnapshot(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	removeErr := errors.New("manifest list cleanup failed")
+
+	for _, version := range []int{2, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			initialIO := newTrackingIO()
+			spec := iceberg.NewPartitionSpec()
+			txn := createTestTransaction(t, initialIO, spec)
+			txn.meta.formatVersion = version
+			sp := newFastAppendFilesProducer(OpAppend, txn, initialIO, nil, nil)
+			manifest := writeTestManifestFile(t, initialIO, spec, simpleSchema(), sp.snapshotID, 1)
+
+			updates, _, err := sp.commitManifests(
+				[]iceberg.ManifestFile{manifest},
+				[]iceberg.ManifestFile{manifest},
+			)
+			require.NoError(t, err)
+			addSnap := updates[0].(*addSnapshotUpdate)
+
+			retryFS := newCloseErrorIO(closeErr, removeErr)
+			var freshMeta Metadata
+			if version == 3 {
+				freshMeta = newV3MetadataWithNextRowID(t, 0)
+			} else {
+				freshMeta = newMetadataWithLastSeqNum(t, 1)
+			}
+
+			rebuilt, err := addSnap.rebuildManifestList(
+				context.Background(), freshMeta, nil, retryFS, 1,
+			)
+			require.ErrorIs(t, err, closeErr)
+			require.ErrorIs(t, err, removeErr)
+			require.Nil(t, rebuilt)
+			require.Len(t, retryFS.removes, 1)
+			require.Empty(t, retryFS.GetUnclosedWriters())
+		})
+	}
+}
+
+func TestRebuildManifestListSummaryFailureCreatesNoOutput(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	manifest := writeTestManifestFile(t, wfs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	updates, _, err := sp.commitManifests(
+		[]iceberg.ManifestFile{manifest},
+		[]iceberg.ManifestFile{manifest},
+	)
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+
+	parentManifestList := "mem://default/table-location/metadata/fresh-parent.avro"
+	out, err := wfs.Create(parentManifestList)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, out.Close())
+
+	sp.op = Operation("unsupported")
+	freshParent := &Snapshot{
+		SnapshotID:   77,
+		ManifestList: parentManifestList,
+		Summary:      &Summary{Operation: OpAppend},
+	}
+	retryFS := newTrackingIO()
+
+	rebuilt, err := addSnap.rebuildManifestList(
+		context.Background(), newMetadataWithLastSeqNum(t, 1), freshParent, retryFS, 1,
+	)
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.Nil(t, rebuilt)
+	require.Zero(t, retryFS.GetWriterCount())
+}
+
 // TestManifestWriterClosesUnderlyingFile tests that when using newManifestWriter,
 // the underlying file writer is properly closed. This test is related to issue #644 and #681
 // where blob.Writer was never closed, causing table corruption.

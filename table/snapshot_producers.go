@@ -1153,23 +1153,55 @@ func (sp *snapshotProducer) commit(ctx context.Context) (_ []Update, _ []Require
 	return sp.commitManifests(newManifests, addedContent)
 }
 
-func closeManifestListOutput(
+func writeManifestListFile(
 	fs iceio.WriteFileIO,
 	path string,
-	out iceio.FileWriter,
-	writer *iceberg.ManifestListWriter,
-	removeOnError bool,
-) error {
-	var err error
-	if writer != nil {
-		err = errors.Join(err, writer.Close())
-	}
-	err = errors.Join(err, out.Close())
-	if removeOnError || err != nil {
-		err = errors.Join(err, fs.Remove(path))
+	version int,
+	snapshotID int64,
+	sequenceNumber int64,
+	firstRowID int64,
+	parentSnapshotID *int64,
+	manifests []iceberg.ManifestFile,
+) (addedRows int64, err error) {
+	out, err := fs.Create(path)
+	if err != nil {
+		return 0, err
 	}
 
-	return err
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, fs.Remove(path))
+		}
+	}()
+	defer internal.CheckedClose(out, &err)
+
+	var writer *iceberg.ManifestListWriter
+	switch version {
+	case 1:
+		writer, err = iceberg.NewManifestListWriterV1(out, snapshotID, parentSnapshotID)
+	case 2:
+		writer, err = iceberg.NewManifestListWriterV2(out, snapshotID, sequenceNumber, parentSnapshotID)
+	case 3:
+		writer, err = iceberg.NewManifestListWriterV3(out, snapshotID, sequenceNumber, firstRowID, parentSnapshotID)
+	default:
+		return 0, fmt.Errorf("unsupported manifest version: %d", version)
+	}
+
+	if writer != nil {
+		defer internal.CheckedClose(writer, &err)
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	if err = writer.AddManifests(manifests); err != nil {
+		return 0, err
+	}
+	if version == 3 && writer.NextRowID() != nil {
+		addedRows = *writer.NextRowID() - firstRowID
+	}
+
+	return addedRows, nil
 }
 
 // commitManifests stages the snapshot for an already-built manifest set.
@@ -1198,49 +1230,22 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 
 	firstRowID := int64(0)
 	var addedRows int64
-
-	out, err := sp.io.Create(manifestListFilePath)
+	if sp.txn.meta.formatVersion == 3 {
+		firstRowID = sp.txn.meta.NextRowID()
+	}
+	addedRows, err = writeManifestListFile(
+		sp.io,
+		manifestListFilePath,
+		sp.txn.meta.formatVersion,
+		sp.snapshotID,
+		nextSequence,
+		firstRowID,
+		parentSnapshot,
+		newManifests,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
-	var writer *iceberg.ManifestListWriter
-	closed := false
-	defer func() {
-		if !closed {
-			err = errors.Join(err, closeManifestListOutput(sp.io, manifestListFilePath, out, writer, true))
-		}
-	}()
-
-	if sp.txn.meta.formatVersion == 3 {
-		firstRowID = sp.txn.meta.NextRowID()
-		writer, err = iceberg.NewManifestListWriterV3(out, sp.snapshotID, nextSequence, firstRowID, parentSnapshot)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err = writer.AddManifests(newManifests); err != nil {
-			return nil, nil, err
-		}
-		if writer.NextRowID() != nil {
-			// addedRows counts ALL rows in new manifests (existing + added), even
-			// for rewrites where survivors preserve old _row_id values. This
-			// "wastes" ID space but doesn't violate uniqueness: actual row IDs come
-			// from the explicit Parquet column, not the global counter. Java's
-			// ManifestListWriter.V3Writer uses the same accounting.
-			addedRows = *writer.NextRowID() - firstRowID
-		}
-	} else {
-		err = iceberg.WriteManifestList(sp.txn.meta.formatVersion, out,
-			sp.snapshotID, parentSnapshot, &nextSequence, firstRowID, newManifests)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	if err = closeManifestListOutput(sp.io, manifestListFilePath, out, writer, false); err != nil {
-		closed = true
-
-		return nil, nil, err
-	}
-	closed = true
 
 	snapshot := Snapshot{
 		SnapshotID:       sp.snapshotID,
@@ -1284,7 +1289,7 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 	commitUUID := sp.commitUuid
 	capturedSnapshot := snapshot // copy the value so the closure is self-contained
 
-	rebuildFn := func(rebuildCtx context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (_ *Snapshot, retErr error) {
+	rebuildFn := func(rebuildCtx context.Context, freshMeta Metadata, freshParent *Snapshot, fio iceio.WriteFileIO, attempt int) (*Snapshot, error) {
 		// A concurrent writer may have already removed the files this producer
 		// intends to rewrite. Grafting our replacement on top of the fresh
 		// parent would duplicate rows, so abort terminally. The scan also
@@ -1314,6 +1319,21 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			newSeq = freshMeta.LastSequenceNumber() + 1
 		}
 
+		var parentID *int64
+		if freshParent != nil {
+			id := freshParent.SnapshotID
+			parentID = &id
+		}
+
+		rebuiltSummary := capturedSnapshot.Summary
+		if freshParent != nil && freshParent.Summary != nil && capturedSnapshot.Summary != nil {
+			s, sumErr := sp.summaryOnRetry(sp.snapshotProps, freshParent, present)
+			if sumErr != nil {
+				return nil, fmt.Errorf("rebuild manifest list: recompute summary: %w", sumErr)
+			}
+			rebuiltSummary = &s
+		}
+
 		// Write the rebuilt manifest list to a path unique to this retry
 		// attempt. Each retry uses a different attempt counter in the filename
 		// (snap-{id}-{attempt}-{uuid}.avro) so that S3 conditional-write
@@ -1323,53 +1343,26 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		fname := newManifestListFileName(snapshotID, attempt, commitUUID)
 		manifestListPath := locProvider.NewMetadataLocation(fname)
 
-		out, createErr := fio.Create(manifestListPath)
-		if createErr != nil {
-			return nil, fmt.Errorf("rebuild manifest list: create file: %w", createErr)
-		}
-		var writer *iceberg.ManifestListWriter
-		closed := false
-		defer func() {
-			if !closed {
-				retErr = errors.Join(retErr, closeManifestListOutput(fio, manifestListPath, out, writer, true))
-			}
-		}()
-
-		var parentID *int64
-		if freshParent != nil {
-			id := freshParent.SnapshotID
-			parentID = &id
-		}
-
 		firstRowID := int64(0)
-		var addedRows int64
 		if formatVersion == 3 {
 			// Derive firstRowID from the fresh metadata so the manifest-list
 			// first-row-id field is consistent with the catalog's nextRowID
 			// after concurrent writers have advanced it since attempt 0.
 			firstRowID = freshMeta.NextRowID()
-			var wrErr error
-			writer, wrErr = iceberg.NewManifestListWriterV3(out, snapshotID, newSeq, firstRowID, parentID)
-			if wrErr != nil {
-				return nil, fmt.Errorf("rebuild manifest list: create v3 writer: %w", wrErr)
-			}
-			if addErr := writer.AddManifests(combined); addErr != nil {
-				return nil, fmt.Errorf("rebuild manifest list: add manifests: %w", addErr)
-			}
-			if writer.NextRowID() != nil {
-				addedRows = *writer.NextRowID() - firstRowID
-			}
-		} else {
-			if wErr := iceberg.WriteManifestList(formatVersion, out, snapshotID, parentID, &newSeq, firstRowID, combined); wErr != nil {
-				return nil, fmt.Errorf("rebuild manifest list: write: %w", wErr)
-			}
 		}
-		if closeErr := closeManifestListOutput(fio, manifestListPath, out, writer, false); closeErr != nil {
-			closed = true
-
-			return nil, fmt.Errorf("rebuild manifest list: close: %w", closeErr)
+		addedRows, writeErr := writeManifestListFile(
+			fio,
+			manifestListPath,
+			formatVersion,
+			snapshotID,
+			newSeq,
+			firstRowID,
+			parentID,
+			combined,
+		)
+		if writeErr != nil {
+			return nil, fmt.Errorf("rebuild manifest list: write: %w", writeErr)
 		}
-		closed = true
 
 		rebuilt := capturedSnapshot
 		rebuilt.ManifestList = manifestListPath
@@ -1379,19 +1372,7 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			rebuilt.FirstRowID = &firstRowID
 			rebuilt.AddedRows = &addedRows
 		}
-
-		// Recompute the snapshot summary against the fresh parent so totals are
-		// not regressed to the stale attempt-0 values. Removals of delete files
-		// / DVs are gated by present (see checkRemovedFiles) so a peer's prior
-		// removal is not subtracted twice, which would undercount
-		// total-delete-files.
-		if freshParent != nil && freshParent.Summary != nil && capturedSnapshot.Summary != nil {
-			s, sumErr := sp.summaryOnRetry(sp.snapshotProps, freshParent, present)
-			if sumErr != nil {
-				return nil, fmt.Errorf("rebuild manifest list: recompute summary: %w", sumErr)
-			}
-			rebuilt.Summary = &s
-		}
+		rebuilt.Summary = rebuiltSummary
 
 		return &rebuilt, nil
 	}
