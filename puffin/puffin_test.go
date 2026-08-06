@@ -720,10 +720,28 @@ func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
 }
 
 func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
-	data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
-	_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "footer")
+	t.Run("json payload", func(t *testing.T) {
+		data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "footer")
+	})
+
+	t.Run("trailing content beyond limit", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithFooterPayload(payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "footer exceeds maximum size")
+	})
+
+	t.Run("compressed advertised size", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithCompressedFooterPayload(t, payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "footer exceeds maximum size")
+	})
 }
 
 // TestReaderBlobAccess verifies blob access methods work correctly.
