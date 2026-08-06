@@ -47,6 +47,10 @@ const (
 	// Override with WithMaxBlobSize when creating a reader.
 	DefaultMaxBlobSize = 256 << 20
 
+	// DefaultMaxFooterSize is the maximum uncompressed footer size allowed when
+	// reading (64 MB). Override with WithMaxFooterSize when creating a reader.
+	DefaultMaxFooterSize = 64 << 20
+
 	// CreatedBy is a human-readable identification of the application writing the file, along with its version.
 	// Example: "Trino version 381".
 	CreatedBy = "created-by"

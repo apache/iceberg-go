@@ -181,10 +181,10 @@ func fileWithCompressedFooterPayload(t *testing.T, payload []byte) []byte {
 
 	var compressed bytes.Buffer
 	writer := lz4.NewWriter(&compressed)
+	require.NoError(t, writer.Apply(lz4.SizeOption(uint64(len(payload)))))
 	_, err := writer.Write(payload)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
-
 	data := append([]byte("PFA1PFA1"), compressed.Bytes()...)
 	trailer := make([]byte, 12)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(compressed.Len()))
@@ -697,6 +697,33 @@ func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "lz4", r.Properties()["source"])
 	assert.Empty(t, r.Blobs())
+}
+
+func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	var compressed bytes.Buffer
+	writer := lz4.NewWriter(&compressed)
+	_, err := writer.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	data := append([]byte("PFA1PFA1"), compressed.Bytes()...)
+	trailer := make([]byte, 12)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
+	copy(trailer[8:], "PFA1")
+	data = append(data, trailer...)
+
+	_, err = puffin.NewReader(bytes.NewReader(data))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing content size")
+}
+
+func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
+	data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
+	_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "footer")
 }
 
 // TestReaderBlobAccess verifies blob access methods work correctly.

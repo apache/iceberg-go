@@ -51,11 +51,12 @@ type ReaderAtSeeker interface {
 //	    // process blob.Data
 //	}
 type Reader struct {
-	r           ReaderAtSeeker
-	size        int64
-	footer      Footer
-	footerStart int64 // cached after ReadFooter
-	maxBlobSize int64
+	r             ReaderAtSeeker
+	size          int64
+	footer        Footer
+	footerStart   int64 // cached after ReadFooter
+	maxBlobSize   int64
+	maxFooterSize int64
 }
 
 // BlobData pairs a blob's metadata with its content.
@@ -73,6 +74,15 @@ type ReaderOption func(*Reader)
 func WithMaxBlobSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxBlobSize = size
+	}
+}
+
+// WithMaxFooterSize sets the maximum uncompressed footer size allowed when
+// reading. This bounds memory used by JSON decoding and decompression of
+// untrusted Puffin metadata. The default is DefaultMaxFooterSize (64 MB).
+func WithMaxFooterSize(size int64) ReaderOption {
+	return func(r *Reader) {
+		r.maxFooterSize = size
 	}
 }
 
@@ -108,9 +118,10 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 	}
 
 	pr := &Reader{
-		r:           r,
-		size:        size,
-		maxBlobSize: DefaultMaxBlobSize,
+		r:             r,
+		size:          size,
+		maxBlobSize:   DefaultMaxBlobSize,
+		maxFooterSize: DefaultMaxFooterSize,
 	}
 
 	for _, opt := range opts {
@@ -227,10 +238,31 @@ func (r *Reader) readFooter() error {
 		payloadReader = io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	}
 
-	decoder := json.NewDecoder(payloadReader)
+	var footerReader io.Reader = payloadReader
+	if flags&FooterFlagCompressed != 0 {
+		lz4Reader := lz4.NewReader(payloadReader)
+		var firstByte [1]byte
+		n, err := lz4Reader.Read(firstByte[:])
+		if lz4Reader.Size() == 0 {
+			return errors.New("puffin: compressed footer LZ4 frame is missing content size")
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("puffin: initialize compressed footer: %w", err)
+		}
+		footerReader = io.MultiReader(bytes.NewReader(firstByte[:n]), lz4Reader)
+	}
+
+	if r.maxFooterSize <= 0 {
+		return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
+	}
+	limitedFooter := &io.LimitedReader{R: footerReader, N: r.maxFooterSize + 1}
+	decoder := json.NewDecoder(limitedFooter)
 	var footer Footer
 	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
+	}
+	if limitedFooter.N == 0 {
+		return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
 	}
 
 	// FooterPayloadSize defines a single JSON footer object. Reject trailing
