@@ -35,6 +35,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -53,6 +54,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twpayne/go-geom/encoding/wkb"
+	"github.com/twpayne/go-geom/encoding/wkt"
 )
 
 type abortTestFile struct {
@@ -1111,6 +1114,91 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	assertWKBValues(t, batch.Column(2), geogWKB, geogWKB)
 	assertWKBValues(t, batch.Column(3), defaultGeomWKB, defaultGeomWKB)
 	assertWKBValues(t, batch.Column(4), defaultGeogWKB, nil)
+}
+
+func TestWriteDataFileNormalizesEWKBOnDisk(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: geomType, Required: false},
+	)
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	isoWKB := pointWKB(t, 1, 2)
+	builder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	builder.Append(ewkbWithSRID(isoWKB, 4326))
+	builder.AppendNull()
+	storage := builder.NewArray()
+	builder.Release()
+	ext := array.NewExtensionArrayWithStorage(
+		arrowSchema.Field(0).Type.(arrow.ExtensionType), storage,
+	).(array.ExtensionArray)
+	storage.Release()
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{ext}, 2)
+	ext.Release()
+	defer record.Release()
+
+	fs := iceio.NewMemFS()
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	_, err = fm.WriteDataFile(ctx, fs, nil, internal.WriteFileInfo{
+		FileSchema: iceSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   "geo.parquet",
+		StatsCols: map[int]internal.StatisticsCollector{
+			1: {FieldID: 1, IcebergTyp: geomType, ColName: "geom", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		},
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+		Content:    iceberg.EntryContentData,
+	}, []arrow.RecordBatch{record})
+	require.NoError(t, err)
+
+	output, err := fs.Open("geo.parquet")
+	require.NoError(t, err)
+	data, err := io.ReadAll(output)
+	closeErr := output.Close()
+	require.NoError(t, err)
+	require.NoError(t, closeErr)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	arrowReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, mem)
+	require.NoError(t, err)
+	reader := internal.WrapParquetFileReader(arrowReader)
+	records, err := reader.GetRecords(ctx, nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+
+	batch := records.RecordBatch()
+	defer batch.Release()
+	assertWKBValues(t, batch.Column(0), geoarrow.WKBBytes(isoWKB), nil)
+}
+
+func pointWKB(t *testing.T, x, y float64) []byte {
+	t.Helper()
+	geom, err := wkt.Unmarshal(fmt.Sprintf("POINT (%g %g)", x, y))
+	require.NoError(t, err)
+	wkbBytes, err := wkb.Marshal(geom, wkb.NDR)
+	require.NoError(t, err)
+
+	return wkbBytes
+}
+
+func ewkbWithSRID(isoWKB []byte, srid uint32) []byte {
+	result := make([]byte, len(isoWKB)+4)
+	copy(result[:5], isoWKB[:5])
+	binary.LittleEndian.PutUint32(result[1:5], binary.LittleEndian.Uint32(isoWKB[1:5])|0x20000000)
+	binary.LittleEndian.PutUint32(result[5:9], srid)
+	copy(result[9:], isoWKB[5:])
+
+	return result
 }
 
 func TestWriteDataFileErrOnClose(t *testing.T) {
