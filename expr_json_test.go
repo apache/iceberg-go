@@ -432,10 +432,23 @@ func TestExpressionTransformTermRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Truef(t, parsed.Equals(reparsed), "want %s, got %s", parsed, reparsed)
 
-	// Binding a predicate over a transform term isn't supported yet, but it must
-	// fail cleanly rather than panic.
-	_, err = iceberg.BindExpr(schema, parsed, true)
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	// Transform terms bind like regular terms and can be evaluated against rows.
+	bound, err := iceberg.BindExpr(schema, parsed, true)
+	require.NoError(t, err)
+	assert.IsType(t, iceberg.PrimitiveTypes.Int32, bound.(iceberg.BoundPredicate).Term().Type())
+
+	transform := iceberg.BucketTransform{NumBuckets: 100}
+	bucketed := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.Int32Literal(7),
+	})
+	bucketedValue := bucketed.Val.(iceberg.TypedLiteral[int32]).Value()
+	eval, err := iceberg.ExpressionEvaluator(schema, iceberg.EqualTo(
+		iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), bucketedValue), true)
+	require.NoError(t, err)
+	matched, err := eval(rowOf(int32(7)))
+	require.NoError(t, err)
+	assert.True(t, matched)
 }
 
 // TestUnboundTransformBind checks the transform term itself binds to a
