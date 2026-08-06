@@ -1096,7 +1096,7 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 // supplied to a rewrite. Delete files may use an older partition spec, so the
 // partition values are checked against the spec carried by each file rather
 // than only against the table's current spec.
-func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []DeleteFileAddition, operation string) (map[string]struct{}, error) {
+func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAddition, operation string) (map[string]struct{}, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
@@ -1110,13 +1110,13 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []DeleteFileAddition,
 
 	setToAdd := make(map[string]struct{}, len(deleteFiles))
 	for i, addition := range deleteFiles {
-		df := addition.File
+		df := addition.file
 		if df == nil {
 			return nil, fmt.Errorf("nil delete file at index %d for %s", i, operation)
 		}
-		if addition.DataSequenceNumber < 0 {
+		if addition.dataSequenceNumber != nil && *addition.dataSequenceNumber < 0 {
 			return nil, fmt.Errorf("delete file %s has invalid data sequence number %d for %s",
-				df.FilePath(), addition.DataSequenceNumber, operation)
+				df.FilePath(), *addition.dataSequenceNumber, operation)
 		}
 		path := df.FilePath()
 		if path == "" {
@@ -1481,10 +1481,19 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 // This is intended for rewrites that change delete-file representation, such as
 // rewriting position deletes into deletion vectors.
 func (t *Transaction) ReplaceFilesWithDeleteFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
-	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, deleteFilesToAdd, snapshotProps, opts...)
+	additions := make([]rewriteDeleteFileAddition, len(deleteFilesToAdd))
+	for i, addition := range deleteFilesToAdd {
+		seq := addition.DataSequenceNumber
+		additions[i] = rewriteDeleteFileAddition{
+			file:               addition.File,
+			dataSequenceNumber: &seq,
+		}
+	}
+
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, additions, snapshotProps, opts...)
 }
 
-func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []rewriteDeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
@@ -1632,6 +1641,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
 	}
 
+	deleteSequenceNumber := int64(-1)
 	if len(deleteFilesToAdd) > 0 {
 		if len(removedDeleteSequenceNumbers) == 0 {
 			return fmt.Errorf("%w: added delete files must replace existing delete files",
@@ -1651,6 +1661,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		for _, seq := range removedDeleteSequenceNumbers[1:] {
 			maxSequenceNumber = max(maxSequenceNumber, seq)
 		}
+		deleteSequenceNumber = maxSequenceNumber
 		if sourceContent == iceberg.EntryContentEqDeletes {
 			for _, seq := range removedDeleteSequenceNumbers[1:] {
 				if seq != firstSequenceNumber {
@@ -1660,13 +1671,13 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			}
 		}
 		for _, addition := range deleteFilesToAdd {
-			if addition.File.ContentType() != sourceContent {
+			if addition.file.ContentType() != sourceContent {
 				return fmt.Errorf("%w: cannot rewrite %s delete files as %s delete files",
-					ErrInvalidOperation, sourceContent, addition.File.ContentType())
+					ErrInvalidOperation, sourceContent, addition.file.ContentType())
 			}
-			if addition.DataSequenceNumber != maxSequenceNumber {
+			if addition.dataSequenceNumber != nil && *addition.dataSequenceNumber != maxSequenceNumber {
 				return fmt.Errorf("%w: delete file %s has data sequence number %d, expected %d",
-					ErrInvalidOperation, addition.File.FilePath(), addition.DataSequenceNumber, maxSequenceNumber)
+					ErrInvalidOperation, addition.file.FilePath(), *addition.dataSequenceNumber, maxSequenceNumber)
 			}
 		}
 	}
@@ -1696,7 +1707,11 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		updater.appendDataFile(df)
 	}
 	for _, addition := range deleteFilesToAdd {
-		updater.appendDeleteFileWithDataSequenceNumber(addition.File, addition.DataSequenceNumber)
+		sequenceNumber := deleteSequenceNumber
+		if addition.dataSequenceNumber != nil {
+			sequenceNumber = *addition.dataSequenceNumber
+		}
+		updater.appendDeleteFileWithDataSequenceNumber(addition.file, sequenceNumber)
 	}
 	for _, df := range markedDeleteForRemoval {
 		updater.removeDeleteFile(df)
