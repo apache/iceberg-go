@@ -136,7 +136,7 @@ func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
 	})
 }
 
-func TestDecodeFileScanTaskRejectsRangeBeyondFileSize(t *testing.T) {
+func TestDecodeFileScanTaskAllowsRangeBeyondFileSize(t *testing.T) {
 	spec := *iceberg.UnpartitionedSpec
 	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
 		"data.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 100)
@@ -148,6 +148,8 @@ func TestDecodeFileScanTaskRejectsRangeBeyondFileSize(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = DecodeFileScanTask(envelope, spec, nil, 2)
-	require.ErrorContains(t, err, "exceeds file size")
+	decoded, err := DecodeFileScanTask(envelope, spec, nil, 2)
+	require.NoError(t, err)
+	require.Equal(t, int64(90), decoded.Start)
+	require.Equal(t, int64(11), decoded.Length)
 }

@@ -135,9 +135,6 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: file: %w", err)
 	}
-	if err := validateScanRange(envelope.Start, envelope.Length, file.FileSizeBytes()); err != nil {
-		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: %w", err)
-	}
 	del, err := decodeDataFileSlice(envelope.DeleteFiles, spec, schema, version)
 	if err != nil {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: delete files: %w", err)
