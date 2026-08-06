@@ -612,37 +612,47 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 // normalizeNestedArray walks an Arrow array and replaces only nested WKB values
 // that use EWKB encoding. Changed nested containers are rebuilt from their
 // logical values with offset zero, so materialized children cannot be sliced a
-// second time by an enclosing Arrow container.
+// second time by an enclosing Arrow container. Recursive calls carry an
+// optional reachability mask so values hidden by nullable ancestors are copied
+// without being decoded.
 func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeNestedArrayReachable(arr, nil, mem)
+}
+
+func normalizeNestedArrayReachable(arr arrow.Array, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	if active != nil && !hasReachableValues(active) {
+		return nil, false, nil
+	}
+
 	if ext, ok := arr.(array.ExtensionArray); ok {
 		if _, ok := ext.ExtensionType().(*geoarrow.WKBType); !ok {
 			return nil, false, nil
 		}
 
-		return normalizeWKBArray(ext, mem)
+		return normalizeWKBArrayReachable(ext, active, mem)
 	}
 
 	switch nested := arr.(type) {
 	case *array.Struct:
-		return normalizeStruct(nested, mem)
+		return normalizeStruct(nested, active, mem)
 
 	case *array.Map:
-		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewMapData(data)
 		})
 
 	case *array.List:
-		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewListData(data)
 		})
 
 	case *array.LargeList:
-		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewLargeListData(data)
 		})
 
 	case *array.FixedSizeList:
-		return normalizeListChild(nested, mem, func(data arrow.ArrayData) arrow.Array {
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
 			return array.NewFixedSizeListData(data)
 		})
 	}
@@ -650,13 +660,41 @@ func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, b
 	return nil, false, nil
 }
 
-func normalizeStruct(nested *array.Struct, mem memory.Allocator) (arrow.Array, bool, error) {
+func isReachable(active []bool, idx int) bool {
+	return active == nil || active[idx]
+}
+
+func hasReachableValues(active []bool) bool {
+	for _, reachable := range active {
+		if reachable {
+			return true
+		}
+	}
+
+	return false
+}
+
+func reachableWithValidity(active []bool, arr arrow.Array) []bool {
+	if arr.NullN() == 0 {
+		return active
+	}
+
+	reachable := make([]bool, arr.Len())
+	for i := range reachable {
+		reachable[i] = isReachable(active, i) && arr.IsValid(i)
+	}
+
+	return reachable
+}
+
+func normalizeStruct(nested *array.Struct, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
 	children := make([]arrow.ArrayData, nested.NumField())
 	changedChildren := make([]arrow.Array, 0, len(children))
+	childActive := reachableWithValidity(active, nested)
 	for idx := range children {
 		field := nested.Field(idx)
 		children[idx] = field.Data()
-		normalized, changed, err := normalizeNestedArray(field, mem)
+		normalized, changed, err := normalizeNestedArrayReachable(field, childActive, mem)
 		if err != nil {
 			for _, changedChild := range changedChildren {
 				changedChild.Release()
@@ -695,7 +733,7 @@ func normalizeStruct(nested *array.Struct, mem memory.Allocator) (arrow.Array, b
 	return result, true, nil
 }
 
-func normalizeListChild(list array.ListLike, mem memory.Allocator,
+func normalizeListChild(list array.ListLike, active []bool, mem memory.Allocator,
 	newArray func(arrow.ArrayData) arrow.Array,
 ) (arrow.Array, bool, error) {
 	if list.Len() == 0 {
@@ -708,9 +746,23 @@ func normalizeListChild(list array.ListLike, mem memory.Allocator,
 		return nil, false, nil
 	}
 
+	childActive := make([]bool, int(end-start))
+	for i := 0; i < list.Len(); i++ {
+		rowStart, rowEnd := list.ValueOffsets(i)
+		if !isReachable(active, i) || list.IsNull(i) {
+			continue
+		}
+		for j := rowStart; j < rowEnd; j++ {
+			childActive[int(j-start)] = true
+		}
+	}
+	if !hasReachableValues(childActive) {
+		return nil, false, nil
+	}
+
 	values := array.NewSlice(list.ListValues(), start, end)
 	defer values.Release()
-	normalized, changed, err := normalizeNestedArray(values, mem)
+	normalized, changed, err := normalizeNestedArrayReachable(values, childActive, mem)
 	if err != nil || !changed {
 		return nil, false, err
 	}
@@ -799,6 +851,10 @@ func rebasedListOffsets(list array.ListLike, first int64, mem memory.Allocator) 
 }
 
 func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeWKBArrayReachable(ext, nil, mem)
+}
+
+func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
 	storage, ok := ext.Storage().(wkbStorage)
 	if !ok {
 		return nil, false, nil
@@ -806,7 +862,7 @@ func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Ar
 
 	needsNormalization := false
 	for i := range storage.Len() {
-		if !storage.IsNull(i) && isEWKB(storage.Value(i)) {
+		if isReachable(active, i) && !storage.IsNull(i) && isEWKB(storage.Value(i)) {
 			needsNormalization = true
 
 			break
@@ -822,6 +878,11 @@ func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Ar
 	for i := range storage.Len() {
 		if storage.IsNull(i) {
 			builder.AppendNull()
+
+			continue
+		}
+		if !isReachable(active, i) || !isEWKB(storage.Value(i)) {
+			builder.Append(storage.Value(i))
 
 			continue
 		}
