@@ -19,11 +19,13 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,6 +44,250 @@ func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	require.Len(t, txn.reqs, 2)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", &featureSnapshotID)
+}
+
+func TestCurrentSnapshotForRefResolvesBranchHead(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+
+	main := txn.meta.currentSnapshotForRef(MainBranch)
+	require.NotNil(t, main)
+	require.Equal(t, int64(10), main.SnapshotID)
+
+	empty := txn.meta.currentSnapshotForRef("")
+	require.NotNil(t, empty)
+	require.Equal(t, int64(10), empty.SnapshotID, "empty ref must resolve like main")
+
+	feature := txn.meta.currentSnapshotForRef("feature")
+	require.NotNil(t, feature)
+	require.Equal(t, int64(20), feature.SnapshotID, "feature branch must resolve to its own head (20), not main (10)")
+
+	missing := txn.meta.currentSnapshotForRef("does-not-exist")
+	require.NotNil(t, missing)
+	require.Equal(t, int64(10), missing.SnapshotID, "a not-yet-created branch falls back to main's head")
+}
+
+func TestCurrentSnapshotIDForRefResolvesBranchHead(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+
+	require.NotNil(t, txn.meta.currentSnapshotIDForRef(MainBranch))
+	require.Equal(t, int64(10), *txn.meta.currentSnapshotIDForRef(MainBranch))
+
+	require.NotNil(t, txn.meta.currentSnapshotIDForRef("feature"))
+	require.Equal(t, int64(20), *txn.meta.currentSnapshotIDForRef("feature"),
+		"feature branch assertion id must be the branch head (20), not main (10)")
+
+	require.Nil(t, txn.meta.currentSnapshotIDForRef("does-not-exist"),
+		"a not-yet-created branch must assert non-existence (nil), not main's head")
+}
+
+func TestCreateSnapshotProducerParentsOnBranchHead(t *testing.T) {
+	t.Run("feature branch parents on feature head", func(t *testing.T) {
+		txn := newTransactionWithSnapshotRefs(t)
+		txn.branch = "feature"
+		sp := createSnapshotProducer(OpAppend, txn, nil, nil, nil)
+		require.Equal(t, int64(20), sp.parentSnapshotID,
+			"append on feature must layer on the feature head (20), not main head (10)")
+	})
+
+	t.Run("main branch still parents on main head", func(t *testing.T) {
+		txn := newTransactionWithSnapshotRefs(t)
+		txn.branch = ""
+		sp := createSnapshotProducer(OpAppend, txn, nil, nil, nil)
+		require.Equal(t, int64(10), sp.parentSnapshotID)
+	})
+}
+
+func TestBranchWriteCommitsThroughCatalogPath(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+
+	producers := []struct {
+		name    string
+		op      Operation
+		newProd func(Operation, *Transaction, iceio.WriteFileIO, *uuid.UUID, iceberg.Properties) *snapshotProducer
+	}{
+		{"fast append", OpAppend, newFastAppendFilesProducer},
+		{"merge append", OpAppend, newMergeAppendFilesProducer},
+		{"overwrite", OpOverwrite, newOverwriteFilesProducer},
+	}
+
+	for _, tc := range producers {
+		t.Run(tc.name, func(t *testing.T) {
+			txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+			// 1. Create the "feature" branch on a fresh table. The branch does
+			// not exist yet, so the snapshot has no parent and the requirement
+			// asserts the branch is absent (nil).
+			txn.branch = "feature"
+			sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+			sp1.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+			up1, rq1, err := sp1.commit(ctx)
+			require.NoError(t, err)
+			addSnap1, ok := up1[0].(*addSnapshotUpdate)
+			require.True(t, ok)
+			require.Nil(t, addSnap1.Snapshot.ParentSnapshotID, "first feature snapshot has no parent")
+			requireContainsRefSnapshotRequirement(t, rq1, "feature", nil)
+			featureHead := addSnap1.Snapshot.SnapshotID
+			require.NoError(t, txn.apply(up1, rq1))
+			meta1, err := txn.meta.Build()
+			require.NoError(t, err)
+
+			// 2. Advance main independently so feature and main diverge.
+			tblMain := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+			txnMain := tblMain.NewTransaction()
+			spMain := newFastAppendFilesProducer(OpAppend, txnMain, memIO, nil, nil)
+			spMain.appendDataFile(newTestDataFile(t, spec, "file://main-1.parquet", nil))
+			upM, rqM, err := spMain.commit(ctx)
+			require.NoError(t, err)
+			addSnapM, ok := upM[0].(*addSnapshotUpdate)
+			require.True(t, ok)
+			mainHead := addSnapM.Snapshot.SnapshotID
+			require.NoError(t, txnMain.apply(upM, rqM))
+			divergedMeta, err := txnMain.meta.Build()
+			require.NoError(t, err)
+			require.NotEqual(t, featureHead, mainHead)
+
+			// 3. Write to feature again with the producer under test and commit
+			// through the public path. Staging mirrors what the high-level op
+			// (Append/Overwrite/Delete) does internally; Commit runs doCommit ->
+			// CommitTable where the branch requirement is validated.
+			cat := &headTrackingCatalog{metadata: divergedMeta}
+			tbl := New(ident, divergedMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+			txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+			require.NoError(t, err)
+
+			spFeat := tc.newProd(tc.op, txnFeat, memIO, nil, nil)
+			spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+			upF, rqF, err := spFeat.commit(ctx)
+			require.NoError(t, err)
+			require.NoError(t, txnFeat.apply(upF, rqF))
+
+			committed, err := txnFeat.Commit(ctx)
+			require.NoError(t, err, "%s: catalog must accept the branch commit; a main-head AssertRefSnapshotID would be rejected", tc.name)
+			require.Equal(t, int32(1), cat.attempts.Load(), "no retry expected: the branch assertion matches on the first attempt")
+
+			newFeatureHead := committed.Metadata().SnapshotByName("feature")
+			require.NotNil(t, newFeatureHead)
+			require.NotNil(t, newFeatureHead.ParentSnapshotID)
+			require.Equal(t, featureHead, *newFeatureHead.ParentSnapshotID,
+				"%s on feature must be parented on the feature head, not main", tc.name)
+			require.NotEqual(t, mainHead, *newFeatureHead.ParentSnapshotID)
+
+			// The feature commit must leave main untouched.
+			mainRef := committed.Metadata().SnapshotByName(MainBranch)
+			require.NotNil(t, mainRef)
+			require.Equal(t, mainHead, mainRef.SnapshotID, "committing to feature must not move main")
+		})
+	}
+}
+
+func liveDataFilePathsForSnapshot(t *testing.T, snap *Snapshot, fs iceio.IO) []string {
+	t.Helper()
+	require.NotNil(t, snap)
+	var paths []string
+	for e, err := range snap.entries(fs, iceberg.ManifestContentData) {
+		require.NoError(t, err)
+		if e.Status() == iceberg.EntryStatusDELETED {
+			continue
+		}
+		if e.DataFile().ContentType() == iceberg.EntryContentData {
+			paths = append(paths, e.DataFile().FilePath())
+		}
+	}
+
+	return paths
+}
+
+func TestBranchCreateForksFromMainHead(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// main -> [main.parquet]
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// First write to the new "feature" branch.
+	cat := &headTrackingCatalog{metadata: mainMeta}
+	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+
+	// The new-branch requirement must assert absence (nil), while the parent must
+	// be main's head — the two halves of the split that the fallback drives.
+	requireContainsRefSnapshotRequirement(t, rqF, "feature", nil)
+	addSnapF, ok := upF[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.NotNil(t, addSnapF.Snapshot.ParentSnapshotID)
+	require.Equal(t, mainHead, *addSnapF.Snapshot.ParentSnapshotID,
+		"first write to a new branch must fork from main's head")
+
+	require.NoError(t, txnFeat.apply(upF, rqF))
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature.parquet"},
+		liveDataFilePathsForSnapshot(t, committed.Metadata().SnapshotByName("feature"), memIO),
+		"a new branch must inherit main's data files, plus its own")
+}
+
+func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// Fail attempt 0 (forcing a retry through rebuildSnapshotUpdates), apply on 1.
+	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), cat.attempts.Load(), "commit must fail once then succeed on retry (exercising the rebuild path)")
+
+	feat := committed.Metadata().SnapshotByName("feature")
+	require.NotNil(t, feat)
+	require.NotNil(t, feat.ParentSnapshotID)
+	require.Equal(t, mainHead, *feat.ParentSnapshotID, "retry must keep main's head as the new branch's parent")
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature.parquet"},
+		liveDataFilePathsForSnapshot(t, feat, memIO),
+		"a new branch must inherit main's data even when the commit retries and rebuilds")
 }
 
 func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
