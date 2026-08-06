@@ -1557,6 +1557,25 @@ func TestValidateParquetWriteProperties(t *testing.T) {
 	}
 }
 
+func TestValidateParquetCompressionLevel(t *testing.T) {
+	for _, value := range []string{"nope", "", "9223372036854775808"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetCompressionLevelKey: value,
+			})
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+
+	for _, value := range []string{"-1", "0", "3"} {
+		t.Run("valid/"+value, func(t *testing.T) {
+			require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetCompressionLevelKey: value,
+			}))
+		})
+	}
+}
+
 func TestGetWritePropertiesBloomFilter(t *testing.T) {
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 

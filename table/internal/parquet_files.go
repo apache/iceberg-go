@@ -388,6 +388,13 @@ func ValidateParquetWriteProperties(props iceberg.Properties) error {
 		}
 	}
 
+	if value, ok := props[ParquetCompressionLevelKey]; ok {
+		if _, err := strconv.Atoi(value); err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument,
+				ParquetCompressionLevelKey, value, err)
+		}
+	}
+
 	return nil
 }
 
