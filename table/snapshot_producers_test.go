@@ -33,6 +33,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -633,10 +634,15 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 
 // trackingWriteCloser wraps a bytes.Buffer and tracks if Close was called.
 type trackingWriteCloser struct {
-	buf      *bytes.Buffer
-	closed   bool
-	closeErr error
-	closeMu  sync.Mutex
+	buf         *bytes.Buffer
+	closed      bool
+	closeErr    error
+	closeCount  int
+	writeCount  int
+	failWriteAt int
+	writeErr    error
+	onClose     func([]byte)
+	closeMu     sync.Mutex
 }
 
 func newTrackingWriteCloser() *trackingWriteCloser {
@@ -644,6 +650,16 @@ func newTrackingWriteCloser() *trackingWriteCloser {
 }
 
 func (t *trackingWriteCloser) Write(p []byte) (int, error) {
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+	if t.closed {
+		return 0, errors.New("write after close")
+	}
+	t.writeCount++
+	if t.failWriteAt > 0 && t.writeCount == t.failWriteAt {
+		return 0, t.writeErr
+	}
+
 	return t.buf.Write(p)
 }
 
@@ -651,6 +667,10 @@ func (t *trackingWriteCloser) Close() error {
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
 	t.closed = true
+	t.closeCount++
+	if t.onClose != nil && t.closeCount == 1 {
+		t.onClose(t.buf.Bytes())
+	}
 
 	return t.closeErr
 }
@@ -664,6 +684,13 @@ func (t *trackingWriteCloser) IsClosed() bool {
 	defer t.closeMu.Unlock()
 
 	return t.closed
+}
+
+func (t *trackingWriteCloser) CloseCount() int {
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+
+	return t.closeCount
 }
 
 // trackingIO is an IO implementation that tracks file writer closure.
@@ -734,9 +761,11 @@ func (t *trackingIO) GetWriterCount() int {
 
 type closeErrorIO struct {
 	*trackingIO
-	closeErr  error
-	removeErr error
-	removes   []string
+	closeErr    error
+	removeErr   error
+	failWriteAt int
+	writeErr    error
+	removes     []string
 }
 
 func newCloseErrorIO(closeErr, removeErr error) *closeErrorIO {
@@ -750,7 +779,13 @@ func newCloseErrorIO(closeErr, removeErr error) *closeErrorIO {
 func (c *closeErrorIO) Create(name string) (iceio.FileWriter, error) {
 	writer, err := c.trackingIO.Create(name)
 	if err == nil {
-		writer.(*trackingWriteCloser).closeErr = c.closeErr
+		tracked := writer.(*trackingWriteCloser)
+		tracked.closeErr = c.closeErr
+		tracked.failWriteAt = c.failWriteAt
+		tracked.writeErr = c.writeErr
+		tracked.onClose = func(data []byte) {
+			c.files[name] = append([]byte(nil), data...)
+		}
 	}
 
 	return writer, err
@@ -787,6 +822,8 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 			updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
 			require.ErrorIs(t, err, closeErr)
 			require.ErrorIs(t, err, removeErr)
+			require.NotContains(t, err.Error(), "write after close",
+				"the manifest-list writer must flush before the outer file writer closes")
 			require.Nil(t, updates)
 			require.Nil(t, requirements)
 			require.Len(t, fs.removes, 1)
@@ -801,12 +838,23 @@ func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
 				fs.writersMu.Unlock()
 
 				require.Equal(t, 1, writerCount)
+				for _, writer := range fs.writers {
+					require.Equal(t, 1, writer.CloseCount(), "each output writer must close exactly once")
+				}
 				writtenManifests, readErr := iceberg.ReadManifestList(bytes.NewReader(output))
 				require.NoError(t, readErr)
 				require.Len(t, writtenManifests, 1, "manifest-list writer must flush before the output is closed")
 			}
 		})
 	}
+}
+
+func newFlushErrorIO(writeErr error) *closeErrorIO {
+	fs := newCloseErrorIO(nil, nil)
+	fs.failWriteAt = 2 // header write succeeds; the OCF close-time block flush fails.
+	fs.writeErr = writeErr
+
+	return fs
 }
 
 func TestRebuildManifestListCloseFailureReturnsNoSnapshot(t *testing.T) {
@@ -851,7 +899,61 @@ func TestRebuildManifestListCloseFailureReturnsNoSnapshot(t *testing.T) {
 			require.Nil(t, rebuilt)
 			require.Len(t, retryFS.removes, 1)
 			require.Empty(t, retryFS.GetUnclosedWriters())
+			retryFS.writersMu.Lock()
+			retryWriters := make([]*trackingWriteCloser, 0, len(retryFS.writers))
+			for _, writer := range retryFS.writers {
+				retryWriters = append(retryWriters, writer)
+			}
+			retryFS.writersMu.Unlock()
+			for _, writer := range retryWriters {
+				require.Equal(t, 1, writer.CloseCount(), "each retry writer must close exactly once")
+			}
 		})
+	}
+}
+
+func TestCommitManifestsCloseFailureRemovesPartialOutput(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	fs := newCloseErrorIO(closeErr, nil)
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, fs, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+	manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	_, _, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
+	require.ErrorIs(t, err, closeErr)
+	require.Len(t, fs.removes, 1)
+	assert.NotContains(t, fs.files, fs.removes[0], "failed manifest-list output must be removed after close failure")
+
+	fs.writersMu.Lock()
+	defer fs.writersMu.Unlock()
+	for _, writer := range fs.writers {
+		require.Equal(t, 1, writer.CloseCount())
+	}
+}
+
+func TestCommitManifestsInnerCloseFailureReturnsNoUpdates(t *testing.T) {
+	flushErr := errors.New("manifest list flush failed")
+	fs := newFlushErrorIO(flushErr)
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, fs, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+	manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
+	require.ErrorIs(t, err, flushErr)
+	require.NotContains(t, err.Error(), "write after close")
+	require.Nil(t, updates)
+	require.Nil(t, requirements)
+	require.Len(t, fs.removes, 1)
+	assert.NotContains(t, fs.files, fs.removes[0])
+
+	fs.writersMu.Lock()
+	defer fs.writersMu.Unlock()
+	for _, writer := range fs.writers {
+		require.Equal(t, 1, writer.CloseCount())
 	}
 }
 
