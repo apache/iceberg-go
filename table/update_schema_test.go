@@ -924,6 +924,49 @@ func TestSetIdentifierField(t *testing.T) {
 		assert.Len(t, newSchema.IdentifierFieldIDs, 1)
 		assert.Equal(t, 2, newSchema.IdentifierFieldIDs[0]) // name field has ID 2
 	})
+
+	t.Run("test rename then set identifier to old name fails", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			RenameColumn([]string{"id"}, "new_id").
+			SetIdentifierField([][]string{{"id"}}).
+			Apply()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "identifier field not found: id")
+	})
+
+	t.Run("test set identifier then rename tracks the new name", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			SetIdentifierField([][]string{{"id"}}).
+			RenameColumn([]string{"id"}, "new_id").
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		require.Len(t, newSchema.IdentifierFieldIDs, 1)
+		// Renamed field keeps ID 1
+		assert.Equal(t, 1, newSchema.IdentifierFieldIDs[0])
+		field, ok := newSchema.FindColumnName(1)
+		require.True(t, ok)
+		assert.Equal(t, "new_id", field)
+	})
+
+	t.Run("test delete then set identifier to deleted name fails", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			DeleteColumn([]string{"name"}).
+			SetIdentifierField([][]string{{"name"}}).
+			Apply()
+		require.Error(t, err)
+		require.ErrorContains(t, err, "identifier field not found: name")
+	})
 }
 
 func TestErrorHandling(t *testing.T) {
