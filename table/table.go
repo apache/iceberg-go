@@ -66,6 +66,12 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // WriteRecords behavior.
 var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
 
+const allManifestsMaxWorkers = 16
+
+func allManifestsWorkerCount(snapshotCount int) int {
+	return max(1, min(snapshotCount, allManifestsMaxWorkers))
+}
+
 // requireWriteFileIO should run immediately after resolving the table FS and
 // before mutating transaction state such as automatic name mapping.
 func requireWriteFileIO(fs icebergio.IO) (icebergio.WriteFileIO, error) {
@@ -331,8 +337,11 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	n := len(snapshots)
 	workCtx, cancel := context.WithCancel(ctx)
 	jobs := make(chan int)
-	ch := make(chan list, max(1, min(n, 16)))
-	workers := max(1, min(n, min(runtime.GOMAXPROCS(0), 16)))
+	// This buffer lets workers finish after an early consumer stop. The result
+	// channel created below still retains all snapshot results, so this is not a
+	// memory bound; all remote reads are bounded by allManifestsMaxWorkers.
+	ch := make(chan list, allManifestsWorkerCount(n))
+	workers := allManifestsWorkerCount(n)
 	g, groupCtx := errgroup.WithContext(workCtx)
 
 	for range workers {

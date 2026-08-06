@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -68,10 +67,6 @@ func TestAllManifestsCompletesAfterErrorChannelCloses(t *testing.T) {
 
 func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
 	const snapshotCount = 64
-	const maxWorkers = 2
-
-	previousMaxProcs := runtime.GOMAXPROCS(maxWorkers)
-	defer runtime.GOMAXPROCS(previousMaxProcs)
 
 	var trackingFS *manifestTrackingIO
 	tbl, _ := tableWithManifestListsUsingIO(t, snapshotCount, func(memFS *iceio.MemFS) iceio.IO {
@@ -88,8 +83,26 @@ func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
 	trackingFS.mu.Lock()
 	maxOpen := trackingFS.maxOpen
 	trackingFS.mu.Unlock()
-	require.Greater(t, maxOpen, 1)
-	require.LessOrEqual(t, maxOpen, maxWorkers)
+	require.LessOrEqual(t, maxOpen, allManifestsMaxWorkers)
+}
+
+func TestAllManifestsWorkerCount(t *testing.T) {
+	tests := []struct {
+		name          string
+		snapshotCount int
+		want          int
+	}{
+		{name: "empty", snapshotCount: 0, want: 1},
+		{name: "single snapshot", snapshotCount: 1, want: 1},
+		{name: "at limit", snapshotCount: allManifestsMaxWorkers, want: allManifestsMaxWorkers},
+		{name: "above limit", snapshotCount: allManifestsMaxWorkers + 1, want: allManifestsMaxWorkers},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, allManifestsWorkerCount(tt.snapshotCount))
+		})
+	}
 }
 
 type manifestTrackingIO struct {
