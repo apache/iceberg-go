@@ -93,7 +93,11 @@ func TestParseRequirementBytes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			actual, err := table.ParseRequirementBytes(tc.data)
 			assert.Equal(t, tc.expected, actual)
-			assert.Equal(t, tc.expectedErr, err)
+			if tc.expectedErr != nil {
+				require.ErrorIs(t, err, tc.expectedErr)
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }
@@ -173,42 +177,76 @@ func TestParseRequirementListReplacesExistingSlice(t *testing.T) {
 
 func TestParseRequirementRejectsMissingRequiredFields(t *testing.T) {
 	tests := []struct {
-		name string
-		data string
+		name          string
+		data          string
+		expectedField string
 	}{
-		{name: "table uuid", data: `{"type":"assert-table-uuid"}`},
-		{name: "missing ref", data: `{"type":"assert-ref-snapshot-id"}`},
-		{name: "missing snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main"}`},
-		{name: "default spec id", data: `{"type":"assert-default-spec-id"}`},
-		{name: "current schema id", data: `{"type":"assert-current-schema-id"}`},
-		{name: "default sort order id", data: `{"type":"assert-default-sort-order-id"}`},
-		{name: "last assigned field id", data: `{"type":"assert-last-assigned-field-id"}`},
-		{name: "last assigned partition id", data: `{"type":"assert-last-assigned-partition-id"}`},
-		{name: "null current schema id", data: `{"type":"assert-current-schema-id","current-schema-id":null}`},
+		{name: "missing type", data: `{}`, expectedField: "type"},
+		{name: "null type", data: `{"type":null}`, expectedField: "type"},
+		{name: "table uuid", data: `{"type":"assert-table-uuid"}`, expectedField: "uuid"},
+		{name: "null table uuid", data: `{"type":"assert-table-uuid","uuid":null}`, expectedField: "uuid"},
+		{name: "missing ref", data: `{"type":"assert-ref-snapshot-id"}`, expectedField: "ref"},
+		{name: "missing snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main"}`, expectedField: "snapshot-id"},
+		{name: "default spec id", data: `{"type":"assert-default-spec-id"}`, expectedField: "default-spec-id"},
+		{name: "null default spec id", data: `{"type":"assert-default-spec-id","default-spec-id":null}`, expectedField: "default-spec-id"},
+		{name: "current schema id", data: `{"type":"assert-current-schema-id"}`, expectedField: "current-schema-id"},
+		{name: "null current schema id", data: `{"type":"assert-current-schema-id","current-schema-id":null}`, expectedField: "current-schema-id"},
+		{name: "default sort order id", data: `{"type":"assert-default-sort-order-id"}`, expectedField: "default-sort-order-id"},
+		{name: "null default sort order id", data: `{"type":"assert-default-sort-order-id","default-sort-order-id":null}`, expectedField: "default-sort-order-id"},
+		{name: "last assigned field id", data: `{"type":"assert-last-assigned-field-id"}`, expectedField: "last-assigned-field-id"},
+		{name: "null last assigned field id", data: `{"type":"assert-last-assigned-field-id","last-assigned-field-id":null}`, expectedField: "last-assigned-field-id"},
+		{name: "last assigned partition id", data: `{"type":"assert-last-assigned-partition-id"}`, expectedField: "last-assigned-partition-id"},
+		{name: "null last assigned partition id", data: `{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":null}`, expectedField: "last-assigned-partition-id"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := table.ParseRequirementBytes([]byte(tt.data))
-			require.Error(t, err)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, tt.expectedField)
 
 			var requirements table.Requirements
 			err = json.Unmarshal([]byte("["+tt.data+"]"), &requirements)
-			require.Error(t, err)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, tt.expectedField)
 		})
 	}
 }
 
 func TestParseRequirementAcceptsExplicitZero(t *testing.T) {
-	actual, err := table.ParseRequirementBytes([]byte(`{"type":"assert-current-schema-id","current-schema-id":0}`))
-	require.NoError(t, err)
-	assert.Equal(t, table.AssertCurrentSchemaID(0), actual)
+	tests := []struct {
+		name     string
+		data     string
+		expected table.Requirement
+	}{
+		{name: "default spec id", data: `{"type":"assert-default-spec-id","default-spec-id":0}`, expected: table.AssertDefaultSpecID(0)},
+		{name: "current schema id", data: `{"type":"assert-current-schema-id","current-schema-id":0}`, expected: table.AssertCurrentSchemaID(0)},
+		{name: "default sort order id", data: `{"type":"assert-default-sort-order-id","default-sort-order-id":0}`, expected: table.AssertDefaultSortOrderID(0)},
+		{name: "last assigned field id", data: `{"type":"assert-last-assigned-field-id","last-assigned-field-id":0}`, expected: table.AssertLastAssignedFieldID(0)},
+		{name: "last assigned partition id", data: `{"type":"assert-last-assigned-partition-id","last-assigned-partition-id":0}`, expected: table.AssertLastAssignedPartitionID(0)},
+		{name: "snapshot id", data: `{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":0}`, expected: table.AssertRefSnapshotID("main", ptr(int64(0)))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := table.ParseRequirementBytes([]byte(tt.data))
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
 }
 
 func TestParseRequirementRefRequiresRefButAllowsNullSnapshotID(t *testing.T) {
-	actual, err := table.ParseRequirementBytes([]byte(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}`))
+	data := []byte(`{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}`)
+
+	actual, err := table.ParseRequirementBytes(data)
 	require.NoError(t, err)
 	assert.Equal(t, table.AssertRefSnapshotID("main", nil), actual)
+
+	var requirements table.Requirements
+	require.NoError(t, json.Unmarshal([]byte("["+string(data)+"]"), &requirements))
+	require.Len(t, requirements, 1)
+	assert.Equal(t, table.AssertRefSnapshotID("main", nil), requirements[0])
 }
 
 func TestParseRequirementRefAcceptsNumericSnapshotID(t *testing.T) {

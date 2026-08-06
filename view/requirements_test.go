@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -102,9 +103,27 @@ func TestParseRequirementRejectsMissingUUID(t *testing.T) {
 		`{"type":"assert-view-uuid","uuid":null}`,
 	} {
 		_, err := view.ParseRequirementBytes([]byte(data))
-		require.Error(t, err)
+		require.ErrorIs(t, err, table.ErrInvalidRequirement)
+		require.ErrorContains(t, err, "uuid")
 
 		var requirements view.Requirements
-		require.Error(t, json.Unmarshal([]byte("["+data+"]"), &requirements))
+		err = json.Unmarshal([]byte("["+data+"]"), &requirements)
+		require.ErrorIs(t, err, table.ErrInvalidRequirement)
+		require.ErrorContains(t, err, "uuid")
+	}
+}
+
+func TestParseRequirementRejectsMissingOrNullType(t *testing.T) {
+	for _, data := range []string{`{}`, `{"type":null}`} {
+		t.Run(data, func(t *testing.T) {
+			_, err := view.ParseRequirementBytes([]byte(data))
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, "type")
+
+			var requirements view.Requirements
+			err = json.Unmarshal([]byte("["+data+"]"), &requirements)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, "type")
+		})
 	}
 }
