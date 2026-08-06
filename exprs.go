@@ -930,7 +930,6 @@ func (usp *unboundSetPredicate) Bind(schema *Schema, caseSensitive bool) (Boolea
 	if err != nil {
 		return nil, err
 	}
-
 	return createBoundSetPredicate(usp.op, bound, usp.lits)
 }
 
@@ -1227,7 +1226,6 @@ func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, 
 
 	return &BoundTransform{transform: u.transform, term: bound}, nil
 }
-
 func isNilTransform(transform Transform) bool {
 	if transform == nil {
 		return true
@@ -1250,7 +1248,6 @@ func isUnknownTransform(transform Transform) bool {
 		return false
 	}
 }
-
 // rejectTransformTerm guards predicates that still do not support transform
 // terms, such as bounding-box predicates.
 func rejectTransformTerm(term BoundTerm) error {
