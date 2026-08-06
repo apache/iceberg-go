@@ -957,11 +957,6 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
 
-	// A new remote plan supersedes any previous plan produced by this Scan.
-	// Release its scoped credentials before replacing the handle so repeated
-	// PlanFiles calls do not retain one PlanIO per plan.
-	scan.closePlanIO()
-
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
 		Identifier:       slices.Clone(scan.identifier),
@@ -976,9 +971,34 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
+	// Replace an unconsumed plan only after the new plan is available. A
+	// planner failure must not destroy a previously usable plan.
+	if scan.planIO != nil && !samePlanIO(scan.planIO, result.IO) {
+		_ = scan.planIO.Close()
+	}
 	scan.planIO = result.IO
 
 	return result.Tasks, nil
+}
+
+// samePlanIO compares plan-scoped IO handles without comparing interfaces
+// directly. PlanIO implementations are allowed to contain slices or maps and
+// therefore may be non-comparable interface values.
+func samePlanIO(left, right PlanIO) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+
+	lv, rv := reflect.ValueOf(left), reflect.ValueOf(right)
+	if lv.Type() != rv.Type() {
+		return false
+	}
+
+	if lv.Comparable() {
+		return lv.Interface() == rv.Interface()
+	}
+
+	return false
 }
 
 type FileScanTask struct {
@@ -1048,13 +1068,15 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 
 	// A plan-scoped FileIO (from remote planning) takes precedence over the
 	// table's default FileIO and is closed once the returned iterator finishes.
+	// Transfer ownership out of Scan before loading so replanning cannot close
+	// resources used by an active iterator.
+	planIO := scan.planIO
+	scan.planIO = nil
 	var fs io.IO
-	if scan.planIO != nil {
-		planIO := scan.planIO
+	if planIO != nil {
 		fs, err = planIO.Load(ctx)
 		if err != nil {
 			_ = planIO.Close()
-			scan.planIO = nil
 			return nil, nil, err
 		}
 	} else {
@@ -1076,16 +1098,15 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}).GetRecords(ctx, tasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so close here.
-		if scan.planIO != nil {
-			_ = scan.planIO.Close()
-			scan.planIO = nil
+		if planIO != nil {
+			_ = planIO.Close()
 		}
 
 		return nil, nil, err
 	}
 
-	if scan.planIO != nil {
-		records = closePlanIOAfter(records, scan.planIO)
+	if planIO != nil {
+		records = closePlanIOAfter(records, planIO)
 	}
 
 	return outSchema, records, nil
@@ -1107,8 +1128,9 @@ func (scan *Scan) closePlanIO() {
 // stops early. A caller that never ranges over the iterator does not trigger
 // the close; that is an accepted edge for an unread result.
 func closePlanIOAfter(seq iter.Seq2[arrow.RecordBatch, error], pio PlanIO) iter.Seq2[arrow.RecordBatch, error] {
+	var closeOnce sync.Once
 	return func(yield func(arrow.RecordBatch, error) bool) {
-		defer func() { _ = pio.Close() }()
+		defer closeOnce.Do(func() { _ = pio.Close() })
 		for rec, err := range seq {
 			if !yield(rec, err) {
 				return

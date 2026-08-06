@@ -93,6 +93,30 @@ func TestReadTasksClosesPlanIOWhenLoadFails(t *testing.T) {
 	assert.Nil(t, scan.planIO)
 }
 
+func TestReadTasksTransfersPlanIOOwnershipToIterator(t *testing.T) {
+	pio := &countingPlanIO{fs: icebergio.LocalFS{}}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.planIO = pio
+
+	_, records, err := scan.ReadTasks(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Nil(t, scan.planIO)
+
+	for _, err := range records {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, pio.closeCalls)
+
+	_, records, err = scan.ReadTasks(context.Background(), nil)
+	require.NoError(t, err)
+	for _, err := range records {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, pio.closeCalls, "the second read uses the table IO and must not close the transferred PlanIO again")
+}
+
 func TestScanPlanningRemoteRejectsIncapablePlanner(t *testing.T) {
 	t.Parallel()
 
@@ -201,11 +225,12 @@ func (fakePlanIO) Close() error                               { return nil }
 
 type countingPlanIO struct {
 	loadErr    error
+	fs         icebergio.IO
 	closeCalls int
 }
 
 func (p *countingPlanIO) Load(context.Context) (icebergio.IO, error) {
-	return nil, p.loadErr
+	return p.fs, p.loadErr
 }
 
 func (p *countingPlanIO) Close() error {
