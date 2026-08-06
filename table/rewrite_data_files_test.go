@@ -418,11 +418,26 @@ func TestRewriteDataFiles_PartialProgress(t *testing.T) {
 	plan, err := defaultTestCompactionCfg.PlanCompaction(tasks)
 	require.NoError(t, err)
 
-	result, tbl := runRewriteWithCleanup(t, tbl, toTaskGroups(plan.Groups), true)
+	plannedGroups := toTaskGroups(plan.Groups)
+	require.NotEmpty(t, plannedGroups)
+	// Split the planned group so the test can distinguish one durable snapshot
+	// per group from one snapshot containing all staged rewrites.
+	first := plannedGroups[0]
+	require.GreaterOrEqual(t, len(first.Tasks), 2)
+	mid := len(first.Tasks) / 2
+	groups := []table.CompactionTaskGroup{
+		{PartitionKey: first.PartitionKey + "/a", Tasks: first.Tasks[:mid], TotalSizeBytes: first.TotalSizeBytes / 2},
+		{PartitionKey: first.PartitionKey + "/b", Tasks: first.Tasks[mid:], TotalSizeBytes: first.TotalSizeBytes - first.TotalSizeBytes/2},
+	}
+	groups = append(groups, plannedGroups[1:]...)
+	beforeSnapshots := len(tbl.Metadata().Snapshots())
+
+	result, tbl := runRewriteWithCleanup(t, tbl, groups, true)
 
 	assertRowCount(t, tbl, 6)
 	assert.Greater(t, result.RewrittenGroups, 0)
 	assert.Equal(t, 6, result.RemovedDataFiles)
+	assert.Equal(t, beforeSnapshots+result.RewrittenGroups, len(tbl.Metadata().Snapshots()))
 }
 
 func TestRewriteDataFiles_ContextCancellation(t *testing.T) {

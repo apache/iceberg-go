@@ -94,6 +94,11 @@ type Transaction struct {
 
 	mx        sync.Mutex
 	committed bool
+	// partialProgressCommitted means RewriteDataFiles(PartialProgress=true)
+	// already committed one or more groups through child transactions. The
+	// parent transaction remains the compatibility handle callers use to fetch
+	// the latest table with Commit, but cannot stage more work.
+	partialProgressCommitted bool
 }
 
 func (t *Transaction) ensureInitialized() error {
@@ -2369,6 +2374,10 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	}
 
 	if t.committed {
+		if t.partialProgressCommitted {
+			return t.tbl, nil
+		}
+
 		return nil, errors.New("transaction has already been committed")
 	}
 

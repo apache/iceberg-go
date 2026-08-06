@@ -128,18 +128,14 @@ type CompactionGroupResult struct {
 // [Transaction.RewriteDataFiles].
 type RewriteDataFilesOptions struct {
 	// PartialProgress, when true, stages each group as its own
-	// rewrite snapshot inside the loop so a mid-loop write failure
-	// leaves the already-completed groups staged on this transaction
-	// (the in-memory transaction can be discarded by group rather
-	// than wholesale). When false (the default), every group lands in
-	// a single atomic rewrite snapshot.
+	// rewrite snapshot and commits it before moving to the next group.
+	// A mid-loop failure therefore leaves already-completed groups durable.
+	// When false (the default), every group lands in a single atomic rewrite
+	// snapshot.
 	//
-	// In both modes the catalog commit happens once at
-	// [Transaction.Commit] time, so a process crash mid-loop loses
-	// every staged group regardless of this flag. Callers who need
-	// true per-group catalog durability (matching Java's behavior)
-	// should drive [Transaction.NewRewrite] themselves and commit a
-	// fresh transaction per group.
+	// The parent transaction remains usable as the final table handle: after
+	// partial progress has committed, [Transaction.Commit] returns the latest
+	// table and rejects additional staged work.
 	PartialProgress bool
 
 	// SnapshotProps are added to the rewrite snapshot's summary.
@@ -432,22 +428,22 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	return true
 }
 
-// rewriteDataFilesPartial stages each group as its own rewrite
-// snapshot via [Transaction.ReplaceFiles] directly. Per-group staging
-// lets a mid-loop write failure leave already-staged groups on the
-// transaction; the catalog still receives them at
-// [Transaction.Commit] time.
-//
-// Validator registration is coalesced: a single [rewriteValidator]
-// covering every rewritten path across all groups is registered once,
-// after the loop, instead of one per group. The transaction's
-// validator list otherwise grows linearly with the group count, and
-// each entry independently walks the concurrent-snapshot set on
-// refresh-replay — the union walk subsumes them.
+// rewriteDataFilesPartial commits each non-empty group in its own child
+// transaction. This is the durable mode: a later group can fail without
+// rolling back snapshots already committed for earlier groups.
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	result := &RewriteResult{}
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	if len(meta.updates) > 0 || len(t.reqs) > 0 || len(t.validators) > 0 {
+		return nil, fmt.Errorf("%w: partial progress requires a fresh transaction",
+			ErrInvalidOperation)
+	}
+
 	props := maps.Clone(opts.SnapshotProps)
-	var allRewritten []iceberg.DataFile
+	current := t.tbl
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -458,7 +454,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, t.tbl, group, opts.GroupOptions...)
+		gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
 		if err != nil {
 			return result, err
 		}
@@ -468,17 +464,34 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 
 		deletesToRemove := append(slices.Clone(gr.SafePosDeletes), gr.SafeDeletionVectors...)
-		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, deletesToRemove,
+		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
+		if err != nil {
+			return result, fmt.Errorf("create transaction for compaction group %q: %w", group.PartitionKey, err)
+		}
+		if err := groupTxn.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, deletesToRemove,
 			props, withRewriteSemantics()); err != nil {
+			return result, fmt.Errorf("stage compaction group %q: %w", group.PartitionKey, err)
+		}
+		groupTxn.addValidator(rewriteValidator(gr.OldDataFiles))
+
+		next, err := groupTxn.Commit(ctx)
+		if err != nil {
+			if next != nil {
+				current = next
+				t.tbl = next
+				t.committed = true
+				t.partialProgressCommitted = true
+				accumulateGroupMetrics(result, gr)
+			}
+
 			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 		}
 
-		allRewritten = append(allRewritten, gr.OldDataFiles...)
+		current = next
+		t.tbl = next
+		t.committed = true
+		t.partialProgressCommitted = true
 		accumulateGroupMetrics(result, gr)
-	}
-
-	if len(allRewritten) > 0 {
-		t.addValidator(rewriteValidator(allRewritten))
 	}
 
 	return result, nil
