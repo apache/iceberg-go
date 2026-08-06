@@ -193,7 +193,7 @@ func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPre
 	case BoundLiteralPredicate:
 		return p.AsUnbound(Reference(name), p.Literal()), nil
 	case BoundSetPredicate:
-		return p.AsUnbound(Reference(name), p.Literals().Members()), nil
+		return p.AsUnbound(Reference(name), boundSetLiteralsForVisit(p).Members()), nil
 	}
 
 	return nil, nil
@@ -1153,7 +1153,7 @@ func removeTransform(partName string, pred BoundPredicate) (UnboundPredicate, er
 	case BoundLiteralPredicate:
 		return p.AsUnbound(Reference(partName), p.Literal()), nil
 	case BoundSetPredicate:
-		return p.AsUnbound(Reference(partName), p.Literals().Members()), nil
+		return p.AsUnbound(Reference(partName), boundSetLiteralsForVisit(p).Members()), nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot replace transform in unknown predicate: %s",
@@ -1279,7 +1279,7 @@ func literalLen(lit Literal) int {
 }
 
 func setApplyTransform[T LiteralType](name string, pred BoundSetPredicate, fn func(any) Optional[T]) UnboundPredicate {
-	lits := pred.Literals().Members()
+	lits := boundSetLiteralsForVisit(pred).Members()
 	for i, l := range lits {
 		lits[i] = transformLiteral(fn, l)
 	}
