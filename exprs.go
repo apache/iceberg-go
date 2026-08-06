@@ -590,11 +590,23 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 	// fast case optimizations
 	switch up.op {
 	case OpIsNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if transform, ok := bound.(*BoundTransform); ok {
+			if _, alwaysNull := transform.transform.(VoidTransform); alwaysNull {
+				return AlwaysTrue{}, nil
+			}
+		}
+		if ref, ok := bound.(BoundReference); ok &&
+			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysFalse{}, nil
 		}
 	case OpNotNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if transform, ok := bound.(*BoundTransform); ok {
+			if _, alwaysNull := transform.transform.(VoidTransform); alwaysNull {
+				return AlwaysFalse{}, nil
+			}
+		}
+		if ref, ok := bound.(BoundReference); ok &&
+			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysTrue{}, nil
 		}
 	case OpIsNan:
@@ -1111,7 +1123,13 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 }
 
 func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
-	bound, err := u.term.Bind(schema, caseSensitive)
+	ref, ok := u.term.(Reference)
+	if !ok {
+		return nil, fmt.Errorf("%w: transform terms must wrap a direct reference, got %T",
+			ErrInvalidArgument, u.term)
+	}
+
+	bound, err := ref.Bind(schema, caseSensitive)
 	if err != nil {
 		return nil, err
 	}
