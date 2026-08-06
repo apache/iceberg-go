@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"slices"
 
 	"github.com/apache/iceberg-go"
 )
@@ -152,8 +151,9 @@ type CompactionGroupResult struct {
 
 	// SafePosDeletes are position-delete files referenced by tasks in
 	// this group whose target data file is being rewritten, computed
-	// via [CollectSafePositionDeletes]. They are safe to expunge in
-	// the rewrite snapshot.
+	// via [CollectSafePositionDeletes]. Partial-progress callers must
+	// re-check them against the complete commit batch before expunging
+	// them because one file can reference data files in multiple groups.
 	SafePosDeletes []iceberg.DataFile
 
 	// SafeDeletionVectors are deletion vectors attached to tasks in this
@@ -174,23 +174,26 @@ type CompactionGroupResult struct {
 // RewriteDataFilesOptions bundles the per-rewrite knobs for
 // [Transaction.RewriteDataFiles].
 type RewriteDataFilesOptions struct {
-	// PartialProgress, when true, commits each non-empty group in its own
-	// catalog snapshot. When false (the default), every group is staged in a
-	// single atomic rewrite snapshot.
+	// PartialProgress, when true, commits non-empty groups in durable catalog
+	// batches. When false (the default), every group is staged in a single
+	// atomic rewrite snapshot.
 	PartialProgress bool
 
-	// MaxCommits bounds the number of catalog commits in partial-progress mode.
-	// Zero uses the default of 10. It has no effect for atomic rewrites.
+	// MaxCommits bounds the number of catalog snapshots produced in
+	// partial-progress mode. Groups are batched so all groups are processed
+	// while staying within this bound. Zero uses the default of 10. It has no
+	// effect for atomic rewrites.
 	MaxCommits int
 
 	// MaxFailedCommits bounds catalog commit failures in partial-progress mode.
-	// Zero (the default) allows all group commits to fail. A negative value also
-	// means unlimited failures.
+	// Zero (the default) and negative values allow unlimited failures. Failures
+	// within the bound are returned in RewriteResult.FailedGroups without making
+	// the operation return an error.
 	MaxFailedCommits int
 
 	// SnapshotProps are added to the rewrite snapshot's summary.
-	// In partial-progress mode the same properties land on every
-	// per-group snapshot rather than being summed or split.
+	// In partial-progress mode the same properties land on every batch
+	// snapshot rather than being summed or split.
 	SnapshotProps iceberg.Properties
 
 	// ExtraDeleteFilesToRemove are delete files that are dead after
@@ -483,9 +486,11 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	return true
 }
 
-// rewriteDataFilesPartial commits each non-empty group in its own child
-// transaction. This is the durable mode: a later group can fail without
-// rolling back snapshots already committed for earlier groups.
+// rewriteDataFilesPartial executes groups and commits them in durable batches.
+// A batch is the atomic unit for both the MaxCommits bound and delete cleanup:
+// classic position deletes are rechecked against the union of every old data
+// file in the batch before they are removed. A later batch can fail without
+// rolling back snapshots already committed for earlier batches.
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	result := &RewriteResult{Table: t.tbl}
 	meta, err := t.txnMeta()
@@ -505,61 +510,121 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 	}
 	maxFailedCommits := opts.MaxFailedCommits
 
+	pendingGroups := make([]CompactionTaskGroup, 0, len(groups))
+	for _, group := range groups {
+		if len(group.Tasks) > 0 {
+			pendingGroups = append(pendingGroups, group)
+		}
+	}
+	if len(pendingGroups) == 0 {
+		return result, nil
+	}
+
+	// Match Iceberg's action semantics: MaxCommits is a bound on snapshots,
+	// not on the number of groups processed. Distribute all groups across at
+	// most MaxCommits batches.
+	groupsPerCommit := (len(pendingGroups)-1)/maxCommits + 1
 	props := maps.Clone(opts.SnapshotProps)
 	current := t.tbl
 	failedCommits := 0
 
-	for _, group := range groups {
+	for batchStart := 0; batchStart < len(pendingGroups); batchStart += groupsPerCommit {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 
-		if len(group.Tasks) == 0 {
-			continue
-		}
-		if result.RewrittenGroups >= maxCommits {
-			return result, fmt.Errorf("%w: partial rewrite reached MaxCommits=%d",
-				ErrInvalidOperation, maxCommits)
+		batchEnd := min(batchStart+groupsPerCommit, len(pendingGroups))
+		batchGroups := pendingGroups[batchStart:batchEnd]
+		batchResults := make([]CompactionGroupResult, 0, len(batchGroups))
+		rewrittenPaths := make(map[string]struct{})
+		rewrittenFiles := make([]iceberg.DataFile, 0)
+
+		for _, group := range batchGroups {
+			if err := ctx.Err(); err != nil {
+				return result, err
+			}
+
+			gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
+			if err != nil {
+				return result, err
+			}
+
+			if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
+				continue
+			}
+			batchResults = append(batchResults, gr)
+			for _, df := range gr.OldDataFiles {
+				if _, ok := rewrittenPaths[df.FilePath()]; ok {
+					continue
+				}
+				rewrittenPaths[df.FilePath()] = struct{}{}
+				rewrittenFiles = append(rewrittenFiles, df)
+			}
 		}
 
-		gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
+		if len(batchResults) == 0 {
+			continue
+		}
+
+		fs, err := current.fsF(ctx)
 		if err != nil {
-			return result, err
+			return result, fmt.Errorf("open table IO for partial rewrite batch: %w", err)
+		}
+		deadPositionDeletes, err := CollectDeadPositionDeletes(
+			ctx, fs, current.CurrentSnapshot(), rewrittenPaths)
+		if err != nil {
+			return result, fmt.Errorf("collect dead position deletes for partial rewrite batch: %w", err)
 		}
 
-		if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
-			continue
+		// Deletion vectors are one-to-one with their referenced data file, so
+		// task-level results are sufficient. Deduplicate by reference because
+		// ReplaceFiles rejects multiple DVs for one data file.
+		safeDVs := make([]iceberg.DataFile, 0)
+		seenDVRefs := make(map[string]struct{})
+		for _, gr := range batchResults {
+			for _, dv := range gr.SafeDeletionVectors {
+				ref := dv.ReferencedDataFile()
+				if ref == nil {
+					continue
+				}
+				if _, ok := seenDVRefs[*ref]; ok {
+					continue
+				}
+				seenDVRefs[*ref] = struct{}{}
+				safeDVs = append(safeDVs, dv)
+			}
 		}
+		deletesToRemove := append(deadPositionDeletes, safeDVs...)
 
-		deletesToRemove := append(slices.Clone(gr.SafePosDeletes), gr.SafeDeletionVectors...)
 		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
 		if err != nil {
-			return result, fmt.Errorf("create transaction for compaction group %q: %w", group.PartitionKey, err)
+			return result, fmt.Errorf("create transaction for partial rewrite batch: %w", err)
 		}
-		if err := groupTxn.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, deletesToRemove,
+		newDataFiles := make([]iceberg.DataFile, 0)
+		oldDataFiles := make([]iceberg.DataFile, 0, len(rewrittenFiles))
+		for _, gr := range batchResults {
+			oldDataFiles = append(oldDataFiles, gr.OldDataFiles...)
+			newDataFiles = append(newDataFiles, gr.NewDataFiles...)
+		}
+		if err := groupTxn.ReplaceFiles(ctx, oldDataFiles, newDataFiles, deletesToRemove,
 			props, withRewriteSemantics()); err != nil {
-			return result, fmt.Errorf("stage compaction group %q: %w", group.PartitionKey, err)
+			return result, fmt.Errorf("stage partial rewrite batch: %w", err)
 		}
-		groupTxn.addValidator(rewriteValidator(gr.OldDataFiles))
+		groupTxn.addValidator(rewriteValidator(rewrittenFiles))
 
 		next, err := groupTxn.Commit(ctx)
 		if err != nil {
-			if next != nil {
-				current = next
-				t.tbl = next
-				t.committed = true
-				accumulateGroupMetrics(result, gr)
-				result.CompletedGroups = append(result.CompletedGroups, gr)
-				result.Table = next
-			} else {
+			if next == nil {
 				failedCommits++
-				result.FailedGroups = append(result.FailedGroups, CompactionGroupFailure{
-					PartitionKey: group.PartitionKey,
-					Err:          err,
-				})
-				if maxFailedCommits > 0 && failedCommits >= maxFailedCommits {
-					return result, fmt.Errorf("commit compaction group %q: %w (maximum failed commits reached)",
-						group.PartitionKey, err)
+				for _, gr := range batchResults {
+					result.FailedGroups = append(result.FailedGroups, CompactionGroupFailure{
+						PartitionKey: gr.PartitionKey,
+						Err:          err,
+					})
+				}
+				if maxFailedCommits > 0 && failedCommits > maxFailedCommits {
+					return result, fmt.Errorf("commit partial rewrite batch %d: %w (maximum failed commits reached)",
+						batchStart/groupsPerCommit+1, err)
 				}
 			}
 
@@ -569,25 +634,28 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		current = next
 		t.tbl = next
 		t.committed = true
-		accumulateGroupMetrics(result, gr)
-		result.CompletedGroups = append(result.CompletedGroups, gr)
+		for _, gr := range batchResults {
+			accumulateGroupMetricsWithDeletes(result, gr, 0, 0)
+			result.CompletedGroups = append(result.CompletedGroups, gr)
+		}
+		result.RemovedPositionDeleteFiles += len(deadPositionDeletes)
+		result.RemovedDeletionVectorFiles += len(safeDVs)
 		result.Table = next
-	}
-
-	if len(result.FailedGroups) > 0 {
-		return result, fmt.Errorf("partial rewrite completed %d groups with %d failed commits",
-			result.RewrittenGroups, len(result.FailedGroups))
 	}
 
 	return result, nil
 }
 
 func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
+	accumulateGroupMetricsWithDeletes(r, gr, len(gr.SafePosDeletes), len(gr.SafeDeletionVectors))
+}
+
+func accumulateGroupMetricsWithDeletes(r *RewriteResult, gr CompactionGroupResult, positionDeletes, deletionVectors int) {
 	r.RewrittenGroups++
 	r.AddedDataFiles += len(gr.NewDataFiles)
 	r.RemovedDataFiles += len(gr.OldDataFiles)
-	r.RemovedPositionDeleteFiles += len(gr.SafePosDeletes)
-	r.RemovedDeletionVectorFiles += len(gr.SafeDeletionVectors)
+	r.RemovedPositionDeleteFiles += positionDeletes
+	r.RemovedDeletionVectorFiles += deletionVectors
 	r.BytesBefore += gr.BytesBefore
 	r.BytesAfter += gr.BytesAfter
 }

@@ -35,6 +35,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type partialProgressCatalog struct {
+	metadata table.Metadata
+	failOn   int
+	calls    int
+}
+
+func (c *partialProgressCatalog) LoadTable(context.Context, table.Identifier) (*table.Table, error) {
+	return nil, nil
+}
+
+func (c *partialProgressCatalog) CommitTable(_ context.Context, _ table.Identifier, _ []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+	c.calls++
+	if c.failOn > 0 && c.calls == c.failOn {
+		return nil, "", fmt.Errorf("injected partial progress commit failure")
+	}
+
+	meta, err := table.UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+
+	return meta, "", nil
+}
+
+func newPartialProgressTestTable(t *testing.T) (*table.Table, *partialProgressCatalog) {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, location,
+		iceberg.Properties{table.PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+
+	cat := &partialProgressCatalog{metadata: meta}
+	tbl := table.New(
+		table.Identifier{"db", "partial_progress_test"},
+		meta, location+"/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		cat,
+	)
+
+	return tbl, cat
+}
+
 func newRewriteTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
@@ -461,6 +510,122 @@ func TestRewriteDataFiles_PartialProgress(t *testing.T) {
 	assert.Same(t, tbl, result.Table)
 	assert.Equal(t, 6, result.RemovedDataFiles)
 	assert.Equal(t, beforeSnapshots+result.RewrittenGroups, len(tbl.Metadata().Snapshots()))
+}
+
+func TestRewriteDataFiles_PartialProgressMaxCommitsProcessesAllGroups(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 3 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/max-commit-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc,
+			fmt.Sprintf(`[{"id": %d, "data": "row"}]`, i+1))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	groups := make([]table.CompactionTaskGroup, 0, len(tasks))
+	for i, task := range tasks {
+		groups = append(groups, table.CompactionTaskGroup{
+			PartitionKey:   fmt.Sprintf("group-%d", i),
+			Tasks:          []table.FileScanTask{task},
+			TotalSizeBytes: task.File.FileSizeBytes(),
+		})
+	}
+
+	beforeSnapshots := len(tbl.Metadata().Snapshots())
+	tx := tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      2,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, result.RewrittenGroups,
+		"MaxCommits limits durable snapshots, not the number of groups processed")
+	assert.Len(t, result.CompletedGroups, 3)
+	assert.Equal(t, beforeSnapshots+2, len(result.Table.Metadata().Snapshots()))
+	assertRowCount(t, result.Table, 3)
+}
+
+func TestRewriteDataFiles_PartialProgressRetainsSharedPositionDeleteAfterFailure(t *testing.T) {
+	tbl, cat := newPartialProgressTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/shared-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc, fmt.Sprintf(
+			`[{"id": %d, "data": "a"}, {"id": %d, "data": "b"}]`, i*2+1, i*2+2))
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	// This partition-scoped position delete targets both data files. The first
+	// partial batch must not remove it while the second data file is still live.
+	posDelPath := tbl.Location() + "/data/shared-position-delete.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema, fmt.Sprintf(
+		`[{"file_path": "%s", "pos": 0}, {"file_path": "%s", "pos": 0}]`,
+		tbl.Location()+"/data/shared-0.parquet", tbl.Location()+"/data/shared-1.parquet"))
+	posDelBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(posDelBuilder.Build()).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	assertRowCount(t, tbl, 2)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	groups := make([]table.CompactionTaskGroup, 0, len(tasks))
+	for i, task := range tasks {
+		groups = append(groups, table.CompactionTaskGroup{
+			PartitionKey:   fmt.Sprintf("shared-group-%d", i),
+			Tasks:          []table.FileScanTask{task},
+			TotalSizeBytes: task.File.FileSizeBytes(),
+		})
+	}
+
+	// The first batch commits; the second batch fails. One tolerated failure
+	// must still return a successful result and leave its old data plus delete
+	// file in the table.
+	cat.failOn = cat.calls + 2
+	tx = tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress:  true,
+		MaxCommits:       2,
+		MaxFailedCommits: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.RewrittenGroups)
+	require.Len(t, result.CompletedGroups, 1)
+	require.Len(t, result.FailedGroups, 1)
+	assert.Equal(t, 1, len(result.Table.Metadata().Snapshots())-len(tbl.Metadata().Snapshots()))
+
+	// The row deleted from the failed group's data file must remain hidden.
+	// If the shared position delete were removed by the first batch, this would
+	// be three rows instead of two.
+	assertRowCount(t, result.Table, 2)
+	newTasks, err := result.Table.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	var remainingPositionDeletes int
+	for _, task := range newTasks {
+		remainingPositionDeletes += len(task.DeleteFiles)
+	}
+	assert.Greater(t, remainingPositionDeletes, 0,
+		"a shared position delete must remain while a referenced data file survives")
 }
 
 func TestRewriteDataFiles_ContextCancellation(t *testing.T) {

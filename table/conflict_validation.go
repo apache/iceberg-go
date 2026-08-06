@@ -692,7 +692,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 // can be determined), which callers must treat conservatively via a
 // partition-tuple match rather than skipping the delete.
 func referencedDataFilePath(df iceberg.DataFile) string {
-	if ref := df.ReferencedDataFile(); ref != nil {
+	if ref := df.ReferencedDataFile(); ref != nil && *ref != "" {
 		return *ref
 	}
 
@@ -706,8 +706,12 @@ func referencedDataFilePath(df iceberg.DataFile) string {
 	if err != nil {
 		return ""
 	}
+	value, ok := lit.(iceberg.TypedLiteral[string])
+	if !ok {
+		return ""
+	}
 
-	return lit.(iceberg.TypedLiteral[string]).Value()
+	return value.Value()
 }
 
 // filePathFieldID is the reserved field ID of the file_path column in a
