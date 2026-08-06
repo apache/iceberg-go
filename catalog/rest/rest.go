@@ -1074,8 +1074,24 @@ func (r *Catalog) Close() error { return r.reporter.Close() }
 
 var _ catalog.Closer = (*Catalog)(nil)
 
-func checkValidNamespace(ident table.Identifier) error {
-	return catalog.ValidateNamespaceIdentifier(ident)
+func (r *Catalog) checkValidNamespace(ident table.Identifier) error {
+	if err := catalog.ValidateNamespaceIdentifier(ident); err != nil {
+		return err
+	}
+
+	separator := r.decodedNamespaceSeparator()
+	if separator == "" {
+		return nil
+	}
+
+	for _, part := range ident {
+		if strings.Contains(part, separator) {
+			return fmt.Errorf("%w: namespace component %q contains the namespace separator %q in %v",
+				catalog.ErrNoSuchNamespace, part, separator, strings.Join(ident, "."))
+		}
+	}
+
+	return nil
 }
 
 func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties, credsVended bool) (*table.Table, error) {
@@ -1185,7 +1201,7 @@ func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 }
 
 func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
@@ -1244,16 +1260,20 @@ func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	return strings.Join(encoded, r.nsSeparator())
 }
 
+func (r *Catalog) decodedNamespaceSeparator() string {
+	sep, err := url.PathUnescape(r.nsSeparator())
+	if err != nil {
+		return r.nsSeparator()
+	}
+
+	return sep
+}
+
 // namespaceToQueryParam joins the raw namespace levels with the decoded
 // separator for use as a query-parameter value, which the HTTP layer then
 // percent-encodes. Mirrors RESTUtil.namespaceToQueryParam in Java.
 func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
-	sep, err := url.PathUnescape(r.nsSeparator())
-	if err != nil {
-		sep = r.nsSeparator()
-	}
-
-	return strings.Join(namespace, sep)
+	return strings.Join(namespace, r.decodedNamespaceSeparator())
 }
 
 func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1734,7 +1754,7 @@ func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	if err := catalog.ValidateNamespaceIdentifier(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
@@ -1756,7 +1776,7 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
@@ -1792,7 +1812,7 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 
 func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
 	if len(parent) != 0 {
-		if err := catalog.ValidateNamespaceIdentifier(parent); err != nil {
+		if err := r.checkValidNamespace(parent); err != nil {
 			return nil, "", err
 		}
 	}
@@ -1841,7 +1861,7 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		return nil, err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
 
@@ -1871,7 +1891,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
@@ -1892,7 +1912,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 }
 
 func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return false, err
 	}
 
@@ -1985,7 +2005,7 @@ func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
@@ -2389,7 +2409,7 @@ func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier)
 }
 
 func (r *Catalog) listFunctionsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.

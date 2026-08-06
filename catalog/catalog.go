@@ -255,10 +255,6 @@ func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 			notFoundErr, strings.Join(ident, "."))
 	}
 
-	return validateIdentifierComponents(ident, notFoundErr)
-}
-
-func validateIdentifierComponents(ident table.Identifier, notFoundErr error) error {
 	for _, part := range ident {
 		if part == "" || part == "." || part == ".." || strings.Contains(part, "/") {
 			return fmt.Errorf("%w: invalid identifier component %q in %v",
@@ -281,7 +277,7 @@ func validateIdentifierComponents(ident table.Identifier, notFoundErr error) err
 // intentionally left to the catalog implementation so existing namespaces
 // remain readable across clients.
 func ValidateNamespaceIdentifier(ident table.Identifier) error {
-	if len(ident) < 1 {
+	if len(ident) == 0 {
 		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
 	}
 
