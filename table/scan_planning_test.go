@@ -81,6 +81,22 @@ func TestScanPlanningRemotePropagatesPlannerError(t *testing.T) {
 	require.ErrorIs(t, err, want)
 }
 
+func TestScanPlanningRemoteRejectsConflictingSnapshotSelectors(t *testing.T) {
+	t.Parallel()
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		planner:      planner,
+		planningMode: ScanPlanningRemote,
+	}
+	WithSnapshotID(1000)(scan)
+	WithSnapshotAsOf(2000)(scan)
+
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.False(t, planner.called)
+}
+
 func TestScanPlanningAutoUsesCapablePlanner(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +148,14 @@ func TestTransactionScanCopiesIdentifier(t *testing.T) {
 	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
 }
 
+func TestTransactionScanRejectsConflictingSnapshotSelectors(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	scan, err := txn.Scan(WithSnapshotID(1000), WithSnapshotAsOf(2000))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Nil(t, scan)
+}
+
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -145,6 +169,7 @@ type fakeScanPlanner struct {
 	result   ScanPlanningResult
 	supports bool
 	err      error
+	called   bool
 	// captured after PlanFiles receives it
 	receivedIdentifier Identifier
 }
@@ -152,6 +177,7 @@ type fakeScanPlanner struct {
 func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports }
 
 func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
+	f.called = true
 	f.receivedIdentifier = req.Identifier
 
 	return f.result, f.err
