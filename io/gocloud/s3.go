@@ -232,6 +232,10 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 			o.BaseEndpoint = aws.String(endpoint)
 		}
 		if compatMode {
+			// Compat mode trades checksums for interoperability: endpoints such as
+			// GCS's S3 interop layer reject the x-amz-checksum-* family outright, so
+			// no request checksum is sent on object writes and any caller-supplied
+			// digest is silently dropped (see clearS3WriteChecksumFields).
 			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 			o.APIOptions = append(o.APIOptions, stripS3InputChecksumAlgorithm)
 			o.APIOptions = append(o.APIOptions, stripGCSIncompatibleSignedHeaders)
@@ -278,6 +282,18 @@ const awsChecksumSetupInputContextID = "AWSChecksum:SetupInputContext"
 // them as XML elements in the request body, not as headers, so they are a
 // legitimate part of the completion request and clearing them could invalidate
 // it.
+//
+// Note that this discards caller-supplied checksums silently: in compat mode a
+// precomputed digest passed on an object write (for example via s3blob's
+// BeforeWrite hook) is dropped rather than sent. Failing loudly instead is not
+// an option here, because by the time this middleware runs there is no way to
+// tell a value the caller set deliberately from one the SDK or the S3 transfer
+// manager injected on its own; erroring out would break ordinary writes. The
+// endpoint would reject the header anyway, so dropping it is what makes the
+// write succeed.
+//
+// It also reports whether the input was one of the object write shapes, so
+// callers that need that classification do not duplicate the type switch.
 func clearS3WriteChecksumFields(params any) bool {
 	switch v := params.(type) {
 	case *s3.PutObjectInput:
@@ -325,11 +341,14 @@ func (m *suppressS3WriteChecksumSetup) ID() string {
 func (m *suppressS3WriteChecksumSetup) HandleInitialize(
 	ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler,
 ) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
-	if isS3WriteInput(in.Parameters) {
+	// clearS3WriteChecksumFields both classifies the input and clears it, which
+	// keeps the list of object write shapes in one place. Calling it here as well
+	// as from the clearing middleware is harmless: it only zeroes fields, so it is
+	// idempotent no matter which of the two runs first.
+	if clearS3WriteChecksumFields(in.Parameters) {
 		// Skip the SDK setup entirely: with no algorithm on the context, the
 		// compute middleware is a no-op and the request carries no SDK-computed
-		// checksum. Caller-supplied values are handled by the clearing
-		// middleware, which runs for every operation.
+		// checksum.
 		return next.HandleInitialize(ctx, in)
 	}
 
@@ -338,16 +357,6 @@ func (m *suppressS3WriteChecksumSetup) HandleInitialize(
 	}
 
 	return next.HandleInitialize(ctx, in)
-}
-
-func isS3WriteInput(params any) bool {
-	switch params.(type) {
-	case *s3.PutObjectInput, *s3.UploadPartInput,
-		*s3.CreateMultipartUploadInput, *s3.CompleteMultipartUploadInput:
-		return true
-	}
-
-	return false
 }
 
 func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {

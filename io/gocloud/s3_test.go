@@ -18,8 +18,9 @@
 package gocloud
 
 import (
-	"bytes"
 	"context"
+	"fmt"
+	stdio "io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -649,8 +650,14 @@ func compatModeTestConfig(srv *httptest.Server) aws.Config {
 
 // assertNoChecksumHeaders asserts a single request carried none of the checksum
 // headers GCS's S3 interop endpoint rejects, including x-amz-checksum-type.
+//
+// The header map must be non-nil: an absent capture means the request never
+// reached the server (or was classified under a different operation name), which
+// would otherwise let every assertion below pass vacuously.
 func assertNoChecksumHeaders(t *testing.T, captured http.Header, op string) {
 	t.Helper()
+
+	require.NotNilf(t, captured, "no request captured for %s", op)
 
 	for header := range captured {
 		h := strings.ToLower(header)
@@ -705,8 +712,9 @@ func newMultipartUploadServer(t *testing.T, record func(op string, h http.Header
 
 		// Drain the body before responding. Part uploads are megabytes, and
 		// replying without consuming them closes the connection while the
-		// client is still writing, which surfaces as a broken pipe.
-		_, _ = new(bytes.Buffer).ReadFrom(r.Body)
+		// client is still writing, which surfaces as a broken pipe. Discard
+		// rather than buffer: the bodies are never inspected here.
+		_, _ = stdio.Copy(stdio.Discard, r.Body)
 
 		w.Header().Set("Content-Type", "application/xml")
 		switch op {
@@ -736,24 +744,37 @@ func newMultipartUploadServer(t *testing.T, record func(op string, h http.Header
 // A real multipart upload in compat mode must be checksum-free on every leg:
 // CreateMultipartUpload and CompleteMultipartUpload register no checksum setup
 // middleware in the SDK, so they are only covered by the input-clearing pass.
+//
+// Every request is asserted individually rather than one per operation kind, so
+// a checksum leaking onto only some of the parts cannot slip through.
 func TestCompatModeMultipartUploadNoChecksumHeaders(t *testing.T) {
 	t.Parallel()
 
-	captured := map[string]http.Header{}
-	var ops []string
+	const (
+		partSize = 5 * 1024 * 1024
+		bodySize = 12 * 1024 * 1024
+		// 12MiB in 5MiB parts: two full parts plus a 2MiB remainder.
+		wantParts = 3
+	)
+
+	type request struct {
+		op     string
+		header http.Header
+	}
+
+	var requests []request
 	srv := newMultipartUploadServer(t, func(op string, h http.Header) {
-		captured[op] = h
-		ops = append(ops, op)
+		requests = append(requests, request{op: op, header: h})
 	})
 
 	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
 	tm := transfermanager.New(client, func(o *transfermanager.Options) {
-		o.PartSizeBytes = 5 * 1024 * 1024
-		o.MultipartUploadThreshold = 5 * 1024 * 1024
+		o.PartSizeBytes = partSize
+		o.MultipartUploadThreshold = partSize
 	})
 
 	// Exceeds the threshold above, so this is a genuine multipart upload.
-	body := strings.NewReader(strings.Repeat("x", 12*1024*1024))
+	body := strings.NewReader(strings.Repeat("x", bodySize))
 	_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
 		Bucket: aws.String("test-bucket"),
 		Key:    aws.String("test-key"),
@@ -761,10 +782,33 @@ func TestCompatModeMultipartUploadNoChecksumHeaders(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	for _, op := range []string{"CreateMultipartUpload", "UploadPart", "CompleteMultipartUpload"} {
-		require.Containsf(t, ops, op, "expected a %s request, got ops=%v", op, ops)
-		assertNoChecksumHeaders(t, captured[op], op)
+	// Parts upload concurrently, so only the create/complete bookends have a
+	// fixed position. Assert the exact operation counts instead of a sequence.
+	counts := map[string]int{}
+	for _, req := range requests {
+		counts[req.op]++
 	}
+	assert.Equalf(t, map[string]int{
+		"CreateMultipartUpload":   1,
+		"UploadPart":              wantParts,
+		"CompleteMultipartUpload": 1,
+	}, counts, "unexpected multipart request mix, got %d requests", len(requests))
+
+	require.NotEmpty(t, requests)
+	assert.Equal(t, "CreateMultipartUpload", requests[0].op,
+		"the upload must begin with CreateMultipartUpload")
+	assert.Equal(t, "CompleteMultipartUpload", requests[len(requests)-1].op,
+		"the upload must end with CompleteMultipartUpload")
+
+	// Assert every individual request, including each part.
+	partsSeen := 0
+	for i, req := range requests {
+		if req.op == "UploadPart" {
+			partsSeen++
+		}
+		assertNoChecksumHeaders(t, req.header, fmt.Sprintf("%s (request %d of %d)", req.op, i+1, len(requests)))
+	}
+	assert.Equalf(t, wantParts, partsSeen, "expected %d UploadPart requests", wantParts)
 }
 
 // Caller-supplied checksum values and ChecksumType are bound straight to headers
@@ -815,6 +859,9 @@ func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
 			ChecksumType:      s3types.ChecksumTypeFullObject,
 		})
 		require.NoError(t, err)
+		// Require the capture first: a missing entry would make every absence
+		// assertion below pass vacuously.
+		require.Contains(t, captured, "CreateMultipartUpload")
 		assertNoChecksumHeaders(t, captured["CreateMultipartUpload"],
 			"CreateMultipartUpload with explicit checksum")
 
@@ -833,6 +880,7 @@ func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
+		require.Contains(t, captured, "CompleteMultipartUpload")
 		assertNoChecksumHeaders(t, captured["CompleteMultipartUpload"],
 			"CompleteMultipartUpload with explicit checksum")
 	})
@@ -847,9 +895,7 @@ func TestCompatModeKeepsCompletedPartBodyChecksums(t *testing.T) {
 
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := new(bytes.Buffer)
-		_, _ = buf.ReadFrom(r.Body)
-		body = buf.Bytes()
+		body, _ = stdio.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
 			`<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
