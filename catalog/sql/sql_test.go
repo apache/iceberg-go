@@ -2220,6 +2220,14 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
 	s.True(exists)
+
+	foundNested := false
+	for identifier, err := range db.ListViews(context.Background(), nestedNamespace) {
+		s.Require().NoError(err)
+		s.Equal(append(nestedNamespace, viewName), identifier)
+		foundNested = true
+	}
+	s.True(foundNested)
 }
 
 func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
