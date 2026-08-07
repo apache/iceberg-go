@@ -370,6 +370,29 @@ func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
 	require.Nil(t, rr)
 }
 
+func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
+	tbl := historyTestTable()
+	minSnapshotsToKeep := int(math.MaxInt32)
+	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+		},
+	}
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	minSnapshots := rec.Column(4).(*array.Int32)
+	require.False(t, minSnapshots.IsNull(0))
+	require.Equal(t, int32(math.MaxInt32), minSnapshots.Value(0))
+}
+
 // snapshotsTestTable builds a table with two snapshots: a root carrying a
 // summary (operation + properties) and a child with no summary at all, to
 // exercise both the populated and null operation/summary paths.

@@ -371,8 +371,9 @@ func SnapshotsSchema() *iceberg.Schema {
 	)
 }
 
-// RefsSchema returns the Iceberg schema of the refs metadata table. The field
-// IDs and names match Java's RefsTable for cross-client parity.
+// RefsSchema returns a fresh Iceberg schema for the refs metadata table. The
+// field IDs and names match Java's RefsTable for cross-client parity; callers
+// should not rely on pointer identity.
 func RefsSchema() *iceberg.Schema {
 	return iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
