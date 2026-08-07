@@ -272,6 +272,25 @@ func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 	return nil
 }
 
+// ValidateNamespaceIdentifier checks that an identifier contains at least one
+// namespace level and no null characters. Other namespace component rules are
+// intentionally left to the catalog implementation so existing namespaces
+// remain readable across clients.
+func ValidateNamespaceIdentifier(ident table.Identifier) error {
+	if len(ident) == 0 {
+		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
+	}
+
+	for _, part := range ident {
+		if strings.ContainsRune(part, '\x00') {
+			return fmt.Errorf("%w: invalid null character in namespace identifier component %q in %v",
+				ErrNoSuchNamespace, part, strings.Join(ident, "."))
+		}
+	}
+
+	return nil
+}
+
 // ValidateTableIdentifier checks that an identifier contains at least one valid namespace level and a table name.
 func ValidateTableIdentifier(ident table.Identifier) error {
 	return validateIdentifier(ident, ErrNoSuchTable)

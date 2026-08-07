@@ -1882,6 +1882,31 @@ func TestEncodeNamespace(t *testing.T) {
 	}
 }
 
+func TestCheckValidNamespaceRejectsDecodedSeparator(t *testing.T) {
+	tests := []struct {
+		name      string
+		separator string
+		namespace table.Identifier
+		wantErr   bool
+	}{
+		{name: "default separator in component", namespace: table.Identifier{"a\x1fb"}, wantErr: true},
+		{name: "configured separator in component", separator: "%2E", namespace: table.Identifier{"a.b"}, wantErr: true},
+		{name: "separator between components", namespace: table.Identifier{"a", "b"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := &Catalog{namespaceSeparator: tt.separator}
+			err := cat.checkValidNamespace(tt.namespace)
+			if tt.wantErr {
+				require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestNamespaceSeparatorFromConfig(t *testing.T) {
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
