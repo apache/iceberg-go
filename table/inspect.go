@@ -247,6 +247,96 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
+// MetadataLogEntries returns one row for every metadata file in the table's
+// metadata log, including the current metadata file. Snapshot information is
+// resolved from the snapshot log at each metadata file's timestamp.
+//
+// Columns:
+//   - timestamp (timestamptz, required): when the metadata file was written
+//   - file (string, required): metadata file location
+//   - latest_snapshot_id (long, optional): latest snapshot visible then
+//   - latest_schema_id (int, optional): schema used by that snapshot
+//   - latest_sequence_number (long, optional): sequence number of that snapshot
+//
+// The returned reader holds a single record batch. The caller must Release it.
+func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := SchemaToArrowSchema(MetadataLogEntriesSchema(), nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect metadata log entries: build arrow schema: %w", err)
+	}
+
+	entries := make([]MetadataLogEntry, 0)
+	for entry := range i.tbl.metadata.PreviousFiles() {
+		entries = append(entries, entry)
+	}
+	entries = append(entries, MetadataLogEntry{
+		MetadataFile: i.tbl.metadataLocation,
+		TimestampMs:  i.tbl.metadata.LastUpdatedMillis(),
+	})
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	timestamp := bldr.Field(0).(*array.TimestampBuilder)
+	file := bldr.Field(1).(*array.StringBuilder)
+	latestSnapshotID := bldr.Field(2).(*array.Int64Builder)
+	latestSchemaID := bldr.Field(3).(*array.Int32Builder)
+	latestSequenceNumber := bldr.Field(4).(*array.Int64Builder)
+
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		timestamp.Append(arrow.Timestamp(entry.TimestampMs * 1000))
+		file.Append(entry.MetadataFile)
+
+		snapshot := latestSnapshotAt(i.tbl.metadata, entry.TimestampMs)
+		if snapshot == nil {
+			latestSnapshotID.AppendNull()
+			latestSchemaID.AppendNull()
+			latestSequenceNumber.AppendNull()
+			continue
+		}
+
+		latestSnapshotID.Append(snapshot.SnapshotID)
+		if snapshot.SchemaID != nil {
+			latestSchemaID.Append(int32(*snapshot.SchemaID))
+		} else {
+			latestSchemaID.AppendNull()
+		}
+		latestSequenceNumber.Append(snapshot.SequenceNumber)
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect metadata log entries: %w", err)
+	}
+
+	return rr, nil
+}
+
+// latestSnapshotAt follows the metadata-table behavior used by Java's
+// MetadataLogEntriesTable: find the snapshot-log entry at or before the
+// metadata timestamp, then expose its details only if that snapshot is still
+// present in the current metadata.
+func latestSnapshotAt(metadata Metadata, timestampMs int64) *Snapshot {
+	var snapshotID *int64
+	for entry := range metadata.SnapshotLogs() {
+		if entry.TimestampMs > timestampMs {
+			break
+		}
+
+		id := entry.SnapshotID
+		snapshotID = &id
+	}
+	if snapshotID == nil {
+		return nil
+	}
+
+	return metadata.SnapshotByID(*snapshotID)
+}
+
 // HistorySchema returns the Iceberg schema of the history metadata table. The
 // field IDs are fixed by the Iceberg metadata-tables spec and match the Java,
 // PyIceberg, and Rust clients for cross-client parity. A fresh schema value is
@@ -283,5 +373,17 @@ func SnapshotsSchema() *iceberg.Schema {
 			ValueType:     iceberg.PrimitiveTypes.String,
 			ValueRequired: false,
 		}},
+	)
+}
+
+// MetadataLogEntriesSchema returns the Iceberg schema of the metadata-log-entries
+// metadata table. The field IDs and names match Java's implementation.
+func MetadataLogEntriesSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "timestamp", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 2, Name: "file", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "latest_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: 4, Name: "latest_schema_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 5, Name: "latest_sequence_number", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 	)
 }
