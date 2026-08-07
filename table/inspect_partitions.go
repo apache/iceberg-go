@@ -46,6 +46,44 @@ type inspectPartitionAggregate struct {
 	orderingKey         string
 }
 
+type inspectPartitionAggregateTree struct {
+	children  map[any]*inspectPartitionAggregateTree
+	aggregate *inspectPartitionAggregate
+}
+
+func newInspectPartitionAggregateTree() *inspectPartitionAggregateTree {
+	return &inspectPartitionAggregateTree{
+		children: make(map[any]*inspectPartitionAggregateTree),
+	}
+}
+
+func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectPartitionAggregate {
+	node := t
+	for _, value := range record {
+		child, ok := node.children[comparablePartitionKey(value)]
+		if !ok {
+			return nil
+		}
+		node = child
+	}
+
+	return node.aggregate
+}
+
+func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
+	node := t
+	for _, value := range record {
+		key := comparablePartitionKey(value)
+		child, ok := node.children[key]
+		if !ok {
+			child = newInspectPartitionAggregateTree()
+			node.children[key] = child
+		}
+		node = child
+	}
+	node.aggregate = aggregate
+}
+
 // Partitions returns one row per live partition, aggregating data and delete
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
@@ -95,7 +133,13 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 		return nil, err
 	}
 
+	snapshotTimes := make(map[int64]int64, len(i.tbl.metadata.Snapshots()))
+	for _, snapshot := range i.tbl.metadata.Snapshots() {
+		snapshotTimes[snapshot.SnapshotID] = snapshot.TimestampMs
+	}
+
 	aggregates := make([]*inspectPartitionAggregate, 0)
+	aggregateTree := newInspectPartitionAggregateTree()
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -107,14 +151,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 			file := entry.DataFile()
 			partition := inspectCoercePartition(file.Partition(), partitionType)
 			record := newPartitionRecord(partition, partitionType)
-			var aggregate *inspectPartitionAggregate
-			for _, candidate := range aggregates {
-				if partitionRecordsEqual(candidate.partitionRecord, record) {
-					aggregate = candidate
-
-					break
-				}
-			}
+			aggregate := aggregateTree.lookup(record)
 			if aggregate == nil {
 				aggregate = &inspectPartitionAggregate{
 					specID:          file.SpecID(),
@@ -123,6 +160,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 					orderingKey:     inspectPartitionKey(partition),
 				}
 				aggregates = append(aggregates, aggregate)
+				aggregateTree.insert(record, aggregate)
 			}
 
 			switch file.ContentType() {
@@ -141,7 +179,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 			if file.ContentType() == iceberg.EntryContentData ||
 				file.ContentType() == iceberg.EntryContentPosDeletes ||
 				file.ContentType() == iceberg.EntryContentEqDeletes {
-				i.updatePartitionTimestamp(aggregate, entry.SnapshotID(), file.SpecID())
+				i.updatePartitionTimestamp(aggregate, snapshotTimes, entry.SnapshotID(), file.SpecID())
 			}
 		}
 	}
@@ -155,20 +193,25 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	return result, nil
 }
 
-func (i InspectTable) updatePartitionTimestamp(aggregate *inspectPartitionAggregate, snapshotID int64, specID int32) {
+func (i InspectTable) updatePartitionTimestamp(
+	aggregate *inspectPartitionAggregate,
+	snapshotTimes map[int64]int64,
+	snapshotID int64,
+	specID int32,
+) {
 	if snapshotID < 0 {
 		return
 	}
-	snapshot := i.tbl.metadata.SnapshotByID(snapshotID)
-	if snapshot == nil {
+	timestampMs, ok := snapshotTimes[snapshotID]
+	if !ok {
 		return
 	}
-	timestamp := snapshot.TimestampMs * 1000
+	timestamp := timestampMs * 1000
 	if aggregate.lastUpdatedAt != nil && timestamp <= *aggregate.lastUpdatedAt {
 		return
 	}
 	aggregate.lastUpdatedAt = &timestamp
-	id := snapshot.SnapshotID
+	id := snapshotID
 	aggregate.lastUpdatedSnapshot = &id
 	aggregate.specID = specID
 }
