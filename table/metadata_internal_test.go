@@ -711,6 +711,83 @@ func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
 	assert.ErrorContains(t, err, "spec ID must be non-negative")
 }
 
+// A create-table request carries unbound placeholder IDs rather than final
+// field IDs. Spark numbers the root struct's fields by ordinal, so the first
+// column is field-id 0 and partitioning or sorting by it yields source-id 0.
+// NewMetadata must accept that and remap every source ID by name, matching
+// Java's TableMetadata.newTableMetadata.
+func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
+	const requestSchema = `{
+		"type": "struct", "schema-id": 0,
+		"fields": [
+			{"id": 0, "name": "my_ints", "required": false, "type": "int"},
+			{"id": 1, "name": "my_floats", "required": false, "type": "double"},
+			{"id": 2, "name": "strings", "required": false, "type": "string"}
+		]
+	}`
+
+	for _, tt := range []struct {
+		name         string
+		spec         string
+		wantSourceID int
+		wantName     string
+	}{
+		{
+			name:         "identity on first column",
+			spec:         `{"spec-id":0,"fields":[{"name":"my_ints","transform":"identity","source-id":0,"field-id":1000}]}`,
+			wantSourceID: 1,
+			wantName:     "my_ints",
+		},
+		{
+			name:         "bucket on first column",
+			spec:         `{"spec-id":0,"fields":[{"name":"my_ints_bucket","transform":"bucket[16]","source-id":0,"field-id":1000}]}`,
+			wantSourceID: 1,
+			wantName:     "my_ints_bucket",
+		},
+		{
+			name:         "identity on last column",
+			spec:         `{"spec-id":0,"fields":[{"name":"strings","transform":"identity","source-id":2,"field-id":1000}]}`,
+			wantSourceID: 3,
+			wantName:     "strings",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var sc iceberg.Schema
+			require.NoError(t, json.Unmarshal([]byte(requestSchema), &sc))
+
+			var spec iceberg.PartitionSpec
+			require.NoError(t, json.Unmarshal([]byte(tt.spec), &spec))
+
+			var order SortOrder
+			require.NoError(t, json.Unmarshal([]byte(
+				`{"order-id":1,"fields":[{"transform":"identity","source-id":0,"direction":"asc","null-order":"nulls-first"}]}`,
+			), &order))
+
+			meta, err := NewMetadata(&sc, &spec, order, "s3://bucket/tbl", nil)
+			require.NoError(t, err)
+
+			gotSpec := meta.PartitionSpec()
+			require.Equal(t, 1, gotSpec.NumFields())
+
+			assert.Equal(t, tt.wantSourceID, gotSpec.Field(0).SourceID())
+			assert.Equal(t, tt.wantName, gotSpec.Field(0).Name)
+
+			// The sort order references the first column, so it remaps to 1.
+			for _, field := range meta.SortOrder().Fields() {
+				assert.Equal(t, 1, field.SourceID())
+			}
+
+			// Metadata must survive a serialize/parse round trip.
+			data, err := json.Marshal(meta)
+			require.NoError(t, err)
+			reparsed, err := ParseMetadataBytes(data)
+			require.NoError(t, err)
+			reparsedSpec := reparsed.PartitionSpec()
+			assert.Equal(t, tt.wantSourceID, reparsedSpec.Field(0).SourceID())
+		})
+	}
+}
+
 func TestSortOrderNotFound(t *testing.T) {
 	metadataSortOrderNotFound := `{
         "format-version": 2,

@@ -191,9 +191,11 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Zero is valid: unbound sort orders carry client ordinal placeholder IDs that
+// start at 0. CheckCompatibility rejects IDs that don't resolve against a schema.
 func validateSortSourceID(id int) error {
-	if id <= 0 {
-		return fmt.Errorf("source ID must be positive: %d", id)
+	if id < 0 {
+		return fmt.Errorf("source ID must be non-negative: %d", id)
 	}
 
 	return nil

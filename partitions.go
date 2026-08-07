@@ -162,10 +162,13 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	} else {
 		p.SourceIDs = []int{aux.SourceID}
 	}
+	// Positivity only holds for specs already bound to a schema. Decoding also
+	// covers unbound specs from create-table and commit requests, whose source
+	// IDs are client ordinal placeholders starting at 0, remapped by name at
+	// bind time.
 	for _, sourceID := range p.SourceIDs {
-		_, isVoid := p.Transform.(VoidTransform)
-		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
-			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+		if sourceID < 0 {
+			return fmt.Errorf("%w: partition source ID must be non-negative: %d", ErrInvalidPartitionSpec, sourceID)
 		}
 	}
 	if p.Name == "" {
