@@ -334,6 +334,15 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 		if value, ok := value.(uuid.UUID); ok {
 			return scalar.MakeScalarParam(value[:], arrowType)
 		}
+	case iceberg.DecimalType:
+		switch value := value.(type) {
+		case iceberg.DecimalLiteral:
+			return scalar.NewDecimal128Scalar(value.Val, arrowType), nil
+		case iceberg.Decimal:
+			return scalar.NewDecimal128Scalar(value.Val, arrowType), nil
+		default:
+			return nil, fmt.Errorf("unsupported decimal partition value %T", value)
+		}
 	}
 
 	return scalar.MakeScalarParam(value, arrowType)
