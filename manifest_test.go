@@ -3020,6 +3020,39 @@ func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() 
 	m.Equal(originalPartitionData, dataFile.PartitionData)
 }
 
+func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionBeforeRetaining() {
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	partitionSpec := NewPartitionSpecID(
+		1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "part", Transform: IdentityTransform{}},
+	)
+	partition := []byte{0x01, 0x02}
+	builder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/file.parquet",
+		ParquetFile,
+		map[int]any{1000: partition},
+		nil,
+		nil,
+		1,
+		10,
+	)
+	m.Require().NoError(err)
+
+	seqNum := int64(1)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+	writer, err := NewManifestWriter(2, io.Discard, partitionSpec, schema, snapshotID)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(entry))
+
+	borrowed := entry.DataFile().(*dataFile).DataFilePartitionRef(internal.DataFileRef{})
+	borrowed[1000].([]byte)[0] = 0xff
+	borrowed[1000] = []byte{0xff, 0xff}
+
+	m.Equal([]byte{0x01, 0x02}, writer.partitions[0][1000])
+}
+
 func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
 	t.Helper()
 

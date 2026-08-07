@@ -1513,7 +1513,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if err := w.writer.Encode(toEncode); err != nil {
 		return err
 	}
-	w.partitions = append(w.partitions, partition)
+	w.partitions = append(w.partitions, clonePartitionMap(partition))
 
 	switch status {
 	case EntryStatusADDED:
