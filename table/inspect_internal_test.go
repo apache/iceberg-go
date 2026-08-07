@@ -245,6 +245,108 @@ func TestInspectHistoryNoCurrentSnapshot(t *testing.T) {
 	require.False(t, isCurrentAncestor.Value(0), "no current snapshot means no ancestors")
 }
 
+func TestInspectRefsSchema(t *testing.T) {
+	sc := RefsSchema()
+
+	require.Equal(t, []string{
+		"name",
+		"type",
+		"snapshot_id",
+		"max_reference_age_in_ms",
+		"min_snapshots_to_keep",
+		"max_snapshot_age_in_ms",
+	}, testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, []int{1, 2, 3, 4, 5, 6}, []int{
+		fields[0].ID,
+		fields[1].ID,
+		fields[2].ID,
+		fields[3].ID,
+		fields[4].ID,
+		fields[5].ID,
+	})
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[0].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[1].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[2].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[3].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int32, fields[4].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[5].Type)
+	require.True(t, fields[0].Required)
+	require.True(t, fields[1].Required)
+	require.True(t, fields[2].Required)
+	require.False(t, fields[3].Required)
+	require.False(t, fields[4].Required)
+	require.False(t, fields[5].Required)
+}
+
+func TestInspectRefs(t *testing.T) {
+	tbl := historyTestTable()
+	minSnapshotsToKeep := 2
+	maxSnapshotAge := int64(3000)
+	maxReferenceAge := int64(4000)
+	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+			MaxSnapshotAgeMs:   &maxSnapshotAge,
+		},
+		"release": {
+			SnapshotID:      102,
+			SnapshotRefType: TagRef,
+			MaxRefAgeMs:     &maxReferenceAge,
+		},
+	}
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+
+	names := rec.Column(0).(*array.String)
+	types := rec.Column(1).(*array.String)
+	snapshotIDs := rec.Column(2).(*array.Int64)
+	maxReferences := rec.Column(3).(*array.Int64)
+	minSnapshots := rec.Column(4).(*array.Int32)
+	maxSnapshots := rec.Column(5).(*array.Int64)
+
+	// Map iteration is normalized to name order by the metadata-table reader.
+	require.Equal(t, "main", names.Value(0))
+	require.Equal(t, "release", names.Value(1))
+	require.Equal(t, "BRANCH", types.Value(0))
+	require.Equal(t, "TAG", types.Value(1))
+	require.EqualValues(t, 103, snapshotIDs.Value(0))
+	require.EqualValues(t, 102, snapshotIDs.Value(1))
+
+	require.True(t, maxReferences.IsNull(0))
+	require.EqualValues(t, maxReferenceAge, maxReferences.Value(1))
+	require.EqualValues(t, minSnapshotsToKeep, minSnapshots.Value(0))
+	require.True(t, minSnapshots.IsNull(1))
+	require.EqualValues(t, maxSnapshotAge, maxSnapshots.Value(0))
+	require.True(t, maxSnapshots.IsNull(1))
+}
+
+func TestInspectRefsEmpty(t *testing.T) {
+	tbl := historyTestTable()
+	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{}
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 0, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+}
+
 // snapshotsTestTable builds a table with two snapshots: a root carrying a
 // summary (operation + properties) and a child with no summary at all, to
 // exercise both the populated and null operation/summary paths.
