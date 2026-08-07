@@ -123,6 +123,7 @@ func inspectPartitionType(metadata Metadata) *iceberg.StructType {
 			for _, sourceID := range field.SourceIDs {
 				if _, ok := currentSchema.FindTypeByID(sourceID); !ok {
 					active = false
+
 					break
 				}
 			}
@@ -139,6 +140,7 @@ func inspectPartitionType(metadata Metadata) *iceberg.StructType {
 					old.Type = partitionType.FieldList[idx].Type
 					fieldsByID[field.FieldID] = old
 				}
+
 				continue
 			}
 
