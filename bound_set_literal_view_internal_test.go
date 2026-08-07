@@ -57,6 +57,7 @@ func (*boundSetVisitVisitor) VisitLess(BoundTerm, Literal) bool { return false }
 func (*boundSetVisitVisitor) VisitStartsWith(BoundTerm, Literal) bool {
 	return false
 }
+
 func (*boundSetVisitVisitor) VisitNotStartsWith(BoundTerm, Literal) bool {
 	return false
 }
