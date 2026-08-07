@@ -208,10 +208,7 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
 	// configuration, so leaving the floor at d/2 there would allow a wait of a third
 	// of the configured minimum.
-	floor := d / 2
-	if minWait > floor {
-		floor = minWait
-	}
+	floor := max(minWait, d/2)
 	for scheduled := minWait; scheduled > 0 && scheduled < maxWait; scheduled <<= 1 {
 		if scheduled > floor {
 			floor = scheduled
