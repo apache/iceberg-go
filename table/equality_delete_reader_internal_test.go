@@ -314,6 +314,7 @@ func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
 				}
 				assert.Contains(t, err.Error(), test.wantErr.Error())
 				assert.Contains(t, err.Error(), "data.parquet")
+
 				return
 			}
 
