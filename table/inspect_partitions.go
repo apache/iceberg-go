@@ -19,8 +19,10 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -83,7 +85,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartiti
 		return nil, nil
 	}
 	if i.tbl.fsF == nil {
-		return nil, fmt.Errorf("table file IO is not configured")
+		return nil, errors.New("table file IO is not configured")
 	}
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
@@ -169,11 +171,12 @@ func inspectPartitionKey(partition map[int]any) string {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
-	key := ""
+	var key strings.Builder
 	for _, id := range ids {
-		key += fmt.Sprintf("%d:%T:%v;", id, partition[id], partition[id])
+		fmt.Fprintf(&key, "%d:%T:%v;", id, partition[id], partition[id])
 	}
-	return key
+
+	return key.String()
 }
 
 func cloneInspectPartition(partition map[int]any) map[int]any {
@@ -184,6 +187,7 @@ func cloneInspectPartition(partition map[int]any) map[int]any {
 	for id, value := range partition {
 		returnMap[id] = value
 	}
+
 	return returnMap
 }
 
@@ -230,6 +234,7 @@ func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.
 			value := aggregate.partition[field.ID]
 			if value == nil {
 				partition.FieldBuilder(fieldIndex).AppendNull()
+
 				continue
 			}
 			valueScalar, err := inspectPartitionValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
@@ -299,5 +304,6 @@ func inspectPartitionValueScalar(value any, typ iceberg.Type, arrowType arrow.Da
 			return scalar.MakeScalarParam(value[:], arrowType)
 		}
 	}
+
 	return scalar.MakeScalarParam(value, arrowType)
 }
