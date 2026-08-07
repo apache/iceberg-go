@@ -161,11 +161,11 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 
 	for _, t := range tasks {
 		for _, d := range t.DeletionVectorFiles {
-			ref := d.ReferencedDataFile()
+			_, _, ref, contentOffset, contentSize := iceinternal.BorrowedDataFilePointers(d)
 			if ref == nil {
 				return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", d.FilePath())
 			}
-			if d.ContentOffset() == nil || d.ContentSizeInBytes() == nil {
+			if contentOffset == nil || contentSize == nil {
 				// Spec §Manifest Files: content_offset and content_size_in_
 				// bytes are required for DV entries. Surface the missing-
 				// field cause directly here — otherwise the dedup check
@@ -249,7 +249,10 @@ func sameDVBlob(a, b iceberg.DataFile) bool {
 		return false
 	}
 
-	return *a.ContentOffset() == *b.ContentOffset()
+	_, _, _, aOffset, _ := iceinternal.BorrowedDataFilePointers(a)
+	_, _, _, bOffset, _ := iceinternal.BorrowedDataFilePointers(b)
+
+	return *aOffset == *bOffset
 }
 
 func filePathValueType(dt arrow.DataType) arrow.DataType {

@@ -124,3 +124,44 @@ func BorrowedDataFileReferencedDataFile(file DataFileReferencedDataFile) *string
 
 	return file.ReferencedDataFile()
 }
+
+// DataFilePointers is the pointer-valued DataFile surface used by internal
+// readers. It avoids importing the root package here.
+type DataFilePointers interface {
+	SortOrderID() *int
+	FirstRowID() *int64
+	ReferencedDataFile() *string
+	ContentOffset() *int64
+	ContentSizeInBytes() *int64
+}
+
+// DataFilePointersRef is implemented by the built-in data file to expose its
+// pointer-valued fields without allocating defensive copies.
+type DataFilePointersRef interface {
+	DataFilePointersRef(DataFileRef) (
+		sortOrderID *int,
+		firstRowID *int64,
+		referencedDataFile *string,
+		contentOffset *int64,
+		contentSizeInBytes *int64,
+	)
+}
+
+// BorrowedDataFilePointers returns pointer-valued metadata without copying for
+// the built-in data file and falls back to the public getters for external
+// implementations. The returned pointers must only be dereferenced during
+// the current operation and must not be retained.
+func BorrowedDataFilePointers(file DataFilePointers) (
+	sortOrderID *int,
+	firstRowID *int64,
+	referencedDataFile *string,
+	contentOffset *int64,
+	contentSizeInBytes *int64,
+) {
+	if ref, ok := file.(DataFilePointersRef); ok {
+		return ref.DataFilePointersRef(DataFileRef{})
+	}
+
+	return file.SortOrderID(), file.FirstRowID(), file.ReferencedDataFile(),
+		file.ContentOffset(), file.ContentSizeInBytes()
+}

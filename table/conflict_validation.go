@@ -530,7 +530,7 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
 	for _, f := range files {
-		p := f.Partition()
+		p := iceberginternal.BorrowedDataFilePartition(f)
 		if len(p) == 0 {
 			return iceberg.AlwaysTrue{}, nil
 		}

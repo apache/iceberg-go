@@ -178,6 +178,63 @@ func TestDataFileReferencedDataFileUsesBorrowedView(t *testing.T) {
 	assert.Equal(t, "s3://bucket/data.parquet", *ref)
 }
 
+func testDataFileWithPointers(t *testing.T) iceberg.DataFile {
+	t.Helper()
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"s3://bucket/file.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: "partition"},
+		nil,
+		nil,
+		1,
+		10,
+	)
+	require.NoError(t, err)
+
+	return builder.
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+}
+
+func TestDataFilePointersUseBorrowedView(t *testing.T) {
+	file := testDataFileWithPointers(t)
+	require.Implements(t, (*internal.DataFilePointersRef)(nil), file)
+
+	sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize := internal.BorrowedDataFilePointers(file)
+	assert.Equal(t, 3, *sortOrderID)
+	assert.Equal(t, int64(4), *firstRowID)
+	assert.Equal(t, "data.parquet", *referencedDataFile)
+	assert.Equal(t, int64(5), *contentOffset)
+	assert.Equal(t, int64(6), *contentSize)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize = internal.BorrowedDataFilePointers(file)
+	})
+	assert.InDelta(t, 0.0, allocs, 0.5)
+	assert.Equal(t, int64(6), *contentSize)
+}
+
+func TestDataFilePointersFallBackToPublicGetters(t *testing.T) {
+	file := &plainStatsDataFile{DataFile: testDataFileWithPointers(t)}
+
+	sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize := internal.BorrowedDataFilePointers(file)
+	assert.Equal(t, 3, *sortOrderID)
+	assert.Equal(t, int64(4), *firstRowID)
+	assert.Equal(t, "data.parquet", *referencedDataFile)
+	assert.Equal(t, int64(5), *contentOffset)
+	assert.Equal(t, int64(6), *contentSize)
+}
+
 func TestDataFilePartitionUsesBorrowedView(t *testing.T) {
 	file := testDataFileWithStats(t)
 	require.Implements(t, (*internal.DataFilePartitionRef)(nil), file)

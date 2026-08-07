@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/errgroup"
 )
@@ -510,7 +511,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 					path:   normalizeFilePath(entry.DataFile().FilePath()),
 					isData: true,
 				})
-				if ref := entry.DataFile().ReferencedDataFile(); ref != nil {
+				if ref := iceberginternal.BorrowedDataFileReferencedDataFile(entry.DataFile()); ref != nil {
 					// This is a deletion vector entry referencing a data file.
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.

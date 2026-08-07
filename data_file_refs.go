@@ -62,3 +62,13 @@ func (d *dataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
 func (d *dataFile) DataFileReferencedDataFileRef(_ internal.DataFileRef) *string {
 	return d.ReferencedDataFileField
 }
+
+// DataFilePointersRef returns pointer-valued metadata without allocating. The
+// token restricts this borrowed accessor to trusted in-module callers; the
+// public getters continue returning defensive copies.
+func (d *dataFile) DataFilePointersRef(_ internal.DataFileRef) (
+	*int, *int64, *string, *int64, *int64,
+) {
+	return d.SortOrder, d.FirstRowIDField, d.ReferencedDataFileField,
+		d.ContentOffsetField, d.ContentSizeInBytesField
+}

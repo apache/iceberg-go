@@ -3276,23 +3276,56 @@ func (m *ManifestTestSuite) TestManifestEntryPresentEmptyListSurvivesRewrite() {
 	// manifest-list partitions field (*[]FieldSummary); split_offsets is *[]int64,
 	// an array of primitives. Cover both so the record-element case (the one that
 	// actually broke for partitions) is guarded here too.
-	built := builder.SplitOffsets([]int64{}).ColumnSizes(map[int]int64{}).Build()
+	built := builder.
+		ColumnSizes(map[int]int64{}).
+		ValueCounts(map[int]int64{}).
+		NullValueCounts(map[int]int64{}).
+		NaNValueCounts(map[int]int64{}).
+		LowerBoundValues(map[int][]byte{}).
+		UpperBoundValues(map[int][]byte{}).
+		KeyMetadata([]byte{}).
+		SplitOffsets([]int64{}).
+		EqualityFieldIDs([]int{}).
+		Build()
 	m.Require().NotNil(built.(*dataFile).Splits, "builder should keep split_offsets present")
 	m.Require().NotNil(built.(*dataFile).ColSizes, "builder should keep column_sizes present")
 
 	// First round trip mirrors reading an existing manifest: a present-empty
 	// array decodes to a non-nil pointer over a nil slice.
 	first := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, built).SequenceNum(1).Build())
-	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
 	m.Require().NotNil(first.ColSizes, "decoded column_sizes must stay present, not null")
+	m.Require().NotNil(first.ValCounts, "decoded value_counts must stay present, not null")
+	m.Require().NotNil(first.NullCounts, "decoded null_value_counts must stay present, not null")
+	m.Require().NotNil(first.NaNCounts, "decoded nan_value_counts must stay present, not null")
+	m.Require().NotNil(first.LowerBounds, "decoded lower_bounds must stay present, not null")
+	m.Require().NotNil(first.UpperBounds, "decoded upper_bounds must stay present, not null")
+	m.Require().NotNil(first.Key, "decoded key_metadata must stay present, not null")
+	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
+	m.Require().NotNil(first.EqualityIDs, "decoded equality_ids must stay present, not null")
 
 	// Re-encoding the decoded entry is what a manifest rewrite/merge does. The
 	// present-empty lists must not collapse to null here.
 	second := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, first).SequenceNum(1).Build())
+	m.Require().NotNil(second.ColSizes,
+		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.ValCounts,
+		"present-empty value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NullCounts,
+		"present-empty null_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NaNCounts,
+		"present-empty nan_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.LowerBounds,
+		"present-empty lower_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.UpperBounds,
+		"present-empty upper_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.Key,
+		"present-empty key_metadata must survive a decode -> re-encode rewrite as a present value")
 	m.Require().NotNil(second.Splits,
 		"present-empty split_offsets must survive a decode -> re-encode rewrite as a present array")
 	m.Require().NotNil(second.ColSizes,
 		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.EqualityIDs,
+		"present-empty equality_ids must survive a decode -> re-encode rewrite as a present array")
 }
 
 func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation() {
@@ -3418,6 +3451,7 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
@@ -3459,6 +3493,7 @@ func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGe
 	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
 	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
 	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
 	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
 	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
 	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
