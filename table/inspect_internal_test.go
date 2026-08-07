@@ -660,10 +660,12 @@ func TestInspectManifestsSchema(t *testing.T) {
 	sc := ManifestsSchema()
 
 	require.Equal(t,
-		[]string{"content", "path", "length", "partition_spec_id", "added_snapshot_id",
+		[]string{
+			"content", "path", "length", "partition_spec_id", "added_snapshot_id",
 			"added_data_files_count", "existing_data_files_count", "deleted_data_files_count",
 			"added_delete_files_count", "existing_delete_files_count", "deleted_delete_files_count",
-			"partition_summaries"},
+			"partition_summaries",
+		},
 		testFieldNames(sc))
 
 	fields := sc.Fields()
