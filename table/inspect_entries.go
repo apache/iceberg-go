@@ -29,7 +29,10 @@ import (
 // entries marked deleted. This exposes commit history that data_files and
 // delete_files intentionally hide.
 func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
-	partitionType := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("inspect entries: %w", err)
+	}
 	schema := EntriesSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
