@@ -1156,6 +1156,265 @@ func TestShreddedVariantWriteChildStats(t *testing.T) {
 	assert.Equal(t, buildObj(5_000_000_007), df.UpperBoundValues()[variantField], "upper bound object")
 }
 
+// TestShreddedVariantExtractPruning prunes variant_get predicates using the written bounds.
+func TestShreddedVariantExtractPruning(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.Len(t, files, 1)
+	df := files[0]
+
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+	)
+
+	extInt := func(op iceberg.Operation, v int64) iceberg.BooleanExpression {
+		return iceberg.LiteralPredicate(op,
+			iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64),
+			iceberg.NewLiteral(v))
+	}
+
+	for _, tt := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want bool
+	}{
+		{"eq in range", extInt(iceberg.OpEQ, 5_000_000_003), rowsMightMatch},
+		{"eq above max", extInt(iceberg.OpEQ, 6_000_000_000), rowsCannotMatch},
+		{"eq below min", extInt(iceberg.OpEQ, 4_000_000_000), rowsCannotMatch},
+		{"gt at max", extInt(iceberg.OpGT, 5_000_000_007), rowsCannotMatch},
+		{"lt at min", extInt(iceberg.OpLT, 5_000_000_000), rowsCannotMatch},
+		{"gt in range", extInt(iceberg.OpGT, 5_000_000_000), rowsMightMatch},
+		{"missing path never prunes", iceberg.LiteralPredicate(iceberg.OpEQ,
+			iceberg.Extract("payload", "$.missing", iceberg.PrimitiveTypes.Int64),
+			iceberg.NewLiteral(int64(1))), rowsMightMatch},
+		{"starts_with match", iceberg.LiteralPredicate(iceberg.OpStartsWith,
+			iceberg.Extract("payload", "$.b", iceberg.PrimitiveTypes.String),
+			iceberg.NewLiteral("r")), rowsMightMatch},
+		{"starts_with no match", iceberg.LiteralPredicate(iceberg.OpStartsWith,
+			iceberg.Extract("payload", "$.b", iceberg.PrimitiveTypes.String),
+			iceberg.NewLiteral("z")), rowsCannotMatch},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := newInclusiveMetricsEvaluator(sc, tt.expr, true, true)
+			require.NoError(t, err)
+			res, err := eval(df)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, res)
+		})
+	}
+}
+
+// TestShreddedVariantExtractResidualScan confirms residual filtering returns only matching rows.
+func TestShreddedVariantExtractResidualScan(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.Len(t, files, 1)
+
+	p := strings.TrimPrefix(files[0].FilePath(), "file://")
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
+	require.NoError(t, err)
+
+	cols := make([]arrow.Array, tbl.NumCols())
+	for i := range cols {
+		cols[i] = tbl.Column(i).Data().Chunk(0)
+	}
+	rec := array.NewRecordBatch(tbl.Schema(), cols, tbl.NumRows())
+
+	// payload.a == 5_000_000_003 matches exactly one of the 8 rows.
+	pred := iceberg.LiteralPredicate(iceberg.OpEQ,
+		iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64),
+		iceberg.NewLiteral(int64(5_000_000_003)))
+	bound, err := iceberg.BindExpr(fileSchema, pred, true)
+	require.NoError(t, err)
+
+	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
+	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema)
+	require.NoError(t, err)
+	require.False(t, skip)
+	require.NotNil(t, fn)
+
+	out, err := fn(rec)
+	require.NoError(t, err)
+	defer out.Release()
+
+	require.Equal(t, int64(1), out.NumRows(), "only the a==5_000_000_003 row survives residual filtering")
+	require.EqualValues(t, tbl.NumCols(), out.NumCols(), "synthetic extract columns must be stripped from the result")
+
+	pv := out.Column(out.Schema().FieldIndices("payload")[0]).(*extensions.VariantArray)
+	v, err := pv.Value(0)
+	require.NoError(t, err)
+	j, err := v.MarshalJSON()
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"a":5000000003,"b":"row"}`, string(j))
+}
+
+// TestNonShreddedVariantExtractResidualScan confirms residual filtering on a non-shredded variant column.
+func TestNonShreddedVariantExtractResidualScan(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion: "3",
+	})
+	require.Len(t, files, 1)
+
+	p := strings.TrimPrefix(files[0].FilePath(), "file://")
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	require.False(t, tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray).IsShredded(),
+		"payload must be non-shredded for this test")
+
+	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
+	require.NoError(t, err)
+
+	cols := make([]arrow.Array, tbl.NumCols())
+	for i := range cols {
+		cols[i] = tbl.Column(i).Data().Chunk(0)
+	}
+	rec := array.NewRecordBatch(tbl.Schema(), cols, tbl.NumRows())
+
+	pred := iceberg.LiteralPredicate(iceberg.OpEQ,
+		iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64),
+		iceberg.NewLiteral(int64(5_000_000_003)))
+	bound, err := iceberg.BindExpr(fileSchema, pred, true)
+	require.NoError(t, err)
+
+	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
+	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema)
+	require.NoError(t, err)
+	require.False(t, skip)
+	require.NotNil(t, fn)
+
+	out, err := fn(rec)
+	require.NoError(t, err)
+	defer out.Release()
+
+	require.Equal(t, int64(1), out.NumRows(), "only the a==5_000_000_003 row survives residual filtering")
+	require.EqualValues(t, tbl.NumCols(), out.NumCols(), "synthetic extract columns must be stripped from the result")
+}
+
+// TestShreddedVariantExtractResidualNoLeak asserts the residual filter releases every Arrow buffer.
+func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.Len(t, files, 1)
+
+	p := strings.TrimPrefix(files[0].FilePath(), "file://")
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
+	require.NoError(t, err)
+
+	cols := make([]arrow.Array, tbl.NumCols())
+	for i := range cols {
+		cols[i] = tbl.Column(i).Data().Chunk(0)
+	}
+	rec := array.NewRecordBatch(tbl.Schema(), cols, tbl.NumRows())
+
+	pred := iceberg.LiteralPredicate(iceberg.OpEQ,
+		iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64),
+		iceberg.NewLiteral(int64(5_000_000_003)))
+	bound, err := iceberg.BindExpr(fileSchema, pred, true)
+	require.NoError(t, err)
+
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(context.Background(), checked)
+
+	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
+	fn, _, err := as.getRecordFilter(ctx, fileSchema)
+	require.NoError(t, err)
+	require.NotNil(t, fn)
+
+	out, err := fn(rec)
+	require.NoError(t, err)
+	out.Release()
+
+	checked.AssertSize(t, 0)
+}
+
+// TestVariantExtractResidualCombined exercises AND/OR filters over multiple extract terms.
+func TestVariantExtractResidualCombined(t *testing.T) {
+	files := writeVariantTable(t, iceberg.Properties{
+		PropertyFormatVersion:   "3",
+		ParquetShredVariantsKey: "true",
+	})
+	require.Len(t, files, 1)
+
+	p := strings.TrimPrefix(files[0].FilePath(), "file://")
+	f, err := os.Open(p)
+	require.NoError(t, err)
+	defer f.Close()
+
+	tbl, err := pqarrow.ReadTable(context.Background(), f, nil, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	defer tbl.Release()
+
+	fileSchema, err := ArrowSchemaToIceberg(tbl.Schema(), false, nil)
+	require.NoError(t, err)
+
+	eqA := func(v int64) iceberg.BooleanExpression {
+		return iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64), iceberg.NewLiteral(v))
+	}
+
+	for _, tt := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want int64
+	}{
+		{"and two distinct extracts", iceberg.NewAnd(eqA(5_000_000_003),
+			iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Extract("payload", "$.b", iceberg.PrimitiveTypes.String), iceberg.NewLiteral("row"))), 1},
+		{"or same extract twice", iceberg.NewOr(eqA(5_000_000_003), eqA(5_000_000_005)), 2},
+		{"and extract excludes all", iceberg.NewAnd(eqA(5_000_000_003), eqA(5_000_000_005)), 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cols := make([]arrow.Array, tbl.NumCols())
+			for i := range cols {
+				cols[i] = tbl.Column(i).Data().Chunk(0)
+			}
+			rec := array.NewRecordBatch(tbl.Schema(), cols, tbl.NumRows())
+
+			bound, err := iceberg.BindExpr(fileSchema, tt.expr, true)
+			require.NoError(t, err)
+
+			as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
+			fn, _, err := as.getRecordFilter(context.Background(), fileSchema)
+			require.NoError(t, err)
+			require.NotNil(t, fn)
+
+			out, err := fn(rec)
+			require.NoError(t, err)
+			defer out.Release()
+
+			require.Equal(t, tt.want, out.NumRows())
+			require.EqualValues(t, tbl.NumCols(), out.NumCols(), "synthetic columns stripped")
+		})
+	}
+}
+
 // TestShreddedVariantWriteNullFieldKeepsBound: int64+null field still gets a bound.
 func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	mem := memory.DefaultAllocator

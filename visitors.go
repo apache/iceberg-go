@@ -532,32 +532,95 @@ func (expressionFieldIDs) VisitBound(pred BoundPredicate) map[int]struct{} {
 // the field IDs in the file schema. If columns don't exist they are replaced with
 // AlwaysFalse or AlwaysTrue depending on the operator.
 func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, error) {
-	return VisitExpr(expr, columnNameTranslator{fileSchema: fileSchema})
+	res, extracts, err := TranslateColumnNamesForScan(expr, fileSchema)
+	if err != nil {
+		return nil, err
+	}
+	if len(extracts) > 0 {
+		return nil, fmt.Errorf("%w: variant extract terms require TranslateColumnNamesForScan", ErrNotImplemented)
+	}
+
+	return res, nil
 }
 
-type columnNameTranslator struct {
+// VariantExtractColumn describes a synthetic column that materializes one variant extract term for filtering.
+type VariantExtractColumn struct {
+	Term    BoundExtract
+	FieldID int
+	Name    string
+}
+
+// TranslateColumnNamesForScan translates a bound filter to the file schema, mapping variant extract terms to synthetic reference columns.
+func TranslateColumnNamesForScan(expr BooleanExpression, fileSchema *Schema) (BooleanExpression, []VariantExtractColumn, error) {
+	tr := &scanTranslator{
+		fileSchema: fileSchema,
+		nextID:     fileSchema.HighestFieldID() + 1,
+		byKey:      map[string]int{},
+	}
+
+	res, err := VisitExpr(expr, tr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return res, tr.columns, nil
+}
+
+type scanTranslator struct {
 	fileSchema *Schema
+	nextID     int
+	nameSeq    int
+	byKey      map[string]int
+	columns    []VariantExtractColumn
 }
 
-func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
-func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
-func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
+func (*scanTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
+func (*scanTranslator) VisitNot(child BooleanExpression) BooleanExpression {
 	return NewNot(child)
 }
 
-func (columnNameTranslator) VisitAnd(left, right BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitAnd(left, right BooleanExpression) BooleanExpression {
 	return NewAnd(left, right)
 }
 
-func (columnNameTranslator) VisitOr(left, right BooleanExpression) BooleanExpression {
+func (*scanTranslator) VisitOr(left, right BooleanExpression) BooleanExpression {
 	return NewOr(left, right)
 }
 
-func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+func (*scanTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
 }
 
-func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+func (t *scanTranslator) extractRef(ext BoundExtract) Reference {
+	key := ext.String()
+	idx, ok := t.byKey[key]
+	if !ok {
+		idx = len(t.columns)
+		t.columns = append(t.columns, VariantExtractColumn{
+			Term:    ext,
+			FieldID: t.nextID,
+			Name:    t.syntheticName(),
+		})
+		t.nextID++
+		t.byKey[key] = idx
+	}
+
+	return Reference(t.columns[idx].Name)
+}
+
+// syntheticName returns a derived-column name absent from the file schema.
+func (t *scanTranslator) syntheticName() string {
+	for {
+		name := fmt.Sprintf("_variant_extract_%d", t.nameSeq)
+		t.nameSeq++
+		if _, found := t.fileSchema.FindFieldByName(name); !found {
+			return name
+		}
+	}
+}
+
+func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 	// A bbox predicate has no substrait/record-filter form; it is evaluated only
 	// during metrics-based file pruning, so the record filter must conservatively
 	// keep every row. It must be matched before the column-not-found early return,
@@ -572,18 +635,21 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 		return AlwaysTrue{}
 	}
 
-	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
-	if !found {
-		// in the case of schema evolution, the column might not be present
-		// in the file schema when reading older data
-		if pred.Op() == OpIsNull {
-			return AlwaysTrue{}
-		}
+	var ref Reference
+	if ext, ok := pred.Term().(BoundExtract); ok {
+		ref = t.extractRef(ext)
+	} else {
+		fileColName, found := t.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
+		if !found {
+			if pred.Op() == OpIsNull {
+				return AlwaysTrue{}
+			}
 
-		return AlwaysFalse{}
+			return AlwaysFalse{}
+		}
+		ref = Reference(fileColName)
 	}
 
-	ref := Reference(fileColName)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
 		return p.AsUnbound(ref)
@@ -659,7 +725,7 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	// rebuilt as a reference predicate like the cases below. Collapse it to
 	// always-true so the surrounding expression still sanitizes and serializes;
 	// nothing user-provided leaks. Matched before ref is taken and on the exported
-	// BoundBBoxPredicate interface (mirrors columnNameTranslator).
+	// BoundBBoxPredicate interface (mirrors scanTranslator).
 	if _, ok := pred.(BoundBBoxPredicate); ok {
 		return AlwaysTrue{}
 	}
