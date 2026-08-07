@@ -70,6 +70,12 @@ var TableSchema = iceberg.NewSchema(0,
 	iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
 )
 
+// OtherSchema is a schema that is not [Schema], used to check that a rejected
+// create leaves the existing table alone.
+var OtherSchema = iceberg.NewSchema(0,
+	iceberg.NestedField{ID: 1, Name: "some_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+)
+
 // Config describes the catalog under test.
 type Config struct {
 	// NewCatalog returns a fresh, empty catalog for a single test. It is called
@@ -85,6 +91,9 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	require.NotNil(t, cfg.NewCatalog, "catalogtest.Config.NewCatalog must be set")
 
 	t.Run("BasicCreateTable", func(t *testing.T) { testBasicCreateTable(t, cfg) })
+	t.Run("BasicCreateTableThatAlreadyExists", func(t *testing.T) { testBasicCreateTableThatAlreadyExists(t, cfg) })
+	t.Run("LoadMissingTable", func(t *testing.T) { testLoadMissingTable(t, cfg) })
+	t.Run("LoadTableWithNonExistingNamespace", func(t *testing.T) { testLoadTableWithNonExistingNamespace(t, cfg) })
 }
 
 // testBasicCreateTable asserts that a newly created table is visible to the
@@ -115,4 +124,67 @@ func testBasicCreateTable(t *testing.T, cfg Config) {
 	assert.True(t, tbl.Spec().IsUnpartitioned(), "table should be unpartitioned")
 	assert.True(t, tbl.SortOrder().IsUnsorted(), "table should be unsorted")
 	assert.NotNil(t, tbl.Properties(), "table should have properties")
+}
+
+// testBasicCreateTableThatAlreadyExists asserts that creating a table over an
+// existing one is rejected and leaves the original table intact.
+func testBasicCreateTableThatAlreadyExists(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, ident := newIdentifiers()
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	exists, err := cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	assert.False(t, exists, "table should not exist before create")
+
+	_, err = cat.CreateTable(ctx, ident, Schema)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cat.DropTable(ctx, ident) })
+
+	exists, err = cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	assert.True(t, exists, "table should exist after create")
+
+	_, err = cat.CreateTable(ctx, ident, OtherSchema)
+	assert.ErrorIs(t, err, catalog.ErrTableAlreadyExists)
+
+	tbl, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	assert.Equal(t, TableSchema.AsStruct(), tbl.Schema().AsStruct(), "schema should match the original table schema")
+}
+
+// testLoadMissingTable asserts that loading a table that was never created
+// reports that the table does not exist.
+func testLoadMissingTable(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	namespace, ident := newIdentifiers()
+
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
+
+	exists, err := cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	assert.False(t, exists, "table should not exist")
+
+	_, err = cat.LoadTable(ctx, ident)
+	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
+}
+
+// testLoadTableWithNonExistingNamespace asserts that a missing namespace is
+// reported as a missing table, not as a missing namespace.
+func testLoadTableWithNonExistingNamespace(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	cat := cfg.NewCatalog(t)
+	_, ident := newIdentifiers()
+
+	exists, err := cat.CheckTableExists(ctx, ident)
+	require.NoError(t, err)
+	assert.False(t, exists, "table should not exist")
+
+	_, err = cat.LoadTable(ctx, ident)
+	assert.ErrorIs(t, err, catalog.ErrNoSuchTable)
 }
