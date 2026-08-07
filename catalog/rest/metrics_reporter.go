@@ -22,7 +22,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	iceberg "github.com/apache/iceberg-go"
@@ -39,23 +41,28 @@ const (
 	// keyReportMetricsEnabledLegacy is the historical dotted spelling, accepted
 	// as an alias so existing configs keep working.
 	keyReportMetricsEnabledLegacy = "rest.metrics-reporting-enabled"
-	// keyReportMetricsTimeoutMs bounds a single report's total auth + request +
-	// response cycle, in milliseconds. Read from the client-supplied properties
-	// only.
+	// keyReportMetricsTimeoutMs bounds a single report's request and response
+	// cycle, in milliseconds. Read from the client-supplied properties only. Auth
+	// (token refresh) is bounded separately by the OAuth refresh client Timeout.
 	keyReportMetricsTimeoutMs = "rest-metrics-reporting-timeout-ms"
 
-	// defaultReportMetricsTimeout bounds a single report's total auth + request
-	// + response cycle when keyReportMetricsTimeoutMs is unset. Telemetry is safe
-	// to drop, so the bound is deliberately short.
+	// defaultReportMetricsTimeout bounds a single report's request and response
+	// cycle when keyReportMetricsTimeoutMs is unset. Telemetry is safe to drop, so
+	// the bound is deliberately short.
 	defaultReportMetricsTimeout = 10 * time.Second
 	// metricsDispatchWorkers is the fixed number of goroutines draining the
 	// dispatch queue, capping the reporter's concurrent connection use.
 	metricsDispatchWorkers = 4
 	// metricsDispatchQueueSize bounds how many reports may await dispatch.
-	// Reports offered while the queue is full are dropped (and logged) rather
-	// than queued without limit, so a stalled endpoint cannot make reporting grow
-	// without bound.
+	// Reports offered while the queue is full are dropped (and counted, then
+	// logged in aggregate) rather than queued without limit, so a stalled
+	// endpoint cannot make reporting grow without bound.
 	metricsDispatchQueueSize = 128
+	// metricsStatsInterval is how often the dispatcher emits an aggregated
+	// warning summarizing dropped and failed reports. Aggregating keeps a stalled
+	// or unavailable endpoint from amplifying into one log line per report while
+	// still surfacing back-pressure.
+	metricsStatsInterval = 30 * time.Second
 )
 
 // reportMetricsEnabled reports whether the client opted into REST metrics
@@ -63,9 +70,19 @@ const (
 // given the client-supplied properties only (never the server-merged config) so
 // a server cannot flip the default and turn on outbound telemetry the client
 // never asked for.
+//
+// The canonical key wins whenever it is present, so a client that has migrated
+// to it and explicitly set it to false is honored even if a stale legacy dotted
+// key lingers in the config. The legacy key is consulted only when the canonical
+// key is absent.
 func reportMetricsEnabled(props iceberg.Properties) bool {
-	return props.GetBool(keyReportMetricsEnabled, false) ||
-		props.GetBool(keyReportMetricsEnabledLegacy, false)
+	if v, ok := props[keyReportMetricsEnabled]; ok {
+		enabled, err := strconv.ParseBool(v)
+
+		return err == nil && enabled
+	}
+
+	return props.GetBool(keyReportMetricsEnabledLegacy, false)
 }
 
 // reportMetricsTimeout resolves the per-report deadline from the client-supplied
@@ -82,6 +99,11 @@ func reportMetricsTimeout(props iceberg.Properties) time.Duration {
 
 // metricsJob is a single report awaiting dispatch to a table's metrics endpoint.
 type metricsJob struct {
+	// ctx carries the observed scan/commit's context values (trace spans,
+	// request-scoped attributes) with its cancellation detached — the scan/commit
+	// is already done, so its cancellation must not abort the report, but its
+	// values should still propagate to the outbound request.
+	ctx     context.Context
 	baseURI *url.URL
 	cl      *http.Client
 	path    []string
@@ -92,32 +114,38 @@ type metricsJob struct {
 // pool of workers draining a bounded queue. It is owned by the catalog and
 // shared across that catalog's table reporters, so concurrent report volume
 // stays bounded no matter how many tables are loaded or how often they are
-// scanned. A stalled endpoint sheds load — reports are dropped and logged —
+// scanned. A stalled endpoint sheds load — reports are dropped and counted —
 // rather than accumulating goroutines and connections. Close cancels in-flight
 // reports and drains the workers.
 type metricsDispatcher struct {
-	jobs    chan metricsJob
-	timeout time.Duration
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	logger  *slog.Logger // nil means resolve slog.Default at call time
+	jobs      chan metricsJob
+	timeout   time.Duration
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	logger    *slog.Logger // nil means resolve slog.Default at call time
+	dropped   atomic.Uint64
+	failed    atomic.Uint64
+	closeOnce sync.Once
+	closeDone chan struct{}
 }
 
 func newMetricsDispatcher(workers, queueSize int, timeout time.Duration, logger *slog.Logger) *metricsDispatcher {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &metricsDispatcher{
-		jobs:    make(chan metricsJob, queueSize),
-		timeout: timeout,
-		ctx:     ctx,
-		cancel:  cancel,
-		logger:  logger,
+		jobs:      make(chan metricsJob, queueSize),
+		timeout:   timeout,
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    logger,
+		closeDone: make(chan struct{}),
 	}
 
-	d.wg.Add(workers)
+	d.wg.Add(workers + 1)
 	for range workers {
 		go d.worker()
 	}
+	go d.reportStats()
 
 	return d
 }
@@ -155,28 +183,38 @@ func (d *metricsDispatcher) send(job metricsJob) {
 		}
 	}()
 
-	// Derive from the dispatcher context so Close cancels in-flight requests,
-	// and add the per-report deadline so a stalled endpoint cannot pin a worker
-	// (and its connection) indefinitely. The deadline covers auth plus the full
-	// request and response cycle.
-	ctx, cancel := context.WithTimeout(d.ctx, d.timeout)
+	// Bound the report by the per-report deadline, starting from the job's
+	// context so the caller's values (trace spans, request-scoped attributes)
+	// still reach the transport, and tie the derived context to dispatcher
+	// shutdown so Close cancels in-flight requests. The deadline covers the
+	// request and response cycle; a token refresh triggered by auth is bounded
+	// separately by the OAuth refresh client's Timeout.
+	ctx, cancel := context.WithTimeout(job.ctx, d.timeout)
 	defer cancel()
+	stop := context.AfterFunc(d.ctx, cancel)
+	defer stop()
 
 	if _, err := doPost[metrics.ReportMetricsRequest, struct{}](
 		ctx, job.baseURI, job.path, job.req, job.cl, nil, allowNoContent()); err != nil {
 		// A report interrupted by Close (dispatcher context cancelled) is expected
-		// shutdown behavior, not a failure worth logging. A per-report timeout
-		// leaves the dispatcher context live, so genuine timeouts still surface.
+		// shutdown behavior, not a failure worth counting. A per-report timeout
+		// leaves the dispatcher context live, so genuine failures still surface.
 		if d.ctx.Err() != nil {
 			return
 		}
-		d.log().Warn("iceberg: failed to report metrics to REST catalog", "error", err)
+		d.failed.Add(1)
+		// The transport error embeds the request URL, which can carry a sensitive
+		// host, prefix, namespace or table name, so keep the detail at Debug and
+		// let reportStats surface the aggregate count at Warn.
+		d.log().Debug("iceberg: failed to report metrics to REST catalog", "error", err)
 	}
 }
 
 // submit offers a job to the queue without blocking. It drops the report (and
-// logs the drop, so back-pressure is visible rather than silent) when the queue
-// is full, and ignores reports once the dispatcher is closed.
+// counts the drop, aggregated and logged by reportStats so back-pressure is
+// visible without amplifying into one log line per drop) when the queue is
+// full, and ignores reports once the dispatcher is closed. Every path here is
+// non-blocking so Report never blocks the observed scan/commit.
 func (d *metricsDispatcher) submit(job metricsJob) {
 	select {
 	case <-d.ctx.Done():
@@ -188,25 +226,67 @@ func (d *metricsDispatcher) submit(job metricsJob) {
 	case d.jobs <- job:
 	case <-d.ctx.Done():
 	default:
-		d.log().Warn("iceberg: metrics report dropped; dispatch queue full")
+		d.dropped.Add(1)
+	}
+}
+
+// reportStats periodically emits an aggregated warning summarizing reports
+// dropped (queue full) and failed (endpoint errors) since the last tick, so a
+// stalled or unavailable endpoint surfaces as bounded, rate-limited log volume
+// rather than one line per report. A final summary is emitted on shutdown.
+func (d *metricsDispatcher) reportStats() {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(metricsStatsInterval)
+	defer ticker.Stop()
+
+	var lastDropped, lastFailed uint64
+	flush := func() {
+		dropped, failed := d.dropped.Load(), d.failed.Load()
+		if dropped == lastDropped && failed == lastFailed {
+			return
+		}
+		d.log().Warn("iceberg: REST metrics reports dropped or failed",
+			"dropped", dropped-lastDropped, "dropped_total", dropped,
+			"failed", failed-lastFailed, "failed_total", failed)
+		lastDropped, lastFailed = dropped, failed
+	}
+
+	for {
+		select {
+		case <-d.ctx.Done():
+			flush()
+
+			return
+		case <-ticker.C:
+			flush()
+		}
 	}
 }
 
 // close cancels in-flight reports and waits for the workers to return, bounded
-// by the report timeout so shutdown cannot hang on a stalled endpoint.
+// by the report timeout so shutdown cannot hang on a stalled endpoint. It is
+// one-shot: repeated calls block until the first completes, then return, so no
+// extra waiter goroutine is spawned per call.
 func (d *metricsDispatcher) close() {
-	d.cancel()
+	d.closeOnce.Do(func() {
+		d.cancel()
 
-	done := make(chan struct{})
-	go func() {
-		d.wg.Wait()
-		close(done)
-	}()
+		done := make(chan struct{})
+		go func() {
+			d.wg.Wait()
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(d.timeout):
-	}
+		select {
+		case <-done:
+		case <-time.After(d.timeout):
+		}
+
+		close(d.closeDone)
+	})
+
+	<-d.closeDone
 }
 
 // restMetricsReporter POSTs metrics reports for a single table to its REST
@@ -224,14 +304,21 @@ var _ metrics.Reporter = (*restMetricsReporter)(nil)
 // Report wraps the report in a ReportMetricsRequest and hands it to the
 // catalog's dispatcher, returning immediately. Per the Reporter contract it
 // never blocks or fails the observed scan/commit: dispatch is asynchronous and
-// bounded, the send is detached from the caller's cancellation (the scan/commit
-// is already done), and any error is logged and swallowed by the dispatcher.
-func (rep *restMetricsReporter) Report(_ context.Context, report metrics.MetricsReport) {
+// bounded, and any error is counted and swallowed by the dispatcher. The
+// caller's context is detached from cancellation (the scan/commit is already
+// done) but its values are preserved so trace spans and request-scoped
+// attributes still propagate to the outbound report.
+func (rep *restMetricsReporter) Report(ctx context.Context, report metrics.MetricsReport) {
 	if report == nil {
 		return
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	rep.dispatcher.submit(metricsJob{
+		ctx:     context.WithoutCancel(ctx),
 		baseURI: rep.baseURI,
 		cl:      rep.cl,
 		path:    rep.path,

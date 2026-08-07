@@ -263,7 +263,18 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// Authorization header by supplying its own. Do not reorder this before the
 	// default-header loop.
 	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
-		k, v, err := s.authManager.AuthHeader()
+		var (
+			k, v string
+			err  error
+		)
+		// Prefer the context-aware path so the request deadline also bounds auth,
+		// falling back to the context-free method for managers that do not
+		// implement ContextAuthManager.
+		if cm, ok := s.authManager.(ContextAuthManager); ok {
+			k, v, err = cm.AuthHeaderWithContext(r.Context())
+		} else {
+			k, v, err = s.authManager.AuthHeader()
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -830,6 +841,13 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 	return r, nil
 }
 
+// defaultOAuthTimeout bounds a single OAuth token-refresh request made by the
+// built-in Oauth2AuthManager. oauth2's TokenSource.Token() takes no context, so
+// this Timeout on the refresh client is what keeps a stalled or black-holing
+// token endpoint from blocking auth — and therefore any request that triggers a
+// refresh, including asynchronous metrics reports — indefinitely.
+const defaultOAuthTimeout = 60 * time.Second
+
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
 // The returned cleanup closes an internally-created OAuth transport, if any.
@@ -886,11 +904,12 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	// Add skip oauth so we don't get in cycles trying to refresh the token
 	ctx := context.WithValue(context.Background(), skipOAuth, true)
 
-	// If a separate TLS config is provided for the OAuth2 server, create a
-	// dedicated HTTP client for token requests instead of reusing the catalog
-	// client. This is needed when the OAuth2 server is a different host with
-	// different TLS requirements.
-	oauthClient := cl
+	// Token refresh uses a client with a Timeout so a stalled token endpoint
+	// cannot block auth forever (oauth2's Token() takes no context). By default
+	// this reuses the catalog client's transport — preserving its TLS, proxy and
+	// header behavior — but as a distinct *http.Client so the Timeout applies to
+	// refresh alone and not to ordinary catalog requests.
+	oauthClient := &http.Client{Transport: cl.Transport, Timeout: defaultOAuthTimeout}
 	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
 		transport := &http.Transport{
@@ -899,6 +918,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 		}
 		oauthClient = &http.Client{
 			Transport: transport,
+			Timeout:   defaultOAuthTimeout,
 		}
 		closeIdleConnections = transport.CloseIdleConnections
 	}

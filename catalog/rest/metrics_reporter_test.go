@@ -21,17 +21,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	iceberg "github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/metrics"
+	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +44,7 @@ type capturedRequest struct {
 	method      string
 	path        string // decoded path
 	escapedPath string // percent-encoded path
+	header      http.Header
 	body        []byte
 }
 
@@ -58,6 +63,7 @@ func (c *captureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 			method:      r.Method,
 			path:        r.URL.Path,
 			escapedPath: r.URL.EscapedPath(),
+			header:      r.Header.Clone(), // the SDK may reuse the request; snapshot it
 			body:        body,
 		}
 	}
@@ -260,6 +266,323 @@ func TestRESTMetricsReporterEscapesFullPath(t *testing.T) {
 	}
 }
 
+// rotatingAuthManager returns a distinct bearer header on each call, standing in
+// for a token source that refreshes between reports.
+type rotatingAuthManager struct{ n atomic.Int32 }
+
+func (m *rotatingAuthManager) AuthHeader() (string, string, error) {
+	return "Authorization", fmt.Sprintf("Bearer tok-%d", m.n.Add(1)), nil
+}
+
+// ctxAuthManager records whether the context-aware path was taken and returns a
+// header value identifying which method produced it.
+type ctxAuthManager struct{ usedContext atomic.Bool }
+
+func (m *ctxAuthManager) AuthHeader() (string, string, error) {
+	return "Authorization", "context-free", nil
+}
+
+func (m *ctxAuthManager) AuthHeaderWithContext(ctx context.Context) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	m.usedContext.Store(true)
+
+	return "Authorization", "with-context", nil
+}
+
+// blockingHandler blocks in Handle until released, so a test can prove the drop
+// path never logs synchronously on the caller's goroutine.
+type blockingHandler struct{ release <-chan struct{} }
+
+func (h *blockingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *blockingHandler) Handle(context.Context, slog.Record) error {
+	<-h.release
+
+	return nil
+}
+func (h *blockingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockingHandler) WithGroup(string) slog.Handler      { return h }
+
+// recordingHandler captures emitted records so a test can assert the aggregated
+// warning content.
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) warnings() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Record
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			out = append(out, r)
+		}
+	}
+
+	return out
+}
+
+// reporterWithSession builds a reporter whose client runs through a
+// sessionTransport (auth + default headers) wrapping the given transport, so a
+// test can assert the metrics POST goes out authenticated.
+func reporterWithSession(t *testing.T, auth AuthManager, tr http.RoundTripper) *restMetricsReporter {
+	t.Helper()
+	session := &sessionTransport{
+		RoundTripper:   tr,
+		authManager:    auth,
+		defaultHeaders: http.Header{},
+	}
+	session.defaultHeaders.Set("Content-Type", "application/json")
+
+	return reporterWith(t, session, newTestDispatcher(t, 5*time.Second), nil)
+}
+
+// TestRESTMetricsReporterSendsAuthenticatedRequest pins that the metrics POST
+// reuses the catalog's authenticated client: the Authorization header the auth
+// manager produces and the catalog's default Content-Type both go out on the
+// wire. Without this a refactor that dispatched metrics through a bare
+// http.Client would keep every other test green.
+func TestRESTMetricsReporterSendsAuthenticatedRequest(t *testing.T) {
+	received := make(chan capturedRequest, 1)
+	rep := reporterWithSession(t, staticAuthManager{key: "Authorization", value: "Bearer tok-abc"}, &captureTransport{ch: received})
+
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+
+	select {
+	case req := <-received:
+		assert.Equal(t, "Bearer tok-abc", req.header.Get("Authorization"),
+			"metrics POST must carry the catalog's Authorization header")
+		assert.Equal(t, "application/json", req.header.Get("Content-Type"),
+			"catalog default headers must be forwarded")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the async metrics POST")
+	}
+}
+
+// TestRESTMetricsReporterRefetchesCredentialPerReport proves auth runs per
+// request, so a credential that rotates between reports is picked up rather than
+// captured once.
+func TestRESTMetricsReporterRefetchesCredentialPerReport(t *testing.T) {
+	received := make(chan capturedRequest, 2)
+	// One worker serializes the two reports so credentials are handed out in order.
+	d := newMetricsDispatcher(1, 8, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(d.close)
+	session := &sessionTransport{
+		RoundTripper:   &captureTransport{ch: received},
+		authManager:    &rotatingAuthManager{},
+		defaultHeaders: http.Header{},
+	}
+	rep := reporterWith(t, session, d, nil)
+
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+
+	seen := make(map[string]bool)
+	for range 2 {
+		select {
+		case req := <-received:
+			seen[req.header.Get("Authorization")] = true
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for a metrics POST")
+		}
+	}
+	assert.True(t, seen["Bearer tok-1"] && seen["Bearer tok-2"],
+		"each report must fetch a fresh credential, got %v", seen)
+}
+
+// TestSessionTransportPrefersContextAuthManager proves sessionTransport uses the
+// context-aware auth path when the manager implements ContextAuthManager, so a
+// request deadline can bound the auth step.
+func TestSessionTransportPrefersContextAuthManager(t *testing.T) {
+	received := make(chan capturedRequest, 1)
+	auth := &ctxAuthManager{}
+	rep := reporterWithSession(t, auth, &captureTransport{ch: received})
+
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+
+	select {
+	case req := <-received:
+		assert.Equal(t, "with-context", req.header.Get("Authorization"),
+			"the context-aware auth path must be preferred")
+		assert.True(t, auth.usedContext.Load())
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the async metrics POST")
+	}
+}
+
+// TestRESTMetricsReporterPreservesContextValues proves the caller's context
+// values (trace spans, request-scoped attributes) reach the outbound report even
+// though the caller's cancellation is detached.
+func TestRESTMetricsReporterPreservesContextValues(t *testing.T) {
+	type ctxKey struct{}
+	got := make(chan any, 1)
+	tr := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		got <- r.Context().Value(ctxKey{})
+
+		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(bytes.NewReader(nil)), Header: make(http.Header)}, nil
+	})
+	rep := newTestReporter(t, tr)
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "trace-123")
+	rep.Report(ctx, metrics.ScanReport{TableName: "db.t"})
+
+	select {
+	case v := <-got:
+		assert.Equal(t, "trace-123", v, "caller context values must propagate to the report")
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the async metrics POST")
+	}
+}
+
+// TestMetricsDispatcherDropCountsWithoutBlocking proves that dropping a report on
+// a full queue neither blocks the caller nor logs synchronously: the logger here
+// blocks in Handle, yet every Report returns promptly and the drops are counted.
+func TestMetricsDispatcherDropCountsWithoutBlocking(t *testing.T) {
+	release := make(chan struct{})
+	handlerRelease := make(chan struct{})
+	tr := &concurrencyTransport{release: release}
+	d := newMetricsDispatcher(1, 1, time.Minute, slog.New(&blockingHandler{release: handlerRelease}))
+	t.Cleanup(func() {
+		close(handlerRelease)
+		close(release)
+		d.close()
+	})
+	rep := reporterWith(t, tr, d, nil)
+
+	// Occupy the single worker; the next report fills the queue, the rest drop.
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+	require.Eventually(t, func() bool {
+		return tr.inFlight.Load() == 1
+	}, 3*time.Second, 5*time.Millisecond, "worker never saturated")
+
+	for range 4 { // 1 fills the queue, 3 are dropped
+		done := make(chan struct{})
+		go func() {
+			rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("Report blocked; the drop path must not log synchronously")
+		}
+	}
+
+	require.Eventually(t, func() bool {
+		return d.dropped.Load() == 3
+	}, 3*time.Second, 5*time.Millisecond, "expected exactly the surplus reports to be dropped")
+}
+
+// TestMetricsDispatcherAggregatesDropWarning proves the drop/failure counters
+// surface as a single aggregated warning (carrying the counts) rather than one
+// log line per dropped report. The shutdown flush is used to make the assertion
+// deterministic without waiting on the stats ticker.
+func TestMetricsDispatcherAggregatesDropWarning(t *testing.T) {
+	handler := &recordingHandler{}
+	release := make(chan struct{})
+	tr := &concurrencyTransport{release: release}
+	d := newMetricsDispatcher(1, 1, time.Minute, slog.New(handler))
+	rep := reporterWith(t, tr, d, nil)
+
+	// Occupy the worker, fill the queue, then overflow: three reports drop.
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+	require.Eventually(t, func() bool {
+		return tr.inFlight.Load() == 1
+	}, 3*time.Second, 5*time.Millisecond, "worker never saturated")
+	for range 4 {
+		rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
+	}
+	require.Eventually(t, func() bool {
+		return d.dropped.Load() == 3
+	}, 3*time.Second, 5*time.Millisecond)
+
+	close(release)
+	d.close() // triggers the final aggregated flush
+
+	warnings := handler.warnings()
+	require.Len(t, warnings, 1, "drops must aggregate into a single warning, not one per drop")
+	attrs := map[string]any{}
+	warnings[0].Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+
+		return true
+	})
+	assert.Equal(t, uint64(3), attrs["dropped"], "the aggregated warning must carry the drop count")
+}
+
+// TestMetricsDispatcherCloseIsIdempotent proves repeated and concurrent Close
+// calls are safe and cheap: they do not panic and each returns, spawning no
+// extra waiter goroutine per call.
+func TestMetricsDispatcherCloseIsIdempotent(t *testing.T) {
+	d := newMetricsDispatcher(2, 4, 5*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.close()
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("concurrent Close calls did not all return")
+	}
+
+	// A further Close after the fact is still safe.
+	d.close()
+}
+
+// TestRESTMetricsReporterBuildsPathThroughProduction runs the real path
+// composition — splitIdentForPath (encodeNamespace) and endpointReportMetrics
+// .reqPath — for a multi-level namespace with segments needing escaping, so a
+// regression in that composition or in the separator handling is caught rather
+// than bypassed by a hand-built path.
+func TestRESTMetricsReporterBuildsPathThroughProduction(t *testing.T) {
+	c := &Catalog{namespaceSeparator: defaultNamespaceSeparator}
+	ns, tbl, err := c.splitIdentForPath(table.Identifier{"a b", "d e", "t x"})
+	require.NoError(t, err)
+	path, err := endpointReportMetrics.reqPath(ns, tbl)
+	require.NoError(t, err)
+
+	received := make(chan capturedRequest, 1)
+	base, err := url.Parse("http://catalog.invalid/v1/my-prefix")
+	require.NoError(t, err)
+	rep := reporterWith(t, &captureTransport{ch: received}, newTestDispatcher(t, 5*time.Second), path)
+	rep.baseURI = base
+
+	rep.Report(context.Background(), metrics.ScanReport{TableName: "a b.d e.t x"})
+
+	select {
+	case req := <-received:
+		// The namespace levels are percent-encoded and joined by the encoded
+		// separator (%1F); the table segment is escaped by the URL builder.
+		assert.Equal(t, "/v1/my-prefix/namespaces/a%20b%1Fd%20e/tables/t%20x/metrics", req.escapedPath)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the async metrics POST")
+	}
+}
+
 // TestMetricsDispatcherReportHasFiniteTimeout proves a report does not hang
 // forever against a black-holing endpoint: the per-report deadline fires and the
 // request context reports DeadlineExceeded.
@@ -391,6 +714,18 @@ func TestReportMetricsEnabled(t *testing.T) {
 	assert.True(t, reportMetricsEnabled(iceberg.Properties{keyReportMetricsEnabledLegacy: "true"}),
 		"the historical dotted key is accepted as an alias")
 	assert.False(t, reportMetricsEnabled(iceberg.Properties{keyReportMetricsEnabled: "false"}))
+
+	// The canonical key wins whenever it is present: a client that migrated to it
+	// and explicitly disabled reporting is honored even if a stale legacy dotted
+	// key still lingers in the config.
+	assert.False(t, reportMetricsEnabled(iceberg.Properties{
+		keyReportMetricsEnabled:       "false",
+		keyReportMetricsEnabledLegacy: "true",
+	}), "an explicit canonical false must override a lingering legacy true")
+	assert.True(t, reportMetricsEnabled(iceberg.Properties{
+		keyReportMetricsEnabled:       "true",
+		keyReportMetricsEnabledLegacy: "false",
+	}), "an explicit canonical true wins over a legacy false")
 }
 
 func TestReportMetricsTimeout(t *testing.T) {
@@ -484,4 +819,26 @@ func orEmpty(m map[string]any) map[string]any {
 	}
 
 	return m
+}
+
+// TestTableResponsePropertiesCannotEnableReporting pins the invariant behind the
+// enablement doc comment: enablement is resolved once from the client-supplied
+// properties, so a property arriving later on a table-load response reaches only
+// the table-local config and can never turn reporting on. A future refactor that
+// resolved enablement from merged properties would flip the first assertion and
+// fail here.
+func TestTableResponsePropertiesCannotEnableReporting(t *testing.T) {
+	clientProps := iceberg.Properties{} // the client did not opt in
+	require.False(t, reportMetricsEnabled(clientProps))
+
+	// A table response carrying the enable key would enable reporting only if it
+	// reached the client properties — it does not, so the client properties that
+	// gate the dispatcher stay unchanged and reporting stays off.
+	tableResponseProps := iceberg.Properties{keyReportMetricsEnabled: "true"}
+	ifItLeaked := maps.Clone(clientProps)
+	maps.Copy(ifItLeaked, tableResponseProps)
+	assert.True(t, reportMetricsEnabled(ifItLeaked),
+		"sanity: the key would enable reporting if it reached the client properties")
+	assert.False(t, reportMetricsEnabled(clientProps),
+		"but the client properties are the ones that gate the dispatcher, and they are untouched")
 }
