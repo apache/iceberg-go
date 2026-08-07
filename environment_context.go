@@ -15,16 +15,21 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package metrics
+package iceberg
 
 import (
 	"maps"
 	"sync"
-
-	"github.com/apache/iceberg-go"
 )
 
-const icebergVersionKey = "iceberg-version"
+const (
+	// EnvironmentContextEngineNameKey identifies the engine name property.
+	EnvironmentContextEngineNameKey = "engine-name"
+	// EnvironmentContextEngineVersionKey identifies the engine version property.
+	EnvironmentContextEngineVersionKey = "engine-version"
+
+	environmentContextIcebergVersionKey = "iceberg-version"
+)
 
 var environmentContext = struct {
 	sync.RWMutex
@@ -33,52 +38,42 @@ var environmentContext = struct {
 	properties: make(map[string]string),
 }
 
-// EnvironmentContext returns a snapshot of the process-wide metadata attached
-// to newly emitted reports. Iceberg's own version is always present and cannot
-// be removed by caller-supplied properties. The returned map is independent of
-// the stored context and may be modified by the caller.
+var environmentContextInit sync.Once
+
+func initializeEnvironmentContext() {
+	environmentContextInit.Do(func() {
+		environmentContext.Lock()
+		environmentContext.properties[environmentContextIcebergVersionKey] = Version()
+		environmentContext.Unlock()
+	})
+}
+
+// EnvironmentContext returns an independent snapshot of the process-wide
+// context used to populate report metadata. The returned map may be modified
+// by the caller without changing the stored context.
 func EnvironmentContext() map[string]string {
+	initializeEnvironmentContext()
+
 	environmentContext.RLock()
 	defer environmentContext.RUnlock()
 
-	result := map[string]string{icebergVersionKey: iceberg.Version()}
-	maps.Copy(result, environmentContext.properties)
-	result[icebergVersionKey] = iceberg.Version()
-
-	return result
+	return maps.Clone(environmentContext.properties)
 }
 
-// SetEnvironmentContext replaces the caller-supplied report metadata. A copy
-// is retained, so later changes to properties do not affect future reports.
-// The built-in Iceberg version metadata is restored automatically.
-func SetEnvironmentContext(properties map[string]string) {
-	environmentContext.Lock()
-	defer environmentContext.Unlock()
-
-	environmentContext.properties = maps.Clone(properties)
-	delete(environmentContext.properties, icebergVersionKey)
-}
-
-// SetEnvironmentProperty sets one process-wide report metadata entry.
+// SetEnvironmentProperty sets one process-wide environment context property.
 func SetEnvironmentProperty(key, value string) {
-	if key == icebergVersionKey {
-		return
-	}
+	initializeEnvironmentContext()
 
 	environmentContext.Lock()
 	defer environmentContext.Unlock()
 
-	if environmentContext.properties == nil {
-		environmentContext.properties = make(map[string]string)
-	}
 	environmentContext.properties[key] = value
 }
 
-// RemoveEnvironmentProperty removes one process-wide report metadata entry.
+// RemoveEnvironmentProperty removes one process-wide environment context
+// property.
 func RemoveEnvironmentProperty(key string) {
-	if key == icebergVersionKey {
-		return
-	}
+	initializeEnvironmentContext()
 
 	environmentContext.Lock()
 	defer environmentContext.Unlock()

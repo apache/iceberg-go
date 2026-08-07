@@ -108,7 +108,7 @@ func buildCommitReport(tableName string, snap *Snapshot, attempts int64, dur tim
 		SnapshotID:     snapshotID,
 		SequenceNumber: seqNum,
 		Operation:      operation,
-		Metadata:       metrics.EnvironmentContext(),
+		Metadata:       iceberg.EnvironmentContext(),
 		Metrics: metrics.CommitMetricsResult{
 			TotalDuration: metrics.NewNanosTimerResult(1, dur.Nanoseconds()),
 			Attempts:      metrics.NewCounterResult(metrics.UnitCount, attempts),

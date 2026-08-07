@@ -116,11 +116,23 @@ func TestBuildCommitReport(t *testing.T) {
 }
 
 func TestBuildCommitReportIncludesEnvironmentContext(t *testing.T) {
-	metrics.SetEnvironmentContext(map[string]string{
-		"engine-name":    "iceberg-go-test",
-		"engine-version": "1.0",
+	keys := []string{
+		iceberg.EnvironmentContextEngineNameKey,
+		iceberg.EnvironmentContextEngineVersionKey,
+	}
+	previous := iceberg.EnvironmentContext()
+	t.Cleanup(func() {
+		for _, key := range keys {
+			if value, ok := previous[key]; ok {
+				iceberg.SetEnvironmentProperty(key, value)
+			} else {
+				iceberg.RemoveEnvironmentProperty(key)
+			}
+		}
 	})
-	t.Cleanup(func() { metrics.SetEnvironmentContext(nil) })
+
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentContextEngineNameKey, "iceberg-go-test")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentContextEngineVersionKey, "1.0")
 
 	cr := buildCommitReport("db.tbl", nil, 1, time.Millisecond)
 	assert.Equal(t, map[string]string{
@@ -130,7 +142,7 @@ func TestBuildCommitReportIncludesEnvironmentContext(t *testing.T) {
 	}, cr.Metadata)
 
 	cr.Metadata["engine-name"] = "changed"
-	assert.Equal(t, "iceberg-go-test", metrics.EnvironmentContext()["engine-name"])
+	assert.Equal(t, "iceberg-go-test", iceberg.EnvironmentContext()["engine-name"])
 }
 
 func TestBuildCommitReportNilSnapshot(t *testing.T) {
