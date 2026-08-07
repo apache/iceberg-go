@@ -421,6 +421,9 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			assert.Empty(t, common.StatisticsList)
 			assert.Empty(t, common.PartitionStatsList)
 			assert.Empty(t, common.EncryptionKeyList)
+			// With no snapshots, an omitted last-sequence-number retains the
+			// legacy -1 sentinel. This documents current behavior, not the
+			// desired metadata normalization.
 			switch metadata := tt.target.(type) {
 			case *metadataV2:
 				assert.Equal(t, int64(-1), metadata.LastSeqNum)
@@ -454,7 +457,7 @@ func TestMetadataUnmarshalPreservesStateOnError(t *testing.T) {
 		{
 			name:    "v1",
 			data:    ExampleTableMetadataV1,
-			invalid: strings.Replace(ExampleTableMetadataV1, `"id": 2, "name": "y"`, `"id": 1, "name": "y"`, 1),
+			invalid: strings.Replace(ExampleTableMetadataV1, `"current-snapshot-id": -1`, `"current-snapshot-id": 999`, 1),
 			target:  &metadataV1{},
 		},
 		{
