@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -75,7 +76,7 @@ func (i InspectTable) currentManifestEntries(ctx context.Context) ([]iceberg.Man
 		return nil, nil
 	}
 	if i.tbl.fsF == nil {
-		return nil, fmt.Errorf("table file IO is not configured")
+		return nil, errors.New("table file IO is not configured")
 	}
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
@@ -153,8 +154,10 @@ func entriesInt64MapField(id int, name string, keyID, valueID int) iceberg.Neste
 }
 
 func entriesBinaryMapType(keyID, valueID int) *iceberg.MapType {
-	return &iceberg.MapType{KeyID: keyID, KeyType: iceberg.PrimitiveTypes.Int32,
-		ValueID: valueID, ValueType: iceberg.PrimitiveTypes.Binary, ValueRequired: true}
+	return &iceberg.MapType{
+		KeyID: keyID, KeyType: iceberg.PrimitiveTypes.Int32,
+		ValueID: valueID, ValueType: iceberg.PrimitiveTypes.Binary, ValueRequired: true,
+	}
 }
 
 func appendEntriesDataFile(bldr *array.StructBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
@@ -215,6 +218,7 @@ func appendEntriesPartition(builder *array.StructBuilder, typ *iceberg.StructTyp
 		value := values[field.ID]
 		if value == nil {
 			builder.FieldBuilder(idx).AppendNull()
+
 			continue
 		}
 		valueScalar, err := inspectEntriesValueScalar(value, field.Type, arrowType.Field(idx).Type)
@@ -225,6 +229,7 @@ func appendEntriesPartition(builder *array.StructBuilder, typ *iceberg.StructTyp
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -254,12 +259,14 @@ func inspectEntriesValueScalar(value any, typ iceberg.Type, arrowType arrow.Data
 			return scalar.MakeScalarParam(value[:], arrowType)
 		}
 	}
+
 	return scalar.MakeScalarParam(value, arrowType)
 }
 
 func appendEntriesInt64Map(builder *array.MapBuilder, values map[int]int64) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -279,6 +286,7 @@ func appendEntriesInt64Map(builder *array.MapBuilder, values map[int]int64) {
 func appendEntriesBinaryMap(builder *array.MapBuilder, values map[int][]byte) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -298,6 +306,7 @@ func appendEntriesBinaryMap(builder *array.MapBuilder, values map[int][]byte) {
 func appendEntriesBytes(builder array.Builder, value []byte) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.(*array.BinaryBuilder).Append(value)
@@ -306,6 +315,7 @@ func appendEntriesBytes(builder array.Builder, value []byte) {
 func appendEntriesInt64List(builder *array.ListBuilder, values []int64) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -315,6 +325,7 @@ func appendEntriesInt64List(builder *array.ListBuilder, values []int64) {
 func appendEntriesInt32List(builder *array.ListBuilder, values []int) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -327,6 +338,7 @@ func appendEntriesInt32List(builder *array.ListBuilder, values []int) {
 func appendEntriesOptionalInt64(builder *array.Int64Builder, value int64) {
 	if value < 0 {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(value)
@@ -335,6 +347,7 @@ func appendEntriesOptionalInt64(builder *array.Int64Builder, value int64) {
 func appendEntriesOptionalInt64Ptr(builder *array.Int64Builder, value *int64) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(*value)
@@ -343,6 +356,7 @@ func appendEntriesOptionalInt64Ptr(builder *array.Int64Builder, value *int64) {
 func appendEntriesOptionalInt32Ptr(builder *array.Int32Builder, value *int) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(int32(*value))
@@ -351,6 +365,7 @@ func appendEntriesOptionalInt32Ptr(builder *array.Int32Builder, value *int) {
 func appendEntriesOptionalString(builder *array.StringBuilder, value *string) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(*value)
