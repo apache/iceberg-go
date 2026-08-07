@@ -88,7 +88,10 @@ func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate
 // files from the current snapshot. Files from evolved specs are coerced into
 // the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	partitionType := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("inspect partitions: %w", err)
+	}
 	schema := PartitionsSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
