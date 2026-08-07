@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -433,6 +435,63 @@ func TestInspectManifestsSchema(t *testing.T) {
 	require.Equal(t, 11, partitionSummary.FieldList[1].ID)
 	require.Equal(t, 12, partitionSummary.FieldList[2].ID)
 	require.Equal(t, 13, partitionSummary.FieldList[3].ID)
+}
+
+func TestInspectManifests(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	file := newTestDataFileWithCount(t, spec,
+		"mem://default/table-location/data/data.parquet", map[int]any{1000: int32(7)}, 3)
+	sequenceNumber := int64(1)
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+
+	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
+		[]iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, 1, record.Column(5).(*array.Int32).Value(0))
+	require.EqualValues(t, 0, record.Column(8).(*array.Int32).Value(0))
+	require.Equal(t, manifestPath, record.Column(1).(*array.String).Value(0))
+
+	summaries := record.Column(11).(*array.List)
+	require.False(t, summaries.IsNull(0))
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 1, end-start)
+	summary := summaries.ListValues().(*array.Struct)
+	require.False(t, summary.Field(0).(*array.Boolean).Value(0))
+	require.Equal(t, "7", summary.Field(2).(*array.String).Value(0))
+	require.Equal(t, "7", summary.Field(3).(*array.String).Value(0))
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
