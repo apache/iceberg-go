@@ -220,7 +220,12 @@ func (of *overwriteFiles) existingManifests(parent *Snapshot) ([]iceberg.Manifes
 				return nil, err
 			}
 			defer internal.CheckedClose(fileCloser, &retErr)
-			defer internal.CheckedClose(wr, &retErr)
+			writerClosed := false
+			defer func() {
+				if !writerClosed {
+					internal.CheckedClose(wr, &retErr)
+				}
+			}()
 
 			for _, entry := range notDeleted {
 				if err := wr.Existing(entry); err != nil {
@@ -229,6 +234,7 @@ func (of *overwriteFiles) existingManifests(parent *Snapshot) ([]iceberg.Manifes
 			}
 
 			// close the writer to force a flush and ensure counter.Count is accurate
+			writerClosed = true
 			if err := wr.Close(); err != nil {
 				return nil, err
 			}
@@ -375,7 +381,12 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 		return nil, err
 	}
 	defer internal.CheckedClose(fileCloser, &err)
-	defer internal.CheckedClose(wr, &err)
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			internal.CheckedClose(wr, &err)
+		}
+	}()
 
 	for _, manifest := range bin {
 		for entry, err := range m.snap.iterManifestEntries(manifest, false) {
@@ -402,6 +413,7 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 	}
 
 	// close the writer to force a flush and ensure counter.Count is accurate
+	writerClosed = true
 	if err := wr.Close(); err != nil {
 		return nil, err
 	}
@@ -834,7 +846,12 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 				if err != nil {
 					return nil, err
 				}
-				defer internal.CheckedClose(wr, &retErr)
+				writerClosed := false
+				defer func() {
+					if !writerClosed {
+						internal.CheckedClose(wr, &retErr)
+					}
+				}()
 
 				for _, entry := range entries {
 					if err := wr.Delete(entry); err != nil {
@@ -842,6 +859,7 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 					}
 				}
 
+				writerClosed = true
 				if err := wr.Close(); err != nil {
 					return nil, err
 				}
@@ -904,7 +922,12 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 		return nil, err
 	}
 	defer internal.CheckedClose(out, &retErr)
-	defer internal.CheckedClose(wr, &retErr)
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			internal.CheckedClose(wr, &retErr)
+		}
+	}()
 
 	for _, df := range files {
 		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
@@ -915,6 +938,7 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 	}
 
 	// close the writer to force a flush and ensure counter.Count is accurate
+	writerClosed = true
 	if err := wr.Close(); err != nil {
 		return nil, err
 	}
