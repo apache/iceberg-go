@@ -793,6 +793,7 @@ func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 	)
 	metadataFor := func(specs []iceberg.PartitionSpec) Metadata {
 		lastPartitionID := 1000
+
 		return &metadataV2{commonMetadata: commonMetadata{
 			FormatVersion:   2,
 			UUID:            uuid.New(),
