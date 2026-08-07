@@ -21,10 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -40,23 +42,13 @@ func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error)
 		return nil, fmt.Errorf("inspect data files: build arrow schema: %w", err)
 	}
 
-	files, err := i.currentContentFiles(ctx, iceberg.ManifestContentData)
-	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
-	}
-
-	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
-	defer bldr.Release()
-	for _, file := range files {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := appendContentFileRecord(bldr, partitionType, file); err != nil {
-			return nil, fmt.Errorf("inspect data files: append %s: %w", file.FilePath(), err)
-		}
-	}
-
-	rr, err := singleBatchReader(arrowSchema, bldr)
+	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentData
+		},
+		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+			return appendContentFileRecord(bldr, partitionType, entry.DataFile())
+		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect data files: %w", err)
 	}
@@ -64,10 +56,21 @@ func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
-func (i InspectTable) currentContentFiles(ctx context.Context, content iceberg.ManifestContent) ([]iceberg.DataFile, error) {
+const inspectRecordBatchSize = 4096
+
+// manifestEntryReader streams manifest entries into bounded Arrow record
+// batches. It keeps only the current batch and manifest decoder state in
+// memory instead of materializing every entry before returning a reader.
+func (i InspectTable) manifestEntryReader(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	discardDeleted bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+) (array.RecordReader, error) {
 	snapshot := i.tbl.metadata.CurrentSnapshot()
 	if snapshot == nil {
-		return nil, nil
+		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
 	}
 	if i.tbl.fsF == nil {
 		return nil, errors.New("table file IO is not configured")
@@ -82,26 +85,90 @@ func (i InspectTable) currentContentFiles(ctx context.Context, content iceberg.M
 		return nil, err
 	}
 
-	files := make([]iceberg.DataFile, 0)
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if manifest.ManifestContent() != content {
-			continue
-		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, err
+	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
+		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+		defer bldr.Release()
+
+		rows := 0
+		emitted := false
+		emit := func() bool {
+			if rows == 0 {
+				return true
 			}
+
+			batch := bldr.NewRecordBatch()
+			rows = 0
+			emitted = true
+			if yield(batch, nil) {
+				return true
+			}
+
+			batch.Release()
+
+			return false
+		}
+		emitEmpty := func() {
+			batch := bldr.NewRecordBatch()
+			emitted = true
+			if !yield(batch, nil) {
+				batch.Release()
+			}
+		}
+		yieldError := func(err error) {
+			_ = yield(nil, err)
+		}
+
+		for _, manifest := range manifests {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				yieldError(err)
+
+				return
 			}
-			files = append(files, entry.DataFile())
+			if includeManifest != nil && !includeManifest(manifest) {
+				continue
+			}
+
+			for entry, err := range manifest.Entries(fs, discardDeleted) {
+				if err != nil {
+					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
+
+					return
+				}
+				if err := ctx.Err(); err != nil {
+					yieldError(err)
+
+					return
+				}
+				if err := appendEntry(bldr, entry); err != nil {
+					yieldError(fmt.Errorf("append manifest entry from %s: %w", manifest.FilePath(), err))
+
+					return
+				}
+				rows++
+				if rows == inspectRecordBatchSize && !emit() {
+					return
+				}
+			}
+		}
+
+		if rows > 0 {
+			_ = emit()
+		} else if !emitted {
+			emitEmpty()
+		}
+	}), nil
+}
+
+func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		bldr := array.NewRecordBuilder(alloc, schema)
+		defer bldr.Release()
+
+		batch := bldr.NewRecordBatch()
+		if !yield(batch, nil) {
+			batch.Release()
 		}
 	}
-
-	return files, nil
 }
 
 // inspectPartitionType returns the table-wide partition type. It contains the
