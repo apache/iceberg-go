@@ -218,6 +218,9 @@ func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
 	asOfScan := tbl.Scan(WithSnapshotAsOf(asOfTimestamp))
 	_, err = asOfScan.UseRef("feature")
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "as-of timestamp")
+	require.Nil(t, asOfScan.snapshotID)
+	require.Equal(t, &asOfTimestamp, asOfScan.asOfTimestamp)
 
 	mainScan, err := asOfScan.UseRef(MainBranch)
 	require.NoError(t, err)
@@ -227,6 +230,12 @@ func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
 
 	snapshotID := int64(10)
 	snapshotScan := tbl.Scan(WithSnapshotID(snapshotID))
+	_, err = snapshotScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "snapshot id")
+	require.Equal(t, &snapshotID, snapshotScan.snapshotID)
+	require.Nil(t, snapshotScan.asOfTimestamp)
+
 	mainScan, err = snapshotScan.UseRef(MainBranch)
 	require.NoError(t, err)
 	require.Equal(t, &snapshotID, mainScan.snapshotID)
@@ -249,10 +258,17 @@ func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
 	branchScan, err := liveScan.UseRef("feature")
 	require.NoError(t, err)
 	require.Equal(t, int64(20), *branchScan.snapshotID)
+	_, err = branchScan.UseRef("release")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "snapshot id")
 
 	tagScan, err := liveScan.UseRef("release")
 	require.NoError(t, err)
 	require.Equal(t, int64(20), *tagScan.snapshotID)
+
+	_, err = liveScan.UseRef("unknown")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "unknown ref=unknown")
 }
 
 func TestTable_WithSnapshotAsOf(t *testing.T) {

@@ -267,10 +267,10 @@ func (scan *Scan) Reporter() metrics.Reporter {
 	return scan.reporter
 }
 
-// UseRef selects a named snapshot reference. UseRef(MainBranch) is an
-// intentional no-op that returns a clone, so it remains valid even when the
-// scan already has an explicit snapshot or as-of selector. Any conflicting
-// selectors recorded by scan options are still surfaced by scan execution.
+// UseRef selects a named snapshot reference. UseRef(MainBranch) is the one
+// intentional exception to selector exclusivity: it returns a clone without
+// changing an existing snapshot or as-of selector. Any conflicting selectors
+// recorded by scan options are still surfaced by scan execution.
 func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if name == MainBranch {
 		out := *scan
