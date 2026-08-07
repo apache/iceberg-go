@@ -345,8 +345,12 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			}
 			fieldType := partType.FieldList[idx].Type
 			transform := spec.Field(idx).Transform
-			appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound)
-			appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound)
+			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
+				return nil, fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
+			}
+			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
+				return nil, fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
+			}
 		}
 	}
 
@@ -375,20 +379,20 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 	return snapshot.Manifests(fs)
 }
 
-func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) {
+func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) error {
 	if bound == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
 
 	literal, err := iceberg.LiteralFromBytes(typ, *bound)
 	if err != nil {
-		builder.AppendNull()
-
-		return
+		return err
 	}
 	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
+
+	return nil
 }
 
 // MetadataLogEntries returns one row for every metadata file in the table's
@@ -552,7 +556,7 @@ func ManifestsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: false, Type: &iceberg.ListType{
+		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: &iceberg.ListType{
 			ElementID:       9,
 			ElementRequired: true,
 			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{

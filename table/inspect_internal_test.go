@@ -673,6 +673,7 @@ func TestInspectManifestsSchema(t *testing.T) {
 	require.Equal(t, 1, fields[1].ID)
 	require.Equal(t, 17, fields[10].ID)
 	require.Equal(t, 8, fields[11].ID)
+	require.True(t, fields[11].Required)
 	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
 	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
 
