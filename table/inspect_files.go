@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -35,7 +36,10 @@ import (
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
 func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
-	partitionType := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("inspect data files: %w", err)
+	}
 	schema := DataFilesSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
@@ -174,7 +178,7 @@ func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.
 // inspectPartitionType returns the table-wide partition type. It contains the
 // union of partition fields from every spec, which lets metadata tables
 // represent live files written before partition evolution.
-func inspectPartitionType(metadata Metadata) *iceberg.StructType {
+func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
 	currentSchema := metadata.CurrentSchema()
 	specs := metadata.PartitionSpecs()
 	sort.Slice(specs, func(left, right int) bool {
@@ -199,13 +203,27 @@ func inspectPartitionType(metadata Metadata) *iceberg.StructType {
 			}
 
 			if previous, exists := selected[field.FieldID]; exists {
-				// A v1 partition-field drop is represented by a void transform.
-				// Keep the newest field name, but use the older non-void type when
-				// that is the only concrete type available.
-				if isInspectVoidTransform(previous.Transform) && !isInspectVoidTransform(field.Transform) {
-					old := fieldsByID[field.FieldID]
-					old.Type = partitionType.FieldList[idx].Type
-					fieldsByID[field.FieldID] = old
+				if !slices.Equal(previous.SourceIDs, field.SourceIDs) {
+					return nil, fmt.Errorf("%w: partition field ID %d has incompatible source IDs %v and %v",
+						iceberg.ErrInvalidPartitionSpec, field.FieldID, previous.SourceIDs, field.SourceIDs)
+				}
+
+				previousVoid := isInspectVoidTransform(previous.Transform)
+				fieldVoid := isInspectVoidTransform(field.Transform)
+				if previousVoid || fieldVoid {
+					if previousVoid && !fieldVoid {
+						selected[field.FieldID] = field
+						old := fieldsByID[field.FieldID]
+						old.Type = partitionType.FieldList[idx].Type
+						fieldsByID[field.FieldID] = old
+					}
+
+					continue
+				}
+
+				if !previous.Transform.Equals(field.Transform) {
+					return nil, fmt.Errorf("%w: partition field ID %d has incompatible transforms %q and %q",
+						iceberg.ErrInvalidPartitionSpec, field.FieldID, previous.Transform, field.Transform)
 				}
 
 				continue
@@ -227,7 +245,7 @@ func inspectPartitionType(metadata Metadata) *iceberg.StructType {
 	}
 	sort.Slice(fields, func(left, right int) bool { return fields[left].ID < fields[right].ID })
 
-	return &iceberg.StructType{FieldList: fields}
+	return &iceberg.StructType{FieldList: fields}, nil
 }
 
 func isInspectVoidTransform(transform iceberg.Transform) bool {
