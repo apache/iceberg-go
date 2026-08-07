@@ -19,6 +19,8 @@ package table
 
 import (
 	"context"
+	"math"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -345,6 +347,27 @@ func TestInspectRefsEmpty(t *testing.T) {
 
 	require.EqualValues(t, 0, rec.NumRows())
 	require.EqualValues(t, 6, rec.NumCols())
+}
+
+func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("requires 64-bit int")
+	}
+
+	tbl := historyTestTable()
+	tooLarge := int64(math.MaxInt32) + 1
+	minSnapshotsToKeep := int(tooLarge)
+	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+		},
+	}
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.ErrorContains(t, err, "min snapshots to keep 2147483648 exceeds int32 range")
+	require.Nil(t, rr)
 }
 
 // snapshotsTestTable builds a table with two snapshots: a root carrying a

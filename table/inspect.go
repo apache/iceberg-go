@@ -21,6 +21,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -306,6 +307,12 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 			maxReferenceAge.AppendNull()
 		}
 		if row.ref.MinSnapshotsToKeep != nil {
+			if *row.ref.MinSnapshotsToKeep > math.MaxInt32 {
+				return nil, fmt.Errorf(
+					"inspect refs: min snapshots to keep %d exceeds int32 range",
+					*row.ref.MinSnapshotsToKeep,
+				)
+			}
 			minSnapshotsToKeep.Append(int32(*row.ref.MinSnapshotsToKeep))
 		} else {
 			minSnapshotsToKeep.AppendNull()
