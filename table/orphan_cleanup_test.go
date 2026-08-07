@@ -351,6 +351,16 @@ func TestIsFileOrphanMatchesWindowsCaseInsensitivePaths(t *testing.T) {
 	assert.False(t, isOrphan)
 }
 
+func TestIsFileOrphanPreservesObjectStoreKeyCase(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"s3://bucket/Data/file.parquet": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("s3://bucket/data/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.True(t, isOrphan, "object-store keys are case-sensitive")
+}
+
 func TestIsFileOrphanClampsDotSegmentsAtWindowsDriveRoot(t *testing.T) {
 	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
 	referencedFiles := map[string]bool{`C:\..\file.parquet`: true}
@@ -393,6 +403,11 @@ func TestVersionHintLocation(t *testing.T) {
 			expected: "file:/tmp/table/metadata/version-hint.text",
 		},
 		{
+			name:     "uppercase_file_uri",
+			location: "FILE:///tmp/table",
+			expected: "file:///tmp/table/metadata/version-hint.text",
+		},
+		{
 			name:     "local_path",
 			location: filepath.Join("local", "table"),
 			expected: filepath.Join("local", "table", "metadata", "version-hint.text"),
@@ -401,9 +416,16 @@ func TestVersionHintLocation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, versionHintLocation(tt.location))
+			result, err := versionHintLocation(tt.location)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestVersionHintLocationRejectsInvalidURL(t *testing.T) {
+	_, err := versionHintLocation("s3://bucket/%zz")
+	assert.Error(t, err)
 }
 
 func TestApplySchemeEquivalence(t *testing.T) {
