@@ -428,6 +428,41 @@ func TestDataFilesSchema(t *testing.T) {
 	require.NotContains(t, testFieldNames(unpartitioned), "partition")
 }
 
+func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	oldSpec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: iceberg.IdentityTransform{},
+	})
+	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "category", Transform: iceberg.IdentityTransform{},
+	})
+	lastPartitionID := 1001
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		LastColumnId:    2,
+		SchemaList:      []*iceberg.Schema{schema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{oldSpec, newSpec},
+		DefaultSpecID:   1,
+		LastPartitionID: &lastPartitionID,
+		SnapshotRefs:    map[string]SnapshotRef{},
+	}}
+
+	partitionType := inspectPartitionType(meta)
+	require.Equal(t, []int{1000, 1001}, []int{
+		partitionType.FieldList[0].ID,
+		partitionType.FieldList[1].ID,
+	})
+	require.Equal(t, []string{"region", "category"}, []string{
+		partitionType.FieldList[0].Name,
+		partitionType.FieldList[1].Name,
+	})
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {

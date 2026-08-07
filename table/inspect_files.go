@@ -33,8 +33,7 @@ import (
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
 func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
-	spec := i.tbl.metadata.PartitionSpec()
-	partitionType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
+	partitionType := inspectPartitionType(i.tbl.metadata)
 	schema := DataFilesSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
@@ -105,10 +104,84 @@ func (i InspectTable) currentContentFiles(ctx context.Context, content iceberg.M
 	return files, nil
 }
 
+// inspectPartitionType returns the table-wide partition type. It contains the
+// union of partition fields from every spec, which lets metadata tables
+// represent live files written before partition evolution.
+func inspectPartitionType(metadata Metadata) *iceberg.StructType {
+	currentSchema := metadata.CurrentSchema()
+	specs := metadata.PartitionSpecs()
+	sort.Slice(specs, func(left, right int) bool {
+		return specs[left].ID() > specs[right].ID()
+	})
+
+	selected := make(map[int]iceberg.PartitionField)
+	fieldsByID := make(map[int]iceberg.NestedField)
+	for _, spec := range specs {
+		partitionType := spec.PartitionType(currentSchema)
+		for idx, field := range spec.Fields() {
+			active := true
+			for _, sourceID := range field.SourceIDs {
+				if _, ok := currentSchema.FindTypeByID(sourceID); !ok {
+					active = false
+					break
+				}
+			}
+			if !active || idx >= len(partitionType.FieldList) {
+				continue
+			}
+
+			if previous, exists := selected[field.FieldID]; exists {
+				// A v1 partition-field drop is represented by a void transform.
+				// Keep the newest field name, but use the older non-void type when
+				// that is the only concrete type available.
+				if isInspectVoidTransform(previous.Transform) && !isInspectVoidTransform(field.Transform) {
+					old := fieldsByID[field.FieldID]
+					old.Type = partitionType.FieldList[idx].Type
+					fieldsByID[field.FieldID] = old
+				}
+				continue
+			}
+
+			selected[field.FieldID] = field
+			fieldsByID[field.FieldID] = iceberg.NestedField{
+				ID:       field.FieldID,
+				Name:     field.Name,
+				Type:     partitionType.FieldList[idx].Type,
+				Required: false,
+			}
+		}
+	}
+
+	fields := make([]iceberg.NestedField, 0, len(fieldsByID))
+	for _, field := range fieldsByID {
+		fields = append(fields, field)
+	}
+	sort.Slice(fields, func(left, right int) bool { return fields[left].ID < fields[right].ID })
+
+	return &iceberg.StructType{FieldList: fields}
+}
+
+func isInspectVoidTransform(transform iceberg.Transform) bool {
+	switch transform.(type) {
+	case iceberg.VoidTransform, *iceberg.VoidTransform:
+		return true
+	default:
+		return false
+	}
+}
+
 // DataFilesSchema returns the common content-file schema used by the data_files
 // and delete_files metadata tables. The partition field is omitted for an
 // unpartitioned table, as required by the Iceberg metadata-table spec.
 func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return iceberg.NewSchema(0, inspectContentFileFields(partitionType)...)
+}
+
+func inspectContentFileType(partitionType *iceberg.StructType) *iceberg.StructType {
+	return &iceberg.StructType{FieldList: inspectContentFileFields(partitionType)}
+}
+
+func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.NestedField {
 	fields := []iceberg.NestedField{
 		{ID: 134, Name: "content", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		{ID: 100, Name: "file_path", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -137,7 +210,7 @@ func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 		iceberg.NestedField{ID: 145, Name: "content_size_in_bytes", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 	)
 
-	return iceberg.NewSchema(0, fields...)
+	return fields
 }
 
 func inspectInt64MapType(keyID, valueID int) *iceberg.MapType {
@@ -149,60 +222,70 @@ func inspectBinaryMapType(keyID, valueID int) *iceberg.MapType {
 }
 
 func appendContentFileRecord(bldr *array.RecordBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
+	return appendContentFileFields(bldr.Field, partitionType, file)
+}
+
+func appendContentFile(builder *array.StructBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
+	builder.Append(true)
+
+	return appendContentFileFields(builder.FieldBuilder, partitionType, file)
+}
+
+func appendContentFileFields(fieldBuilder func(int) array.Builder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
 	idx := 0
-	bldr.Field(idx).(*array.Int32Builder).Append(int32(file.ContentType()))
+	fieldBuilder(idx).(*array.Int32Builder).Append(int32(file.ContentType()))
 	idx++
-	bldr.Field(idx).(*array.StringBuilder).Append(file.FilePath())
+	fieldBuilder(idx).(*array.StringBuilder).Append(file.FilePath())
 	idx++
-	bldr.Field(idx).(*array.StringBuilder).Append(string(file.FileFormat()))
+	fieldBuilder(idx).(*array.StringBuilder).Append(string(file.FileFormat()))
 	idx++
-	bldr.Field(idx).(*array.Int32Builder).Append(file.SpecID())
+	fieldBuilder(idx).(*array.Int32Builder).Append(file.SpecID())
 	idx++
 
 	if partitionType != nil && len(partitionType.FieldList) > 0 {
-		partition := bldr.Field(idx).(*array.StructBuilder)
-		if err := appendPartitionStruct(partition, partitionType, file.Partition()); err != nil {
+		partition := fieldBuilder(idx).(*array.StructBuilder)
+		if err := appendInspectPartition(partition, partitionType, file.Partition()); err != nil {
 			return err
 		}
 		idx++
 	}
 
-	bldr.Field(idx).(*array.Int64Builder).Append(file.Count())
+	fieldBuilder(idx).(*array.Int64Builder).Append(file.Count())
 	idx++
-	bldr.Field(idx).(*array.Int64Builder).Append(file.FileSizeBytes())
+	fieldBuilder(idx).(*array.Int64Builder).Append(file.FileSizeBytes())
 	idx++
-	appendInspectInt64Map(bldr.Field(idx).(*array.MapBuilder), file.ColumnSizes())
+	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.ColumnSizes())
 	idx++
-	appendInspectInt64Map(bldr.Field(idx).(*array.MapBuilder), file.ValueCounts())
+	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.ValueCounts())
 	idx++
-	appendInspectInt64Map(bldr.Field(idx).(*array.MapBuilder), file.NullValueCounts())
+	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.NullValueCounts())
 	idx++
-	appendInspectInt64Map(bldr.Field(idx).(*array.MapBuilder), file.NaNValueCounts())
+	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.NaNValueCounts())
 	idx++
-	appendInspectBinaryMap(bldr.Field(idx).(*array.MapBuilder), file.LowerBoundValues())
+	appendInspectBinaryMap(fieldBuilder(idx).(*array.MapBuilder), file.LowerBoundValues())
 	idx++
-	appendInspectBinaryMap(bldr.Field(idx).(*array.MapBuilder), file.UpperBoundValues())
+	appendInspectBinaryMap(fieldBuilder(idx).(*array.MapBuilder), file.UpperBoundValues())
 	idx++
-	appendInspectBytes(bldr.Field(idx), file.KeyMetadata())
+	appendInspectBytes(fieldBuilder(idx), file.KeyMetadata())
 	idx++
-	appendInspectInt64List(bldr.Field(idx).(*array.ListBuilder), file.SplitOffsets())
+	appendInspectInt64List(fieldBuilder(idx).(*array.ListBuilder), file.SplitOffsets())
 	idx++
-	appendInspectInt32List(bldr.Field(idx).(*array.ListBuilder), file.EqualityFieldIDs())
+	appendInspectInt32List(fieldBuilder(idx).(*array.ListBuilder), file.EqualityFieldIDs())
 	idx++
-	appendInspectOptionalInt32(bldr.Field(idx).(*array.Int32Builder), file.SortOrderID())
+	appendInspectOptionalInt32(fieldBuilder(idx).(*array.Int32Builder), file.SortOrderID())
 	idx++
-	appendInspectOptionalInt64(bldr.Field(idx).(*array.Int64Builder), file.FirstRowID())
+	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.FirstRowID())
 	idx++
-	appendInspectOptionalString(bldr.Field(idx).(*array.StringBuilder), file.ReferencedDataFile())
+	appendInspectOptionalString(fieldBuilder(idx).(*array.StringBuilder), file.ReferencedDataFile())
 	idx++
-	appendInspectOptionalInt64(bldr.Field(idx).(*array.Int64Builder), file.ContentOffset())
+	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.ContentOffset())
 	idx++
-	appendInspectOptionalInt64(bldr.Field(idx).(*array.Int64Builder), file.ContentSizeInBytes())
+	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.ContentSizeInBytes())
 
 	return nil
 }
 
-func appendPartitionStruct(builder *array.StructBuilder, partitionType *iceberg.StructType, values map[int]any) error {
+func appendInspectPartition(builder *array.StructBuilder, partitionType *iceberg.StructType, values map[int]any) error {
 	arrowType := builder.Type().(*arrow.StructType)
 	builder.Append(true)
 	for idx, field := range partitionType.FieldList {
