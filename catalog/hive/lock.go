@@ -165,38 +165,20 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 	return minWait << attempt
 }
 
-// applyJitter spreads a backoff interval by adding a random amount on top of it,
-// bounded so the result never exceeds maxWait.
+// applyJitter spreads a backoff interval so clients contending for the same lock
+// stop re-polling in lockstep. calculateBackoff is a pure function of the attempt
+// and the configured bounds, and contention is the precondition for retrying at
+// all, so without this every waiter issues its CheckLock calls at the same instants
+// and each round reaches the metastore as a burst.
 //
-// calculateBackoff is a pure function of the attempt number and the configured
-// bounds, so every client waiting on the same table lock computes an identical
-// sequence of delays. Contention is the precondition for entering the retry loop
-// at all, which means those clients are waiting simultaneously by construction:
-// they re-check the lock in lockstep, and each round of CheckLock calls arrives
-// at the metastore as a burst. Spreading the wait decorrelates them.
-//
-// The jitter is added rather than subtracted so that the result is never shorter
-// than the interval calculateBackoff produced. That keeps the guarantee implied
-// by the lock-check-min-wait-time property: a caller who configures a minimum
-// wait never polls sooner than it.
-//
-// Once the backoff saturates at maxWait there is no headroom left to add into.
-// calculateBackoff reaches that point deliberately, so leaving it unjittered
-// would put contending clients back in lockstep for every retry after the
-// sequence tops out. The wait is therefore spread downwards instead. Drawing
-// below maxWait breaks no contract, because it is an upper bound on the polling
-// interval rather than a target.
-//
-// How far down it may draw is the subtle part. Flooring at half the interval is
-// wrong: the last attempt that did not saturate waited for its own full interval,
-// which is somewhere in [maxWait/2, maxWait), so a floor of maxWait/2 lets the
-// first saturated attempt wait less than the attempt before it did. That inverts
-// the one property callers rely on, which is that the wait between lock checks
-// only ever grows. The floor is therefore the last interval the doubling sequence
-// produced before it hit the cap, recovered by replaying the sequence. It is a
-// bound the schedule has already cleared, so honouring it keeps the guaranteed
-// minimum monotonic across the saturation boundary, and it can never fall below
-// minWait because minWait is where the sequence starts.
+// The invariants, in the order the code establishes them:
+//   - below the cap the jitter is added rather than centred, so the wait is never
+//     shorter than the interval calculateBackoff produced;
+//   - at the cap there is no headroom left to add into, so the wait is spread
+//     downward instead, floored at the last interval the sequence produced before
+//     it saturated — a bound the schedule has already cleared, which stops a later
+//     attempt from being allowed to wait less than an earlier one;
+//   - the result never exceeds maxWait and never falls below minWait.
 func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	if d <= 0 {
 		return d
@@ -220,8 +202,16 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 
 	// Replay the doubling sequence and keep the largest interval that still fitted
 	// under the cap. The guard on scheduled keeps a non-positive or overflowing
-	// minWait from spinning here; in that case the half-interval floor stands.
+	// minWait from spinning here.
+	//
+	// minWait is applied before the replay rather than relying on it. When minWait
+	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
+	// configuration, so leaving the floor at d/2 there would allow a wait of a third
+	// of the configured minimum.
 	floor := d / 2
+	if minWait > floor {
+		floor = minWait
+	}
 	for scheduled := minWait; scheduled > 0 && scheduled < maxWait; scheduled <<= 1 {
 		if scheduled > floor {
 			floor = scheduled

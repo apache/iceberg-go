@@ -508,6 +508,68 @@ func TestApplyJitterAtCapFloorsAtTheLastUncappedInterval(t *testing.T) {
 	}
 }
 
+// A caller may configure minWait above maxWait; options.go accepts it, and
+// calculateBackoff resolves it by returning maxWait. The downward spread must not
+// then draw below the configured minimum. Flooring at half the interval would
+// permit a third of it, because the replay loop cannot run when minWait is already
+// past the cap.
+func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
+	minWait := 90 * time.Second
+	maxWait := 60 * time.Second
+
+	d := calculateBackoff(0, minWait, maxWait)
+	require.Equal(t, maxWait, d, "calculateBackoff resolves this configuration to the cap")
+
+	for i := 0; i < 2000; i++ {
+		got := applyJitter(d, minWait, maxWait)
+		assert.Equal(t, maxWait, got,
+			"with minWait past the cap the wait cannot be spread at all without breaking it")
+	}
+}
+
+// Exercises the wiring at the acquireLocks call site rather than the helper alone,
+// and pins the aggregate delay. The schedule is 10ms, 20ms, 40ms, 80ms, and each
+// draw adds up to one further interval, so the total falls in [150ms, 300ms]. Only
+// the lower bound is asserted tightly; the ceiling is loose because a busy CI box
+// can add arbitrary scheduling delay on top, and a flaky timing test is worse than
+// no timing test.
+func TestAcquireLocksAggregateRetryDelayStaysWithinBound(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	opts := NewHiveOptions()
+	opts.LockMinWaitTime = 10 * time.Millisecond
+	opts.LockMaxWaitTime = time.Second
+	opts.LockRetries = 4
+
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Return(&hive_metastore.LockResponse{
+			Lockid: 901,
+			State:  hive_metastore.LockState_WAITING,
+		}, nil)
+	mockClient.On("CheckLock", ctx, int64(901)).
+		Return(&hive_metastore.LockResponse{
+			Lockid: 901,
+			State:  hive_metastore.LockState_WAITING,
+		}, nil)
+	mockClient.On("Unlock", mock.Anything, int64(901)).Return(nil)
+
+	start := time.Now()
+	lock, err := acquireLocks(ctx, mockClient,
+		[]tableLockIdentifier{{database: "testdb", table: "testtable"}}, opts)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Nil(t, lock)
+	assert.ErrorIs(t, err, ErrLockAcquisitionFailed)
+
+	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond,
+		"the jittered waits must never sum to less than the unjittered schedule")
+	assert.Less(t, elapsed, 5*time.Second,
+		"the jittered waits must stay bounded by roughly twice the schedule")
+
+	mockClient.AssertExpectations(t)
+}
+
 func TestApplyJitterRespectsMaxWait(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := 1 * time.Second
