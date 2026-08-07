@@ -28,6 +28,7 @@ import (
 	iofs "io/fs"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1503,6 +1504,109 @@ func writeDictTestColumn(t *testing.T, tableProps iceberg.Properties, values []p
 	require.NoError(t, pageRdr.Err())
 
 	return summary
+}
+
+func TestValidateParquetWriteProperties(t *testing.T) {
+	keys := []string{
+		internal.ParquetRowGroupSizeBytesKey,
+		internal.ParquetRowGroupLimitKey,
+		internal.ParquetPageSizeBytesKey,
+		internal.ParquetPageRowLimitKey,
+		internal.ParquetDictSizeBytesKey,
+	}
+
+	for _, key := range keys {
+		for _, value := range []string{"nope", "0", "-1"} {
+			t.Run(key+"/"+value, func(t *testing.T) {
+				err := internal.ValidateParquetWriteProperties(iceberg.Properties{key: value})
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			})
+		}
+
+		t.Run(key+"/valid", func(t *testing.T) {
+			require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{key: "1"}))
+		})
+	}
+
+	for _, tt := range []struct {
+		value string
+		valid bool
+	}{
+		{value: "31", valid: false},
+		{value: "32", valid: true},
+		{value: "134217728", valid: true},
+		{value: "134217729", valid: false},
+	} {
+		t.Run(internal.ParquetBloomFilterMaxBytesKey+"/"+tt.value, func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetBloomFilterMaxBytesKey: tt.value,
+			})
+			if tt.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			}
+		})
+	}
+
+	if strconv.IntSize == 32 {
+		err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+			internal.ParquetPageSizeBytesKey: "2147483648",
+		})
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
+}
+
+func TestValidateParquetCompressionLevel(t *testing.T) {
+	t.Run("absent uses the default", func(t *testing.T) {
+		require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{}))
+	})
+
+	t.Run("explicit default is valid", func(t *testing.T) {
+		require.NoError(t, internal.ValidateParquetWriteProperties(iceberg.Properties{
+			internal.ParquetCompressionLevelKey: strconv.Itoa(internal.ParquetCompressionLevelDefault),
+		}))
+	})
+
+	for _, value := range []string{"nope", "", "9223372036854775808"} {
+		t.Run("invalid/"+value, func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetCompressionLevelKey: value,
+			})
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+
+	for _, tt := range []struct {
+		codec string
+		level int
+		valid bool
+	}{
+		{codec: "gzip", level: -3, valid: true},
+		{codec: "gzip", level: 9, valid: true},
+		{codec: "gzip", level: 10, valid: false},
+		{codec: "zstd", level: -5, valid: true},
+		{codec: "zstd", level: 22, valid: true},
+		{codec: "zstd", level: 23, valid: false},
+		{codec: "brotli", level: -1, valid: true},
+		{codec: "brotli", level: 0, valid: true},
+		{codec: "brotli", level: 11, valid: true},
+		{codec: "brotli", level: 12, valid: false},
+	} {
+		t.Run(fmt.Sprintf("%s/%d", tt.codec, tt.level), func(t *testing.T) {
+			err := internal.ValidateParquetWriteProperties(iceberg.Properties{
+				internal.ParquetCompressionKey:      tt.codec,
+				internal.ParquetCompressionLevelKey: strconv.Itoa(tt.level),
+			})
+			if tt.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+				require.Contains(t, err.Error(), internal.ParquetCompressionLevelKey)
+				require.Contains(t, err.Error(), tt.codec)
+			}
+		})
+	}
 }
 
 func TestGetWritePropertiesBloomFilter(t *testing.T) {
