@@ -18,7 +18,9 @@
 package table
 
 import (
+	"bytes"
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -27,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -428,6 +431,71 @@ func TestDataFilesSchema(t *testing.T) {
 
 	unpartitioned := DataFilesSchema(&iceberg.StructType{})
 	require.NotContains(t, testFieldNames(unpartitioned), "partition")
+}
+
+func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := *iceberg.UnpartitionedSpec
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+
+	entries := make([]iceberg.ManifestEntry, 0, inspectRecordBatchSize+2)
+	for index := 0; index < inspectRecordBatchSize+1; index++ {
+		file := newTestDataFile(t, spec,
+			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
+		sequenceNumber := int64(1)
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file))
+	}
+	deletedPath := "mem://default/table-location/data/deleted.parquet"
+	deleted := newTestDataFile(t, spec, deletedPath, nil)
+	deletedSequenceNumber := int64(1)
+	entries = append(entries, iceberg.NewManifestEntry(
+		iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &deletedSequenceNumber, &deletedSequenceNumber, deleted))
+
+	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	var batchRows []int
+	var paths []string
+	for rr.Next() {
+		record := rr.RecordBatch()
+		batchRows = append(batchRows, int(record.NumRows()))
+		filePaths := record.Column(1).(*array.String)
+		for row := 0; row < filePaths.Len(); row++ {
+			paths = append(paths, filePaths.Value(row))
+		}
+	}
+	require.NoError(t, rr.Err())
+	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
+	require.Len(t, paths, inspectRecordBatchSize+1)
+	require.NotContains(t, paths, deletedPath)
 }
 
 func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
