@@ -421,6 +421,33 @@ func TestDeleteFilesSchema(t *testing.T) {
 	require.NotContains(t, names, "partition")
 }
 
+func TestInspectDeleteFiles(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	deleteFile := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/delete/delete.parquet", map[int]any{1000: int32(7)},
+		"mem://default/table-location/data/data.parquet")
+	snapshot := writeParentSnapshotWithDeletesManifest(t, memIO, spec, snapshotID, "inspect", deleteFile)
+	txn.meta.snapshotList = []Snapshot{*snapshot}
+	txn.meta.currentSnapshotID = int64Ptr(snapshotID)
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().DeleteFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, iceberg.EntryContentPosDeletes, record.Column(0).(*array.Int32).Value(0))
+	require.Equal(t, deleteFile.FilePath(), record.Column(1).(*array.String).Value(0))
+	require.Equal(t, *deleteFile.ReferencedDataFile(), record.Column(18).(*array.String).Value(0))
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},

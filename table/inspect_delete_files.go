@@ -36,23 +36,13 @@ func (i InspectTable) DeleteFiles(ctx context.Context) (array.RecordReader, erro
 		return nil, fmt.Errorf("inspect delete files: build arrow schema: %w", err)
 	}
 
-	files, err := i.currentContentFiles(ctx, iceberg.ManifestContentDeletes)
-	if err != nil {
-		return nil, fmt.Errorf("inspect delete files: %w", err)
-	}
-
-	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
-	defer bldr.Release()
-	for _, file := range files {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if err := appendContentFileRecord(bldr, partitionType, file); err != nil {
-			return nil, fmt.Errorf("inspect delete files: append %s: %w", file.FilePath(), err)
-		}
-	}
-
-	rr, err := singleBatchReader(arrowSchema, bldr)
+	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
+		},
+		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+			return appendContentFileRecord(bldr, partitionType, entry.DataFile())
+		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect delete files: %w", err)
 	}
