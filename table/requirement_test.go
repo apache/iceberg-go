@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go/table"
@@ -94,7 +95,7 @@ func TestParseRequirementBytes(t *testing.T) {
 			actual, err := table.ParseRequirementBytes(tc.data)
 			assert.Equal(t, tc.expected, actual)
 			if tc.expectedErr != nil {
-				require.ErrorIs(t, err, tc.expectedErr)
+				require.Equal(t, tc.expectedErr, err)
 			} else {
 				require.NoError(t, err)
 			}
@@ -202,14 +203,16 @@ func TestParseRequirementRejectsMissingRequiredFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			expectedError := fmt.Sprintf("missing required field %q", tt.expectedField)
+
 			_, err := table.ParseRequirementBytes([]byte(tt.data))
 			require.ErrorIs(t, err, table.ErrInvalidRequirement)
-			require.ErrorContains(t, err, tt.expectedField)
+			require.ErrorContains(t, err, expectedError)
 
 			var requirements table.Requirements
 			err = json.Unmarshal([]byte("["+tt.data+"]"), &requirements)
 			require.ErrorIs(t, err, table.ErrInvalidRequirement)
-			require.ErrorContains(t, err, tt.expectedField)
+			require.ErrorContains(t, err, expectedError)
 		})
 	}
 }

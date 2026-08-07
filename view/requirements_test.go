@@ -19,6 +19,7 @@ package view_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go/table"
@@ -104,26 +105,28 @@ func TestParseRequirementRejectsMissingUUID(t *testing.T) {
 	} {
 		_, err := view.ParseRequirementBytes([]byte(data))
 		require.ErrorIs(t, err, table.ErrInvalidRequirement)
-		require.ErrorContains(t, err, "uuid")
+		require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
 
 		var requirements view.Requirements
 		err = json.Unmarshal([]byte("["+data+"]"), &requirements)
 		require.ErrorIs(t, err, table.ErrInvalidRequirement)
-		require.ErrorContains(t, err, "uuid")
+		require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
 	}
 }
 
 func TestParseRequirementRejectsMissingOrNullType(t *testing.T) {
 	for _, data := range []string{`{}`, `{"type":null}`} {
 		t.Run(data, func(t *testing.T) {
+			expectedError := fmt.Sprintf("missing required field %q", "type")
+
 			_, err := view.ParseRequirementBytes([]byte(data))
 			require.ErrorIs(t, err, table.ErrInvalidRequirement)
-			require.ErrorContains(t, err, "type")
+			require.ErrorContains(t, err, expectedError)
 
 			var requirements view.Requirements
 			err = json.Unmarshal([]byte("["+data+"]"), &requirements)
 			require.ErrorIs(t, err, table.ErrInvalidRequirement)
-			require.ErrorContains(t, err, "type")
+			require.ErrorContains(t, err, expectedError)
 		})
 	}
 }
