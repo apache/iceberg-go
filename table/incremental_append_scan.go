@@ -1,0 +1,207 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package table
+
+import (
+	"context"
+	"fmt"
+	"slices"
+
+	"github.com/apache/iceberg-go"
+)
+
+// IncrementalAppendScan plans data files added by append snapshots between a
+// starting snapshot and an ending snapshot. It follows one snapshot ancestry
+// chain and never returns files inherited from an earlier snapshot.
+type IncrementalAppendScan struct {
+	scan           *Scan
+	fromSnapshotID *int64
+	fromInclusive  bool
+	toSnapshotID   *int64
+}
+
+// NewIncrementalAppendScan creates an incremental append scan. Scan options
+// configure the underlying table scan and are retained for callers that pass
+// projection, filter, or concurrency options before planning.
+func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
+	return &IncrementalAppendScan{scan: t.Scan(opts...)}
+}
+
+// FromSnapshotInclusive includes files added by the starting snapshot.
+func (s *IncrementalAppendScan) FromSnapshotInclusive(snapshotID int64) (*IncrementalAppendScan, error) {
+	if s.scan.metadata.SnapshotByID(snapshotID) == nil {
+		return nil, fmt.Errorf("%w: starting snapshot not found: %d", iceberg.ErrInvalidArgument, snapshotID)
+	}
+	out := *s
+	out.fromSnapshotID = &snapshotID
+	out.fromInclusive = true
+	return &out, nil
+}
+
+// FromSnapshotExclusive starts after the given snapshot. The starting
+// snapshot must be an ancestor of the ending snapshot when planning.
+func (s *IncrementalAppendScan) FromSnapshotExclusive(snapshotID int64) *IncrementalAppendScan {
+	out := *s
+	out.fromSnapshotID = &snapshotID
+	out.fromInclusive = false
+	return &out
+}
+
+// ToSnapshot sets the inclusive ending snapshot.
+func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) (*IncrementalAppendScan, error) {
+	if s.scan.metadata.SnapshotByID(snapshotID) == nil {
+		return nil, fmt.Errorf("%w: ending snapshot not found: %d", iceberg.ErrInvalidArgument, snapshotID)
+	}
+	out := *s
+	out.toSnapshotID = &snapshotID
+	return &out, nil
+}
+
+// PlanFiles returns one task per newly added data file. Delete files are not
+// applied because appended files are not present before the append snapshot.
+func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	toSnapshot, err := s.toSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	if toSnapshot == nil {
+		return nil, nil
+	}
+
+	snapshots, err := s.snapshotsBetween(toSnapshot.SnapshotID)
+	if err != nil {
+		return nil, err
+	}
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	if s.scan.tblFSUnavailable() {
+		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
+	}
+
+	fs, err := s.scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	appendSnapshots := make(map[int64]struct{}, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
+			appendSnapshots[snapshot.SnapshotID] = struct{}{}
+		}
+	}
+	if len(appendSnapshots) == 0 {
+		return nil, nil
+	}
+
+	tasks := make([]FileScanTask, 0)
+	for _, snapshot := range snapshots {
+		if _, ok := appendSnapshots[snapshot.SnapshotID]; !ok {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		manifests, err := snapshot.Manifests(fs)
+		if err != nil {
+			return nil, err
+		}
+		for _, manifest := range manifests {
+			if manifest.ManifestContent() != iceberg.ManifestContentData {
+				continue
+			}
+			if _, ok := appendSnapshots[manifest.SnapshotID()]; !ok {
+				continue
+			}
+			for entry, err := range manifest.Entries(fs, true) {
+				if err != nil {
+					return nil, err
+				}
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				if entry.Status() != iceberg.EntryStatusADDED {
+					continue
+				}
+				if _, ok := appendSnapshots[entry.SnapshotID()]; !ok {
+					continue
+				}
+				file := entry.DataFile()
+				tasks = append(tasks, FileScanTask{File: file, Length: file.FileSizeBytes()})
+			}
+		}
+	}
+
+	return tasks, nil
+}
+
+func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
+	if s.toSnapshotID != nil {
+		return s.scan.metadata.SnapshotByID(*s.toSnapshotID), nil
+	}
+	return s.scan.metadata.CurrentSnapshot(), nil
+}
+
+func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot, error) {
+	ancestors := AncestorsOf(toSnapshotID, s.scan.metadata.SnapshotByID)
+	if len(ancestors) == 0 {
+		return nil, fmt.Errorf("%w: ending snapshot not found: %d", iceberg.ErrInvalidArgument, toSnapshotID)
+	}
+
+	if s.fromSnapshotID == nil {
+		slices.Reverse(ancestors)
+		return appendOnlySnapshots(ancestors), nil
+	}
+
+	fromID := *s.fromSnapshotID
+	if !s.fromInclusive {
+		between, found := AncestorsBetween(toSnapshotID, fromID, s.scan.metadata.SnapshotByID)
+		if !found {
+			return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
+		}
+		slices.Reverse(between)
+		return appendOnlySnapshots(between), nil
+	}
+
+	if s.scan.metadata.SnapshotByID(fromID) == nil || !IsAncestorOf(toSnapshotID, fromID, s.scan.metadata.SnapshotByID) {
+		return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
+	}
+	selected := make([]Snapshot, 0, len(ancestors))
+	for _, snapshot := range ancestors {
+		selected = append(selected, snapshot)
+		if snapshot.SnapshotID == fromID {
+			break
+		}
+	}
+	slices.Reverse(selected)
+	return appendOnlySnapshots(selected), nil
+}
+
+func appendOnlySnapshots(snapshots []Snapshot) []Snapshot {
+	result := make([]Snapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
+			result = append(result, snapshot)
+		}
+	}
+	return result
+}
+
+func (s *Scan) tblFSUnavailable() bool {
+	return s.ioF == nil
+}
