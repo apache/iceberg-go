@@ -28,7 +28,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
-	"github.com/google/uuid"
 )
 
 type inspectPartitionAggregate struct {
@@ -43,22 +42,22 @@ type inspectPartitionAggregate struct {
 	equalityDeleteFiles int32
 	lastUpdatedAt       *int64
 	lastUpdatedSnapshot *int64
+	partitionRecord     partitionRecord
 	orderingKey         string
 }
 
 // Partitions returns one row per live partition, aggregating data and delete
-// files from the current snapshot. Different partition specs remain separate
-// groups so files from evolved specs are never combined by raw map equality.
+// files from the current snapshot. Files from evolved specs are coerced into
+// the table-wide partition type before grouping.
 func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error) {
-	spec := i.tbl.metadata.PartitionSpec()
-	partitionType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
+	partitionType := inspectPartitionType(i.tbl.metadata)
 	schema := PartitionsSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: build arrow schema: %w", err)
 	}
 
-	aggregates, err := i.partitionAggregates(ctx)
+	aggregates, err := i.partitionAggregates(ctx, partitionType)
 	if err != nil {
 		return nil, fmt.Errorf("inspect partitions: %w", err)
 	}
@@ -79,7 +78,7 @@ func (i InspectTable) Partitions(ctx context.Context) (array.RecordReader, error
 	return rr, nil
 }
 
-func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartitionAggregate, error) {
+func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *iceberg.StructType) ([]inspectPartitionAggregate, error) {
 	snapshot := i.tbl.metadata.CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil
@@ -96,7 +95,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartiti
 		return nil, err
 	}
 
-	aggregates := make(map[string]*inspectPartitionAggregate)
+	aggregates := make([]*inspectPartitionAggregate, 0)
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -106,16 +105,24 @@ func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartiti
 				return nil, err
 			}
 			file := entry.DataFile()
-			partition := file.Partition()
-			key := fmt.Sprintf("%d:%s", file.SpecID(), inspectPartitionKey(partition))
-			aggregate := aggregates[key]
+			partition := inspectCoercePartition(file.Partition(), partitionType)
+			record := newPartitionRecord(partition, partitionType)
+			var aggregate *inspectPartitionAggregate
+			for _, candidate := range aggregates {
+				if partitionRecordsEqual(candidate.partitionRecord, record) {
+					aggregate = candidate
+
+					break
+				}
+			}
 			if aggregate == nil {
 				aggregate = &inspectPartitionAggregate{
-					specID:      file.SpecID(),
-					partition:   cloneInspectPartition(partition),
-					orderingKey: key,
+					specID:          file.SpecID(),
+					partition:       cloneInspectPartition(partition),
+					partitionRecord: record,
+					orderingKey:     inspectPartitionKey(partition),
 				}
-				aggregates[key] = aggregate
+				aggregates = append(aggregates, aggregate)
 			}
 
 			switch file.ContentType() {
@@ -134,7 +141,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartiti
 			if file.ContentType() == iceberg.EntryContentData ||
 				file.ContentType() == iceberg.EntryContentPosDeletes ||
 				file.ContentType() == iceberg.EntryContentEqDeletes {
-				i.updatePartitionTimestamp(aggregate, entry.SnapshotID())
+				i.updatePartitionTimestamp(aggregate, entry.SnapshotID(), file.SpecID())
 			}
 		}
 	}
@@ -148,7 +155,7 @@ func (i InspectTable) partitionAggregates(ctx context.Context) ([]inspectPartiti
 	return result, nil
 }
 
-func (i InspectTable) updatePartitionTimestamp(aggregate *inspectPartitionAggregate, snapshotID int64) {
+func (i InspectTable) updatePartitionTimestamp(aggregate *inspectPartitionAggregate, snapshotID int64, specID int32) {
 	if snapshotID < 0 {
 		return
 	}
@@ -163,6 +170,22 @@ func (i InspectTable) updatePartitionTimestamp(aggregate *inspectPartitionAggreg
 	aggregate.lastUpdatedAt = &timestamp
 	id := snapshot.SnapshotID
 	aggregate.lastUpdatedSnapshot = &id
+	aggregate.specID = specID
+}
+
+func inspectCoercePartition(values map[int]any, partitionType *iceberg.StructType) map[int]any {
+	if partitionType == nil || len(partitionType.FieldList) == 0 {
+		return nil
+	}
+
+	coerced := make(map[int]any, len(partitionType.FieldList))
+	for _, field := range partitionType.FieldList {
+		if value, ok := values[field.ID]; ok {
+			coerced[field.ID] = value
+		}
+	}
+
+	return coerced
 }
 
 func inspectPartitionKey(partition map[int]any) string {
@@ -237,7 +260,7 @@ func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.
 
 				continue
 			}
-			valueScalar, err := inspectPartitionValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
+			valueScalar, err := inspectValueScalar(value, field.Type, arrowType.Field(fieldIndex).Type)
 			if err != nil {
 				return fmt.Errorf("partition field %q: %w", field.Name, err)
 			}
@@ -276,34 +299,4 @@ func appendPartitionAggregate(bldr *array.RecordBuilder, partitionType *iceberg.
 	}
 
 	return nil
-}
-
-func inspectPartitionValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (scalar.Scalar, error) {
-	switch typ.(type) {
-	case iceberg.DateType:
-		switch value := value.(type) {
-		case iceberg.Date:
-			return scalar.NewDate32Scalar(arrow.Date32(value)), nil
-		case int32:
-			return scalar.NewDate32Scalar(arrow.Date32(value)), nil
-		}
-	case iceberg.TimeType:
-		if value, ok := value.(iceberg.Time); ok {
-			return scalar.NewTime64Scalar(arrow.Time64(value), arrowType), nil
-		}
-	case iceberg.TimestampType, iceberg.TimestampTzType:
-		if value, ok := value.(iceberg.Timestamp); ok {
-			return scalar.NewTimestampScalar(arrow.Timestamp(value), arrowType), nil
-		}
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
-		if value, ok := value.(iceberg.TimestampNano); ok {
-			return scalar.NewTimestampScalar(arrow.Timestamp(value), arrowType), nil
-		}
-	case iceberg.UUIDType:
-		if value, ok := value.(uuid.UUID); ok {
-			return scalar.MakeScalarParam(value[:], arrowType)
-		}
-	}
-
-	return scalar.MakeScalarParam(value, arrowType)
 }
