@@ -50,6 +50,7 @@ func (s *IncrementalAppendScan) FromSnapshotInclusive(snapshotID int64) (*Increm
 	out := *s
 	out.fromSnapshotID = &snapshotID
 	out.fromInclusive = true
+
 	return &out, nil
 }
 
@@ -59,6 +60,7 @@ func (s *IncrementalAppendScan) FromSnapshotExclusive(snapshotID int64) *Increme
 	out := *s
 	out.fromSnapshotID = &snapshotID
 	out.fromInclusive = false
+
 	return &out
 }
 
@@ -69,6 +71,7 @@ func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) (*IncrementalAppend
 	}
 	out := *s
 	out.toSnapshotID = &snapshotID
+
 	return &out, nil
 }
 
@@ -154,6 +157,7 @@ func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
 	if s.toSnapshotID != nil {
 		return s.scan.metadata.SnapshotByID(*s.toSnapshotID), nil
 	}
+
 	return s.scan.metadata.CurrentSnapshot(), nil
 }
 
@@ -165,6 +169,7 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 
 	if s.fromSnapshotID == nil {
 		slices.Reverse(ancestors)
+
 		return appendOnlySnapshots(ancestors), nil
 	}
 
@@ -175,6 +180,7 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 			return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
 		}
 		slices.Reverse(between)
+
 		return appendOnlySnapshots(between), nil
 	}
 
@@ -189,6 +195,7 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 		}
 	}
 	slices.Reverse(selected)
+
 	return appendOnlySnapshots(selected), nil
 }
 
@@ -199,6 +206,7 @@ func appendOnlySnapshots(snapshots []Snapshot) []Snapshot {
 			result = append(result, snapshot)
 		}
 	}
+
 	return result
 }
 
