@@ -33,6 +33,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestCatalogLoadTypeIsCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	defer catalog.Unregister("foobar")
+
+	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
+		return nil, nil
+	}))
+
+	for _, catalogType := range []string{"foobar", "FOOBAR", "FooBar"} {
+		c, err := catalog.Load(ctx, "not found", iceberg.Properties{"type": catalogType})
+		assert.Nil(t, c)
+		assert.NoError(t, err)
+	}
+
+	c, err := catalog.Load(ctx, "not found", iceberg.Properties{"type": "FOOBARX"})
+	assert.Nil(t, c)
+	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
+}
+
 func TestCatalogRegistry(t *testing.T) {
 	ctx := context.Background()
 	assert.ElementsMatch(t, []string{
