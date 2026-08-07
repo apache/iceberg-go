@@ -66,6 +66,20 @@ func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[0].File.FilePath())
 }
 
+func TestIncrementalAppendScanHonorsSnapshotOptions(t *testing.T) {
+	tbl := incrementalAppendTestTable(t)
+
+	byID, err := tbl.NewIncrementalAppendScan(WithSnapshotID(1)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, byID, 1)
+	require.Equal(t, "mem://default/table-location/data-1.parquet", byID[0].File.FilePath())
+
+	byTime, err := tbl.NewIncrementalAppendScan(WithSnapshotAsOf(1000)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, byTime, 1)
+	require.Equal(t, "mem://default/table-location/data-1.parquet", byTime[0].File.FilePath())
+}
+
 func incrementalAppendTestTable(t *testing.T) *Table {
 	t.Helper()
 	spec := partitionedSpec()
@@ -108,6 +122,10 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	txn.meta.snapshotList = []Snapshot{
 		{SnapshotID: 1, TimestampMs: 1000, ManifestList: "mem://default/table-location/metadata/snap-1.avro", SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
 		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: "mem://default/table-location/metadata/snap-2.avro", SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
+	}
+	txn.meta.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: 1, TimestampMs: 1000},
+		{SnapshotID: 2, TimestampMs: 2000},
 	}
 	currentSnapshotID := int64(2)
 	txn.meta.currentSnapshotID = &currentSnapshotID
