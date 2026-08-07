@@ -107,7 +107,8 @@ func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version 
 		return nil, err
 	}
 	clone := cloneDataFileAvroFields(d)
-	partitionData, err := avroEncodePartitionData(d.Partition(), maps)
+	partitionData, err := avroEncodePartitionData(
+		d.DataFilePartitionRef(internal.DataFileRef{}), maps)
 	if err != nil {
 		return nil, err
 	}

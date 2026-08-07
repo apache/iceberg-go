@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -718,7 +719,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 // validateDataFilePartitionData verifies that DataFile partition values match
 // the current partition spec fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
-	partitionData := df.Partition()
+	partitionData := dataFilePartition(df)
 
 	expectedFieldIDs := make(map[int]string)
 	for _, field := range spec.Fields() {
@@ -803,7 +804,8 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
-		if requireFirstRowID && meta.formatVersion >= 3 && df.FirstRowID() == nil {
+		_, firstRowID, _, _, _ := iceberginternal.BorrowedDataFilePointers(df)
+		if requireFirstRowID && meta.formatVersion >= 3 && firstRowID == nil {
 			return nil, fmt.Errorf(
 				"data file %s is missing first_row_id which is required for v3 tables for %s: use DataFileBuilder.FirstRowID() to set it explicitly",
 				path, operation)
@@ -1149,7 +1151,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
 		}
 		if IsDeletionVector(df) {
-			ref := df.ReferencedDataFile()
+			ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
@@ -1197,7 +1199,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-			} else if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
+			} else if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); IsDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
 					markedDVsForRemoval[*ref] = df
 				}
@@ -1995,7 +1997,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// end. File-level skipping (against the bound filter's residual on file
 	// stats) could be re-enabled here without breaking _row_id synthesis,
 	// since synthesis depends only on within-file row positions.
-	preserveRowLineage := meta.formatVersion >= 3 && args.originalFile.FirstRowID() != nil
+	_, originalFirstRowID, _, _, _ := iceberginternal.BorrowedDataFilePointers(args.originalFile)
+	preserveRowLineage := meta.formatVersion >= 3 && originalFirstRowID != nil
 	projectedSchema := meta.CurrentSchema()
 	var factoryOpts []writerFactoryOption
 	if preserveRowLineage {
@@ -2179,7 +2182,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 			return nil, err
 		}
 		updater.appendDeleteFile(f)
-		if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(f); ref != nil && *ref != "" {
 			if _, ok := seen[*ref]; !ok {
 				seen[*ref] = struct{}{}
 				referenced = append(referenced, *ref)
@@ -2234,7 +2237,7 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 		if !IsDeletionVector(df) {
 			continue
 		}
-		ref := df.ReferencedDataFile()
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
 		if ref == nil {
 			continue
 		}

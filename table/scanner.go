@@ -33,6 +33,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
@@ -173,7 +174,12 @@ func (m *manifestEntries) addDVEntry(e iceberg.ManifestEntry) {
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
-		out[i] = partitionData[f.ID]
+		value := partitionData[f.ID]
+		if bytes, ok := value.([]byte); ok {
+			out[i] = slices.Clone(bytes)
+		} else {
+			out[i] = value
+		}
 	}
 
 	return out
@@ -182,7 +188,7 @@ func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.Struct
 // GetPartitionRecord converts a DataFile's partition map into a positional
 // record ordered by the fields of the given partition struct type.
 func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
-	return newPartitionRecord(dataFile.Partition(), partitionType)
+	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
@@ -562,7 +568,7 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 // atomically adds new rows alongside deletes for old rows.
 func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
 	dataSeqNum := dataEntry.SequenceNum()
-	dataPartition := dataEntry.DataFile().Partition()
+	dataPartition := dataFilePartition(dataEntry.DataFile())
 
 	out := make([]iceberg.DataFile, 0)
 	for _, del := range eqDeleteEntries {
@@ -575,7 +581,7 @@ func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries
 		// For partitioned tables, equality deletes must share the same
 		// partition as the data file. Unpartitioned deletes (nil/empty
 		// partition) apply globally.
-		delPartition := del.DataFile().Partition()
+		delPartition := dataFilePartition(del.DataFile())
 		if len(delPartition) > 0 && len(dataPartition) > 0 {
 			if !partitionsMatch(dataPartition, delPartition) {
 				continue
@@ -598,7 +604,7 @@ func partitionsMatch(a, b map[int]any) bool {
 func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
 	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
 	for _, del := range dvEntries {
-		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
+		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(del.DataFile()); ref != nil {
 			if _, exists := dvIndex[*ref]; exists {
 				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
 			}

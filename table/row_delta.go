@@ -24,6 +24,7 @@ import (
 	"maps"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // RowDelta encodes a set of row-level changes to a table: new data files
@@ -228,7 +229,7 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	for _, f := range rd.delFiles {
 		switch f.ContentType() {
 		case iceberg.EntryContentPosDeletes:
-			if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+			if ref := iceberginternal.BorrowedDataFileReferencedDataFile(f); ref != nil && *ref != "" {
 				referenced = append(referenced, *ref)
 			}
 		case iceberg.EntryContentEqDeletes:

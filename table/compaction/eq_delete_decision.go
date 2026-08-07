@@ -24,6 +24,7 @@ import (
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot
@@ -153,7 +154,7 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 		if e.SequenceNum() < 0 {
 			continue
 		}
-		if survey.applicableMinSeq(df.Partition()) >= e.SequenceNum() {
+		if survey.applicableMinSeq(internal.BorrowedDataFilePartition(df)) >= e.SequenceNum() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
