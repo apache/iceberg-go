@@ -1715,6 +1715,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1837,7 +1841,54 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1976,6 +2027,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}

@@ -52,6 +52,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"github.com/pterm/pterm"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
@@ -3389,4 +3390,183 @@ func equalSnapshotSummary(expected *table.Summary, actual *table.Summary) (err e
 	}
 
 	return nil
+}
+
+// The spec forbids committing files against a partition spec with an unknown
+// transform. Run across format versions -- v3 is where reading such a table is
+// required, so it's where the write rejection matters most.
+func TestWritesToUnknownTransformSpecFail(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.Bool},
+		iceberg.NestedField{ID: 2, Name: "bar", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 4, Name: "baz", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 10, Name: "qux", Type: iceberg.PrimitiveTypes.Date})
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "foo", Type: arrow.FixedWidthTypes.Boolean, Nullable: true},
+		{Name: "bar", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "baz", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "qux", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
+	}, nil)
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	unknownSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{4}, FieldID: 1000, Transform: unknown, Name: "baz_custom",
+	})
+
+	fsF := func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }
+	newTable := func(t *testing.T, location string, formatVersion int, spec iceberg.PartitionSpec) *table.Table {
+		t.Helper()
+
+		meta, err := table.NewMetadata(tableSchema, &spec, table.UnsortedSortOrder, location,
+			iceberg.Properties{
+				table.PropertyFormatVersion: strconv.Itoa(formatVersion),
+				table.WriteDeleteModeKey:    table.WriteModeMergeOnRead,
+			})
+		require.NoError(t, err)
+		metaLoc := fmt.Sprintf("%s/metadata/%05d-%s.metadata.json", location, 1, uuid.New().String())
+
+		return table.New(table.Identifier{"default", "unknown_transform"}, meta, metaLoc, fsF, &mockedCatalog{meta})
+	}
+
+	for _, formatVersion := range []int{1, 2, 3} {
+		t.Run("v"+strconv.Itoa(formatVersion), func(t *testing.T) {
+			location := filepath.ToSlash(strings.ReplaceAll(t.TempDir(), "#", ""))
+			ctx := context.Background()
+
+			t.Run("AddFiles", func(t *testing.T) {
+				tbl := newTable(t, location, formatVersion, unknownSpec)
+				arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
+					`[{"foo": true, "bar": "bar_string", "baz": 1, "qux": "2024-03-07"}]`,
+				})
+				require.NoError(t, err)
+				defer arrTable.Release()
+
+				filePath := location + "/data/add-files.parquet"
+				fo, err := mustFS(t, tbl).(iceio.WriteFileIO).Create(filePath)
+				require.NoError(t, err)
+				require.NoError(t, pqarrow.WriteTable(arrTable, fo, arrTable.NumRows(), nil, pqarrow.DefaultWriterProps()))
+
+				err = tbl.NewTransaction().AddFiles(ctx, []string{filePath}, nil, false)
+				require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+				assert.ErrorContains(t, err, "custom_transform[42]")
+			})
+
+			t.Run("AddDataFiles", func(t *testing.T) {
+				tbl := newTable(t, location, formatVersion, unknownSpec)
+				df, err := iceberg.NewDataFileBuilder(unknownSpec, iceberg.EntryContentData,
+					location+"/data/add-data-files.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+				require.NoError(t, err)
+
+				err = tbl.NewTransaction().AddDataFiles(ctx, []iceberg.DataFile{df.Build()}, nil)
+				require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+				assert.ErrorContains(t, err, "custom_transform[42]")
+			})
+
+			t.Run("WriteRecords", func(t *testing.T) {
+				tbl := newTable(t, location, formatVersion, unknownSpec)
+				arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
+					`[{"foo": true, "bar": "bar_string", "baz": 1, "qux": "2024-03-07"}]`,
+				})
+				require.NoError(t, err)
+				defer arrTable.Release()
+
+				_, err = tbl.AppendTable(ctx, arrTable, 1, nil)
+				require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+				assert.ErrorContains(t, err, "custom_transform[42]")
+			})
+
+			// v1 requires sequential partition field IDs, so a second spec can't
+			// be added there.
+			if formatVersion < 2 {
+				return
+			}
+
+			t.Run("Delete", func(t *testing.T) {
+				identitySpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+					SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz",
+				})
+				tbl := newTable(t, location, formatVersion, identitySpec)
+
+				// One partition, so deleting a subset writes delete files rather
+				// than dropping the whole data file.
+				arrTable, err := array.TableFromJSON(memory.DefaultAllocator, arrSchema, []string{
+					`[{"foo": false, "bar": "delete_me", "baz": 123, "qux": "2024-01-01"},
+					  {"foo": true, "bar": "keep_this", "baz": 123, "qux": "2024-01-02"}]`,
+				})
+				require.NoError(t, err)
+				defer arrTable.Release()
+
+				tbl, err = tbl.OverwriteTable(ctx, arrTable, 1, nil)
+				require.NoError(t, err)
+
+				// Evolve onto the unknown spec after the data is written, since
+				// writing against it directly is already rejected above.
+				evolvedSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+					SourceIDs: []int{4}, FieldID: 1001, Transform: unknown, Name: "baz_custom",
+				})
+				builder, err := table.MetadataBuilderFromBase(tbl.Metadata(), tbl.MetadataLocation())
+				require.NoError(t, err)
+				require.NoError(t, builder.AddPartitionSpec(&evolvedSpec, false))
+				require.NoError(t, builder.SetDefaultSpecID(-1))
+				evolved, err := builder.Build()
+				require.NoError(t, err)
+
+				tbl = table.New(tbl.Identifier(), evolved, tbl.MetadataLocation(), fsF, &mockedCatalog{evolved})
+
+				// The data is still readable; only the delete write is blocked.
+				scanned, err := tbl.Scan().ToArrowTable(ctx)
+				require.NoError(t, err)
+				assert.Equal(t, int64(2), scanned.NumRows())
+
+				_, err = tbl.Delete(ctx, iceberg.EqualTo(iceberg.Reference("bar"), "delete_me"), nil)
+				require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+				assert.ErrorContains(t, err, "custom_transform[42]")
+			})
+		})
+	}
+}
+
+// Creating a table with an unknown-transform spec is allowed, matching Java's
+// builder; the spec sentence bites on write, not on create.
+func TestCreateTableWithUnknownTransformSpec(t *testing.T) {
+	ctx := context.Background()
+	location := filepath.ToSlash(strings.ReplaceAll(t.TempDir(), "#", ""))
+
+	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + location,
+	})
+	require.NoError(t, err)
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: unknown, Name: "id_custom",
+	})
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+
+	ident := table.Identifier{"default", "created_unknown"}
+	require.NoError(t, cat.CreateNamespace(ctx, catalog.NamespaceFromIdent(ident), nil))
+	tbl, err := cat.CreateTable(ctx, ident, sc,
+		catalog.WithPartitionSpec(&spec),
+		catalog.WithLocation("file://"+location),
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}))
+	require.NoError(t, err)
+
+	loaded, err := cat.LoadTable(ctx, ident)
+	require.NoError(t, err)
+	loadedSpec := loaded.Metadata().PartitionSpec()
+	field := loadedSpec.Field(0)
+	_, ok := field.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown transform should survive create and load")
+	assert.Equal(t, "custom_transform[42]", field.Transform.String())
+
+	// Evolving the spec of such a table is what's blocked.
+	_, err = tbl.NewTransaction().UpdateSpec(false).RemoveField("id_custom").Apply()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }

@@ -126,6 +126,10 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	_, hasSourceID := raw["source-id"]
 	_, hasSourceIDs := raw["source-ids"]
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int    `json:"source-id"`
 		SourceIDs       []int  `json:"source-ids,omitempty"`
@@ -322,6 +326,14 @@ func validateTransform(transform Transform) error {
 		return t.validateWidth()
 	case *TruncateTransform:
 		return t.validateWidth()
+	case UnknownTransform:
+		// The zero value is constructible from outside the package and would
+		// serialize as "transform": "".
+		if t.String() == "" {
+			return fmt.Errorf("%w: unknown transform has no name", ErrInvalidTransform)
+		}
+
+		return nil
 	default:
 		return nil
 	}
@@ -743,6 +755,11 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 
 	transform := field.Transform
 	switch t := transform.(type) {
+	case UnknownTransform:
+		// A generated name would embed the transform's brackets, e.g.
+		// "id_custom_transform[42]". Make the caller supply one.
+		return "", fmt.Errorf("%w: partition field using unknown transform %s must be given an explicit name",
+			ErrInvalidTransform, t)
 	case IdentityTransform:
 		return sourceName, nil
 	case VoidTransform:
