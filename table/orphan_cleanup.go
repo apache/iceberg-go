@@ -858,6 +858,7 @@ func isWindowsLocalPath(path string) bool {
 	}
 
 	volume, _, rooted := splitPortableVolume(path)
+
 	return rooted && strings.HasPrefix(volume, "//")
 }
 
