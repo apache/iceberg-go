@@ -178,6 +178,7 @@ func TestGCSCredentialsPropagatesADCError(t *testing.T) {
 		creds, err := gcsCredentialsWithDefault(context.Background(), map[string]string{io.GCSNoAuth: "true"},
 			func(context.Context) (*google.Credentials, error) {
 				called = true
+
 				return nil, errors.New("default credentials should not be requested")
 			})
 		require.NoError(t, err)
