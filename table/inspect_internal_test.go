@@ -538,6 +538,28 @@ func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
 	require.Equal(t, lateSnapshot, snapshot.SnapshotID)
 }
 
+func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
+	const (
+		firstSnapshot  = int64(101)
+		secondSnapshot = int64(102)
+		timestamp      = int64(2000)
+	)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotList: []Snapshot{
+			{SnapshotID: firstSnapshot},
+			{SnapshotID: secondSnapshot},
+		},
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: firstSnapshot, TimestampMs: timestamp},
+			{SnapshotID: secondSnapshot, TimestampMs: timestamp},
+		},
+	}}
+
+	snapshot := latestSnapshotAt(meta, timestamp)
+	require.NotNil(t, snapshot)
+	require.Equal(t, firstSnapshot, snapshot.SnapshotID)
+}
+
 func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
 	lastPartitionID := 999
 	meta := &metadataV2{commonMetadata: commonMetadata{

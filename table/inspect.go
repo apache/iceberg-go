@@ -326,7 +326,7 @@ func latestSnapshotAt(metadata Metadata, timestampMs int64) *Snapshot {
 	var latestTimestamp int64
 	found := false
 	for entry := range metadata.SnapshotLogs() {
-		if entry.TimestampMs <= timestampMs && (!found || entry.TimestampMs >= latestTimestamp) {
+		if entry.TimestampMs <= timestampMs && (!found || entry.TimestampMs > latestTimestamp) {
 			snapshotID = entry.SnapshotID
 			latestTimestamp = entry.TimestampMs
 			found = true
