@@ -28,7 +28,6 @@ import (
 
 func TestHadoopCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
-		RequiresNamespaceCreate: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := hadoop.NewCatalog("test", t.TempDir(), nil)
 			require.NoError(t, err)

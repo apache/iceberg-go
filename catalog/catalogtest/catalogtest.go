@@ -70,19 +70,12 @@ var TableSchema = iceberg.NewSchema(0,
 	iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
 )
 
-// Config describes the catalog under test and the optional behaviors it
-// supports. The zero value of each flag is the more permissive setting, so an
-// implementation only declares what it restricts.
+// Config describes the catalog under test.
 type Config struct {
 	// NewCatalog returns a fresh, empty catalog for a single test. It is called
 	// once per test; implementations should register any teardown with
 	// t.Cleanup rather than relying on the suite to release resources.
 	NewCatalog func(t *testing.T) catalog.Catalog
-
-	// RequiresNamespaceCreate reports whether a namespace must be created
-	// before a table can be created in it. Catalogs that derive namespaces
-	// from table paths leave this false.
-	RequiresNamespaceCreate bool
 }
 
 // RunCatalogTests runs the conformance suite against the catalog described by
@@ -105,10 +98,8 @@ func testBasicCreateTable(t *testing.T, cfg Config) {
 	require.NoError(t, err)
 	assert.False(t, exists, "table should not exist before create")
 
-	if cfg.RequiresNamespaceCreate {
-		require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
-		t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
-	}
+	require.NoError(t, cat.CreateNamespace(ctx, namespace, nil))
+	t.Cleanup(func() { _ = cat.DropNamespace(ctx, namespace) })
 
 	tbl, err := cat.CreateTable(ctx, ident, Schema)
 	require.NoError(t, err)
