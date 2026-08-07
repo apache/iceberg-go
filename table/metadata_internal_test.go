@@ -2462,3 +2462,18 @@ func TestMetadataV3EmitsNullCurrentSnapshotID(t *testing.T) {
 		assert.Nil(t, v3.CurrentSnapshotID, "explicit null must parse back to nil")
 	})
 }
+
+func TestPropertiesRoundTripToEmptyMap(t *testing.T) {
+	meta, err := NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec,
+		UnsortedSortOrder, "s3://bucket/test/location", nil)
+	require.NoError(t, err)
+	assert.NotNil(t, meta.Properties())
+
+	raw, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"properties"`)
+
+	parsed, err := ParseMetadataBytes(raw)
+	require.NoError(t, err)
+	assert.NotNil(t, parsed.Properties(), "omitted properties must parse back to an empty map, not nil")
+}
