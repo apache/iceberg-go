@@ -417,6 +417,32 @@ func TestEntriesSchema(t *testing.T) {
 	require.Equal(t, 145, dataFile.FieldList[len(dataFile.FieldList)-1].ID)
 }
 
+func TestEntriesDataFileStructBuilderAppendsParent(t *testing.T) {
+	arrowSchema, err := SchemaToArrowSchema(EntriesSchema(&iceberg.StructType{}), nil, true, false)
+	require.NoError(t, err)
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer bldr.Release()
+	bldr.Field(0).(*array.Int32Builder).Append(int32(iceberg.EntryStatusADDED))
+	bldr.Field(1).(*array.Int64Builder).Append(7)
+	bldr.Field(2).(*array.Int64Builder).Append(8)
+	bldr.Field(3).(*array.Int64Builder).AppendNull()
+
+	err = appendContentFile(bldr.Field(4).(*array.StructBuilder), &iceberg.StructType{}, &mockDataFile{
+		path:        "data.parquet",
+		contentType: iceberg.EntryContentData,
+		format:      iceberg.ParquetFile,
+	})
+	require.NoError(t, err)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+	require.EqualValues(t, 1, rec.NumRows())
+	dataFile := rec.Column(4).(*array.Struct)
+	require.EqualValues(t, 1, dataFile.Len())
+	require.False(t, dataFile.IsNull(0))
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
