@@ -29,7 +29,10 @@ import (
 // deletion-vector files in the current snapshot. It reports file metadata and
 // does not open or scan the delete-file contents.
 func (i InspectTable) DeleteFiles(ctx context.Context) (array.RecordReader, error) {
-	partitionType := inspectPartitionType(i.tbl.metadata)
+	partitionType, err := inspectPartitionType(i.tbl.metadata)
+	if err != nil {
+		return nil, fmt.Errorf("inspect delete files: %w", err)
+	}
 	schema := DeleteFilesSchema(partitionType)
 	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
 	if err != nil {
