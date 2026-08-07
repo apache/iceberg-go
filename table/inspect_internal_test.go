@@ -774,7 +774,8 @@ func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 		SnapshotRefs:    map[string]SnapshotRef{},
 	}}
 
-	partitionType := inspectPartitionType(meta)
+	partitionType, err := inspectPartitionType(meta)
+	require.NoError(t, err)
 	require.Equal(t, []int{1000, 1001}, []int{
 		partitionType.FieldList[0].ID,
 		partitionType.FieldList[1].ID,
@@ -783,6 +784,71 @@ func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 		partitionType.FieldList[0].Name,
 		partitionType.FieldList[1].Name,
 	})
+}
+
+func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	metadataFor := func(specs []iceberg.PartitionSpec) Metadata {
+		lastPartitionID := 1000
+		return &metadataV2{commonMetadata: commonMetadata{
+			FormatVersion:   2,
+			UUID:            uuid.New(),
+			LastColumnId:    2,
+			SchemaList:      []*iceberg.Schema{schema},
+			CurrentSchemaID: 0,
+			Specs:           specs,
+			DefaultSpecID:   specs[len(specs)-1].ID(),
+			LastPartitionID: &lastPartitionID,
+		}}
+	}
+	field := func(specID, sourceID int, transform iceberg.Transform) iceberg.PartitionSpec {
+		return iceberg.NewPartitionSpecID(specID, iceberg.PartitionField{
+			SourceIDs: []int{sourceID}, FieldID: 1000, Name: "part", Transform: transform,
+		})
+	}
+
+	tests := []struct {
+		name  string
+		specs []iceberg.PartitionSpec
+		valid bool
+	}{
+		{
+			name:  "void transition is compatible",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.VoidTransform{})},
+			valid: true,
+		},
+		{
+			name:  "different source ids",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 2, iceberg.IdentityTransform{})},
+		},
+		{
+			name:  "different transforms",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.BucketTransform{NumBuckets: 16})},
+		},
+		{
+			name: "void cannot hide incompatible history",
+			specs: []iceberg.PartitionSpec{
+				field(0, 1, iceberg.BucketTransform{NumBuckets: 16}),
+				field(1, 1, iceberg.IdentityTransform{}),
+				field(2, 1, iceberg.VoidTransform{}),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := inspectPartitionType(metadataFor(tt.specs))
+			if tt.valid {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		})
+	}
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
