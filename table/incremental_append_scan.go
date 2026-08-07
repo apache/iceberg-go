@@ -38,7 +38,7 @@ type IncrementalAppendScan struct {
 
 // NewIncrementalAppendScan creates an incremental append scan. Scan options
 // configure the underlying table scan and are retained for callers that pass
-// projection, filter, or concurrency options before planning.
+// snapshot, projection, filter, or concurrency options before planning.
 func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
 	return &IncrementalAppendScan{scan: t.Scan(opts...)}
 }
@@ -185,7 +185,7 @@ func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
 		return s.scan.metadata.SnapshotByID(*s.toSnapshotID), nil
 	}
 
-	return s.scan.metadata.CurrentSnapshot(), nil
+	return s.scan.ResolveSnapshot()
 }
 
 func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot, error) {
