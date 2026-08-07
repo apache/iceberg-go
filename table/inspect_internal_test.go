@@ -404,6 +404,18 @@ func TestInspectSnapshotsEmpty(t *testing.T) {
 	require.EqualValues(t, 6, rec.NumCols())
 }
 
+func TestDeleteFilesSchema(t *testing.T) {
+	sc := DeleteFilesSchema(&iceberg.StructType{})
+	names := testFieldNames(sc)
+	require.Equal(t, "content", names[0])
+	require.Equal(t, "file_path", names[1])
+	require.Equal(t, "equality_ids", names[14])
+	require.Equal(t, "referenced_data_file", names[17])
+	require.Equal(t, 134, sc.Fields()[0].ID)
+	require.Equal(t, 145, sc.Fields()[len(sc.Fields())-1].ID)
+	require.NotContains(t, names, "partition")
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
