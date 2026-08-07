@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -766,6 +767,11 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
+	// closeSession releases transports owned by the catalog. Caller-provided
+	// transports are excluded when the session is constructed.
+	closeSession     func()
+	closeSessionOnce sync.Once
+	closeErr         error
 
 	name string
 	// Retained catalog properties are reused for table/view IO and may carry
@@ -914,7 +920,7 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		return err
 	}
 
-	r.cl, _, err = r.createSession(ctx, ops)
+	r.cl, r.closeSession, err = r.createSession(ctx, ops)
 	if err != nil {
 		return err
 	}
@@ -933,6 +939,12 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
+	} else if opts.transportFactory != nil {
+		var cleanup func()
+		baseTransport, cleanup = opts.transportFactory(opts.tlsConfig)
+		if cleanup != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanup)
+		}
 	} else {
 		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 		baseTransport = transport
@@ -1066,11 +1078,21 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
-// Close releases the catalog's metrics reporter. The REST catalog does not own
-// the lifetime of the HTTP client it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via a
+// Close drains idle connections from transports created by the catalog and
+// closes its metrics reporter.
+// Caller-provided transports remain caller-owned. Close is safe to call more
+// than once. Callers holding a [catalog.Catalog] can reach this via a
 // [catalog.Closer] type assertion.
-func (r *Catalog) Close() error { return r.reporter.Close() }
+func (r *Catalog) Close() error {
+	r.closeSessionOnce.Do(func() {
+		if r.closeSession != nil {
+			r.closeSession()
+		}
+		r.closeErr = r.reporter.Close()
+	})
+
+	return r.closeErr
+}
 
 var _ catalog.Closer = (*Catalog)(nil)
 
