@@ -1,0 +1,915 @@
+{
+  "Initial": "AQAAAA7gDLzTJessZQAA",
+  "Version": "0.2",
+  "Converter": {
+    "ScrubBody": null,
+    "ClearHeaders": [
+      "^X-Goog-.*Encryption-Key$",
+      "^Expires$",
+      "^Signature$",
+      "^X-Goog-Gcs-Idempotency-Token$",
+      "^User-Agent$"
+    ],
+    "RemoveRequestHeaders": [
+      "^Authorization$",
+      "^Proxy-Authorization$",
+      "^Connection$",
+      "^Content-Type$",
+      "^Date$",
+      "^Host$",
+      "^Transfer-Encoding$",
+      "^Via$",
+      "^X-Forwarded-.*$",
+      "^X-Cloud-Trace-Context$",
+      "^X-Goog-Api-Client$",
+      "^X-Google-.*$",
+      "^X-Gfe-.*$"
+    ],
+    "RemoveResponseHeaders": [
+      "^X-Google-.*$",
+      "^X-Gfe-.*$"
+    ],
+    "ClearParams": [
+      "^Expires$",
+      "^Signature$"
+    ],
+    "RemoveParams": null
+  },
+  "Entries": [
+    {
+      "ID": "70704aa657c55a66",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "355"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:19 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8-eXc5Tbi8KrDwpd77sJuYcMmxB4LWXrCe2otnHx2SnPX2hKUAjkHlTcx0Yk16u5pbal6HUSOs"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5QVVQKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "859a5a65e45d16cc",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "355"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:19 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH88ks6cPcNwA5zAnlGeRys4WAxKg8R2Qe11PmbQUkt5sWA9K61k2cWSujFU8_JpUzahknRUwCaE"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5QVVQKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "b8c1c702a997a133",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "text/plain",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "0"
+          ],
+          "Content-Type": [
+            "text/html; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Etag": [
+            "\"5eb63bbbe01eeed093cb22bb8f5acdc3\""
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Goog-Generation": [
+            "1752876500005070"
+          ],
+          "X-Goog-Hash": [
+            "crc32c=yZRlqg==",
+            "md5=XrY7u+Ae7tCTyyK7j1rNww=="
+          ],
+          "X-Goog-Metageneration": [
+            "1"
+          ],
+          "X-Goog-Stored-Content-Encoding": [
+            "identity"
+          ],
+          "X-Goog-Stored-Content-Length": [
+            "11"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH88A2dqkjfuYIoFfWDocVkfjrnugweF_0cDlB2ROTeFFAwwFiQESwCeokFRbqpxItutTUCbdtPA"
+          ]
+        },
+        "Body": ""
+      }
+    },
+    {
+      "ID": "cbb542525a2577f2",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "application/octet-stream",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "379"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH88BbTkjwo1Zsgw8DWXRTa3t9xm8Ow0tpdFhRqGYmbIIvny-__4HQL_B4szNljbThTH_Xl6hePs"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5QVVQKCmFwcGxpY2F0aW9uL29jdGV0LXN0cmVhbQoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "e18cd2bd58b18da9",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "355"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8-jil-L9WCnOOfaBgaGajE0wG31B7R1TxV3o3k2KJUHyAxeO0ANymHsRCZ-3c9TSKP_CajpOMc"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5QVVQKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "4e5c1b3cdefcfe97",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "0"
+          ],
+          "Content-Type": [
+            "text/html; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Etag": [
+            "\"5eb63bbbe01eeed093cb22bb8f5acdc3\""
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Goog-Generation": [
+            "1752876500309753"
+          ],
+          "X-Goog-Hash": [
+            "crc32c=yZRlqg==",
+            "md5=XrY7u+Ae7tCTyyK7j1rNww=="
+          ],
+          "X-Goog-Metageneration": [
+            "1"
+          ],
+          "X-Goog-Stored-Content-Encoding": [
+            "identity"
+          ],
+          "X-Goog-Stored-Content-Length": [
+            "11"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH89ey7Nw9PYlIqEpkjQBTcYlcVcSPGrcCrUPZGwNzwJOkm4tZu4_HJkoV4wAbbTzJ8e8L5xZFqg"
+          ]
+        },
+        "Body": ""
+      }
+    },
+    {
+      "ID": "628dad72644e59b7",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "application/octet-stream",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "379"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH89qZNksUCTnKEpWPqaRnFm6yJ5aVIcuz7cg9FP_92znemzYflFNbbKJxbEo9vsCsq7jucWWJaw"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5QVVQKCmFwcGxpY2F0aW9uL29jdGV0LXN0cmVhbQoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "6940d57013b26411",
+      "Request": {
+        "Method": "PUT",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          "aGVsbG8gd29ybGQ="
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Content-Length": [
+            "0"
+          ],
+          "Content-Type": [
+            "text/html; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Etag": [
+            "\"5eb63bbbe01eeed093cb22bb8f5acdc3\""
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Goog-Generation": [
+            "1752876500526849"
+          ],
+          "X-Goog-Hash": [
+            "crc32c=yZRlqg==",
+            "md5=XrY7u+Ae7tCTyyK7j1rNww=="
+          ],
+          "X-Goog-Metageneration": [
+            "1"
+          ],
+          "X-Goog-Stored-Content-Encoding": [
+            "identity"
+          ],
+          "X-Goog-Stored-Content-Length": [
+            "11"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8_a5iEb-v_B052zoYO-YJryh88M7pL92DhO9yGag0kWm8J88MGij05dkygGQzLkMQBg94ApiMY"
+          ]
+        },
+        "Body": ""
+      }
+    },
+    {
+      "ID": "ceea7dbab8db988b",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "355"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH89MW_3ONur8R-ygTK7UQe7B40jvs8V66GboX3rKFp2r4uUVouPxlm96qJsyktX7HZM"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5HRVQKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "a1eff2f8ce09e93e",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "355"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8_wqrPTiIj1XGeWiEL-YctlyzBgrnih-QKJcVkyC3-KvwJ6EVJx0UlsiPfCec9lYxI"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5HRVQKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "fc316f2582fca5e0",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "298"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH892pCoAdUgxGLtSahDucEnRIyd25D5LERBcr9v_NoPmI6VjdMVvN83utdIOebX9BGAL"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+QWNjZXNzRGVuaWVkPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPkFub255bW91cyBjYWxsZXIgZG9lcyBub3QgaGF2ZSBzdG9yYWdlLm9iamVjdHMuZ2V0IGFjY2VzcyB0byB0aGUgR29vZ2xlIENsb3VkIFN0b3JhZ2Ugb2JqZWN0LiBQZXJtaXNzaW9uICdzdG9yYWdlLm9iamVjdHMuZ2V0JyBkZW5pZWQgb24gcmVzb3VyY2UgKG9yIGl0IG1heSBub3QgZXhpc3QpLjwvRGV0YWlscz48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "8601b93fe51a60de",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 200,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Accept-Ranges": [
+            "bytes"
+          ],
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "11"
+          ],
+          "Content-Type": [
+            "application/octet-stream"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:21 GMT"
+          ],
+          "Etag": [
+            "\"5eb63bbbe01eeed093cb22bb8f5acdc3\""
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Last-Modified": [
+            "Fri, 18 Jul 2025 22:08:20 GMT"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Goog-Generation": [
+            "1752876500526849"
+          ],
+          "X-Goog-Hash": [
+            "crc32c=yZRlqg==",
+            "md5=XrY7u+Ae7tCTyyK7j1rNww=="
+          ],
+          "X-Goog-Metageneration": [
+            "1"
+          ],
+          "X-Goog-Storage-Class": [
+            "REGIONAL"
+          ],
+          "X-Goog-Stored-Content-Encoding": [
+            "identity"
+          ],
+          "X-Goog-Stored-Content-Length": [
+            "11"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH88JfytUX5rs2OWUk4r3gHhx5H8ME3MH2L62LHR6fXiyawrsAdpTl7c9GrBj8eKQCvA"
+          ]
+        },
+        "Body": "aGVsbG8gd29ybGQ="
+      }
+    },
+    {
+      "ID": "8fd5fecfabc111b2",
+      "Request": {
+        "Method": "DELETE",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "358"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:21 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8-C2QF4EvuiqPfmjSQLa_sSsjtT3wz0slLCYH0BSWcVwD5Ppi_nVE1wyjl02aKsf27mr2a86bs"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5ERUxFVEUKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "e0910f2d7f044a14",
+      "Request": {
+        "Method": "DELETE",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 403,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "358"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:21 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH8-dVj4DWXaeDwGiEjUIyvXkY7QpMhJT07Evn_dtb7K7dzpD9zPCFGcCTDYGG9mA2LxnJe7nLIk"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+U2lnbmF0dXJlRG9lc05vdE1hdGNoPC9Db2RlPjxNZXNzYWdlPkFjY2VzcyBkZW5pZWQuPC9NZXNzYWdlPjxEZXRhaWxzPlRoZSByZXF1ZXN0IHNpZ25hdHVyZSB3ZSBjYWxjdWxhdGVkIGRvZXMgbm90IG1hdGNoIHRoZSBzaWduYXR1cmUgeW91IHByb3ZpZGVkLiBDaGVjayB5b3VyIEdvb2dsZSBzZWNyZXQga2V5IGFuZCBzaWduaW5nIG1ldGhvZC48L0RldGFpbHM+PFN0cmluZ1RvU2lnbj5ERUxFVEUKCgoxNzUyODgwMDk5Ci9nby1jbG91ZC1ibG9iLXRlc3QtYnVja2V0L2Jsb2ItZm9yLXNpZ25pbmc8L1N0cmluZ1RvU2lnbj48L0Vycm9yPg=="
+      }
+    },
+    {
+      "ID": "4dfca2f27b10fd33",
+      "Request": {
+        "Method": "DELETE",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 204,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "0"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:21 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "Vary": [
+            "Origin"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH89zN8THi8OelXGLZI-1KQUAqOXPgtwmgilB5hh5OxK-xFedSl2FEnJk2fIf4swp3rJ4TM8-KE8"
+          ]
+        },
+        "Body": ""
+      }
+    },
+    {
+      "ID": "2e3ff5b012790987",
+      "Request": {
+        "Method": "GET",
+        "URL": "https://storage.googleapis.com/go-cloud-blob-test-bucket/blob-for-signing?Expires=CLEARED\u0026GoogleAccessId=storage-updater%40go-cloud-test-216917.iam.gserviceaccount.com\u0026Signature=CLEARED",
+        "Header": {
+          "Accept-Encoding": [
+            "gzip"
+          ],
+          "User-Agent": [
+            "CLEARED"
+          ]
+        },
+        "MediaType": "",
+        "BodyParts": [
+          ""
+        ]
+      },
+      "Response": {
+        "StatusCode": 404,
+        "Proto": "HTTP/1.1",
+        "ProtoMajor": 1,
+        "ProtoMinor": 1,
+        "Header": {
+          "Cache-Control": [
+            "private, max-age=0"
+          ],
+          "Content-Length": [
+            "204"
+          ],
+          "Content-Type": [
+            "application/xml; charset=UTF-8"
+          ],
+          "Date": [
+            "Fri, 18 Jul 2025 22:08:21 GMT"
+          ],
+          "Expires": [
+            "CLEARED"
+          ],
+          "Server": [
+            "UploadServer"
+          ],
+          "X-Guploader-Uploadid": [
+            "ABgVH88iyU_DI1gIV1zQg2XQjQASLBGq-nqFaiiliKhJZddacz4NIeWFsGOLe5tD-jhcN_8"
+          ]
+        },
+        "Body": "PD94bWwgdmVyc2lvbj0nMS4wJyBlbmNvZGluZz0nVVRGLTgnPz48RXJyb3I+PENvZGU+Tm9TdWNoS2V5PC9Db2RlPjxNZXNzYWdlPlRoZSBzcGVjaWZpZWQga2V5IGRvZXMgbm90IGV4aXN0LjwvTWVzc2FnZT48RGV0YWlscz5ObyBzdWNoIG9iamVjdDogZ28tY2xvdWQtYmxvYi10ZXN0LWJ1Y2tldC9ibG9iLWZvci1zaWduaW5nPC9EZXRhaWxzPjwvRXJyb3I+"
+      }
+    }
+  ]
+}
