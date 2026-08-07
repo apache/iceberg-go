@@ -21,6 +21,7 @@ import (
 	"context"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 )
@@ -144,7 +145,7 @@ func collectPositionDeleteCandidates(ctx context.Context, fs iceio.IO, manifests
 				hasPartitionScoped = true
 				candidates = append(candidates, positionDeleteCandidate{
 					df:           df,
-					partitionKey: partitionBucketKey(df.SpecID(), df.Partition()),
+					partitionKey: partitionBucketKey(df.SpecID(), internal.BorrowedDataFilePartition(df)),
 					seq:          seq,
 				})
 			}
@@ -182,7 +183,7 @@ func minSurvivorSeqByPartition(ctx context.Context, fs iceio.IO, manifests []ice
 			// unknown survivor is treated as old as possible so it retains
 			// every delete it might predate.
 			seq := max(e.SequenceNum(), 0)
-			key := partitionBucketKey(df.SpecID(), df.Partition())
+			key := partitionBucketKey(df.SpecID(), internal.BorrowedDataFilePartition(df))
 			if cur, ok := minSeq[key]; ok {
 				seq = min(seq, cur)
 			}

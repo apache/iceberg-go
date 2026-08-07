@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	iceberg "github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,7 +108,7 @@ func testDataFileWithStats(t *testing.T) iceberg.DataFile {
 
 func TestDataFileStatsUsesBorrowedView(t *testing.T) {
 	file := testDataFileWithStats(t)
-	require.Implements(t, (*dataFileStatsRefer)(nil), file)
+	require.Implements(t, (*internal.DataFileStatsRef)(nil), file)
 
 	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
 	assert.Equal(t, map[int]int64{1: 2}, valueCounts)
@@ -136,9 +137,50 @@ func TestDataFileStatsFallsBackToPublicGetters(t *testing.T) {
 	assert.Equal(t, 5, file.getterCalls)
 }
 
+func TestDataFileBoundsUseBorrowedView(t *testing.T) {
+	file := testDataFileWithStats(t)
+	lowerBounds, upperBounds := internal.BorrowedDataFileBounds(file)
+	assert.Equal(t, map[int][]byte{1: {1, 2}}, lowerBounds)
+	assert.Equal(t, map[int][]byte{1: {3, 4}}, upperBounds)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		lowerBounds, upperBounds = internal.BorrowedDataFileBounds(file)
+	})
+	assert.InDelta(t, 0.0, allocs, 0.5)
+	assert.Equal(t, []byte{1, 2}, lowerBounds[1])
+	assert.Equal(t, []byte{3, 4}, upperBounds[1])
+}
+
+func TestDataFileReferencedDataFileUsesBorrowedView(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentPosDeletes,
+		"s3://bucket/delete.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		10,
+	)
+	require.NoError(t, err)
+	file := builder.ReferencedDataFile("s3://bucket/data.parquet").Build()
+
+	ref := internal.BorrowedDataFileReferencedDataFile(file)
+	require.NotNil(t, ref)
+	assert.Equal(t, "s3://bucket/data.parquet", *ref)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		ref = internal.BorrowedDataFileReferencedDataFile(file)
+	})
+	assert.InDelta(t, 0.0, allocs, 0.5)
+	assert.Equal(t, "s3://bucket/data.parquet", *ref)
+}
+
 func TestDataFilePartitionUsesBorrowedView(t *testing.T) {
 	file := testDataFileWithStats(t)
-	require.Implements(t, (*dataFilePartitionRefer)(nil), file)
+	require.Implements(t, (*internal.DataFilePartitionRef)(nil), file)
 
 	partition := dataFilePartition(file)
 	assert.Equal(t, map[int]any{1000: "partition"}, partition)

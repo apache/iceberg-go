@@ -57,6 +57,7 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -652,7 +653,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
 	for _, df := range rewrittenFiles {
 		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := partitionConflictKey(df.SpecID(), df.Partition())
+		key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
 		if err != nil {
 			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
 				df.FilePath(), df.SpecID(), err)
@@ -673,7 +674,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 				return nil
 			}
 
-			key, err := partitionConflictKey(df.SpecID(), df.Partition())
+			key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
 					df.FilePath(), df.SpecID(), err)
@@ -705,12 +706,13 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 // can be determined), which callers must treat conservatively via a
 // partition-tuple match rather than skipping the delete.
 func referencedDataFilePath(df iceberg.DataFile) string {
-	if ref := df.ReferencedDataFile(); ref != nil {
+	if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); ref != nil {
 		return *ref
 	}
 
-	lower := df.LowerBoundValues()[filePathFieldID]
-	upper := df.UpperBoundValues()[filePathFieldID]
+	lowerBounds, upperBounds := iceberginternal.BorrowedDataFileBounds(df)
+	lower := lowerBounds[filePathFieldID]
+	upper := upperBounds[filePathFieldID]
 	if len(lower) == 0 || !bytes.Equal(lower, upper) {
 		return ""
 	}

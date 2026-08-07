@@ -22,24 +22,10 @@ import (
 	"github.com/apache/iceberg-go/internal"
 )
 
-type dataFileStatsRefer interface {
-	DataFileStatsRef(internal.DataFileRef) (
-		valueCounts map[int]int64,
-		nullCounts map[int]int64,
-		nanCounts map[int]int64,
-		lowerBounds map[int][]byte,
-		upperBounds map[int][]byte,
-	)
-}
-
-type dataFilePartitionRefer interface {
-	DataFilePartitionRef(internal.DataFileRef) map[int]any
-}
-
 // dataFileStats returns borrowed metadata for the concrete manifest data file
-// and falls back to the public defensive-copying getters for other DataFile
-// implementations. Borrowed maps are used only while evaluating one file and
-// must never escape or be mutated.
+// and falls back to the public getters for other DataFile implementations.
+// Borrowed maps are used only while evaluating one file and must never escape
+// or be mutated.
 func dataFileStats(file iceberg.DataFile) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
@@ -47,12 +33,7 @@ func dataFileStats(file iceberg.DataFile) (
 	lowerBounds map[int][]byte,
 	upperBounds map[int][]byte,
 ) {
-	if ref, ok := file.(dataFileStatsRefer); ok {
-		return ref.DataFileStatsRef(internal.DataFileRef{})
-	}
-
-	return file.ValueCounts(), file.NullValueCounts(), file.NaNValueCounts(),
-		file.LowerBoundValues(), file.UpperBoundValues()
+	return internal.BorrowedDataFileStats(file)
 }
 
 // dataFilePartition returns a borrowed partition map for the concrete
@@ -60,9 +41,5 @@ func dataFileStats(file iceberg.DataFile) (
 // implementations. Callers must use the map only for the current planning
 // operation; exported results must clone mutable values before returning them.
 func dataFilePartition(file iceberg.DataFile) map[int]any {
-	if ref, ok := file.(dataFilePartitionRefer); ok {
-		return ref.DataFilePartitionRef(internal.DataFileRef{})
-	}
-
-	return file.Partition()
+	return internal.BorrowedDataFilePartition(file)
 }

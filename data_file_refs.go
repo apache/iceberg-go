@@ -55,3 +55,10 @@ func (d *dataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
 
 	return d.fieldIDToPartitionData
 }
+
+// DataFileReferencedDataFileRef returns the optional referenced data file
+// path without allocating. The token restricts this borrowed accessor to
+// trusted in-module callers; the public getter continues returning a copy.
+func (d *dataFile) DataFileReferencedDataFileRef(_ internal.DataFileRef) *string {
+	return d.ReferencedDataFileField
+}

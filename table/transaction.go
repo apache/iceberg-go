@@ -718,7 +718,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 // validateDataFilePartitionData verifies that DataFile partition values match
 // the current partition spec fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
-	partitionData := df.Partition()
+	partitionData := dataFilePartition(df)
 
 	expectedFieldIDs := make(map[int]string)
 	for _, field := range spec.Fields() {

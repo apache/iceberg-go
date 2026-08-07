@@ -1488,17 +1488,21 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		return fmt.Errorf("unknown entry status: %v", status)
 	}
 	count := entry.DataFile().Count()
-	partition := entry.Data.Partition()
 
+	var partition map[int]any
 	entryToEncode := *entry
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		partition = dataFile.DataFilePartitionRef(internal.DataFileRef{})
 		encodeDataFile := cloneDataFileAvroFields(dataFile)
-		encodePartition, err := avroEncodePartitionData(partition, w.partFieldMaps)
+		encodePartition, err := avroEncodePartitionData(
+			partition, w.partFieldMaps)
 		if err != nil {
 			return err
 		}
 		encodeDataFile.PartitionData = encodePartition
 		entryToEncode.Data = encodeDataFile
+	} else {
+		partition = entry.Data.Partition()
 	}
 
 	toEncode, err := w.impl.prepareEntry(&entryToEncode, w.snapshotID)
@@ -1509,6 +1513,7 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if err := w.writer.Encode(toEncode); err != nil {
 		return err
 	}
+	w.partitions = append(w.partitions, partition)
 
 	switch status {
 	case EntryStatusADDED:
@@ -1521,8 +1526,6 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		w.deletedFiles++
 		w.deletedRows += count
 	}
-
-	w.partitions = append(w.partitions, partition)
 
 	if status == EntryStatusADDED || status == EntryStatusEXISTING {
 		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
