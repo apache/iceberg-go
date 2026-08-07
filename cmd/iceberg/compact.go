@@ -23,9 +23,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/table/compaction"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/table/compaction"
 	"github.com/pterm/pterm"
 )
 

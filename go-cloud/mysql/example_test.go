@@ -18,7 +18,7 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/mysql"
+	"github.com/DataDog/iceberg-go/go-cloud/mysql"
 )
 
 func ExampleOpen() {

@@ -8,8 +8,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"gocloud.dev/docstore/drivertest"
-	"gocloud.dev/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
 )
 
 const connectionStringTemplate = "mongodb://%s:%s@%s/?connect=direct&connectTimeoutMS=3000"

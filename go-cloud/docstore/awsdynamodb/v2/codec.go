@@ -22,7 +22,7 @@ import (
 	"time"
 
 	dyn2Types "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
-	"gocloud.dev/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
 )
 
 var nullValue = &dyn2Types.AttributeValueMemberNULL{Value: true}

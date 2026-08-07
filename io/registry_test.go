@@ -22,8 +22,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
+	"github.com/DataDog/iceberg-go/io"
+	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

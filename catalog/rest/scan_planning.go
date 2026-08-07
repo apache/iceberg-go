@@ -35,10 +35,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/google/uuid"
 	"golang.org/x/sync/semaphore"
 )

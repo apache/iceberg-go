@@ -18,9 +18,9 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/gcp"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/gcpsecretmanager"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/gcpsecretmanager"
 )
 
 func ExampleOpenVariable() {

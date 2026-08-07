@@ -25,8 +25,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/require"
 )
 

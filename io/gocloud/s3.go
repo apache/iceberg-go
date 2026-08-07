@@ -28,9 +28,9 @@ import (
 	"strconv"
 	"time"
 
-	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
-	"github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/utils"
+	internalaws "github.com/DataDog/iceberg-go/internal/awsconfig"
+	"github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -39,8 +39,8 @@ import (
 	"github.com/aws/smithy-go/auth/bearer"
 	smithymiddleware "github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/s3blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
 )
 
 // ParseAWSConfig parses S3 properties and returns a configuration.

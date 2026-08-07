@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"testing"
 
-	"gocloud.dev/internal/testing/terraform"
-	"gocloud.dev/mysql"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/terraform"
+	"github.com/DataDog/iceberg-go/go-cloud/mysql"
 )
 
 func TestOpen(t *testing.T) {

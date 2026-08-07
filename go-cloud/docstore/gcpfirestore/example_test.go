@@ -18,9 +18,9 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/docstore"
-	"gocloud.dev/docstore/gcpfirestore"
-	"gocloud.dev/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/gcpfirestore"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
 )
 
 func ExampleOpenCollection() {

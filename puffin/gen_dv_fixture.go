@@ -35,7 +35,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/apache/iceberg-go/puffin"
+	"github.com/DataDog/iceberg-go/puffin"
 )
 
 const (

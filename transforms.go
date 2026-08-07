@@ -32,7 +32,7 @@ import (
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
-	"github.com/apache/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go/internal"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
 )

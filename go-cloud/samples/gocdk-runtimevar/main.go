@@ -25,15 +25,15 @@ import (
 	"time"
 
 	"github.com/google/subcommands"
-	"gocloud.dev/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
 
 	// Import the runtimevar driver packages we want to be able to open.
-	_ "gocloud.dev/runtimevar/awsparamstore"
-	_ "gocloud.dev/runtimevar/blobvar"
-	_ "gocloud.dev/runtimevar/constantvar"
-	_ "gocloud.dev/runtimevar/filevar"
-	_ "gocloud.dev/runtimevar/gcpruntimeconfig"
-	_ "gocloud.dev/runtimevar/httpvar"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/awsparamstore"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/blobvar"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/constantvar"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/filevar"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/gcpruntimeconfig"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/httpvar"
 )
 
 const helpSuffix = `

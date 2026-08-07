@@ -22,9 +22,9 @@ import (
 
 	"github.com/google/wire"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"gocloud.dev/gcp/gcpcloud"
-	"gocloud.dev/server"
-	"gocloud.dev/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp/gcpcloud"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
 )
 
 // This is an example of how to bootstrap an HTTP server running on

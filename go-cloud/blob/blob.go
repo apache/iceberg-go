@@ -81,11 +81,11 @@ import (
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/metric"
-	"gocloud.dev/blob/driver"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/openurl"
-	gcdkotel "gocloud.dev/internal/otel"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/openurl"
+	gcdkotel "github.com/DataDog/iceberg-go/go-cloud/internal/otel"
 )
 
 // Ensure that Reader implements io.ReadSeekCloser.

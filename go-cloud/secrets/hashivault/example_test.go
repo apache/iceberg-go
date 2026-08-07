@@ -19,8 +19,8 @@ import (
 	"log"
 
 	"github.com/hashicorp/vault/api"
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/hashivault"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/hashivault"
 )
 
 func ExampleOpenKeeper() {

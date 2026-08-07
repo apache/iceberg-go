@@ -30,13 +30,13 @@ import (
 
 	"github.com/google/wire"
 	"github.com/gorilla/mux"
-	"gocloud.dev/blob"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
 
-	"gocloud.dev/server"
-	"gocloud.dev/server/health"
-	"gocloud.dev/server/health/sqlhealth"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health"
+	"github.com/DataDog/iceberg-go/go-cloud/server/health/sqlhealth"
 )
 
 type cliFlags struct {

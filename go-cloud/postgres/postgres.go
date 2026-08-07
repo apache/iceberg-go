@@ -23,7 +23,7 @@ import (
 
 	"github.com/XSAM/otelsql"
 	"github.com/lib/pq"
-	"gocloud.dev/internal/openurl"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/openurl"
 )
 
 // Scheme is the URL scheme this package registers its URLOpener under on

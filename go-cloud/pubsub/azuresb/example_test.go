@@ -20,8 +20,8 @@ import (
 	"os"
 
 	servicebus "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/azuresb"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/azuresb"
 )
 
 func ExampleOpenTopic() {

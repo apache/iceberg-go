@@ -25,7 +25,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // ErrInvalidUDFType is returned when a UDF parameter or return type

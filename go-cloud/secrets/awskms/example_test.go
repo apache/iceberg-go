@@ -19,8 +19,8 @@ import (
 	"log"
 
 	"github.com/aws/aws-sdk-go-v2/config"
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/awskms"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/awskms"
 )
 
 func ExampleOpenKeeper() {

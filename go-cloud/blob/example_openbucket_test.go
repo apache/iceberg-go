@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"log"
 
-	"gocloud.dev/blob"
-	_ "gocloud.dev/blob/memblob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/memblob"
 )
 
 func Example_openFromURL() {

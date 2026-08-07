@@ -21,10 +21,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gocloud.dev/internal/testing/setup"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/driver"
-	"gocloud.dev/pubsub/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/drivertest"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	servicebus "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus"

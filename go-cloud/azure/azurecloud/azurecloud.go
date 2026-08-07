@@ -17,8 +17,8 @@ package azurecloud // import "gocloud.dev/azure/azurecloud"
 
 import (
 	"github.com/google/wire"
-	"gocloud.dev/blob/azureblob"
-	"gocloud.dev/secrets/azurekeyvault"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/azurekeyvault"
 )
 
 // Azure is a Wire provider set that includes the default wiring for all

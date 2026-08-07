@@ -26,8 +26,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

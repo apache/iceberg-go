@@ -18,8 +18,8 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/kafkapubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/kafkapubsub"
 )
 
 func ExampleOpenTopic() {

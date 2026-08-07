@@ -20,9 +20,9 @@ package compaction
 import (
 	"context"
 
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 // CollectDeadEqualityDeletes walks the given snapshot's manifests and

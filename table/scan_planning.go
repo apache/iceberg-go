@@ -28,8 +28,8 @@ package table
 import (
 	"context"
 
-	"github.com/apache/iceberg-go"
-	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	icebergio "github.com/DataDog/iceberg-go/io"
 )
 
 // ScanPlanningMode is the user-facing scan option: three values

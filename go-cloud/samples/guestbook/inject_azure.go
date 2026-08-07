@@ -25,12 +25,12 @@ import (
 
 	azcontainer "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/google/wire"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/azureblob"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/blobvar"
-	"gocloud.dev/server"
-	"gocloud.dev/server/requestlog"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/blobvar"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server/requestlog"
 )
 
 // This file wires the generic interfaces up to Microsoft Azure. It

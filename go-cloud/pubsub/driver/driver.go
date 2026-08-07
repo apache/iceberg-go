@@ -20,7 +20,7 @@ package driver // import "gocloud.dev/pubsub/driver"
 import (
 	"context"
 
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 // AckID is the identifier of a message for purposes of acknowledgement.

@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/apache/iceberg-go/internal"
-	"github.com/apache/iceberg-go/internal/datafileavro"
+	"github.com/DataDog/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go/internal/datafileavro"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/twmb/avro"
 )

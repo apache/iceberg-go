@@ -21,7 +21,7 @@ import (
 	"strings"
 	"sync"
 
-	"gocloud.dev/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
 )
 
 func init() {

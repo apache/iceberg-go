@@ -31,7 +31,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 
 	"github.com/google/uuid"
 )

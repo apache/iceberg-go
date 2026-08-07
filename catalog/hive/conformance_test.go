@@ -22,9 +22,9 @@ package hive
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/catalogtest"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/catalogtest"
 	"github.com/stretchr/testify/require"
 )
 

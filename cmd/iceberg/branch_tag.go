@@ -26,8 +26,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/pterm/pterm"
 )
 

@@ -24,11 +24,11 @@ import (
 
 	raw "cloud.google.com/go/pubsub/apiv1"
 	"cloud.google.com/go/pubsub/apiv1/pubsubpb"
-	"gocloud.dev/gcp"
-	"gocloud.dev/internal/testing/setup"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/driver"
-	"gocloud.dev/pubsub/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/drivertest"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

@@ -20,7 +20,7 @@ package encryption_test
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go/encryption"
+	"github.com/DataDog/iceberg-go/encryption"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

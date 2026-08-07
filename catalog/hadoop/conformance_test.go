@@ -20,9 +20,9 @@ package hadoop_test
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/catalogtest"
-	"github.com/apache/iceberg-go/catalog/hadoop"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/catalogtest"
+	"github.com/DataDog/iceberg-go/catalog/hadoop"
 	"github.com/stretchr/testify/require"
 )
 

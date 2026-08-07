@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // RowDelta encodes a set of row-level changes to a table: new data files

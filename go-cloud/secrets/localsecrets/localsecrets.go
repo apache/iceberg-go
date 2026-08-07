@@ -37,8 +37,8 @@ import (
 	"io"
 	"net/url"
 
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
 	"golang.org/x/crypto/nacl/secretbox"
 )
 

@@ -22,10 +22,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/catalogtest"
-	sqlcat "github.com/apache/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/catalogtest"
+	sqlcat "github.com/DataDog/iceberg-go/catalog/sql"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )

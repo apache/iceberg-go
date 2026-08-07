@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 // Analyze scans the table and produces a compaction Plan without

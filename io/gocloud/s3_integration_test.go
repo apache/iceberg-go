@@ -23,13 +23,13 @@ import (
 	"context"
 	"testing"
 
-	"github.com/apache/iceberg-go/internal/recipe"
+	"github.com/DataDog/iceberg-go/internal/recipe"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	sqlcat "github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	sqlcat "github.com/DataDog/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go/io"
+	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )

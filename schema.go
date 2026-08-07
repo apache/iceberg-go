@@ -31,7 +31,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/apache/iceberg-go/internal"
+	"github.com/DataDog/iceberg-go/internal"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with

@@ -23,7 +23,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot

@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"testing"
 
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/puffin"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/puffin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

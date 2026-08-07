@@ -22,8 +22,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	icebergio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	icebergio "github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

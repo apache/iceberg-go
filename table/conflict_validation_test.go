@@ -27,9 +27,9 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

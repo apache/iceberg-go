@@ -30,9 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

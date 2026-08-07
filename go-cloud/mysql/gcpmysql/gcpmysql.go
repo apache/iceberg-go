@@ -40,9 +40,9 @@ import (
 	"github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/proxy"
 	"github.com/XSAM/otelsql"
 	"github.com/go-sql-driver/mysql"
-	"gocloud.dev/gcp"
-	"gocloud.dev/gcp/cloudsql"
-	cdkmysql "gocloud.dev/mysql"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp/cloudsql"
+	cdkmysql "github.com/DataDog/iceberg-go/go-cloud/mysql"
 )
 
 // Scheme is the URL scheme gcpmysql registers its URLOpener under on

@@ -20,8 +20,8 @@ import (
 	"log"
 	"os"
 
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/filevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/filevar"
 )
 
 func ExampleOpenVariable() {

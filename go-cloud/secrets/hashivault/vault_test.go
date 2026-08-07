@@ -23,10 +23,10 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/api"
-	"gocloud.dev/internal/testing/setup"
-	"gocloud.dev/secrets"
-	"gocloud.dev/secrets/driver"
-	"gocloud.dev/secrets/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/setup"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/drivertest"
 )
 
 // To run these tests against a real Vault server, first run ./localvault.sh.

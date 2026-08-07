@@ -37,8 +37,8 @@ import (
 	"github.com/XSAM/otelsql"
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/wire"
-	"gocloud.dev/aws/rds"
-	gcmysql "gocloud.dev/mysql"
+	"github.com/DataDog/iceberg-go/go-cloud/aws/rds"
+	gcmysql "github.com/DataDog/iceberg-go/go-cloud/mysql"
 )
 
 // Set is a Wire provider set that provides a *sql.DB given

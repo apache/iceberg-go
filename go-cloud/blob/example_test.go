@@ -23,10 +23,10 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/fileblob"
-	_ "gocloud.dev/blob/gcsblob"
-	_ "gocloud.dev/blob/s3blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/fileblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/gcsblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
 )
 
 func ExampleBucket_NewReader() {

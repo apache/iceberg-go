@@ -24,7 +24,7 @@ import (
 	"time"
 
 	pb "cloud.google.com/go/firestore/apiv1/firestorepb"
-	"gocloud.dev/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
 	"google.golang.org/genproto/googleapis/type/latlng"
 	tspb "google.golang.org/protobuf/types/known/timestamppb"
 )

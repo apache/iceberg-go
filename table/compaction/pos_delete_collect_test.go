@@ -20,7 +20,7 @@ package compaction
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
 

@@ -19,8 +19,8 @@ import (
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/rabbitpubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/rabbitpubsub"
 )
 
 func ExampleOpenTopic() {

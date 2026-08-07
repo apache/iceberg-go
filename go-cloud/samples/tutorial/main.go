@@ -20,12 +20,12 @@ import (
 	"log"
 	"os"
 
-	"gocloud.dev/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
 
 	// Import the blob packages we want to be able to open.
-	_ "gocloud.dev/blob/azureblob"
-	_ "gocloud.dev/blob/gcsblob"
-	_ "gocloud.dev/blob/s3blob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/gcsblob"
+	_ "github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
 )
 
 func main() {

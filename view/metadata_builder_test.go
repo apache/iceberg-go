@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
-	"github.com/apache/iceberg-go/view/internal"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/view/internal"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

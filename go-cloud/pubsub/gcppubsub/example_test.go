@@ -18,9 +18,9 @@ import (
 	"context"
 	"log"
 
-	"gocloud.dev/gcp"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/gcppubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/gcppubsub"
 
 	raw "cloud.google.com/go/pubsub/apiv1"
 	pb "cloud.google.com/go/pubsub/apiv1/pubsubpb"

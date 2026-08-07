@@ -21,8 +21,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 func runRewriteManifests(ctx context.Context, output Output, cat catalog.Catalog, cmd *RewriteManifestsCmd) {

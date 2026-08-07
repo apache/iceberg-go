@@ -20,8 +20,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"gocloud.dev/docstore"
-	awsdynamodb "gocloud.dev/docstore/awsdynamodb/v2"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
+	awsdynamodb "github.com/DataDog/iceberg-go/go-cloud/docstore/awsdynamodb/v2"
 )
 
 func ExampleOpenCollection() {

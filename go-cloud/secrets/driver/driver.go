@@ -20,7 +20,7 @@ package driver // import "gocloud.dev/secrets/driver"
 import (
 	"context"
 
-	"gocloud.dev/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
 )
 
 // Keeper holds the key information to encrypt a plain text message into a

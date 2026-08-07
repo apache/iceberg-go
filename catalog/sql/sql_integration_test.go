@@ -30,12 +30,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/sql"
-	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go/io"
+	_ "github.com/DataDog/iceberg-go/io/gocloud"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 )
 

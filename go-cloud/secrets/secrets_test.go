@@ -22,10 +22,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/testing/oteltest"
-	"gocloud.dev/secrets/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/testing/oteltest"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/driver"
 )
 
 var errFake = errors.New("fake")

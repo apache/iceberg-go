@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"gocloud.dev/pubsub/driver"
-	"gocloud.dev/pubsub/drivertest"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/drivertest"
 )
 
 type harness struct{}

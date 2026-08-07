@@ -20,7 +20,7 @@ package iceberg_test
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go"
+	"github.com/DataDog/iceberg-go"
 )
 
 // BenchmarkPartitionToPath benchmarks the optimized PartitionToPath function

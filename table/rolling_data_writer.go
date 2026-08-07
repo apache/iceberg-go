@@ -33,9 +33,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/apache/iceberg-go"
-	iceio "github.com/apache/iceberg-go/io"
-	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	tblutils "github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 

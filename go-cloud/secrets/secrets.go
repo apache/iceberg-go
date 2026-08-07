@@ -44,10 +44,10 @@ import (
 	"net/url"
 	"sync"
 
-	"gocloud.dev/internal/gcerr"
-	"gocloud.dev/internal/openurl"
-	gcdkotel "gocloud.dev/internal/otel"
-	"gocloud.dev/secrets/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/openurl"
+	gcdkotel "github.com/DataDog/iceberg-go/go-cloud/internal/otel"
+	"github.com/DataDog/iceberg-go/go-cloud/secrets/driver"
 )
 
 // Keeper does encryption and decryption. To create a Keeper, use constructors

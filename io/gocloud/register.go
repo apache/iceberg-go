@@ -21,7 +21,7 @@ import (
 	"context"
 	"net/url"
 
-	icebergio "github.com/apache/iceberg-go/io"
+	icebergio "github.com/DataDog/iceberg-go/io"
 )
 
 func init() {

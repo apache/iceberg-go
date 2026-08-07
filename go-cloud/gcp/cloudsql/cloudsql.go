@@ -20,7 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/certs"
 	"github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/proxy"
 	"github.com/google/wire"
-	"gocloud.dev/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
 	"golang.org/x/oauth2"
 )
 

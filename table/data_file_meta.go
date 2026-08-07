@@ -23,8 +23,8 @@ import (
 	"maps"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
-	"github.com/apache/iceberg-go"
-	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	tblutils "github.com/DataDog/iceberg-go/table/internal"
 )
 
 const referencedDataFilePathFieldID = 2147483546

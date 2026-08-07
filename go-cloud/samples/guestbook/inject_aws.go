@@ -25,13 +25,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/google/wire"
-	"gocloud.dev/aws/awscloud"
-	"gocloud.dev/blob"
-	"gocloud.dev/blob/s3blob"
-	"gocloud.dev/mysql/awsmysql"
-	"gocloud.dev/runtimevar"
-	"gocloud.dev/runtimevar/awsparamstore"
-	"gocloud.dev/server"
+	"github.com/DataDog/iceberg-go/go-cloud/aws/awscloud"
+	"github.com/DataDog/iceberg-go/go-cloud/blob"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/s3blob"
+	"github.com/DataDog/iceberg-go/go-cloud/mysql/awsmysql"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar/awsparamstore"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
 )
 
 // This file wires the generic interfaces up to Amazon Web Services (AWS). It

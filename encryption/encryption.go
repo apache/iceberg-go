@@ -33,7 +33,7 @@ import (
 	"context"
 	"errors"
 
-	icebergio "github.com/apache/iceberg-go/io"
+	icebergio "github.com/DataDog/iceberg-go/io"
 )
 
 var (

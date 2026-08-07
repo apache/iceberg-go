@@ -20,8 +20,8 @@ package catalog_test
 import (
 	"testing"
 
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 

@@ -27,10 +27,10 @@ import (
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/trace"
-	"gocloud.dev/docstore/driver"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
-	gcdkotel "gocloud.dev/internal/otel"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
+	gcdkotel "github.com/DataDog/iceberg-go/go-cloud/internal/otel"
 )
 
 // A Document is a set of field-value pairs. One or more fields, called the key

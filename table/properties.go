@@ -20,7 +20,7 @@ package table
 import (
 	"math"
 
-	"github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go/table/internal"
 )
 
 const (

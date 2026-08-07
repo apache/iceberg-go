@@ -20,7 +20,7 @@ import (
 	"os"
 	"testing"
 
-	"gocloud.dev/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
 )
 
 func fakeConnectionStringInEnv() func() {

@@ -25,10 +25,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/rest"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/rest"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/require"
 )
 

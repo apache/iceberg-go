@@ -26,11 +26,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/hadoop"
-	"github.com/apache/iceberg-go/internal/recipe"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/catalog"
+	"github.com/DataDog/iceberg-go/catalog/hadoop"
+	"github.com/DataDog/iceberg-go/internal/recipe"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
 )

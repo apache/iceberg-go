@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/metrics"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/metrics"
 )
 
 // scanMetricsAccumulator gathers scan-planning counts. Every field is written

@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/metrics"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

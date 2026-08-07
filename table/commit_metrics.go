@@ -23,8 +23,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/metrics"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/metrics"
 )
 
 // safeReport forwards a report to rep, recovering from a panic in a misbehaving

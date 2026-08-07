@@ -23,7 +23,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/trace"
-	"gocloud.dev/server"
+	"github.com/DataDog/iceberg-go/go-cloud/server"
 	"os"
 
 	gcpmex "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
@@ -33,8 +33,8 @@ import (
 	gcpres "go.opentelemetry.io/contrib/detectors/gcp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"gocloud.dev/gcp"
-	"gocloud.dev/server/requestlog"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/server/requestlog"
 )
 
 // Set is a Wire provider set that provides the diagnostic hooks for

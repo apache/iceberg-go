@@ -28,9 +28,9 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/driver"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/driver"
 )
 
 func init() {

@@ -24,7 +24,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 // MultiTableTransaction collects changes across multiple tables and

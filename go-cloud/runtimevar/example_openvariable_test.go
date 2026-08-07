@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"log"
 
-	"gocloud.dev/runtimevar"
-	_ "gocloud.dev/runtimevar/constantvar"
+	"github.com/DataDog/iceberg-go/go-cloud/runtimevar"
+	_ "github.com/DataDog/iceberg-go/go-cloud/runtimevar/constantvar"
 )
 
 func Example_openVariableFromURL() {

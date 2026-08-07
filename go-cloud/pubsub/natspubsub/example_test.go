@@ -20,8 +20,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"gocloud.dev/pubsub"
-	"gocloud.dev/pubsub/natspubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub"
+	"github.com/DataDog/iceberg-go/go-cloud/pubsub/natspubsub"
 )
 
 func ExampleOpenTopic() {

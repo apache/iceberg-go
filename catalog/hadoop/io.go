@@ -18,8 +18,8 @@
 package hadoop
 
 import (
-	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud"
+	icebergio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/io/gocloud"
 )
 
 // HadoopCatalogFS represents all the interfaces that a filesystem implementation

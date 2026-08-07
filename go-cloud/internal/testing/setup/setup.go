@@ -31,8 +31,8 @@ import (
 	awsv2config "github.com/aws/aws-sdk-go-v2/config"
 	awsv2creds "github.com/aws/aws-sdk-go-v2/credentials"
 
-	"gocloud.dev/gcp"
-	"gocloud.dev/internal/useragent"
+	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/useragent"
 
 	"github.com/google/go-replayers/grpcreplay"
 	"github.com/google/go-replayers/httpreplay"

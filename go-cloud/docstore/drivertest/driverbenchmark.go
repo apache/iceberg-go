@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"gocloud.dev/docstore"
+	"github.com/DataDog/iceberg-go/go-cloud/docstore"
 )
 
 // RunBenchmarks runs benchmarks for docstore drivers.

@@ -29,10 +29,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/iceberg-go"
-	iceinternal "github.com/apache/iceberg-go/internal"
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table/internal"
+	"github.com/DataDog/iceberg-go"
+	iceinternal "github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 

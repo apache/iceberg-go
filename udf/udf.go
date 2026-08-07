@@ -20,8 +20,8 @@ package udf
 import (
 	"slices"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/table"
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/table"
 )
 
 // UDF is a function (SQL UDF) loaded from a catalog: its catalog identifier,

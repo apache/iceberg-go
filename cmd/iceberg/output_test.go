@@ -24,8 +24,8 @@ import (
 	"strings"
 	"testing"
 
-	iceio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/table"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

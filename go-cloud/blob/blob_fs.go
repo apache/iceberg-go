@@ -22,8 +22,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"gocloud.dev/gcerrors"
-	"gocloud.dev/internal/gcerr"
+	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	"github.com/DataDog/iceberg-go/go-cloud/internal/gcerr"
 )
 
 // Ensure that Bucket implements various io/fs interfaces.
