@@ -404,6 +404,34 @@ func TestInspectSnapshotsEmpty(t *testing.T) {
 	require.EqualValues(t, 6, rec.NumCols())
 }
 
+func TestInspectManifestsSchema(t *testing.T) {
+	sc := ManifestsSchema()
+
+	require.Equal(t,
+		[]string{"content", "path", "length", "partition_spec_id", "added_snapshot_id",
+			"added_data_files_count", "existing_data_files_count", "deleted_data_files_count",
+			"added_delete_files_count", "existing_delete_files_count", "deleted_delete_files_count",
+			"partition_summaries"},
+		testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, 14, fields[0].ID)
+	require.Equal(t, 1, fields[1].ID)
+	require.Equal(t, 17, fields[10].ID)
+	require.Equal(t, 8, fields[11].ID)
+	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
+	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
+
+	partitionSummary := fields[11].Type.(*iceberg.ListType).Element.(*iceberg.StructType)
+	require.Equal(t,
+		[]string{"contains_null", "contains_nan", "lower_bound", "upper_bound"},
+		testFieldNames(iceberg.NewSchema(0, partitionSummary.FieldList...)))
+	require.Equal(t, 10, partitionSummary.FieldList[0].ID)
+	require.Equal(t, 11, partitionSummary.FieldList[1].ID)
+	require.Equal(t, 12, partitionSummary.FieldList[2].ID)
+	require.Equal(t, 13, partitionSummary.FieldList[3].ID)
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
