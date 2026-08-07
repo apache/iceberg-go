@@ -803,7 +803,7 @@ func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
 	}{
 		{
 			name: "invalid transform",
-			data: `{"source-id":1,"field-id":1000,"transform":"not-a-transform","name":"new"}`,
+			data: `{"source-id":1,"field-id":1000,"transform":"bucket[0]","name":"new"}`,
 		},
 		{
 			name: "non-positive source ID",

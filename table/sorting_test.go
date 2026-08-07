@@ -364,7 +364,7 @@ func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
 	}{
 		{
 			name: "invalid transform",
-			data: `{"source-id":1,"transform":"not-a-transform","direction":"asc","null-order":"nulls-first"}`,
+			data: `{"source-id":1,"transform":"bucket[0]","direction":"asc","null-order":"nulls-first"}`,
 		},
 		{
 			name: "non-positive source ID",
