@@ -249,25 +249,55 @@ func createS3Bucket(ctx context.Context, parsed *url.URL, props map[string]strin
 	return bucket, nil
 }
 
-// awsChecksumSetupInputContextID is the ID of the SDK middleware that decides
-// which input checksum algorithm (if any) is recorded on the request context.
-// Everything downstream (the x-amz-checksum-* header, the x-amz-trailer and
-// aws-chunked framing, and the STREAMING- payload hash) is driven off that
-// context value, so suppressing it here suppresses all of them.
+// awsChecksumSetupInputContextID is the ID of the SDK middleware that records
+// which input checksum algorithm the SDK should compute for itself. That context
+// value drives the SDK-computed checksum: the x-amz-checksum-* header it derives
+// from the payload, the x-amz-trailer and aws-chunked framing, and the
+// STREAMING- payload hash.
+//
+// It does not cover checksums the caller supplies up front. The modeled
+// Checksum* input fields are bound directly to x-amz-checksum-* headers by the
+// serializers without consulting this context, so they have to be cleared on the
+// input as well (see clearS3WriteChecksumFields).
 const awsChecksumSetupInputContextID = "AWSChecksum:SetupInputContext"
 
-// s3WriteChecksumInputCleared clears the caller-supplied checksum algorithm on
-// the S3 write inputs, which the serializers otherwise bind straight to
-// x-amz-checksum-algorithm / x-amz-sdk-checksum-algorithm. It reports whether
-// the input was one of those write shapes.
-func s3WriteChecksumInputCleared(params any) bool {
+// clearS3WriteChecksumFields zeroes every input field the S3 serializers bind to
+// a forbidden checksum header on the object write shapes, and reports whether
+// the input was one of those shapes.
+//
+// The field sets differ per shape and are taken from the s3 v1.106.0 input
+// structs and their awsRestxml_serializeOpHttpBindings*Input serializers:
+// PutObjectInput and UploadPartInput carry ChecksumAlgorithm (bound to
+// x-amz-sdk-checksum-algorithm) plus the precomputed digests, but no
+// ChecksumType; CreateMultipartUploadInput carries only ChecksumAlgorithm (bound
+// to x-amz-checksum-algorithm) and ChecksumType; CompleteMultipartUploadInput
+// carries the precomputed digests and ChecksumType but no ChecksumAlgorithm.
+//
+// Per-part checksums inside CompleteMultipartUploadInput.MultipartUpload.Parts
+// are deliberately left alone: awsRestxml_serializeDocumentCompletedPart writes
+// them as XML elements in the request body, not as headers, so they are a
+// legitimate part of the completion request and clearing them could invalidate
+// it.
+func clearS3WriteChecksumFields(params any) bool {
 	switch v := params.(type) {
 	case *s3.PutObjectInput:
 		v.ChecksumAlgorithm = ""
+		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
+		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
+		v.ChecksumXXHASH128, v.ChecksumXXHASH3, v.ChecksumXXHASH64 = nil, nil, nil
 	case *s3.UploadPartInput:
 		v.ChecksumAlgorithm = ""
+		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
+		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
+		v.ChecksumXXHASH128, v.ChecksumXXHASH3, v.ChecksumXXHASH64 = nil, nil, nil
 	case *s3.CreateMultipartUploadInput:
 		v.ChecksumAlgorithm = ""
+		v.ChecksumType = ""
+	case *s3.CompleteMultipartUploadInput:
+		v.ChecksumType = ""
+		v.ChecksumCRC32, v.ChecksumCRC32C, v.ChecksumCRC64NVME = nil, nil, nil
+		v.ChecksumMD5, v.ChecksumSHA1, v.ChecksumSHA256, v.ChecksumSHA512 = nil, nil, nil, nil
+		v.ChecksumXXHASH128, v.ChecksumXXHASH3, v.ChecksumXXHASH64 = nil, nil, nil
 	default:
 		return false
 	}
@@ -295,9 +325,11 @@ func (m *suppressS3WriteChecksumSetup) ID() string {
 func (m *suppressS3WriteChecksumSetup) HandleInitialize(
 	ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler,
 ) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
-	if s3WriteChecksumInputCleared(in.Parameters) {
+	if isS3WriteInput(in.Parameters) {
 		// Skip the SDK setup entirely: with no algorithm on the context, the
-		// compute middleware is a no-op and the request carries no checksum.
+		// compute middleware is a no-op and the request carries no SDK-computed
+		// checksum. Caller-supplied values are handled by the clearing
+		// middleware, which runs for every operation.
 		return next.HandleInitialize(ctx, in)
 	}
 
@@ -308,28 +340,42 @@ func (m *suppressS3WriteChecksumSetup) HandleInitialize(
 	return next.HandleInitialize(ctx, in)
 }
 
-func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
-	suppress := &suppressS3WriteChecksumSetup{}
-
-	original, err := stack.Initialize.Swap(awsChecksumSetupInputContextID, suppress)
-	if err == nil {
-		suppress.original = original
-
-		return nil
+func isS3WriteInput(params any) bool {
+	switch params.(type) {
+	case *s3.PutObjectInput, *s3.UploadPartInput,
+		*s3.CreateMultipartUploadInput, *s3.CompleteMultipartUploadInput:
+		return true
 	}
 
-	// Operation has no checksum setup middleware (reads, and writes on older
-	// SDKs); clearing the input algorithm is all that is needed.
+	return false
+}
+
+func stripS3InputChecksumAlgorithm(stack *smithymiddleware.Stack) error {
+	// Clear caller-supplied checksum fields for every operation. This cannot be
+	// folded into the swap below: CreateMultipartUpload and CompleteMultipartUpload
+	// register no checksum setup middleware at all in s3 v1.106.0, so the swap
+	// never happens for them, yet both bind checksum inputs to headers.
 	clearInput := smithymiddleware.InitializeMiddlewareFunc(
 		"iceberg-go/strip-s3-input-checksum-algorithm",
 		func(ctx context.Context, in smithymiddleware.InitializeInput, next smithymiddleware.InitializeHandler) (smithymiddleware.InitializeOutput, smithymiddleware.Metadata, error) {
-			s3WriteChecksumInputCleared(in.Parameters)
+			clearS3WriteChecksumFields(in.Parameters)
 
 			return next.HandleInitialize(ctx, in)
 		},
 	)
+	if err := stack.Initialize.Add(clearInput, smithymiddleware.Before); err != nil {
+		return err
+	}
 
-	return stack.Initialize.Add(clearInput, smithymiddleware.Before)
+	// Additionally suppress the SDK's own computed checksum on write operations
+	// that do set up a checksum context (PutObject, UploadPart). A missing
+	// middleware is expected for the operations noted above, so it is not an error.
+	suppress := &suppressS3WriteChecksumSetup{}
+	if original, err := stack.Initialize.Swap(awsChecksumSetupInputContextID, suppress); err == nil {
+		suppress.original = original
+	}
+
+	return nil
 }
 
 // SDK-internal headers GCS's S3 interop endpoint rejects in the SigV4 signed set; removing
