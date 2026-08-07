@@ -23,7 +23,9 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -517,4 +519,14 @@ func testFieldNames(sc *iceberg.Schema) []string {
 	}
 
 	return names
+}
+
+func TestInspectValueScalarDecimal(t *testing.T) {
+	typ := iceberg.DecimalTypeOf(10, 2)
+	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
+	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
+
+	got, err := inspectValueScalar(value, typ, arrowType)
+	require.NoError(t, err)
+	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
 }
