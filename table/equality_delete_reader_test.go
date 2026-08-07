@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,9 +155,13 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	batch.Release()
 	file, err := iceio.LocalFS{}.Create(deletePath)
 	require.NoError(t, err)
-	defer file.Close()
-	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,
-		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	writeErr := pqarrow.WriteTable(deleteTable, file, 1,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	closeErr := file.Close()
+	require.NoError(t, writeErr)
+	if closeErr != nil {
+		require.ErrorIs(t, closeErr, fs.ErrClosed)
+	}
 	deleteTable.Release()
 	deleteBuilder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,

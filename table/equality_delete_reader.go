@@ -148,15 +148,19 @@ func resolveArrowField(schema *arrow.Schema, fieldID int, fieldName, filePath st
 }
 
 func arrowArrayAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, error) {
+	location := filePath
+	if location == "" {
+		location = "data record"
+	}
 	if len(ref.path) == 0 || ref.path[0] >= int(record.NumCols()) {
-		return nil, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, filePath)
+		return nil, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
 	}
 
 	result := record.Column(ref.path[0])
 	for _, index := range ref.path[1:] {
 		structArray, ok := result.(*array.Struct)
 		if !ok || index >= structArray.NumField() {
-			return nil, fmt.Errorf("equality field ID %d (%s) has unsupported nested path in %s", fieldID, fieldName, filePath)
+			return nil, fmt.Errorf("equality field ID %d (%s) has unsupported nested path in %s", fieldID, fieldName, location)
 		}
 		result = structArray.Field(index)
 	}
@@ -330,7 +334,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	for i, fid := range fieldIDs {
 		name, ok := tableSchema.FindColumnName(fid)
 		if !ok {
-			return nil, nil, fmt.Errorf("equality delete field ID %d not found in table schema", fid)
+			return nil, nil, fmt.Errorf("equality delete field ID %d not found in table schema for %s", fid, dataFile.FilePath())
 		}
 
 		ref, err := resolveArrowField(tbl.Schema(), fid, name, dataFile.FilePath())
