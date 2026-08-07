@@ -317,6 +317,43 @@ func TestSerializePartitionSpec(t *testing.T) {
 	assert.True(t, spec.Equals(outspec))
 }
 
+func TestDeserializePartitionSpecRequiresTopLevelFields(t *testing.T) {
+	t.Run("missing spec id defaults to initial id", func(t *testing.T) {
+		spec := iceberg.NewPartitionSpecID(7)
+		require.NoError(t, json.Unmarshal([]byte(`{"fields": []}`), &spec))
+		assert.Equal(t, iceberg.InitialPartitionSpecID, spec.ID())
+		assert.Zero(t, spec.NumFields())
+	})
+
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{name: "null spec id", data: `{"spec-id": null, "fields": []}`},
+		{name: "missing fields", data: `{"spec-id": 3}`},
+		{name: "null fields", data: `{"spec-id": 3, "fields": null}`},
+		{name: "non-array fields", data: `{"spec-id": 3, "fields": {}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := iceberg.NewPartitionSpecID(7)
+			err := json.Unmarshal([]byte(tt.data), &spec)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.Equal(t, 7, spec.ID())
+			assert.Zero(t, spec.NumFields())
+		})
+	}
+}
+
+func TestDeserializePartitionSpecWrapsMalformedJSON(t *testing.T) {
+	for _, data := range []string{`[]`, `{"fields": [1]}`} {
+		t.Run(data, func(t *testing.T) {
+			var spec iceberg.PartitionSpec
+			err := json.Unmarshal([]byte(data), &spec)
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		})
+	}
+}
+
 func TestDeserializePartitionSpecWithoutFieldIDs(t *testing.T) {
 	data := []byte(`{
 		"spec-id": 3,
