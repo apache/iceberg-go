@@ -328,21 +328,12 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 // metadata timestamp, then resolve its details independently. The snapshot
 // ID remains available when the snapshot itself has expired from metadata.
 func latestSnapshotAt(metadata Metadata, timestampMs int64) (int64, *Snapshot, bool) {
-	var snapshotID int64
-	var latestTimestamp int64
-	found := false
-	for entry := range metadata.SnapshotLogs() {
-		if entry.TimestampMs <= timestampMs && (!found || entry.TimestampMs > latestTimestamp) {
-			snapshotID = entry.SnapshotID
-			latestTimestamp = entry.TimestampMs
-			found = true
-		}
-	}
+	entry, found := snapshotLogEntryAsOf(metadata.SnapshotLogs(), timestampMs, true)
 	if !found {
 		return 0, nil, false
 	}
 
-	return snapshotID, metadata.SnapshotByID(snapshotID), true
+	return entry.SnapshotID, metadata.SnapshotByID(entry.SnapshotID), true
 }
 
 // HistorySchema returns the Iceberg schema of the history metadata table. The
@@ -384,8 +375,9 @@ func SnapshotsSchema() *iceberg.Schema {
 	)
 }
 
-// MetadataLogEntriesSchema returns the Iceberg schema of the metadata-log-entries
-// metadata table. The field IDs and names match Java's implementation.
+// MetadataLogEntriesSchema returns a fresh Iceberg schema for the
+// metadata-log-entries metadata table. The field IDs and names match Java's
+// implementation; callers should not rely on pointer identity.
 func MetadataLogEntriesSchema() *iceberg.Schema {
 	return iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "timestamp", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},

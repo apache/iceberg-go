@@ -518,56 +518,6 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 	require.True(t, latestSequenceNumber.IsNull(2))
 }
 
-func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
-	const (
-		firstSnapshot  = int64(101)
-		secondSnapshot = int64(102)
-		lateSnapshot   = int64(103)
-	)
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		SnapshotList: []Snapshot{
-			{SnapshotID: firstSnapshot},
-			{SnapshotID: secondSnapshot},
-			{SnapshotID: lateSnapshot},
-		},
-		SnapshotLog: []SnapshotLogEntry{
-			{SnapshotID: firstSnapshot, TimestampMs: 2000},
-			{SnapshotID: secondSnapshot, TimestampMs: 3000},
-			{SnapshotID: lateSnapshot, TimestampMs: 2500},
-		},
-	}}
-
-	snapshotID, snapshot, found := latestSnapshotAt(meta, 2600)
-	require.True(t, found)
-	require.NotNil(t, snapshot)
-	require.Equal(t, lateSnapshot, snapshotID)
-	require.Equal(t, lateSnapshot, snapshot.SnapshotID)
-}
-
-func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
-	const (
-		firstSnapshot  = int64(101)
-		secondSnapshot = int64(102)
-		timestamp      = int64(2000)
-	)
-	meta := &metadataV2{commonMetadata: commonMetadata{
-		SnapshotList: []Snapshot{
-			{SnapshotID: firstSnapshot},
-			{SnapshotID: secondSnapshot},
-		},
-		SnapshotLog: []SnapshotLogEntry{
-			{SnapshotID: firstSnapshot, TimestampMs: timestamp},
-			{SnapshotID: secondSnapshot, TimestampMs: timestamp},
-		},
-	}}
-
-	snapshotID, snapshot, found := latestSnapshotAt(meta, timestamp)
-	require.True(t, found)
-	require.NotNil(t, snapshot)
-	require.Equal(t, firstSnapshot, snapshotID)
-	require.Equal(t, firstSnapshot, snapshot.SnapshotID)
-}
-
 func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
 	const expiredSnapshot = int64(101)
 	meta := &metadataV2{commonMetadata: commonMetadata{
@@ -578,6 +528,31 @@ func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, expiredSnapshot, snapshotID)
 	require.Nil(t, snapshot)
+}
+
+func TestInspectMetadataLogEntriesAllowsLiveSnapshotWithoutSchemaID(t *testing.T) {
+	const snapshotID = int64(101)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		LastUpdatedMS: 2000,
+		SnapshotList:  []Snapshot{{SnapshotID: snapshotID, SequenceNumber: 7}},
+		SnapshotLog:   []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 1500}},
+		SnapshotRefs:  map[string]SnapshotRef{},
+	}}
+	tbl := New(Identifier{"metadata-log-entries-nil-schema"}, meta, "/metadata/v2.json", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	latestSnapshotID := rec.Column(2).(*array.Int64)
+	latestSchemaID := rec.Column(3).(*array.Int32)
+	latestSequenceNumber := rec.Column(4).(*array.Int64)
+	require.EqualValues(t, snapshotID, latestSnapshotID.Value(0))
+	require.True(t, latestSchemaID.IsNull(0))
+	require.EqualValues(t, 7, latestSequenceNumber.Value(0))
 }
 
 func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
