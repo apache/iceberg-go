@@ -387,10 +387,16 @@ func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
 				NullOrder: table.NullsLast,
 			}
 			field := initial
+			field.SourceIDs = []int{7}
 			require.Error(t, json.Unmarshal([]byte(test.data), &field))
 			assert.Equal(t, initial, field)
 		})
 	}
+}
+
+func TestSortFieldUnmarshalJSON(t *testing.T) {
+	var field table.SortField
+	require.Error(t, json.Unmarshal([]byte(`[1, 2]`), &field))
 }
 
 func TestSortFieldMultiArgSourceIDs(t *testing.T) {
@@ -409,11 +415,6 @@ func TestSortFieldMultiArgSourceIDs(t *testing.T) {
 		err := json.Unmarshal([]byte(jsonData), &field)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot contain both source-id and source-ids")
-	})
-
-	t.Run("unmarshal rejects malformed JSON", func(t *testing.T) {
-		var field table.SortField
-		require.Error(t, json.Unmarshal([]byte(`{"source-id":`), &field))
 	})
 
 	t.Run("unmarshal rejects missing/invalid source ids", func(t *testing.T) {

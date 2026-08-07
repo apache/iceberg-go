@@ -769,9 +769,9 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.ErrorContains(t, err, "source-ids cannot be empty")
 	})
 
-	t.Run("unmarshal rejects malformed JSON", func(t *testing.T) {
+	t.Run("unmarshal rejects non-object JSON", func(t *testing.T) {
 		var field iceberg.PartitionField
-		require.Error(t, json.Unmarshal([]byte(`{"source-id":`), &field))
+		require.Error(t, json.Unmarshal([]byte(`[1, 2]`), &field))
 	})
 
 	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
@@ -784,6 +784,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
 		assert.Equal(t, 0, field.SourceID())
+		assert.Equal(t, []int{0}, field.SourceIDs)
 	})
 
 	t.Run("unmarshal void with source id", func(t *testing.T) {
@@ -825,6 +826,7 @@ func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
 				Transform: iceberg.IdentityTransform{},
 			}
 			field := initial
+			field.SourceIDs = slices.Clone(initial.SourceIDs)
 			require.Error(t, json.Unmarshal([]byte(test.data), &field))
 			assert.Equal(t, initial, field)
 		})
@@ -833,7 +835,7 @@ func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
 
 func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
-		SourceIDs: []int{1},
+		SourceIDs: []int{1, 2},
 		FieldID:   1000,
 		Name:      "old field",
 		Transform: iceberg.IdentityTransform{},
@@ -848,6 +850,7 @@ func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
 	}`), &field))
 
 	assert.Equal(t, []int{2}, field.SourceIDs)
+	assert.Equal(t, 1001, field.FieldID)
 	assert.Equal(t, "new field", field.Name)
 	assert.Equal(t, "new+field", field.EscapedName())
 }
