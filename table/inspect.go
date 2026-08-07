@@ -291,8 +291,8 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 		timestamp.Append(arrow.Timestamp(entry.TimestampMs * 1000))
 		file.Append(entry.MetadataFile)
 
-		snapshot := latestSnapshotAt(i.tbl.metadata, entry.TimestampMs)
-		if snapshot == nil {
+		snapshotID, snapshot, found := latestSnapshotAt(i.tbl.metadata, entry.TimestampMs)
+		if !found {
 			latestSnapshotID.AppendNull()
 			latestSchemaID.AppendNull()
 			latestSequenceNumber.AppendNull()
@@ -300,7 +300,13 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 			continue
 		}
 
-		latestSnapshotID.Append(snapshot.SnapshotID)
+		latestSnapshotID.Append(snapshotID)
+		if snapshot == nil {
+			latestSchemaID.AppendNull()
+			latestSequenceNumber.AppendNull()
+
+			continue
+		}
 		if snapshot.SchemaID != nil {
 			latestSchemaID.Append(int32(*snapshot.SchemaID))
 		} else {
@@ -319,9 +325,9 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 
 // latestSnapshotAt follows the metadata-table behavior used by Java's
 // MetadataLogEntriesTable: find the snapshot-log entry at or before the
-// metadata timestamp, then expose its details only if that snapshot is still
-// present in the current metadata.
-func latestSnapshotAt(metadata Metadata, timestampMs int64) *Snapshot {
+// metadata timestamp, then resolve its details independently. The snapshot
+// ID remains available when the snapshot itself has expired from metadata.
+func latestSnapshotAt(metadata Metadata, timestampMs int64) (int64, *Snapshot, bool) {
 	var snapshotID int64
 	var latestTimestamp int64
 	found := false
@@ -333,10 +339,10 @@ func latestSnapshotAt(metadata Metadata, timestampMs int64) *Snapshot {
 		}
 	}
 	if !found {
-		return nil
+		return 0, nil, false
 	}
 
-	return metadata.SnapshotByID(snapshotID)
+	return snapshotID, metadata.SnapshotByID(snapshotID), true
 }
 
 // HistorySchema returns the Iceberg schema of the history metadata table. The

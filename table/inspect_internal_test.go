@@ -431,8 +431,9 @@ func TestInspectMetadataLogEntriesSchema(t *testing.T) {
 
 func TestInspectMetadataLogEntries(t *testing.T) {
 	const (
-		s1 = int64(101)
-		s2 = int64(102)
+		s1      = int64(101)
+		s2      = int64(102)
+		expired = int64(999)
 	)
 	schema1 := 1
 	schema2 := 2
@@ -465,6 +466,7 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 		SnapshotLog: []SnapshotLogEntry{
 			{SnapshotID: s1, TimestampMs: 1500},
 			{SnapshotID: s2, TimestampMs: 3000},
+			{SnapshotID: expired, TimestampMs: 3500},
 		},
 		CurrentSnapshotID:  &current,
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
@@ -509,9 +511,11 @@ func TestInspectMetadataLogEntries(t *testing.T) {
 	require.EqualValues(t, s1, latestSnapshotID.Value(1))
 	require.EqualValues(t, schema1, latestSchemaID.Value(1))
 	require.EqualValues(t, 7, latestSequenceNumber.Value(1))
-	require.EqualValues(t, s2, latestSnapshotID.Value(2))
-	require.EqualValues(t, schema2, latestSchemaID.Value(2))
-	require.EqualValues(t, 8, latestSequenceNumber.Value(2))
+	// The snapshot log can retain an entry after the snapshot itself expires.
+	// Keep its ID while leaving details that require the missing snapshot null.
+	require.EqualValues(t, expired, latestSnapshotID.Value(2))
+	require.True(t, latestSchemaID.IsNull(2))
+	require.True(t, latestSequenceNumber.IsNull(2))
 }
 
 func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
@@ -533,8 +537,10 @@ func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
 		},
 	}}
 
-	snapshot := latestSnapshotAt(meta, 2600)
+	snapshotID, snapshot, found := latestSnapshotAt(meta, 2600)
+	require.True(t, found)
 	require.NotNil(t, snapshot)
+	require.Equal(t, lateSnapshot, snapshotID)
 	require.Equal(t, lateSnapshot, snapshot.SnapshotID)
 }
 
@@ -555,9 +561,23 @@ func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
 		},
 	}}
 
-	snapshot := latestSnapshotAt(meta, timestamp)
+	snapshotID, snapshot, found := latestSnapshotAt(meta, timestamp)
+	require.True(t, found)
 	require.NotNil(t, snapshot)
+	require.Equal(t, firstSnapshot, snapshotID)
 	require.Equal(t, firstSnapshot, snapshot.SnapshotID)
+}
+
+func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
+	const expiredSnapshot = int64(101)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotLog: []SnapshotLogEntry{{SnapshotID: expiredSnapshot, TimestampMs: 2000}},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, 2500)
+	require.True(t, found)
+	require.Equal(t, expiredSnapshot, snapshotID)
+	require.Nil(t, snapshot)
 }
 
 func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
