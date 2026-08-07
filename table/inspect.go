@@ -322,20 +322,21 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 // metadata timestamp, then expose its details only if that snapshot is still
 // present in the current metadata.
 func latestSnapshotAt(metadata Metadata, timestampMs int64) *Snapshot {
-	var snapshotID *int64
+	var snapshotID int64
+	var latestTimestamp int64
+	found := false
 	for entry := range metadata.SnapshotLogs() {
-		if entry.TimestampMs > timestampMs {
-			break
+		if entry.TimestampMs <= timestampMs && (!found || entry.TimestampMs >= latestTimestamp) {
+			snapshotID = entry.SnapshotID
+			latestTimestamp = entry.TimestampMs
+			found = true
 		}
-
-		id := entry.SnapshotID
-		snapshotID = &id
 	}
-	if snapshotID == nil {
+	if !found {
 		return nil
 	}
 
-	return metadata.SnapshotByID(*snapshotID)
+	return metadata.SnapshotByID(snapshotID)
 }
 
 // HistorySchema returns the Iceberg schema of the history metadata table. The
