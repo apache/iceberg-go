@@ -312,14 +312,21 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			deletedDeleteFiles.Append(manifest.DeletedDataFiles())
 		}
 
-		if manifest.Partitions() == nil {
+		partitions := manifest.Partitions()
+		if partitions == nil {
 			partitionSummaries.AppendNull()
 
 			continue
 		}
 
+		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
+		var partType *iceberg.StructType
+		if spec != nil {
+			partType = spec.PartitionType(i.tbl.metadata.CurrentSchema())
+		}
+
 		partitionSummaries.Append(true)
-		for idx, summary := range manifest.Partitions() {
+		for idx, summary := range partitions {
 			summaryStruct.Append(true)
 			summaryContainsNull.Append(summary.ContainsNull)
 			if summary.ContainsNaN == nil {
@@ -328,7 +335,6 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 				summaryContainsNaN.Append(*summary.ContainsNaN)
 			}
 
-			spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
 			if spec == nil || idx >= spec.NumFields() {
 				summaryLower.AppendNull()
 				summaryUpper.AppendNull()
@@ -336,7 +342,6 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 				continue
 			}
 
-			partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
 			if idx >= len(partType.FieldList) {
 				summaryLower.AppendNull()
 				summaryUpper.AppendNull()
