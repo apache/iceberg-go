@@ -790,6 +790,12 @@ type Catalog struct {
 	// metrics-reporter-impl cannot select (or, via an unregistered name, break)
 	// a reporter the client never asked for.
 	reporterProps iceberg.Properties
+	// metricsDispatcher POSTs scan/commit reports to the server's metrics
+	// endpoint on a bounded worker pool shared across this catalog's table
+	// reporters. It is nil unless the client opted in (reportMetricsEnabled, read
+	// from reporterProps) and the server advertises the endpoint. Owned here and
+	// closed by Close.
+	metricsDispatcher *metricsDispatcher
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -928,6 +934,16 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
 	r.props = toProps(ops)
+
+	// Stand up the metrics dispatcher only when the client opted in and the
+	// server advertises the endpoint. Enablement is read from the
+	// client-supplied properties alone (see reporterProps): a server-vended
+	// default, override, or table-response property must never turn on outbound
+	// telemetry the client never asked for.
+	if reportMetricsEnabled(r.reporterProps) && r.endpoints.check(endpointReportMetrics) == nil {
+		r.metricsDispatcher = newMetricsDispatcher(
+			metricsDispatchWorkers, metricsDispatchQueueSize, reportMetricsTimeout(r.reporterProps), nil)
+	}
 
 	return nil
 }
@@ -1079,7 +1095,8 @@ func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
 // Close drains idle connections from transports created by the catalog and
-// closes its metrics reporter.
+// releases its metrics reporter. Closing the metrics dispatcher cancels any
+// in-flight reports and drains its workers so outbound telemetry stops.
 // Caller-provided transports remain caller-owned. Close is safe to call more
 // than once. Callers holding a [catalog.Catalog] can reach this via a
 // [catalog.Closer] type assertion.
@@ -1087,6 +1104,9 @@ func (r *Catalog) Close() error {
 	r.closeSessionOnce.Do(func() {
 		if r.closeSession != nil {
 			r.closeSession()
+		}
+		if r.metricsDispatcher != nil {
+			r.metricsDispatcher.close()
 		}
 		r.closeErr = r.reporter.Close()
 	})
@@ -1143,12 +1163,18 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
-	// Opt-in: POST scan/commit reports to the catalog's metrics endpoint, but
-	// only when enabled and the server advertises the endpoint.
-	if config.GetBool(keyReportMetricsEnabled, false) && r.endpoints.check(endpointReportMetrics) == nil {
+	// Opt-in: POST scan/commit reports to the catalog's metrics endpoint via the
+	// catalog-owned dispatcher. It is non-nil only when the client enabled
+	// reporting and the server advertises the endpoint (see init).
+	if r.metricsDispatcher != nil {
 		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr == nil {
 			if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr == nil {
-				reporter = metrics.Combine(reporter, &restMetricsReporter{baseURI: r.baseURI, cl: r.cl, path: path})
+				reporter = metrics.Combine(reporter, &restMetricsReporter{
+					baseURI:    r.baseURI,
+					cl:         r.cl,
+					path:       path,
+					dispatcher: r.metricsDispatcher,
+				})
 			}
 		}
 	}
