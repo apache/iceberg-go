@@ -661,11 +661,13 @@ func TestDataFilesSchema(t *testing.T) {
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	}})
 
-	require.Equal(t, []string{"content", "file_path", "file_format", "spec_id", "partition",
+	require.Equal(t, []string{
+		"content", "file_path", "file_format", "spec_id", "partition",
 		"record_count", "file_size_in_bytes", "column_sizes", "value_counts", "null_value_counts",
 		"nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
 		"equality_ids", "sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
-		"content_size_in_bytes"}, testFieldNames(sc))
+		"content_size_in_bytes",
+	}, testFieldNames(sc))
 
 	fields := sc.Fields()
 	require.Equal(t, 134, fields[0].ID)
