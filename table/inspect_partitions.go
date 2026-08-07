@@ -154,7 +154,6 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 			aggregate := aggregateTree.lookup(record)
 			if aggregate == nil {
 				aggregate = &inspectPartitionAggregate{
-					specID:          file.SpecID(),
 					partition:       cloneInspectPartition(partition),
 					partitionRecord: record,
 					orderingKey:     inspectPartitionKey(partition),
