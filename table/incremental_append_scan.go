@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sort"
 
 	"github.com/apache/iceberg-go"
 )
@@ -93,15 +94,6 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if len(snapshots) == 0 {
 		return nil, nil
 	}
-	if s.scan.tblFSUnavailable() {
-		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
-	}
-
-	fs, err := s.scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	appendSnapshots := make(map[int64]struct{}, len(snapshots))
 	for _, snapshot := range snapshots {
 		if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
@@ -112,11 +104,19 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		return nil, nil
 	}
 
-	tasks := make([]FileScanTask, 0)
+	if s.scan.ioF == nil {
+		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
+	}
+	fs, err := s.scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// An inherited manifest can occur in every later snapshot's manifest list.
+	// Read each manifest path once, just as the Java incremental append scan
+	// collects the selected manifests into a set before opening them.
+	manifestsByPath := make(map[string]iceberg.ManifestFile)
 	for _, snapshot := range snapshots {
-		if _, ok := appendSnapshots[snapshot.SnapshotID]; !ok {
-			continue
-		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -131,24 +131,51 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 			if _, ok := appendSnapshots[manifest.SnapshotID()]; !ok {
 				continue
 			}
-			for entry, err := range manifest.Entries(fs, true) {
-				if err != nil {
-					return nil, err
-				}
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				if entry.Status() != iceberg.EntryStatusADDED {
-					continue
-				}
-				if _, ok := appendSnapshots[entry.SnapshotID()]; !ok {
-					continue
-				}
-				file := entry.DataFile()
-				tasks = append(tasks, FileScanTask{File: file, Length: file.FileSizeBytes()})
-			}
+			manifestsByPath[manifest.FilePath()] = manifest
 		}
 	}
+
+	paths := make([]string, 0, len(manifestsByPath))
+	for path := range manifestsByPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	manifestList := make([]iceberg.ManifestFile, 0, len(paths))
+	for _, path := range paths {
+		manifestList = append(manifestList, manifestsByPath[path])
+	}
+
+	planningScan := *s.scan
+	planningScan.snapshotID = &toSnapshot.SnapshotID
+	planningScan.asOfTimestamp = nil
+	schema, err := planningScan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make([]FileScanTask, 0, len(entries.dataEntries))
+	for _, entry := range entries.dataEntries {
+		if entry.Status() != iceberg.EntryStatusADDED {
+			continue
+		}
+		if _, ok := appendSnapshots[entry.SnapshotID()]; !ok {
+			continue
+		}
+		file := entry.DataFile()
+		task := FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+		task.FirstRowID = file.FirstRowID()
+		if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
+			task.DataSequenceNumber = &sequenceNumber
+		}
+		tasks = append(tasks, task)
+	}
+	sort.Slice(tasks, func(left, right int) bool {
+		return tasks[left].File.FilePath() < tasks[right].File.FilePath()
+	})
 
 	return tasks, nil
 }
@@ -208,8 +235,4 @@ func appendOnlySnapshots(snapshots []Snapshot) []Snapshot {
 	}
 
 	return result
-}
-
-func (s *Scan) tblFSUnavailable() bool {
-	return s.ioF == nil
 }
