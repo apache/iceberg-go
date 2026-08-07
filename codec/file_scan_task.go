@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -255,11 +256,28 @@ func decodeFileScanTaskResidual(data []byte, schema *iceberg.Schema) (iceberg.Bo
 // carrying a different spec would silently mis-map or drop partition values and
 // still succeed. Every file in a FileScanTask must therefore share spec.ID().
 func checkDataFileSpecID(f iceberg.DataFile, spec iceberg.PartitionSpec) error {
+	if isNilDataFile(f) {
+		return fmt.Errorf("%w: data file is nil", iceberg.ErrInvalidArgument)
+	}
 	if int(f.SpecID()) != spec.ID() {
 		return fmt.Errorf("data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", f.SpecID(), spec.ID())
 	}
 
 	return nil
+}
+
+func isNilDataFile(f iceberg.DataFile) bool {
+	if f == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(f)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 func encodeDataFileSlice(files []iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([][]byte, error) {
