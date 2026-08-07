@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -37,65 +36,20 @@ func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
 		return nil, fmt.Errorf("inspect entries: build arrow schema: %w", err)
 	}
 
-	entries, err := i.currentManifestEntries(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("inspect entries: %w", err)
-	}
+	rr, err := i.manifestEntryReader(ctx, arrowSchema, false, nil,
+		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+			bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
+			appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
+			appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
+			appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
 
-	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
-	defer bldr.Release()
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
-		appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
-		appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
-		appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
-		if err := appendContentFile(bldr.Field(4).(*array.StructBuilder), partitionType, entry.DataFile()); err != nil {
-			return nil, fmt.Errorf("inspect entries: append %w", err)
-		}
-	}
-
-	rr, err := singleBatchReader(arrowSchema, bldr)
+			return appendContentFile(bldr.Field(4).(*array.StructBuilder), partitionType, entry.DataFile())
+		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect entries: %w", err)
 	}
 
 	return rr, nil
-}
-
-func (i InspectTable) currentManifestEntries(ctx context.Context) ([]iceberg.ManifestEntry, error) {
-	snapshot := i.tbl.metadata.CurrentSnapshot()
-	if snapshot == nil {
-		return nil, nil
-	}
-	if i.tbl.fsF == nil {
-		return nil, errors.New("table file IO is not configured")
-	}
-	fs, err := i.tbl.fsF(ctx)
-	if err != nil {
-		return nil, err
-	}
-	manifests, err := snapshot.Manifests(fs)
-	if err != nil {
-		return nil, err
-	}
-
-	entries := make([]iceberg.ManifestEntry, 0)
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		for entry, err := range manifest.Entries(fs, false) {
-			if err != nil {
-				return nil, err
-			}
-			entries = append(entries, entry)
-		}
-	}
-
-	return entries, nil
 }
 
 // EntriesSchema returns the schema of the entries metadata table.
