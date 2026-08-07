@@ -526,6 +526,63 @@ func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	require.EqualValues(t, snapshotID, record.Column(10).(*array.Int64).Value(0))
 }
 
+func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
+	const (
+		expiredSnapshotID = int64(1)
+		currentSnapshotID = int64(2)
+	)
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	file := newTestDataFile(t, spec,
+		"mem://default/table-location/data/expired.parquet", map[int]any{1000: int32(7)})
+	sequenceNumber := int64(1)
+	manifestPath := "mem://default/table-location/metadata/expired-manifest.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, expiredSnapshotID,
+		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	manifest = iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
+		SequenceNum(sequenceNumber, sequenceNumber).
+		AddedFiles(1).
+		AddedRows(1).
+		Build()
+
+	manifestListPath := "mem://default/table-location/metadata/snap-2-manifest-list.avro"
+	var listBuf bytes.Buffer
+	currentSequenceNumber := int64(2)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, currentSnapshotID, nil,
+		&currentSequenceNumber, 0, []iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     currentSnapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: currentSequenceNumber,
+		TimestampMs:    2000,
+	}}
+	txn.meta.currentSnapshotID = int64Ptr(currentSnapshotID)
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().Partitions(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, 0, record.Column(1).(*array.Int32).Value(0))
+	require.True(t, record.Column(9).IsNull(0))
+	require.True(t, record.Column(10).IsNull(0))
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
