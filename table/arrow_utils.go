@@ -870,7 +870,7 @@ func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ st
 		return nil
 	}
 
-	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	field, ok := a.fileSchema.FindFieldByIDRef(fieldID, internal.SchemaRef{})
 	if !ok {
 		return nil
 	}
@@ -1062,7 +1062,7 @@ func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType 
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
-	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	fileField, ok := a.fileSchema.FindFieldByIDRef(field.ID, internal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
 	}
