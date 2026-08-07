@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -312,6 +313,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 
 		if manifest.Partitions() == nil {
 			partitionSummaries.AppendNull()
+
 			continue
 		}
 
@@ -329,6 +331,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			if spec == nil || idx >= spec.NumFields() {
 				summaryLower.AppendNull()
 				summaryUpper.AppendNull()
+
 				continue
 			}
 
@@ -336,6 +339,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			if idx >= len(partType.FieldList) {
 				summaryLower.AppendNull()
 				summaryUpper.AppendNull()
+
 				continue
 			}
 			fieldType := partType.FieldList[idx].Type
@@ -359,7 +363,7 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 		return nil, nil
 	}
 	if i.tbl.fsF == nil {
-		return nil, fmt.Errorf("table file IO is not configured")
+		return nil, errors.New("table file IO is not configured")
 	}
 
 	fs, err := i.tbl.fsF(ctx)
@@ -373,12 +377,14 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) {
 	if bound == nil {
 		builder.AppendNull()
+
 		return
 	}
 
 	literal, err := iceberg.LiteralFromBytes(typ, *bound)
 	if err != nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
