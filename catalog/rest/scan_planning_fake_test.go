@@ -711,62 +711,6 @@ func waitForPlanFakeResult(t *testing.T, ctx context.Context, result <-chan erro
 	}
 }
 
-type rawPlanningFixture struct {
-	Status             string                        `json:"status"`
-	PlanID             string                        `json:"plan-id"`
-	PlanTasks          []string                      `json:"plan-tasks"`
-	FileScanTasks      []rawFileScanTaskFixture      `json:"file-scan-tasks"`
-	DeleteFiles        []rawDeleteFileFixture        `json:"delete-files"`
-	StorageCredentials []rawStorageCredentialFixture `json:"storage-credentials"`
-}
-
-type rawFileScanTaskFixture struct {
-	DataFile             rawDataFileFixture `json:"data-file"`
-	DeleteFileReferences []int              `json:"delete-file-references"`
-	ResidualFilter       json.RawMessage    `json:"residual-filter"`
-}
-
-type rawDataFileFixture struct {
-	SpecID      int                `json:"spec-id"`
-	Partition   []json.RawMessage  `json:"partition"`
-	Content     string             `json:"content"`
-	FilePath    string             `json:"file-path"`
-	LowerBounds rawValueMapFixture `json:"lower-bounds"`
-	UpperBounds rawValueMapFixture `json:"upper-bounds"`
-	ColumnSizes rawCountMapFixture `json:"column-sizes"`
-}
-
-type rawDeleteFileFixture struct {
-	SpecID    int               `json:"spec-id"`
-	Partition []json.RawMessage `json:"partition"`
-	Content   string            `json:"content"`
-	FilePath  string            `json:"file-path"`
-}
-
-type rawValueMapFixture struct {
-	Keys   []int    `json:"keys"`
-	Values []string `json:"values"`
-}
-
-type rawCountMapFixture struct {
-	Keys   []int   `json:"keys"`
-	Values []int64 `json:"values"`
-}
-
-type rawStorageCredentialFixture struct {
-	Prefix string            `json:"prefix"`
-	Config map[string]string `json:"config"`
-}
-
-func parseRawPlanningFixture(t *testing.T, body string) rawPlanningFixture {
-	t.Helper()
-
-	var fixture rawPlanningFixture
-	require.NoError(t, json.Unmarshal([]byte(body), &fixture))
-
-	return fixture
-}
-
 func fetchRawPlanTaskFixture(t *testing.T, serverURL, planTask string) rawPlanningFixture {
 	t.Helper()
 

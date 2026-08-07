@@ -46,7 +46,11 @@ services:
       retries: 12
       start_period: 30s
   rest:
-    image: apache/iceberg-rest-fixture:1.10.1
+    # 1.10.1 predates the fixture's scan-planning implementation. Pin the
+    # multi-platform image built from apache/iceberg@b0df3ca so the Java wire
+    # compatibility tests are reproducible even though the released tag is not
+    # available yet.
+    image: apache/iceberg-rest-fixture:latest@sha256:db8de90b5b7693d4ac334c336f91d9bbe320d7b19f4f514d26de84cdfbcbfe8d
     container_name: iceberg-rest
     networks:
       iceberg_net:
@@ -59,6 +63,10 @@ services:
       - CATALOG_WAREHOUSE=s3://warehouse/
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
       - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_INCLUDE__CREDENTIALS=true
+      # Use a non-S3 credential so vending can be asserted without changing the
+      # static MinIO credentials used by the fixture's backing FileIO.
+      - CATALOG_GCS_OAUTH2_TOKEN=scan-planning-integration-token
   minio:
     image: minio/minio
     container_name: minio
