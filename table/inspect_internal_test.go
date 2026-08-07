@@ -404,6 +404,19 @@ func TestInspectSnapshotsEmpty(t *testing.T) {
 	require.EqualValues(t, 6, rec.NumCols())
 }
 
+func TestEntriesSchema(t *testing.T) {
+	sc := EntriesSchema(&iceberg.StructType{})
+	require.Equal(t, []string{"status", "snapshot_id", "sequence_number", "file_sequence_number", "data_file"}, testFieldNames(sc))
+	require.Equal(t, 0, sc.Fields()[0].ID)
+	require.Equal(t, 2, sc.Fields()[4].ID)
+	require.True(t, sc.Fields()[4].Required)
+
+	dataFile := sc.Fields()[4].Type.(*iceberg.StructType)
+	require.Equal(t, 134, dataFile.FieldList[0].ID)
+	require.Equal(t, "file_path", dataFile.FieldList[1].Name)
+	require.Equal(t, 145, dataFile.FieldList[len(dataFile.FieldList)-1].ID)
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
