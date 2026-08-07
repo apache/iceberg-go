@@ -296,6 +296,7 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 			latestSnapshotID.AppendNull()
 			latestSchemaID.AppendNull()
 			latestSequenceNumber.AppendNull()
+
 			continue
 		}
 
