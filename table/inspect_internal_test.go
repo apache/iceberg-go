@@ -409,19 +409,23 @@ func TestPartitionsSchema(t *testing.T) {
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 	}}
 	sc := PartitionsSchema(partitionType)
-	require.Equal(t, []string{"partition", "spec_id", "record_count", "file_count",
+	require.Equal(t, []string{
+		"partition", "spec_id", "record_count", "file_count",
 		"total_data_file_size_in_bytes", "position_delete_record_count", "position_delete_file_count",
 		"equality_delete_record_count", "equality_delete_file_count", "last_updated_at",
-		"last_updated_snapshot_id"}, testFieldNames(sc))
+		"last_updated_snapshot_id",
+	}, testFieldNames(sc))
 	require.Equal(t, 1, sc.Fields()[0].ID)
 	require.Equal(t, 4, sc.Fields()[1].ID)
 	require.Equal(t, 11, sc.Fields()[4].ID)
 	require.Equal(t, 10, sc.Fields()[10].ID)
 
 	unpartitioned := PartitionsSchema(&iceberg.StructType{})
-	require.Equal(t, []string{"record_count", "file_count", "total_data_file_size_in_bytes",
+	require.Equal(t, []string{
+		"record_count", "file_count", "total_data_file_size_in_bytes",
 		"position_delete_record_count", "position_delete_file_count", "equality_delete_record_count",
-		"equality_delete_file_count", "last_updated_at", "last_updated_snapshot_id"}, testFieldNames(unpartitioned))
+		"equality_delete_file_count", "last_updated_at", "last_updated_snapshot_id",
+	}, testFieldNames(unpartitioned))
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
