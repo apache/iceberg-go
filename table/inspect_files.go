@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -70,7 +71,7 @@ func (i InspectTable) currentContentFiles(ctx context.Context, content iceberg.M
 		return nil, nil
 	}
 	if i.tbl.fsF == nil {
-		return nil, fmt.Errorf("table file IO is not configured")
+		return nil, errors.New("table file IO is not configured")
 	}
 
 	fs, err := i.tbl.fsF(ctx)
@@ -208,6 +209,7 @@ func appendPartitionStruct(builder *array.StructBuilder, partitionType *iceberg.
 		value := values[field.ID]
 		if value == nil {
 			builder.FieldBuilder(idx).AppendNull()
+
 			continue
 		}
 		sc, err := inspectValueScalar(value, field.Type, arrowType.Field(idx).Type)
@@ -255,6 +257,7 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -274,6 +277,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) {
 func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -293,6 +297,7 @@ func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) {
 func appendInspectBytes(builder array.Builder, value []byte) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.(*array.BinaryBuilder).Append(value)
@@ -301,6 +306,7 @@ func appendInspectBytes(builder array.Builder, value []byte) {
 func appendInspectInt64List(builder *array.ListBuilder, values []int64) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -310,6 +316,7 @@ func appendInspectInt64List(builder *array.ListBuilder, values []int64) {
 func appendInspectInt32List(builder *array.ListBuilder, values []int) {
 	if values == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(true)
@@ -322,6 +329,7 @@ func appendInspectInt32List(builder *array.ListBuilder, values []int) {
 func appendInspectOptionalInt32(builder *array.Int32Builder, value *int) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(int32(*value))
@@ -330,6 +338,7 @@ func appendInspectOptionalInt32(builder *array.Int32Builder, value *int) {
 func appendInspectOptionalInt64(builder *array.Int64Builder, value *int64) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(*value)
@@ -338,6 +347,7 @@ func appendInspectOptionalInt64(builder *array.Int64Builder, value *int64) {
 func appendInspectOptionalString(builder *array.StringBuilder, value *string) {
 	if value == nil {
 		builder.AppendNull()
+
 		return
 	}
 	builder.Append(*value)
