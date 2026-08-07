@@ -1269,15 +1269,33 @@ func (c *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 			})
 		}
 
-		_, err := tx.NewInsert().Model(&toInsert).Exec(ctx)
+		// Run the insert in a savepoint so a failure can be rolled back without
+		// aborting the whole transaction (Postgres); the re-check then still runs.
+		sp, err := tx.BeginTx(ctx, nil)
 		if err != nil {
-			// A concurrent writer may have inserted since the check above; if the
-			// re-check itself fails, fall through to the insert error.
-			if _, exists, checkErr := c.resolveNamespaceKeyInTx(ctx, tx, namespace); checkErr == nil && exists {
+			return fmt.Errorf("error creating savepoint for namespace '%s': %w", namespace, err)
+		}
+
+		if _, err = sp.NewInsert().Model(&toInsert).Exec(ctx); err != nil {
+			if rbErr := sp.Rollback(); rbErr != nil {
+				// A failed rollback poisons the tx (Postgres); keep both causes.
+				return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(err, rbErr))
+			}
+			// A concurrent writer may have won the race; return the sentinel in the
+			// same form as the pre-check above so both paths are identical.
+			_, exists, checkErr := c.resolveNamespaceKeyInTx(ctx, tx, namespace)
+			if checkErr == nil && exists {
 				return fmt.Errorf("%w: %s", catalog.ErrNamespaceAlreadyExists, strings.Join(namespace, "."))
+			}
+			if checkErr != nil {
+				return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, errors.Join(err, checkErr))
 			}
 
 			return fmt.Errorf("error inserting namespace properties for namespace '%s': %w", namespace, err)
+		}
+
+		if err = sp.Commit(); err != nil {
+			return fmt.Errorf("error releasing savepoint for namespace '%s': %w", namespace, err)
 		}
 
 		return nil
