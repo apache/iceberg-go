@@ -80,6 +80,20 @@ func TestIncrementalAppendScanHonorsSnapshotOptions(t *testing.T) {
 	require.Equal(t, "mem://default/table-location/data-1.parquet", byTime[0].File.FilePath())
 }
 
+func TestIncrementalAppendScanAllowsExpiredExclusiveParent(t *testing.T) {
+	const expiredSnapshotID = int64(1)
+	tbl := incrementalAppendExpiredExclusiveTable(t)
+
+	scan := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(expiredSnapshotID)
+	scan, err := scan.ToSnapshot(3)
+	require.NoError(t, err)
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Equal(t, "mem://default/table-location/data-b.parquet", tasks[0].File.FilePath())
+	require.Equal(t, "mem://default/table-location/data-c.parquet", tasks[1].File.FilePath())
+}
+
 func incrementalAppendTestTable(t *testing.T) *Table {
 	t.Helper()
 	spec := partitionedSpec()
@@ -133,6 +147,81 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	require.NoError(t, err)
 
 	return New(Identifier{"incremental"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+}
+
+func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
+	t.Helper()
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+
+	writeManifest := func(snapshotID int64, manifestPath, dataPath string) iceberg.ManifestFile {
+		file := newTestDataFile(t, spec, dataPath, map[int]any{1000: int32(snapshotID)})
+		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, file)
+		var manifestBuf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
+			[]iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+		return manifest
+	}
+
+	manifestB := writeManifest(2,
+		"mem://default/table-location/metadata/manifest-b.avro",
+		"mem://default/table-location/data-b.parquet")
+	manifestC := writeManifest(3,
+		"mem://default/table-location/metadata/manifest-c.avro",
+		"mem://default/table-location/data-c.parquet")
+
+	writeManifestList := func(snapshotID int64, path string, manifests []iceberg.ManifestFile) {
+		var listBuf bytes.Buffer
+		sequenceNumber := snapshotID
+		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifests))
+		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
+	}
+	manifestListBPath := "mem://default/table-location/metadata/snap-b.avro"
+	writeManifestList(2, manifestListBPath, []iceberg.ManifestFile{manifestB})
+	listFile, err := fs.Open(manifestListBPath)
+	require.NoError(t, err)
+	manifestListB, err := iceberg.ReadManifestList(listFile)
+	require.NoError(t, err)
+	require.NoError(t, listFile.Close())
+
+	manifestListCPath := "mem://default/table-location/metadata/snap-c.avro"
+	writeManifestList(3, manifestListCPath, []iceberg.ManifestFile{manifestListB[0], manifestC})
+
+	expiredParentID := int64(1)
+	currentSnapshotID := int64(3)
+	txn.meta.snapshotList = []Snapshot{
+		{
+			SnapshotID:       2,
+			ParentSnapshotID: &expiredParentID,
+			TimestampMs:      2000,
+			ManifestList:     manifestListBPath,
+			SequenceNumber:   2,
+			Summary:          &Summary{Operation: OpAppend},
+		},
+		{
+			SnapshotID:       3,
+			ParentSnapshotID: int64Ptr(2),
+			TimestampMs:      3000,
+			ManifestList:     manifestListCPath,
+			SequenceNumber:   3,
+			Summary:          &Summary{Operation: OpAppend},
+		},
+	}
+	txn.meta.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: 2, TimestampMs: 2000},
+		{SnapshotID: 3, TimestampMs: 3000},
+	}
+	txn.meta.currentSnapshotID = &currentSnapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"incremental-expired"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
 		return fs, nil
 	}, nil)
 }
