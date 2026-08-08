@@ -930,3 +930,21 @@ func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
 }
+
+func TestUnknownTransformCannotBindAsPredicate(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	transform, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+
+	tests := []iceberg.UnboundPredicate{
+		iceberg.IsNull(iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))),
+		iceberg.EqualTo(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1)),
+		iceberg.IsIn(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1), int32(2)).(iceberg.UnboundPredicate),
+	}
+	for _, pred := range tests {
+		_, err := pred.Bind(schema, true)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented, pred)
+	}
+}
