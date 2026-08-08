@@ -687,6 +687,7 @@ func TestInspectDeleteFiles(t *testing.T) {
 	require.Equal(t, deleteFile.FilePath(), record.Column(1).(*array.String).Value(0))
 	require.Equal(t, *deleteFile.ReferencedDataFile(), record.Column(18).(*array.String).Value(0))
 }
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
