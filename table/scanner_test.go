@@ -113,6 +113,7 @@ func (s *ScannerSuite) TestScanner() {
 			s.Len(tasks, tt.expectedNumTasks)
 		})
 	}
+
 }
 
 func (s *ScannerSuite) TestScannerWithDeletes() {
