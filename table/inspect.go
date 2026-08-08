@@ -290,39 +290,51 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			return nil, err
 		}
 
-		content.Append(int32(manifest.ManifestContent()))
+		manifestContent := manifest.ManifestContent()
+		switch manifestContent {
+		case iceberg.ManifestContentData, iceberg.ManifestContentDeletes:
+		default:
+			return nil, fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
+		}
+
+		content.Append(int32(manifestContent))
 		path.Append(manifest.FilePath())
 		length.Append(manifest.Length())
 		partitionSpecID.Append(manifest.PartitionSpecID())
 		addedSnapshotID.Append(manifest.SnapshotID())
 
-		if manifest.ManifestContent() == iceberg.ManifestContentData {
-			addedDataFiles.Append(manifest.AddedDataFiles())
-			existingDataFiles.Append(manifest.ExistingDataFiles())
-			deletedDataFiles.Append(manifest.DeletedDataFiles())
+		switch manifestContent {
+		case iceberg.ManifestContentData:
+			appendManifestCount(addedDataFiles, manifest.AddedDataFiles())
+			appendManifestCount(existingDataFiles, manifest.ExistingDataFiles())
+			appendManifestCount(deletedDataFiles, manifest.DeletedDataFiles())
 			addedDeleteFiles.Append(0)
 			existingDeleteFiles.Append(0)
 			deletedDeleteFiles.Append(0)
-		} else {
+		case iceberg.ManifestContentDeletes:
 			addedDataFiles.Append(0)
 			existingDataFiles.Append(0)
 			deletedDataFiles.Append(0)
-			addedDeleteFiles.Append(manifest.AddedDataFiles())
-			existingDeleteFiles.Append(manifest.ExistingDataFiles())
-			deletedDeleteFiles.Append(manifest.DeletedDataFiles())
+			appendManifestCount(addedDeleteFiles, manifest.AddedDataFiles())
+			appendManifestCount(existingDeleteFiles, manifest.ExistingDataFiles())
+			appendManifestCount(deletedDeleteFiles, manifest.DeletedDataFiles())
 		}
 
+		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
+		if spec == nil {
+			return nil, fmt.Errorf("manifest %s references missing partition spec %d",
+				manifest.FilePath(), manifest.PartitionSpecID())
+		}
+		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
 		partitions := manifest.Partitions()
 		if partitions == nil {
 			partitionSummaries.AppendNull()
 
 			continue
 		}
-
-		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
-		var partType *iceberg.StructType
-		if spec != nil {
-			partType = spec.PartitionType(i.tbl.metadata.CurrentSchema())
+		if len(partitions) > spec.NumFields() {
+			return nil, fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
+				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
 		}
 
 		partitionSummaries.Append(true)
@@ -335,19 +347,6 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 				summaryContainsNaN.Append(*summary.ContainsNaN)
 			}
 
-			if spec == nil || idx >= spec.NumFields() {
-				summaryLower.AppendNull()
-				summaryUpper.AppendNull()
-
-				continue
-			}
-
-			if idx >= len(partType.FieldList) {
-				summaryLower.AppendNull()
-				summaryUpper.AppendNull()
-
-				continue
-			}
 			fieldType := partType.FieldList[idx].Type
 			transform := spec.Field(idx).Transform
 			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
@@ -365,6 +364,16 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 	}
 
 	return rr, nil
+}
+
+func appendManifestCount(builder *array.Int32Builder, count int32) {
+	if count < 0 {
+		builder.AppendNull()
+
+		return
+	}
+
+	builder.Append(count)
 }
 
 func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
