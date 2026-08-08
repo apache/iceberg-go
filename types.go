@@ -481,6 +481,9 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Elem.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'element' key in JSON", ErrInvalidSchema)
+	}
 
 	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
