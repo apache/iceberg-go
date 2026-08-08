@@ -265,6 +265,38 @@ func (u *UpdateSchema) findParentID(fieldID int) int {
 	return parentID
 }
 
+// findDeletedAncestor walks fieldID and all of its ancestors (following the parent chain
+// up to the table root) and returns the id of the first field staged for deletion, if any.
+//
+// This prevents adding a column under a deleted ancestor, even when the
+// immediate parent is still present.
+func (u *UpdateSchema) findDeletedAncestor(fieldID int) (int, bool) {
+	for id := fieldID; id != TableRootID; id = u.findParentID(id) {
+		if u.isDeleted(id) {
+			return id, true
+		}
+	}
+
+	return TableRootID, false
+}
+
+// hasStagedAddUnder reports whether any column addition is staged
+// beneath fieldID or any of its descendants.
+func (u *UpdateSchema) hasStagedAddUnder(fieldID int) bool {
+	for addParentID, added := range u.adds {
+		if len(added) == 0 {
+			continue
+		}
+		for id := addParentID; id != TableRootID; id = u.findParentID(id) {
+			if id == fieldID {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func (u *UpdateSchema) AddColumn(path []string, fieldType iceberg.Type, doc string, required bool, defaultValue iceberg.Literal) *UpdateSchema {
 	u.ops = append(u.ops, func() error {
 		return u.addColumn(path, fieldType, doc, required, defaultValue)
@@ -320,6 +352,15 @@ func (u *UpdateSchema) addColumn(path []string, fieldType iceberg.Type, doc stri
 		}
 
 		parentID = parentField.ID
+
+		if ancestorID, ok := u.findDeletedAncestor(parentID); ok {
+			deletedName, found := u.schema.FindColumnName(ancestorID)
+			if !found {
+				deletedName = parentFullPath
+			}
+
+			return fmt.Errorf("cannot add to a column that will be deleted: %s", deletedName)
+		}
 	}
 
 	name := path[len(path)-1]
@@ -376,7 +417,10 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		return fmt.Errorf("field not found: %s", fullName)
 	}
 
-	if _, ok := u.adds[field.ID]; ok {
+	// Reject deletion when an addition is staged beneath this field or any of its descendants;
+	// applyChanges drops the whole subtree, so any such add keyed under a descendant
+	// would otherwise be silently discarded.
+	if u.hasStagedAddUnder(field.ID) {
 		return fmt.Errorf("field that has additions cannot be deleted: %s", fullName)
 	}
 
@@ -751,6 +795,15 @@ func (u *UpdateSchema) unionAddColumn(path []string, newField iceberg.NestedFiel
 		}
 
 		parentID = parentField.ID
+
+		if ancestorID, ok := u.findDeletedAncestor(parentID); ok {
+			deletedName, found := u.schema.FindColumnName(ancestorID)
+			if !found {
+				deletedName = parentFullPath
+			}
+
+			return fmt.Errorf("cannot add to a column that will be deleted: %s", deletedName)
+		}
 	}
 
 	name := path[len(path)-1]
