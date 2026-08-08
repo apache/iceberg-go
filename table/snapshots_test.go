@@ -126,6 +126,12 @@ func TestEmptyOperationIsInvalid(t *testing.T) {
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 }
 
+func TestNullOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":null}`), &summary)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+}
+
 func TestSummaryEqualsHandlesNil(t *testing.T) {
 	var nilSummary *table.Summary
 	summary := &table.Summary{Operation: table.OpAppend}
