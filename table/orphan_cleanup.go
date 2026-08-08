@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -435,7 +436,10 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
-	versionHintPath := versionHintLocation(metadata.Location())
+	versionHintPath, err := versionHintLocation(metadata.Location())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build version hint path: %w", err)
+	}
 	referenced[normalizeFilePath(versionHintPath)] = false
 
 	for sf := range metadata.Statistics() {
@@ -737,7 +741,7 @@ func normalizeFilePath(path string) string {
 }
 
 func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
-	if strings.HasPrefix(path, "file:") {
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
 		if u, err := url.Parse(path); err == nil {
 			host := strings.ToLower(u.Host)
 			if host == "" || host == "localhost" {
@@ -747,10 +751,10 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 					pathStr = pathStr[1:]
 				}
 
-				return filepath.Clean(pathStr)
+				return normalizeNonURLPath(pathStr)
 			}
 			// Remote authority – keep it as //host/path
-			return filepath.Clean("//" + u.Host + u.Path)
+			return normalizeNonURLPath("//" + u.Host + u.Path)
 		}
 	}
 
@@ -762,14 +766,12 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 	return normalizeNonURLPath(path)
 }
 
-func versionHintLocation(tableLocation string) string {
-	if strings.Contains(tableLocation, "://") || strings.HasPrefix(tableLocation, "file:") {
-		if joined, err := url.JoinPath(tableLocation, "metadata", "version-hint.text"); err == nil {
-			return joined
-		}
+func versionHintLocation(tableLocation string) (string, error) {
+	if strings.Contains(tableLocation, "://") || strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
+		return url.JoinPath(tableLocation, "metadata", "version-hint.text")
 	}
 
-	return filepath.Join(tableLocation, "metadata", "version-hint.text")
+	return filepath.Join(tableLocation, "metadata", "version-hint.text"), nil
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.
@@ -802,11 +804,14 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 
 	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
 	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
-	normalizedURL := &url.URL{
-		Scheme: normalizedScheme,
-		Host:   normalizedAuthority,
-		Path:   filepath.Clean(parsedURL.Path),
-	}
+
+	// Object-store paths are opaque keys. Keep their spelling exactly as
+	// supplied: escaped separators, duplicate slashes, and dot segments can
+	// all be meaningful parts of a key. Only the explicitly configured scheme
+	// and authority equivalences are normalized here.
+	normalizedURL := *parsedURL
+	normalizedURL.Scheme = normalizedScheme
+	normalizedURL.Host = normalizedAuthority
 
 	return normalizedURL.String()
 }
@@ -814,19 +819,84 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
 //
 // Handles file system paths by:
-// 1. Applying filepath.Clean() to resolve "..", ".", and redundant separators
-// 2. Converting Windows-style backslashes to forward slashes for consistency
+// 1. Converting Windows-style backslashes to forward slashes for consistency
+// 2. Applying slash-based path cleaning to resolve "..", ".", and redundant separators
 //
 // This ensures that paths like "dir/./file", "dir//file", and "dir\file" (on Windows)
 // all normalize to "dir/file" for consistent comparison.
-//
-// Uses filepath.ToSlash() equivalent logic to match Go's standard library approach.
 func normalizeNonURLPath(path string) string {
-	normalized := filepath.Clean(path)
-	// We use this because to handle Windows paths
-	// on all platforms.filepath.ToSlash() only convert the current OS separator, and
-	// we need cross-platform support.
-	return strings.ReplaceAll(normalized, "\\", "/")
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	volume, remainder, rooted := splitPortableVolume(normalized)
+	if volume == "" {
+		return normalizeWindowsLocalPathCase(pathpkg.Clean(normalized))
+	}
+
+	if rooted {
+		cleaned := pathpkg.Clean("/" + remainder)
+
+		return normalizeWindowsLocalPathCase(volume + "/" + strings.TrimPrefix(cleaned, "/"))
+	}
+
+	if remainder == "" {
+		return normalizeWindowsLocalPathCase(volume)
+	}
+
+	return normalizeWindowsLocalPathCase(volume + pathpkg.Clean(remainder))
+}
+
+func normalizeWindowsLocalPathCase(path string) string {
+	if isWindowsLocalPath(path) {
+		return strings.ToLower(path)
+	}
+
+	return path
+}
+
+func isWindowsLocalPath(path string) bool {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		return true
+	}
+
+	volume, _, rooted := splitPortableVolume(path)
+
+	return rooted && strings.HasPrefix(volume, "//")
+}
+
+func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		if len(path) >= 3 && path[2] == '/' {
+			return path[:2], path[3:], true
+		}
+
+		return path[:2], path[2:], false
+	}
+
+	if !strings.HasPrefix(path, "//") {
+		return "", path, false
+	}
+
+	unc := strings.TrimPrefix(path, "//")
+	serverEnd := strings.IndexByte(unc, '/')
+	if serverEnd <= 0 || serverEnd+1 >= len(unc) {
+		return "", path, false
+	}
+
+	shareStart := serverEnd + 1
+	shareEnd := strings.IndexByte(unc[shareStart:], '/')
+	if shareEnd < 0 {
+		return "//" + unc, "", true
+	}
+	if shareEnd == 0 {
+		return "", path, false
+	}
+
+	shareEnd += shareStart
+
+	return "//" + unc[:shareEnd], unc[shareEnd+1:], true
+}
+
+func isDriveLetter(r byte) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 // filePathKey returns the path component used to compare listed files with
@@ -837,6 +907,12 @@ func filePathKey(file string) string {
 	// remain part of the comparison key.
 	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
 		if parsedURL, err := url.Parse(file); err == nil {
+			if parsedURL.Scheme != "" && !strings.EqualFold(parsedURL.Scheme, "file") {
+				// Keep remote object-key spelling, including escaped separators,
+				// when grouping candidates for prefix-mismatch checks.
+				return parsedURL.EscapedPath()
+			}
+
 			return normalizeNonURLPath(parsedURL.Path)
 		}
 	}
