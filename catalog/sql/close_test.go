@@ -35,16 +35,14 @@ const (
 	closeErrorReporterName = "iceberg_go_sql_close_reporter"
 )
 
-var closeErrorDBErr error
-
 func init() {
 	sql.Register(closeErrorDriverName, closeErrorDriver{})
 }
 
 type closeErrorDriver struct{}
 
-func (closeErrorDriver) Open(string) (driver.Conn, error) {
-	return closeErrorConn{err: closeErrorDBErr}, nil
+func (closeErrorDriver) Open(dsn string) (driver.Conn, error) {
+	return closeErrorConn{err: errors.New(dsn)}, nil
 }
 
 type closeErrorConn struct{ err error }
@@ -62,7 +60,6 @@ func TestCloseReturnsReporterAndDatabaseErrors(t *testing.T) {
 	dbErr := errors.New("database close")
 	reporterErr := errors.New("reporter close")
 
-	closeErrorDBErr = dbErr
 	metrics.Register(closeErrorReporterName, func(map[string]string) (metrics.Reporter, error) {
 		return closeErrorReporter{err: reporterErr}, nil
 	})
@@ -70,8 +67,9 @@ func TestCloseReturnsReporterAndDatabaseErrors(t *testing.T) {
 		metrics.Deregister(closeErrorReporterName)
 	})
 
-	db, err := sql.Open(closeErrorDriverName, "")
+	db, err := sql.Open(closeErrorDriverName, dbErr.Error())
 	require.NoError(t, err)
+	// Ping opens a connection so db.Close has a connection to drain.
 	require.NoError(t, db.Ping())
 
 	cat := &Catalog{
@@ -85,5 +83,5 @@ func TestCloseReturnsReporterAndDatabaseErrors(t *testing.T) {
 	err = cat.Close()
 	require.Error(t, err)
 	require.ErrorIs(t, err, reporterErr)
-	require.ErrorIs(t, err, dbErr)
+	require.ErrorContains(t, err, dbErr.Error())
 }

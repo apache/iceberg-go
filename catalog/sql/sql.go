@@ -456,7 +456,11 @@ func (c *Catalog) Close() error {
 	err := c.reporter.Close()
 	if c.ownsDB {
 		if dbErr := c.db.Close(); dbErr != nil {
-			err = errors.Join(err, dbErr)
+			if err == nil {
+				err = dbErr
+			} else {
+				err = errors.Join(err, dbErr)
+			}
 		}
 	}
 
