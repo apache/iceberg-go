@@ -177,7 +177,7 @@ func TestVendedCredsReturnsRefreshFailureForExpiredCredentials(t *testing.T) {
 	require.ErrorIs(t, err, fetchErr)
 	require.ErrorContains(t, err, "refresh vended credentials for file:///tmp/test")
 	assert.Nil(t, got)
-	
+
 	assert.Equal(t, int32(1), callCount.Load(), "a refresh should have been attempted")
 }
 
