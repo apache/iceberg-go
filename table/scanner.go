@@ -672,6 +672,17 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 		return nil, err
 	}
 
+	return scan.filterManifestsWithSchema(manifestList, schema, acc)
+}
+
+// filterManifestsWithSchema applies partition-summary pruning to an existing
+// list of manifests. Callers use this after resolving a snapshot's manifest
+// list, or after collecting manifests across an incremental snapshot range.
+func (scan *Scan) filterManifestsWithSchema(
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+) ([]iceberg.ManifestFile, error) {
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
 	partitionFilters := scan.partitionFiltersForSchema(schema)
 	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
