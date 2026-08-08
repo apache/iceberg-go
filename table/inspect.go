@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -248,8 +249,9 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 }
 
 // MetadataLogEntries returns one row for every metadata file in the table's
-// metadata log, including the current metadata file. Snapshot information is
-// resolved from the snapshot log at each metadata file's timestamp.
+// metadata log, plus the current metadata file when its location is set.
+// Snapshot information is resolved from the snapshot log at each metadata
+// file's timestamp.
 //
 // Columns:
 //   - timestamp (timestamptz, required): when the metadata file was written
@@ -265,14 +267,13 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 		return nil, fmt.Errorf("inspect metadata log entries: build arrow schema: %w", err)
 	}
 
-	entries := make([]MetadataLogEntry, 0)
-	for entry := range i.tbl.metadata.PreviousFiles() {
-		entries = append(entries, entry)
+	entries := slices.Collect(i.tbl.metadata.PreviousFiles())
+	if i.tbl.metadataLocation != "" {
+		entries = append(entries, MetadataLogEntry{
+			MetadataFile: i.tbl.metadataLocation,
+			TimestampMs:  i.tbl.metadata.LastUpdatedMillis(),
+		})
 	}
-	entries = append(entries, MetadataLogEntry{
-		MetadataFile: i.tbl.metadataLocation,
-		TimestampMs:  i.tbl.metadata.LastUpdatedMillis(),
-	})
 
 	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 	defer bldr.Release()
@@ -308,6 +309,8 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 			continue
 		}
 		if snapshot.SchemaID != nil {
+			// Iceberg schema IDs are bounded to int32 by the specification.
+			//nolint:gosec // schema IDs are spec-bounded to int32
 			latestSchemaID.Append(int32(*snapshot.SchemaID))
 		} else {
 			latestSchemaID.AppendNull()
@@ -324,9 +327,13 @@ func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReade
 }
 
 // latestSnapshotAt follows the metadata-table behavior used by Java's
-// MetadataLogEntriesTable: find the snapshot-log entry at or before the
-// metadata timestamp, then resolve its details independently. The snapshot
-// ID remains available when the snapshot itself has expired from metadata.
+// MetadataLogEntriesTable: it resolves against the current snapshot log, not
+// a point-in-time copy of that log. Trimming old entries can therefore shift
+// the result to a later eligible entry or make it unavailable. Equal
+// timestamps keep the first entry encountered, matching Java's
+// SnapshotUtil.snapshotIdAsOfTime; PyIceberg keeps the last entry instead.
+// The snapshot ID remains available when the snapshot itself has expired from
+// metadata.
 func latestSnapshotAt(metadata Metadata, timestampMs int64) (int64, *Snapshot, bool) {
 	entry, found := snapshotLogEntryAsOf(metadata.SnapshotLogs(), timestampMs, true)
 	if !found {

@@ -530,6 +530,58 @@ func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
 	require.Nil(t, snapshot)
 }
 
+func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
+	const (
+		firstSnapshot  = int64(101)
+		secondSnapshot = int64(102)
+		lateSnapshot   = int64(103)
+	)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotList: []Snapshot{
+			{SnapshotID: firstSnapshot},
+			{SnapshotID: secondSnapshot},
+			{SnapshotID: lateSnapshot},
+		},
+		// The 500ms inversion is intentional and models clock skew within the
+		// metadata validator's one-minute tolerance.
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: firstSnapshot, TimestampMs: 2000},
+			{SnapshotID: secondSnapshot, TimestampMs: 3000},
+			{SnapshotID: lateSnapshot, TimestampMs: 2500},
+		},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, 2600)
+	require.True(t, found)
+	require.NotNil(t, snapshot)
+	require.Equal(t, lateSnapshot, snapshotID)
+	require.Equal(t, lateSnapshot, snapshot.SnapshotID)
+}
+
+func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
+	const (
+		firstSnapshot  = int64(101)
+		secondSnapshot = int64(102)
+		timestamp      = int64(2000)
+	)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotList: []Snapshot{
+			{SnapshotID: firstSnapshot},
+			{SnapshotID: secondSnapshot},
+		},
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: firstSnapshot, TimestampMs: timestamp},
+			{SnapshotID: secondSnapshot, TimestampMs: timestamp},
+		},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, timestamp)
+	require.True(t, found)
+	require.NotNil(t, snapshot)
+	require.Equal(t, firstSnapshot, snapshotID)
+	require.Equal(t, firstSnapshot, snapshot.SnapshotID)
+}
+
 func TestInspectMetadataLogEntriesAllowsLiveSnapshotWithoutSchemaID(t *testing.T) {
 	const snapshotID = int64(101)
 	meta := &metadataV2{commonMetadata: commonMetadata{
@@ -589,6 +641,21 @@ func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
 	}
 }
 
+func TestInspectMetadataLogEntriesSkipsEmptyCurrentMetadataLocation(t *testing.T) {
+	meta := &metadataV2{commonMetadata: commonMetadata{LastUpdatedMS: 1000}}
+	tbl := New(Identifier{"empty-metadata-location"}, meta, "", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 0, rec.NumRows())
+	require.EqualValues(t, 5, rec.NumCols())
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
@@ -599,6 +666,29 @@ func TestInspectAllocatorOption(t *testing.T) {
 	tbl := snapshotsTestTable()
 
 	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Snapshots(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+}
+
+func TestInspectMetadataLogEntriesAllocator(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		LastUpdatedMS: 2000,
+		MetadataLog: []MetadataLogEntry{
+			{MetadataFile: "/metadata/v1.json", TimestampMs: 1000},
+		},
+		SnapshotList: []Snapshot{{SnapshotID: 101, SequenceNumber: 7}},
+		SnapshotLog:  []SnapshotLogEntry{{SnapshotID: 101, TimestampMs: 1500}},
+	}}
+	tbl := New(Identifier{"metadata-log-entries-allocator"}, meta, "/metadata/v2.json", nil, nil)
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).MetadataLogEntries(context.Background())
 	require.NoError(t, err)
 	defer rr.Release()
 
