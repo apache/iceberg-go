@@ -58,6 +58,9 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	}
 
 	host := parsed.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("invalid URI: host is required")
+	}
 	portStr := parsed.Port()
 	if portStr == "" {
 		portStr = "9083"
