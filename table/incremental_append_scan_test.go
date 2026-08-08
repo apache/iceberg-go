@@ -45,6 +45,21 @@ func TestIncrementalAppendScanRejectsUnknownStart(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestIncrementalAppendScanRejectsUnsupportedPlanningModes(t *testing.T) {
+	for _, mode := range []ScanPlanningMode{ScanPlanningRemote, ScanPlanningAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			scan := incrementalAppendTestTable(t).NewIncrementalAppendScan(
+				WithScanPlanningMode(mode),
+			)
+
+			tasks, err := scan.PlanFiles(context.Background())
+			require.ErrorIs(t, err, ErrInvalidOperation)
+			require.ErrorContains(t, err, "support local planning only")
+			require.Nil(t, tasks)
+		})
+	}
+}
+
 func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	tbl := incrementalAppendTestTable(t)
 
@@ -94,6 +109,49 @@ func TestIncrementalAppendScanAllowsExpiredExclusiveParent(t *testing.T) {
 	require.Equal(t, "mem://default/table-location/data-c.parquet", tasks[1].File.FilePath())
 }
 
+func TestIncrementalAppendScanRejectsDivergentStart(t *testing.T) {
+	tbl := incrementalAppendDivergentTable(t)
+
+	inclusive, err := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(10)
+	require.NoError(t, err)
+	inclusive, err = inclusive.ToSnapshot(22)
+	require.NoError(t, err)
+	_, err = inclusive.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "not an ancestor")
+
+	exclusive := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(10)
+	exclusive, err = exclusive.ToSnapshot(22)
+	require.NoError(t, err)
+	_, err = exclusive.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "not an ancestor")
+}
+
+func TestIncrementalAppendScanUsesLiveSchemaForImplicitCurrent(t *testing.T) {
+	tbl := incrementalAppendSchemaEvolutionTable(t)
+	filter := iceberg.EqualTo(iceberg.Reference("category"), "new")
+
+	normalTasks, err := tbl.Scan(WithRowFilter(filter)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, normalTasks, 2)
+
+	incrementalTasks, err := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, incrementalTasks, 2)
+}
+
+func TestIncrementalAppendScanUsesSnapshotSchemaForExplicitEnd(t *testing.T) {
+	tbl := incrementalAppendSchemaEvolutionTable(t)
+	filter := iceberg.EqualTo(iceberg.Reference("category"), "new")
+
+	scan, err := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "category")
+}
+
 func incrementalAppendTestTable(t *testing.T) *Table {
 	t.Helper()
 	spec := partitionedSpec()
@@ -134,8 +192,8 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	writeManifestList(2, "mem://default/table-location/metadata/snap-2.avro", []iceberg.ManifestFile{manifestList1[0], manifest2})
 
 	txn.meta.snapshotList = []Snapshot{
-		{SnapshotID: 1, TimestampMs: 1000, ManifestList: "mem://default/table-location/metadata/snap-1.avro", SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
-		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: "mem://default/table-location/metadata/snap-2.avro", SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 1, TimestampMs: 1000, ManifestList: "mem://default/table-location/metadata/snap-1.avro", SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: "mem://default/table-location/metadata/snap-2.avro", SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
 	}
 	txn.meta.snapshotLog = []SnapshotLogEntry{
 		{SnapshotID: 1, TimestampMs: 1000},
@@ -149,6 +207,50 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	return New(Identifier{"incremental"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
 		return fs, nil
 	}, nil)
+}
+
+func incrementalAppendSchemaEvolutionTable(t *testing.T) *Table {
+	t.Helper()
+	tbl := incrementalAppendTestTable(t)
+	builder, err := MetadataBuilderFromBase(tbl.metadata, "")
+	require.NoError(t, err)
+
+	evolvedSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	require.NoError(t, builder.AddSchema(evolvedSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(evolvedSchema.ID))
+
+	tbl.metadata, err = builder.Build()
+	require.NoError(t, err)
+
+	return tbl
+}
+
+func incrementalAppendDivergentTable(t *testing.T) *Table {
+	t.Helper()
+	base, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://default/divergent", nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+
+	baseTimestamp := base.LastUpdatedMillis()
+	snapshots := []*Snapshot{
+		{SnapshotID: 10, TimestampMs: baseTimestamp + 1, SequenceNumber: 1, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 20, TimestampMs: baseTimestamp + 2, SequenceNumber: 2, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 21, ParentSnapshotID: int64Ptr(20), TimestampMs: baseTimestamp + 3, SequenceNumber: 3, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 22, ParentSnapshotID: int64Ptr(21), TimestampMs: baseTimestamp + 4, SequenceNumber: 4, Summary: &Summary{Operation: OpAppend}},
+	}
+	for _, snapshot := range snapshots {
+		require.NoError(t, builder.AddSnapshot(snapshot))
+	}
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 22, BranchRef))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"incremental-divergent"}, meta, "metadata.json", nil, nil)
 }
 
 func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
@@ -202,6 +304,7 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 			TimestampMs:      2000,
 			ManifestList:     manifestListBPath,
 			SequenceNumber:   2,
+			SchemaID:         &schema.ID,
 			Summary:          &Summary{Operation: OpAppend},
 		},
 		{
@@ -210,6 +313,7 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 			TimestampMs:      3000,
 			ManifestList:     manifestListCPath,
 			SequenceNumber:   3,
+			SchemaID:         &schema.ID,
 			Summary:          &Summary{Operation: OpAppend},
 		},
 	}
