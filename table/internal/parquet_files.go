@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
@@ -500,6 +501,7 @@ type ParquetFileWriter struct {
 	pqWriter      *pqarrow.FileWriter
 	counter       *internal.CountingWriter
 	fileCloser    io.Closer
+	mem           memory.Allocator
 	fs            iceio.WriteFileIO
 	format        parquetFormat
 	info          WriteFileInfo
@@ -598,6 +600,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		pqWriter:      writer,
 		counter:       counter,
 		fileCloser:    fw,
+		mem:           mem,
 		fs:            fs,
 		format:        p,
 		info:          info,
@@ -666,21 +669,29 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 
 // Write appends a record batch to the Parquet file.
 func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
-	if err := w.accumulateGeoBounds(batch); err != nil {
+	writeBatch, err := w.normalizeGeoBatch(batch)
+	if err != nil {
+		return err
+	}
+	if writeBatch != batch {
+		defer writeBatch.Release()
+	}
+
+	if err := w.accumulateGeoBounds(writeBatch); err != nil {
 		return err
 	}
 
 	// Rotate before writing the next non-empty batch. Rotating immediately after
 	// crossing the target would leave an empty trailing row group when the file
 	// is closed without another write.
-	if batch.NumRows() > 0 &&
+	if writeBatch.NumRows() > 0 &&
 		w.pqWriter.RowGroupTotalBytesWritten() >= w.rowGroupBytes {
 		if err := w.pqWriter.NewBufferedRowGroupChecked(); err != nil {
 			return err
 		}
 	}
 
-	return w.pqWriter.WriteBuffered(batch)
+	return w.pqWriter.WriteBuffered(writeBatch)
 }
 
 // wkbStorage is the subset of the binary Arrow arrays that back a geoarrow WKB
@@ -688,6 +699,330 @@ func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 type wkbStorage interface {
 	arrow.Array
 	Value(int) []byte
+}
+
+func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	columns := make(map[int]arrow.Array)
+	for idx := range int(batch.NumCols()) {
+		normalized, changed, err := normalizeNestedArray(batch.Column(idx), w.mem)
+		if err != nil {
+			for _, col := range columns {
+				col.Release()
+			}
+
+			return nil, fmt.Errorf("normalizing geo values for column %d: %w", idx, err)
+		}
+		if changed {
+			columns[idx] = normalized
+		}
+	}
+
+	if len(columns) == 0 {
+		return batch, nil
+	}
+
+	resultColumns := slices.Clone(batch.Columns())
+	for idx, col := range columns {
+		resultColumns[idx] = col
+	}
+	result := array.NewRecordBatch(batch.Schema(), resultColumns, batch.NumRows())
+	for _, col := range columns {
+		col.Release()
+	}
+
+	return result, nil
+}
+
+// normalizeNestedArray walks an Arrow array and replaces only nested WKB values
+// that use EWKB encoding. Changed nested containers are rebuilt from their
+// logical values with offset zero, so materialized children cannot be sliced a
+// second time by an enclosing Arrow container. Recursive calls carry an
+// optional reachability mask so values hidden by nullable ancestors are copied
+// without being decoded.
+func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeNestedArrayReachable(arr, nil, mem)
+}
+
+func normalizeNestedArrayReachable(arr arrow.Array, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	if active != nil && !hasReachableValues(active) {
+		return nil, false, nil
+	}
+
+	if ext, ok := arr.(array.ExtensionArray); ok {
+		if _, ok := ext.ExtensionType().(*geoarrow.WKBType); !ok {
+			return nil, false, nil
+		}
+
+		return normalizeWKBArrayReachable(ext, active, mem)
+	}
+
+	switch nested := arr.(type) {
+	case *array.Struct:
+		return normalizeStruct(nested, active, mem)
+
+	case *array.Map:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewMapData(data)
+		})
+
+	case *array.List:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewListData(data)
+		})
+
+	case *array.LargeList:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewLargeListData(data)
+		})
+
+	case *array.FixedSizeList:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewFixedSizeListData(data)
+		})
+	}
+
+	return nil, false, nil
+}
+
+func isReachable(active []bool, idx int) bool {
+	return active == nil || active[idx]
+}
+
+func hasReachableValues(active []bool) bool {
+	for _, reachable := range active {
+		if reachable {
+			return true
+		}
+	}
+
+	return false
+}
+
+func reachableWithValidity(active []bool, arr arrow.Array) []bool {
+	if arr.NullN() == 0 {
+		return active
+	}
+
+	reachable := make([]bool, arr.Len())
+	for i := range reachable {
+		reachable[i] = isReachable(active, i) && arr.IsValid(i)
+	}
+
+	return reachable
+}
+
+func normalizeStruct(nested *array.Struct, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	children := make([]arrow.ArrayData, nested.NumField())
+	changedChildren := make([]arrow.Array, 0, len(children))
+	childActive := reachableWithValidity(active, nested)
+	for idx := range children {
+		field := nested.Field(idx)
+		children[idx] = field.Data()
+		normalized, changed, err := normalizeNestedArrayReachable(field, childActive, mem)
+		if err != nil {
+			for _, changedChild := range changedChildren {
+				changedChild.Release()
+			}
+
+			return nil, false, err
+		}
+		if changed {
+			children[idx] = normalized.Data()
+			changedChildren = append(changedChildren, normalized)
+		}
+	}
+	if len(changedChildren) == 0 {
+		return nil, false, nil
+	}
+	defer func() {
+		for _, changedChild := range changedChildren {
+			changedChild.Release()
+		}
+	}()
+
+	validity, nulls := rebasedValidity(nested, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(nested.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	} else {
+		buffers[0] = validity
+	}
+	data := array.NewData(nested.DataType(), nested.Len(), buffers, children, nulls, 0)
+	result := array.NewStructData(data)
+	data.Release()
+
+	return result, true, nil
+}
+
+func normalizeListChild(list array.ListLike, active []bool, mem memory.Allocator,
+	newArray func(arrow.ArrayData) arrow.Array,
+) (arrow.Array, bool, error) {
+	if list.Len() == 0 {
+		return nil, false, nil
+	}
+
+	start, _ := list.ValueOffsets(0)
+	_, end := list.ValueOffsets(list.Len() - 1)
+	if start == end {
+		return nil, false, nil
+	}
+
+	childActive := make([]bool, int(end-start))
+	for i := 0; i < list.Len(); i++ {
+		rowStart, rowEnd := list.ValueOffsets(i)
+		if !isReachable(active, i) || list.IsNull(i) {
+			continue
+		}
+		for j := rowStart; j < rowEnd; j++ {
+			childActive[int(j-start)] = true
+		}
+	}
+	if !hasReachableValues(childActive) {
+		return nil, false, nil
+	}
+
+	values := array.NewSlice(list.ListValues(), start, end)
+	defer values.Release()
+	normalized, changed, err := normalizeNestedArrayReachable(values, childActive, mem)
+	if err != nil || !changed {
+		return nil, false, err
+	}
+	defer normalized.Release()
+
+	children := slices.Clone(list.Data().Children())
+	children[0] = normalized.Data()
+
+	validity, nulls := rebasedValidity(list, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(list.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	}
+	buffers[0] = validity
+	if list.DataType().ID() != arrow.FIXED_SIZE_LIST {
+		offsets, err := rebasedListOffsets(list, start, mem)
+		if err != nil {
+			return nil, false, err
+		}
+		defer offsets.Release()
+		if len(buffers) < 2 {
+			return nil, false, errors.New("list array has no offsets buffer")
+		}
+		buffers[1] = offsets
+	}
+
+	newData := array.NewData(list.DataType(), list.Len(), buffers, children, nulls, 0)
+	result := newArray(newData)
+	newData.Release()
+
+	return result, true, nil
+}
+
+func rebasedValidity(arr arrow.Array, mem memory.Allocator) (*memory.Buffer, int) {
+	nulls := arr.NullN()
+	if nulls == 0 {
+		return nil, 0
+	}
+
+	data := mem.Allocate(int(bitutil.BytesForBits(int64(arr.Len()))))
+	for i := range data {
+		data[i] = 0
+	}
+	for i := 0; i < arr.Len(); i++ {
+		if arr.IsValid(i) {
+			bitutil.SetBit(data, i)
+		}
+	}
+
+	return memory.NewBufferWithAllocator(data, mem), nulls
+}
+
+func rebasedListOffsets(list array.ListLike, first int64, mem memory.Allocator) (*memory.Buffer, error) {
+	var (
+		data []byte
+		set  func(int, int64)
+	)
+	switch list.DataType().ID() {
+	case arrow.LIST, arrow.MAP:
+		data = mem.Allocate((list.Len() + 1) * 4)
+		offsets := arrow.Int32Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = int32(value)
+		}
+	case arrow.LARGE_LIST:
+		data = mem.Allocate((list.Len() + 1) * 8)
+		offsets := arrow.Int64Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = value
+		}
+	default:
+		return nil, fmt.Errorf("unsupported list type %s", list.DataType())
+	}
+
+	buffer := memory.NewBufferWithAllocator(data, mem)
+	for i := 0; i < list.Len(); i++ {
+		start, end := list.ValueOffsets(i)
+		set(i, start-first)
+		set(i+1, end-first)
+	}
+
+	return buffer, nil
+}
+
+func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeWKBArrayReachable(ext, nil, mem)
+}
+
+func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	storage, ok := ext.Storage().(wkbStorage)
+	if !ok {
+		return nil, false, nil
+	}
+
+	needsNormalization := false
+	for i := range storage.Len() {
+		if isReachable(active, i) && !storage.IsNull(i) && isEWKB(storage.Value(i)) {
+			needsNormalization = true
+
+			break
+		}
+	}
+	if !needsNormalization {
+		return nil, false, nil
+	}
+
+	builder := array.NewBinaryBuilder(mem, storage.DataType().(arrow.BinaryDataType))
+	defer builder.Release()
+
+	for i := range storage.Len() {
+		if storage.IsNull(i) {
+			builder.AppendNull()
+
+			continue
+		}
+		if !isReachable(active, i) || !isEWKB(storage.Value(i)) {
+			builder.Append(storage.Value(i))
+
+			continue
+		}
+
+		value, err := normalizeWKB(storage.Value(i))
+		if err != nil {
+			return nil, false, err
+		}
+		builder.Append(value)
+	}
+
+	normalizedStorage := builder.NewArray()
+	normalized := array.NewExtensionArrayWithStorage(ext.ExtensionType(), normalizedStorage)
+	normalizedStorage.Release()
+
+	return normalized, true, nil
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values

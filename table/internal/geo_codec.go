@@ -26,6 +26,7 @@ import (
 	"github.com/twpayne/go-geom"
 	"github.com/twpayne/go-geom/encoding/ewkb"
 	"github.com/twpayne/go-geom/encoding/wkb"
+	"github.com/twpayne/go-geom/encoding/wkbcommon"
 )
 
 // Geo bounding box dimension indices. X is longitude/easting, Y is
@@ -38,6 +39,8 @@ const (
 	geoDimM
 	geoNumDims
 )
+
+var wkbEmptyPointOption = wkbcommon.WKBOptionEmptyPointHandling(wkbcommon.EmptyPointHandlingNaN)
 
 // geoBoundsAccumulator computes a geospatial bounding box from a stream of WKB
 // values. Iceberg stores geometry/geography column bounds using the single-value
@@ -107,13 +110,31 @@ const (
 // dimension in the type value itself (PointZ = 1001); some writers instead emit
 // EWKB, which flags Z/M in the high bits of the type word and may embed an SRID
 // after it. Both yield the same coordinates, so bounds do not depend on the
-// encoding. Stored values are never rewritten - this decode is read-only.
+// encoding.
 func decodeWKB(data []byte) (geom.T, error) {
 	if isEWKB(data) {
 		return ewkb.Unmarshal(data)
 	}
 
-	return wkb.Unmarshal(data)
+	return wkb.Unmarshal(data, wkbEmptyPointOption)
+}
+
+func normalizeWKB(data []byte) ([]byte, error) {
+	if !isEWKB(data) {
+		return data, nil
+	}
+
+	g, err := ewkb.Unmarshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var order binary.ByteOrder = binary.LittleEndian
+	if data[0] == wkbBigEndian {
+		order = binary.BigEndian
+	}
+
+	return wkb.Marshal(g, order, wkbEmptyPointOption)
 }
 
 // isEWKB reports whether data's type word carries EWKB flags. The two decoders
