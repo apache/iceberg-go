@@ -195,6 +195,17 @@ func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
 		"error must name the offending file path")
 }
 
+func TestRewriteFiles_RejectsAddOnlyDeleteFile(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	deleteFile := newPosDeleteFile(t, tbl.Location()+"/data/pos-delete.parquet")
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil).AddDeleteFile(deleteFile)
+	err := rewrite.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "requires replacing at least one existing delete file")
+}
+
 func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 
@@ -238,6 +249,59 @@ func TestRewriteFiles_Commit_SingleShot(t *testing.T) {
 	require.Error(t, err, "double commit must reject so validators are not re-appended")
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 	assert.Contains(t, err.Error(), "already called")
+}
+
+func TestRewriteFiles_PreservesIndependentPositionDeleteSequences(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/independent-seq-data.parquet"
+	writeParquetFile(t, dataPath, arrowSc,
+		`[{"id": 1, "data": "a"}, {"id": 2, "data": "b"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	oldDeletes := make([]iceberg.DataFile, 0, 2)
+	oldSequences := make([]int64, 0, 2)
+	for i := range 2 {
+		path := tbl.Location() + fmt.Sprintf("/data/independent-old-%d.parquet", i)
+		writeParquetFile(t, path, table.PositionalDeleteArrowSchema,
+			fmt.Sprintf(`[{"file_path": %q, "pos": %d}]`, dataPath, i))
+		builder := newPosDeleteFile(t, path)
+		tx = tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(builder).Commit(t.Context()))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+		oldDeletes = append(oldDeletes, builder)
+		oldSequences = append(oldSequences, deleteFileSequence(t, tbl, path))
+	}
+	require.NotEqual(t, oldSequences[0], oldSequences[1])
+
+	newDeletes := make([]iceberg.DataFile, 0, 2)
+	for i := range 2 {
+		path := tbl.Location() + fmt.Sprintf("/data/independent-new-%d.parquet", i)
+		writeParquetFile(t, path, table.PositionalDeleteArrowSchema,
+			fmt.Sprintf(`[{"file_path": %q, "pos": %d}]`, dataPath, i))
+		newDeletes = append(newDeletes, newPosDeleteFile(t, path))
+	}
+
+	tx = tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for i := range oldDeletes {
+		rewrite.DeleteFile(oldDeletes[i]).AddDeleteFileWithDataSequenceNumber(newDeletes[i], oldSequences[i])
+	}
+	require.NoError(t, rewrite.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	for i, df := range newDeletes {
+		assert.Equal(t, oldSequences[i], deleteFileSequence(t, tbl, df.FilePath()))
+	}
+	assert.Empty(t, scanIDs(t, tbl),
+		"each replacement must retain the applicability of its corresponding old position delete")
 }
 
 // TestRewriteFiles_Commit_SingleShot_AfterFailure pins down the

@@ -813,6 +813,81 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	return setToAdd, nil
 }
 
+// validateDeleteFilesToAdd performs metadata-only validation for delete files
+// supplied to a rewrite. Delete files may use an older partition spec, so the
+// partition values are checked against the spec carried by each file rather
+// than only against the table's current spec.
+func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAddition, operation string) (map[string]struct{}, error) {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return nil, err
+	}
+	if len(deleteFiles) == 0 {
+		return map[string]struct{}{}, nil
+	}
+	if meta.formatVersion < 2 {
+		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
+	}
+
+	setToAdd := make(map[string]struct{}, len(deleteFiles))
+	for i, addition := range deleteFiles {
+		df := addition.file
+		if df == nil {
+			return nil, fmt.Errorf("nil delete file at index %d for %s", i, operation)
+		}
+		if addition.dataSequenceNumber != nil && *addition.dataSequenceNumber < 0 {
+			return nil, fmt.Errorf("delete file %s has invalid data sequence number %d for %s",
+				df.FilePath(), *addition.dataSequenceNumber, operation)
+		}
+		path := df.FilePath()
+		if path == "" {
+			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
+		}
+		if _, ok := setToAdd[path]; ok {
+			return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
+		}
+		setToAdd[path] = struct{}{}
+
+		switch df.ContentType() {
+		case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
+		default:
+			return nil, fmt.Errorf("adding non-delete file %s has content type %s for %s", path, df.ContentType(), operation)
+		}
+
+		spec, err := meta.GetSpecByID(int(df.SpecID()))
+		if err != nil {
+			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s: %w", path, df.SpecID(), operation, err)
+		}
+		if spec == nil {
+			return nil, fmt.Errorf("delete file %s references unknown partition spec id %d for %s", path, df.SpecID(), operation)
+		}
+		if err := validateDataFilePartitionData(df, spec); err != nil {
+			return nil, fmt.Errorf("delete file %s has invalid partition data for %s: %w", path, operation, err)
+		}
+
+		if df.ContentType() == iceberg.EntryContentEqDeletes {
+			eqIDs := df.EqualityFieldIDs()
+			if len(eqIDs) == 0 {
+				return nil, fmt.Errorf("equality delete file must have non-empty EqualityFieldIDs: %s", path)
+			}
+			if _, err := validateEqualityFieldIDs(meta.CurrentSchema(), eqIDs); err != nil {
+				return nil, fmt.Errorf("invalid equality delete file %s: %w", path, err)
+			}
+		}
+		if IsDeletionVector(df) {
+			if meta.formatVersion < 3 {
+				return nil, fmt.Errorf("deletion vector %s requires table format version >= 3 for %s",
+					path, operation)
+			}
+			if df.ReferencedDataFile() == nil {
+				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
+			}
+		}
+	}
+
+	return setToAdd, nil
+}
+
 // WriteOption is an option for methods that operate on pre-built DataFile objects.
 type WriteOption func(*dataFileCfg)
 
@@ -1099,18 +1174,52 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 	return t.apply(updates, reqs)
 }
 
+// DeleteFileAddition is a delete file added by a rewrite. The data sequence
+// number must be copied from the delete files being replaced so the new file
+// has the same applicability boundary as the old files.
+type DeleteFileAddition struct {
+	File               iceberg.DataFile
+	DataSequenceNumber int64
+}
+
 // ReplaceFiles atomically replaces data files and removes associated delete files
 // in a single snapshot. This is the commit primitive for compaction: old data files
 // are replaced with new (compacted) data files, and delete files that are fully
 // applied are removed.
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, nil, snapshotProps, opts...)
+}
+
+// ReplaceFilesWithDeleteFiles atomically replaces data files, adds new delete
+// files, and removes superseded delete files in one snapshot. Every added delete
+// file must carry the data sequence number of the delete files it replaces.
+// This is intended for rewrites that change delete-file representation, such as
+// rewriting position deletes into deletion vectors.
+func (t *Transaction) ReplaceFilesWithDeleteFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []DeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
+	additions := make([]rewriteDeleteFileAddition, len(deleteFilesToAdd))
+	for i, addition := range deleteFilesToAdd {
+		seq := addition.DataSequenceNumber
+		additions[i] = rewriteDeleteFileAddition{
+			file:               addition.File,
+			dataSequenceNumber: &seq,
+		}
+	}
+
+	return t.replaceFiles(ctx, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, nil, additions, snapshotProps, opts...)
+}
+
+func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove, autoDeleteFilesToRemove []iceberg.DataFile, deleteFilesToAdd []rewriteDeleteFileAddition, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return err
 	}
 	// Delegate data file replacement to existing logic.
-	if len(deleteFilesToRemove) == 0 {
+	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
 		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
+	}
+	if len(deleteFilesToAdd) > 0 && len(deleteFilesToRemove) == 0 {
+		return fmt.Errorf("%w: adding delete files requires replacing at least one existing delete file",
+			ErrInvalidOperation)
 	}
 
 	var cfg dataFileCfg
@@ -1121,6 +1230,15 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
 	if err != nil {
 		return err
+	}
+	setDeleteFilesToAdd, err := t.validateDeleteFilesToAdd(deleteFilesToAdd, "ReplaceFiles")
+	if err != nil {
+		return err
+	}
+	for path := range setDeleteFilesToAdd {
+		if _, ok := setToAdd[path]; ok {
+			return fmt.Errorf("data and delete file paths must be unique for ReplaceFiles: %s", path)
+		}
 	}
 
 	setToDelete := make(map[string]struct{}, len(dataFilesToDelete))
@@ -1165,6 +1283,39 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 		setDeleteFilesToRemove[path] = struct{}{}
 	}
+	autoSetDeleteFilesToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
+	autoDVRefsToRemove := make(map[string]struct{}, len(autoDeleteFilesToRemove))
+	for i, df := range autoDeleteFilesToRemove {
+		if df == nil {
+			return fmt.Errorf("nil automatic delete file at index %d for ReplaceFiles", i)
+		}
+		path := df.FilePath()
+		if path == "" {
+			return errors.New("automatic delete file paths must be non-empty for ReplaceFiles")
+		}
+		if IsDeletionVector(df) {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				return errors.New("automatic deletion vector to remove is missing referenced_data_file for ReplaceFiles")
+			}
+			if _, ok := dvRefsToRemove[*ref]; ok {
+				return errors.New("delete vectors to remove must reference distinct data files for ReplaceFiles")
+			}
+			if _, ok := autoDVRefsToRemove[*ref]; ok {
+				return errors.New("automatic deletion vectors to remove must reference distinct data files for ReplaceFiles")
+			}
+			autoDVRefsToRemove[*ref] = struct{}{}
+
+			continue
+		}
+		if _, ok := setDeleteFilesToRemove[path]; ok {
+			return errors.New("delete file paths must be unique for ReplaceFiles")
+		}
+		if _, ok := autoSetDeleteFilesToRemove[path]; ok {
+			return errors.New("automatic delete file paths must be unique for ReplaceFiles")
+		}
+		autoSetDeleteFilesToRemove[path] = struct{}{}
+	}
 
 	s := meta.currentSnapshot()
 	if s == nil {
@@ -1184,11 +1335,15 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	// that all files to delete/remove actually exist in the table.
 	markedDataForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
 	markedDeleteForRemoval := make([]iceberg.DataFile, 0, len(setDeleteFilesToRemove))
+	markedAutoDeleteForRemoval := make([]iceberg.DataFile, 0, len(autoSetDeleteFilesToRemove))
 	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
-	for df, err := range s.dataFiles(fs, nil) {
+	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
+	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
+	for entry, err := range s.entries(fs, -1) {
 		if err != nil {
 			return err
 		}
+		df := entry.DataFile()
 		path := df.FilePath()
 		isData := df.ContentType() == iceberg.EntryContentData
 		if _, ok := setToDelete[path]; ok && isData {
@@ -1197,13 +1352,32 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
+				if seq := entry.SequenceNum(); seq >= 0 {
+					removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
+					removedDeleteContents[df.ContentType()] = struct{}{}
+				} else {
+					return fmt.Errorf("delete file %s has no data sequence number in the current snapshot", path)
+				}
+			} else if _, ok := autoSetDeleteFilesToRemove[path]; ok {
+				markedAutoDeleteForRemoval = append(markedAutoDeleteForRemoval, df)
 			} else if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
+					markedDVsForRemoval[*ref] = df
+					if seq := entry.SequenceNum(); seq >= 0 {
+						removedDeleteSequenceNumbers = append(removedDeleteSequenceNumbers, seq)
+						removedDeleteContents[df.ContentType()] = struct{}{}
+					} else {
+						return fmt.Errorf("deletion vector %s has no data sequence number in the current snapshot", path)
+					}
+				} else if _, ok := autoDVRefsToRemove[*ref]; ok {
 					markedDVsForRemoval[*ref] = df
 				}
 			}
 		}
 		if _, ok := setToAdd[path]; ok {
+			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		}
+		if _, ok := setDeleteFilesToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
 	}
@@ -1214,10 +1388,60 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(markedDeleteForRemoval) != len(setDeleteFilesToRemove) {
 		return errors.New("cannot remove delete files that do not belong to the table")
 	}
+	if len(markedAutoDeleteForRemoval) != len(autoSetDeleteFilesToRemove) {
+		return errors.New("cannot remove automatic delete files that do not belong to the table")
+	}
 	// Keyed by referenced data file, so duplicate DV entries for one ref collapse
 	// to one slot; equality then means every requested ref exists in the table.
-	if len(markedDVsForRemoval) != len(dvRefsToRemove) {
+	if len(markedDVsForRemoval) != len(dvRefsToRemove)+len(autoDVRefsToRemove) {
 		return errors.New("cannot remove deletion vectors that do not belong to the table")
+	}
+
+	deleteSequenceNumber := int64(-1)
+	if len(deleteFilesToAdd) > 0 {
+		if len(removedDeleteSequenceNumbers) == 0 {
+			return fmt.Errorf("%w: added delete files must replace existing delete files",
+				ErrInvalidOperation)
+		}
+		if len(removedDeleteContents) != 1 {
+			return fmt.Errorf("%w: delete-file rewrites cannot combine position and equality delete files",
+				ErrInvalidOperation)
+		}
+
+		maxSequenceNumber := removedDeleteSequenceNumbers[0]
+		var sourceContent iceberg.ManifestEntryContent
+		for content := range removedDeleteContents {
+			sourceContent = content
+		}
+		for _, seq := range removedDeleteSequenceNumbers[1:] {
+			maxSequenceNumber = max(maxSequenceNumber, seq)
+		}
+		deleteSequenceNumber = maxSequenceNumber
+		removedDeleteSeqs := make(map[int64]struct{}, len(removedDeleteSequenceNumbers))
+		for _, seq := range removedDeleteSequenceNumbers {
+			removedDeleteSeqs[seq] = struct{}{}
+		}
+		if sourceContent == iceberg.EntryContentEqDeletes && len(removedDeleteSeqs) != 1 {
+			return fmt.Errorf("%w: equality delete files with different data sequence numbers cannot be merged",
+				ErrInvalidOperation)
+		}
+		for _, addition := range deleteFilesToAdd {
+			if addition.file.ContentType() != sourceContent {
+				return fmt.Errorf("%w: cannot rewrite %s delete files as %s delete files",
+					ErrInvalidOperation, sourceContent, addition.file.ContentType())
+			}
+			if addition.dataSequenceNumber != nil {
+				if sourceContent == iceberg.EntryContentEqDeletes {
+					if *addition.dataSequenceNumber != maxSequenceNumber {
+						return fmt.Errorf("%w: equality delete file %s has data sequence number %d, expected %d",
+							ErrInvalidOperation, addition.file.FilePath(), *addition.dataSequenceNumber, maxSequenceNumber)
+					}
+				} else if _, ok := removedDeleteSeqs[*addition.dataSequenceNumber]; !ok {
+					return fmt.Errorf("%w: delete file %s has data sequence number %d, expected one of the replaced delete sequence numbers",
+						ErrInvalidOperation, addition.file.FilePath(), *addition.dataSequenceNumber)
+				}
+			}
+		}
 	}
 
 	if !cfg.skipAutoNameMapping {
@@ -1244,7 +1468,17 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	for _, df := range dataFilesToAdd {
 		updater.appendDataFile(df)
 	}
+	for _, addition := range deleteFilesToAdd {
+		sequenceNumber := deleteSequenceNumber
+		if addition.dataSequenceNumber != nil {
+			sequenceNumber = *addition.dataSequenceNumber
+		}
+		updater.appendDeleteFileWithDataSequenceNumber(addition.file, sequenceNumber)
+	}
 	for _, df := range markedDeleteForRemoval {
+		updater.removeDeleteFile(df)
+	}
+	for _, df := range markedAutoDeleteForRemoval {
 		updater.removeDeleteFile(df)
 	}
 	for _, df := range markedDVsForRemoval {

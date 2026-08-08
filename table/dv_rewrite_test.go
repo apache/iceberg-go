@@ -174,6 +174,53 @@ func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 		"the coordinator path must preserve survivors' _row_id")
 }
 
+func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.T) {
+	ctx := context.Background()
+	tbl, dvTarget := seedV3TableWithDV(t)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id": 99}]`)
+
+	var oldEquality iceberg.DataFile
+	var oldEqualitySequence int64
+	manifests, err := tbl.CurrentSnapshot().Manifests(iceio.LocalFS{})
+	require.NoError(t, err)
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+		for entry, err := range manifest.Entries(iceio.LocalFS{}, false) {
+			require.NoError(t, err)
+			if entry.Status() == iceberg.EntryStatusDELETED || entry.DataFile().ContentType() != iceberg.EntryContentEqDeletes {
+				continue
+			}
+			oldEquality = entry.DataFile()
+			oldEqualitySequence = entry.SequenceNum()
+		}
+	}
+	require.NotNil(t, oldEquality)
+
+	groups, rewritten := planDVCompaction(t, tbl, dvTarget)
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for _, group := range groups {
+		result, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+		require.NoError(t, err)
+		rewrite.ApplyResult(result)
+	}
+
+	newEqualityPath := tbl.Location() + "/data/replacement-equality-delete.parquet"
+	newEquality := newEqDeleteFile(t, newEqualityPath)
+	rewrite.DeleteFile(oldEquality).
+		AddDeleteFileWithDataSequenceNumber(newEquality, oldEqualitySequence)
+	require.NoError(t, rewrite.Commit(ctx),
+		"automatic DV cleanup must not be treated as part of the explicit equality-delete rewrite")
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, oldEqualitySequence, deleteFileSequence(t, tbl, newEqualityPath))
+	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten))
+	assertRowCount(t, tbl, 3)
+}
+
 // TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV
 // removal: one Puffin file holds DV blobs for two data files (a shared path),
 // but only one of those data files is rewritten. The rewritten file's DV must
