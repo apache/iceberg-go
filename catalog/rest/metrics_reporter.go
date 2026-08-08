@@ -118,8 +118,11 @@ type metricsJob struct {
 // rather than accumulating goroutines and connections. Close cancels in-flight
 // reports and drains the workers.
 type metricsDispatcher struct {
-	jobs      chan metricsJob
-	timeout   time.Duration
+	jobs    chan metricsJob
+	timeout time.Duration
+	// ctx/cancel are the dispatcher's own lifecycle context, deliberately stored
+	// on the struct (the documented exception to "don't store a context in a
+	// struct"): Close cancels it to abort in-flight reports and stop the workers.
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -278,9 +281,20 @@ func (d *metricsDispatcher) close() {
 			close(done)
 		}()
 
+		// Explicit timer with a deferred Stop rather than time.After, which would
+		// leak a live timer (up to the full timeout) on the common path where the
+		// workers finish first — it adds up in a process that cycles through many
+		// catalogs.
+		t := time.NewTimer(d.timeout)
+		defer t.Stop()
 		select {
 		case <-done:
-		case <-time.After(d.timeout):
+		case <-t.C:
+			// Shutdown budget expired before the workers returned (a report wedged in
+			// auth, say). d.ctx is already cancelled, so each worker self-exits once
+			// its attempt unblocks — nothing leaks — but Close can return here before
+			// the workers have fully stopped; do not tear down a shared transport on
+			// the assumption that they have.
 		}
 
 		close(d.closeDone)

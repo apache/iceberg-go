@@ -29,6 +29,7 @@ import (
 	"hash"
 	"io"
 	"iter"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -956,11 +957,19 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 	r.props = toProps(ops)
 
 	// Stand up the metrics dispatcher only when the client opted in and the
-	// server advertises the endpoint. Enablement is read from the
-	// client-supplied properties alone (see reporterProps): a server-vended
-	// default, override, or table-response property must never turn on outbound
-	// telemetry the client never asked for.
-	if reportMetricsEnabled(r.reporterProps) && r.endpoints.check(endpointReportMetrics) == nil {
+	// server advertises the endpoint. Enablement of outbound telemetry is read
+	// from the client-supplied properties alone (see reporterProps): a server
+	// must never be able to turn on reporting the client never asked for.
+	//
+	// Disabling, however, is always safe, so an explicit server-side false is
+	// honored: r.props is the merged config (server defaults < client < server
+	// overrides), so an override setting the key false resolves to false here and
+	// suppresses a client that opted in — matching how a Java client resolves it
+	// and letting an operator switch reporting off fleet-wide. A mere server
+	// default cannot flip off a client opt-in, since client props beat defaults in
+	// the merge.
+	if reportMetricsEnabled(r.reporterProps) && reportMetricsEnabled(r.props) &&
+		r.endpoints.check(endpointReportMetrics) == nil {
 		r.metricsDispatcher = newMetricsDispatcher(
 			metricsDispatchWorkers, metricsDispatchQueueSize, reportMetricsTimeout(r.reporterProps), nil)
 	}
@@ -1187,15 +1196,22 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	// catalog-owned dispatcher. It is non-nil only when the client enabled
 	// reporting and the server advertises the endpoint (see init).
 	if r.metricsDispatcher != nil {
-		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr == nil {
-			if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr == nil {
-				reporter = metrics.Combine(reporter, &restMetricsReporter{
-					baseURI:    r.baseURI,
-					cl:         r.cl,
-					path:       path,
-					dispatcher: r.metricsDispatcher,
-				})
-			}
+		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr != nil {
+			// Unreachable for a valid identifier that already loaded above, but if it
+			// ever regresses, log why the REST reporter was dropped rather than let
+			// metrics silently vanish with no signal.
+			slog.Debug("iceberg: skipping REST metrics reporter, cannot split identifier",
+				"error", idErr)
+		} else if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr != nil {
+			slog.Debug("iceberg: skipping REST metrics reporter, cannot build metrics path",
+				"error", pErr)
+		} else {
+			reporter = metrics.Combine(reporter, &restMetricsReporter{
+				baseURI:    r.baseURI,
+				cl:         r.cl,
+				path:       path,
+				dispatcher: r.metricsDispatcher,
+			})
 		}
 	}
 

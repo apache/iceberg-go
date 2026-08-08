@@ -649,6 +649,7 @@ func TestMetricsDispatcherCloseCancelsInFlight(t *testing.T) {
 	tr := &ctxBlockTransport{started: make(chan struct{}, 1), ctxErr: make(chan error, 1)}
 	// A long per-report timeout so it is Close, not the deadline, that unblocks.
 	d := newMetricsDispatcher(1, 1, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(d.close) // guard against a t.Fatal below leaking the worker
 	rep := reporterWith(t, tr, d, nil)
 
 	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
@@ -686,6 +687,7 @@ func TestMetricsDispatcherCloseDropsQueuedReports(t *testing.T) {
 	// One worker, roomy queue: the worker is occupied by the first report while
 	// the rest pile up behind it.
 	d := newMetricsDispatcher(1, 8, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(d.close) // guard against a t.Fatal below leaking the worker
 	rep := reporterWith(t, tr, d, nil)
 
 	rep.Report(context.Background(), metrics.ScanReport{TableName: "db.t"})
@@ -737,10 +739,12 @@ func TestReportMetricsTimeout(t *testing.T) {
 }
 
 // TestMetricsReportingEnablementPrecedence pins that reporting is enabled only
-// by client-supplied configuration: server-vended defaults and overrides setting
-// the key must not turn it on, and the server must advertise the endpoint.
-// Table-response properties likewise cannot enable it, since enablement is
-// resolved once at init from the client properties alone.
+// by a client opt-in: server-vended defaults and overrides setting the key must
+// not turn it on, and the server must advertise the endpoint. Table-response
+// properties likewise cannot enable it, since enablement is resolved once at
+// init from the client properties. Disabling is safe in either direction, so an
+// explicit server override false does suppress a client that opted in, while a
+// mere server default cannot.
 func TestMetricsReportingEnablementPrecedence(t *testing.T) {
 	cfg := func(defaults, overrides map[string]any, endpoints []string) map[string]any {
 		m := map[string]any{
@@ -788,6 +792,35 @@ func TestMetricsReportingEnablementPrecedence(t *testing.T) {
 			name:        "client enables but endpoint not advertised",
 			serverCfg:   cfg(nil, nil, []string{"GET /v1/{prefix}/namespaces"}),
 			clientProps: iceberg.Properties{keyReportMetricsEnabled: "true"},
+		},
+		{
+			// The production path: the server advertises an explicit endpoint list
+			// that includes the metrics endpoint, exercising resolveEndpoints /
+			// endpointFromString parsing of the template rather than the
+			// fallback-to-defaults path the cases above hit. A parse regression here
+			// would silently disable reporting for servers that advertise it.
+			name: "client enables and metrics endpoint advertised",
+			serverCfg: cfg(nil, nil, []string{
+				"POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
+			}),
+			clientProps: iceberg.Properties{keyReportMetricsEnabled: "true"},
+			wantEnabled: true,
+		},
+		{
+			// Disabling is always safe, so an explicit server override false honors
+			// an operator suppressing reporting fleet-wide even for a client that
+			// opted in — matching how a Java client resolves the merged config.
+			name:        "server override disables client opt-in",
+			serverCfg:   cfg(nil, map[string]any{keyReportMetricsEnabled: "false"}, nil),
+			clientProps: iceberg.Properties{keyReportMetricsEnabled: "true"},
+		},
+		{
+			// A mere server default cannot flip off a client opt-in: client props beat
+			// server defaults in the merge, so the resolved value stays true.
+			name:        "server default cannot disable client opt-in",
+			serverCfg:   cfg(map[string]any{keyReportMetricsEnabled: "false"}, nil, nil),
+			clientProps: iceberg.Properties{keyReportMetricsEnabled: "true"},
+			wantEnabled: true,
 		},
 	}
 
