@@ -427,14 +427,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.SQL:
+		// Always set uri/warehouse keys (even when empty) so catalog.Load does not
+		// fill them from EnvConfig for a differently typed catalog of the same name.
 		props := iceberg.Properties{
-			"type": string(catalog.SQL),
-		}
-		if len(args.URI) > 0 {
-			props["uri"] = args.URI
-		}
-		if len(args.Warehouse) > 0 {
-			props["warehouse"] = args.Warehouse
+			"type":      string(catalog.SQL),
+			"uri":       args.URI,
+			"warehouse": args.Warehouse,
 		}
 		if len(args.SQLDriver) > 0 {
 			props[sqlcat.DriverKey] = args.SQLDriver
