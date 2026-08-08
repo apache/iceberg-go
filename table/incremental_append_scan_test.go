@@ -46,18 +46,24 @@ func TestIncrementalAppendScanRejectsUnknownStart(t *testing.T) {
 }
 
 func TestIncrementalAppendScanRejectsUnsupportedPlanningModes(t *testing.T) {
-	for _, mode := range []ScanPlanningMode{ScanPlanningRemote, ScanPlanningAuto} {
-		t.Run(string(mode), func(t *testing.T) {
-			scan := incrementalAppendTestTable(t).NewIncrementalAppendScan(
-				WithScanPlanningMode(mode),
-			)
+	scan := incrementalAppendTestTable(t).NewIncrementalAppendScan(
+		WithScanPlanningMode(ScanPlanningRemote),
+	)
 
-			tasks, err := scan.PlanFiles(context.Background())
-			require.ErrorIs(t, err, ErrInvalidOperation)
-			require.ErrorContains(t, err, "support local planning only")
-			require.Nil(t, tasks)
-		})
-	}
+	tasks, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, "do not support remote planning")
+	require.Nil(t, tasks)
+}
+
+func TestIncrementalAppendScanAutoFallsBackToLocal(t *testing.T) {
+	scan := incrementalAppendTestTable(t).NewIncrementalAppendScan(
+		WithScanPlanningMode(ScanPlanningAuto),
+	)
+
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
 }
 
 func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
@@ -152,6 +158,83 @@ func TestIncrementalAppendScanUsesSnapshotSchemaForExplicitEnd(t *testing.T) {
 	require.ErrorContains(t, err, "category")
 }
 
+func TestIncrementalAppendScanRejectsMissingImplicitEnd(t *testing.T) {
+	tbl := incrementalAppendTableWithoutCurrentSnapshot(t)
+
+	inclusive, err := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(1)
+	require.NoError(t, err)
+	_, err = inclusive.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "no ending snapshot")
+
+	exclusive := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(1)
+	_, err = exclusive.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "no ending snapshot")
+}
+
+func TestIncrementalAppendScanPrunesManifestSummariesBeforeOpening(t *testing.T) {
+	const (
+		matchingManifestPath   = "mem://default/incremental/metadata/manifest-matching.avro"
+		irrelevantManifestPath = "mem://default/incremental/metadata/manifest-irrelevant.avro"
+		manifestListPath       = "mem://default/incremental/metadata/snap-1.avro"
+		matchingDataPath       = "mem://default/incremental/data-matching.parquet"
+		irrelevantDataPath     = "mem://default/incremental/data-irrelevant.parquet"
+	)
+	spec := partitionedSpec()
+	schema := simpleSchema()
+	fs := newTrackingCallsIO()
+
+	writeManifest := func(manifestPath, dataPath string, partitionValue int32) iceberg.ManifestFile {
+		dataFile := newTestDataFile(t, spec, dataPath, map[int]any{1000: partitionValue})
+		snapshotID := int64(1)
+		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dataFile)
+		var manifestBuf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
+			[]iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+		return manifest
+	}
+
+	matchingManifest := writeManifest(matchingManifestPath, matchingDataPath, 1)
+	irrelevantManifest := writeManifest(irrelevantManifestPath, irrelevantDataPath, 2)
+	var manifestListBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &manifestListBuf, 1, nil, &seqNum, 0,
+		[]iceberg.ManifestFile{matchingManifest, irrelevantManifest}))
+	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuf.Bytes()))
+
+	meta, err := NewMetadata(schema, &spec, UnsortedSortOrder, "mem://default/incremental", nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	schemaID := schema.ID
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     1,
+		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		ManifestList:   manifestListPath,
+		SequenceNumber: 1,
+		SchemaID:       &schemaID,
+		Summary:        &Summary{Operation: OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"incremental-pruning"}, meta, "metadata.json", testFSF(fs), nil)
+	scan := tbl.NewIncrementalAppendScan(WithRowFilter(
+		iceberg.EqualTo(iceberg.Reference("id"), int32(1)),
+	))
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, matchingDataPath, tasks[0].File.FilePath())
+	require.Equal(t, 1, fs.openCount[matchingManifestPath])
+	require.Zero(t, fs.openCount[irrelevantManifestPath])
+}
+
 func incrementalAppendTestTable(t *testing.T) *Table {
 	t.Helper()
 	spec := partitionedSpec()
@@ -226,6 +309,28 @@ func incrementalAppendSchemaEvolutionTable(t *testing.T) *Table {
 	require.NoError(t, err)
 
 	return tbl
+}
+
+func incrementalAppendTableWithoutCurrentSnapshot(t *testing.T) *Table {
+	t.Helper()
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://default/no-current", nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	schemaID := schema.ID
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     1,
+		TimestampMs:    meta.LastUpdatedMillis() + 1,
+		SequenceNumber: 1,
+		SchemaID:       &schemaID,
+		Summary:        &Summary{Operation: OpAppend},
+	}))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"incremental-no-current"}, meta, "metadata.json", nil, nil)
 }
 
 func incrementalAppendDivergentTable(t *testing.T) *Table {
