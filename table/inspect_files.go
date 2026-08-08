@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"slices"
 	"sort"
 
@@ -46,12 +47,13 @@ func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error)
 		return nil, fmt.Errorf("inspect data files: build arrow schema: %w", err)
 	}
 
+	appendFile := newInspectContentFileAppender(partitionType)
 	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentData
 		},
 		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			return appendContentFileRecord(bldr, partitionType, entry.DataFile())
+			return appendFile(bldr, entry.DataFile())
 		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect data files: %w", err)
@@ -250,7 +252,7 @@ func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
 
 func isInspectVoidTransform(transform iceberg.Transform) bool {
 	switch transform.(type) {
-	case iceberg.VoidTransform, *iceberg.VoidTransform:
+	case iceberg.VoidTransform:
 		return true
 	default:
 		return false
@@ -264,37 +266,61 @@ func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	return iceberg.NewSchema(0, inspectContentFileFields(partitionType)...)
 }
 
-func inspectContentFileType(partitionType *iceberg.StructType) *iceberg.StructType {
-	return &iceberg.StructType{FieldList: inspectContentFileFields(partitionType)}
-}
+const (
+	inspectContentFieldIDContent             = 134
+	inspectContentFieldIDFilePath            = 100
+	inspectContentFieldIDFileFormat          = 101
+	inspectContentFieldIDSpecID              = 141
+	inspectContentFieldIDPartition           = 102
+	inspectContentFieldIDRecordCount         = 103
+	inspectContentFieldIDFileSize            = 104
+	inspectContentFieldIDColumnSizes         = 108
+	inspectContentFieldIDValueCounts         = 109
+	inspectContentFieldIDNullValueCounts     = 110
+	inspectContentFieldIDDistinctValueCounts = 111
+	inspectContentFieldIDNaNValueCounts      = 137
+	inspectContentFieldIDLowerBounds         = 125
+	inspectContentFieldIDUpperBounds         = 128
+	inspectContentFieldIDKeyMetadata         = 131
+	inspectContentFieldIDSplitOffsets        = 132
+	inspectContentFieldIDEqualityIDs         = 135
+	inspectContentFieldIDSortOrderID         = 140
+	inspectContentFieldIDFirstRowID          = 142
+	inspectContentFieldIDReferencedDataFile  = 143
+	inspectContentFieldIDContentOffset       = 144
+	inspectContentFieldIDContentSize         = 145
+)
 
 func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.NestedField {
 	fields := []iceberg.NestedField{
-		{ID: 134, Name: "content", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-		{ID: 100, Name: "file_path", Type: iceberg.PrimitiveTypes.String, Required: true},
-		{ID: 101, Name: "file_format", Type: iceberg.PrimitiveTypes.String, Required: true},
-		{ID: 141, Name: "spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		{ID: inspectContentFieldIDContent, Name: "content", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		{ID: inspectContentFieldIDFilePath, Name: "file_path", Type: iceberg.PrimitiveTypes.String, Required: true},
+		{ID: inspectContentFieldIDFileFormat, Name: "file_format", Type: iceberg.PrimitiveTypes.String, Required: true},
+		{ID: inspectContentFieldIDSpecID, Name: "spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 	}
 	if partitionType != nil && len(partitionType.FieldList) > 0 {
-		fields = append(fields, iceberg.NestedField{ID: 102, Name: "partition", Type: partitionType, Required: true})
+		fields = append(fields, iceberg.NestedField{
+			ID: inspectContentFieldIDPartition, Name: "partition", Type: partitionType, Required: true,
+		})
 	}
 	fields = append(fields,
-		iceberg.NestedField{ID: 103, Name: "record_count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 104, Name: "file_size_in_bytes", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 108, Name: "column_sizes", Type: inspectInt64MapType(117, 118), Required: false},
-		iceberg.NestedField{ID: 109, Name: "value_counts", Type: inspectInt64MapType(119, 120), Required: false},
-		iceberg.NestedField{ID: 110, Name: "null_value_counts", Type: inspectInt64MapType(121, 122), Required: false},
-		iceberg.NestedField{ID: 137, Name: "nan_value_counts", Type: inspectInt64MapType(138, 139), Required: false},
-		iceberg.NestedField{ID: 125, Name: "lower_bounds", Type: inspectBinaryMapType(126, 127), Required: false},
-		iceberg.NestedField{ID: 128, Name: "upper_bounds", Type: inspectBinaryMapType(129, 130), Required: false},
-		iceberg.NestedField{ID: 131, Name: "key_metadata", Type: iceberg.PrimitiveTypes.Binary, Required: false},
-		iceberg.NestedField{ID: 132, Name: "split_offsets", Type: &iceberg.ListType{ElementID: 133, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: true}, Required: false},
-		iceberg.NestedField{ID: 135, Name: "equality_ids", Type: &iceberg.ListType{ElementID: 136, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true}, Required: false},
-		iceberg.NestedField{ID: 140, Name: "sort_order_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
-		iceberg.NestedField{ID: 142, Name: "first_row_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-		iceberg.NestedField{ID: 143, Name: "referenced_data_file", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.NestedField{ID: 144, Name: "content_offset", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-		iceberg.NestedField{ID: 145, Name: "content_size_in_bytes", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDRecordCount, Name: "record_count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: inspectContentFieldIDFileSize, Name: "file_size_in_bytes", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: inspectContentFieldIDColumnSizes, Name: "column_sizes", Type: inspectInt64MapType(117, 118), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDValueCounts, Name: "value_counts", Type: inspectInt64MapType(119, 120), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDNullValueCounts, Name: "null_value_counts", Type: inspectInt64MapType(121, 122), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDDistinctValueCounts, Name: "distinct_value_counts", Type: inspectInt64MapType(112, 113), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDNaNValueCounts, Name: "nan_value_counts", Type: inspectInt64MapType(138, 139), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDLowerBounds, Name: "lower_bounds", Type: inspectBinaryMapType(126, 127), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDUpperBounds, Name: "upper_bounds", Type: inspectBinaryMapType(129, 130), Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDKeyMetadata, Name: "key_metadata", Type: iceberg.PrimitiveTypes.Binary, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDSplitOffsets, Name: "split_offsets", Type: &iceberg.ListType{ElementID: 133, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: true}, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDEqualityIDs, Name: "equality_ids", Type: &iceberg.ListType{ElementID: 136, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true}, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDSortOrderID, Name: "sort_order_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDFirstRowID, Name: "first_row_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDReferencedDataFile, Name: "referenced_data_file", Type: iceberg.PrimitiveTypes.String, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDContentOffset, Name: "content_offset", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: inspectContentFieldIDContentSize, Name: "content_size_in_bytes", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 	)
 
 	return fields
@@ -309,84 +335,223 @@ func inspectBinaryMapType(keyID, valueID int) *iceberg.MapType {
 }
 
 func appendContentFileRecord(bldr *array.RecordBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
-	return appendContentFileFields(bldr.Field, partitionType, file)
-}
-
-func appendContentFile(builder *array.StructBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
-	builder.Append(true)
-
-	return appendContentFileFields(builder.FieldBuilder, partitionType, file)
-}
-
-func appendContentFileFields(fieldBuilder func(int) array.Builder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
-	idx := 0
-	fieldBuilder(idx).(*array.Int32Builder).Append(int32(file.ContentType()))
-	idx++
-	fieldBuilder(idx).(*array.StringBuilder).Append(file.FilePath())
-	idx++
-	fieldBuilder(idx).(*array.StringBuilder).Append(string(file.FileFormat()))
-	idx++
-	fieldBuilder(idx).(*array.Int32Builder).Append(file.SpecID())
-	idx++
-
-	if partitionType != nil && len(partitionType.FieldList) > 0 {
-		partition := fieldBuilder(idx).(*array.StructBuilder)
-		if err := appendInspectPartition(partition, partitionType, file.Partition()); err != nil {
-			return err
-		}
-		idx++
+	contentFileBuilder, err := newInspectContentFileBuilder(bldr, partitionType)
+	if err != nil {
+		return err
 	}
 
-	fieldBuilder(idx).(*array.Int64Builder).Append(file.Count())
-	idx++
-	fieldBuilder(idx).(*array.Int64Builder).Append(file.FileSizeBytes())
-	idx++
-	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.ColumnSizes())
-	idx++
-	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.ValueCounts())
-	idx++
-	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.NullValueCounts())
-	idx++
-	appendInspectInt64Map(fieldBuilder(idx).(*array.MapBuilder), file.NaNValueCounts())
-	idx++
-	appendInspectBinaryMap(fieldBuilder(idx).(*array.MapBuilder), file.LowerBoundValues())
-	idx++
-	appendInspectBinaryMap(fieldBuilder(idx).(*array.MapBuilder), file.UpperBoundValues())
-	idx++
-	appendInspectBytes(fieldBuilder(idx), file.KeyMetadata())
-	idx++
-	appendInspectInt64List(fieldBuilder(idx).(*array.ListBuilder), file.SplitOffsets())
-	idx++
-	appendInspectInt32List(fieldBuilder(idx).(*array.ListBuilder), file.EqualityFieldIDs())
-	idx++
-	appendInspectOptionalInt32(fieldBuilder(idx).(*array.Int32Builder), file.SortOrderID())
-	idx++
-	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.FirstRowID())
-	idx++
-	appendInspectOptionalString(fieldBuilder(idx).(*array.StringBuilder), file.ReferencedDataFile())
-	idx++
-	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.ContentOffset())
-	idx++
-	appendInspectOptionalInt64(fieldBuilder(idx).(*array.Int64Builder), file.ContentSizeInBytes())
+	return contentFileBuilder.append(partitionType, file)
+}
+
+func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*array.RecordBuilder, iceberg.DataFile) error {
+	var current *array.RecordBuilder
+	var contentFileBuilder inspectContentFileBuilder
+	var bindErr error
+
+	return func(bldr *array.RecordBuilder, file iceberg.DataFile) error {
+		if bldr != current {
+			contentFileBuilder, bindErr = newInspectContentFileBuilder(bldr, partitionType)
+			current = bldr
+		}
+		if bindErr != nil {
+			return bindErr
+		}
+
+		return contentFileBuilder.append(partitionType, file)
+	}
+}
+
+type inspectContentFileBuilder struct {
+	content             *array.Int32Builder
+	filePath            *array.StringBuilder
+	fileFormat          *array.StringBuilder
+	specID              *array.Int32Builder
+	partition           *array.StructBuilder
+	recordCount         *array.Int64Builder
+	fileSize            *array.Int64Builder
+	columnSizes         *array.MapBuilder
+	valueCounts         *array.MapBuilder
+	nullValueCounts     *array.MapBuilder
+	distinctValueCounts *array.MapBuilder
+	nanValueCounts      *array.MapBuilder
+	lowerBounds         *array.MapBuilder
+	upperBounds         *array.MapBuilder
+	keyMetadata         *array.BinaryBuilder
+	splitOffsets        *array.ListBuilder
+	equalityIDs         *array.ListBuilder
+	sortOrderID         *array.Int32Builder
+	firstRowID          *array.Int64Builder
+	referencedDataFile  *array.StringBuilder
+	contentOffset       *array.Int64Builder
+	contentSize         *array.Int64Builder
+}
+
+func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
+	lookup, err := newInspectBuilderLookup("content-file", bldr.Schema().Fields(), bldr.Field)
+	if err != nil {
+		return inspectContentFileBuilder{}, err
+	}
+	if err := validateInspectBuilderLookup("content-file", lookup, inspectContentFileFieldIDs(partitionType)); err != nil {
+		return inspectContentFileBuilder{}, err
+	}
+
+	var out inspectContentFileBuilder
+	if out.content, err = inspectBuilderAs[*array.Int32Builder](lookup, inspectContentFieldIDContent, "content"); err != nil {
+		return out, err
+	}
+	if out.filePath, err = inspectBuilderAs[*array.StringBuilder](lookup, inspectContentFieldIDFilePath, "file_path"); err != nil {
+		return out, err
+	}
+	if out.fileFormat, err = inspectBuilderAs[*array.StringBuilder](lookup, inspectContentFieldIDFileFormat, "file_format"); err != nil {
+		return out, err
+	}
+	if out.specID, err = inspectBuilderAs[*array.Int32Builder](lookup, inspectContentFieldIDSpecID, "spec_id"); err != nil {
+		return out, err
+	}
+	if partitionType != nil && len(partitionType.FieldList) > 0 {
+		if out.partition, err = inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition"); err != nil {
+			return out, err
+		}
+	}
+	if out.recordCount, err = inspectBuilderAs[*array.Int64Builder](lookup, inspectContentFieldIDRecordCount, "record_count"); err != nil {
+		return out, err
+	}
+	if out.fileSize, err = inspectBuilderAs[*array.Int64Builder](lookup, inspectContentFieldIDFileSize, "file_size_in_bytes"); err != nil {
+		return out, err
+	}
+	if out.columnSizes, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDColumnSizes, "column_sizes"); err != nil {
+		return out, err
+	}
+	if out.valueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDValueCounts, "value_counts"); err != nil {
+		return out, err
+	}
+	if out.nullValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDNullValueCounts, "null_value_counts"); err != nil {
+		return out, err
+	}
+	if out.distinctValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDDistinctValueCounts, "distinct_value_counts"); err != nil {
+		return out, err
+	}
+	if out.nanValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDNaNValueCounts, "nan_value_counts"); err != nil {
+		return out, err
+	}
+	if out.lowerBounds, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDLowerBounds, "lower_bounds"); err != nil {
+		return out, err
+	}
+	if out.upperBounds, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDUpperBounds, "upper_bounds"); err != nil {
+		return out, err
+	}
+	if out.keyMetadata, err = inspectBuilderAs[*array.BinaryBuilder](lookup, inspectContentFieldIDKeyMetadata, "key_metadata"); err != nil {
+		return out, err
+	}
+	if out.splitOffsets, err = inspectBuilderAs[*array.ListBuilder](lookup, inspectContentFieldIDSplitOffsets, "split_offsets"); err != nil {
+		return out, err
+	}
+	if out.equalityIDs, err = inspectBuilderAs[*array.ListBuilder](lookup, inspectContentFieldIDEqualityIDs, "equality_ids"); err != nil {
+		return out, err
+	}
+	if out.sortOrderID, err = inspectBuilderAs[*array.Int32Builder](lookup, inspectContentFieldIDSortOrderID, "sort_order_id"); err != nil {
+		return out, err
+	}
+	if out.firstRowID, err = inspectBuilderAs[*array.Int64Builder](lookup, inspectContentFieldIDFirstRowID, "first_row_id"); err != nil {
+		return out, err
+	}
+	if out.referencedDataFile, err = inspectBuilderAs[*array.StringBuilder](lookup, inspectContentFieldIDReferencedDataFile, "referenced_data_file"); err != nil {
+		return out, err
+	}
+	if out.contentOffset, err = inspectBuilderAs[*array.Int64Builder](lookup, inspectContentFieldIDContentOffset, "content_offset"); err != nil {
+		return out, err
+	}
+	if out.contentSize, err = inspectBuilderAs[*array.Int64Builder](lookup, inspectContentFieldIDContentSize, "content_size_in_bytes"); err != nil {
+		return out, err
+	}
+
+	return out, nil
+}
+
+func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, file iceberg.DataFile) error {
+	b.content.Append(int32(file.ContentType()))
+	b.filePath.Append(file.FilePath())
+	b.fileFormat.Append(string(file.FileFormat()))
+	b.specID.Append(file.SpecID())
+
+	if b.partition != nil {
+		if err := appendInspectPartition(b.partition, partitionType, file.Partition()); err != nil {
+			return err
+		}
+	}
+
+	b.recordCount.Append(file.Count())
+	b.fileSize.Append(file.FileSizeBytes())
+	if err := appendInspectInt64Map(b.columnSizes, file.ColumnSizes()); err != nil {
+		return err
+	}
+	if err := appendInspectInt64Map(b.valueCounts, file.ValueCounts()); err != nil {
+		return err
+	}
+	if err := appendInspectInt64Map(b.nullValueCounts, file.NullValueCounts()); err != nil {
+		return err
+	}
+	if err := appendInspectInt64Map(b.distinctValueCounts, file.DistinctValueCounts()); err != nil {
+		return err
+	}
+	if err := appendInspectInt64Map(b.nanValueCounts, file.NaNValueCounts()); err != nil {
+		return err
+	}
+	if err := appendInspectBinaryMap(b.lowerBounds, file.LowerBoundValues()); err != nil {
+		return err
+	}
+	if err := appendInspectBinaryMap(b.upperBounds, file.UpperBoundValues()); err != nil {
+		return err
+	}
+	appendInspectBytes(b.keyMetadata, file.KeyMetadata())
+	if err := appendInspectInt64List(b.splitOffsets, file.SplitOffsets()); err != nil {
+		return err
+	}
+	if err := appendInspectInt32List(b.equalityIDs, file.EqualityFieldIDs()); err != nil {
+		return err
+	}
+	if err := appendInspectOptionalInt32(b.sortOrderID, file.SortOrderID()); err != nil {
+		return err
+	}
+	appendInspectOptionalInt64(b.firstRowID, file.FirstRowID())
+	appendInspectOptionalString(b.referencedDataFile, file.ReferencedDataFile())
+	appendInspectOptionalInt64(b.contentOffset, file.ContentOffset())
+	appendInspectOptionalInt64(b.contentSize, file.ContentSizeInBytes())
 
 	return nil
 }
 
 func appendInspectPartition(builder *array.StructBuilder, partitionType *iceberg.StructType, values map[int]any) error {
-	arrowType := builder.Type().(*arrow.StructType)
+	arrowType, ok := builder.Type().(*arrow.StructType)
+	if !ok {
+		return fmt.Errorf("partition builder has type %T, want struct", builder.Type())
+	}
+	lookup, err := newInspectBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
+	if err != nil {
+		return err
+	}
+	expected := make(map[int]struct{}, len(partitionType.FieldList))
+	for _, field := range partitionType.FieldList {
+		expected[field.ID] = struct{}{}
+	}
+	if err := validateInspectBuilderLookup("partition", lookup, expected); err != nil {
+		return err
+	}
+
 	builder.Append(true)
-	for idx, field := range partitionType.FieldList {
+	for _, field := range partitionType.FieldList {
 		value := values[field.ID]
+		fieldBuilder := lookup[field.ID]
 		if value == nil {
-			builder.FieldBuilder(idx).AppendNull()
+			fieldBuilder.AppendNull()
 
 			continue
 		}
-		sc, err := inspectValueScalar(value, field.Type, arrowType.Field(idx).Type)
+		sc, err := inspectValueScalar(value, field.Type, fieldBuilder.Type())
 		if err != nil {
 			return fmt.Errorf("partition field %q: %w", field.Name, err)
 		}
-		if err := scalar.Append(builder.FieldBuilder(idx), sc); err != nil {
+		if err := scalar.Append(fieldBuilder, sc); err != nil {
 			return err
 		}
 	}
@@ -402,23 +567,33 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 			return scalar.NewDate32Scalar(arrow.Date32(value)), nil
 		case int32:
 			return scalar.NewDate32Scalar(arrow.Date32(value)), nil
+		default:
+			return nil, fmt.Errorf("unsupported date partition value %T", value)
 		}
 	case iceberg.TimeType:
 		if value, ok := value.(iceberg.Time); ok {
 			return scalar.NewTime64Scalar(arrow.Time64(value), arrowType), nil
 		}
+
+		return nil, fmt.Errorf("unsupported time partition value %T", value)
 	case iceberg.TimestampType, iceberg.TimestampTzType:
 		if value, ok := value.(iceberg.Timestamp); ok {
 			return scalar.NewTimestampScalar(arrow.Timestamp(value), arrowType), nil
 		}
+
+		return nil, fmt.Errorf("unsupported timestamp partition value %T", value)
 	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
 		if value, ok := value.(iceberg.TimestampNano); ok {
 			return scalar.NewTimestampScalar(arrow.Timestamp(value), arrowType), nil
 		}
+
+		return nil, fmt.Errorf("unsupported nanosecond timestamp partition value %T", value)
 	case iceberg.UUIDType:
 		if value, ok := value.(uuid.UUID); ok {
 			return scalar.MakeScalarParam(value[:], arrowType)
 		}
+
+		return nil, fmt.Errorf("unsupported UUID partition value %T", value)
 	case iceberg.DecimalType:
 		switch value := value.(type) {
 		case iceberg.DecimalLiteral:
@@ -433,85 +608,217 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 	return scalar.MakeScalarParam(value, arrowType)
 }
 
-func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) {
+func inspectContentFileFieldIDs(partitionType *iceberg.StructType) map[int]struct{} {
+	ids := map[int]struct{}{
+		inspectContentFieldIDContent:             {},
+		inspectContentFieldIDFilePath:            {},
+		inspectContentFieldIDFileFormat:          {},
+		inspectContentFieldIDSpecID:              {},
+		inspectContentFieldIDRecordCount:         {},
+		inspectContentFieldIDFileSize:            {},
+		inspectContentFieldIDColumnSizes:         {},
+		inspectContentFieldIDValueCounts:         {},
+		inspectContentFieldIDNullValueCounts:     {},
+		inspectContentFieldIDDistinctValueCounts: {},
+		inspectContentFieldIDNaNValueCounts:      {},
+		inspectContentFieldIDLowerBounds:         {},
+		inspectContentFieldIDUpperBounds:         {},
+		inspectContentFieldIDKeyMetadata:         {},
+		inspectContentFieldIDSplitOffsets:        {},
+		inspectContentFieldIDEqualityIDs:         {},
+		inspectContentFieldIDSortOrderID:         {},
+		inspectContentFieldIDFirstRowID:          {},
+		inspectContentFieldIDReferencedDataFile:  {},
+		inspectContentFieldIDContentOffset:       {},
+		inspectContentFieldIDContentSize:         {},
+	}
+	if partitionType != nil && len(partitionType.FieldList) > 0 {
+		ids[inspectContentFieldIDPartition] = struct{}{}
+	}
+
+	return ids
+}
+
+func newInspectBuilderLookup(scope string, fields []arrow.Field, builder func(int) array.Builder) (map[int]array.Builder, error) {
+	lookup := make(map[int]array.Builder, len(fields))
+	for idx, field := range fields {
+		id := getFieldID(field)
+		if id == nil {
+			return nil, fmt.Errorf("%s field %q is missing a valid field ID", scope, field.Name)
+		}
+		if _, exists := lookup[*id]; exists {
+			return nil, fmt.Errorf("%s schema contains duplicate field ID %d", scope, *id)
+		}
+		lookup[*id] = builder(idx)
+	}
+
+	return lookup, nil
+}
+
+func validateInspectBuilderLookup(scope string, lookup map[int]array.Builder, expected map[int]struct{}) error {
+	if len(lookup) != len(expected) {
+		return fmt.Errorf("%s schema has %d fields, want %d", scope, len(lookup), len(expected))
+	}
+	for id := range lookup {
+		if _, ok := expected[id]; !ok {
+			return fmt.Errorf("%s schema contains unexpected field ID %d", scope, id)
+		}
+	}
+	for id := range expected {
+		if _, ok := lookup[id]; !ok {
+			return fmt.Errorf("%s schema is missing field ID %d", scope, id)
+		}
+	}
+
+	return nil
+}
+
+func inspectBuilderAs[T any](lookup map[int]array.Builder, id int, name string) (T, error) {
+	var zero T
+	builder, ok := lookup[id]
+	if !ok {
+		return zero, fmt.Errorf("content-file schema is missing field %q (ID %d)", name, id)
+	}
+	typed, ok := builder.(T)
+	if !ok {
+		return zero, fmt.Errorf("content-file field %q (ID %d) has builder type %T", name, id, builder)
+	}
+
+	return typed, nil
+}
+
+func inspectInt32Value(value int, name string) (int32, error) {
+	if value < math.MinInt32 || value > math.MaxInt32 {
+		return 0, fmt.Errorf("%s %d does not fit in int32", name, value)
+	}
+
+	return int32(value), nil
+}
+
+func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) error {
 	if values == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
 	builder.Append(true)
-	keys := builder.KeyBuilder().(*array.Int32Builder)
-	items := builder.ItemBuilder().(*array.Int64Builder)
+	keys, ok := builder.KeyBuilder().(*array.Int32Builder)
+	if !ok {
+		return fmt.Errorf("map key builder has type %T, want int32", builder.KeyBuilder())
+	}
+	items, ok := builder.ItemBuilder().(*array.Int64Builder)
+	if !ok {
+		return fmt.Errorf("map item builder has type %T, want int64", builder.ItemBuilder())
+	}
 	ids := make([]int, 0, len(values))
 	for id := range values {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
 	for _, id := range ids {
-		keys.Append(int32(id))
+		key, err := inspectInt32Value(id, "field ID")
+		if err != nil {
+			return err
+		}
+		keys.Append(key)
 		items.Append(values[id])
 	}
+
+	return nil
 }
 
-func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) {
+func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) error {
 	if values == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
 	builder.Append(true)
-	keys := builder.KeyBuilder().(*array.Int32Builder)
-	items := builder.ItemBuilder().(*array.BinaryBuilder)
+	keys, ok := builder.KeyBuilder().(*array.Int32Builder)
+	if !ok {
+		return fmt.Errorf("map key builder has type %T, want int32", builder.KeyBuilder())
+	}
+	items, ok := builder.ItemBuilder().(*array.BinaryBuilder)
+	if !ok {
+		return fmt.Errorf("map item builder has type %T, want binary", builder.ItemBuilder())
+	}
 	ids := make([]int, 0, len(values))
 	for id := range values {
 		ids = append(ids, id)
 	}
 	sort.Ints(ids)
 	for _, id := range ids {
-		keys.Append(int32(id))
+		key, err := inspectInt32Value(id, "field ID")
+		if err != nil {
+			return err
+		}
+		keys.Append(key)
 		items.Append(values[id])
 	}
+
+	return nil
 }
 
-func appendInspectBytes(builder array.Builder, value []byte) {
+func appendInspectBytes(builder *array.BinaryBuilder, value []byte) {
 	if value == nil {
 		builder.AppendNull()
 
 		return
 	}
-	builder.(*array.BinaryBuilder).Append(value)
+	builder.Append(value)
 }
 
-func appendInspectInt64List(builder *array.ListBuilder, values []int64) {
+func appendInspectInt64List(builder *array.ListBuilder, values []int64) error {
 	if values == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
 	builder.Append(true)
-	builder.ValueBuilder().(*array.Int64Builder).AppendValues(values, nil)
+	items, ok := builder.ValueBuilder().(*array.Int64Builder)
+	if !ok {
+		return fmt.Errorf("list item builder has type %T, want int64", builder.ValueBuilder())
+	}
+	items.AppendValues(values, nil)
+
+	return nil
 }
 
-func appendInspectInt32List(builder *array.ListBuilder, values []int) {
+func appendInspectInt32List(builder *array.ListBuilder, values []int) error {
 	if values == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
 	builder.Append(true)
-	items := builder.ValueBuilder().(*array.Int32Builder)
+	items, ok := builder.ValueBuilder().(*array.Int32Builder)
+	if !ok {
+		return fmt.Errorf("list item builder has type %T, want int32", builder.ValueBuilder())
+	}
 	for _, value := range values {
-		items.Append(int32(value))
+		converted, err := inspectInt32Value(value, "equality field ID")
+		if err != nil {
+			return err
+		}
+		items.Append(converted)
 	}
+
+	return nil
 }
 
-func appendInspectOptionalInt32(builder *array.Int32Builder, value *int) {
+func appendInspectOptionalInt32(builder *array.Int32Builder, value *int) error {
 	if value == nil {
 		builder.AppendNull()
 
-		return
+		return nil
 	}
-	builder.Append(int32(*value))
+	converted, err := inspectInt32Value(*value, "sort order ID")
+	if err != nil {
+		return err
+	}
+	builder.Append(converted)
+
+	return nil
 }
 
 func appendInspectOptionalInt64(builder *array.Int64Builder, value *int64) {
