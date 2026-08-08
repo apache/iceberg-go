@@ -1123,6 +1123,10 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 }
 
 func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
+	if isUnknownTransform(u.transform) {
+		return nil, fmt.Errorf("%w: unknown transform %s cannot be evaluated", ErrNotImplemented, u.transform)
+	}
+
 	ref, ok := u.term.(Reference)
 	if !ok {
 		return nil, fmt.Errorf("%w: transform terms must wrap a direct reference, got %T",
@@ -1139,6 +1143,15 @@ func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, 
 	}
 
 	return &BoundTransform{transform: u.transform, term: bound}, nil
+}
+
+func isUnknownTransform(transform Transform) bool {
+	switch transform.(type) {
+	case UnknownTransform, *UnknownTransform:
+		return true
+	default:
+		return false
+	}
 }
 
 // rejectTransformTerm guards predicates that still do not support transform
