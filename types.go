@@ -577,6 +577,9 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	if aux.ValueID == nil {
 		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Value.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'value' key in JSON", ErrInvalidSchema)
+	}
 
 	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
 	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
