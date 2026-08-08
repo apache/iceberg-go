@@ -274,7 +274,7 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 		name string
 		ref  SnapshotRef
 	}
-	refs := make([]refRow, 0)
+	var refs []refRow
 	for name, ref := range i.tbl.metadata.Refs() {
 		refs = append(refs, refRow{name: name, ref: ref})
 	}
@@ -307,13 +307,14 @@ func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
 			maxReferenceAge.AppendNull()
 		}
 		if row.ref.MinSnapshotsToKeep != nil {
-			if *row.ref.MinSnapshotsToKeep > math.MaxInt32 {
+			value := *row.ref.MinSnapshotsToKeep
+			if value < math.MinInt32 || value > math.MaxInt32 {
 				return nil, fmt.Errorf(
-					"inspect refs: min snapshots to keep %d exceeds int32 range",
-					*row.ref.MinSnapshotsToKeep,
+					"inspect refs: min snapshots to keep %d is outside int32 range",
+					value,
 				)
 			}
-			minSnapshotsToKeep.Append(int32(*row.ref.MinSnapshotsToKeep))
+			minSnapshotsToKeep.Append(int32(value))
 		} else {
 			minSnapshotsToKeep.AppendNull()
 		}

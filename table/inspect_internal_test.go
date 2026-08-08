@@ -44,6 +44,13 @@ import (
 // log entry references an expired snapshot (id 999, absent from the snapshot
 // list) to exercise the null-parent path.
 func historyTestTable() *Table {
+	return refsTestTable(map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+	})
+}
+
+// refsTestTable builds the history table with the supplied snapshot refs.
+func refsTestTable(snapshotRefs map[string]SnapshotRef) *Table {
 	const (
 		s1 = int64(101)
 		s2 = int64(102)
@@ -80,10 +87,10 @@ func historyTestTable() *Table {
 		},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       snapshotRefs,
 	}}
 
-	return New(Identifier{"history"}, meta, "", nil, nil)
+	return New(Identifier{"refs"}, meta, "", nil, nil)
 }
 
 // collectRecord drains a RecordReader into a single record for assertions and
@@ -283,11 +290,10 @@ func TestInspectRefsSchema(t *testing.T) {
 }
 
 func TestInspectRefs(t *testing.T) {
-	tbl := historyTestTable()
 	minSnapshotsToKeep := 2
 	maxSnapshotAge := int64(3000)
 	maxReferenceAge := int64(4000)
-	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
 			SnapshotRefType:    BranchRef,
@@ -299,7 +305,7 @@ func TestInspectRefs(t *testing.T) {
 			SnapshotRefType: TagRef,
 			MaxRefAgeMs:     &maxReferenceAge,
 		},
-	}
+	})
 
 	rr, err := tbl.Inspect().Refs(context.Background())
 	require.NoError(t, err)
@@ -335,8 +341,7 @@ func TestInspectRefs(t *testing.T) {
 }
 
 func TestInspectRefsEmpty(t *testing.T) {
-	tbl := historyTestTable()
-	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{}
+	tbl := refsTestTable(map[string]SnapshotRef{})
 
 	rr, err := tbl.Inspect().Refs(context.Background())
 	require.NoError(t, err)
@@ -349,37 +354,52 @@ func TestInspectRefsEmpty(t *testing.T) {
 	require.EqualValues(t, 6, rec.NumCols())
 }
 
+func TestInspectRefsAllocator(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	tbl := refsTestTable(map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+	})
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 1, rec.NumRows())
+}
+
 func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("requires 64-bit int")
 	}
 
-	tbl := historyTestTable()
 	tooLarge := int64(math.MaxInt32) + 1
 	minSnapshotsToKeep := int(tooLarge)
-	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
 			SnapshotRefType:    BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
-	}
+	})
 
 	rr, err := tbl.Inspect().Refs(context.Background())
-	require.ErrorContains(t, err, "min snapshots to keep 2147483648 exceeds int32 range")
+	require.ErrorContains(t, err, "min snapshots to keep 2147483648 is outside int32 range")
 	require.Nil(t, rr)
 }
 
 func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
-	tbl := historyTestTable()
 	minSnapshotsToKeep := int(math.MaxInt32)
-	tbl.metadata.(*metadataV2).SnapshotRefs = map[string]SnapshotRef{
+	tbl := refsTestTable(map[string]SnapshotRef{
 		"main": {
 			SnapshotID:         103,
 			SnapshotRefType:    BranchRef,
 			MinSnapshotsToKeep: &minSnapshotsToKeep,
 		},
-	}
+	})
 
 	rr, err := tbl.Inspect().Refs(context.Background())
 	require.NoError(t, err)
