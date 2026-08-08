@@ -324,6 +324,210 @@ func TestMetadataV3Parsing(t *testing.T) {
 	assert.Equal(t, int64(2000), *secondSnapshot.FirstRowID)
 }
 
+func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		target any
+	}{
+		{name: "v1", data: ExampleTableMetadataV1, target: &metadataV1{}},
+		{name: "v2", data: ExampleTableMetadataV2, target: &metadataV2{}},
+		{name: "v3", data: ExampleTableMetadataV3, target: &metadataV3{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initialData := []byte(tt.data)
+			var initial map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(initialData, &initial))
+			setJSON := func(key string, value any) {
+				encoded, err := json.Marshal(value)
+				require.NoError(t, err)
+				initial[key] = encoded
+			}
+			var snapshots []struct {
+				SnapshotID int64 `json:"snapshot-id"`
+			}
+			require.NoError(t, json.Unmarshal(initial["snapshots"], &snapshots))
+			require.NotEmpty(t, snapshots)
+			snapshotID := snapshots[len(snapshots)-1].SnapshotID
+			setJSON("properties", map[string]any{"seed": "value"})
+			setJSON("current-snapshot-id", snapshotID)
+			setJSON("snapshot-log", []any{map[string]any{"snapshot-id": snapshotID, "timestamp-ms": int64(1)}})
+			setJSON("metadata-log", []any{map[string]any{"metadata-file": "s3://bucket/old.json", "timestamp-ms": int64(1)}})
+			setJSON("refs", map[string]any{"main": map[string]any{"snapshot-id": snapshotID, "type": "branch"}})
+			setJSON("last-partition-id", int64(1000))
+			setJSON("statistics", []any{map[string]any{
+				"snapshot-id": snapshotID, "statistics-path": "s3://bucket/stats.puffin",
+				"file-size-in-bytes": int64(1), "file-footer-size-in-bytes": int64(1), "blob-metadata": []any{},
+			}})
+			setJSON("partition-statistics", []any{map[string]any{
+				"snapshot-id": snapshotID, "statistics-path": "s3://bucket/partition-stats.parquet", "file-size-in-bytes": int64(1),
+			}})
+			if tt.name == "v2" || tt.name == "v3" {
+				setJSON("last-sequence-number", int64(34))
+			}
+			if tt.name == "v3" {
+				setJSON("encryption-keys", []any{map[string]any{
+					"key-id": "key-1", "encrypted-key-metadata": "YWJj",
+				}})
+			}
+			var err error
+			initialData, err = json.Marshal(initial)
+			require.NoError(t, err)
+
+			require.NoError(t, json.Unmarshal(initialData, tt.target))
+
+			common := metadataCommon(tt.target)
+			require.NotEmpty(t, common.Props)
+			require.NotEmpty(t, common.SnapshotList)
+			require.NotEmpty(t, common.SnapshotLog)
+			require.NotEmpty(t, common.MetadataLog)
+			require.NotEmpty(t, common.SnapshotRefs)
+			require.NotNil(t, common.CurrentSnapshotID)
+			require.NotNil(t, common.LastPartitionID)
+			require.NotEmpty(t, common.StatisticsList)
+			require.NotEmpty(t, common.PartitionStatsList)
+			switch metadata := tt.target.(type) {
+			case *metadataV1:
+				require.Equal(t, int64(0), metadata.LastSequenceNumber())
+			case *metadataV2:
+				require.Equal(t, int64(34), metadata.LastSeqNum)
+			case *metadataV3:
+				require.Equal(t, int64(34), metadata.LastSeqNum)
+			}
+			if tt.name == "v3" {
+				require.NotEmpty(t, common.EncryptionKeyList)
+			}
+
+			var reduced map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &reduced))
+			for _, key := range []string{
+				"properties", "current-snapshot-id", "snapshots", "snapshot-log", "metadata-log", "refs",
+				"statistics", "partition-statistics", "encryption-keys", "last-sequence-number",
+			} {
+				delete(reduced, key)
+			}
+			reduced["last-partition-id"] = json.RawMessage("1001")
+			reducedData, err := json.Marshal(reduced)
+			require.NoError(t, err)
+
+			require.NoError(t, json.Unmarshal(reducedData, tt.target))
+
+			common = metadataCommon(tt.target)
+			assert.Empty(t, common.Props)
+			assert.Empty(t, common.SnapshotList)
+			assert.Empty(t, common.SnapshotLog)
+			assert.Empty(t, common.MetadataLog)
+			assert.Empty(t, common.SnapshotRefs)
+			assert.Nil(t, common.CurrentSnapshotID)
+			assert.Equal(t, 1001, *common.LastPartitionID)
+			assert.Empty(t, common.StatisticsList)
+			assert.Empty(t, common.PartitionStatsList)
+			assert.Empty(t, common.EncryptionKeyList)
+			// With no snapshots, an omitted last-sequence-number retains the
+			// legacy -1 sentinel. This documents current behavior, not the
+			// desired metadata normalization.
+			switch metadata := tt.target.(type) {
+			case *metadataV1:
+				assert.Equal(t, int64(0), metadata.LastSequenceNumber())
+			case *metadataV2:
+				assert.Equal(t, int64(-1), metadata.LastSeqNum)
+			case *metadataV3:
+				assert.Equal(t, int64(-1), metadata.LastSeqNum)
+			}
+		})
+	}
+}
+
+func metadataCommon(target any) *commonMetadata {
+	switch metadata := target.(type) {
+	case *metadataV1:
+		return &metadata.commonMetadata
+	case *metadataV2:
+		return &metadata.commonMetadata
+	case *metadataV3:
+		return &metadata.commonMetadata
+	default:
+		panic("unsupported metadata type")
+	}
+}
+
+func TestMetadataUnmarshalPreservesStateOnError(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		invalid   string
+		malformed string
+		target    any
+	}{
+		{
+			name:      "v1",
+			data:      ExampleTableMetadataV1,
+			invalid:   strings.Replace(ExampleTableMetadataV1, `"current-snapshot-id": -1`, `"current-snapshot-id": 999`, 1),
+			malformed: "not json {",
+			target:    &metadataV1{},
+		},
+		{
+			name:      "v2",
+			data:      ExampleTableMetadataV2,
+			invalid:   strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			malformed: "not json {",
+			target:    &metadataV2{},
+		},
+		{
+			name:      "v3",
+			data:      ExampleTableMetadataV3,
+			invalid:   strings.Replace(ExampleTableMetadataV3, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			malformed: "not json {",
+			target:    &metadataV3{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, invalid := range []struct {
+				name string
+				data string
+			}{
+				{name: "validation", data: tt.invalid},
+				{name: "json", data: tt.malformed},
+			} {
+				t.Run(invalid.name, func(t *testing.T) {
+					require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
+					before, err := json.Marshal(tt.target)
+					require.NoError(t, err)
+
+					require.Error(t, json.Unmarshal([]byte(invalid.data), tt.target))
+
+					after, err := json.Marshal(tt.target)
+					require.NoError(t, err)
+					assert.Equal(t, before, after)
+				})
+			}
+		})
+	}
+}
+
+func TestMetadataV2UnmarshalRejectsMissingRequiredStateOnReuse(t *testing.T) {
+	seedData := strings.Replace(ExampleTableMetadataV2, `"spec-id": 0`, `"spec-id": 7`, 1)
+	seedData = strings.Replace(seedData, `"default-spec-id": 0`, `"default-spec-id": 7`, 1)
+
+	var metadata metadataV2
+	require.NoError(t, json.Unmarshal([]byte(seedData), &metadata))
+
+	var reduced map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(seedData), &reduced))
+	delete(reduced, "default-spec-id")
+	reducedData, err := json.Marshal(reduced)
+	require.NoError(t, err)
+
+	require.Error(t, json.Unmarshal(reducedData, &metadata))
+	assert.Equal(t, 7, metadata.DefaultSpecID)
+	assert.Equal(t, 1, metadata.CurrentSchemaID)
+	assert.Len(t, metadata.SnapshotList, 2)
+}
+
 func TestLastUpdatedMSPresence(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1410,7 +1614,9 @@ func TestMetadataV1Validation(t *testing.T) {
 	}`
 
 	// Parse each test case
-	var meta1, meta2, meta3 metadataV1
+	meta1 := initMetadataV1Deser()
+	meta2 := initMetadataV1Deser()
+	meta3 := initMetadataV1Deser()
 
 	// Test case 1: Verify LastColumnId is -1 when not specified
 	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))
@@ -1450,6 +1656,7 @@ func TestMetadataV2Validation(t *testing.T) {
 		"current-schema-id": 0,
 		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"default-spec-id": 0,
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"properties": {},
         "default-sort-order-id": 0,
@@ -1469,13 +1676,16 @@ func TestMetadataV2Validation(t *testing.T) {
 		"last-column-id": 0,
 		"last-partition-id": 1000,
 		"schemas": [{"type":"struct","schema-id":0,"fields":[]}],
+		"default-spec-id": 0,
 		"partition-specs": [{"spec-id": 0, "fields": []}],
 		"sort-orders": [],
 		"default-sort-order-id": 0
 	}`
 
 	// Parse each test case
-	var meta1, meta2, meta3 metadataV2
+	meta1 := initMetadataV2Deser()
+	meta2 := initMetadataV2Deser()
+	meta3 := initMetadataV2Deser()
 
 	// Test case 1: Verify LastColumnId is -1 when not specified
 	require.Error(t, meta1.UnmarshalJSON([]byte(noColumnID)))
