@@ -828,12 +828,15 @@ func (filterBindingVisitor) VisitAnd(left, right filterBindingState) filterBindi
 		hasUnbound: left.hasUnbound || right.hasUnbound,
 	}
 }
+
 func (filterBindingVisitor) VisitOr(left, right filterBindingState) filterBindingState {
 	return filterBindingVisitor{}.VisitAnd(left, right)
 }
+
 func (filterBindingVisitor) VisitUnbound(iceberg.UnboundPredicate) filterBindingState {
 	return filterBindingState{hasUnbound: true}
 }
+
 func (filterBindingVisitor) VisitBound(iceberg.BoundPredicate) filterBindingState {
 	return filterBindingState{hasBound: true}
 }
