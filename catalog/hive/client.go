@@ -19,6 +19,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -58,6 +59,9 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	}
 
 	host := parsed.Hostname()
+	if host == "" {
+		return nil, errors.New("invalid URI: host is required")
+	}
 	portStr := parsed.Port()
 	if portStr == "" {
 		portStr = "9083"
