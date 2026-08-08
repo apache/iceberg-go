@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -207,6 +208,61 @@ func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 			assert.Equal(t, []int64{4}, int64Values(got["file-c.parquet"]))
 		})
 	}
+}
+
+func TestGroupPosDeletesByFilePathHonorsCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(t.Context(), mem)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	filePathArr := stringArray(mem, "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	dict := nullableStringArray(mem, "file-a.parquet", "")
+	defer dict.Release()
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int32,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	idxA := int32Array(mem, 0)
+	defer idxA.Release()
+	filePathA := array.NewDictionaryArray(dictType, idxA, dict)
+	defer filePathA.Release()
+	idxB := int32Array(mem, 1)
+	defer idxB.Release()
+	filePathB := array.NewDictionaryArray(dictType, idxB, dict)
+	defer filePathB.Release()
+	filePathCol := arrow.NewChunked(dictType, []arrow.Array{filePathA, filePathB})
+	defer filePathCol.Release()
+
+	posA := int64Array(mem, 1)
+	defer posA.Release()
+	posB := int64Array(mem, 2)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "null file_path dictionary value")
 }
 
 func TestGroupPosDeletesByFilePathHandlesDifferentChunkBoundaries(t *testing.T) {

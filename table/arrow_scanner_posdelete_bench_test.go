@@ -29,43 +29,90 @@ import (
 
 func BenchmarkGroupPosDeletesByFilePath(b *testing.B) {
 	const numRows = 1_000_000
+	chunkConfigs := []struct {
+		name           string
+		filePathChunks int
+		posChunks      int
+	}{
+		{name: "1x1", filePathChunks: 1, posChunks: 1},
+		{name: "64x65", filePathChunks: 64, posChunks: 65},
+	}
 
 	for _, numPaths := range []int{1, 10, 100, 1_000} {
-		b.Run(fmt.Sprintf("rows=%d/paths=%d", numRows, numPaths), func(b *testing.B) {
-			mem := memory.DefaultAllocator
-			pathNames := make([]string, numPaths)
-			for i := range numPaths {
-				pathNames[i] = fmt.Sprintf("file-%04d.parquet", i)
-			}
-
-			filePaths := make([]string, numRows)
-			positions := make([]int64, numRows)
-			for i := range numRows {
-				filePaths[i] = pathNames[i%numPaths]
-				positions[i] = int64(i)
-			}
-
-			filePathArr := stringArray(mem, filePaths...)
-			defer filePathArr.Release()
-			filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
-			defer filePathCol.Release()
-
-			posArr := int64Array(mem, positions...)
-			defer posArr.Release()
-			posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
-			defer posCol.Release()
-
-			ctx := compute.WithAllocator(context.Background(), mem)
-			b.ReportAllocs()
-			b.ResetTimer()
-
-			for b.Loop() {
-				deletes, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
-				if err != nil {
-					b.Fatal(err)
+		for _, chunks := range chunkConfigs {
+			b.Run(fmt.Sprintf("rows=%d/paths=%d/chunks=%s", numRows, numPaths, chunks.name), func(b *testing.B) {
+				mem := memory.DefaultAllocator
+				pathNames := make([]string, numPaths)
+				for i := range numPaths {
+					pathNames[i] = fmt.Sprintf("file-%04d.parquet", i)
 				}
-				releasePosDeletes(deletes)
-			}
-		})
+
+				filePaths := make([]string, numRows)
+				positions := make([]int64, numRows)
+				for i := range numRows {
+					filePaths[i] = pathNames[i%numPaths]
+					positions[i] = int64(i)
+				}
+
+				filePathChunks := makeStringChunks(mem, filePaths, chunks.filePathChunks)
+				filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, filePathChunks)
+				defer func() {
+					filePathCol.Release()
+					for _, chunk := range filePathChunks {
+						chunk.Release()
+					}
+				}()
+
+				posChunks := makeInt64Chunks(mem, positions, chunks.posChunks)
+				posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, posChunks)
+				defer func() {
+					posCol.Release()
+					for _, chunk := range posChunks {
+						chunk.Release()
+					}
+				}()
+
+				ctx := compute.WithAllocator(context.Background(), mem)
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				for b.Loop() {
+					deletes, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+					if err != nil {
+						b.Fatal(err)
+					}
+					releasePosDeletes(deletes)
+				}
+			})
+		}
 	}
+}
+
+func makeStringChunks(mem memory.Allocator, values []string, numChunks int) []arrow.Array {
+	boundaries := benchmarkChunkBoundaries(len(values), numChunks)
+	chunks := make([]arrow.Array, numChunks)
+	for i := range numChunks {
+		chunks[i] = stringArray(mem, values[boundaries[i]:boundaries[i+1]]...)
+	}
+
+	return chunks
+}
+
+func makeInt64Chunks(mem memory.Allocator, values []int64, numChunks int) []arrow.Array {
+	boundaries := benchmarkChunkBoundaries(len(values), numChunks)
+	chunks := make([]arrow.Array, numChunks)
+	for i := range numChunks {
+		chunks[i] = int64Array(mem, values[boundaries[i]:boundaries[i+1]]...)
+	}
+
+	return chunks
+}
+
+func benchmarkChunkBoundaries(length, numChunks int) []int {
+	boundaries := make([]int, numChunks+1)
+	for i := range boundaries {
+		boundaries[i] = i * length / numChunks
+	}
+
+	return boundaries
 }

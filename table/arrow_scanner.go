@@ -279,6 +279,11 @@ func filePathValues(values arrow.Array) (arrow.TypedArray[string], error) {
 }
 
 func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
+	const cancellationCheckInterval = 16 * 1024
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if filePathCol.NullN() > 0 {
 		return nil, fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
 	}
@@ -321,6 +326,10 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 
 	posChunkIndex, posOffset := 0, 0
 	for _, filePathChunk := range filePathCol.Chunks() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		paths, pathErr := filePathValues(filePathChunk)
 		if pathErr != nil {
 			return nil, pathErr
@@ -334,6 +343,12 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 		}
 
 		for i := 0; i < filePathChunk.Len(); i++ {
+			if i&(cancellationCheckInterval-1) == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+			}
+
 			for posChunkIndex < len(posArrays) && posOffset == posArrays[posChunkIndex].Len() {
 				posChunkIndex++
 				posOffset = 0
@@ -357,6 +372,9 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 			builder.Append(posArrays[posChunkIndex].Value(posOffset))
 			posOffset++
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	results = make(map[string]*arrow.Chunked, len(builders))
