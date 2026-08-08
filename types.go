@@ -33,10 +33,10 @@ import (
 )
 
 var (
-	regexFromBrackets = regexp.MustCompile(`^\w+\[(\d+)\]$`)
-	decimalRegex      = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
-	geometryRegex     = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
-	geographyRegex    = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
+	fixedRegex     = regexp.MustCompile(`^fixed\[(\d+)\]$`)
+	decimalRegex   = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+	geometryRegex  = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
+	geographyRegex = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
 )
 
 type Properties map[string]string
@@ -196,7 +196,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
-				matches := regexFromBrackets.FindStringSubmatch(typename)
+				matches := fixedRegex.FindStringSubmatch(typename)
 				if len(matches) != 2 {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
