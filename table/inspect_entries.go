@@ -39,14 +39,28 @@ func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
 		return nil, fmt.Errorf("inspect entries: build arrow schema: %w", err)
 	}
 
+	var current *array.RecordBuilder
+	var contentFileBuilder inspectContentFileBuilder
+	var bindErr error
 	rr, err := i.manifestEntryReader(ctx, arrowSchema, false, nil,
 		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+			dataFileBuilder := bldr.Field(4).(*array.StructBuilder)
+			if bldr != current {
+				contentFileBuilder, bindErr = newInspectContentFileStructBuilder(dataFileBuilder, partitionType)
+				current = bldr
+			}
+			if bindErr != nil {
+				return bindErr
+			}
+
 			bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
 			appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
 			appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
 			appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
 
-			return appendContentFile(bldr.Field(4).(*array.StructBuilder), partitionType, entry.DataFile())
+			dataFileBuilder.Append(true)
+
+			return contentFileBuilder.append(partitionType, entry.DataFile())
 		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect entries: %w", err)
@@ -64,6 +78,21 @@ func EntriesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 		iceberg.NestedField{ID: 4, Name: "file_sequence_number", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 		iceberg.NestedField{ID: 2, Name: "data_file", Type: inspectContentFileType(partitionType), Required: true},
 	)
+}
+
+func appendContentFile(builder *array.StructBuilder, partitionType *iceberg.StructType, file iceberg.DataFile) error {
+	contentFileBuilder, err := newInspectContentFileStructBuilder(builder, partitionType)
+	if err != nil {
+		return err
+	}
+
+	builder.Append(true)
+
+	return contentFileBuilder.append(partitionType, file)
+}
+
+func inspectContentFileType(partitionType *iceberg.StructType) *iceberg.StructType {
+	return &iceberg.StructType{FieldList: inspectContentFileFields(partitionType)}
 }
 
 func appendEntriesOptionalInt64(builder *array.Int64Builder, value int64) {
