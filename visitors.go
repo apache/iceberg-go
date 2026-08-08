@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -42,7 +43,10 @@ type BooleanExprVisitor[T any] interface {
 // BoundBooleanExprVisitor builds on BooleanExprVisitor by adding interface
 // methods for visiting bound expressions, because we do casting of literals
 // during binding you can assume that the BoundTerm and the Literal passed
-// to a method have the same type.
+// to a method have the same type. Sets passed to VisitIn and VisitNotIn are
+// detached when dispatched through VisitBoundPredicate. The internal
+// VisitBoundPredicateRef path may pass borrowed sets to trusted built-in
+// visitors, which must not call Add or mutate their literal values.
 type BoundBooleanExprVisitor[T any] interface {
 	BooleanExprVisitor[T]
 
@@ -131,12 +135,25 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 // panics with an error wrapping ErrNotImplemented. When reached through VisitExpr
 // that panic is recovered into a returned error; a caller invoking this directly
 // must implement the extension or recover the panic itself.
+// Set predicates are dispatched with detached literal sets. Trusted built-in
+// visitors that need the zero-copy path can use [VisitBoundPredicateRef].
 func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T]) T {
+	return visitBoundPredicate(e, visitor, false)
+}
+
+// VisitBoundPredicateRef is the zero-copy dispatch path for trusted visitors
+// inside this module. It is gated by an internal token so external visitors
+// use VisitBoundPredicate and receive a detached set.
+func VisitBoundPredicateRef[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], _ internal.BoundPredicateRef) T {
+	return visitBoundPredicate(e, visitor, true)
+}
+
+func visitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], borrowed bool) T {
 	switch e.Op() {
 	case OpIn:
-		return visitor.VisitIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitIn(e.Term(), literalSetForVisit(e, borrowed))
 	case OpNotIn:
-		return visitor.VisitNotIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitNotIn(e.Term(), literalSetForVisit(e, borrowed))
 	case OpIsNan:
 		return visitor.VisitIsNan(e.Term())
 	case OpNotNan:
@@ -180,6 +197,19 @@ func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisito
 		return gv.VisitBBoxNotIntersects(e.Term(), bbox)
 	}
 	panic(fmt.Errorf("%w: unhandled bound predicate type: %s", ErrNotImplemented, e))
+}
+
+func literalSetForVisit(predicate BoundPredicate, borrowed bool) Set[Literal] {
+	setPredicate, ok := predicate.(BoundSetPredicate)
+	if !ok {
+		panic(fmt.Errorf("%w: %s predicate %T does not implement BoundSetPredicate",
+			ErrNotImplemented, predicate.Op(), predicate))
+	}
+	if borrowed {
+		return boundSetLiteralsForVisit(predicate)
+	}
+
+	return setPredicate.Literals()
 }
 
 // BindExpr recursively binds each portion of an expression using the provided schema.
@@ -253,7 +283,7 @@ func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
 }
 
 func (e *exprEvaluator) VisitBound(pred BoundPredicate) bool {
-	return VisitBoundPredicate(pred, e)
+	return visitBoundPredicate(pred, e, true)
 }
 
 func (*exprEvaluator) VisitTrue() bool                { return true }
@@ -590,7 +620,7 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 	case BoundLiteralPredicate:
 		return p.AsUnbound(ref, p.Literal())
 	case BoundSetPredicate:
-		return p.AsUnbound(ref, p.Literals().Members())
+		return p.AsUnbound(ref, boundSetLiteralsForVisit(p).Members())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
@@ -674,7 +704,7 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	case BoundLiteralPredicate:
 		return sanitizeLiteralPredicate(p.Op(), ref)
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+		return sanitizeSetPredicate(p.Op(), ref, boundSetLiteralsForVisit(p).Len())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
