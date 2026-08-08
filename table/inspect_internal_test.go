@@ -103,7 +103,8 @@ func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, vers
 }
 
 func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, currentSchema *iceberg.Schema,
-	spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
+	spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile,
+) *Table {
 	t.Helper()
 
 	const snapshotID = int64(1)
