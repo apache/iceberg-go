@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -247,6 +248,224 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
+// Manifests returns one row for each manifest in the current snapshot.
+// Partition summaries are exposed as the human-readable values used by the
+// other Iceberg clients.
+func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error) {
+	schema := ManifestsSchema()
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manifests: build arrow schema: %w", err)
+	}
+
+	manifests, err := i.currentSnapshotManifests(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manifests: %w", err)
+	}
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	content := bldr.Field(0).(*array.Int32Builder)
+	path := bldr.Field(1).(*array.StringBuilder)
+	length := bldr.Field(2).(*array.Int64Builder)
+	partitionSpecID := bldr.Field(3).(*array.Int32Builder)
+	addedSnapshotID := bldr.Field(4).(*array.Int64Builder)
+	addedDataFiles := bldr.Field(5).(*array.Int32Builder)
+	existingDataFiles := bldr.Field(6).(*array.Int32Builder)
+	deletedDataFiles := bldr.Field(7).(*array.Int32Builder)
+	addedDeleteFiles := bldr.Field(8).(*array.Int32Builder)
+	existingDeleteFiles := bldr.Field(9).(*array.Int32Builder)
+	deletedDeleteFiles := bldr.Field(10).(*array.Int32Builder)
+	partitionSummaries := bldr.Field(11).(*array.ListBuilder)
+	summaryStruct := partitionSummaries.ValueBuilder().(*array.StructBuilder)
+	summaryContainsNull := summaryStruct.FieldBuilder(0).(*array.BooleanBuilder)
+	summaryContainsNaN := summaryStruct.FieldBuilder(1).(*array.BooleanBuilder)
+	summaryLower := summaryStruct.FieldBuilder(2).(*array.StringBuilder)
+	summaryUpper := summaryStruct.FieldBuilder(3).(*array.StringBuilder)
+
+	for _, manifest := range manifests {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		manifestContent := manifest.ManifestContent()
+		switch manifestContent {
+		case iceberg.ManifestContentData, iceberg.ManifestContentDeletes:
+		default:
+			return nil, fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
+		}
+
+		content.Append(int32(manifestContent))
+		path.Append(manifest.FilePath())
+		length.Append(manifest.Length())
+		partitionSpecID.Append(manifest.PartitionSpecID())
+		addedSnapshotID.Append(manifest.SnapshotID())
+		appendCount := func(builder *array.Int32Builder, name string, count int32) error {
+			if err := appendManifestCount(builder, manifest.Version(), name, count); err != nil {
+				return fmt.Errorf("manifest %s: %w", manifest.FilePath(), err)
+			}
+
+			return nil
+		}
+
+		switch manifestContent {
+		case iceberg.ManifestContentData:
+			if err := appendCount(addedDataFiles, "added_data_files", manifest.AddedDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(existingDataFiles, "existing_data_files", manifest.ExistingDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(deletedDataFiles, "deleted_data_files", manifest.DeletedDataFiles()); err != nil {
+				return nil, err
+			}
+			addedDeleteFiles.Append(0)
+			existingDeleteFiles.Append(0)
+			deletedDeleteFiles.Append(0)
+		case iceberg.ManifestContentDeletes:
+			addedDataFiles.Append(0)
+			existingDataFiles.Append(0)
+			deletedDataFiles.Append(0)
+			if err := appendCount(addedDeleteFiles, "added_delete_files", manifest.AddedDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(existingDeleteFiles, "existing_delete_files", manifest.ExistingDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(deletedDeleteFiles, "deleted_delete_files", manifest.DeletedDataFiles()); err != nil {
+				return nil, err
+			}
+		}
+
+		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
+		if spec == nil {
+			return nil, fmt.Errorf("manifest %s references missing partition spec %d",
+				manifest.FilePath(), manifest.PartitionSpecID())
+		}
+		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
+		partitions := manifest.Partitions()
+		if partitions == nil {
+			partitionSummaries.AppendNull()
+
+			continue
+		}
+		if len(partitions) > spec.NumFields() {
+			return nil, fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
+				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
+		}
+
+		partitionSummaries.Append(true)
+		for idx, summary := range partitions {
+			summaryStruct.Append(true)
+			summaryContainsNull.Append(summary.ContainsNull)
+			if summary.ContainsNaN == nil {
+				summaryContainsNaN.AppendNull()
+			} else {
+				summaryContainsNaN.Append(*summary.ContainsNaN)
+			}
+
+			fieldType := partType.FieldList[idx].Type
+			transform := spec.Field(idx).Transform
+			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
+				return nil, fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
+			}
+			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
+				return nil, fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
+			}
+		}
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manifests: %w", err)
+	}
+
+	return rr, nil
+}
+
+func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
+	if count < 0 {
+		if version == 1 {
+			builder.AppendNull()
+
+			return nil
+		}
+
+		return fmt.Errorf("negative %s count %d in manifest list version %d", name, count, version)
+	}
+
+	builder.Append(count)
+
+	return nil
+}
+
+func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
+	snapshot := i.tbl.metadata.CurrentSnapshot()
+	if snapshot == nil {
+		return nil, nil
+	}
+	if i.tbl.fsF == nil {
+		return nil, errors.New("table file IO is not configured")
+	}
+
+	fs, err := i.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return snapshot.Manifests(fs)
+}
+
+func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transform iceberg.Transform, bound *[]byte) error {
+	if bound == nil {
+		builder.AppendNull()
+
+		return nil
+	}
+
+	literal, err := manifestBoundLiteral(typ, *bound)
+	if err != nil {
+		return err
+	}
+	if literal == nil {
+		builder.AppendNull()
+
+		return nil
+	}
+
+	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
+
+	return nil
+}
+
+func manifestBoundLiteral(typ iceberg.Type, bound []byte) (iceberg.Literal, error) {
+	switch t := typ.(type) {
+	case iceberg.UnknownType:
+		return nil, nil
+	case iceberg.Int64Type:
+		if len(bound) == 4 {
+			literal, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Int32, bound)
+			if err != nil {
+				return nil, err
+			}
+
+			return literal.To(t)
+		}
+	case iceberg.Float64Type:
+		if len(bound) == 4 {
+			literal, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, bound)
+			if err != nil {
+				return nil, err
+			}
+
+			return literal.To(t)
+		}
+	}
+
+	return iceberg.LiteralFromBytes(typ, bound)
+}
+
 // HistorySchema returns the Iceberg schema of the history metadata table. The
 // field IDs are fixed by the Iceberg metadata-tables spec and match the Java,
 // PyIceberg, and Rust clients for cross-client parity. A fresh schema value is
@@ -282,6 +501,33 @@ func SnapshotsSchema() *iceberg.Schema {
 			ValueID:       8,
 			ValueType:     iceberg.PrimitiveTypes.String,
 			ValueRequired: false,
+		}},
+	)
+}
+
+// ManifestsSchema returns the Iceberg schema of the manifests metadata table.
+func ManifestsSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 14, Name: "content", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 1, Name: "path", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "length", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 3, Name: "partition_spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: &iceberg.ListType{
+			ElementID:       9,
+			ElementRequired: true,
+			Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 10, Name: "contains_null", Type: iceberg.PrimitiveTypes.Bool, Required: true},
+				{ID: 11, Name: "contains_nan", Type: iceberg.PrimitiveTypes.Bool, Required: false},
+				{ID: 12, Name: "lower_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
+				{ID: 13, Name: "upper_bound", Type: iceberg.PrimitiveTypes.String, Required: false},
+			}},
 		}},
 	)
 }
