@@ -44,13 +44,18 @@ import (
 // log entry references an expired snapshot (id 999, absent from the snapshot
 // list) to exercise the null-parent path.
 func historyTestTable() *Table {
-	return refsTestTable(map[string]SnapshotRef{
+	return inspectTestTable(Identifier{"history"}, map[string]SnapshotRef{
 		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
 	})
 }
 
-// refsTestTable builds the history table with the supplied snapshot refs.
 func refsTestTable(snapshotRefs map[string]SnapshotRef) *Table {
+	return inspectTestTable(Identifier{"refs"}, snapshotRefs)
+}
+
+// inspectTestTable builds the shared metadata fixture with the supplied
+// identifier and snapshot refs.
+func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef) *Table {
 	const (
 		s1 = int64(101)
 		s2 = int64(102)
@@ -90,7 +95,7 @@ func refsTestTable(snapshotRefs map[string]SnapshotRef) *Table {
 		SnapshotRefs:       snapshotRefs,
 	}}
 
-	return New(Identifier{"refs"}, meta, "", nil, nil)
+	return New(identifier, meta, "", nil, nil)
 }
 
 // collectRecord drains a RecordReader into a single record for assertions and
