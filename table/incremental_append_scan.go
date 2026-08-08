@@ -39,7 +39,7 @@ type IncrementalAppendScan struct {
 // NewIncrementalAppendScan creates an incremental append scan. Scan options
 // configure the underlying table scan and are retained for callers that pass
 // snapshot, projection, filter, or concurrency options before planning.
-// Only local planning is supported; remote and auto planning return
+// Auto planning falls back to local planning. Remote planning returns
 // ErrInvalidOperation until incremental remote planning is implemented.
 func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
 	return &IncrementalAppendScan{scan: t.Scan(opts...)}
@@ -82,9 +82,9 @@ func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) (*IncrementalAppend
 // applied because appended files are not present before the append snapshot.
 func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	switch s.scan.planningMode {
-	case ScanPlanningLocal:
-	case ScanPlanningRemote, ScanPlanningAuto:
-		return nil, fmt.Errorf("%w: incremental append scans support local planning only", ErrInvalidOperation)
+	case ScanPlanningLocal, ScanPlanningAuto:
+	case ScanPlanningRemote:
+		return nil, fmt.Errorf("%w: incremental append scans do not support remote planning", ErrInvalidOperation)
 	default:
 		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
 	}
@@ -94,6 +94,11 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		return nil, err
 	}
 	if toSnapshot == nil {
+		if s.fromSnapshotID != nil {
+			return nil, fmt.Errorf("%w: no ending snapshot found for incremental append scan from %d",
+				iceberg.ErrInvalidArgument, *s.fromSnapshotID)
+		}
+
 		return nil, nil
 	}
 
@@ -166,6 +171,13 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	schema, err := planningScan.effectiveSchema()
 	if err != nil {
 		return nil, err
+	}
+	manifestList, err = planningScan.filterManifestsWithSchema(manifestList, schema, &scanMetricsAccumulator{})
+	if err != nil {
+		return nil, err
+	}
+	if len(manifestList) == 0 {
+		return nil, nil
 	}
 	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
