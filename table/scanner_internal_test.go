@@ -31,6 +31,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -1146,6 +1147,108 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 			seen[f.ID] = f.Name
 		}
 		assert.Contains(t, seen, iceberg.RowIDFieldID, "_row_id must survive projection")
+	})
+}
+
+func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
+	tbl := buildV3TableWithRows(t, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	decimalDefault := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn(
+			[]string{"new_col"},
+			iceberg.PrimitiveTypes.Int32,
+			"",
+			false,
+			iceberg.Int32Literal(42),
+		).
+		AddColumn(
+			[]string{"new_decimal"},
+			iceberg.DecimalTypeOf(9, 2),
+			"",
+			false,
+			iceberg.DecimalLiteral(decimalDefault),
+		).
+		Commit())
+	var err error
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		filter   iceberg.BooleanExpression
+		expected int64
+	}{
+		{
+			name:     "matching equality",
+			filter:   iceberg.EqualTo(iceberg.Reference("new_col"), int32(42)),
+			expected: 2,
+		},
+		{
+			name:     "mismatching equality",
+			filter:   iceberg.EqualTo(iceberg.Reference("new_col"), int32(7)),
+			expected: 0,
+		},
+		{
+			name:     "is null",
+			filter:   iceberg.IsNull(iceberg.Reference("new_col")),
+			expected: 0,
+		},
+		{
+			name:     "not null",
+			filter:   iceberg.NotNull(iceberg.Reference("new_col")),
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan := tbl.Scan(
+				WithSelectedFields("id", "new_col"),
+				WithRowFilter(tt.filter),
+			)
+			tasks, err := scan.PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, 1, "manifest planning must retain the old file")
+
+			result, err := scan.ToArrowTable(t.Context())
+			require.NoError(t, err)
+			defer result.Release()
+			require.Equal(t, tt.expected, result.NumRows())
+
+			for _, chunk := range result.Column(1).Data().Chunks() {
+				defaults := chunk.(*array.Int32)
+				for i := range defaults.Len() {
+					require.Equal(t, int32(42), defaults.Value(i))
+				}
+			}
+		})
+	}
+
+	t.Run("matching decimal", func(t *testing.T) {
+		scan := tbl.Scan(
+			WithSelectedFields("id", "new_decimal"),
+			WithRowFilter(iceberg.EqualTo(
+				iceberg.Reference("new_decimal"),
+				decimalDefault,
+			)),
+		)
+		tasks, err := scan.PlanFiles(t.Context())
+		require.NoError(t, err)
+		require.Len(t, tasks, 1, "manifest planning must retain the old file")
+
+		result, err := scan.ToArrowTable(t.Context())
+		require.NoError(t, err)
+		defer result.Release()
+		require.Equal(t, int64(2), result.NumRows())
+
+		for _, chunk := range result.Column(1).Data().Chunks() {
+			defaults := chunk.(*array.Decimal128)
+			for i := range defaults.Len() {
+				require.Equal(t, decimal128.FromI64(1234), defaults.Value(i))
+			}
+		}
 	})
 }
 
