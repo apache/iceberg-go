@@ -637,9 +637,10 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 
 	newOrderID := b.reuseOrCreateNewSortOrderID(sortOrder)
 	if _, err := b.GetSortOrderByID(newOrderID); err == nil {
-		if b.lastAddedSortOrderID != &newOrderID {
+		sortOrder.orderID = newOrderID
+
+		if b.lastAddedSortOrderID == nil || *b.lastAddedSortOrderID != newOrderID {
 			b.lastAddedSortOrderID = &newOrderID
-			sortOrder.orderID = newOrderID
 			b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
 		}
 
