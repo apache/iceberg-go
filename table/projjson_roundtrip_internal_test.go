@@ -91,7 +91,7 @@ func TestWriteRecordsRecoversExactProjJSONCRSOnRead(t *testing.T) {
 		projectedSchema: tbl.Schema(),
 		concurrency:     1,
 		nameMapping:     tbl.Metadata().NameMapping(),
-	}).prepareToRead(ctx, dataFiles[0])
+	}).prepareToRead(ctx, dataFiles[0], nil)
 	require.NoError(t, err)
 	defer rdr.Close()
 
