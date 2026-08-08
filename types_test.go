@@ -96,6 +96,14 @@ func TestFixedTypeInvalidParse(t *testing.T) {
 			data: `{"id": 1, "name": "f", "type": "fixed[0]junk", "required": true}`,
 		},
 		{
+			name: "malformed prefix",
+			data: `{"id": 1, "name": "f", "type": "fixedfoo[16]", "required": true}`,
+		},
+		{
+			name: "malformed short prefix",
+			data: `{"id": 1, "name": "f", "type": "fixedx[5]", "required": true}`,
+		},
+		{
 			name: "overflow",
 			data: `{"id": 1, "name": "f", "type": "fixed[99999999999999999999]", "required": true}`,
 		},
