@@ -1500,6 +1500,11 @@ func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 			valid: true,
 		},
 		{
+			name:  "pointer void transition is compatible",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, &iceberg.VoidTransform{})},
+			valid: true,
+		},
+		{
 			name:  "different source ids",
 			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 2, iceberg.IdentityTransform{})},
 		},
@@ -1528,6 +1533,11 @@ func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 		})
 	}
+
+	unknown, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+	_, err = inspectPartitionType(metadataFor([]iceberg.PartitionSpec{field(0, 1, unknown)}))
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations

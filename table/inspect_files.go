@@ -190,6 +190,13 @@ func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
 	selected := make(map[int]iceberg.PartitionField)
 	fieldsByID := make(map[int]iceberg.NestedField)
 	for _, spec := range specs {
+		for _, field := range spec.Fields() {
+			if isInspectUnknownTransform(field.Transform) {
+				return nil, fmt.Errorf("%w: cannot build metadata partition type for field %d with unknown transform %s",
+					iceberg.ErrInvalidPartitionSpec, field.FieldID, field.Transform)
+			}
+		}
+
 		partitionType := spec.PartitionType(currentSchema)
 		for idx, field := range spec.Fields() {
 			active := true
@@ -252,7 +259,16 @@ func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
 
 func isInspectVoidTransform(transform iceberg.Transform) bool {
 	switch transform.(type) {
-	case iceberg.VoidTransform:
+	case iceberg.VoidTransform, *iceberg.VoidTransform:
+		return true
+	default:
+		return false
+	}
+}
+
+func isInspectUnknownTransform(transform iceberg.Transform) bool {
+	switch transform.(type) {
+	case iceberg.UnknownTransform, *iceberg.UnknownTransform:
 		return true
 	default:
 		return false
