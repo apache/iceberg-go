@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"time"
@@ -100,7 +101,11 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	// If not acquired immediately, wait and retry
 	for attempt := 0; attempt < opts.LockRetries; attempt++ {
 		// Wait before checking again
-		waitTime := calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime)
+		waitTime := applyJitter(
+			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),
+			opts.LockMinWaitTime,
+			opts.LockMaxWaitTime,
+		)
 
 		select {
 		case <-ctx.Done():
@@ -158,6 +163,62 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 	}
 
 	return minWait << attempt
+}
+
+// applyJitter spreads a backoff interval so clients contending for the same lock
+// stop re-polling in lockstep. calculateBackoff is a pure function of the attempt
+// and the configured bounds, and contention is the precondition for retrying at
+// all, so without this every waiter issues its CheckLock calls at the same instants
+// and each round reaches the metastore as a burst.
+//
+// The invariants, in the order the code establishes them:
+//   - below the cap the jitter is added rather than centred, so the wait is never
+//     shorter than the interval calculateBackoff produced;
+//   - at the cap there is no headroom left to add into, so the wait is spread
+//     downward instead, floored at the last interval the sequence produced before
+//     it saturated — a bound the schedule has already cleared, which stops a later
+//     attempt from being allowed to wait less than an earlier one;
+//   - the result never exceeds maxWait and never falls below minWait.
+func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+
+	// A caller that hands in an interval already past the cap is outside the
+	// contract; leave it exactly as given rather than silently reshaping it.
+	headroom := maxWait - d
+	if headroom < 0 {
+		return d
+	}
+
+	// Add up to another full interval, without exceeding the configured maximum.
+	extra := d
+	if headroom < extra {
+		extra = headroom
+	}
+	if extra > 0 {
+		return d + time.Duration(rand.Int64N(int64(extra)+1))
+	}
+
+	// Replay the doubling sequence and keep the largest interval that still fitted
+	// under the cap. The guard on scheduled keeps a non-positive or overflowing
+	// minWait from spinning here.
+	//
+	// minWait is applied before the replay rather than relying on it. When minWait
+	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
+	// configuration, so leaving the floor at d/2 there would allow a wait of a third
+	// of the configured minimum.
+	floor := max(minWait, d/2)
+	for scheduled := minWait; scheduled > 0 && scheduled < maxWait; scheduled <<= 1 {
+		if scheduled > floor {
+			floor = scheduled
+		}
+	}
+	if floor >= d {
+		return d
+	}
+
+	return d - time.Duration(rand.Int64N(int64(d-floor)+1))
 }
 
 func (l *HiveLock) Release(ctx context.Context) error {
