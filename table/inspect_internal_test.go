@@ -98,6 +98,37 @@ func collectRecord(t *testing.T, rr array.RecordReader) arrow.RecordBatch {
 	return rec
 }
 
+func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
+	t.Helper()
+
+	const snapshotID = int64(1)
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	sequenceNumber := int64(1)
+	var listSequenceNumber *int64
+	if version > 1 {
+		listSequenceNumber = &sequenceNumber
+	}
+
+	var listBuf bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(version, &listBuf, snapshotID, nil,
+		listSequenceNumber, 0, manifests))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+}
+
 func TestInspectHistorySchema(t *testing.T) {
 	sc := HistorySchema()
 
@@ -492,6 +523,99 @@ func TestInspectManifests(t *testing.T) {
 	require.False(t, summary.Field(0).(*array.Boolean).Value(0))
 	require.Equal(t, "7", summary.Field(2).(*array.String).Value(0))
 	require.Equal(t, "7", summary.Field(3).(*array.String).Value(0))
+}
+
+func TestInspectManifestsDeleteCounts(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-manifest.avro",
+		100, int32(spec.ID()), 1).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		AddedFiles(2).
+		ExistingFiles(3).
+		DeletedFiles(4).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, iceberg.ManifestContentDeletes, record.Column(0).(*array.Int32).Value(0))
+	for _, col := range []int{5, 6, 7} {
+		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
+	}
+	require.EqualValues(t, 2, record.Column(8).(*array.Int32).Value(0))
+	require.EqualValues(t, 3, record.Column(9).(*array.Int32).Value(0))
+	require.EqualValues(t, 4, record.Column(10).(*array.Int32).Value(0))
+}
+
+func TestInspectManifestsV1UnknownCounts(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
+		100, int32(spec.ID()), 1).
+		AddedFiles(-1).
+		ExistingFiles(-1).
+		DeletedFiles(-1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	for _, col := range []int{5, 6, 7} {
+		require.True(t, record.Column(col).(*array.Int32).IsNull(0))
+	}
+	for _, col := range []int{8, 9, 10} {
+		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
+	}
+	require.True(t, record.Column(11).(*array.List).IsNull(0))
+}
+
+func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
+		100, 999, 1).
+		SequenceNum(1, 1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "references missing partition spec 999")
+}
+
+func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/extra-summary.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{}, {}}).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has 2 partition summaries")
+}
+
+func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/unknown-content.avro",
+		100, int32(spec.ID()), 1).
+		Content(iceberg.ManifestContent(2)).
+		SequenceNum(1, 1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has unknown content 2")
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
