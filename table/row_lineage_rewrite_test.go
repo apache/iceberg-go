@@ -252,6 +252,19 @@ func TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis(t *testing.T) {
 	}, readRowIDsByID(t, ctx, tbl))
 }
 
+func TestCoWRewriteNormalizesTheSurvivorComplement(t *testing.T) {
+	ctx := context.Background()
+	tbl := buildTwoRowGroupV3Table(t)
+
+	var err error
+	tbl, err = tbl.Delete(ctx,
+		iceberg.NotEqualTo(iceberg.Reference("id"), int64(7)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{7: 6}, readRowIDsByID(t, ctx, tbl),
+		"the complement of id != 7 must retain only the original row at position 6")
+}
+
 // TestCoWRewriteRowIDNextRowIDAccounting verifies that row-id accounting remains
 // correct after a CoW rewrite. The overcounting (where next-row-id advances by
 // the full manifest row count including preserved survivors) is intentional and

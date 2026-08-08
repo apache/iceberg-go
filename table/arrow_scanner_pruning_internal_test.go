@@ -74,8 +74,8 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	fileSchema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
-	rowGroupFilter, err := iceberg.BindExpr(fileSchema,
-		iceberg.EqualTo(iceberg.Reference("id"), int64(1)), true)
+	rowGroupFilter, err := iceberg.BindExpr(fileSchema, iceberg.NewNot(
+		iceberg.NotEqualTo(iceberg.Reference("id"), int64(1))), true)
 	require.NoError(t, err)
 
 	dataFileBuilder, err := iceberg.NewDataFileBuilder(
@@ -99,4 +99,55 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 
 	result := <-out
 	result.Record.Value.Release()
+}
+
+func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
+	int64Schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	bound, err := iceberg.BindExpr(int64Schema,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)), true)
+	require.NoError(t, err)
+
+	t.Run("matching schema is accepted", func(t *testing.T) {
+		got, err := bindTaskFilter(int64Schema, bound, true)
+		require.NoError(t, err)
+		require.Same(t, bound, got)
+	})
+
+	t.Run("missing field is rejected", func(t *testing.T) {
+		otherSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 2, Name: "other", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		)
+		_, err := bindTaskFilter(otherSchema, bound, true)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "field ID 1")
+	})
+
+	t.Run("type mismatch is rejected", func(t *testing.T) {
+		otherSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		)
+		_, err := bindTaskFilter(otherSchema, bound, true)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "type")
+	})
+
+	t.Run("accessor path mismatch is rejected", func(t *testing.T) {
+		field := iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}
+		originalSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 10, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{field}}},
+		)
+		boundNested, err := iceberg.BindExpr(originalSchema,
+			iceberg.EqualTo(iceberg.Reference("payload.id"), int64(1)), true)
+		require.NoError(t, err)
+		otherSchema := iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 11, Name: "other", Type: iceberg.PrimitiveTypes.String, Required: true},
+			iceberg.NestedField{ID: 10, Name: "payload", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{field}}},
+		)
+
+		_, err = bindTaskFilter(otherSchema, boundNested, true)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "accessor path")
+	})
 }

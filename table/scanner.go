@@ -1207,6 +1207,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		scanSchema:      effectiveSchema,
 		projectedSchema: schema,
 		boundRowFilter:  boundFilter,
+		filterSchema:    effectiveSchema,
 		caseSensitive:   scan.caseSensitive,
 		rowLimit:        scan.limit,
 		options:         scan.options,

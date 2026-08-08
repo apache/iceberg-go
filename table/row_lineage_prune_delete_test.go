@@ -131,6 +131,25 @@ func TestScanPruningSurvivingGroupSpansBatches(t *testing.T) {
 		"_row_id must stay contiguous as one surviving row group spans multiple batches")
 }
 
+func TestScanPruningAllRowGroupsCompletes(t *testing.T) {
+	ctx := context.Background()
+	tbl := buildTwoRowGroupV3Table(t)
+
+	_, itr, err := tbl.Scan(
+		table.WithRowLineage(),
+		table.WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int64(999))),
+	).ToArrowRecords(ctx)
+	require.NoError(t, err)
+
+	count := 0
+	for rec, err := range itr {
+		require.NoError(t, err)
+		count += int(rec.NumRows())
+		rec.Release()
+	}
+	assert.Zero(t, count)
+}
+
 // TestReadTaskDeletionVectorSupersedesPositionalDeletes locks the spec contract
 // PlanFiles enforces (scanner.go) for hand-built tasks too: when a data file has
 // both a DV and a positional delete attached, the DV wins and positional deletes

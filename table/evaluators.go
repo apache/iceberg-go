@@ -1859,5 +1859,14 @@ func (c *bloomPredicateCollector) VisitBBoxNotIntersects(_ iceberg.BoundTerm, _ 
 // predicates for row group pruning. Returns nil (no predicates) for
 // AlwaysTrue or any expression with no EqualTo/In conjuncts.
 func newBloomFilterPredicates(expr iceberg.BooleanExpression) ([]internal.RowGroupBloomPred, error) {
-	return iceberg.VisitExpr(expr, &bloomPredicateCollector{})
+	if expr == nil {
+		return nil, nil
+	}
+
+	rewritten, err := iceberg.RewriteNotExpr(expr)
+	if err != nil {
+		return nil, err
+	}
+
+	return iceberg.VisitExpr(rewritten, &bloomPredicateCollector{})
 }
