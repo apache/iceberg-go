@@ -1770,6 +1770,16 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicateNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsEmptyIdentifier() {
+	ctx := context.Background()
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		for _, namespace := range []table.Identifier{nil, {}} {
+			err := cat.CreateNamespace(ctx, namespace, nil)
+			s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceSharingPrefix() {
 	tests := []struct {
 		cat       *sqlcat.Catalog
