@@ -20,14 +20,20 @@ package sql_test
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -1909,6 +1915,249 @@ func (s *SqliteCatalogTestSuite) TestLoadEmptyNamespaceProperties() {
 		s.Require().NoError(err)
 		s.Empty(props)
 	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceConcurrent() {
+	// Two callers creating the same namespace: exactly one succeeds and the other
+	// gets ErrNamespaceAlreadyExists, not the driver's duplicate-key error.
+	const writers = 8
+
+	// A busy timeout so the writers queue on the sqlite lock instead of failing
+	// with SQLITE_BUSY, which is a different contention problem to this one.
+	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":             s.catalogUri() + "?_pragma=" + url.QueryEscape("busy_timeout(10000)"),
+		sqlcat.DriverKey:  sqliteshim.ShimName,
+		sqlcat.DialectKey: string(sqlcat.SQLite),
+		"type":            "sql",
+		"warehouse":       "file://" + s.warehouse,
+	})
+	s.Require().NoError(err)
+
+	cat := loaded.(*sqlcat.Catalog)
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- cat.CreateNamespace(ctx, namespace, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	created, alreadyExists := 0, 0
+	var unexpected []error
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, catalog.ErrNamespaceAlreadyExists):
+			alreadyExists++
+		default:
+			unexpected = append(unexpected, err)
+		}
+	}
+
+	s.Empty(unexpected, "want nil or ErrNamespaceAlreadyExists")
+	s.Equal(1, created)
+	s.Equal(writers-1, alreadyExists)
+}
+
+// insertFailure selects how the emulated namespace insert fails.
+type insertFailure int
+
+const (
+	// failUnique: insert trips the unique constraint and the namespace exists on
+	// the re-check -- the raced create-if-absent that the fix must recover.
+	failUnique insertFailure = iota
+	// failUnrelated: insert fails for an unrelated reason and the namespace does
+	// not exist -- the original error must survive, not become "already exists".
+	failUnrelated
+)
+
+var (
+	errEmulatedUnique    = errors.New("UNIQUE constraint failed: iceberg_namespace_properties.catalog_name, iceberg_namespace_properties.namespace, iceberg_namespace_properties.property_key")
+	errEmulatedUnrelated = errors.New("disk I/O error")
+	errEmulatedAborted   = errors.New("current transaction is aborted, commands ignored until end of transaction block")
+)
+
+// pgAbortDriver emulates Postgres for the create race: after the namespace
+// insert fails it refuses statements until a ROLLBACK TO SAVEPOINT clears it.
+type pgAbortDriver struct {
+	base            driver.Driver
+	mode            insertFailure
+	insertAttempted atomic.Bool
+	aborted         atomic.Bool
+}
+
+func (d *pgAbortDriver) Open(dsn string) (driver.Conn, error) {
+	conn, err := d.base.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pgAbortConn{Conn: conn, drv: d}, nil
+}
+
+type pgAbortConn struct {
+	driver.Conn
+	drv *pgAbortDriver
+}
+
+func isNamespaceInsert(query string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "INSERT") &&
+		strings.Contains(query, "iceberg_namespace_properties")
+}
+
+func isNamespaceExistsProbe(query string) bool {
+	return strings.Contains(strings.ToUpper(query), "EXISTS") &&
+		strings.Contains(query, "iceberg_namespace_properties")
+}
+
+func isRollbackToSavepoint(query string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "ROLLBACK TO SAVEPOINT")
+}
+
+func (c *pgAbortConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	execer, ok := c.Conn.(driver.ExecerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+
+	if c.drv.aborted.Load() {
+		if isRollbackToSavepoint(query) {
+			c.drv.aborted.Store(false)
+
+			return execer.ExecContext(ctx, query, args)
+		}
+
+		return nil, errEmulatedAborted
+	}
+
+	if isNamespaceInsert(query) {
+		c.drv.insertAttempted.Store(true)
+		c.drv.aborted.Store(true)
+		if c.drv.mode == failUnique {
+			return nil, errEmulatedUnique
+		}
+
+		return nil, errEmulatedUnrelated
+	}
+
+	return execer.ExecContext(ctx, query, args)
+}
+
+func (c *pgAbortConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	queryer, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+
+	if c.drv.aborted.Load() {
+		return nil, errEmulatedAborted
+	}
+
+	// The namespace exists on the re-check only in the unique-violation case: a
+	// concurrent winner committed the row. An unrelated failure leaves it absent.
+	if isNamespaceExistsProbe(query) {
+		return &boolRows{val: c.drv.insertAttempted.Load() && c.drv.mode == failUnique}, nil
+	}
+
+	return queryer.QueryContext(ctx, query, args)
+}
+
+func (c *pgAbortConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	beginTx, ok := c.Conn.(driver.ConnBeginTx)
+	if !ok {
+		return nil, driver.ErrBadConn
+	}
+
+	return beginTx.BeginTx(ctx, opts)
+}
+
+func (c *pgAbortConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	prepCtx, ok := c.Conn.(driver.ConnPrepareContext)
+	if !ok {
+		return nil, driver.ErrBadConn
+	}
+
+	return prepCtx.PrepareContext(ctx, query)
+}
+
+// boolRows is a single-row, single-column result carrying a SQL EXISTS answer.
+type boolRows struct {
+	val  bool
+	done bool
+}
+
+func (r *boolRows) Columns() []string { return []string{"exists"} }
+func (r *boolRows) Close() error      { return nil }
+func (r *boolRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	if r.val {
+		dest[0] = int64(1)
+	} else {
+		dest[0] = int64(0)
+	}
+
+	return nil
+}
+
+func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) *sqlcat.Catalog {
+	base, err := sql.Open(sqliteshim.ShimName, ":memory:")
+	s.Require().NoError(err)
+	s.Require().NoError(base.Close())
+
+	// drvName derives from databaseName() (unique per call); sql.Register panics
+	// on a duplicate name, so this must not become a fixed string.
+	drvName := "sqlite-pgabort-" + databaseName()
+	sql.Register(drvName, &pgAbortDriver{base: base.Driver(), mode: mode})
+
+	sqldb, err := sql.Open(drvName, s.catalogUri())
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { _ = sqldb.Close() })
+	// Single connection so the driver's abort state spans the pre-check and the
+	// transaction that follows it.
+	sqldb.SetMaxOpenConns(1)
+
+	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	s.Require().NoError(err)
+
+	return cat
+}
+
+// Emulates Postgres aborting the transaction: only passes if the savepoint let
+// the re-check recover the sentinel, which SQLite alone cannot show.
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceLosesInsertRace() {
+	namespace := table.Identifier{databaseName()}
+	cat := s.newAbortCatalog(failUnique)
+
+	err := cat.CreateNamespace(context.Background(), namespace, nil)
+	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+	s.Contains(err.Error(), namespace[0])
+}
+
+// An unrelated insert failure on an absent namespace must surface its own
+// error, not a misleading ErrNamespaceAlreadyExists.
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceInsertFailureSurfacesOriginalError() {
+	namespace := table.Identifier{databaseName()}
+	cat := s.newAbortCatalog(failUnrelated)
+
+	err := cat.CreateNamespace(context.Background(), namespace, nil)
+	s.Error(err)
+	s.NotErrorIs(err, catalog.ErrNamespaceAlreadyExists)
+	s.Contains(err.Error(), "disk I/O error")
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
