@@ -36,11 +36,13 @@ import (
 	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
+	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/config"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
 // Subcommand structs
@@ -200,7 +202,7 @@ type Args struct {
 	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
 	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
-	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
+	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql)"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
 	URI         string `arg:"--uri" help:"catalog URI"`
 	Output      string `arg:"--output" default:"text" help:"output type (json/text)"`
@@ -210,6 +212,8 @@ type Args struct {
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
 	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
+	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; e.g. sqliteshim)"`
+	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog: postgres, mysql, sqlite, mssql, oracle)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -422,6 +426,26 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}); err != nil {
 			log.Fatal(err)
 		}
+	case catalog.SQL:
+		// Always set uri/warehouse keys (even when empty) so catalog.Load does not
+		// fill them from EnvConfig for a differently typed catalog of the same name.
+		props := iceberg.Properties{
+			"type":      string(catalog.SQL),
+			"uri":       args.URI,
+			"warehouse": args.Warehouse,
+		}
+		if len(args.SQLDriver) > 0 {
+			props[sqlcat.DriverKey] = args.SQLDriver
+		}
+		if len(args.SQLDialect) > 0 {
+			props[sqlcat.DialectKey] = args.SQLDialect
+		}
+
+		if cat, err = catalog.Load(ctx, args.CatalogName, props); err != nil {
+			log.Fatal(err)
+		}
+	case catalog.DynamoDB:
+		log.Fatal("dynamodb catalog is not implemented")
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -902,6 +926,14 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 
 	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
 		args.AwsProfile = fileConf.AwsProfile
+	}
+
+	if !explicitFlags["sql-driver"] && len(fileConf.SQLDriver) > 0 {
+		args.SQLDriver = fileConf.SQLDriver
+	}
+
+	if !explicitFlags["sql-dialect"] && len(fileConf.SQLDialect) > 0 {
+		args.SQLDialect = fileConf.SQLDialect
 	}
 
 	if fileConf.RestOptions != nil {
