@@ -256,15 +256,27 @@ func (s *Summary) MarshalJSON() ([]byte, error) {
 }
 
 type Snapshot struct {
-	SnapshotID       int64    `json:"snapshot-id"`
-	ParentSnapshotID *int64   `json:"parent-snapshot-id,omitempty"`
-	SequenceNumber   int64    `json:"sequence-number"`
-	TimestampMs      int64    `json:"timestamp-ms"`
-	ManifestList     string   `json:"manifest-list,omitempty"`
-	Summary          *Summary `json:"summary,omitempty"`
-	SchemaID         *int     `json:"schema-id,omitempty"`
-	FirstRowID       *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
-	AddedRows        *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
+	SnapshotID        int64    `json:"snapshot-id"`
+	ParentSnapshotID  *int64   `json:"parent-snapshot-id,omitempty"`
+	SequenceNumber    int64    `json:"sequence-number"`
+	TimestampMs       int64    `json:"timestamp-ms"`
+	ManifestList      string   `json:"manifest-list,omitempty"`
+	ManifestLocations []string `json:"manifests,omitempty"` // V1: Embedded manifest locations
+	Summary           *Summary `json:"summary,omitempty"`
+	SchemaID          *int     `json:"schema-id,omitempty"`
+	FirstRowID        *int64   `json:"first-row-id,omitempty"` // V3: Starting row ID for this snapshot
+	AddedRows         *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
+}
+
+func (s Snapshot) MarshalJSON() ([]byte, error) {
+	type Alias Snapshot
+	if s.ManifestList != "" {
+		// The manifest list is authoritative when both legacy and current
+		// representations are present. Do not write the V1 fallback alongside it.
+		s.ManifestLocations = nil
+	}
+
+	return json.Marshal((*Alias)(&s))
 }
 
 func (s Snapshot) String() string {
@@ -312,6 +324,7 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
+		slices.Equal(s.ManifestLocations, other.ManifestLocations) &&
 		s.Summary.Equals(other.Summary)
 }
 
@@ -338,6 +351,21 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 		defer internal.CheckedClose(f, &err)
 
 		return iceberg.ReadManifestList(f)
+	}
+	if len(s.ManifestLocations) > 0 {
+		manifests := make([]iceberg.ManifestFile, len(s.ManifestLocations))
+		for i, path := range s.ManifestLocations {
+			manifests[i] = iceberg.NewManifestFile(1, path, -1, 0, s.SnapshotID).
+				AddedFiles(-1).
+				ExistingFiles(-1).
+				DeletedFiles(-1).
+				AddedRows(-1).
+				ExistingRows(-1).
+				DeletedRows(-1).
+				Build()
+		}
+
+		return manifests, nil
 	}
 
 	return nil, nil

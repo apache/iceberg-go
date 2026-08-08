@@ -94,6 +94,64 @@ func TestSerializeSnapshotWithProps(t *testing.T) {
 	}`, string(data))
 }
 
+func TestSerializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestLocations: []string{"s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"sequence-number": 0,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"]
+	}`, string(data))
+}
+
+func TestDeserializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	var snapshot table.Snapshot
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"}, snapshot.ManifestLocations)
+	manifests, err := snapshot.Manifests(nil)
+	require.NoError(t, err)
+	require.Len(t, manifests, 2)
+	assert.Equal(t, "s3:/a/b/manifest-1.avro", manifests[0].FilePath())
+	assert.Equal(t, "s3:/a/b/manifest-2.avro", manifests[1].FilePath())
+	assert.Equal(t, 1, manifests[0].Version())
+	assert.Equal(t, int32(0), manifests[0].PartitionSpecID())
+	assert.Equal(t, int64(25), manifests[0].SnapshotID())
+	assert.Equal(t, int32(-1), manifests[0].AddedDataFiles())
+}
+
+func TestSerializeSnapshotPrefersManifestListOverEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestList:      "s3:/a/b/manifest-list.avro",
+		ManifestLocations: []string{"s3:/a/b/manifest.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"sequence-number": 0,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "s3:/a/b/manifest-list.avro"
+	}`, string(data))
+}
+
 func TestMissingOperationDefaultsToOverwrite(t *testing.T) {
 	var summary table.Summary
 	err := json.Unmarshal([]byte(`{"foo": "bar"}`), &summary)

@@ -2064,6 +2064,7 @@ func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	clone := snapshot
+	clone.ManifestLocations = slices.Clone(snapshot.ManifestLocations)
 	if snapshot.ParentSnapshotID != nil {
 		value := *snapshot.ParentSnapshotID
 		clone.ParentSnapshotID = &value
