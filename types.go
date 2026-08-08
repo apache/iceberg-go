@@ -343,8 +343,9 @@ func (n NestedField) MarshalJSON() ([]byte, error) {
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
 	aux := struct {
-		ID   *int      `json:"id"`
-		Type typeIFace `json:"type"`
+		ID       *int      `json:"id"`
+		Required *bool     `json:"required"`
+		Type     typeIFace `json:"type"`
 		*Alias
 	}{
 		Alias: (*Alias)(n),
@@ -368,6 +369,11 @@ func (n *NestedField) UnmarshalJSON(b []byte) error {
 	if n.Type == nil {
 		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, n.Name)
 	}
+
+	if aux.Required == nil {
+		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
+	}
+	n.Required = *aux.Required
 
 	return nil
 }
@@ -472,7 +478,7 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	aux := struct {
 		ID   *int      `json:"element-id"`
 		Elem typeIFace `json:"element"`
-		Req  bool      `json:"element-required"`
+		Req  *bool     `json:"element-required"`
 	}{}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -481,10 +487,13 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Req == nil {
+		return fmt.Errorf("%w: field is missing required 'element-required' key in JSON", ErrInvalidSchema)
+	}
 
 	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
-	l.ElementRequired = aux.Req
+	l.ElementRequired = *aux.Req
 
 	return nil
 }
@@ -571,14 +580,13 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	if aux.ValueID == nil {
 		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.ValueReq == nil {
+		return fmt.Errorf("%w: field is missing required 'value-required' key in JSON", ErrInvalidSchema)
+	}
 
 	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
 	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
-	if aux.ValueReq == nil {
-		m.ValueRequired = true
-	} else {
-		m.ValueRequired = *aux.ValueReq
-	}
+	m.ValueRequired = *aux.ValueReq
 
 	return nil
 }
