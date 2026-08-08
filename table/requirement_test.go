@@ -236,6 +236,11 @@ func TestParseRequirementAcceptsExplicitZero(t *testing.T) {
 			actual, err := table.ParseRequirementBytes([]byte(tt.data))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, actual)
+
+			var requirements table.Requirements
+			require.NoError(t, json.Unmarshal([]byte("["+tt.data+"]"), &requirements))
+			require.Len(t, requirements, 1)
+			assert.Equal(t, tt.expected, requirements[0])
 		})
 	}
 }

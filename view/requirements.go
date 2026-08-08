@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -73,20 +74,16 @@ type baseRequirement struct {
 	Type string `json:"type"`
 }
 
-type requirementWire struct {
-	Type *string `json:"type"`
-}
-
 type assertViewUUIDWire struct {
 	UUID *uuid.UUID `json:"uuid"`
 }
 
 func requiredRequirementField(name string) error {
-	return fmt.Errorf("%w: missing required field %q", table.ErrInvalidRequirement, name)
+	return internal.MissingRequiredField(table.ErrInvalidRequirement, name)
 }
 
 func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, error) {
-	var base requirementWire
+	var base internal.RequirementWire
 	if err := json.Unmarshal(b, &base); err != nil {
 		return nil, err
 	}

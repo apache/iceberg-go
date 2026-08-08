@@ -18,12 +18,12 @@
 package table
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -82,23 +82,19 @@ type baseRequirement struct {
 	Type string `json:"type"`
 }
 
-type requirementWire struct {
-	Type *string `json:"type"`
-}
-
 type assertTableUUIDWire struct {
 	UUID *uuid.UUID `json:"uuid"`
 }
 
 type nullableInt64 struct {
-	Set   bool
-	Value *int64
+	set   bool
+	value *int64
 }
 
 func (n *nullableInt64) UnmarshalJSON(data []byte) error {
-	n.Set = true
-	n.Value = nil
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+	n.set = true
+	n.value = nil
+	if string(data) == "null" {
 		return nil
 	}
 
@@ -106,7 +102,7 @@ func (n *nullableInt64) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	n.Value = &value
+	n.value = &value
 
 	return nil
 }
@@ -117,11 +113,11 @@ type assertRefSnapshotIDWire struct {
 }
 
 func requiredRequirementField(name string) error {
-	return fmt.Errorf("%w: missing required field %q", ErrInvalidRequirement, name)
+	return internal.MissingRequiredField(ErrInvalidRequirement, name)
 }
 
 func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, error) {
-	var base requirementWire
+	var base internal.RequirementWire
 	if err := json.Unmarshal(b, &base); err != nil {
 		return nil, err
 	}
@@ -152,11 +148,11 @@ func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, e
 		if req.Ref == nil {
 			return nil, requiredRequirementField("ref")
 		}
-		if !req.SnapshotID.Set {
+		if !req.SnapshotID.set {
 			return nil, requiredRequirementField("snapshot-id")
 		}
 
-		return AssertRefSnapshotID(*req.Ref, req.SnapshotID.Value), nil
+		return AssertRefSnapshotID(*req.Ref, req.SnapshotID.value), nil
 
 	case reqAssertDefaultSpecID:
 		var req struct {

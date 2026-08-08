@@ -103,14 +103,16 @@ func TestParseRequirementRejectsMissingUUID(t *testing.T) {
 		`{"type":"assert-view-uuid"}`,
 		`{"type":"assert-view-uuid","uuid":null}`,
 	} {
-		_, err := view.ParseRequirementBytes([]byte(data))
-		require.ErrorIs(t, err, table.ErrInvalidRequirement)
-		require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
+		t.Run(data, func(t *testing.T) {
+			_, err := view.ParseRequirementBytes([]byte(data))
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
 
-		var requirements view.Requirements
-		err = json.Unmarshal([]byte("["+data+"]"), &requirements)
-		require.ErrorIs(t, err, table.ErrInvalidRequirement)
-		require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
+			var requirements view.Requirements
+			err = json.Unmarshal([]byte("["+data+"]"), &requirements)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
+		})
 	}
 }
 
