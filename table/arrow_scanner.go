@@ -1167,7 +1167,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if len(eqDeleteSets) > 0 {
-		eqFn, eqErr := processEqualityDeletes(ctx, eqDeleteSets)
+		eqFn, eqErr := processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, task.Value.File.FilePath())
 		if eqErr != nil {
 			return eqErr
 		}

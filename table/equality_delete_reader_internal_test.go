@@ -19,6 +19,8 @@ package table
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -191,4 +193,133 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
+}
+
+func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	first := builder.NewArray()
+	builder.Append(2)
+	second := builder.NewArray()
+	builder.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+	}, nil)
+	record := array.NewRecordBatch(schema, []arrow.Array{first, second}, 1)
+	first.Release()
+	second.Release()
+
+	process, err := processEqualityDeletesColumnar(context.Background(), []*equalityDeleteSet{{
+		keys:     make(set[string]),
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}})
+	require.NoError(t, err)
+
+	_, err = process(record)
+	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
+}
+
+func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {
+	schema := arrow.NewSchema([]arrow.Field{
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+		},
+		{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int64,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+		},
+		{
+			Name: "record",
+			Type: arrow.StructOf(arrow.Field{
+				Name:     "value",
+				Type:     arrow.PrimitiveTypes.Int64,
+				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "3"}),
+			}),
+		},
+	}, nil)
+
+	ref, err := resolveArrowField(schema, 2, "id", "data.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []int{1}, ref.path)
+
+	ref, err = resolveArrowField(schema, 3, "record.value", "data.parquet")
+	require.NoError(t, err)
+	assert.Equal(t, []int{2, 0}, ref.path)
+}
+
+func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
+	tests := []struct {
+		name      string
+		schema    *arrow.Schema
+		fieldID   int
+		fieldName string
+		wantPath  []int
+		wantErr   error
+	}{
+		{
+			name: "renamed field uses matching ID",
+			schema: arrow.NewSchema([]arrow.Field{{
+				Name: "renamed", Type: arrow.PrimitiveTypes.Int64,
+				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "7"}),
+			}}, nil),
+			fieldID: 7, fieldName: "old_name", wantPath: []int{0},
+		},
+		{
+			name: "unique name with wrong ID is rejected",
+			schema: arrow.NewSchema([]arrow.Field{{
+				Name: "id", Type: arrow.PrimitiveTypes.Int64,
+				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+			}}, nil),
+			fieldID: 1, fieldName: "id", wantErr: errors.New("not found"),
+		},
+		{
+			name: "duplicate IDs are rejected",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "left", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
+				{Name: "right", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
+			}, nil),
+			fieldID: 1, fieldName: "left", wantErr: ErrAmbiguousEqualityColumn,
+		},
+		{
+			name: "repeated nested leaf names are ambiguous without IDs",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "left", Type: arrow.StructOf(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64})},
+				{Name: "right", Type: arrow.StructOf(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64})},
+			}, nil),
+			fieldName: "value", wantErr: ErrAmbiguousEqualityColumn,
+		},
+		{
+			name: "case-sensitive name fallback remains unique",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+				{Name: "ID", Type: arrow.PrimitiveTypes.Int64},
+			}, nil),
+			fieldName: "id", wantPath: []int{0},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ref, err := resolveArrowField(test.schema, test.fieldID, test.fieldName, "data.parquet")
+			if test.wantErr != nil {
+				require.Error(t, err)
+				if test.wantErr == ErrAmbiguousEqualityColumn {
+					assert.ErrorIs(t, err, test.wantErr)
+				}
+				assert.Contains(t, err.Error(), test.wantErr.Error())
+				assert.Contains(t, err.Error(), "data.parquet")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantPath, ref.path)
+		})
+	}
 }
