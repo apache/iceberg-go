@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -681,6 +682,40 @@ func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
 	}
 	require.True(t, record.Column(11).(*array.List).IsNull(0))
+}
+
+func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
+	tests := []struct {
+		name                     string
+		version                  int
+		added, existing, deleted int32
+		invalidCountName         string
+	}{
+		{name: "v2 added data files", version: 2, added: -123, existing: 1, deleted: 1, invalidCountName: "added_data_files"},
+		{name: "v2 existing data files", version: 2, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_data_files"},
+		{name: "v2 deleted data files", version: 2, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_data_files"},
+		{name: "v3 added data files", version: 3, added: -123, existing: 1, deleted: 1, invalidCountName: "added_data_files"},
+		{name: "v3 existing data files", version: 3, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_data_files"},
+		{name: "v3 deleted data files", version: 3, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_data_files"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := partitionedSpec()
+			manifest := iceberg.NewManifestFile(tt.version, "mem://default/table-location/metadata/negative-count.avro",
+				100, int32(spec.ID()), 1).
+				SequenceNum(1, 1).
+				AddedFiles(tt.added).
+				ExistingFiles(tt.existing).
+				DeletedFiles(tt.deleted).
+				Build()
+			tbl := inspectTableWithManifestList(t, spec, tt.version, []iceberg.ManifestFile{manifest})
+
+			_, err := tbl.Inspect().Manifests(context.Background())
+			require.ErrorContains(t, err, fmt.Sprintf("negative %s count -123", tt.invalidCountName))
+			require.ErrorContains(t, err, fmt.Sprintf("manifest list version %d", tt.version))
+		})
+	}
 }
 
 func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {

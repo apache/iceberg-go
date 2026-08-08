@@ -301,12 +301,25 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 		length.Append(manifest.Length())
 		partitionSpecID.Append(manifest.PartitionSpecID())
 		addedSnapshotID.Append(manifest.SnapshotID())
+		appendCount := func(builder *array.Int32Builder, name string, count int32) error {
+			if err := appendManifestCount(builder, manifest.Version(), name, count); err != nil {
+				return fmt.Errorf("manifest %s: %w", manifest.FilePath(), err)
+			}
+
+			return nil
+		}
 
 		switch manifestContent {
 		case iceberg.ManifestContentData:
-			appendManifestCount(addedDataFiles, manifest.AddedDataFiles())
-			appendManifestCount(existingDataFiles, manifest.ExistingDataFiles())
-			appendManifestCount(deletedDataFiles, manifest.DeletedDataFiles())
+			if err := appendCount(addedDataFiles, "added_data_files", manifest.AddedDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(existingDataFiles, "existing_data_files", manifest.ExistingDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(deletedDataFiles, "deleted_data_files", manifest.DeletedDataFiles()); err != nil {
+				return nil, err
+			}
 			addedDeleteFiles.Append(0)
 			existingDeleteFiles.Append(0)
 			deletedDeleteFiles.Append(0)
@@ -314,9 +327,15 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			addedDataFiles.Append(0)
 			existingDataFiles.Append(0)
 			deletedDataFiles.Append(0)
-			appendManifestCount(addedDeleteFiles, manifest.AddedDataFiles())
-			appendManifestCount(existingDeleteFiles, manifest.ExistingDataFiles())
-			appendManifestCount(deletedDeleteFiles, manifest.DeletedDataFiles())
+			if err := appendCount(addedDeleteFiles, "added_delete_files", manifest.AddedDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(existingDeleteFiles, "existing_delete_files", manifest.ExistingDataFiles()); err != nil {
+				return nil, err
+			}
+			if err := appendCount(deletedDeleteFiles, "deleted_delete_files", manifest.DeletedDataFiles()); err != nil {
+				return nil, err
+			}
 		}
 
 		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
@@ -365,14 +384,20 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
-func appendManifestCount(builder *array.Int32Builder, count int32) {
+func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
 	if count < 0 {
-		builder.AppendNull()
+		if version == 1 {
+			builder.AppendNull()
 
-		return
+			return nil
+		}
+
+		return fmt.Errorf("negative %s count %d in manifest list version %d", name, count, version)
 	}
 
 	builder.Append(count)
+
+	return nil
 }
 
 func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
