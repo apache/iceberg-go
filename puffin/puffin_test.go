@@ -161,11 +161,23 @@ func fileWithFooterPayload(payload []byte) []byte {
 }
 
 func fileWithCompressedFooterPayload(t *testing.T, payload []byte) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(uint64(len(payload))))
+}
+
+func fileWithCompressedFooterPayloadWithSize(t *testing.T, payload []byte, size uint64) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(size))
+}
+
+func fileWithCompressedFooterPayloadNoSize(t *testing.T, payload []byte) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload)
+}
+
+func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, options ...lz4.Option) []byte {
 	t.Helper()
 
 	var compressed bytes.Buffer
 	writer := lz4.NewWriter(&compressed)
-	require.NoError(t, writer.Apply(lz4.SizeOption(uint64(len(payload)))))
+	require.NoError(t, writer.Apply(options...))
 	_, err := writer.Write(payload)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
@@ -649,46 +661,57 @@ func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
 
 func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
 	payload := []byte(`{"blobs":[]}`)
-	var compressed bytes.Buffer
-	writer := lz4.NewWriter(&compressed)
-	_, err := writer.Write(payload)
-	require.NoError(t, err)
-	require.NoError(t, writer.Close())
+	data := fileWithCompressedFooterPayloadNoSize(t, payload)
 
-	data := append([]byte("PFA1PFA1"), compressed.Bytes()...)
-	trailer := make([]byte, 12)
-	binary.LittleEndian.PutUint32(trailer[:4], uint32(compressed.Len()))
-	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
-	copy(trailer[8:], "PFA1")
-	data = append(data, trailer...)
-
-	_, err = puffin.NewReader(bytes.NewReader(data))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing content size")
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "missing content size")
 }
 
 func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
 	t.Run("json payload", func(t *testing.T) {
 		data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "footer")
+		require.ErrorContains(t, err, "footer exceeds maximum size")
 	})
 
 	t.Run("trailing content beyond limit", func(t *testing.T) {
 		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
 		data := fileWithFooterPayload(payload)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "footer exceeds maximum size")
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("compressed output beyond limit", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, 16)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
 	})
 
 	t.Run("compressed advertised size", func(t *testing.T) {
 		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
 		data := fileWithCompressedFooterPayload(t, payload)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "footer exceeds maximum size")
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("compressed advertised size overflow", func(t *testing.T) {
+		data := fileWithCompressedFooterPayloadWithSize(t, []byte(`{"blobs":[]}`), uint64(math.MaxInt64)+1)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("trailing JSON is reported before size limit", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}42`)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, uint64(len(payload)-1))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(int64(len(payload)-1)))
+		require.ErrorContains(t, err, "unexpected content after footer JSON")
+	})
+
+	t.Run("maximum int64 limit", func(t *testing.T) {
+		data := fileWithFooterPayload([]byte(`{"blobs":[]}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(math.MaxInt64))
+		require.NoError(t, err)
 	})
 }
 
