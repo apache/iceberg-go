@@ -932,6 +932,7 @@ func (usp *unboundSetPredicate) Bind(schema *Schema, caseSensitive bool) (Boolea
 	if err != nil {
 		return nil, err
 	}
+
 	return createBoundSetPredicate(usp.op, bound, usp.lits)
 }
 
