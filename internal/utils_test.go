@@ -26,6 +26,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultBytesCodec(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		fixedLen int
+		expected []byte
+		wantErr  string
+	}{
+		{name: "hex", value: "000102ff", fixedLen: -1, expected: []byte{0, 1, 2, 0xff}},
+		{name: "ambiguous prefers hex", value: "deadbeef", fixedLen: -1, expected: []byte{0xde, 0xad, 0xbe, 0xef}},
+		{name: "legacy base64", value: "aGVsbG8=", fixedLen: -1, expected: []byte("hello")},
+		{name: "empty fixed", value: "", fixedLen: 0, expected: []byte{}},
+		{name: "fixed falls back when hex width differs", value: "deadbeef", fixedLen: 6, expected: []byte{0x75, 0xe6, 0x9d, 0x6d, 0xe7, 0x9f}},
+		{name: "wrong fixed width", value: "01020304", fixedLen: 3, wantErr: "expected 3"},
+		{name: "invalid", value: "GG", fixedLen: -1, wantErr: "invalid hex"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := internal.DecodeDefaultBytes(tt.value, tt.fixedLen)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+
+	assert.Equal(t, "000102ff", internal.EncodeDefaultBytes([]byte{0, 1, 2, 0xff}))
+}
+
 func TestBinPacking(t *testing.T) {
 	tests := []struct {
 		splits          []int

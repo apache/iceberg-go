@@ -318,6 +318,15 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 			expected: iceberg.AlwaysTrue{},
 		},
 		{
+			name: "matching legacy base64 metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: "AAEC/w==",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{0, 1, 2, 0xff}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
 			name: "matching native byte default",
 			field: iceberg.NestedField{
 				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
@@ -342,6 +351,24 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 				InitialDefault: "1970-01-02",
 			},
 			expr:     iceberg.EqualTo(ref, iceberg.Date(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching timestamp metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Timestamp,
+				InitialDefault: "1970-01-01T00:00:00.000001",
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Timestamp(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching boolean metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Bool,
+				InitialDefault: true,
+			},
+			expr:     iceberg.EqualTo(ref, true),
 			expected: iceberg.AlwaysTrue{},
 		},
 		{
@@ -377,6 +404,24 @@ func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
 			},
 			expr:     iceberg.EqualTo(ref, int32(42)),
 			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "geometry default fails open",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.GeometryType{},
+				InitialDefault: "POINT (30 10)",
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "geography default fails open",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.GeographyType{},
+				InitialDefault: "POINT (30 10)",
+			},
+			expr:     iceberg.NotNull(ref),
+			expected: iceberg.AlwaysTrue{},
 		},
 	}
 
