@@ -549,6 +549,33 @@ func TestUnmarshalAddSpecWithoutIDUsesInitialSpecID(t *testing.T) {
 	assert.Equal(t, iceberg.InitialPartitionSpecID, update.Spec.ID())
 }
 
+func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
+	data := []byte(`[
+		{"action":"set-properties","updated":{"key":"legacy"}},
+		{"action":"remove-properties","removed":["key"]},
+		{"action":"set-properties","updated":{"key":"legacy"},"updates":{"key":"modern"}},
+		{"action":"remove-properties","removed":["legacy"],"removals":["modern"]}
+	]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	assert.Equal(t, Updates{
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "legacy"}),
+		NewRemovePropertiesUpdate([]string{"key"}),
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "modern"}),
+		NewRemovePropertiesUpdate([]string{"modern"}),
+	}, updates)
+
+	encoded, err := json.Marshal(updates)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[
+		{"action":"set-properties","updates":{"key":"legacy"}},
+		{"action":"remove-properties","removals":["key"]},
+		{"action":"set-properties","updates":{"key":"modern"}},
+		{"action":"remove-properties","removals":["modern"]}
+	]`, string(encoded))
+}
+
 func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 	var updates Updates
 	require.NoError(t, json.Unmarshal([]byte(`[
