@@ -319,30 +319,30 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 
 func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 	aux := struct {
-		OrderID int               `json:"order-id"`
-		Fields  []json.RawMessage `json:"fields"`
-	}{OrderID: -1}
+		OrderID *int         `json:"order-id"`
+		Fields  *[]json.RawMessage `json:"fields"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	fields := make([]SortField, len(aux.Fields))
-	for i, rawField := range aux.Fields {
+	fields := make([]SortField, len(*aux.Fields))
+	for i, rawField := range *aux.Fields {
 		if err := fields[i].unmarshal(rawField, binding); err != nil {
 			return err
 		}
 	}
 
-	if len(fields) == 0 && aux.OrderID == -1 {
-		aux.OrderID = 0
+	if aux.OrderID == nil {
+		return fmt.Errorf("%w: sort order is missing required 'order-id' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	if aux.OrderID == -1 {
-		aux.OrderID = InitialSortOrderID
+	if aux.Fields == nil {
+		return fmt.Errorf("%w: sort order is missing required 'fields' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	newOrder, err := newSortOrder(aux.OrderID, fields, false)
+	newOrder, err := newSortOrder(*aux.OrderID, *aux.Fields, false)
 	if err != nil {
 		return err
 	}
