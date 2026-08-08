@@ -375,7 +375,8 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			iceberg.ErrInvalidArgument, key.Transform, err)
 	}
 
-	if us.txn.tbl.Metadata().Version() == 2 {
+	// Field-ID reuse applies to format v2 and above.
+	if us.txn.tbl.Metadata().Version() >= 2 {
 		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
 		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
@@ -385,11 +386,14 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		}
 		for _, field := range historicalFields {
 			if field.SourceID() == sourceId && field.Transform.String() == transformName {
-				if len(name) > 0 && field.Name == name {
+				// Reuse the historical field's ID when no explicit name is
+				// requested (match on source + transform alone) or when the
+				// requested name matches.
+				if len(name) == 0 || field.Name == name {
 					return iceberg.PartitionField{
 						SourceIDs: []int{sourceId},
 						FieldID:   field.FieldID,
-						Name:      name,
+						Name:      field.Name,
 						Transform: field.Transform,
 					}, nil
 				}

@@ -603,3 +603,126 @@ func TestUpdateSpecCommit(t *testing.T) {
 		assert.Nil(t, err)
 	})
 }
+
+func TestUpdateSpecReuseHistoricalFieldID(t *testing.T) {
+	t.Run("re-add deleted field without a name reuses historical field ID", func(t *testing.T) {
+		txn := testPartitionedTable.NewTransaction()
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		// The re-added field on source 1 must recycle the original field ID
+		// (PartitionDataIDStart == 1000) and the historical name, rather than
+		// allocating a brand-new field ID.
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+
+		// The untouched field must remain unchanged.
+		untouched := newSpec.FieldsBySourceID(5)
+		require.Len(t, untouched, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, untouched[0].FieldID)
+		assert.Equal(t, "street_void", untouched[0].Name)
+	})
+
+	t.Run("re-add deleted field with matching name reuses historical field ID", func(t *testing.T) {
+		txn := testPartitionedTable.NewTransaction()
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "id_identity").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+	})
+
+	t.Run("re-add deleted field with a different name allocates a new field ID", func(t *testing.T) {
+		txn := testPartitionedTable.NewTransaction()
+		specUpdate := table.NewUpdateSpec(txn, false)
+
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "id_renamed").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		// A different explicit name must NOT reuse the historical field ID; a
+		// fresh field ID is allocated after the last assigned one (1001 -> 1002).
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+2, reAdded[0].FieldID)
+		assert.Equal(t, "id_renamed", reAdded[0].Name)
+	})
+
+	t.Run("re-add field removed in a previous commit reuses historical field ID", func(t *testing.T) {
+		txn := testPartitionedTable.NewTransaction()
+		require.NoError(t, txn.UpdateSpec(false).RemoveField("id_identity").Commit())
+
+		staged, err := txn.StagedTable()
+		require.NoError(t, err)
+		removedSpec := staged.Spec()
+		require.Empty(t, removedSpec.FieldsBySourceID(1), "field should be removed from the current spec")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "").Commit())
+
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+	})
+
+	t.Run("reuse applies to format version 3 tables", func(t *testing.T) {
+		v3Spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "id_identity",
+			Transform: iceberg.IdentityTransform{},
+		})
+		v3Metadata, err := table.NewMetadata(testSchema, &v3Spec, table.UnsortedSortOrder, "", iceberg.Properties{
+			table.PropertyFormatVersion: "3",
+		})
+		require.NoError(t, err)
+		v3Table := table.New([]string{"v3_partitioned"}, v3Metadata, "", nil, nil)
+
+		specUpdate := table.NewUpdateSpec(v3Table.NewTransaction(), false)
+		_, _, err = specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+	})
+}
