@@ -1196,17 +1196,18 @@ func TestDataFilesSchema(t *testing.T) {
 	require.Equal(t, []string{
 		"content", "file_path", "file_format", "spec_id", "partition",
 		"record_count", "file_size_in_bytes", "column_sizes", "value_counts", "null_value_counts",
-		"distinct_value_counts", "nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
+		"nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
 		"equality_ids", "sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
 		"content_size_in_bytes",
 	}, testFieldNames(sc))
+	require.NotContains(t, testFieldNames(sc), "distinct_value_counts")
 
 	fields := sc.Fields()
 	require.Equal(t, 134, fields[0].ID)
 	require.Equal(t, 100, fields[1].ID)
 	require.Equal(t, 141, fields[3].ID)
 	require.Equal(t, 102, fields[4].ID)
-	require.Equal(t, 111, fields[10].ID)
+	require.Equal(t, 137, fields[10].ID)
 	require.Equal(t, 145, fields[len(fields)-1].ID)
 
 	unpartitioned := DataFilesSchema(&iceberg.StructType{})

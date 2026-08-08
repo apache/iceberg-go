@@ -267,28 +267,27 @@ func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 }
 
 const (
-	inspectContentFieldIDContent             = 134
-	inspectContentFieldIDFilePath            = 100
-	inspectContentFieldIDFileFormat          = 101
-	inspectContentFieldIDSpecID              = 141
-	inspectContentFieldIDPartition           = 102
-	inspectContentFieldIDRecordCount         = 103
-	inspectContentFieldIDFileSize            = 104
-	inspectContentFieldIDColumnSizes         = 108
-	inspectContentFieldIDValueCounts         = 109
-	inspectContentFieldIDNullValueCounts     = 110
-	inspectContentFieldIDDistinctValueCounts = 111
-	inspectContentFieldIDNaNValueCounts      = 137
-	inspectContentFieldIDLowerBounds         = 125
-	inspectContentFieldIDUpperBounds         = 128
-	inspectContentFieldIDKeyMetadata         = 131
-	inspectContentFieldIDSplitOffsets        = 132
-	inspectContentFieldIDEqualityIDs         = 135
-	inspectContentFieldIDSortOrderID         = 140
-	inspectContentFieldIDFirstRowID          = 142
-	inspectContentFieldIDReferencedDataFile  = 143
-	inspectContentFieldIDContentOffset       = 144
-	inspectContentFieldIDContentSize         = 145
+	inspectContentFieldIDContent            = 134
+	inspectContentFieldIDFilePath           = 100
+	inspectContentFieldIDFileFormat         = 101
+	inspectContentFieldIDSpecID             = 141
+	inspectContentFieldIDPartition          = 102
+	inspectContentFieldIDRecordCount        = 103
+	inspectContentFieldIDFileSize           = 104
+	inspectContentFieldIDColumnSizes        = 108
+	inspectContentFieldIDValueCounts        = 109
+	inspectContentFieldIDNullValueCounts    = 110
+	inspectContentFieldIDNaNValueCounts     = 137
+	inspectContentFieldIDLowerBounds        = 125
+	inspectContentFieldIDUpperBounds        = 128
+	inspectContentFieldIDKeyMetadata        = 131
+	inspectContentFieldIDSplitOffsets       = 132
+	inspectContentFieldIDEqualityIDs        = 135
+	inspectContentFieldIDSortOrderID        = 140
+	inspectContentFieldIDFirstRowID         = 142
+	inspectContentFieldIDReferencedDataFile = 143
+	inspectContentFieldIDContentOffset      = 144
+	inspectContentFieldIDContentSize        = 145
 )
 
 func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.NestedField {
@@ -309,7 +308,6 @@ func inspectContentFileFields(partitionType *iceberg.StructType) []iceberg.Neste
 		iceberg.NestedField{ID: inspectContentFieldIDColumnSizes, Name: "column_sizes", Type: inspectInt64MapType(117, 118), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDValueCounts, Name: "value_counts", Type: inspectInt64MapType(119, 120), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDNullValueCounts, Name: "null_value_counts", Type: inspectInt64MapType(121, 122), Required: false},
-		iceberg.NestedField{ID: inspectContentFieldIDDistinctValueCounts, Name: "distinct_value_counts", Type: inspectInt64MapType(112, 113), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDNaNValueCounts, Name: "nan_value_counts", Type: inspectInt64MapType(138, 139), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDLowerBounds, Name: "lower_bounds", Type: inspectBinaryMapType(126, 127), Required: false},
 		iceberg.NestedField{ID: inspectContentFieldIDUpperBounds, Name: "upper_bounds", Type: inspectBinaryMapType(129, 130), Required: false},
@@ -362,28 +360,27 @@ func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*arra
 }
 
 type inspectContentFileBuilder struct {
-	content             *array.Int32Builder
-	filePath            *array.StringBuilder
-	fileFormat          *array.StringBuilder
-	specID              *array.Int32Builder
-	partition           *array.StructBuilder
-	recordCount         *array.Int64Builder
-	fileSize            *array.Int64Builder
-	columnSizes         *array.MapBuilder
-	valueCounts         *array.MapBuilder
-	nullValueCounts     *array.MapBuilder
-	distinctValueCounts *array.MapBuilder
-	nanValueCounts      *array.MapBuilder
-	lowerBounds         *array.MapBuilder
-	upperBounds         *array.MapBuilder
-	keyMetadata         *array.BinaryBuilder
-	splitOffsets        *array.ListBuilder
-	equalityIDs         *array.ListBuilder
-	sortOrderID         *array.Int32Builder
-	firstRowID          *array.Int64Builder
-	referencedDataFile  *array.StringBuilder
-	contentOffset       *array.Int64Builder
-	contentSize         *array.Int64Builder
+	content            *array.Int32Builder
+	filePath           *array.StringBuilder
+	fileFormat         *array.StringBuilder
+	specID             *array.Int32Builder
+	partition          *array.StructBuilder
+	recordCount        *array.Int64Builder
+	fileSize           *array.Int64Builder
+	columnSizes        *array.MapBuilder
+	valueCounts        *array.MapBuilder
+	nullValueCounts    *array.MapBuilder
+	nanValueCounts     *array.MapBuilder
+	lowerBounds        *array.MapBuilder
+	upperBounds        *array.MapBuilder
+	keyMetadata        *array.BinaryBuilder
+	splitOffsets       *array.ListBuilder
+	equalityIDs        *array.ListBuilder
+	sortOrderID        *array.Int32Builder
+	firstRowID         *array.Int64Builder
+	referencedDataFile *array.StringBuilder
+	contentOffset      *array.Int64Builder
+	contentSize        *array.Int64Builder
 }
 
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
@@ -426,9 +423,6 @@ func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceb
 		return out, err
 	}
 	if out.nullValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDNullValueCounts, "null_value_counts"); err != nil {
-		return out, err
-	}
-	if out.distinctValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDDistinctValueCounts, "distinct_value_counts"); err != nil {
 		return out, err
 	}
 	if out.nanValueCounts, err = inspectBuilderAs[*array.MapBuilder](lookup, inspectContentFieldIDNaNValueCounts, "nan_value_counts"); err != nil {
@@ -489,9 +483,6 @@ func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, fil
 		return err
 	}
 	if err := appendInspectInt64Map(b.nullValueCounts, file.NullValueCounts()); err != nil {
-		return err
-	}
-	if err := appendInspectInt64Map(b.distinctValueCounts, file.DistinctValueCounts()); err != nil {
 		return err
 	}
 	if err := appendInspectInt64Map(b.nanValueCounts, file.NaNValueCounts()); err != nil {
@@ -610,27 +601,26 @@ func inspectValueScalar(value any, typ iceberg.Type, arrowType arrow.DataType) (
 
 func inspectContentFileFieldIDs(partitionType *iceberg.StructType) map[int]struct{} {
 	ids := map[int]struct{}{
-		inspectContentFieldIDContent:             {},
-		inspectContentFieldIDFilePath:            {},
-		inspectContentFieldIDFileFormat:          {},
-		inspectContentFieldIDSpecID:              {},
-		inspectContentFieldIDRecordCount:         {},
-		inspectContentFieldIDFileSize:            {},
-		inspectContentFieldIDColumnSizes:         {},
-		inspectContentFieldIDValueCounts:         {},
-		inspectContentFieldIDNullValueCounts:     {},
-		inspectContentFieldIDDistinctValueCounts: {},
-		inspectContentFieldIDNaNValueCounts:      {},
-		inspectContentFieldIDLowerBounds:         {},
-		inspectContentFieldIDUpperBounds:         {},
-		inspectContentFieldIDKeyMetadata:         {},
-		inspectContentFieldIDSplitOffsets:        {},
-		inspectContentFieldIDEqualityIDs:         {},
-		inspectContentFieldIDSortOrderID:         {},
-		inspectContentFieldIDFirstRowID:          {},
-		inspectContentFieldIDReferencedDataFile:  {},
-		inspectContentFieldIDContentOffset:       {},
-		inspectContentFieldIDContentSize:         {},
+		inspectContentFieldIDContent:            {},
+		inspectContentFieldIDFilePath:           {},
+		inspectContentFieldIDFileFormat:         {},
+		inspectContentFieldIDSpecID:             {},
+		inspectContentFieldIDRecordCount:        {},
+		inspectContentFieldIDFileSize:           {},
+		inspectContentFieldIDColumnSizes:        {},
+		inspectContentFieldIDValueCounts:        {},
+		inspectContentFieldIDNullValueCounts:    {},
+		inspectContentFieldIDNaNValueCounts:     {},
+		inspectContentFieldIDLowerBounds:        {},
+		inspectContentFieldIDUpperBounds:        {},
+		inspectContentFieldIDKeyMetadata:        {},
+		inspectContentFieldIDSplitOffsets:       {},
+		inspectContentFieldIDEqualityIDs:        {},
+		inspectContentFieldIDSortOrderID:        {},
+		inspectContentFieldIDFirstRowID:         {},
+		inspectContentFieldIDReferencedDataFile: {},
+		inspectContentFieldIDContentOffset:      {},
+		inspectContentFieldIDContentSize:        {},
 	}
 	if partitionType != nil && len(partitionType.FieldList) > 0 {
 		ids[inspectContentFieldIDPartition] = struct{}{}
