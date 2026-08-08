@@ -115,6 +115,18 @@ func (s *ScannerSuite) TestScanner() {
 	}
 
 	s.Run("task residual", func() {
+		ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
+		tbl, err := s.cat.LoadTable(s.ctx, ident)
+		s.Require().NoError(err)
+
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer mem.AssertSize(s.T(), 0)
+
+		expectedSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "number", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		}, nil)
+		ref := iceberg.Reference("letter")
+
 		ctx := compute.WithAllocator(s.ctx, mem)
 		scan := tbl.Scan(table.WithRowFilter(iceberg.AlwaysTrue{}),
 			table.WithSelectedFields("number"))

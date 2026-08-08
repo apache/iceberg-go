@@ -821,6 +821,7 @@ func (filterBindingVisitor) VisitFalse() filterBindingState { return filterBindi
 func (filterBindingVisitor) VisitNot(child filterBindingState) filterBindingState {
 	return child
 }
+
 func (filterBindingVisitor) VisitAnd(left, right filterBindingState) filterBindingState {
 	return filterBindingState{
 		hasBound:   left.hasBound || right.hasBound,
@@ -1142,6 +1143,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}()
 
 	var (
+		rowFilter  iceberg.BooleanExpression
 		rdr        tblutils.FileReader
 		iceSchema  *iceberg.Schema
 		colIndices []int
@@ -1149,7 +1151,6 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		dropFile   bool
 	)
 
-	rowFilter := as.boundRowFilter
 	rowFilter, err = bindTaskFilter(as.metadata.CurrentSchema(), task.Value.Residual, as.caseSensitive)
 	if task.Value.Residual == nil {
 		rowFilter = as.boundRowFilter
