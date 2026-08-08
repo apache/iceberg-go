@@ -97,6 +97,63 @@ func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T
 	require.Nil(t, txn)
 }
 
+func TestNewTransactionOnBranchRejectsTags(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	require.NoError(t, txn.meta.SetSnapshotRef("release", 10, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
+
+	before := tbl.Metadata()
+	transaction, err := tbl.NewTransactionOnBranchWithError("release")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Nil(t, transaction)
+	require.True(t, before.Equals(tbl.Metadata()))
+
+	legacyTransaction := tbl.NewTransactionOnBranch("release")
+	require.ErrorIs(t, legacyTransaction.initErr, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, legacyTransaction.SetProperties(iceberg.Properties{"k": "v"}), "tags cannot be transaction targets")
+}
+
+func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
+	seed := newTransactionWithSnapshotRefs(t)
+	baseMeta, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	head := baseMeta.SnapshotByName(MainBranch)
+	require.NotNil(t, head)
+	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.SetSnapshotRef(MainBranch, head.SnapshotID, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	cat := &headTrackingCatalog{metadata: tagMeta}
+	tbl := New(Identifier{"db", "tag-race"}, baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"k": "v"}))
+
+	_, err = txn.Commit(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load())
+}
+
+func TestNewTransactionOnBranchAllowsBranchesAndNewRefs(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
+
+	for _, branch := range []string{MainBranch, "feature", "new-branch"} {
+		transaction, err := tbl.NewTransactionOnBranchWithError(branch)
+		require.NoError(t, err, branch)
+		require.NotNil(t, transaction, branch)
+	}
+}
+
 func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
 	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
 	require.NoError(t, err, "new metadata")
@@ -477,6 +534,57 @@ func TestTransactionApplyDedupesIdenticalNonRefRequirements(t *testing.T) {
 	}
 	require.Equal(t, 1, schemaAsserts)
 	require.Equal(t, 1, specAsserts)
+}
+
+func TestRollbackToSnapshotPreservesRetention(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	now := time.Now().UnixMilli()
+
+	const (
+		minKeep      = 5
+		maxSnapAgeMs = int64(172800000) // 2 days
+		maxRefAgeMs  = int64(604800000) // 7 days
+	)
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:     10,
+		SequenceNumber: 1,
+		ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		TimestampMs:    now,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(
+		MainBranch, 10, BranchRef,
+		WithMinSnapshotsToKeep(minKeep),
+		WithMaxSnapshotAgeMs(maxSnapAgeMs),
+		WithMaxRefAgeMs(maxRefAgeMs),
+	))
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       20,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   2,
+		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 1,
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef(
+		MainBranch, 20, BranchRef,
+		WithMinSnapshotsToKeep(minKeep),
+		WithMaxSnapshotAgeMs(maxSnapAgeMs),
+		WithMaxRefAgeMs(maxRefAgeMs),
+	))
+
+	require.NoError(t, txn.RollbackToSnapshot(10))
+
+	ref := txn.meta.refs[MainBranch]
+	require.Equal(t, int64(10), ref.SnapshotID, "rollback should move main to the ancestor")
+	require.NotNil(t, ref.MinSnapshotsToKeep, "min-snapshots-to-keep must survive rollback")
+	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
+	require.NotNil(t, ref.MaxSnapshotAgeMs, "max-snapshot-age-ms must survive rollback")
+	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
+	require.NotNil(t, ref.MaxRefAgeMs, "max-ref-age-ms must survive rollback")
+	require.Equal(t, maxRefAgeMs, *ref.MaxRefAgeMs)
 }
 
 func newTransactionWithSnapshotRefs(t *testing.T) *Transaction {

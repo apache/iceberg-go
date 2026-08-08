@@ -249,20 +249,21 @@ func directoryName(key string) string {
 }
 
 func (bfs *BlobFileIO) Open(path string) (icebergio.File, error) {
+	originalPath := path
 	var err error
 	path, err = bfs.preprocess(path)
 	if err != nil {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+		return nil, &fs.PathError{Op: "open", Path: originalPath, Err: err}
 	}
 	if !fs.ValidPath(path) {
-		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrInvalid}
+		return nil, &fs.PathError{Op: "open", Path: originalPath, Err: fs.ErrInvalid}
 	}
 
 	key, name := path, pathpkg.Base(path)
 
 	r, err := bfs.NewReader(bfs.ctx, key, nil)
 	if err != nil {
-		return nil, err
+		return nil, blobErrToFsErr("open", originalPath, err)
 	}
 
 	return &blobOpenFile{Reader: r, name: name, key: key, b: bfs, ctx: bfs.ctx}, nil

@@ -82,7 +82,7 @@ func TestCrossClientReadJavaMultiBlobDV(t *testing.T) {
 
 	seen := make(map[string]struct{}, len(expected))
 	for i, blob := range blobs {
-		ref, ok := blob.Properties["referenced-data-file"]
+		ref, ok := blob.Properties[dvReferencedDataFileProperty]
 		require.True(t, ok, "blob %d missing referenced-data-file property", i)
 		want, ok := expected[ref]
 		require.Truef(t, ok, "blob %d references unexpected data file %q", i, ref)
@@ -173,7 +173,7 @@ func loadJavaPuffinBlob(t *testing.T, fixture string, blobIdx int, referencedDat
 	require.Greaterf(t, len(blobs), blobIdx, "fixture %s has only %d blob(s)", fixture, len(blobs))
 	blob := blobs[blobIdx]
 
-	cardStr, ok := blob.Properties["cardinality"]
+	cardStr, ok := blob.Properties[dvCardinalityProperty]
 	require.Truef(t, ok, "blob %d missing cardinality property", blobIdx)
 	cardinality, err := strconv.ParseInt(cardStr, 10, 64)
 	require.NoErrorf(t, err, "parse cardinality %q", cardStr)

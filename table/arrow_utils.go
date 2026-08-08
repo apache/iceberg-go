@@ -870,7 +870,7 @@ func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ st
 		return nil
 	}
 
-	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	field, ok := a.fileSchema.FindFieldByIDRef(fieldID, internal.SchemaRef{})
 	if !ok {
 		return nil
 	}
@@ -1062,7 +1062,7 @@ func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType 
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
-	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	fileField, ok := a.fileSchema.FindFieldByIDRef(field.ID, internal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
 	}
@@ -1089,6 +1089,10 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	targetType := a.typeToArrowType(field.Type)
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
+		if out, ok := a.rewrapExtension(targetType, vals); ok {
+			return out
+		}
+
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
 			tt, tgtok := targetType.(*arrow.TimestampType)
@@ -1129,6 +1133,38 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	vals.Retain()
 
 	return vals
+}
+
+// rewrapExtension re-wraps vals in targetType when both are extension types
+// with the same extension name but differing extension parameters, returning
+// false when the types are not such a pair. Arrow's compute layer has no
+// extension-to-extension cast kernel, and the values are already in the
+// extension's storage encoding, so only the storage array is cast and that only
+// when the storage types differ. This is safe only because a shared extension
+// name implies the storage payload is interpretation-compatible: parameters may
+// differ, the encoded values do not.
+func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals arrow.Array) (arrow.Array, bool) {
+	tgtExt, ok := targetType.(arrow.ExtensionType)
+	if !ok {
+		return nil, false
+	}
+
+	srcExt, ok := vals.DataType().(arrow.ExtensionType)
+	if !ok || srcExt.ExtensionName() != tgtExt.ExtensionName() {
+		return nil, false
+	}
+
+	if arrow.TypeEqual(srcExt.StorageType(), tgtExt.StorageType()) {
+		return array.NewExtensionArrayWithStorage(tgtExt,
+			vals.(array.ExtensionArray).Storage()), true
+	}
+
+	storage := retOrPanic(compute.CastArray(a.ctx,
+		vals.(array.ExtensionArray).Storage(),
+		compute.SafeCastOptions(tgtExt.StorageType())))
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(tgtExt, storage), true
 }
 
 func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
@@ -1679,6 +1715,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1801,7 +1841,54 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1866,12 +1953,13 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 func unpartitionedWrite(ctx context.Context, factory *writerFactory, records iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[iceberg.DataFile, error] {
 	outputCh := make(chan iceberg.DataFile, 1)
 	errCh := make(chan error, 1)
+	writerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1880,6 +1968,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 
 				return
 			}
+
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
@@ -1899,6 +1988,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			for range outputCh {
 			}
 		}()
+		defer cancel()
 		for df := range outputCh {
 			if !yield(df, nil) {
 				return
@@ -1937,6 +2027,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}
@@ -2144,9 +2243,12 @@ func isWKT2CRSString(crs string) bool {
 	return false
 }
 
+// geoArrowCRSToIcebergCRS maps GeoArrow CRS metadata to an Iceberg CRS string.
+// Absent CRS metadata means the default CRS OGC:CRS84, matching the Parquet
+// geospatial spec and Iceberg's default geometry/geography types.
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
-		return "srid:0", nil
+		return iceberg.DefaultGeoCRS, nil
 	}
 
 	switch {
@@ -2160,8 +2262,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(crs, iceberg.DefaultGeoCRS) || strings.EqualFold(crs, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		switch meta.CRSType {
@@ -2178,6 +2280,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errWKT2CRSNotSupported
 		}
 		if meta.CRSType == geoarrow.CRSTypeSRID {
+			// Some writers store the identifier already prefixed; don't prefix twice.
+			if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+				return crs, nil
+			}
+
 			return "srid:" + crs, nil
 		}
 
@@ -2235,8 +2342,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 
 		authorityCode := authority + ":" + code
-		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(authorityCode, iceberg.DefaultGeoCRS) || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		return authorityCode, nil
@@ -2301,10 +2408,6 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
-		if id == "0" {
-			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
-		}
-
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
@@ -2343,7 +2446,7 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 
 	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
-		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+		raw, _ = json.Marshal(iceberg.DefaultGeoCRS) //nolint:errcheck // Marshalling a string can't fail
 	} else {
 		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}

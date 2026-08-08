@@ -172,6 +172,18 @@ func (e *FooBoundExprVisitor) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Lite
 	return e.visitHistory
 }
 
+func (e *FooBoundExprVisitor) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) []string {
+	e.visitHistory = append(e.visitHistory, "BBOX_INTERSECTS")
+
+	return e.visitHistory
+}
+
+func (e *FooBoundExprVisitor) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) []string {
+	e.visitHistory = append(e.visitHistory, "BBOX_NOT_INTERSECTS")
+
+	return e.visitHistory
+}
+
 func TestBooleanExprVisitor(t *testing.T) {
 	expr := iceberg.NewAnd(
 		iceberg.NewOr(
@@ -488,6 +500,116 @@ func TestBoundBoolExprVisitor(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+// noGeoBoundVisitor is a BoundBooleanExprVisitor that deliberately does NOT
+// implement BoundGeospatialExprVisitor. It models an external visitor written
+// before geo support: VisitBoundPredicate must reject a bbox predicate with an
+// ErrNotImplemented error rather than mis-dispatching it. The literal/set/unary
+// methods are stubs - a bbox expr panics before any of them is reached.
+type noGeoBoundVisitor struct {
+	ExampleVisitor
+}
+
+func (e *noGeoBoundVisitor) VisitBound(pred iceberg.BoundPredicate) []string {
+	return iceberg.VisitBoundPredicate(pred, e)
+}
+
+func (e *noGeoBoundVisitor) VisitUnbound(iceberg.UnboundPredicate) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotIn(iceberg.BoundTerm, iceberg.Set[iceberg.Literal]) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIsNan(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotNan(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitIsNull(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotNull(iceberg.BoundTerm) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitGreaterEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitGreater(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitLessEqual(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitLess(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func (e *noGeoBoundVisitor) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Literal) []string {
+	return e.visitHistory
+}
+
+func geoVisitorSchema() *iceberg.Schema {
+	return iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false},
+	)
+}
+
+// TestVisitBoundPredicateDispatchesBBox drives a bound bbox predicate through the
+// type-assert-and-dispatch path in VisitBoundPredicate: a visitor implementing
+// BoundGeospatialExprVisitor must have VisitBBoxIntersects invoked. This guards
+// the extension wiring - a refactor breaking the BoundGeospatialExprVisitor[T]
+// assertion would be caught here.
+func TestVisitBoundPredicateDispatchesBBox(t *testing.T) {
+	bound, err := iceberg.BBoxIntersects(iceberg.Reference("geom"),
+		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(geoVisitorSchema(), true)
+	require.NoError(t, err)
+
+	visitor := FooBoundExprVisitor{ExampleVisitor: ExampleVisitor{visitHistory: []string{}}}
+	result, err := iceberg.VisitExpr(bound, &visitor)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"BBOX_INTERSECTS"}, result)
+}
+
+// TestVisitBoundPredicateBBoxWithoutGeoVisitor pins the load-bearing error path an
+// external caller hits: a BoundBooleanExprVisitor that does not implement
+// BoundGeospatialExprVisitor, handed a bbox predicate, surfaces an error wrapping
+// ErrNotImplemented (the panic recovered by VisitExpr) rather than mis-dispatching.
+func TestVisitBoundPredicateBBoxWithoutGeoVisitor(t *testing.T) {
+	bound, err := iceberg.BBoxIntersects(iceberg.Reference("geom"),
+		iceberg.BoundingBox{MinX: 0, MinY: 0, MaxX: 10, MaxY: 10}).Bind(geoVisitorSchema(), true)
+	require.NoError(t, err)
+
+	visitor := noGeoBoundVisitor{ExampleVisitor: ExampleVisitor{visitHistory: []string{}}}
+	_, err = iceberg.VisitExpr(bound, &visitor)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
 
 type rowTester []any

@@ -50,25 +50,44 @@ import (
 )
 
 const (
-	ParquetRowGroupSizeBytesKey              = "write.parquet.row-group-size-bytes"
-	ParquetRowGroupSizeBytesDefault          = 128 * 1024 * 1024 // 128 MB
-	ParquetRowGroupLimitKey                  = "write.parquet.row-group-limit"
-	ParquetRowGroupLimitDefault              = 1048576
-	ParquetPageSizeBytesKey                  = "write.parquet.page-size-bytes"
-	ParquetPageSizeBytesDefault              = 1024 * 1024 // 1 MB
-	ParquetPageRowLimitKey                   = "write.parquet.page-row-limit"
-	ParquetPageRowLimitDefault               = 20000
-	ParquetDictSizeBytesKey                  = "write.parquet.dict-size-bytes"
-	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
-	ParquetPageVersionKey                    = "write.parquet.page-version"
-	ParquetPageVersionDefault                = "2"
-	ParquetCompressionKey                    = "write.parquet.compression-codec"
-	ParquetCompressionDefault                = "zstd"
-	ParquetCompressionLevelKey               = "write.parquet.compression-level"
-	ParquetCompressionLevelDefault           = -1
-	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
-	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
+	ParquetRowGroupSizeBytesKey       = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault   = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey           = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault       = 1048576
+	ParquetPageSizeBytesKey           = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault       = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey            = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault        = 20000
+	ParquetDictSizeBytesKey           = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault       = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey             = "write.parquet.page-version"
+	ParquetPageVersionDefault         = "2"
+	ParquetCompressionKey             = "write.parquet.compression-codec"
+	ParquetCompressionDefault         = "zstd"
+	ParquetCompressionLevelKey        = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault    = -1
+	ParquetBloomFilterMaxBytesKey     = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault = 1024 * 1024
+	// These bounds mirror Arrow's public bloom-filter writer-property constraint.
+	parquetBloomFilterMaxBytesMin            = 32
+	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+
+	// These bounds mirror the compression libraries used by Arrow's Parquet
+	// writers. -1 is the shared default level and is included in each range.
+	parquetGzipCompressionLevelMin   = -3
+	parquetGzipCompressionLevelMax   = 9
+	parquetZstdCompressionLevelMin   = -5
+	parquetZstdCompressionLevelMax   = 22
+	parquetBrotliCompressionLevelMin = 0
+	parquetBrotliCompressionLevelMax = 11
+
+	// Deliberately not namespaced under write.parquet: this is the parquet-mr key
+	// Iceberg Java reads straight from the table properties, so a table carrying
+	// it gets the same dictionary behavior from either implementation.
+	ParquetDictEnabledKey                     = "parquet.enable.dictionary"
+	ParquetDictEnabledDefault                 = true
+	ParquetDictEncodingColumnEnabledKeyPrefix = "write.parquet.dict-encoding-enabled.column"
 
 	ParquetShredVariantsKey     = "write.parquet.shred-variants"
 	ParquetShredVariantsDefault = false
@@ -260,7 +279,6 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 
 	writerProps := []parquet.WriterProperty{
-		parquet.WithDictionaryDefault(false),
 		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
 			ParquetRowGroupLimitDefault))),
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
@@ -314,14 +332,120 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		if !ok || colName == "" {
 			continue
 		}
-		// EqualFold matches Java's Boolean.parseBoolean: only "true"
-		// (case-insensitive) is true; anything else, including "1" or
-		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
-		enabled := strings.EqualFold(val, "true")
-		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
+		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, javaBool(val)))
+	}
+
+	// Dictionary encoding is on unless parquet.enable.dictionary disables it;
+	// write.parquet.dict-encoding-enabled.column.<col-name> overrides per column.
+	dictEnabled := ParquetDictEnabledDefault
+	if val, ok := props[ParquetDictEnabledKey]; ok {
+		dictEnabled = javaBool(val)
+	}
+	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
+
+	// The suffix is matched against the Parquet physical column path, not the
+	// Iceberg field name. These differ for nested fields (Iceberg `items.element`
+	// is `items.list.element` in Parquet), so a per-column override on one of
+	// those has no effect. Same for the bloom filter prefix above.
+	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
 	return writerProps
+}
+
+// javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses
+// for these properties: only "true" (case-insensitive) is true; anything else,
+// including "1" and "yes", is false. strconv.ParseBool differs ("1" → true).
+func javaBool(val string) bool {
+	return strings.EqualFold(val, "true")
+}
+
+func ValidateParquetWriteProperties(props iceberg.Properties) error {
+	// A missing property uses the writer default, but an explicitly configured
+	// empty value is invalid. This keeps validation from silently accepting a
+	// value that GetInt would otherwise replace with its default.
+	for _, key := range []string{
+		ParquetRowGroupSizeBytesKey,
+		ParquetRowGroupLimitKey,
+		ParquetPageSizeBytesKey,
+		ParquetPageRowLimitKey,
+		ParquetDictSizeBytesKey,
+		ParquetBloomFilterMaxBytesKey,
+	} {
+		value, ok := props[key]
+		if !ok {
+			continue
+		}
+
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument, key, value, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("%w: %s must be greater than 0, got %d", iceberg.ErrInvalidArgument, key, parsed)
+		}
+		if key == ParquetBloomFilterMaxBytesKey &&
+			(parsed < parquetBloomFilterMaxBytesMin || parsed > parquetBloomFilterMaxBytesMax) {
+			return fmt.Errorf("%w: %s must be between %d and %d bytes, got %d",
+				iceberg.ErrInvalidArgument, key, parquetBloomFilterMaxBytesMin, parquetBloomFilterMaxBytesMax, parsed)
+		}
+		// Row-group size is kept as int64 all the way through the writer. The
+		// other values are passed to Arrow APIs that take int and therefore
+		// must fit the platform's int range.
+		if key != ParquetRowGroupSizeBytesKey && strconv.IntSize == 32 && parsed > int64(^uint(0)>>1) {
+			return fmt.Errorf("%w: %s value %d exceeds int range", iceberg.ErrInvalidArgument, key, parsed)
+		}
+	}
+
+	if value, ok := props[ParquetCompressionLevelKey]; ok {
+		level, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument,
+				ParquetCompressionLevelKey, value, err)
+		}
+
+		compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
+		if err := validateParquetCompressionLevel(compression, level); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateParquetCompressionLevel(compression string, level int) error {
+	min, max := 0, 0
+	switch compression {
+	case "gzip":
+		min, max = parquetGzipCompressionLevelMin, parquetGzipCompressionLevelMax
+	case "zstd":
+		min, max = parquetZstdCompressionLevelMin, parquetZstdCompressionLevelMax
+	case "brotli":
+		// Brotli uses -1 as the Iceberg default even though its underlying
+		// library accepts explicit qualities only in the 0..11 range.
+		if level == ParquetCompressionLevelDefault {
+			return nil
+		}
+		min, max = parquetBrotliCompressionLevelMin, parquetBrotliCompressionLevelMax
+	default:
+		// The remaining codecs do not expose a tunable level in Arrow's
+		// streaming writers, so the value is ignored after it is parsed.
+		return nil
+	}
+
+	if level < min || level > max {
+		return fmt.Errorf("%w: invalid %s value %d for %s; supported range is %d..%d (or %d for the default)",
+			iceberg.ErrInvalidArgument, ParquetCompressionLevelKey, level, compression, min, max,
+			ParquetCompressionLevelDefault)
+	}
+
+	return nil
 }
 
 // ParquetRowGroupTargetSizeBytes returns the configured uncompressed row-group

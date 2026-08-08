@@ -29,6 +29,10 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
+// SchemaRef marks schema access that may return references to internal state.
+// It is restricted to packages within this module by Go's internal package rules.
+type SchemaRef struct{}
+
 // FloorDiv performs floored integer division, rounding toward negative infinity.
 // This matches Java's Math.floorDiv behavior for negative dividends.
 func FloorDiv[T constraints.Integer](a, b T) T {

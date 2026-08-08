@@ -164,6 +164,17 @@ func (l *HiveLock) Release(ctx context.Context) error {
 	return l.client.Unlock(ctx, l.lockId)
 }
 
+func (l *HiveLock) releaseForCleanup(ctx context.Context) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pendingLockCleanupTimeout)
+	defer cancel()
+
+	if err := l.Release(cleanupCtx); err != nil {
+		return fmt.Errorf("failed to release acquired lock %d: %w", l.lockId, err)
+	}
+
+	return nil
+}
+
 func (l *HiveLock) LockID() int64 {
 	if l == nil {
 		return 0

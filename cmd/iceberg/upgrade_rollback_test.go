@@ -713,11 +713,16 @@ func int64Ptr(v int64) *int64 {
 
 type errCapture struct {
 	textOutput
-	lastErr error
+	lastErr  error
+	lastText string
 }
 
 func (e *errCapture) Error(err error) {
 	e.lastErr = err
+}
+
+func (e *errCapture) Text(val string) {
+	e.lastText = val
 }
 
 func captureExit(f func()) (exitCode int) {

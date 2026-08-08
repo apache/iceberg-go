@@ -296,20 +296,17 @@ func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
 	}
 
 	if scan.asOfTimestamp != nil {
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snap := scan.metadata.SnapshotByID(entry.SnapshotID)
-				if snap == nil {
-					break
-				}
-
-				return snap, nil
-			}
+		entry, ok := snapshotLogEntryAsOf(scan.metadata.SnapshotLogs(), *scan.asOfTimestamp, true)
+		if !ok {
+			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
 		}
 
-		return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+		snap := scan.metadata.SnapshotByID(entry.SnapshotID)
+		if snap == nil {
+			return nil, fmt.Errorf("%w: snapshot log references unknown snapshot %d", ErrInvalidMetadata, entry.SnapshotID)
+		}
+
+		return snap, nil
 	}
 
 	return scan.metadata.CurrentSnapshot(), nil
@@ -864,7 +861,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			// fields. Report assembly must never fail a scan, so a projection error
 			// just yields a report that omits projected fields.
 			projected, _ := scan.Projection()
-			rep.Report(ctx, scan.buildScanReport(&acc, schema, projected, planningDuration))
+			safeReport(ctx, rep, scan.buildScanReport(&acc, schema, projected, planningDuration))
 		}
 	}
 

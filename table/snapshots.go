@@ -420,6 +420,31 @@ type SnapshotLogEntry struct {
 	TimestampMs int64 `json:"timestamp-ms"`
 }
 
+// snapshotLogEntryAsOf returns the log entry with the greatest eligible
+// timestamp. Snapshot-log entries can be out of chronological order when
+// commits have small clock skews, so the result must not depend on iteration
+// order.
+func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
+	var (
+		best  SnapshotLogEntry
+		found bool
+	)
+
+	for entry := range entries {
+		eligible := entry.TimestampMs < timestampMs
+		if inclusive {
+			eligible = entry.TimestampMs <= timestampMs
+		}
+
+		if eligible && (!found || entry.TimestampMs > best.TimestampMs) {
+			best = entry
+			found = true
+		}
+	}
+
+	return best, found
+}
+
 type SnapshotSummaryCollector struct {
 	metrics                          updateMetrics
 	partitionMetrics                 map[string]updateMetrics
@@ -530,12 +555,12 @@ func updateSnapshotSummaries(sum Summary, previous iceberg.Properties) (Summary,
 	}
 
 	updateTotals := func(totalProp, addedProp, removedProp string) {
-		newTotal := previous.GetInt(totalProp, 0)
-		newTotal += sum.Properties.GetInt(addedProp, 0)
-		newTotal -= sum.Properties.GetInt(removedProp, 0)
+		newTotal := previous.GetInt64(totalProp, 0)
+		newTotal += sum.Properties.GetInt64(addedProp, 0)
+		newTotal -= sum.Properties.GetInt64(removedProp, 0)
 
 		if newTotal >= 0 {
-			sum.Properties[totalProp] = strconv.Itoa(newTotal)
+			sum.Properties[totalProp] = strconv.FormatInt(newTotal, 10)
 		}
 	}
 

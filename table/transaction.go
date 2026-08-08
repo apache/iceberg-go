@@ -240,6 +240,37 @@ func requirementSemanticKey(r Requirement) (string, error) {
 	return string(data), nil
 }
 
+func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	out := slices.Clone(reqs)
+	for i, req := range out {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.Ref == branch {
+			if ref.requireBranch {
+				return out
+			}
+
+			out[i] = assertBranchRefSnapshotID(branch, ref.SnapshotID)
+
+			return out
+		}
+	}
+
+	var snapshotID *int64
+	for name, ref := range base.Refs() {
+		if name == branch {
+			id := ref.SnapshotID
+			snapshotID = &id
+
+			break
+		}
+	}
+
+	return append(out, assertBranchRefSnapshotID(branch, snapshotID))
+}
+
 // addValidator appends a conflict validator under t.mx. Producers
 // that register validators from outside doCommit (RowDelta, RewriteFiles)
 // must use this helper rather than mutating t.validators directly —
@@ -313,7 +344,7 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			snapshotID, cs.SnapshotID)
 	}
 
-	update := NewSetSnapshotRefUpdate(MainBranch, snapshotID, BranchRef, 0, 0, 0)
+	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
 	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
 
 	return t.apply([]Update{update}, []Requirement{req})
@@ -728,6 +759,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	}
 	if currentSpec == nil {
 		return nil, errors.New("could not get current partition spec: no current partition spec found")
+	}
+	// The spec forbids committing files against a spec with an unknown
+	// transform, whoever computed the partition tuple.
+	if err := checkNoUnknownTransform(currentSpec); err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 
 	expectedSpecID := int32(currentSpec.ID())
@@ -2372,17 +2408,28 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, errors.New("transaction has already been committed")
 	}
 
-	t.committed = true
-
 	if len(meta.updates) > 0 {
-		t.reqs = append(t.reqs, AssertTableUUID(meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, meta.updates, t.reqs,
+		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 		)
 		if err != nil {
+			// A clean conflict (ErrCommitFailed) committed nothing and stays
+			// retriable. Any other failure leaves the commit state unknown
+			// (the catalog may have accepted it), so mark it terminal to
+			// avoid a double-apply on retry.
+			if !errors.Is(err, ErrCommitFailed) {
+				t.committed = true
+			}
+
 			return tbl, err
 		}
+
+		// Mark committed after the catalog accepts but before PostCommit runs.
+		// A PostCommit failure must not leave the transaction retriable;
+		// otherwise a retry would re-run the catalog commit.
+		t.committed = true
 
 		for _, u := range meta.updates {
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
@@ -2392,6 +2439,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 		return tbl, err
 	}
+
+	t.committed = true
 
 	return t.tbl, nil
 }

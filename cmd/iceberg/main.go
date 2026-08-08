@@ -358,7 +358,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		err error
 	)
 
-	switch catalog.Type(args.Catalog) {
+	switch catalog.Type(strings.ToLower(args.Catalog)) {
 	case catalog.REST:
 		opts := []rest.Option{}
 		if len(args.Token) > 0 {
@@ -462,11 +462,11 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		ns := cmd.Namespace
 		props := iceberg.Properties{}
 		if ns.Description != "" {
-			props["Description"] = ns.Description
+			props["comment"] = ns.Description
 		}
 
 		if ns.LocationURI != "" {
-			props["Location"] = ns.LocationURI
+			props["location"] = ns.LocationURI
 		}
 
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
@@ -563,24 +563,43 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		if err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Namespace " + cmd.Namespace.Identifier + " dropped successfully")
 	case cmd.Table != nil:
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)
-		var err error
+
 		if cmd.Table.Purge {
-			if purger, ok := cat.(catalog.PurgeableTable); ok {
-				err = purger.PurgeTable(ctx, ident)
-			} else {
+			purger, ok := cat.(catalog.PurgeableTable)
+			if !ok {
 				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
 				osExit(1)
+
+				return
 			}
-		} else {
-			err = cat.DropTable(ctx, ident)
+
+			if err := purger.PurgeTable(ctx, ident); err != nil {
+				output.Error(err)
+				osExit(1)
+
+				return
+			}
+
+			output.Text("Table " + cmd.Table.Identifier + " purged successfully")
+
+			return
 		}
-		if err != nil {
+
+		if err := cat.DropTable(ctx, ident); err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Table " + cmd.Table.Identifier + " dropped successfully")
 	}
 }
 
@@ -633,8 +652,8 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 		if val, ok := props[get.PropName]; ok {
 			output.Text(val)
 		} else {
-			output.Error(errors.New("could not find property " + get.PropName + " on namespace " + get.Identifier))
-			os.Exit(1)
+			output.Error(fmt.Errorf("could not find property %s on %s %s", get.PropName, get.Type, get.Identifier))
+			osExit(1)
 		}
 	case cmd.Set != nil:
 		set := cmd.Set

@@ -194,8 +194,8 @@ type PurgeableTable interface {
 }
 
 // Closer is an optional interface implemented by catalogs that hold releasable
-// resources — currently a metrics reporter, and in future a stateful (e.g.
-// HTTP-backed) one. It is not part of [Catalog] because adding a method to that
+// resources — currently a metrics reporter and stateful resources (e.g.
+// HTTP-backed clients). It is not part of [Catalog] because adding a method to that
 // widely-implemented interface would break every external implementation; a
 // follow-up may promote it. Callers holding a [Catalog] from [Load] should
 // release it via a type assertion:
@@ -266,6 +266,25 @@ func validateIdentifier(ident table.Identifier, notFoundErr error) error {
 				return fmt.Errorf("%w: invalid control character in identifier component %q in %v",
 					notFoundErr, part, strings.Join(ident, "."))
 			}
+		}
+	}
+
+	return nil
+}
+
+// ValidateNamespaceIdentifier checks that an identifier contains at least one
+// namespace level and no null characters. Other namespace component rules are
+// intentionally left to the catalog implementation so existing namespaces
+// remain readable across clients.
+func ValidateNamespaceIdentifier(ident table.Identifier) error {
+	if len(ident) == 0 {
+		return fmt.Errorf("%w: empty namespace identifier", ErrNoSuchNamespace)
+	}
+
+	for _, part := range ident {
+		if strings.ContainsRune(part, '\x00') {
+			return fmt.Errorf("%w: invalid null character in namespace identifier component %q in %v",
+				ErrNoSuchNamespace, part, strings.Join(ident, "."))
 		}
 	}
 

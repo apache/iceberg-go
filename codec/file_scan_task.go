@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -43,6 +44,8 @@ import (
 // partition spec than the data file; the caller is responsible for
 // partitioning the FileScanTask by per-file specID and calling
 // EncodeFileScanTask once per group.
+// The scan range is checked against the DataFile's recorded file size, which
+// is manifest metadata rather than a filesystem stat.
 func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([]byte, error) {
 	if version < 1 || version > 3 {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: unsupported format version %d", version)
@@ -56,6 +59,9 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 	// Validate the primary data file's spec, like encodeDataFileSlice does for
 	// every delete/equality/DV file.
 	if err := checkDataFileSpecID(task.File, spec); err != nil {
+		return nil, fmt.Errorf("codec: EncodeFileScanTask: %w", err)
+	}
+	if err := validateScanRange(task.Start, task.Length, task.File.FileSizeBytes()); err != nil {
 		return nil, fmt.Errorf("codec: EncodeFileScanTask: %w", err)
 	}
 	fileBytes, err := EncodeDataFile(task.File, spec, schema, version)
@@ -113,6 +119,9 @@ func EncodeFileScanTask(task table.FileScanTask, spec iceberg.PartitionSpec, sch
 
 // DecodeFileScanTask reverses [EncodeFileScanTask]. The triple
 // (spec, schema, version) must match the encoder.
+// Decode accepts non-negative ranges beyond the recorded file size for
+// interoperability with foreign encoders; callers that re-encode the task
+// must validate the range before doing so.
 func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) (table.FileScanTask, error) {
 	if version < 1 || version > 3 {
 		return table.FileScanTask{}, fmt.Errorf("codec: DecodeFileScanTask: unsupported format version %d", version)
@@ -160,6 +169,18 @@ func DecodeFileScanTask(data []byte, spec iceberg.PartitionSpec, schema *iceberg
 		FirstRowID:          envelope.FirstRowID,
 		DataSequenceNumber:  envelope.DataSequenceNumber,
 	}, nil
+}
+
+// validateScanRange checks a non-negative scan range against a recorded file
+// size. Callers must reject negative start and length values first. The end is
+// checked as a subtraction after confirming start <= fileSize, so the
+// fileSize-start subtraction cannot underflow and start+length cannot overflow.
+func validateScanRange(start, length, fileSize int64) error {
+	if start > fileSize || length > fileSize-start {
+		return fmt.Errorf("scan range start=%d length=%d exceeds file size %d", start, length, fileSize)
+	}
+
+	return nil
 }
 
 // fileScanTaskShape is a compile-time drift guard for FileScanTask.
@@ -255,11 +276,28 @@ func decodeFileScanTaskResidual(data []byte, schema *iceberg.Schema) (iceberg.Bo
 // carrying a different spec would silently mis-map or drop partition values and
 // still succeed. Every file in a FileScanTask must therefore share spec.ID().
 func checkDataFileSpecID(f iceberg.DataFile, spec iceberg.PartitionSpec) error {
+	if isNilDataFile(f) {
+		return fmt.Errorf("%w: data file is nil", iceberg.ErrInvalidArgument)
+	}
 	if int(f.SpecID()) != spec.ID() {
 		return fmt.Errorf("data file spec id %d does not match codec spec id %d (partition evolution requires per-spec grouping)", f.SpecID(), spec.ID())
 	}
 
 	return nil
+}
+
+func isNilDataFile(f iceberg.DataFile) bool {
+	if f == nil {
+		return true
+	}
+
+	v := reflect.ValueOf(f)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 func encodeDataFileSlice(files []iceberg.DataFile, spec iceberg.PartitionSpec, schema *iceberg.Schema, version int) ([][]byte, error) {

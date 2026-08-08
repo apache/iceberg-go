@@ -807,6 +807,47 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 	r.Equal([]table.Identifier{{"accounting", "tax"}}, results)
 }
 
+func (r *RestCatalogSuite) TestNamespaceOperationsRejectInvalidComponents() {
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+	})
+	r.mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	for _, namespace := range []table.Identifier{
+		{"bad\x00name"},
+		{"a\x1fb"},
+	} {
+		r.ErrorIs(cat.CreateNamespace(context.Background(), namespace, nil), catalog.ErrNoSuchNamespace)
+		r.ErrorIs(cat.DropNamespace(context.Background(), namespace), catalog.ErrNoSuchNamespace)
+		_, err = cat.LoadNamespaceProperties(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.UpdateNamespaceProperties(context.Background(), namespace, nil, nil)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.CheckNamespaceExists(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.ListNamespaces(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		for _, err := range cat.ListTables(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+		for _, err := range cat.ListViews(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+		for _, err := range cat.ListFunctions(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+	}
+
+	r.Zero(requestCount)
+}
+
 func (r *RestCatalogSuite) TestListNamespaces400() {
 	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)

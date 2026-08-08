@@ -248,7 +248,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
-				crs := defaultGeoCRS
+				crs := DefaultGeoCRS
 				if matches[1] != "" {
 					crs = strings.TrimSpace(matches[1])
 				}
@@ -799,7 +799,7 @@ func (t TimestampNano) ToTime() time.Time {
 }
 
 func (t TimestampNano) ToMicros() Timestamp {
-	return Timestamp(int64(t) / 1000)
+	return Timestamp(internal.FloorDiv(int64(t), 1000))
 }
 
 func (t TimestampNano) ToDate() Date {
@@ -925,7 +925,10 @@ func (VariantType) Equals(other Type) bool {
 func (VariantType) Type() string   { return "variant" }
 func (VariantType) String() string { return "variant" }
 
-const defaultGeoCRS = "OGC:CRS84"
+// DefaultGeoCRS is the CRS of the geometry and geography types when no CRS is
+// given; a Parquet GEOMETRY or GEOGRAPHY logical type without a CRS means the
+// same value.
+const DefaultGeoCRS = "OGC:CRS84"
 
 type GeometryType struct {
 	crs string
@@ -936,7 +939,7 @@ func GeometryTypeOf(crs string) (GeometryType, error) {
 		return GeometryType{}, fmt.Errorf("%w: invalid CRS: (empty string)", ErrInvalidTypeString)
 	}
 	crs = strings.TrimSpace(crs)
-	if crs == defaultGeoCRS {
+	if crs == DefaultGeoCRS {
 		return GeometryType{}, nil
 	}
 
@@ -945,7 +948,7 @@ func GeometryTypeOf(crs string) (GeometryType, error) {
 
 func (g GeometryType) CRS() string {
 	if g.crs == "" {
-		return defaultGeoCRS
+		return DefaultGeoCRS
 	}
 
 	return g.crs
@@ -1000,7 +1003,7 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 	}
 	crs = strings.TrimSpace(crs)
 	normalizedCRS := crs
-	if normalizedCRS == defaultGeoCRS {
+	if normalizedCRS == DefaultGeoCRS {
 		normalizedCRS = ""
 	}
 
@@ -1018,7 +1021,7 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 
 func (g GeographyType) CRS() string {
 	if g.crs == "" {
-		return defaultGeoCRS
+		return DefaultGeoCRS
 	}
 
 	return g.crs
@@ -1053,7 +1056,7 @@ func (g GeographyType) Type() string {
 		return fmt.Sprintf("geography(%s)", g.crs)
 	}
 	if !hasCRS && hasAlgo {
-		return fmt.Sprintf("geography(%s, %s)", defaultGeoCRS, g.algorithm)
+		return fmt.Sprintf("geography(%s, %s)", DefaultGeoCRS, g.algorithm)
 	}
 
 	return fmt.Sprintf("geography(%s, %s)", g.crs, g.algorithm)

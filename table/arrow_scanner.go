@@ -449,13 +449,42 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 	defer tbl.Release()
 
-	filePathCol := tbl.Column(tbl.Schema().FieldIndices("file_path")[0]).Data()
-	posCol := tbl.Column(tbl.Schema().FieldIndices("pos")[0]).Data()
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	if err != nil {
+		return nil, err
+	}
+	filePathCol := tbl.Column(filePathIndex).Data()
+	posCol := tbl.Column(posIndex).Data()
 	if posCol.NullN() > 0 {
 		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
 	}
 
 	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+}
+
+func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
+	// Position-delete columns are resolved by their spec-defined names because
+	// Arrow schemas read from external files do not always retain Iceberg IDs.
+	requiredColumn := func(name string) (int, error) {
+		indices := schema.FieldIndices(name)
+		if len(indices) != 1 {
+			return 0, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
+				iceberg.ErrInvalidSchema, name, len(indices))
+		}
+
+		return indices[0], nil
+	}
+
+	filePathIndex, err := requiredColumn("file_path")
+	if err != nil {
+		return 0, 0, err
+	}
+	posIndex, err := requiredColumn("pos")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return filePathIndex, posIndex, nil
 }
 
 type set[T comparable] map[T]struct{}
@@ -501,6 +530,10 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *r
 	}
 }
 
+func deletionVectorKeepsRow(keepBits []byte, rowCount, pos int64) bool {
+	return pos >= rowCount || keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0
+}
+
 // filterByDeletionVector returns a pipeline step that drops rows present in
 // the bitmap by precomputing a bit-packed keep-mask covering the whole file
 // once and slicing the relevant range per batch into compute.FilterRecordBatch.
@@ -531,16 +564,37 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			currentIdx := nextIdx
 			nextIdx += nrows
 
-			// Wrap (and slice) the shared keep-mask buffer for this batch.
-			// array.NewSlice on a Boolean array tracks the bit-level offset,
-			// so we don't need byte-aligned slicing — currentIdx can land
-			// anywhere within a byte.
-			full := array.NewBoolean(int(rowCount), buf, nil, 0)
-			defer full.Release()
-			sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
-			defer sliced.Release()
+			if nextIdx <= rowCount {
+				// Wrap (and slice) the shared keep-mask buffer for this batch.
+				// array.NewSlice on a Boolean array tracks the bit-level offset,
+				// so we don't need byte-aligned slicing — currentIdx can land
+				// anywhere within a byte.
+				full := array.NewBoolean(int(rowCount), buf, nil, 0)
+				defer full.Release()
+				sliced := array.NewSlice(full, currentIdx, nextIdx).(*array.Boolean)
+				defer sliced.Release()
 
-			return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+				return compute.FilterRecordBatch(ctx, r, sliced, compute.DefaultFilterOptions())
+			}
+			if currentIdx >= rowCount {
+				r.Retain()
+
+				return r, nil
+			}
+
+			// A stale manifest count can be smaller than the rows emitted by
+			// the file. Preserve rows beyond the mask rather than slicing past
+			// its bounds and panicking.
+			bldr := array.NewBooleanBuilder(mem)
+			defer bldr.Release()
+			bldr.Reserve(int(nrows))
+			for pos := currentIdx; pos < nextIdx; pos++ {
+				bldr.Append(deletionVectorKeepsRow(keepBits, rowCount, pos))
+			}
+			mask := bldr.NewBooleanArray()
+			defer mask.Release()
+
+			return compute.FilterRecordBatch(ctx, r, mask, compute.DefaultFilterOptions())
 		}
 
 		bldr := array.NewBooleanBuilder(mem)
@@ -551,14 +605,7 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 			// keepBits is sized for rowCount; a pos past it means row-group
 			// metadata and the manifest's File.Count() disagree. Keep the row
 			// rather than indexing out of bounds.
-			if pos >= rowCount {
-				bldr.Append(true)
-
-				continue
-			}
-			// Test keep bit at absolute position pos: byte pos/8, bit pos%8,
-			// LSB-first (the layout the fast path's array.NewBoolean reads).
-			bldr.Append(keepBits[pos>>3]&(1<<(uint(pos)&7)) != 0)
+			bldr.Append(deletionVectorKeepsRow(keepBits, rowCount, pos))
 		}
 		mask := bldr.NewBooleanArray()
 		defer mask.Release()
@@ -1024,7 +1071,7 @@ func (as *arrowScan) processRecords(
 		if err != nil {
 			return err
 		}
-		out <- enumeratedRecord{Record: internal.Enumerated[arrow.RecordBatch]{
+		out <- enumeratedRecord{Record: tblutils.Enumerated[arrow.RecordBatch]{
 			Value: array.NewRecordBatch(emptySchema, nil, 0), Index: idx, Last: true,
 		}, Task: task}
 	}

@@ -19,10 +19,10 @@ package io
 
 import (
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -73,7 +73,7 @@ func TestLocalFSWalkDirWithFileScheme(t *testing.T) {
 	lfs := LocalFS{}
 
 	var files []string
-	err := lfs.WalkDir("file://"+dir, func(path string, d fs.DirEntry, err error) error {
+	err := lfs.WalkDir(fileURI(dir), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -93,30 +93,132 @@ func TestLocalFSWriteFileCreatesParentDirectories(t *testing.T) {
 	content := []byte("content")
 
 	for _, tt := range []struct {
-		name string
-		path string
+		name     string
+		path     string
+		readPath string
 	}{
 		{
-			name: "plain path",
-			path: filepath.Join(dir, "plain", "nested", "file.txt"),
+			name:     "plain path",
+			path:     filepath.Join(dir, "plain", "nested", "file.txt"),
+			readPath: filepath.Join(dir, "plain", "nested", "file.txt"),
 		},
 		{
-			name: "file scheme",
-			path: "file://" + filepath.Join(dir, "scheme", "nested", "file.txt"),
+			name:     "file scheme",
+			path:     fileURI(filepath.Join(dir, "scheme", "nested", "file.txt")),
+			readPath: filepath.Join(dir, "scheme", "nested", "file.txt"),
+		},
+		{
+			name:     "escaped file scheme",
+			path:     fileURI(filepath.Join(dir, "scheme with space", "nested", "file.txt")),
+			readPath: filepath.Join(dir, "scheme with space", "nested", "file.txt"),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, LocalFS{}.WriteFile(tt.path, content))
 
-			got, err := os.ReadFile(strings.TrimPrefix(tt.path, "file://"))
+			got, err := os.ReadFile(tt.readPath)
 			require.NoError(t, err)
 			assert.Equal(t, content, got)
 		})
 	}
 }
 
+func TestLocalFSParsesFileURIs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+
+	for _, name := range []string{
+		path,
+		fileURI(path),
+		singleSlashFileURI(path),
+		"file:" + filepath.ToSlash(path),
+		localhostFileURI(path),
+	} {
+		content, err := (LocalFS{}).ReadFile(name)
+		require.NoError(t, err, name)
+		assert.Equal(t, []byte("metadata"), content)
+	}
+}
+
+func TestLocalFSParsesEscapedFileURIsConsistently(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata with space%20.txt")
+	require.NoError(t, os.WriteFile(path, []byte("metadata"), 0o600))
+
+	for _, name := range []string{
+		fileURI(path),
+		singleSlashFileURI(path),
+	} {
+		content, err := (LocalFS{}).ReadFile(name)
+		require.NoError(t, err, name)
+		assert.Equal(t, []byte("metadata"), content)
+	}
+}
+
+func TestLocalFSRejectsUnsupportedFileURIAuthority(t *testing.T) {
+	t.Parallel()
+
+	_, err := (LocalFS{}).Open("file://remotehost/tmp/metadata.json")
+	require.ErrorContains(t, err, `unsupported file URI authority "remotehost"`)
+}
+
+func TestLocalFSPreservesPlainPathsWithRawPercent(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "discount:100%off.txt")
+	require.NoError(t, os.WriteFile(path, []byte("content"), 0o600))
+
+	content, err := (LocalFS{}).ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content"), content)
+}
+
+func TestLocalFSPreservesRelativePathsWithColon(t *testing.T) {
+	t.Parallel()
+
+	path := "partition:2026/data.parquet"
+	got, err := localPath(path)
+	require.NoError(t, err)
+	assert.Equal(t, path, got)
+}
+
 func TestLocalFSImplementsListableIO(t *testing.T) {
 	var _ ListableIO = LocalFS{}
+}
+
+func fileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	path = filepath.ToSlash(path)
+	if hasVolume {
+		path = "/" + path
+	}
+
+	return (&url.URL{Scheme: "file", Path: path}).String()
+}
+
+func singleSlashFileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	pathSlash := filepath.ToSlash(path)
+	if hasVolume {
+		pathSlash = "/" + pathSlash
+	}
+
+	return "file:" + (&url.URL{Path: pathSlash}).EscapedPath()
+}
+
+func localhostFileURI(path string) string {
+	hasVolume := filepath.VolumeName(path) != ""
+	path = filepath.ToSlash(path)
+	if hasVolume {
+		path = "/" + path
+	}
+
+	return (&url.URL{Scheme: "file", Host: "localhost", Path: path}).String()
 }
 
 func TestLocalFSRenameNoReplaceDoesNotOverwrite(t *testing.T) {

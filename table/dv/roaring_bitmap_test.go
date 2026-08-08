@@ -148,6 +148,33 @@ func TestDeserializeRoaringBitmapTruncatedAfterKey(t *testing.T) {
 	assert.ErrorContains(t, err, "read bitmap for key 0")
 }
 
+// Why: the outer count fully frames the portable bitmap and extra bytes are
+// malformed rather than a forward-compatible extension.
+// Condition: append bytes after otherwise valid empty and non-empty bitmaps.
+// Assertion: returns an error containing "trailing data".
+func TestDeserializeRoaringBitmapTrailingData(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		positions []uint64
+	}{
+		{name: "empty"},
+		{name: "non-empty", positions: []uint64{1, (uint64(3) << 32) | 7}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bm := NewRoaringPositionBitmap()
+			for _, position := range tt.positions {
+				bm.Set(position)
+			}
+			var buf bytes.Buffer
+			require.NoError(t, bm.Serialize(&buf))
+			buf.Write([]byte{0xde, 0xad})
+
+			_, err := DeserializeRoaringPositionBitmap(buf.Bytes())
+			assert.ErrorContains(t, err, "trailing data")
+		})
+	}
+}
+
 // TestKeepMaskBytes pins KeepMaskBytes' contract: a bit-packed []byte where
 // bit i is 1 iff position i is NOT in the bitmap, sized to ⌈length/8⌉ bytes,
 // matching Arrow Boolean buffer layout so it can be wrapped without re-packing.
