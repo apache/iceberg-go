@@ -608,10 +608,24 @@ func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
 }
 
 func initialDefaultLiteral(field NestedField) (Literal, error) {
-	switch field.Type.(type) {
+	switch typ := field.Type.(type) {
 	case BinaryType, FixedType:
 		if val, ok := field.InitialDefault.([]byte); ok {
 			return BinaryLiteral(val).To(field.Type)
+		}
+		// Metadata defaults are spec hex strings. The shared decoder also accepts
+		// legacy base64 written by iceberg-go v0.6.0.
+		if val, ok := field.InitialDefault.(string); ok {
+			fixedLen := -1
+			if fixed, ok := typ.(FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			decoded, err := internal.DecodeDefaultBytes(val, fixedLen)
+			if err != nil {
+				return nil, err
+			}
+
+			return BinaryLiteral(decoded).To(field.Type)
 		}
 	case DecimalType:
 		if val, ok := field.InitialDefault.(Decimal); ok {
@@ -649,6 +663,12 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 			}
 
 			return AlwaysFalse{}
+		}
+		// The spec requires geo defaults to be null, but fail open for metadata
+		// written by non-conforming V3 writers rather than aborting the scan.
+		switch field.Type.(type) {
+		case GeometryType, GeographyType:
+			return AlwaysTrue{}
 		}
 
 		withContext := func(err error) error {
