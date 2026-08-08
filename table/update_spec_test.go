@@ -315,6 +315,110 @@ func TestUpdateSpecAddField(t *testing.T) {
 	})
 }
 
+func TestUpdateSpecReadsStagedTransactionMetadata(t *testing.T) {
+	t.Run("end-to-end: partition by column added earlier in the same transaction", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		require.NoError(t, txn.UpdateSchema(false, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Commit())
+
+		require.NoError(t, txn.UpdateSpec(false).
+			AddField("new_col", iceberg.IdentityTransform{}, "new_col_identity").
+			Commit())
+
+		stagedTbl, err := txn.StagedTable()
+		require.NoError(t, err)
+
+		// The new column is assigned schema field id 8 (the existing schema
+		// occupies ids 1-7), so the partition field must reference source id 8.
+		spec := stagedTbl.Spec()
+		added := spec.FieldsBySourceID(8)
+		require.Len(t, added, 1)
+		assert.Equal(t, "new_col_identity", added[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, added[0].Transform)
+		assert.Equal(t, iceberg.PartitionDataIDStart, added[0].FieldID)
+	})
+
+	t.Run("auto-generated partition name resolves against the staged schema", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		require.NoError(t, txn.UpdateSchema(false, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Commit())
+
+		// An empty target name forces GeneratePartitionFieldName, which must
+		// resolve the source column against the staged schema.
+		specUpdate := txn.UpdateSpec(false)
+		_, _, err := specUpdate.
+			AddField("new_col", iceberg.IdentityTransform{}, "").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		added := newSpec.FieldsBySourceID(8)
+		require.Len(t, added, 1)
+		assert.Equal(t, "new_col", added[0].Name)
+	})
+
+	t.Run("end-to-end: chained UpdateSpec sees partition fields staged earlier", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		// Two independent UpdateSpec commits in the same transaction. The
+		// second must observe the field staged by the first.
+		require.NoError(t, txn.UpdateSpec(false).AddIdentity("id").Commit())
+		require.NoError(t, txn.UpdateSpec(false).AddIdentity("name").Commit())
+
+		stagedTbl, err := txn.StagedTable()
+		require.NoError(t, err)
+
+		spec := stagedTbl.Spec()
+		// Both fields must be retained, and the second must be assigned a new
+		// field id rather than reusing the first's.
+		assert.Equal(t, 2, spec.NumFields())
+
+		first := spec.FieldsBySourceID(1)
+		require.Len(t, first, 1)
+		assert.Equal(t, "id", first[0].Name)
+		assert.Equal(t, iceberg.PartitionDataIDStart, first[0].FieldID)
+
+		second := spec.FieldsBySourceID(2)
+		require.Len(t, second, 1)
+		assert.Equal(t, "name", second[0].Name)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, second[0].FieldID)
+	})
+
+	t.Run("partition by renamed column staged in the same transaction", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		// Rename an existing column, staging it into the transaction.
+		require.NoError(t, txn.UpdateSchema(false, false).
+			RenameColumn([]string{"name"}, "full_name").
+			Commit())
+
+		// The old name must no longer bind against the staged schema.
+		_, _, err := txn.UpdateSpec(false).
+			AddField("name", iceberg.IdentityTransform{}, "name_identity").
+			BuildUpdates()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "could not bind reference")
+
+		// The new name must bind and produce a partition field on the same source column id.
+		specUpdate := txn.UpdateSpec(false)
+		_, _, err = specUpdate.
+			AddField("full_name", iceberg.IdentityTransform{}, "full_name_identity").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		added := newSpec.FieldsBySourceID(2)
+		require.Len(t, added, 1)
+		assert.Equal(t, "full_name_identity", added[0].Name)
+	})
+}
+
 func TestUpdateSpecAddIdentityField(t *testing.T) {
 	var txn *table.Transaction
 
