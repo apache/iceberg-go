@@ -852,6 +852,7 @@ func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
 	assert.Equal(t, []int{2}, field.SourceIDs)
 	assert.Equal(t, 1001, field.FieldID)
 	assert.Equal(t, "new field", field.Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, field.Transform)
 	assert.Equal(t, "new+field", field.EscapedName())
 }
 
