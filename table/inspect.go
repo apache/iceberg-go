@@ -18,8 +18,12 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"math"
+	"slices"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -247,6 +251,88 @@ func (i InspectTable) Snapshots(ctx context.Context) (array.RecordReader, error)
 	return rr, nil
 }
 
+// Refs returns one row per snapshot reference known to the table. Reference
+// names are sorted to make the result deterministic even though table metadata
+// stores refs in a map.
+//
+// Columns:
+//   - name (string, required): the branch or tag name
+//   - type (string, required): BRANCH or TAG
+//   - snapshot_id (long, required): the referenced snapshot
+//   - max_reference_age_in_ms (long, optional): tag/branch reference retention
+//   - min_snapshots_to_keep (int, optional): branch snapshot retention
+//   - max_snapshot_age_in_ms (long, optional): branch snapshot retention
+//
+// The returned reader holds a single record batch. The caller must Release it.
+func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := SchemaToArrowSchema(RefsSchema(), nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect refs: build arrow schema: %w", err)
+	}
+
+	type refRow struct {
+		name string
+		ref  SnapshotRef
+	}
+	var refs []refRow
+	for name, ref := range i.tbl.metadata.Refs() {
+		refs = append(refs, refRow{name: name, ref: ref})
+	}
+	slices.SortFunc(refs, func(a, b refRow) int {
+		return cmp.Compare(a.name, b.name)
+	})
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	name := bldr.Field(0).(*array.StringBuilder)
+	refType := bldr.Field(1).(*array.StringBuilder)
+	snapshotID := bldr.Field(2).(*array.Int64Builder)
+	maxReferenceAge := bldr.Field(3).(*array.Int64Builder)
+	minSnapshotsToKeep := bldr.Field(4).(*array.Int32Builder)
+	maxSnapshotAge := bldr.Field(5).(*array.Int64Builder)
+
+	for _, row := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		name.Append(row.name)
+		refType.Append(strings.ToUpper(string(row.ref.SnapshotRefType)))
+		snapshotID.Append(row.ref.SnapshotID)
+
+		if row.ref.MaxRefAgeMs != nil {
+			maxReferenceAge.Append(*row.ref.MaxRefAgeMs)
+		} else {
+			maxReferenceAge.AppendNull()
+		}
+		if row.ref.MinSnapshotsToKeep != nil {
+			value := *row.ref.MinSnapshotsToKeep
+			if value < math.MinInt32 || value > math.MaxInt32 {
+				return nil, fmt.Errorf(
+					"inspect refs: min snapshots to keep %d is outside int32 range",
+					value,
+				)
+			}
+			minSnapshotsToKeep.Append(int32(value))
+		} else {
+			minSnapshotsToKeep.AppendNull()
+		}
+		if row.ref.MaxSnapshotAgeMs != nil {
+			maxSnapshotAge.Append(*row.ref.MaxSnapshotAgeMs)
+		} else {
+			maxSnapshotAge.AppendNull()
+		}
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect refs: %w", err)
+	}
+
+	return rr, nil
+}
+
 // HistorySchema returns the Iceberg schema of the history metadata table. The
 // field IDs are fixed by the Iceberg metadata-tables spec and match the Java,
 // PyIceberg, and Rust clients for cross-client parity. A fresh schema value is
@@ -283,5 +369,19 @@ func SnapshotsSchema() *iceberg.Schema {
 			ValueType:     iceberg.PrimitiveTypes.String,
 			ValueRequired: false,
 		}},
+	)
+}
+
+// RefsSchema returns a fresh Iceberg schema for the refs metadata table. The
+// field IDs and names match Java's RefsTable for cross-client parity; callers
+// should not rely on pointer identity.
+func RefsSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "type", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 4, Name: "max_reference_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: 5, Name: "min_snapshots_to_keep", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 6, Name: "max_snapshot_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 	)
 }
