@@ -59,6 +59,10 @@ func wktToWKB(t *testing.T, s string) geoarrow.WKBBytes {
 // and returns a data file writer over it. props feed the metrics-mode
 // configuration (e.g. write.metadata.metrics.column.geom=none) so tests can
 // exercise the stats-plan dispatch that decides whether geo bounds are recorded.
+//
+// The geo columns are all top-level; nested geo columns are still unhandled in
+// the writer (see the TODO(#992) in parquet_files.go), so nothing here covers
+// them.
 func newGeoTestWriter(t *testing.T, dir string, props iceberg.Properties) (*defaultDataFileWriter, *iceberg.Schema, *arrow.Schema) {
 	t.Helper()
 
@@ -127,7 +131,6 @@ func TestWriteGeometryColumnPopulatesBounds(t *testing.T) {
 		{"id": 2, "geom": "`+geomHi.String()+`", "geog": null}
 	]`))
 	require.NoError(t, err)
-	defer rec.Release()
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
 		Uuid:      uuid.New(),
@@ -165,6 +168,11 @@ func TestWriteGeometryColumnPopulatesBounds(t *testing.T) {
 	// conservative choice until geodesic/antimeridian-aware computation lands (see
 	// geoBoundsAccumulator). This assertion should flip when that computation is
 	// added.
+	//
+	// Note for whoever adds it: geography needs its own decode, not a reuse of
+	// GeoBoundsXY. That helper rejects xmin > xmax as inverted (correct for planar
+	// geometry), which would silently drop the valid antimeridian-crossing bounds
+	// Java/PyIceberg emit for geography.
 	assert.NotContains(t, lower, geoTestGeogFieldID, "geography column does not record bounds in the current implementation")
 	assert.NotContains(t, upper, geoTestGeogFieldID, "geography column does not record bounds in the current implementation")
 }
@@ -183,7 +191,6 @@ func TestWriteGeometryColumnAllNull(t *testing.T) {
 		{"id": 2, "geom": null, "geog": null}
 	]`))
 	require.NoError(t, err)
-	defer rec.Release()
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
 		Uuid:      uuid.New(),
@@ -197,6 +204,10 @@ func TestWriteGeometryColumnAllNull(t *testing.T) {
 
 	lower := df.LowerBoundValues()
 	upper := df.UpperBoundValues()
+	// This asserts absence, which also holds if the accumulator were never wired
+	// up at all (e.g. collectGeoColumns stopped registering geo columns).
+	// TestWriteGeometryColumnPopulatesBounds is the positive guard against that
+	// bypass; this test pins the all-null case on top of it.
 	assert.NotContains(t, lower, geoTestGeomFieldID, "all-null geometry column must not record a lower bound")
 	assert.NotContains(t, upper, geoTestGeomFieldID, "all-null geometry column must not record an upper bound")
 
@@ -227,7 +238,6 @@ func TestWriteGeometryColumnMetricsNone(t *testing.T) {
 		{"id": 2, "geom": "`+geomHi.String()+`", "geog": null}
 	]`))
 	require.NoError(t, err)
-	defer rec.Release()
 
 	df, err := writer.writeFile(t.Context(), nil, WriteTask{
 		Uuid:      uuid.New(),
@@ -250,9 +260,11 @@ func TestWriteGeometryColumnMetricsNone(t *testing.T) {
 }
 
 // TestWriteGeometryColumnCheckedAllocator runs the geometry write path on a
-// checked allocator and asserts zero residual once the writer is done, catching
-// a silent allocation escape in the geo-bounds accumulator wiring. This mirrors
-// the memory.NewCheckedAllocator/AssertSize pattern the writer suites use.
+// checked allocator and asserts zero residual once the writer is done. The
+// geo-bounds accumulator works on plain Go fields and returns []byte, so the
+// checked allocator cannot see it; what this pins is that the Arrow write
+// pipeline (ToRequestedSchema, the pqarrow writer) releases every buffer it
+// allocates on the geo write path.
 func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 	t.Parallel()
 
@@ -271,7 +283,6 @@ func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 		{"id": 2, "geom": "`+geomHi.String()+`", "geog": null}
 	]`))
 	require.NoError(t, err)
-	defer rec.Release()
 
 	df, err := writer.writeFile(ctx, nil, WriteTask{
 		Uuid:      uuid.New(),
@@ -283,4 +294,5 @@ func TestWriteGeometryColumnCheckedAllocator(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 2, df.Count())
 	require.Contains(t, df.LowerBoundValues(), geoTestGeomFieldID, "geometry column must record a lower bound")
+	require.Contains(t, df.UpperBoundValues(), geoTestGeomFieldID, "geometry column must record an upper bound")
 }
