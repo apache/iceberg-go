@@ -76,6 +76,42 @@ func TestMakeColEncoderMatchesGenericForNullFastPathTypes(t *testing.T) {
 	}
 }
 
+func TestMakeArrowFieldEncoderHonorsNullStructParents(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	childBuilder := array.NewInt64Builder(mem)
+	childBuilder.Append(123)
+	childBuilder.Append(456)
+	child := childBuilder.NewArray()
+	childBuilder.Release()
+	defer child.Release()
+	structArray, err := array.NewStructArrayWithNulls(
+		[]arrow.Array{child}, []string{"id"}, memory.NewBufferBytes([]byte{0x02}), 1, 0)
+	require.NoError(t, err)
+	structType := structArray.DataType().(*arrow.StructType)
+
+	schema := arrow.NewSchema([]arrow.Field{{Name: "person", Type: structType}}, nil)
+	record := array.NewRecordBatch(schema, []arrow.Array{structArray}, 2)
+	structArray.Release()
+	defer record.Release()
+
+	assert.False(t, record.Column(0).(*array.Struct).Field(0).IsNull(0), "child storage must remain valid under the null parent")
+
+	encoder, err := makeArrowFieldEncoder(record, arrowFieldRef{path: []int{0, 0}}, 1, "person.id", "")
+	require.NoError(t, err)
+
+	var got bytes.Buffer
+	encoder(&got, 0)
+	assert.Equal(t, []byte{0}, got.Bytes())
+
+	got.Reset()
+	encoder(&got, 1)
+	var want bytes.Buffer
+	encodeArrowValue(&want, record.Column(0).(*array.Struct).Field(0), 1)
+	assert.Equal(t, want.Bytes(), got.Bytes())
+}
+
 type encoderArrayShape int
 
 const (

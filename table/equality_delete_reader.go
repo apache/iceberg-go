@@ -148,24 +148,56 @@ func resolveArrowField(schema *arrow.Schema, fieldID int, fieldName, filePath st
 }
 
 func arrowArrayAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, error) {
+	result, _, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
+
+	return result, err
+}
+
+func arrowArraysAtField(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (arrow.Array, []arrow.Array, error) {
 	location := filePath
 	if location == "" {
 		location = "data record"
 	}
 	if len(ref.path) == 0 || ref.path[0] >= int(record.NumCols()) {
-		return nil, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+		return nil, nil, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
 	}
 
 	result := record.Column(ref.path[0])
+	parents := make([]arrow.Array, 0, len(ref.path)-1)
 	for _, index := range ref.path[1:] {
 		structArray, ok := result.(*array.Struct)
 		if !ok || index >= structArray.NumField() {
-			return nil, fmt.Errorf("equality field ID %d (%s) has unsupported nested path in %s", fieldID, fieldName, location)
+			return nil, nil, fmt.Errorf("equality field ID %d (%s) has unsupported nested path in %s", fieldID, fieldName, location)
 		}
+		parents = append(parents, result)
 		result = structArray.Field(index)
 	}
 
-	return result, nil
+	return result, parents, nil
+}
+
+func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID int, fieldName, filePath string) (colEncoder, error) {
+	column, parents, err := arrowArraysAtField(record, ref, fieldID, fieldName, filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	encoder := makeColEncoder(column)
+	if len(parents) == 0 {
+		return encoder, nil
+	}
+
+	return func(buf *bytes.Buffer, row int) {
+		for _, parent := range parents {
+			if parent.IsNull(row) {
+				buf.WriteByte(0)
+
+				return
+			}
+		}
+
+		encoder(buf, row)
+	}, nil
 }
 
 // readAllEqualityDeleteFiles reads all unique equality delete files from
@@ -358,11 +390,10 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		rec := tr.RecordBatch()
 		encoders := make([]colEncoder, len(fieldRefs))
 		for i, ref := range fieldRefs {
-			column, err := arrowArrayAtField(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
+			encoders[i], err = makeArrowFieldEncoder(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
 			if err != nil {
 				return nil, nil, err
 			}
-			encoders[i] = makeColEncoder(column)
 		}
 
 		numRows := int(rec.NumRows())
@@ -686,11 +717,10 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				if err != nil {
 					return nil, err
 				}
-				column, err := arrowArrayAtField(r, ref, fieldID, name, dataFilePath)
+				encoders[i], err = makeArrowFieldEncoder(r, ref, fieldID, name, dataFilePath)
 				if err != nil {
 					return nil, err
 				}
-				encoders[i] = makeColEncoder(column)
 			}
 
 			for row := 0; row < numRows; row++ {
