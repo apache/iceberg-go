@@ -455,8 +455,12 @@ func (c *Catalog) CatalogType() catalog.Type {
 func (c *Catalog) Close() error {
 	err := c.reporter.Close()
 	if c.ownsDB {
-		if dbErr := c.db.Close(); dbErr != nil && err == nil {
-			err = dbErr
+		if dbErr := c.db.Close(); dbErr != nil {
+			if err == nil {
+				err = dbErr
+			} else {
+				err = errors.Join(err, dbErr)
+			}
 		}
 	}
 
