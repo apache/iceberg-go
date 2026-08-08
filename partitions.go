@@ -142,14 +142,16 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	p.FieldID = aux.FieldID
-	p.Name = aux.Name
+	next := PartitionField{
+		FieldID: aux.FieldID,
+		Name:    aux.Name,
+	}
 
 	var err error
-	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = ParseTransform(aux.TransformString); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
-	if err := validateTransform(p.Transform); err != nil {
+	if err := validateTransform(next.Transform); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
@@ -157,25 +159,27 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
 	}
 	if !hasSourceID && !hasSourceIDs {
-		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+		if _, isVoid := next.Transform.(VoidTransform); !isVoid {
 			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 		}
 		// Preserve compatibility with historical source-less void tombstones.
-		p.SourceIDs = []int{0}
+		next.SourceIDs = []int{0}
 	} else if len(aux.SourceIDs) > 0 {
-		p.SourceIDs = aux.SourceIDs
+		next.SourceIDs = aux.SourceIDs
 	} else {
-		p.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{aux.SourceID}
 	}
-	for _, sourceID := range p.SourceIDs {
-		_, isVoid := p.Transform.(VoidTransform)
+	for _, sourceID := range next.SourceIDs {
+		_, isVoid := next.Transform.(VoidTransform)
 		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
 			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
 		}
 	}
-	if p.Name == "" {
+	if next.Name == "" {
 		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
+
+	*p = next
 
 	return nil
 }
