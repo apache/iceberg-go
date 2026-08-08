@@ -939,6 +939,31 @@ func TestBoolLiteralComparator(t *testing.T) {
 	}
 }
 
+func TestBoolLiteralMarshalBinaryReturnsIndependentBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		value iceberg.BoolLiteral
+		want  byte
+	}{
+		{name: "false", value: iceberg.BoolLiteral(false), want: 0x0},
+		{name: "true", value: iceberg.BoolLiteral(true), want: 0x1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, data)
+
+			data[0] ^= 0x1
+
+			again, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, again)
+		})
+	}
+}
+
 func TestInvalidNumericConversions(t *testing.T) {
 	testInvalidLiteralConversions(t, iceberg.NewLiteral(int32(34)), []iceberg.Type{
 		iceberg.PrimitiveTypes.Bool,
