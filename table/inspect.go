@@ -399,13 +399,46 @@ func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transfo
 		return nil
 	}
 
-	literal, err := iceberg.LiteralFromBytes(typ, *bound)
+	literal, err := manifestBoundLiteral(typ, *bound)
 	if err != nil {
 		return err
 	}
+	if literal == nil {
+		builder.AppendNull()
+
+		return nil
+	}
+
 	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
 
 	return nil
+}
+
+func manifestBoundLiteral(typ iceberg.Type, bound []byte) (iceberg.Literal, error) {
+	switch t := typ.(type) {
+	case iceberg.UnknownType:
+		return nil, nil
+	case iceberg.Int64Type:
+		if len(bound) == 4 {
+			literal, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Int32, bound)
+			if err != nil {
+				return nil, err
+			}
+
+			return literal.To(t)
+		}
+	case iceberg.Float64Type:
+		if len(bound) == 4 {
+			literal, err := iceberg.LiteralFromBytes(iceberg.PrimitiveTypes.Float32, bound)
+			if err != nil {
+				return nil, err
+			}
+
+			return literal.To(t)
+		}
+	}
+
+	return iceberg.LiteralFromBytes(typ, bound)
 }
 
 // HistorySchema returns the Iceberg schema of the history metadata table. The

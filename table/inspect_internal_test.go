@@ -99,10 +99,28 @@ func collectRecord(t *testing.T, rr array.RecordReader) arrow.RecordBatch {
 }
 
 func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
+	return inspectTableWithManifestListAndSchemas(t, simpleSchema(), nil, spec, version, manifests)
+}
+
+func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, currentSchema *iceberg.Schema,
+	spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
 	t.Helper()
 
 	const snapshotID = int64(1)
-	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	ctx := context.Background()
+	fs, err := iceio.LoadFS(ctx, nil, "mem://default/table-location")
+	require.NoError(t, err)
+	memIO := fs.(iceio.WriteFileIO)
+	meta, err := NewMetadata(initialSchema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn := tbl.NewTransaction()
+	if currentSchema != nil {
+		require.NoError(t, txn.meta.AddSchema(currentSchema))
+		require.NoError(t, txn.meta.SetCurrentSchemaID(currentSchema.ID))
+	}
+
 	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
 	sequenceNumber := int64(1)
 	var listSequenceNumber *int64
@@ -523,6 +541,93 @@ func TestInspectManifests(t *testing.T) {
 	require.False(t, summary.Field(0).(*array.Boolean).Value(0))
 	require.Equal(t, "7", summary.Field(2).(*array.String).Value(0))
 	require.Equal(t, "7", summary.Field(3).(*array.String).Value(0))
+}
+
+func TestInspectManifestsPromotedPartitionSummaryBounds(t *testing.T) {
+	tests := []struct {
+		name        string
+		initialType iceberg.Type
+		currentType iceberg.Type
+		literal     iceberg.Literal
+		expected    string
+	}{
+		{
+			name:        "int to long",
+			initialType: iceberg.PrimitiveTypes.Int32,
+			currentType: iceberg.PrimitiveTypes.Int64,
+			literal:     iceberg.Int32Literal(7),
+			expected:    "7",
+		},
+		{
+			name:        "float to double",
+			initialType: iceberg.PrimitiveTypes.Float32,
+			currentType: iceberg.PrimitiveTypes.Float64,
+			literal:     iceberg.Float32Literal(1.5),
+			expected:    "1.5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := partitionedSpec()
+			initialSchema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: tt.initialType, Required: true,
+			})
+			currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
+				ID: 1, Name: "id", Type: tt.currentType, Required: true,
+			})
+			bound, err := tt.literal.MarshalBinary()
+			require.NoError(t, err)
+			manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/promoted.avro",
+				100, int32(spec.ID()), 1).
+				SequenceNum(1, 1).
+				Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
+				Build()
+			tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
+				spec, 2, []iceberg.ManifestFile{manifest})
+
+			rr, err := tbl.Inspect().Manifests(context.Background())
+			require.NoError(t, err)
+			defer rr.Release()
+			record := collectRecord(t, rr)
+			defer record.Release()
+
+			summaries := record.Column(11).(*array.List)
+			start, end := summaries.ValueOffsets(0)
+			require.EqualValues(t, 1, end-start)
+			summary := summaries.ListValues().(*array.Struct)
+			require.Equal(t, tt.expected, summary.Field(2).(*array.String).Value(0))
+			require.Equal(t, tt.expected, summary.Field(3).(*array.String).Value(0))
+		})
+	}
+}
+
+func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
+	spec := partitionedSpec()
+	initialSchema := simpleSchema()
+	currentSchema := iceberg.NewSchema(1)
+	bound, err := iceberg.Int32Literal(7).MarshalBinary()
+	require.NoError(t, err)
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/dropped-source.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
+		Build()
+	tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
+		spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	summaries := record.Column(11).(*array.List)
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 1, end-start)
+	summary := summaries.ListValues().(*array.Struct)
+	require.True(t, summary.Field(2).(*array.String).IsNull(0))
+	require.True(t, summary.Field(3).(*array.String).IsNull(0))
 }
 
 func TestInspectManifestsDeleteCounts(t *testing.T) {
