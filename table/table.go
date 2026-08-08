@@ -1052,15 +1052,25 @@ func WithSnapshotID(n int64) ScanOption {
 	}
 
 	return func(scan *Scan) {
+		if scan.asOfTimestamp != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select snapshot ID %d when as-of timestamp %d is already selected",
+				iceberg.ErrInvalidArgument, n, *scan.asOfTimestamp)
+
+			return
+		}
 		scan.snapshotID = &n
-		scan.asOfTimestamp = nil
 	}
 }
 
 func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 	return func(scan *Scan) {
+		if scan.snapshotID != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select as-of timestamp %d when snapshot ID %d is already selected",
+				iceberg.ErrInvalidArgument, timeStampMs, *scan.snapshotID)
+
+			return
+		}
 		scan.asOfTimestamp = &timeStampMs
-		scan.snapshotID = nil
 	}
 }
 
