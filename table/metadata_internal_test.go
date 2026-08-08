@@ -345,10 +345,12 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 				require.NoError(t, err)
 				initial[key] = encoded
 			}
-			snapshotID := int64(1925)
-			if tt.name != "v1" {
-				snapshotID = 3055729675574597004
+			var snapshots []struct {
+				SnapshotID int64 `json:"snapshot-id"`
 			}
+			require.NoError(t, json.Unmarshal(initial["snapshots"], &snapshots))
+			require.NotEmpty(t, snapshots)
+			snapshotID := snapshots[len(snapshots)-1].SnapshotID
 			setJSON("properties", map[string]any{"seed": "value"})
 			setJSON("current-snapshot-id", snapshotID)
 			setJSON("snapshot-log", []any{map[string]any{"snapshot-id": snapshotID, "timestamp-ms": int64(1)}})
@@ -387,6 +389,8 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			require.NotEmpty(t, common.StatisticsList)
 			require.NotEmpty(t, common.PartitionStatsList)
 			switch metadata := tt.target.(type) {
+			case *metadataV1:
+				require.Equal(t, int64(0), metadata.LastSequenceNumber())
 			case *metadataV2:
 				require.Equal(t, int64(34), metadata.LastSeqNum)
 			case *metadataV3:
@@ -425,6 +429,8 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			// legacy -1 sentinel. This documents current behavior, not the
 			// desired metadata normalization.
 			switch metadata := tt.target.(type) {
+			case *metadataV1:
+				assert.Equal(t, int64(0), metadata.LastSequenceNumber())
 			case *metadataV2:
 				assert.Equal(t, int64(-1), metadata.LastSeqNum)
 			case *metadataV3:
@@ -449,58 +455,75 @@ func metadataCommon(target any) *commonMetadata {
 
 func TestMetadataUnmarshalPreservesStateOnError(t *testing.T) {
 	tests := []struct {
-		name    string
-		data    string
-		invalid string
-		target  any
+		name      string
+		data      string
+		invalid   string
+		malformed string
+		target    any
 	}{
 		{
-			name:    "v1",
-			data:    ExampleTableMetadataV1,
-			invalid: strings.Replace(ExampleTableMetadataV1, `"current-snapshot-id": -1`, `"current-snapshot-id": 999`, 1),
-			target:  &metadataV1{},
+			name:      "v1",
+			data:      ExampleTableMetadataV1,
+			invalid:   strings.Replace(ExampleTableMetadataV1, `"current-snapshot-id": -1`, `"current-snapshot-id": 999`, 1),
+			malformed: "not json {",
+			target:    &metadataV1{},
 		},
 		{
-			name:    "v2",
-			data:    ExampleTableMetadataV2,
-			invalid: strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
-			target:  &metadataV2{},
+			name:      "v2",
+			data:      ExampleTableMetadataV2,
+			invalid:   strings.Replace(ExampleTableMetadataV2, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			malformed: "not json {",
+			target:    &metadataV2{},
 		},
 		{
-			name:    "v3",
-			data:    ExampleTableMetadataV3,
-			invalid: strings.Replace(ExampleTableMetadataV3, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
-			target:  &metadataV3{},
+			name:      "v3",
+			data:      ExampleTableMetadataV3,
+			invalid:   strings.Replace(ExampleTableMetadataV3, `"current-schema-id": 1`, `"current-schema-id": 99`, 1),
+			malformed: "not json {",
+			target:    &metadataV3{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
-			before, err := json.Marshal(tt.target)
-			require.NoError(t, err)
+			for _, invalid := range []struct {
+				name string
+				data string
+			}{
+				{name: "validation", data: tt.invalid},
+				{name: "json", data: tt.malformed},
+			} {
+				t.Run(invalid.name, func(t *testing.T) {
+					require.NoError(t, json.Unmarshal([]byte(tt.data), tt.target))
+					before, err := json.Marshal(tt.target)
+					require.NoError(t, err)
 
-			require.Error(t, json.Unmarshal([]byte(tt.invalid), tt.target))
+					require.Error(t, json.Unmarshal([]byte(invalid.data), tt.target))
 
-			after, err := json.Marshal(tt.target)
-			require.NoError(t, err)
-			assert.Equal(t, before, after)
+					after, err := json.Marshal(tt.target)
+					require.NoError(t, err)
+					assert.Equal(t, before, after)
+				})
+			}
 		})
 	}
 }
 
 func TestMetadataV2UnmarshalRejectsMissingRequiredStateOnReuse(t *testing.T) {
+	seedData := strings.Replace(ExampleTableMetadataV2, `"spec-id": 0`, `"spec-id": 7`, 1)
+	seedData = strings.Replace(seedData, `"default-spec-id": 0`, `"default-spec-id": 7`, 1)
+
 	var metadata metadataV2
-	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &metadata))
+	require.NoError(t, json.Unmarshal([]byte(seedData), &metadata))
 
 	var reduced map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &reduced))
+	require.NoError(t, json.Unmarshal([]byte(seedData), &reduced))
 	delete(reduced, "default-spec-id")
 	reducedData, err := json.Marshal(reduced)
 	require.NoError(t, err)
 
 	require.Error(t, json.Unmarshal(reducedData, &metadata))
-	assert.Equal(t, 0, metadata.DefaultSpecID)
+	assert.Equal(t, 7, metadata.DefaultSpecID)
 	assert.Equal(t, 1, metadata.CurrentSchemaID)
 	assert.Len(t, metadata.SnapshotList, 2)
 }

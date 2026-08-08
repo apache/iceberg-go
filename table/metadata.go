@@ -1692,7 +1692,8 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		// Negative sentinels distinguish omitted required fields from explicit zero values.
+		// These fields use negative sentinels so validation can distinguish omitted
+		// values from explicit zero values.
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -2666,6 +2667,10 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
+		return err
+	}
+
+	if err := rejectFieldsBeyondVersion(aux.FormatVersion); err != nil {
 		return err
 	}
 
