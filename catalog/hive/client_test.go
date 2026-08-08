@@ -23,12 +23,12 @@ import (
 )
 
 func TestNewHiveClientRejectsMissingHost(t *testing.T) {
-	for _, uri := range []string{"thrift://:9083", "localhost:9083"} {
+	for _, uri := range []string{"thrift://", "thrift://:9083", "localhost:9083"} {
 		t.Run(uri, func(t *testing.T) {
 			client, err := newHiveClient(uri, nil)
 			require.Error(t, err)
 			require.Nil(t, client)
-			require.Contains(t, err.Error(), "host is required")
+			require.ErrorContains(t, err, "host is required")
 		})
 	}
 }
