@@ -651,6 +651,33 @@ func TestNestedFieldUnmarshalMissingName(t *testing.T) {
 	assert.ErrorContains(t, err, "missing required 'name'")
 }
 
+func TestNestedFieldUnmarshalMissingRequired(t *testing.T) {
+	data := []byte(`{"id":1,"name":"col","type":"string"}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'required'")
+}
+
+func TestListTypeUnmarshalMissingElementRequired(t *testing.T) {
+	data := []byte(`{"type":"list","element-id":1,"element":"string"}`)
+
+	var list iceberg.ListType
+	err := json.Unmarshal(data, &list)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'element-required'")
+}
+
+func TestMapTypeUnmarshalMissingValueRequired(t *testing.T) {
+	data := []byte(`{"type":"map","key-id":1,"key":"string","value-id":2,"value":"string"}`)
+
+	var m iceberg.MapType
+	err := json.Unmarshal(data, &m)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'value-required'")
+}
+
 func TestNestedFieldUnmarshalZeroIDIsValid(t *testing.T) {
 	// id:0 is a valid field ID — should NOT be treated as a missing key
 	data := []byte(`{"id":0,"name":"col","type":"string","required":false}`)
