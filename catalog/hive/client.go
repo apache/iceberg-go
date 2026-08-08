@@ -66,6 +66,9 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid port: %w", err)
 	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid port: %d", port)
+	}
 
 	config := gohive.NewMetastoreConnectConfiguration()
 	config.TransportMode = "binary"
