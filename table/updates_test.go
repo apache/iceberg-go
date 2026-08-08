@@ -553,6 +553,8 @@ func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
 	data := []byte(`[
 		{"action":"set-properties","updated":{"key":"legacy"}},
 		{"action":"remove-properties","removed":["key"]},
+		{"action":"set-properties","updated":{}},
+		{"action":"remove-properties","removed":[]},
 		{"action":"set-properties","updated":{"key":"legacy"},"updates":{"key":"modern"}},
 		{"action":"remove-properties","removed":["legacy"],"removals":["modern"]}
 	]`)
@@ -562,6 +564,8 @@ func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
 	assert.Equal(t, Updates{
 		NewSetPropertiesUpdate(iceberg.Properties{"key": "legacy"}),
 		NewRemovePropertiesUpdate([]string{"key"}),
+		NewSetPropertiesUpdate(iceberg.Properties{}),
+		NewRemovePropertiesUpdate([]string{}),
 		NewSetPropertiesUpdate(iceberg.Properties{"key": "modern"}),
 		NewRemovePropertiesUpdate([]string{"modern"}),
 	}, updates)
@@ -571,9 +575,49 @@ func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
 	assert.JSONEq(t, `[
 		{"action":"set-properties","updates":{"key":"legacy"}},
 		{"action":"remove-properties","removals":["key"]},
+		{"action":"set-properties","updates":{}},
+		{"action":"remove-properties","removals":[]},
 		{"action":"set-properties","updates":{"key":"modern"}},
 		{"action":"remove-properties","removals":["modern"]}
 	]`, string(encoded))
+}
+
+func TestUnmarshalUpdatesRejectsNullLegacyPropertyFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  string
+		field string
+	}{
+		{
+			name:  "set-properties legacy field",
+			data:  `{"action":"set-properties","updated":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties legacy field",
+			data:  `{"action":"remove-properties","removed":null}`,
+			field: "removals",
+		},
+		{
+			name:  "set-properties canonical field takes precedence",
+			data:  `{"action":"set-properties","updated":{"key":"legacy"},"updates":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties canonical field takes precedence",
+			data:  `{"action":"remove-properties","removed":["legacy"],"removals":null}`,
+			field: "removals",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			err := json.Unmarshal([]byte("["+tt.data+"]"), &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
 }
 
 func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
