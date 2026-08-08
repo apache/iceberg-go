@@ -39,6 +39,8 @@ type IncrementalAppendScan struct {
 // NewIncrementalAppendScan creates an incremental append scan. Scan options
 // configure the underlying table scan and are retained for callers that pass
 // snapshot, projection, filter, or concurrency options before planning.
+// Only local planning is supported; remote and auto planning return
+// ErrInvalidOperation until incremental remote planning is implemented.
 func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
 	return &IncrementalAppendScan{scan: t.Scan(opts...)}
 }
@@ -79,6 +81,14 @@ func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) (*IncrementalAppend
 // PlanFiles returns one task per newly added data file. Delete files are not
 // applied because appended files are not present before the append snapshot.
 func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	switch s.scan.planningMode {
+	case ScanPlanningLocal:
+	case ScanPlanningRemote, ScanPlanningAuto:
+		return nil, fmt.Errorf("%w: incremental append scans support local planning only", ErrInvalidOperation)
+	default:
+		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
+	}
+
 	toSnapshot, err := s.toSnapshot()
 	if err != nil {
 		return nil, err
@@ -146,8 +156,13 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	}
 
 	planningScan := *s.scan
-	planningScan.snapshotID = &toSnapshot.SnapshotID
-	planningScan.asOfTimestamp = nil
+	if s.toSnapshotID != nil {
+		// An explicit end snapshot is a historical scan and must use that
+		// snapshot's schema. An implicit current end remains a live scan so a
+		// schema-only metadata update is visible during pruning.
+		planningScan.snapshotID = &toSnapshot.SnapshotID
+		planningScan.asOfTimestamp = nil
+	}
 	schema, err := planningScan.effectiveSchema()
 	if err != nil {
 		return nil, err
