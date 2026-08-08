@@ -194,6 +194,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		}
 		file := entry.DataFile()
 		task := FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+		task.Residual = s.scan.rowFilter
 		task.FirstRowID = file.FirstRowID()
 		if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
 			task.DataSequenceNumber = &sequenceNumber

@@ -77,14 +77,15 @@ func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	require.Equal(t, "mem://default/table-location/data-1.parquet", tasks[0].File.FilePath())
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[1].File.FilePath())
 
-	filtered, err := tbl.NewIncrementalAppendScan(WithRowFilter(
-		iceberg.EqualTo(iceberg.Reference("id"), int32(2)),
-	)).ToSnapshot(2)
+	filter := iceberg.EqualTo(iceberg.Reference("id"), int32(2))
+	filtered, err := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
 	require.NoError(t, err)
 	tasks, err = filtered.PlanFiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[0].File.FilePath())
+	require.NotNil(t, tasks[0].Residual)
+	require.True(t, tasks[0].Residual.Equals(filter))
 }
 
 func TestIncrementalAppendScanHonorsSnapshotOptions(t *testing.T) {
