@@ -634,6 +634,9 @@ func validateDecimalPrecisionScale(precision, scale int) error {
 	if scale < 0 {
 		return fmt.Errorf("invalid scale %d: must be greater than or equal to 0", scale)
 	}
+	if scale > precision {
+		return fmt.Errorf("invalid scale %d: must be less than or equal to precision %d", scale, precision)
+	}
 
 	return nil
 }
