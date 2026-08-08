@@ -416,19 +416,19 @@ func (e *exprEvaluator) VisitLessEqual(term BoundTerm, lit Literal) bool {
 func (e *exprEvaluator) VisitStartsWith(term BoundTerm, lit Literal) bool {
 	var value, prefix string
 
-	switch lit.(type) {
+	switch lit := lit.(type) {
 	case TypedLiteral[string]:
 		val := typedTermEval[string](e.st, term)
 		if !val.Valid {
 			return false
 		}
-		prefix, value = lit.(StringLiteral).Value(), val.Val
+		prefix, value = lit.Value(), val.Val
 	case TypedLiteral[[]byte]:
 		val := typedTermEval[[]byte](e.st, term)
 		if !val.Valid {
 			return false
 		}
-		prefix, value = string(lit.(TypedLiteral[[]byte]).Value()), string(val.Val)
+		prefix, value = string(lit.Value()), string(val.Val)
 	}
 
 	return strings.HasPrefix(value, prefix)
