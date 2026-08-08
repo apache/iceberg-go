@@ -209,6 +209,34 @@ func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	}
 }
 
+func TestGroupPosDeletesByFilePathHandlesDifferentChunkBoundaries(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	filePathA := stringArray(mem, "file-a.parquet", "file-b.parquet", "file-a.parquet")
+	defer filePathA.Release()
+	filePathB := stringArray(mem, "file-c.parquet")
+	defer filePathB.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathA, filePathB})
+	defer filePathCol.Release()
+
+	posA := int64Array(mem, 1, 2)
+	defer posA.Release()
+	posB := int64Array(mem, 3, 4)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+
+	assert.Equal(t, []int64{1, 3}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{2}, int64Values(got["file-b.parquet"]))
+	assert.Equal(t, []int64{4}, int64Values(got["file-c.parquet"]))
+}
+
 func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
