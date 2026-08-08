@@ -178,7 +178,18 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 //     downward instead, floored at the last interval the sequence produced before
 //     it saturated — a bound the schedule has already cleared, which stops a later
 //     attempt from being allowed to wait less than an earlier one;
-//   - the result never exceeds maxWait and never falls below minWait.
+//   - the result never exceeds maxWait, and never falls below minWait when
+//     minWait <= maxWait. When minWait > maxWait the configuration is
+//     self-contradictory, calculateBackoff resolves it to maxWait, and this
+//     returns exactly maxWait — below the configured minimum, because there is no
+//     value that honours both bounds.
+//
+// The spread below the cap is wider than the Java implementation's. Java's
+// Tasks.exponentialBackoff jitters by roughly 10% of the current delay, whereas
+// this draws from [d, 2d]. The wider window is deliberate — it decorrelates a
+// contended fleet faster — but it does mean Go and Java clients polling the same
+// metastore spread differently, so do not assume the two are interchangeable when
+// reasoning about load.
 func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	if d <= 0 {
 		return d
@@ -200,9 +211,22 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 		return d + time.Duration(rand.Int64N(int64(extra)+1))
 	}
 
+	// Everything below this point is unreachable under the default configuration.
+	// lock-check-min-wait-time=100ms, lock-check-max-wait-time=1m and
+	// lock-check-retries=4 top the sequence out at 800ms, so it never saturates and
+	// the branch above always wins. Getting here needs a lowered maximum or a raised
+	// retry count. Stated plainly because this is the most intricate part of the
+	// helper and the least exercised in practice.
+	//
 	// Replay the doubling sequence and keep the largest interval that still fitted
 	// under the cap. The guard on scheduled keeps a non-positive or overflowing
 	// minWait from spinning here.
+	//
+	// The replay is what a flat max(minWait, d/2) floor cannot do, and the gap is
+	// not hypothetical: at minWait=300ms, maxWait=1s the sequence runs 300ms, 600ms,
+	// then saturates. The last uncapped interval is 600ms, but d/2 is 500ms, so a
+	// flat floor would let the first capped attempt wait less than the one before it.
+	// The divergence appears whenever the ratio is not a clean power of two.
 	//
 	// minWait is applied before the replay rather than relying on it. When minWait
 	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
