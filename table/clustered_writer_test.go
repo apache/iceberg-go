@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -37,6 +38,26 @@ import (
 )
 
 // -- Functional tests --
+
+func TestClusteredPartitionTrackingUsesComparableKeys(t *testing.T) {
+	t.Parallel()
+
+	records := []partitionRecord{
+		{[]byte{1, 2, 3}},
+		{math.NaN()},
+	}
+	completed := make(closedPartitionSet)
+	for _, record := range records {
+		completed.add(record)
+		require.True(t, completed.contains(record))
+		require.True(t, partitionRecordsEqual(record, record))
+	}
+
+	require.True(t, completed.contains(partitionRecord{[]byte{1, 2, 3}}))
+	require.True(t, completed.contains(partitionRecord{math.NaN()}))
+	require.True(t, partitionRecordsEqual(partitionRecord{[]byte{1, 2, 3}}, partitionRecord{[]byte{1, 2, 3}}))
+	require.True(t, partitionRecordsEqual(partitionRecord{math.NaN()}, partitionRecord{math.NaN()}))
+}
 
 type ClusteredWriterTestSuite struct {
 	suite.Suite

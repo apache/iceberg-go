@@ -482,6 +482,7 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 			wantCRSType geoarrow.CRSType
 		}{
 			{"srid:4326", geoarrow.CRSTypeSRID},
+			{"srid:0", geoarrow.CRSTypeSRID},
 			{"OGC:CRS84", geoarrow.CRSTypeAuthorityCode},
 			{"EPSG:4326", geoarrow.CRSTypeAuthorityCode},
 			{"EPSG:4267", geoarrow.CRSTypeAuthorityCode},
@@ -495,11 +496,16 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 		}
 	})
 
-	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
+	// An omitted CRS means OGC:CRS84, so the unknown CRS srid:0 must be explicit.
+	t.Run("srid:0 round trips as an explicit srid CRS", func(t *testing.T) {
 		meta, err := icebergCRSToGeoArrowMetadata("srid:0", nil)
 		require.NoError(t, err)
-		assert.Empty(t, meta.CRS)
-		assert.Empty(t, meta.CRSType)
+		assert.JSONEq(t, `"0"`, string(meta.CRS))
+		assert.Equal(t, geoarrow.CRSTypeSRID, meta.CRSType)
+
+		crs, err := geoArrowCRSToIcebergCRS(meta)
+		require.NoError(t, err)
+		assert.Equal(t, "srid:0", crs)
 	})
 }
 
@@ -509,6 +515,27 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 
 		return raw
 	}
+
+	t.Run("absent CRS maps to the default CRS", func(t *testing.T) {
+		got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{})
+		require.NoError(t, err)
+		assert.Equal(t, "OGC:CRS84", got)
+	})
+
+	t.Run("absent CRS with a crs_type annotation maps to the default CRS", func(t *testing.T) {
+		for _, crsType := range []geoarrow.CRSType{
+			geoarrow.CRSTypeSRID,
+			geoarrow.CRSTypeAuthorityCode,
+			geoarrow.CRSTypePROJJSON,
+			geoarrow.CRSTypeWKT22019,
+		} {
+			t.Run(string(crsType), func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRSType: crsType})
+				require.NoError(t, err)
+				assert.Equal(t, "OGC:CRS84", got)
+			})
+		}
+	})
 
 	t.Run("accepts long authority code string", func(t *testing.T) {
 		const crs = "EPSGAuthorityLongName:CODE-12345678901234567890"
@@ -550,6 +577,19 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "srid:3857", got)
+	})
+
+	t.Run("already prefixed srid is not prefixed twice", func(t *testing.T) {
+		for _, crs := range []string{"srid:0", "srid:3857", "SRID:3857"} {
+			t.Run(crs, func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+					CRS:     stringCRS(crs),
+					CRSType: geoarrow.CRSTypeSRID,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, crs, got)
+			})
+		}
 	})
 
 	t.Run("rejects empty string CRS", func(t *testing.T) {

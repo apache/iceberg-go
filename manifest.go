@@ -546,10 +546,10 @@ type hasFieldToIDMap interface {
 	setFieldIDToDecimalScaleMap(map[int]int)
 }
 
-// ManifestFile is the interface which covers both V1 and V2 manifest files.
+// ManifestFile is the interface for version 1, 2, and 3 manifest files.
 type ManifestFile interface {
 	// Version returns the version number of this manifest file.
-	// It should be 1 or 2.
+	// It must be 1, 2, or 3.
 	Version() int
 	// FilePath is the location URI of this manifest file.
 	FilePath() string
@@ -743,6 +743,9 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 		if err != nil {
 			return nil, fmt.Errorf("manifest file's 'format-version' metadata is invalid: %w", err)
 		}
+	}
+	if err := validateManifestFormatVersion(formatVersion); err != nil {
+		return nil, err
 	}
 	// The manifest's own metadata is authoritative for its version. A v2/v3
 	// manifest list may reference older manifests so a table can be upgraded
@@ -1015,6 +1018,9 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 
 			version = v
 		}
+		if err := validateManifestFormatVersion(version); err != nil {
+			return nil, err
+		}
 
 		if version == 1 {
 			return manifestFileV1Reader, nil
@@ -1031,6 +1037,14 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	}
 
 	return decodeManifests[*manifestFile](rd, version)
+}
+
+func validateManifestFormatVersion(version int) error {
+	if version < 1 || version > 3 {
+		return fmt.Errorf("unsupported manifest format version: %d", version)
+	}
+
+	return nil
 }
 
 type writerImpl interface {
@@ -1573,6 +1587,10 @@ func NewManifestListWriterV2(out io.Writer, snapshotID, sequenceNumber int64, pa
 }
 
 func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRowID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
+	if firstRowID < 0 {
+		return nil, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+
 	m := &ManifestListWriter{
 		version:          3,
 		out:              out,
@@ -1592,6 +1610,28 @@ func NewManifestListWriterV3(out io.Writer, snapshotId, sequenceNumber, firstRow
 		"first-row-id":       []byte(strconv.FormatInt(firstRowID, 10)),
 		"parent-snapshot-id": []byte(parentSnapshotStr),
 	})
+}
+
+func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
+	if firstRowID < 0 {
+		return 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+	if existingRows == -1 {
+		existingRows = 0
+	}
+	if addedRows == -1 {
+		addedRows = 0
+	}
+	if existingRows < 0 || addedRows < 0 {
+		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
+			ErrInvalidArgument, existingRows, addedRows)
+	}
+	if existingRows > math.MaxInt64-firstRowID || addedRows > math.MaxInt64-firstRowID-existingRows {
+		return 0, fmt.Errorf("%w: assigning %d existing and %d added rows from first row ID %d overflows int64",
+			ErrInvalidArgument, existingRows, addedRows, firstRowID)
+	}
+
+	return firstRowID + existingRows + addedRows, nil
 }
 
 func (m *ManifestListWriter) init(meta map[string][]byte) error {
@@ -1625,9 +1665,17 @@ func (m *ManifestListWriter) NextRowID() *int64 {
 	return m.nextRowID
 }
 
-func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
+func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
 	if len(files) == 0 {
 		return nil
+	}
+	if m.version == 3 && m.nextRowID != nil {
+		batchStartRowID := *m.nextRowID
+		defer func() {
+			if err != nil {
+				*m.nextRowID = batchStartRowID
+			}
+		}()
 	}
 
 	switch m.version {
@@ -1649,6 +1697,8 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 
 	case 2, 3:
 		for _, file := range files {
+			var assignedNextRowID *int64
+
 			// Per the Iceberg spec a v2 manifest list may reference v1 manifest
 			// files (and a v3 list may reference v1 or v2 manifests) so that a
 			// table can be upgraded without rewriting historical manifests. The
@@ -1671,8 +1721,12 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 					if wrapped.FirstRowIDValue == nil {
 						if m.nextRowID != nil {
 							firstRowID := *m.nextRowID
+							nextRowID, err := advanceRowID(firstRowID, wrapped.ExistingRowsCount, wrapped.AddedRowsCount)
+							if err != nil {
+								return fmt.Errorf("manifest %q: %w", wrapped.Path, err)
+							}
 							wrapped.FirstRowIDValue = &firstRowID
-							*m.nextRowID += wrapped.ExistingRowsCount + wrapped.AddedRowsCount
+							assignedNextRowID = &nextRowID
 						}
 					}
 				}
@@ -1700,6 +1754,9 @@ func (m *ManifestListWriter) AddManifests(files []ManifestFile) error {
 			}
 			if err := m.writer.Encode(wrapped); err != nil {
 				return err
+			}
+			if assignedNextRowID != nil {
+				*m.nextRowID = *assignedNextRowID
 			}
 		}
 	default:
@@ -1784,6 +1841,10 @@ func WriteManifestV3(
 	snapshotID int64,
 	entries []ManifestEntry,
 ) (mf ManifestFile, nextFirstRowID int64, err error) {
+	if firstRowID < 0 {
+		return nil, 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
+	}
+
 	cnt := &internal.CountingWriter{W: out}
 
 	w, err := NewManifestWriter(3, cnt, spec, schema, snapshotID)
@@ -1810,7 +1871,10 @@ func WriteManifestV3(
 	raw := mf.(*manifestFile)
 	v := firstRowID
 	raw.FirstRowIDValue = &v
-	nextFirstRowID = firstRowID + raw.AddedRowsCount + raw.ExistingRowsCount
+	nextFirstRowID, err = advanceRowID(firstRowID, raw.ExistingRowsCount, raw.AddedRowsCount)
+	if err != nil {
+		return nil, 0, fmt.Errorf("manifest %q: %w", filename, err)
+	}
 
 	return raw, nextFirstRowID, nil
 }

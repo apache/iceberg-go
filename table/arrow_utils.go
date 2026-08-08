@@ -1089,6 +1089,10 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	targetType := a.typeToArrowType(field.Type)
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
+		if out, ok := a.rewrapExtension(targetType, vals); ok {
+			return out
+		}
+
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
 			tt, tgtok := targetType.(*arrow.TimestampType)
@@ -1129,6 +1133,38 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	vals.Retain()
 
 	return vals
+}
+
+// rewrapExtension re-wraps vals in targetType when both are extension types
+// with the same extension name but differing extension parameters, returning
+// false when the types are not such a pair. Arrow's compute layer has no
+// extension-to-extension cast kernel, and the values are already in the
+// extension's storage encoding, so only the storage array is cast and that only
+// when the storage types differ. This is safe only because a shared extension
+// name implies the storage payload is interpretation-compatible: parameters may
+// differ, the encoded values do not.
+func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals arrow.Array) (arrow.Array, bool) {
+	tgtExt, ok := targetType.(arrow.ExtensionType)
+	if !ok {
+		return nil, false
+	}
+
+	srcExt, ok := vals.DataType().(arrow.ExtensionType)
+	if !ok || srcExt.ExtensionName() != tgtExt.ExtensionName() {
+		return nil, false
+	}
+
+	if arrow.TypeEqual(srcExt.StorageType(), tgtExt.StorageType()) {
+		return array.NewExtensionArrayWithStorage(tgtExt,
+			vals.(array.ExtensionArray).Storage()), true
+	}
+
+	storage := retOrPanic(compute.CastArray(a.ctx,
+		vals.(array.ExtensionArray).Storage(),
+		compute.SafeCastOptions(tgtExt.StorageType())))
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(tgtExt, storage), true
 }
 
 func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
@@ -1866,12 +1902,13 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 func unpartitionedWrite(ctx context.Context, factory *writerFactory, records iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[iceberg.DataFile, error] {
 	outputCh := make(chan iceberg.DataFile, 1)
 	errCh := make(chan error, 1)
+	writerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1880,6 +1917,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 
 				return
 			}
+
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
@@ -1899,6 +1937,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			for range outputCh {
 			}
 		}()
+		defer cancel()
 		for df := range outputCh {
 			if !yield(df, nil) {
 				return
@@ -2144,9 +2183,12 @@ func isWKT2CRSString(crs string) bool {
 	return false
 }
 
+// geoArrowCRSToIcebergCRS maps GeoArrow CRS metadata to an Iceberg CRS string.
+// Absent CRS metadata means the default CRS OGC:CRS84, matching the Parquet
+// geospatial spec and Iceberg's default geometry/geography types.
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
-		return "srid:0", nil
+		return iceberg.DefaultGeoCRS, nil
 	}
 
 	switch {
@@ -2160,8 +2202,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(crs, iceberg.DefaultGeoCRS) || strings.EqualFold(crs, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		switch meta.CRSType {
@@ -2178,6 +2220,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errWKT2CRSNotSupported
 		}
 		if meta.CRSType == geoarrow.CRSTypeSRID {
+			// Some writers store the identifier already prefixed; don't prefix twice.
+			if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+				return crs, nil
+			}
+
 			return "srid:" + crs, nil
 		}
 
@@ -2235,8 +2282,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 
 		authorityCode := authority + ":" + code
-		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(authorityCode, iceberg.DefaultGeoCRS) || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		return authorityCode, nil
@@ -2301,10 +2348,6 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
-		if id == "0" {
-			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
-		}
-
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
@@ -2343,7 +2386,7 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 
 	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
-		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+		raw, _ = json.Marshal(iceberg.DefaultGeoCRS) //nolint:errcheck // Marshalling a string can't fail
 	} else {
 		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}

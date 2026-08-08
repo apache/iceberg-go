@@ -313,7 +313,7 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			snapshotID, cs.SnapshotID)
 	}
 
-	update := NewSetSnapshotRefUpdate(MainBranch, snapshotID, BranchRef, 0, 0, 0)
+	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
 	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
 
 	return t.apply([]Update{update}, []Requirement{req})
@@ -2372,17 +2372,28 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, errors.New("transaction has already been committed")
 	}
 
-	t.committed = true
-
 	if len(meta.updates) > 0 {
-		t.reqs = append(t.reqs, AssertTableUUID(meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, meta.updates, t.reqs,
+		reqs := append(slices.Clone(t.reqs), AssertTableUUID(meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 		)
 		if err != nil {
+			// A clean conflict (ErrCommitFailed) committed nothing and stays
+			// retriable. Any other failure leaves the commit state unknown
+			// (the catalog may have accepted it), so mark it terminal to
+			// avoid a double-apply on retry.
+			if !errors.Is(err, ErrCommitFailed) {
+				t.committed = true
+			}
+
 			return tbl, err
 		}
+
+		// Mark committed after the catalog accepts but before PostCommit runs.
+		// A PostCommit failure must not leave the transaction retriable;
+		// otherwise a retry would re-run the catalog commit.
+		t.committed = true
 
 		for _, u := range meta.updates {
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
@@ -2392,6 +2403,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 		return tbl, err
 	}
+
+	t.committed = true
 
 	return t.tbl, nil
 }

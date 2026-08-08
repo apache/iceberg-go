@@ -25,10 +25,14 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
@@ -400,6 +404,76 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	require.Contains(t, byPart, int32(2))
 	assert.Equal(t, int64(2), byPart[1].Count(), "id=1 delete file must contain only the two rows targeting pathA")
 	assert.Equal(t, int64(1), byPart[2].Count(), "id=2 delete file must contain only the one row targeting pathB")
+}
+
+func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t *testing.T) {
+	t.Parallel()
+
+	const path = "file://t/id=1/a.parquet"
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	tableSchema := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID: 1000, SourceIDs: []int{1}, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(tableSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&partitionSpec, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	require.NoError(t, metadataBuilder.AddSortOrder(&UnsortedSortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(0))
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	var produced atomic.Int32
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		for range 1000 {
+			produced.Add(1)
+			batch, _, err := array.RecordFromJSON(
+				mem,
+				PositionalDeleteArrowSchema,
+				strings.NewReader(fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, path)),
+			)
+			require.NoError(t, err)
+			accepted := yield(batch, nil)
+			batch.Release()
+			if !accepted {
+				return
+			}
+		}
+	}
+
+	writeUUID := uuid.New()
+	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+		fs: &io.LocalFS{}, sc: PositionalDeleteArrowSchema, writeUUID: &writeUUID, counter: internal.Counter(0),
+	}, metadataBuilder, iceberg.PositionalDeleteSchema, 1,
+		withContentType(iceberg.EntryContentPosDeletes),
+		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, err)
+	writer := newPositionDeletePartitionedFanoutWriter(
+		latestMeta,
+		map[string]partitionContext{path: {partitionData: map[int]any{1000: int32(1)}, specID: 0}},
+		records,
+		factory,
+	)
+
+	for dataFile, writeErr := range writer.Write(ctx, 1) {
+		require.NoError(t, writeErr)
+		require.NotNil(t, dataFile)
+
+		break
+	}
+
+	assert.Positive(t, produced.Load())
+	assert.Less(t, produced.Load(), int32(100))
+	require.Zero(t, mem.CurrentAlloc())
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {

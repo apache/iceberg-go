@@ -217,3 +217,18 @@ func TestUpdateSnapshotSummariesUnsupportedOperation(t *testing.T) {
 	_, err := updateSnapshotSummaries(Summary{Operation: Operation("scan")}, nil)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
+
+func TestUpdateSnapshotSummariesPreservesLargeTotals(t *testing.T) {
+	t.Parallel()
+
+	result, err := updateSnapshotSummaries(Summary{Operation: OpAppend, Properties: iceberg.Properties{
+		addedRecordsKey:  "1000000000",
+		addedFileSizeKey: "1000000000",
+	}}, iceberg.Properties{
+		totalRecordsKey:  "3000000000",
+		totalFileSizeKey: "8000000000",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "4000000000", result.Properties[totalRecordsKey])
+	assert.Equal(t, "9000000000", result.Properties[totalFileSizeKey])
+}

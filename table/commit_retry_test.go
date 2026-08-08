@@ -31,6 +31,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,6 +51,7 @@ type sequentialCatalog struct {
 	loadMeta Metadata // optional: returned by LoadTable if non-nil
 	errs     []error
 	attempts atomic.Int32
+	lastReqs []Requirement
 }
 
 func (c *sequentialCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
@@ -62,7 +64,8 @@ func (c *sequentialCatalog) LoadTable(_ context.Context, ident Identifier) (*Tab
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
 }
 
-func (c *sequentialCatalog) CommitTable(_ context.Context, _ Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
+func (c *sequentialCatalog) CommitTable(_ context.Context, _ Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
+	c.lastReqs = reqs
 	n := int(c.attempts.Add(1)) - 1 // 0-indexed
 	if n < len(c.errs) && c.errs[n] != nil {
 		return nil, "", c.errs[n]
@@ -523,6 +526,52 @@ func TestDoCommit_OrphanCleanedOnSuccess(t *testing.T) {
 		"live committed manifest list must be preserved by the cleanup defer")
 }
 
+// TestDoCommit_CommitReportRecordsRetryAttempts drives one retryable
+// ErrCommitFailed before success and asserts the emitted CommitReport records
+// Attempts == 2. This exercises the attempt-counting on the emit path, which no
+// other test does — every other commit test is a clean single-attempt success.
+func TestDoCommit_CommitReportRecordsRetryAttempts(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	tbl := newOCCTable(t, meta, wfs, nil)
+	txn := tbl.NewTransaction()
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/f.parquet", nil))
+
+	updates, reqs, err := sp.commit(context.Background())
+	require.NoError(t, err)
+
+	// Fail once with ErrCommitFailed (one retry), then succeed on the 2nd attempt.
+	cat := &sequentialCatalog{
+		metadata: meta,
+		errs:     []error{ErrCommitFailed},
+	}
+	sink := &metrics.InMemoryReporter{}
+	tbl = New(
+		Identifier{"db", "commit-report-retry"},
+		meta,
+		"mem://default/table-location/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil },
+		cat,
+		WithMetricsReporter(sink),
+	)
+
+	_, err = tbl.doCommit(t.Context(), updates, reqs, withCommitBranch(MainBranch))
+	require.NoError(t, err, "doCommit must succeed on the second attempt")
+
+	var cr *metrics.CommitReport
+	for _, r := range sink.Reports() {
+		if c, ok := r.(metrics.CommitReport); ok {
+			cr = &c
+		}
+	}
+	require.NotNil(t, cr, "a successful commit must emit a CommitReport")
+	require.NotNil(t, cr.Metrics.Attempts)
+	assert.Equal(t, int64(2), cr.Metrics.Attempts.Value,
+		"one retry then success must record 2 attempts")
+}
+
 // TestDoCommit_OrphanNotCleanedOnUnknownError verifies that manifest-list
 // files are NOT removed when CommitTable returns an unknown non-ErrCommitFailed
 // error (5xx / gateway timeout). In that case the catalog may have silently
@@ -943,4 +992,96 @@ func TestDoCommit_RetryProgressesFreshMeta(t *testing.T) {
 		"attempt-0 manifest list must be cleaned as orphan after success")
 	require.NotContains(t, wfs.files, cat.observedManifestLists[1],
 		"attempt-1 rebuild manifest list must be cleaned as orphan after success")
+}
+
+// To verify a retried commit does not accumulate duplicates.
+func countAssertTableUUID(reqs []Requirement) int {
+	n := 0
+	for _, r := range reqs {
+		if r.GetType() == "assert-table-uuid" {
+			n++
+		}
+	}
+
+	return n
+}
+
+func TestTransactionCommit_RetriableAfterCleanConflict(t *testing.T) {
+	// Default retry config (numRetries == 0): each Commit is a single
+	// CommitTable attempt. The first fails with a clean conflict, the second succeeds.
+	cat := &sequentialCatalog{
+		errs: []error{ErrCommitFailed},
+	}
+	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed, "first commit must surface the clean conflict")
+	assert.False(t, tx.committed, "clean-conflict failure must leave committed == false")
+	assert.Equal(t, int32(1), cat.attempts.Load(), "first commit must reach the catalog once")
+
+	// The transaction stays usable: applying further changes and retrying the
+	// commit must both be allowed.
+	require.NoError(t, tx.SetProperties(map[string]string{"key2": "value2"}),
+		"apply must be allowed after a failed commit")
+
+	committed, err := tx.Commit(t.Context())
+	require.NoError(t, err, "commit retry must be allowed after a clean conflict")
+	require.NotNil(t, committed)
+	assert.True(t, tx.committed, "committed must be set only after a successful commit")
+	assert.Equal(t, int32(2), cat.attempts.Load(), "the retry must reach the catalog")
+
+	assert.Equal(t, 1, countAssertTableUUID(cat.lastReqs),
+		"retry must not append a duplicate AssertTableUUID")
+
+	_, err = tx.Commit(t.Context())
+	assert.ErrorContains(t, err, "already been committed")
+}
+
+// doCommit exhausts its own retry loop on ErrCommitFailed, the transaction must still be left retriable.
+func TestTransactionCommit_RetriableAfterExhaustedInternalRetries(t *testing.T) {
+	// numRetries == 2 → doCommit makes 3 attempts, all clean conflicts, so it
+	// exhausts its internal retries and returns ErrCommitFailed.
+	cat := &sequentialCatalog{
+		errs: []error{ErrCommitFailed, ErrCommitFailed, ErrCommitFailed},
+	}
+	tbl := newRetryTestTable(t, cat, iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	_, err := tx.Commit(t.Context())
+	require.ErrorIs(t, err, ErrCommitFailed)
+	assert.Equal(t, int32(3), cat.attempts.Load(), "doCommit must exhaust all internal attempts")
+	assert.False(t, tx.committed, "exhausted clean-conflict retries must leave committed == false")
+}
+
+func TestTransactionCommit_TerminalOnUnknownState(t *testing.T) {
+	cat := &sequentialCatalog{
+		errs: []error{errors.New("simulated 5xx: internal server error")},
+	}
+	tbl := newRetryTestTable(t, cat, nil)
+	cat.metadata = tbl.Metadata()
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"key": "value"}))
+
+	_, err := tx.Commit(t.Context())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrCommitFailed, "test must exercise the unknown-state path")
+	assert.True(t, tx.committed, "unknown-state failure must mark the transaction terminal")
+
+	// A retry must be rejected — retrying could double-apply if the first
+	// attempt actually landed at the catalog.
+	_, err = tx.Commit(t.Context())
+	assert.ErrorContains(t, err, "already been committed")
+	assert.Equal(t, int32(1), cat.attempts.Load(), "terminal failure must not reach the catalog again")
 }

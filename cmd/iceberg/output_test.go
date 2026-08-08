@@ -28,6 +28,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_textOutput_DescribeTable(t *testing.T) {
@@ -150,6 +151,7 @@ read.split.target.size | 134217728
         {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
         {
             "type": "struct",
+			"schema-id": 1,
             "fields": [
                 {"id": 1, "name": "x", "required": true, "type": "long"}
             ]
@@ -201,7 +203,8 @@ read.split.target.size | 134217728
 			pterm.SetDefaultOutput(&buf)
 			pterm.DisableColor()
 
-			meta, _ := table.ParseMetadataBytes([]byte(tt.args.meta))
+			meta, err := table.ParseMetadataBytes([]byte(tt.args.meta))
+			require.NoError(t, err)
 			tbl := table.New([]string{"t"}, meta, "", nil, nil)
 			buf.Reset()
 
@@ -361,6 +364,7 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
         {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
         {
             "type": "struct",
+			"schema-id": 1,
             "fields": [
                 {"id": 1, "name": "x", "required": true, "type": "long"}
             ]
@@ -384,7 +388,7 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
     "refs": { }
 }`,
 			},
-			expected: `{"metadata":{"last-sequence-number":0,"format-version":2,"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1","location":"s3://bucket/test/location","last-updated-ms":1602638573590,"last-column-id":3,"schemas":[{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]},{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}],"current-schema-id":0,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":1000,"properties":{"read.split.target.size":"134217728"},"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0},"sort-order":{"order-id":0,"fields":[]},"spec":{"spec-id":0,"fields":[]},"schema":{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}}`,
+			expected: `{"metadata":{"last-sequence-number":0,"format-version":2,"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1","location":"s3://bucket/test/location","last-updated-ms":1602638573590,"last-column-id":3,"schemas":[{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]},{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":1,"identifier-field-ids":[]}],"current-schema-id":0,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":1000,"properties":{"read.split.target.size":"134217728"},"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0},"sort-order":{"order-id":0,"fields":[]},"spec":{"spec-id":0,"fields":[]},"schema":{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}}`,
 		},
 	}
 	for _, tt := range tests {
@@ -397,7 +401,8 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
 				os.Stdout = oldStdout
 			}()
 
-			meta, _ := table.ParseMetadataBytes([]byte(tt.args.meta))
+			meta, err := table.ParseMetadataBytes([]byte(tt.args.meta))
+			require.NoError(t, err)
 			tbl := table.New([]string{"t"}, meta, "", nil, nil)
 
 			jsonOutput{}.DescribeTable(tbl)

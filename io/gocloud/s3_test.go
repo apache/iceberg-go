@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	internalaws "github.com/apache/iceberg-go/internal/awsconfig"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -95,12 +96,12 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 		assert.Nil(t, shared.HTTPClient, "shared ctx config must stay unmutated")
 	})
 
-	// A partial key set (missing the secret) must not clobber the context creds.
-	t.Run("partial props creds fall through", func(t *testing.T) {
+	// A partial key set must fail consistently, even with ambient credentials.
+	t.Run("partial props creds are rejected", func(t *testing.T) {
 		t.Parallel()
-		cfg, err := resolveS3AWSConfig(ctxWith, map[string]string{io.S3AccessKeyID: "PARTIAL"})
-		require.NoError(t, err)
-		assert.Equal(t, "CTX", retrieve(t, cfg), "incomplete override must keep ctx creds")
+		_, err := resolveS3AWSConfig(ctxWith, map[string]string{io.S3AccessKeyID: "PARTIAL"})
+		require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials)
+		require.ErrorContains(t, err, "s3.access-key-id and s3.secret-access-key must be configured together")
 	})
 
 	// Explicit region overrides the context config's region, without mutating it.
@@ -112,6 +113,60 @@ func TestResolveS3AWSConfigCredentialPrecedence(t *testing.T) {
 		assert.Equal(t, "props-region", cfg.Region)
 		assert.Equal(t, "ctx-region", shared.Region, "shared ctx config must not be mutated")
 	})
+}
+
+func TestParseAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		props map[string]string
+		err   string
+	}{
+		{"access key only", map[string]string{io.S3AccessKeyID: "access"}, "s3.access-key-id and s3.secret-access-key must be configured together"},
+		{"secret key only", map[string]string{io.S3SecretAccessKey: "secret"}, "s3.access-key-id and s3.secret-access-key must be configured together"},
+		{"session token only", map[string]string{io.S3SessionToken: "token"}, "s3.session-token requires s3.access-key-id and s3.secret-access-key"},
+		{"access key and token", map[string]string{io.S3AccessKeyID: "access", io.S3SessionToken: "token"}, "s3.access-key-id and s3.secret-access-key must be configured together"},
+		{"secret key and token", map[string]string{io.S3SecretAccessKey: "secret", io.S3SessionToken: "token"}, "s3.access-key-id and s3.secret-access-key must be configured together"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := ParseAWSConfig(context.Background(), tt.props)
+			require.ErrorIs(t, err, internalaws.ErrIncompleteStaticCredentials)
+			require.ErrorContains(t, err, tt.err)
+		})
+	}
+
+	t.Run("empty props use the default chain", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := ParseAWSConfig(context.Background(), map[string]string{})
+		require.NoError(t, err)
+		_, static := cfg.Credentials.(credentials.StaticCredentialsProvider)
+		assert.False(t, static)
+	})
+
+	t.Run("key pair without token is accepted", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+			io.S3AccessKeyID: "access", io.S3SecretAccessKey: "secret",
+		})
+		require.NoError(t, err)
+		creds, err := cfg.Credentials.Retrieve(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, creds.SessionToken)
+	})
+
+	cfg, err := ParseAWSConfig(context.Background(), map[string]string{
+		io.S3AccessKeyID: "access", io.S3SecretAccessKey: "secret", io.S3SessionToken: "token",
+	})
+	require.NoError(t, err)
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "access", creds.AccessKeyID)
+	require.Equal(t, "secret", creds.SecretAccessKey)
+	require.Equal(t, "token", creds.SessionToken)
 }
 
 func TestParseAWSConfigRemoteSigningEnabled(t *testing.T) {
