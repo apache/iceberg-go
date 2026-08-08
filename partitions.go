@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,6 +125,10 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	}
 	_, hasSourceID := raw["source-id"]
 	_, hasSourceIDs := raw["source-ids"]
+
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
+	}
 
 	aux := struct {
 		SourceID        int    `json:"source-id"`
@@ -321,6 +326,14 @@ func validateTransform(transform Transform) error {
 		return t.validateWidth()
 	case *TruncateTransform:
 		return t.validateWidth()
+	case UnknownTransform:
+		// The zero value is constructible from outside the package and would
+		// serialize as "transform": "".
+		if t.String() == "" {
+			return fmt.Errorf("%w: unknown transform has no name", ErrInvalidTransform)
+		}
+
+		return nil
 	default:
 		return nil
 	}
@@ -454,23 +467,38 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 }
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
-	aux := struct {
-		ID     int               `json:"spec-id"`
-		Fields []json.RawMessage `json:"fields"`
-	}{ID: ps.id}
-
-	if err := json.Unmarshal(b, &aux); err != nil {
-		return err
-	}
-	if aux.ID < 0 {
-		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, aux.ID)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: invalid partition spec JSON: %w", ErrInvalidPartitionSpec, err)
 	}
 
-	fields := make([]PartitionField, len(aux.Fields))
-	for i, rawField := range aux.Fields {
+	id := InitialPartitionSpecID
+	if rawID, ok := raw["spec-id"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec spec-id cannot be null", ErrInvalidPartitionSpec)
+		}
+		if err := json.Unmarshal(rawID, &id); err != nil {
+			return fmt.Errorf("%w: invalid partition spec ID: %w", ErrInvalidPartitionSpec, err)
+		}
+	}
+	if id < 0 {
+		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, id)
+	}
+
+	rawFields, ok := raw["fields"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawFields), []byte("null")) {
+		return fmt.Errorf("%w: partition spec is missing required fields", ErrInvalidPartitionSpec)
+	}
+	var rawFieldList []json.RawMessage
+	if err := json.Unmarshal(rawFields, &rawFieldList); err != nil {
+		return fmt.Errorf("%w: invalid partition spec fields: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	fields := make([]PartitionField, len(rawFieldList))
+	for i, rawField := range rawFieldList {
 		var keys map[string]json.RawMessage
 		if err := json.Unmarshal(rawField, &keys); err != nil {
-			return err
+			return fmt.Errorf("%w: invalid partition field JSON: %w", ErrInvalidPartitionSpec, err)
 		}
 		if rawFieldID, ok := keys["field-id"]; ok {
 			var fieldID *int
@@ -482,18 +510,19 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 			}
 		}
 		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
-			return err
+			return fmt.Errorf("%w: invalid partition field: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
 	if err := validatePartitionFields(fields); err != nil {
 		return err
 	}
 
-	ps.id, ps.fields = aux.ID, fields
-	if err := ps.assignPartitionFieldIds(nil); err != nil {
+	decoded := PartitionSpec{id: id, fields: fields}
+	if err := decoded.assignPartitionFieldIds(nil); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
-	ps.initialize()
+	decoded.initialize()
+	*ps = decoded
 
 	return nil
 }
@@ -726,6 +755,11 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 
 	transform := field.Transform
 	switch t := transform.(type) {
+	case UnknownTransform:
+		// A generated name would embed the transform's brackets, e.g.
+		// "id_custom_transform[42]". Make the caller supply one.
+		return "", fmt.Errorf("%w: partition field using unknown transform %s must be given an explicit name",
+			ErrInvalidTransform, t)
 	case IdentityTransform:
 		return sourceName, nil
 	case VoidTransform:

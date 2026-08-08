@@ -1275,9 +1275,10 @@ func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions 
 }
 
 type ManifestWriter struct {
-	closed  bool
-	version int
-	impl    writerImpl
+	closed   bool
+	closeErr error
+	version  int
+	impl     writerImpl
 
 	output io.Writer
 	writer *ocf.Writer
@@ -1372,16 +1373,30 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 
 func (w *ManifestWriter) Close() error {
 	if w.closed {
-		return nil
+		return w.closeErr
 	}
-
-	if w.addedFiles+w.existingFiles+w.deletedFiles == 0 {
-		return errors.New("empty manifest file has been written")
-	}
-
 	w.closed = true
 
-	return w.writer.Close()
+	var emptyErr error
+	if w.addedFiles+w.existingFiles+w.deletedFiles == 0 {
+		emptyErr = ErrEmptyManifest
+	}
+
+	var writerErr error
+	if w.writer != nil {
+		writerErr = w.writer.Close()
+	}
+
+	switch {
+	case emptyErr == nil:
+		w.closeErr = writerErr
+	case writerErr == nil:
+		w.closeErr = emptyErr
+	default:
+		w.closeErr = errors.Join(emptyErr, writerErr)
+	}
+
+	return w.closeErr
 }
 
 type ManifestFileOption func(mf *manifestFile)
@@ -1810,7 +1825,11 @@ func WriteManifest(
 	if err != nil {
 		return nil, err
 	}
-	defer internal.CheckedClose(w, &err)
+	defer func() {
+		if !w.closed {
+			internal.CheckedClose(w, &err)
+		}
+	}()
 
 	for _, entry := range entries {
 		if err := w.addEntry(entry.(*manifestEntry)); err != nil {
@@ -1851,7 +1870,11 @@ func WriteManifestV3(
 	if err != nil {
 		return nil, 0, err
 	}
-	defer internal.CheckedClose(w, &err)
+	defer func() {
+		if !w.closed {
+			internal.CheckedClose(w, &err)
+		}
+	}()
 
 	for _, entry := range entries {
 		if err := w.addEntry(entry.(*manifestEntry)); err != nil {

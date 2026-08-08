@@ -29,6 +29,7 @@ var (
 	ErrInvalidFormatVersion    = fmt.Errorf("%w: invalid format version", ErrInvalidArgument)
 	ErrInvalidSchema           = errors.New("invalid schema")
 	ErrInvalidPartitionSpec    = errors.New("invalid partition spec")
+	ErrEmptyManifest           = errors.New("empty manifest file has been written")
 	ErrInvalidTransform        = errors.New("invalid transform syntax")
 	ErrType                    = errors.New("type error")
 	ErrBadCast                 = errors.New("could not cast value")

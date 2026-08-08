@@ -73,27 +73,19 @@ func TestParseTransform(t *testing.T) {
 		})
 	}
 
+	// A bucket/truncate width that parses as a number but is out of range is an
+	// error, matching Java's Bucket.get/Truncate.get preconditions.
 	errorTests := []struct {
 		name    string
 		toparse string
 	}{
-		{"foobar", "foobar"},
-		{"bucket no brackets", "bucket"},
-		{"truncate no brackets", "truncate"},
-		{"bucket no val", "bucket[]"},
-		{"truncate no val", "truncate[]"},
-		{"bucket neg", "bucket[-1]"},
-		{"truncate neg", "truncate[-1]"},
 		{"bucket zero", "bucket[0]"},
 		{"truncate zero", "truncate[0]"},
 		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
-		{"bucket extra suffix", "bucketx[5]"},
-		{"bucket extra token", "bucket_extra[5]"},
-		{"truncate extra suffix", "truncatefoo[10]"},
-		{"truncate extra token", "truncate_garbage[4]"},
+		{"empty string", ""},
 	}
 
 	for _, tt := range errorTests {
@@ -104,6 +96,85 @@ func TestParseTransform(t *testing.T) {
 			assert.ErrorContains(t, err, tt.toparse)
 		})
 	}
+
+	// Unrecognized transform strings parse to an UnknownTransform (v3 requires
+	// readers to load unknown transforms) and round-trip verbatim, preserving
+	// the original casing.
+	unknownTests := []struct {
+		name    string
+		toparse string
+	}{
+		{"foobar", "foobar"},
+		{"bucket no brackets", "bucket"},
+		{"truncate no brackets", "truncate"},
+		{"bucket extra suffix", "bucketx[5]"},
+		{"bucket extra token", "bucket_extra[5]"},
+		{"truncate extra suffix", "truncatefoo[10]"},
+		{"truncate extra token", "truncate_garbage[4]"},
+		{"preserves original case", "Custom_V2[3]"},
+		// Java's width pattern is (\w+)\[(\d+)\], so a reserved name with a
+		// missing/negative/non-numeric width simply doesn't match and becomes an
+		// unknown transform rather than an error.
+		{"bucket empty brackets", "bucket[]"},
+		{"truncate empty brackets", "truncate[]"},
+		{"bucket negative", "bucket[-1]"},
+		{"truncate negative", "truncate[-1]"},
+		{"bucket non-numeric", "bucket[abc]"},
+		{"truncate non-numeric", "truncate[abc]"},
+	}
+
+	for _, tt := range unknownTests {
+		t.Run("unknown/"+tt.name, func(t *testing.T) {
+			tr, err := iceberg.ParseTransform(tt.toparse)
+			require.NoError(t, err)
+			_, ok := tr.(iceberg.UnknownTransform)
+			require.True(t, ok)
+			assert.Equal(t, tt.toparse, tr.String())
+
+			txt, err := tr.MarshalText()
+			require.NoError(t, err)
+			assert.Equal(t, tt.toparse, string(txt))
+
+			// Human rendering is of the value, never the transform name.
+			u := tr.(iceberg.UnknownTransform)
+			assert.Equal(t, "null", u.ToHumanStr(nil))
+			assert.Equal(t, "abc", u.ToHumanStrType(iceberg.StringType{}, "abc"))
+		})
+	}
+}
+
+func TestUnknownTransformEquals(t *testing.T) {
+	custom, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	same, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	assert.True(t, custom.Equals(same))
+
+	other, err := iceberg.ParseTransform("other_transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(other))
+
+	// Names compare byte-for-byte, matching Java's UnknownTransform.
+	upper, err := iceberg.ParseTransform("Custom_Transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(upper))
+
+	assert.False(t, custom.Equals(iceberg.IdentityTransform{}))
+}
+
+// The zero value is constructible outside the package; it must not serialize
+// to "transform": "".
+func TestUnknownTransformRejectsEmptyName(t *testing.T) {
+	_, err := iceberg.UnknownTransform{}.MarshalText()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	_, err = iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "custom", iceberg.UnknownTransform{}, schema, nil),
+	)
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
 func TestToHumanString(t *testing.T) {
