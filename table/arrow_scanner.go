@@ -1063,8 +1063,12 @@ func (as *arrowScan) processRecords(
 		testRowGroups any
 		recRdr        array.RecordReader
 	)
-	if rowFilter == nil {
-		rowFilter = iceberg.AlwaysTrue{}
+	pruningFilter := rowFilter
+	if as.rowGroupFilter != nil {
+		pruningFilter = as.rowGroupFilter
+	}
+	if pruningFilter == nil {
+		pruningFilter = iceberg.AlwaysTrue{}
 	}
 
 	// Row-group stats/bloom pruning skips whole groups, so emitted batches no
@@ -1075,12 +1079,12 @@ func (as *arrowScan) processRecords(
 	// stays enabled.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile:
-		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, rowFilter, false)
+		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, pruningFilter, false)
 		if err != nil {
 			return err
 		}
 
-		bloomPreds, err := newBloomFilterPredicates(rowFilter)
+		bloomPreds, err := newBloomFilterPredicates(pruningFilter)
 		if err != nil {
 			return err
 		}
