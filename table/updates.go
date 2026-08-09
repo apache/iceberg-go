@@ -632,7 +632,7 @@ func (u *removeSnapshotsUpdate) Apply(builder *MetadataBuilder) error {
 }
 
 func (u *removeSnapshotsUpdate) PostCommit(ctx context.Context, preTable *Table, postTable *Table) error {
-	if !u.postCommit {
+	if !u.postCommit || postTable == nil || !postTable.Properties().GetBool(GCEnabledKey, GCEnabledDefault) {
 		return nil
 	}
 
