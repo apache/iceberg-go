@@ -422,6 +422,7 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 				after, err := json.Marshal(tt.target)
 				require.NoError(t, err)
 				assert.Equal(t, before, after)
+
 				return
 			}
 
