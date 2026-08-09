@@ -18,6 +18,7 @@
 package puffin
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
@@ -188,6 +189,7 @@ const (
 	lz4FrameDictionaryIDFlag      byte   = 1
 	lz4FrameReservedBDFlags       byte   = 0x8f
 	lz4FrameBlockSizeMask         uint32 = 0x7fffffff
+	lz4FrameReadBufferSize               = 4 << 20 // LZ4 maximum block size.
 )
 
 type countingReader struct {
@@ -269,9 +271,14 @@ func readLZ4FrameHeader(r io.ReaderAt) (lz4FrameHeader, error) {
 	return frameHeader, nil
 }
 
-func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, headerSize int) error {
+func validateLZ4FrameEnvelope(r io.Reader, payloadSize int64, flags byte, headerSize int) error {
 	if payloadSize < int64(headerSize) {
 		return errors.New("LZ4 frame is shorter than its header")
+	}
+
+	reader := bufio.NewReaderSize(io.LimitReader(r, payloadSize), lz4FrameReadBufferSize)
+	if _, err := io.CopyN(io.Discard, reader, int64(headerSize)); err != nil {
+		return fmt.Errorf("read LZ4 frame header: %w", err)
 	}
 
 	offset := int64(headerSize)
@@ -280,7 +287,7 @@ func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, head
 		if payloadSize-offset < int64(len(blockHeader)) {
 			return errors.New("LZ4 frame is missing its end mark")
 		}
-		if _, err := r.ReadAt(blockHeader[:], offset); err != nil {
+		if _, err := io.ReadFull(reader, blockHeader[:]); err != nil {
 			return fmt.Errorf("read LZ4 frame block header: %w", err)
 		}
 		offset += int64(len(blockHeader))
@@ -294,11 +301,17 @@ func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, head
 		if dataSize > payloadSize-offset {
 			return errors.New("LZ4 frame block exceeds its payload")
 		}
+		if _, err := io.CopyN(io.Discard, reader, dataSize); err != nil {
+			return fmt.Errorf("read LZ4 frame block: %w", err)
+		}
 		offset += dataSize
 
 		if flags&lz4FrameBlockChecksumFlag != 0 {
 			if payloadSize-offset < 4 {
 				return errors.New("LZ4 frame block checksum is truncated")
+			}
+			if _, err := io.CopyN(io.Discard, reader, 4); err != nil {
+				return fmt.Errorf("read LZ4 frame block checksum: %w", err)
 			}
 			offset += 4
 		}
@@ -307,6 +320,9 @@ func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, head
 	if flags&lz4FrameContentChecksumFlag != 0 {
 		if payloadSize-offset < 4 {
 			return errors.New("LZ4 frame content checksum is truncated")
+		}
+		if _, err := io.CopyN(io.Discard, reader, 4); err != nil {
+			return fmt.Errorf("read LZ4 frame content checksum: %w", err)
 		}
 		offset += 4
 	}
@@ -399,7 +415,7 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
 		}
 		if err := validateLZ4FrameEnvelope(
-			payloadReader,
+			io.NewSectionReader(payloadReader, 0, payloadSize),
 			payloadSize,
 			frameHeader.flags,
 			frameHeader.headerSize,
@@ -408,7 +424,11 @@ func (r *Reader) readFooter() error {
 		}
 
 		compressedContentSize = frameHeader.contentSize
-		compressedFooter = &countingReader{reader: lz4.NewReader(payloadReader)}
+		compressedPayloadReader := bufio.NewReaderSize(
+			io.NewSectionReader(payloadReader, 0, payloadSize),
+			lz4FrameReadBufferSize,
+		)
+		compressedFooter = &countingReader{reader: lz4.NewReader(compressedPayloadReader)}
 		footerReader = compressedFooter
 
 		limitedFooterSize := r.maxFooterSize

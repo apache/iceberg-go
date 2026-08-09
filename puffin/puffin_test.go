@@ -687,6 +687,15 @@ func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
 	assert.Empty(t, r.Blobs())
 }
 
+func TestReaderReadsExternalLZ4CompressedFooter(t *testing.T) {
+	data := readFixture(t, "compressed-footer-lz4-cli.puffin")
+
+	r, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, "lz4-cli", r.Properties()["source"])
+	assert.Empty(t, r.Blobs())
+}
+
 func TestReaderReadsLZ4CompressedFooterWithBlockChecksums(t *testing.T) {
 	payload := []byte(`{"blobs":[]}`)
 	data := fileWithCompressedFooterPayloadWithOptions(
