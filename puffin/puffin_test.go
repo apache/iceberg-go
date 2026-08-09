@@ -719,18 +719,65 @@ func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
 	require.ErrorContains(t, err, "missing content size")
 }
 
+func TestReaderRejectsUnsupportedLZ4FrameFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func([]byte)
+		wantErr string
+	}{
+		{
+			name: "version",
+			mutate: func(data []byte) {
+				data[12] = data[12]&^byte(0xc0) | 0x80
+			},
+			wantErr: "frame version",
+		},
+		{
+			name: "reserved FLG flag",
+			mutate: func(data []byte) {
+				data[12] |= 0x02
+			},
+			wantErr: "reserved flag",
+		},
+		{
+			name: "dictionary ID",
+			mutate: func(data []byte) {
+				data[12] |= 0x01
+			},
+			wantErr: "dictionary ID",
+		},
+		{
+			name: "reserved BD flags",
+			mutate: func(data []byte) {
+				data[13] |= 0x01
+			},
+			wantErr: "reserved block descriptor flags",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[]}`))
+			test.mutate(data)
+
+			_, err := puffin.NewReader(bytes.NewReader(data))
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
 func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
-	t.Run("json payload", func(t *testing.T) {
+	t.Run("uncompressed JSON remains unrestricted", func(t *testing.T) {
 		data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.ErrorContains(t, err, "footer exceeds maximum size")
+		require.NoError(t, err)
 	})
 
-	t.Run("trailing content beyond limit", func(t *testing.T) {
+	t.Run("uncompressed trailing content remains unrestricted", func(t *testing.T) {
 		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
 		data := fileWithFooterPayload(payload)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.ErrorContains(t, err, "footer exceeds maximum size")
+		require.NoError(t, err)
 	})
 
 	t.Run("compressed output beyond limit", func(t *testing.T) {
@@ -738,6 +785,13 @@ func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
 		data := fileWithCompressedFooterPayloadWithSize(t, payload, 16)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
 		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("compressed content size mismatch", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}`)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, uint64(len(payload)-1))
+		_, err := puffin.NewReader(bytes.NewReader(data))
+		require.ErrorContains(t, err, "decoded size")
 	})
 
 	t.Run("compressed advertised size", func(t *testing.T) {
