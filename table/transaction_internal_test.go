@@ -852,6 +852,17 @@ func expireSnapshotsSnapshot(t *testing.T, txn *Transaction, snapshotID int64) *
 	return nil
 }
 
+func TestExpireSnapshotsRejectsWhenGCDisabled(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.meta.props = iceberg.Properties{GCEnabledKey: "false"}
+
+	err := txn.ExpireSnapshots(WithPostCommit(false))
+	require.ErrorContains(t, err, "GC is disabled")
+	require.Empty(t, txn.reqs)
+	_, err = txn.meta.SnapshotByID(10)
+	require.NoError(t, err)
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 

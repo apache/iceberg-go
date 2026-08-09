@@ -99,6 +99,9 @@ const (
 	ParquetVariantBufferSizeKey     = internal.ParquetVariantBufferSizeKey
 	ParquetVariantBufferSizeDefault = internal.ParquetVariantBufferSizeDefault
 
+	GCEnabledKey     = "gc.enabled"
+	GCEnabledDefault = true
+
 	MinSnapshotsToKeepKey     = "history.expire.min-snapshots-to-keep"
 	MinSnapshotsToKeepDefault = 1
 
