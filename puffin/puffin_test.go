@@ -752,6 +752,20 @@ func TestReaderReadsLZ4CompressedFooterWithBlockChecksums(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestReaderPreservesLZ4ChecksumError(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	data := fileWithCompressedFooterPayloadWithOptions(
+		t,
+		payload,
+		lz4.SizeOption(uint64(len(payload))),
+		lz4.ChecksumOption(true),
+	)
+	data[len(data)-13] ^= 0xff
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid frame checksum")
+}
+
 func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
 	payload := []byte(`{"blobs":[]}`)
 	data := fileWithCompressedFooterPayloadNoSize(t, payload)
@@ -879,7 +893,7 @@ func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
 	})
 
 	t.Run("maximum int64 limit", func(t *testing.T) {
-		data := fileWithFooterPayload([]byte(`{"blobs":[]}`))
+		data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[]}`))
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(math.MaxInt64))
 		require.NoError(t, err)
 	})

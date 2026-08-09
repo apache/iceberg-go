@@ -193,11 +193,15 @@ const (
 type countingReader struct {
 	reader io.Reader
 	count  int64
+	err    error
 }
 
 func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	r.count += int64(n)
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.err = err
+	}
 
 	return n, err
 }
@@ -443,6 +447,10 @@ func (r *Reader) readFooter() error {
 		return errors.New("puffin: unexpected content after footer JSON")
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if compressedFooter != nil && compressedFooter.err != nil {
+			return fmt.Errorf("puffin: read compressed footer: %w", compressedFooter.err)
+		}
+
 		return errors.New("puffin: unexpected content after footer JSON")
 	}
 	if limitedFooter != nil && limitedFooter.N == 0 {
