@@ -1352,6 +1352,9 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	for _, apply := range opts {
 		apply(w)
 	}
+	if w.content != ManifestContentData && w.content != ManifestContentDeletes {
+		return nil, fmt.Errorf("%w: invalid manifest content: %d", ErrInvalidArgument, w.content)
+	}
 	if version < 2 && w.content != ManifestContentData {
 		return nil, fmt.Errorf("unsupported content '%s' for format version '%d'", w.content, version)
 	}
@@ -1402,7 +1405,7 @@ func (w *ManifestWriter) Close() error {
 type ManifestFileOption func(mf *manifestFile)
 
 // WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
-// Default: ManifestContentData
+// Default: the content configured on the ManifestWriter
 func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 	return func(mf *manifestFile) {
 		mf.Content = content
@@ -1424,7 +1427,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		Path:               location,
 		Len:                length,
 		SpecID:             int32(w.spec.id),
-		Content:            ManifestContentData,
+		Content:            w.content,
 		SeqNumber:          -1,
 		MinSeqNumber:       w.minSeqNum,
 		AddedSnapshotID:    w.snapshotID,
@@ -1439,6 +1442,10 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 	}
 	for _, apply := range opts {
 		apply(&mf)
+	}
+	if mf.Content != w.content {
+		return nil, fmt.Errorf("%w: manifest file content %s does not match writer content %s",
+			ErrInvalidArgument, mf.Content, w.content)
 	}
 
 	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
@@ -1485,6 +1492,21 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	case EntryStatusADDED, EntryStatusEXISTING, EntryStatusDELETED:
 	default:
 		return fmt.Errorf("unknown entry status: %v", status)
+	}
+	if w.version > 1 {
+		entryContent := entry.DataFile().ContentType()
+		switch entryContent {
+		case EntryContentData:
+			if w.content != ManifestContentData {
+				return fmt.Errorf("%w: data file cannot be written to a delete manifest", ErrInvalidArgument)
+			}
+		case EntryContentPosDeletes, EntryContentEqDeletes:
+			if w.content != ManifestContentDeletes {
+				return fmt.Errorf("%w: delete file cannot be written to a data manifest", ErrInvalidArgument)
+			}
+		default:
+			return fmt.Errorf("%w: invalid manifest entry content: %d", ErrInvalidArgument, entryContent)
+		}
 	}
 	count := entry.DataFile().Count()
 	partition := entry.Data.Partition()
