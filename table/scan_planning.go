@@ -80,16 +80,16 @@ var _ ScanPlanningMetadata = (Metadata)(nil)
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
-// Open question (epic OQ4): when the table has evolved, UseSnapshotSchema must
-// pin which schema binds a returned residual and the partition decode: the
-// snapshot's schema (via schema-id), kept separate from each file's partition
-// spec-id. Incremental scans (start/end snapshot) are deferred to a later
-// phase; point-in-time SnapshotID lands first.
+// Schema is the schema resolved for this scan. It is kept separate from
+// Metadata.CurrentSchema because a historical/tag scan may use a snapshot
+// schema while a branch scan uses the table schema. Planners should use this
+// same schema for filter binding and returned residual decoding.
 type ScanPlanningRequest struct {
 	Identifier Identifier
 	// Metadata is the narrowed planner view of table metadata (see
 	// ScanPlanningMetadata); MetadataLocation is kept separate.
 	Metadata         ScanPlanningMetadata
+	Schema           *iceberg.Schema
 	MetadataLocation string
 	SnapshotID       *int64
 	SelectedFields   []string

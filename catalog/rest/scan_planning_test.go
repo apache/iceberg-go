@@ -142,6 +142,18 @@ func TestScanPlanningCapabilities(t *testing.T) {
 		assert.True(t, cat.SupportsRemoteScanPlanning())
 	})
 
+	t.Run("execution endpoints without optional cancel", func(t *testing.T) {
+		t.Parallel()
+
+		cat := &Catalog{endpoints: newEndpointSet([]endpoint{
+			endpointPlanTableScan,
+			endpointFetchPlanResult,
+			endpointFetchScanTasks,
+		})}
+		assert.True(t, cat.SupportsFullRemoteScanPlanning())
+		assert.True(t, cat.SupportsRemoteScanPlanning())
+	})
+
 	t.Run("default fallback does not advertise scan planning", func(t *testing.T) {
 		t.Parallel()
 
@@ -918,6 +930,10 @@ func TestPlanTableScanRequestFromPassesFields(t *testing.T) {
 	assert.Equal(t, &caseSensitive, wire.CaseSensitive)
 	assert.Equal(t, []string{"a"}, wire.StatsFields)
 	assert.Nil(t, wire.Filter)
+
+	wire, err = planTableScanRequestFrom(table.ScanPlanningRequest{SelectedFields: []string{"*"}})
+	require.NoError(t, err)
+	assert.Nil(t, wire.Select, "the local wildcard sentinel is not a REST FieldName")
 }
 
 // scanFilterSchema is the schema filter-binding tests resolve references against.
@@ -1087,6 +1103,43 @@ func TestPlanFilesFanoutCycleTerminates(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load())
 }
 
+func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
+	t.Parallel()
+
+	var cancels atomic.Int32
+	cat := newScanPlanningTestCatalog(t, []endpoint{
+		endpointPlanTableScan,
+		endpointFetchScanTasks,
+		endpointCancelPlanning,
+	}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1","h2"]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			if body.PlanTask == "h1" {
+				_, err := w.Write([]byte(`{}`))
+				require.NoError(t, err)
+
+				return
+			}
+
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
+			require.Equal(t, http.MethodDelete, req.Method)
+			cancels.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	_, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.ErrorIs(t, err, ErrServiceUnavailable)
+	assert.Equal(t, int32(1), cancels.Load())
+}
+
 // TestPlanFilesDecodesFanoutTaskEnvelopes exercises the Phase 5 boundary from
 // REST wire tasks to table.FileScanTask. In particular, each fetchScanTasks
 // response has its own delete-file reference namespace; decoding after
@@ -1164,7 +1217,8 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 	planIO, ok := result.IO.(*planScopedIO)
 	require.True(t, ok)
 	assert.Equal(t, "https://minio.local", planIO.refresher.props["s3.endpoint"])
-	assert.Equal(t, "vended", planIO.refresher.props["s3.access-key-id"])
+	require.Len(t, planIO.refresher.credentials, 1)
+	assert.Equal(t, "vended", planIO.refresher.credentials[0].Config["s3.access-key-id"])
 }
 
 // TestPlanScopedIOExpiredCredentials checks a plan whose creds state an expiry

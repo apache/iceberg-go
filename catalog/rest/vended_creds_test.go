@@ -419,3 +419,18 @@ func TestResolveStorageCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestPrefixScopedIOUsesLongestCredentialPerLocation(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{"base": "yes"}, []StorageCredential{
+		{Prefix: "s3://metadata/table/", Config: iceberg.Properties{"credential": "metadata"}},
+		{Prefix: "s3://data/table/", Config: iceberg.Properties{"credential": "data"}},
+		{Prefix: "s3://data/table/private/", Config: iceberg.Properties{"credential": "private"}},
+	})
+
+	assert.Equal(t, "metadata", p.propertiesForLocation("s3://metadata/table/metadata.json")["credential"])
+	assert.Equal(t, "data", p.propertiesForLocation("s3://data/table/file.parquet")["credential"])
+	assert.Equal(t, "private", p.propertiesForLocation("s3://data/table/private/file.parquet")["credential"])
+	assert.Equal(t, "yes", p.propertiesForLocation("s3://other/table/file.parquet")["base"])
+}
