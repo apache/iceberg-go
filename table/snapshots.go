@@ -300,8 +300,8 @@ func (s Snapshot) MarshalJSON() ([]byte, error) {
 	}
 
 	// A non-nil slice represents the V1 embedded-manifest form, including an
-	// explicitly empty manifests array. V1 snapshots do not serialize a
-	// sequence number.
+	// explicitly empty manifests array. Match Java by omitting the default
+	// sequence number while preserving any positive value accepted on read.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
@@ -311,7 +311,9 @@ func (s Snapshot) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	fields["manifests"] = locations
-	delete(fields, "sequence-number")
+	if s.SequenceNumber <= 0 {
+		delete(fields, "sequence-number")
+	}
 
 	return json.Marshal(fields)
 }
