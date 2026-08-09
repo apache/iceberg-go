@@ -172,7 +172,7 @@ func fileWithCompressedFooterPayloadNoSize(t *testing.T, payload []byte) []byte 
 	return fileWithCompressedFooterPayloadWithOptions(t, payload)
 }
 
-func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, options ...lz4.Option) []byte {
+func compressedLZ4Frame(t *testing.T, payload []byte, options ...lz4.Option) []byte {
 	t.Helper()
 
 	var compressed bytes.Buffer
@@ -181,9 +181,29 @@ func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, op
 	_, err := writer.Write(payload)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
-	data := append([]byte("PFA1PFA1"), compressed.Bytes()...)
+
+	return compressed.Bytes()
+}
+
+func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, options ...lz4.Option) []byte {
+	compressed := compressedLZ4Frame(t, payload, options...)
+	data := append([]byte("PFA1PFA1"), compressed...)
 	trailer := make([]byte, 12)
-	binary.LittleEndian.PutUint32(trailer[:4], uint32(compressed.Len()))
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
+	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
+	copy(trailer[8:], "PFA1")
+
+	return append(data, trailer...)
+}
+
+func fileWithCompressedFooterFrames(frames ...[]byte) []byte {
+	compressed := make([]byte, 0)
+	for _, frame := range frames {
+		compressed = append(compressed, frame...)
+	}
+	data := append([]byte("PFA1PFA1"), compressed...)
+	trailer := make([]byte, 12)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
 	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
 	copy(trailer[8:], "PFA1")
 
@@ -701,6 +721,13 @@ func TestReaderRejectsUnsupportedLZ4FrameFlags(t *testing.T) {
 			},
 			wantErr: "reserved block descriptor flags",
 		},
+		{
+			name: "reserved BD high flag",
+			mutate: func(data []byte) {
+				data[13] |= 0x80
+			},
+			wantErr: "reserved block descriptor flags",
+		},
 	}
 
 	for _, test := range tests {
@@ -712,6 +739,16 @@ func TestReaderRejectsUnsupportedLZ4FrameFlags(t *testing.T) {
 			require.ErrorContains(t, err, test.wantErr)
 		})
 	}
+}
+
+func TestReaderRejectsConcatenatedLZ4FooterFrames(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	firstFrame := compressedLZ4Frame(t, payload, lz4.SizeOption(uint64(len(payload))))
+	emptySecondFrame := compressedLZ4Frame(t, nil)
+	data := fileWithCompressedFooterFrames(firstFrame, emptySecondFrame)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "trailing data")
 }
 
 func TestReaderEnforcesFooterSizeLimit(t *testing.T) {

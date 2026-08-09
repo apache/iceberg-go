@@ -174,15 +174,19 @@ func cloneBlobMetadata(blob BlobMetadata) BlobMetadata {
 const defaultFooterReadSize = 8 * 1024 // 8 KB
 
 const (
-	lz4FrameHeaderPrefixSize           = 6 // magic (4) + FLG (1) + BD (1)
-	lz4FrameHeaderSize                 = 7 // prefix + header checksum
-	lz4FrameHeaderSizeWithContent      = 15
-	lz4FrameContentSizeFlag       byte = 1 << 3
-	lz4FrameVersionMask           byte = 0xc0
-	lz4FrameVersionOne            byte = 0x40
-	lz4FrameReservedFLGFlag       byte = 1 << 1
-	lz4FrameDictionaryIDFlag      byte = 1
-	lz4FrameReservedBDFlags       byte = 0x0f
+	lz4FrameMagic                 uint32 = 0x184d2204
+	lz4FrameHeaderPrefixSize             = 6 // magic (4) + FLG (1) + BD (1)
+	lz4FrameHeaderSize                   = 7 // prefix + header checksum
+	lz4FrameHeaderSizeWithContent        = 15
+	lz4FrameContentSizeFlag       byte   = 1 << 3
+	lz4FrameContentChecksumFlag   byte   = 1 << 2
+	lz4FrameBlockChecksumFlag     byte   = 1 << 4
+	lz4FrameVersionMask           byte   = 0xc0
+	lz4FrameVersionOne            byte   = 0x40
+	lz4FrameReservedFLGFlag       byte   = 1 << 1
+	lz4FrameDictionaryIDFlag      byte   = 1
+	lz4FrameReservedBDFlags       byte   = 0x8f
+	lz4FrameBlockSizeMask         uint32 = 0x7fffffff
 )
 
 type countingReader struct {
@@ -197,13 +201,17 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// readLZ4FrameContentSize reads the LZ4 frame descriptor without consuming
-// the payload. The content size is required by the Puffin format for
-// compressed footer payloads.
-func readLZ4FrameContentSize(r io.ReaderAt) (uint64, bool, error) {
+// readLZ4FrameContentSize validates a single LZ4 frame envelope without
+// consuming the payload. The content size is required by the Puffin format
+// for compressed footer payloads.
+func readLZ4FrameContentSize(r io.ReaderAt, payloadSize int64) (uint64, bool, error) {
 	var header [lz4FrameHeaderSizeWithContent]byte
 	if _, err := r.ReadAt(header[:lz4FrameHeaderSize], 0); err != nil {
 		return 0, false, err
+	}
+
+	if binary.LittleEndian.Uint32(header[:4]) != lz4FrameMagic {
+		return 0, false, errors.New("invalid LZ4 frame magic")
 	}
 
 	hasContentSize := header[4]&lz4FrameContentSizeFlag != 0
@@ -239,8 +247,60 @@ func readLZ4FrameContentSize(r io.ReaderAt) (uint64, bool, error) {
 	if !hasContentSize {
 		return 0, false, nil
 	}
+	if err := validateLZ4FrameEnvelope(r, payloadSize, header[4], headerSize); err != nil {
+		return 0, false, err
+	}
 
 	return binary.LittleEndian.Uint64(header[lz4FrameHeaderPrefixSize : lz4FrameHeaderPrefixSize+8]), true, nil
+}
+
+func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, headerSize int) error {
+	if payloadSize < int64(headerSize) {
+		return errors.New("LZ4 frame is shorter than its header")
+	}
+
+	offset := int64(headerSize)
+	var blockHeader [4]byte
+	for {
+		if payloadSize-offset < int64(len(blockHeader)) {
+			return errors.New("LZ4 frame is missing its end mark")
+		}
+		if _, err := r.ReadAt(blockHeader[:], offset); err != nil {
+			return fmt.Errorf("read LZ4 frame block header: %w", err)
+		}
+		offset += int64(len(blockHeader))
+
+		blockSize := binary.LittleEndian.Uint32(blockHeader[:])
+		if blockSize == 0 {
+			break
+		}
+
+		dataSize := int64(blockSize & lz4FrameBlockSizeMask)
+		if dataSize > payloadSize-offset {
+			return errors.New("LZ4 frame block exceeds its payload")
+		}
+		offset += dataSize
+
+		if flags&lz4FrameBlockChecksumFlag != 0 {
+			if payloadSize-offset < 4 {
+				return errors.New("LZ4 frame block checksum is truncated")
+			}
+			offset += 4
+		}
+	}
+
+	if flags&lz4FrameContentChecksumFlag != 0 {
+		if payloadSize-offset < 4 {
+			return errors.New("LZ4 frame content checksum is truncated")
+		}
+		offset += 4
+	}
+
+	if offset != payloadSize {
+		return errors.New("LZ4 frame has trailing data")
+	}
+
+	return nil
 }
 
 // readFooter reads and parses the footer from the Puffin file.
@@ -312,7 +372,7 @@ func (r *Reader) readFooter() error {
 	var compressedContentSize uint64
 	var limitedFooter *io.LimitedReader
 	if flags&FooterFlagCompressed != 0 {
-		contentSize, hasContentSize, err := readLZ4FrameContentSize(payloadReader)
+		contentSize, hasContentSize, err := readLZ4FrameContentSize(payloadReader, payloadSize)
 		if err != nil {
 			return fmt.Errorf("puffin: inspect compressed footer LZ4 frame: %w", err)
 		}
