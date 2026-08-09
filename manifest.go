@@ -1631,11 +1631,9 @@ func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
 	if firstRowID < 0 {
 		return 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
 	}
-	if existingRows == -1 {
-		existingRows = 0
-	}
-	if addedRows == -1 {
-		addedRows = 0
+	if existingRows == -1 || addedRows == -1 {
+		return 0, fmt.Errorf("%w: cannot assign row-lineage IDs with unknown row counts: existing=%d added=%d",
+			ErrInvalidArgument, existingRows, addedRows)
 	}
 	if existingRows < 0 || addedRows < 0 {
 		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",

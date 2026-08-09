@@ -3416,7 +3416,7 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
 }
 
-func (m *ManifestTestSuite) TestV3ManifestListAssignsZeroForV1ManifestWithUnknownRowCounts() {
+func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCounts() {
 	legacy := *(manifestFileRecordsV1[0].(*manifestFile))
 	legacy.AddedRowsCount = -1
 	legacy.ExistingRowsCount = -1
@@ -3430,7 +3430,10 @@ func (m *ManifestTestSuite) TestV3ManifestListAssignsZeroForV1ManifestWithUnknow
 	var v3Buf bytes.Buffer
 	writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
 	m.Require().NoError(err)
-	m.Require().NoError(writer.AddManifests(manifests))
+	err = writer.AddManifests(manifests)
+	m.Require().ErrorIs(err, ErrInvalidArgument)
+	m.Require().ErrorContains(err, "cannot assign row-lineage IDs with unknown row counts")
+	m.Require().ErrorContains(err, legacy.Path)
 	m.EqualValues(1000, *writer.NextRowID())
 	m.Require().NoError(writer.Close())
 }
