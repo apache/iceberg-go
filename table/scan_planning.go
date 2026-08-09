@@ -120,7 +120,9 @@ type ScanPlanningRequest struct {
 // FileIO and closes it after the returned iterator finishes. This ties a
 // plan-scoped scan to the PlanFiles -> ReadTasks sequence on one Scan — tasks
 // from a remote plan must be read by the Scan that produced them, and a Scan
-// carrying plan-scoped IO is not safe for concurrent PlanFiles/ReadTasks.
+// carrying plan-scoped IO is not safe for concurrent PlanFiles/ReadTasks. Scan
+// refinements such as UseRowLimit transfer this single-owner lease to the
+// returned Scan rather than sharing it.
 type PlanIO interface {
 	Load(context.Context) (icebergio.IO, error)
 	Close() error
