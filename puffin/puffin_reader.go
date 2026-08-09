@@ -78,9 +78,10 @@ func WithMaxBlobSize(size int64) ReaderOption {
 	}
 }
 
-// WithMaxFooterSize sets the maximum uncompressed footer size allowed when
-// reading. This bounds memory used by JSON decoding and decompression of
-// untrusted Puffin metadata. The default is DefaultMaxFooterSize (64 MB).
+// WithMaxFooterSize sets the maximum decompressed size allowed for compressed
+// footer payloads when reading. This bounds memory used by JSON decoding and
+// decompression of untrusted Puffin metadata. The default is
+// DefaultMaxFooterSize (64 MB).
 func WithMaxFooterSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxFooterSize = size
@@ -177,7 +178,24 @@ const (
 	lz4FrameHeaderSize                 = 7 // prefix + header checksum
 	lz4FrameHeaderSizeWithContent      = 15
 	lz4FrameContentSizeFlag       byte = 1 << 3
+	lz4FrameVersionMask           byte = 0xc0
+	lz4FrameVersionOne            byte = 0x40
+	lz4FrameReservedFLGFlag       byte = 1 << 1
+	lz4FrameDictionaryIDFlag      byte = 1
+	lz4FrameReservedBDFlags       byte = 0x0f
 )
+
+type countingReader struct {
+	reader io.Reader
+	count  int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.count += int64(n)
+
+	return n, err
+}
 
 // readLZ4FrameContentSize reads the LZ4 frame descriptor without consuming
 // the payload. The content size is required by the Puffin format for
@@ -189,6 +207,18 @@ func readLZ4FrameContentSize(r io.ReaderAt) (uint64, bool, error) {
 	}
 
 	hasContentSize := header[4]&lz4FrameContentSizeFlag != 0
+	if header[4]&lz4FrameVersionMask != lz4FrameVersionOne {
+		return 0, false, errors.New("invalid LZ4 frame version")
+	}
+	if header[4]&lz4FrameReservedFLGFlag != 0 {
+		return 0, false, errors.New("invalid LZ4 frame reserved flag")
+	}
+	if header[4]&lz4FrameDictionaryIDFlag != 0 {
+		return 0, false, errors.New("LZ4 frame dictionary ID is not supported")
+	}
+	if header[5]&lz4FrameReservedBDFlags != 0 {
+		return 0, false, errors.New("invalid LZ4 frame reserved block descriptor flags")
+	}
 	if hasContentSize {
 		if _, err := r.ReadAt(header[lz4FrameHeaderSize:], lz4FrameHeaderSize); err != nil {
 			return 0, false, err
@@ -247,9 +277,6 @@ func (r *Reader) readFooter() error {
 	if r.maxFooterSize <= 0 {
 		return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
 	}
-	if flags&FooterFlagCompressed == 0 && payloadSize > r.maxFooterSize {
-		return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
-	}
 
 	// Calculate footer start position
 	// Layout: [header magic (4)] [blobs...] [footer magic (4)] [JSON (payloadSize)] [trailer (12)]
@@ -281,6 +308,9 @@ func (r *Reader) readFooter() error {
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	var footerReader io.Reader = payloadReader
+	var compressedFooter *countingReader
+	var compressedContentSize uint64
+	var limitedFooter *io.LimitedReader
 	if flags&FooterFlagCompressed != 0 {
 		contentSize, hasContentSize, err := readLZ4FrameContentSize(payloadReader)
 		if err != nil {
@@ -293,21 +323,24 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
 		}
 
-		lz4Reader := lz4.NewReader(payloadReader)
-		footerReader = lz4Reader
+		compressedContentSize = contentSize
+		compressedFooter = &countingReader{reader: lz4.NewReader(payloadReader)}
+		footerReader = compressedFooter
+
+		limitedFooterSize := r.maxFooterSize
+		if limitedFooterSize < math.MaxInt64 {
+			limitedFooterSize++
+		}
+		limitedFooter = &io.LimitedReader{R: footerReader, N: limitedFooterSize}
+		footerReader = limitedFooter
 	}
 
-	limitedFooterSize := r.maxFooterSize
-	if limitedFooterSize < math.MaxInt64 {
-		limitedFooterSize++
-	}
-	limitedFooter := &io.LimitedReader{R: footerReader, N: limitedFooterSize}
-	decoder := json.NewDecoder(limitedFooter)
+	decoder := json.NewDecoder(footerReader)
 	var footer Footer
 	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
 	}
-	if limitedFooter.N == 0 {
+	if limitedFooter != nil && limitedFooter.N == 0 {
 		buffered, err := io.ReadAll(decoder.Buffered())
 		if err != nil {
 			return fmt.Errorf("puffin: read buffered footer JSON: %w", err)
@@ -326,8 +359,15 @@ func (r *Reader) readFooter() error {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return errors.New("puffin: unexpected content after footer JSON")
 	}
-	if limitedFooter.N == 0 {
+	if limitedFooter != nil && limitedFooter.N == 0 {
 		return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
+	}
+	if compressedFooter != nil && uint64(compressedFooter.count) != compressedContentSize {
+		return fmt.Errorf(
+			"puffin: compressed footer decoded size %d does not match LZ4 content size %d",
+			compressedFooter.count,
+			compressedContentSize,
+		)
 	}
 
 	// Validate blob metadata
