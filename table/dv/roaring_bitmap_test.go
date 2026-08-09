@@ -74,6 +74,22 @@ func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 	assert.False(t, bm.Contains(10))
 }
 
+// Why: metadata-table readers need deterministic expansion of deletion vectors.
+// Condition: positions span multiple high-bit buckets and were inserted out of order.
+// Assertion: Positions yields every value once in ascending order.
+func TestRoaringPositionBitmapPositions(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	for _, position := range []uint64{(uint64(2) << 32) | 4, 9, 1, (uint64(1) << 32) | 3} {
+		bm.Set(position)
+	}
+
+	var actual []uint64
+	for position := range bm.Positions() {
+		actual = append(actual, position)
+	}
+	assert.Equal(t, []uint64{1, 9, (uint64(1) << 32) | 3, (uint64(2) << 32) | 4}, actual)
+}
+
 // Why: the deserializer must fail cleanly when the outer bitmap count cannot be read.
 // Condition: empty input stream.
 // Assertion: returns an error containing "read bitmap count".
