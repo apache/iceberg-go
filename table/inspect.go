@@ -266,6 +266,24 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 	defer bldr.Release()
 
+	if err := i.appendManifestRows(ctx, bldr, manifests, nil); err != nil {
+		return nil, fmt.Errorf("inspect manifests: %w", err)
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect manifests: %w", err)
+	}
+
+	return rr, nil
+}
+
+func (i InspectTable) appendManifestRows(
+	ctx context.Context,
+	bldr *array.RecordBuilder,
+	manifests []iceberg.ManifestFile,
+	referenceSnapshotID *int64,
+) error {
 	content := bldr.Field(0).(*array.Int32Builder)
 	path := bldr.Field(1).(*array.StringBuilder)
 	length := bldr.Field(2).(*array.Int64Builder)
@@ -283,17 +301,23 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 	summaryContainsNaN := summaryStruct.FieldBuilder(1).(*array.BooleanBuilder)
 	summaryLower := summaryStruct.FieldBuilder(2).(*array.StringBuilder)
 	summaryUpper := summaryStruct.FieldBuilder(3).(*array.StringBuilder)
+	var referenceSnapshot *array.Int64Builder
+	var keyMetadata *array.BinaryBuilder
+	if referenceSnapshotID != nil {
+		referenceSnapshot = bldr.Field(12).(*array.Int64Builder)
+		keyMetadata = bldr.Field(13).(*array.BinaryBuilder)
+	}
 
 	for _, manifest := range manifests {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 
 		manifestContent := manifest.ManifestContent()
 		switch manifestContent {
 		case iceberg.ManifestContentData, iceberg.ManifestContentDeletes:
 		default:
-			return nil, fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
+			return fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
 		}
 
 		content.Append(int32(manifestContent))
@@ -312,13 +336,13 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 		switch manifestContent {
 		case iceberg.ManifestContentData:
 			if err := appendCount(addedDataFiles, "added_data_files", manifest.AddedDataFiles()); err != nil {
-				return nil, err
+				return err
 			}
 			if err := appendCount(existingDataFiles, "existing_data_files", manifest.ExistingDataFiles()); err != nil {
-				return nil, err
+				return err
 			}
 			if err := appendCount(deletedDataFiles, "deleted_data_files", manifest.DeletedDataFiles()); err != nil {
-				return nil, err
+				return err
 			}
 			addedDeleteFiles.Append(0)
 			existingDeleteFiles.Append(0)
@@ -328,19 +352,27 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			existingDataFiles.Append(0)
 			deletedDataFiles.Append(0)
 			if err := appendCount(addedDeleteFiles, "added_delete_files", manifest.AddedDataFiles()); err != nil {
-				return nil, err
+				return err
 			}
 			if err := appendCount(existingDeleteFiles, "existing_delete_files", manifest.ExistingDataFiles()); err != nil {
-				return nil, err
+				return err
 			}
 			if err := appendCount(deletedDeleteFiles, "deleted_delete_files", manifest.DeletedDataFiles()); err != nil {
-				return nil, err
+				return err
+			}
+		}
+		if referenceSnapshotID != nil {
+			referenceSnapshot.Append(*referenceSnapshotID)
+			if metadata := manifest.KeyMetadata(); metadata != nil {
+				keyMetadata.Append(metadata)
+			} else {
+				keyMetadata.AppendNull()
 			}
 		}
 
 		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
 		if spec == nil {
-			return nil, fmt.Errorf("manifest %s references missing partition spec %d",
+			return fmt.Errorf("manifest %s references missing partition spec %d",
 				manifest.FilePath(), manifest.PartitionSpecID())
 		}
 		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
@@ -351,7 +383,7 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			continue
 		}
 		if len(partitions) > spec.NumFields() {
-			return nil, fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
+			return fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
 				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
 		}
 
@@ -368,20 +400,15 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			fieldType := partType.FieldList[idx].Type
 			transform := spec.Field(idx).Transform
 			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
-				return nil, fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
+				return fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
 			}
 			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
-				return nil, fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
+				return fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
 			}
 		}
 	}
 
-	rr, err := singleBatchReader(arrowSchema, bldr)
-	if err != nil {
-		return nil, fmt.Errorf("inspect manifests: %w", err)
-	}
-
-	return rr, nil
+	return nil
 }
 
 func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
