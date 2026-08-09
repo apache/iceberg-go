@@ -418,6 +418,22 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 	}
 }
 
+func getRetentionInt(props iceberg.Properties, standardKey, legacyKey string, defaultValue int) int {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt(standardKey, defaultValue)
+	}
+
+	return props.GetInt(legacyKey, defaultValue)
+}
+
+func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, defaultValue int64) int64 {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt64(standardKey, defaultValue)
+	}
+
+	return props.GetInt64(legacyKey, defaultValue)
+}
+
 // ExpireSnapshots removes expired snapshots from the table metadata, staging
 // the changes on the transaction. Call [Transaction.Commit] to persist them.
 //
@@ -468,29 +484,27 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	// mirroring the Java implementation. The unprefixed property names are
 	// retained as compatibility fallbacks for tables created by older Go
 	// versions.
-	propMaxRefAgeMs := meta.props.GetInt64(
-		MaxRefAgeMsKey,
-		meta.props.GetInt64(legacyMaxRefAgeMsKey, MaxRefAgeMsDefault),
+	propMaxRefAgeMs := getRetentionInt64(
+		meta.props, MaxRefAgeMsKey, legacyMaxRefAgeMsKey, MaxRefAgeMsDefault,
 	)
-	propMinSnapshotsToKeep := meta.props.GetInt(
-		MinSnapshotsToKeepKey,
-		meta.props.GetInt(legacyMinSnapshotsToKeepKey, MinSnapshotsToKeepDefault),
+	propMinSnapshotsToKeep := getRetentionInt(
+		meta.props, MinSnapshotsToKeepKey, legacyMinSnapshotsToKeepKey, MinSnapshotsToKeepDefault,
 	)
-	propMaxSnapshotAgeMs := meta.props.GetInt64(
-		MaxSnapshotAgeMsKey,
-		meta.props.GetInt64(legacyMaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault),
+	propMaxSnapshotAgeMs := getRetentionInt64(
+		meta.props, MaxSnapshotAgeMsKey, legacyMaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault,
 	)
+	defaultMaxSnapshotAgeMs := propMaxSnapshotAgeMs
+	if cfg.maxSnapshotAgeMs != nil {
+		defaultMaxSnapshotAgeMs = *cfg.maxSnapshotAgeMs
+	}
 
+	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
 		// This ensures we don't accidentally expire snapshots that are now
 		// referenced by updated refs.
 		snapshotID := ref.SnapshotID
 		reqs = append(reqs, AssertRefSnapshotID(refName, &snapshotID))
-
-		if refName == MainBranch {
-			snapsToKeep[ref.SnapshotID] = struct{}{}
-		}
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
@@ -504,6 +518,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 
 			continue
+		}
+		retainedRefs[refName] = ref
+
+		if refName == MainBranch {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
 		}
 
 		var (
@@ -543,6 +562,41 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 			snapId = *snap.ParentSnapshotID
 			numSnapshots++
+		}
+	}
+
+	referencedSnapshots := make(map[int64]struct{})
+	for _, ref := range retainedRefs {
+		if ref.SnapshotRefType != BranchRef {
+			referencedSnapshots[ref.SnapshotID] = struct{}{}
+
+			continue
+		}
+
+		snapshotID := ref.SnapshotID
+		for {
+			snap, err := meta.SnapshotByID(snapshotID)
+			if err != nil {
+				break
+			}
+
+			referencedSnapshots[snap.SnapshotID] = struct{}{}
+			if snap.ParentSnapshotID == nil {
+				break
+			}
+
+			snapshotID = *snap.ParentSnapshotID
+		}
+	}
+
+	unreferencedSnapshotCutoff := nowMs - defaultMaxSnapshotAgeMs
+	for _, snap := range meta.snapshotList {
+		if _, referenced := referencedSnapshots[snap.SnapshotID]; referenced {
+			continue
+		}
+
+		if snap.TimestampMs >= unreferencedSnapshotCutoff {
+			snapsToKeep[snap.SnapshotID] = struct{}{}
 		}
 	}
 

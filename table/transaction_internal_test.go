@@ -103,6 +103,16 @@ func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {
 				legacyMaxSnapshotAgeMsKey:   "0",
 			},
 		},
+		{
+			name:            "malformed standard max age does not use legacy value",
+			oldSnapshotKept: true,
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "1",
+				MaxSnapshotAgeMsKey:         "not-a-number",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -142,13 +152,13 @@ func TestExpireSnapshotsUsesStandardMaxRefAgeProperty(t *testing.T) {
 		{
 			name: "standard property",
 			props: iceberg.Properties{
-				MaxRefAgeMsKey: "0",
+				MaxRefAgeMsKey: "60000",
 			},
 		},
 		{
 			name: "legacy property",
 			props: iceberg.Properties{
-				legacyMaxRefAgeMsKey: "0",
+				legacyMaxRefAgeMsKey: "60000",
 			},
 		},
 		{
@@ -156,7 +166,7 @@ func TestExpireSnapshotsUsesStandardMaxRefAgeProperty(t *testing.T) {
 			refKept: true,
 			props: iceberg.Properties{
 				MaxRefAgeMsKey:       "1000000000000000000",
-				legacyMaxRefAgeMsKey: "0",
+				legacyMaxRefAgeMsKey: "60000",
 			},
 		},
 	}
@@ -175,6 +185,53 @@ func TestExpireSnapshotsUsesStandardMaxRefAgeProperty(t *testing.T) {
 				require.True(t, refKept)
 			} else {
 				require.False(t, refKept)
+			}
+		})
+	}
+}
+
+func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
+	tests := []struct {
+		name         string
+		age          time.Duration
+		snapshotKept bool
+	}{
+		{name: "younger than default age", age: time.Hour, snapshotKept: true},
+		{name: "older than default age", age: 6 * 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			now := time.Now().UnixMilli()
+			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+				SnapshotID:       30,
+				ParentSnapshotID: transactionTestPtr(int64(10)),
+				SequenceNumber:   3,
+				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+				Summary:          &Summary{Operation: OpAppend},
+				TimestampMs:      now,
+			}))
+			txn.meta.props = iceberg.Properties{MaxRefAgeMsKey: "60000"}
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+			require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 30, BranchRef))
+			require.NoError(t, txn.meta.RemoveSnapshotRef("feature"))
+			for i := range txn.meta.snapshotList {
+				if txn.meta.snapshotList[i].SnapshotID == 30 {
+					txn.meta.snapshotList[i].TimestampMs = time.Now().Add(-tt.age).UnixMilli()
+
+					break
+				}
+			}
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, refKept := txn.meta.refs["old-branch"]
+			require.False(t, refKept)
+			_, snapshotErr := txn.meta.SnapshotByID(30)
+			if tt.snapshotKept {
+				require.NoError(t, snapshotErr)
+			} else {
+				require.Error(t, snapshotErr)
 			}
 		})
 	}
