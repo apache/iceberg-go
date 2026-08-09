@@ -3417,25 +3417,40 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 }
 
 func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCounts() {
-	legacy := *(manifestFileRecordsV1[0].(*manifestFile))
-	legacy.AddedRowsCount = -1
-	legacy.ExistingRowsCount = -1
+	tests := []struct {
+		name         string
+		addedRows    int64
+		existingRows int64
+	}{
+		{name: "both row counts unknown", addedRows: -1, existingRows: -1},
+		{name: "existing row count unknown", addedRows: 1, existingRows: -1},
+		{name: "added row count unknown", addedRows: -1, existingRows: 1},
+	}
 
-	var v1Buf bytes.Buffer
-	m.Require().NoError(WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
-	manifests, err := ReadManifestList(&v1Buf)
-	m.Require().NoError(err)
-	m.Require().Len(manifests, 1)
+	for _, test := range tests {
+		m.Run(test.name, func() {
+			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+			legacy.AddedRowsCount = test.addedRows
+			legacy.ExistingRowsCount = test.existingRows
 
-	var v3Buf bytes.Buffer
-	writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
-	m.Require().NoError(err)
-	err = writer.AddManifests(manifests)
-	m.Require().ErrorIs(err, ErrInvalidArgument)
-	m.Require().ErrorContains(err, "cannot assign row-lineage IDs with unknown row counts")
-	m.Require().ErrorContains(err, legacy.Path)
-	m.EqualValues(1000, *writer.NextRowID())
-	m.Require().NoError(writer.Close())
+			var v1Buf bytes.Buffer
+			m.Require().NoError(
+				WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
+			manifests, err := ReadManifestList(&v1Buf)
+			m.Require().NoError(err)
+			m.Require().Len(manifests, 1)
+
+			var v3Buf bytes.Buffer
+			writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
+			m.Require().NoError(err)
+			err = writer.AddManifests(manifests)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.Require().ErrorContains(err, "cannot assign row-lineage IDs with unknown row counts")
+			m.Require().ErrorContains(err, legacy.Path)
+			m.EqualValues(1000, *writer.NextRowID())
+			m.Require().NoError(writer.Close())
+		})
+	}
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
