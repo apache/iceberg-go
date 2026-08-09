@@ -276,6 +276,21 @@ func TestUnmarshalSortOrderAcceptsExplicitUnsortedOrder(t *testing.T) {
 	assert.Equal(t, table.UnsortedSortOrder, order)
 }
 
+func TestUnmarshalSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	var order table.SortOrder
+	err := json.Unmarshal([]byte(`{"order-id": 1, "fields": []}`), &order)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
+}
+
+func TestNewSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	_, err := table.NewSortOrder(1, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
+}
+
 func TestUnmarshalSortOrderRejectsInvalidSourceIDs(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
