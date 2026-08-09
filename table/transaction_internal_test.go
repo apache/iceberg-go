@@ -856,11 +856,38 @@ func TestExpireSnapshotsRejectsWhenGCDisabled(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 	txn.meta.props = iceberg.Properties{GCEnabledKey: "false"}
 
-	err := txn.ExpireSnapshots(WithPostCommit(false))
+	err := txn.ExpireSnapshots()
 	require.ErrorContains(t, err, "GC is disabled")
 	require.Empty(t, txn.reqs)
 	_, err = txn.meta.SnapshotByID(10)
 	require.NoError(t, err)
+}
+
+func TestExpireSnapshotsRejectsWhenGCDisabledBeforeCommit(t *testing.T) {
+	tbl, cat := newValidationTestTable(t, nil)
+
+	builder, err := MetadataBuilderFromBase(tbl.Metadata(), "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     99,
+		SequenceNumber: 2,
+		ManifestList:   "file:///tmp/validation-test/metadata/manifest-99.avro",
+		TimestampMs:    time.Now().UnixMilli(),
+		Summary:        &Summary{Operation: OpAppend},
+	}))
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	cat.metadata = meta
+	tbl = New(Identifier{"db", "validation"}, meta, "file:///tmp/validation-test/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(time.Hour), WithRetainLast(1)))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{GCEnabledKey: "false"}))
+
+	_, err = txn.Commit(context.Background())
+	require.ErrorContains(t, err, "GC is disabled")
+	require.Equal(t, int32(0), cat.attempts.Load(), "GC-disabled snapshot expiration must not commit")
 }
 
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
