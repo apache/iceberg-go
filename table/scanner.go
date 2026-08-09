@@ -239,8 +239,13 @@ type Scan struct {
 	caseSensitive  bool
 	snapshotID     *int64
 	asOfTimestamp  *int64
-	options        iceberg.Properties
-	limit          int64
+	// useSnapshotSchema is set for explicit snapshot/time-travel and tag
+	// scans. A branch ref deliberately keeps the table's current schema. A nil
+	// value preserves the historical behavior for scans assembled directly in
+	// package tests with snapshotID/asOfTimestamp fields set.
+	useSnapshotSchema *bool
+	options           iceberg.Properties
+	limit             int64
 
 	includeRowLineage bool
 
@@ -275,6 +280,15 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
 		out := *scan
 		out.snapshotID = &snap.SnapshotID
+		out.asOfTimestamp = nil
+		useSnapshotSchema := true
+		for refName, ref := range scan.metadata.Refs() {
+			if refName == name {
+				useSnapshotSchema = ref.SnapshotRefType == TagRef
+				break
+			}
+		}
+		out.useSnapshotSchema = &useSnapshotSchema
 
 		return &out, nil
 	}
@@ -377,10 +391,11 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 
 func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 	curSchema := scan.metadata.CurrentSchema()
-	if scan.snapshotID == nil && scan.asOfTimestamp == nil {
+	if !scan.snapshotSchemaEnabled() {
 		// Live scans intentionally use the table's current schema. A schema-only
 		// metadata update can advance CurrentSchema without creating a snapshot,
-		// while explicit snapshot/as-of scans use the snapshot schema below.
+		// and branch refs intentionally use the table schema even though they
+		// resolve to a snapshot.
 		return curSchema, nil
 	}
 
@@ -401,6 +416,14 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 
 	return nil, fmt.Errorf("%w: snapshot %d references unknown schema id %d",
 		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
+}
+
+func (scan *Scan) snapshotSchemaEnabled() bool {
+	if scan.useSnapshotSchema != nil {
+		return *scan.useSnapshotSchema
+	}
+
+	return scan.snapshotID != nil || scan.asOfTimestamp != nil
 }
 
 // splitLineageMetadataFields partitions selectedFields into user fields and
@@ -954,15 +977,34 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
 
+	var schema *iceberg.Schema
+	if scan.metadata != nil {
+		var err error
+		schema, err = scan.effectiveSchema()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	caseSensitive := scan.caseSensitive
+	useSnapshotSchema := scan.snapshotSchemaEnabled()
+	var minRowsRequested *int64
+	if scan.limit != ScanNoLimit {
+		minRows := scan.limit
+		minRowsRequested = &minRows
+	}
+
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       slices.Clone(scan.identifier),
-		Metadata:         scan.metadata,
-		MetadataLocation: scan.metadataLocation,
-		SnapshotID:       scan.snapshotID,
-		SelectedFields:   scan.selectedFields,
-		RowFilter:        scan.rowFilter,
-		CaseSensitive:    &caseSensitive,
+		Identifier:        slices.Clone(scan.identifier),
+		Metadata:          scan.metadata,
+		Schema:            schema,
+		MetadataLocation:  scan.metadataLocation,
+		SnapshotID:        scan.snapshotID,
+		SelectedFields:    scan.remoteSelectedFields(schema),
+		RowFilter:         scan.rowFilter,
+		MinRowsRequested:  minRowsRequested,
+		CaseSensitive:     &caseSensitive,
+		UseSnapshotSchema: &useSnapshotSchema,
 	})
 	if err != nil {
 		return nil, err
@@ -971,6 +1013,23 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	scan.planIO = result.IO
 
 	return result.Tasks, nil
+}
+
+func (scan *Scan) remoteSelectedFields(schema *iceberg.Schema) []string {
+	if !slices.Contains(scan.selectedFields, "*") {
+		return slices.Clone(scan.selectedFields)
+	}
+	if schema == nil {
+		return nil
+	}
+
+	fields := schema.Fields()
+	selected := make([]string, 0, len(fields))
+	for _, field := range fields {
+		selected = append(selected, field.Name)
+	}
+
+	return selected
 }
 
 type FileScanTask struct {

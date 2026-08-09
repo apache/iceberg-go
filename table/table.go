@@ -1054,6 +1054,8 @@ func WithSnapshotID(n int64) ScanOption {
 	return func(scan *Scan) {
 		scan.snapshotID = &n
 		scan.asOfTimestamp = nil
+		useSnapshotSchema := true
+		scan.useSnapshotSchema = &useSnapshotSchema
 	}
 }
 
@@ -1061,6 +1063,8 @@ func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 	return func(scan *Scan) {
 		scan.asOfTimestamp = &timeStampMs
 		scan.snapshotID = nil
+		useSnapshotSchema := true
+		scan.useSnapshotSchema = &useSnapshotSchema
 	}
 }
 

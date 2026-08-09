@@ -89,7 +89,7 @@ func TestPlanFakeCapabilityDiscovery(t *testing.T) {
 				planfake.FetchScanTasksEndpoint,
 			},
 			wantPlan:         true,
-			wantFullPlanning: false,
+			wantFullPlanning: true,
 		},
 		{
 			name: "missing task fetch",

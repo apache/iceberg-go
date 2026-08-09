@@ -30,6 +30,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -145,15 +146,16 @@ const headerIdempotencyKey = "Idempotency-Key"
 //
 // Capability is split into two predicates. SupportsPlanTableScan is the narrow
 // "server can plan inline" check (plan endpoint only). SupportsFullRemoteScanPlanning
-// is the endpoint-level "server advertises all four endpoints" check: an
+// is the endpoint-level execution check: an
 // end-to-end plan can come back `submitted` or with `plan-tasks` that need the
-// poll/cancel/fetch endpoints to finish, and auto mode has no second chance to
-// fall back to local once it commits to remote, so a plan-only server must not
-// count as end-to-end capable.
+// poll/fetch endpoints to finish, and auto mode has no second chance to fall
+// back to local once it commits to remote, so a plan-only server must not count
+// as end-to-end capable. The cancel endpoint is best-effort cleanup rather than
+// an execution dependency.
 //
 // SupportsRemoteScanPlanning is the table.ScanPlanner-facing predicate that
-// table.Scan's auto mode routes on. It requires all four endpoints because an
-// accepted plan may be asynchronous or return opaque plan-task handles.
+// table.Scan's auto mode routes on. It requires the execution endpoints because
+// an accepted plan may be asynchronous or return opaque plan-task handles.
 
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
@@ -161,13 +163,13 @@ func (r *Catalog) SupportsPlanTableScan() bool {
 	return r.endpoints.contains(endpointPlanTableScan)
 }
 
-// SupportsFullRemoteScanPlanning reports whether the server advertised all four
-// scan-planning endpoints (plan, fetch-result, cancel, fetch-tasks), i.e. it can
-// drive the async/fanout path, not just sync inline planning.
+// SupportsFullRemoteScanPlanning reports whether the server advertised the
+// execution endpoints (plan, fetch-result, fetch-tasks), i.e. it can drive the
+// async/fanout path, not just sync inline planning. Cancellation is optional
+// cleanup and does not prevent a plan from producing tasks.
 func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 	return r.SupportsPlanTableScan() &&
 		r.endpoints.contains(endpointFetchPlanResult) &&
-		r.endpoints.contains(endpointCancelPlanning) &&
 		r.endpoints.contains(endpointFetchScanTasks)
 }
 
@@ -200,6 +202,11 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 		return table.ScanPlanningResult{}, err
 	}
 
+	planID := ""
+	if resp.PlanID != nil {
+		planID = *resp.PlanID
+	}
+
 	// Resolve to a completed plan: use an inline result as-is, or poll a
 	// submitted one to completion. PlanTableScan maps failed to an error and
 	// rejects other statuses, so only completed/submitted reach here.
@@ -222,6 +229,10 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
 	if err != nil {
+		if planID != "" {
+			r.abandonPlan(ctx, req.Identifier, planID, DefaultWaitForPlanOptions.CancelGracePeriod)
+		}
+
 		return table.ScanPlanningResult{}, err
 	}
 
@@ -300,27 +311,21 @@ func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]ta
 	return result, nil
 }
 
-// planIOFromCredentials wraps a plan's vended storage credentials in a lazy
-// PlanIO, overlaid on the table's base IO props so vended keys win on collision.
-// With none vended it returns a nil PlanIO, and the scan falls back to the
-// table's own FileIO.
+// planIOFromCredentials wraps a plan's prefix-scoped storage credentials in a
+// lazy PlanIO. The returned IO resolves the longest matching credential prefix
+// for each data or delete file it opens, overlaid on the table's base IO props
+// so vended keys win on collision. With none vended it returns a nil PlanIO,
+// and the scan falls back to the table's own FileIO.
 func planIOFromCredentials(creds []StorageCredential, location string, baseProps iceberg.Properties) table.PlanIO {
 	if len(creds) == 0 {
 		return nil
 	}
 
-	// TODO(#1178): plan.storage-credentials is prefix-scoped, but this builds one
-	// IO from the metadata location — wrong cred if data/delete files sit under a
-	// different prefix. The scan-task decoder settles the PlanIO shape.
-	resolved := resolveStorageCredentials(creds, location)
-	props := make(iceberg.Properties, len(baseProps)+len(resolved))
-	maps.Copy(props, baseProps)
-	maps.Copy(props, resolved)
-
 	return &planScopedIO{refresher: &vendedCredentialRefresher{
-		mu:       semaphore.NewWeighted(1),
-		location: location,
-		props:    props,
+		mu:          semaphore.NewWeighted(1),
+		location:    location,
+		props:       maps.Clone(baseProps),
+		credentials: slices.Clone(creds),
 		// fetchCreds stays nil: a plan's creds can't be renewed via the
 		// table-credentials endpoint, so an expiry is fatal, not a re-fetch.
 	}}
@@ -346,11 +351,16 @@ func (p *planScopedIO) Close() error {
 func planTableScanRequestFrom(req table.ScanPlanningRequest) (PlanTableScanRequest, error) {
 	out := PlanTableScanRequest{
 		SnapshotID:        req.SnapshotID,
-		Select:            req.SelectedFields,
 		MinRowsRequested:  req.MinRowsRequested,
 		CaseSensitive:     req.CaseSensitive,
 		UseSnapshotSchema: req.UseSnapshotSchema,
 		StatsFields:       req.StatsFields,
+	}
+	// `*` is table.Scan's local sentinel, not a REST FieldName. A planner
+	// normally expands it to schema field names before reaching this function;
+	// omitting it here is the safe fallback for direct callers without a schema.
+	if len(req.SelectedFields) > 0 && !slices.Contains(req.SelectedFields, "*") {
+		out.Select = slices.Clone(req.SelectedFields)
 	}
 
 	if req.RowFilter != nil && !req.RowFilter.Equals(iceberg.AlwaysTrue{}) {
@@ -378,8 +388,18 @@ func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
 		caseSensitive = *req.CaseSensitive
 	}
 
-	// Snapshot-schema selection (UseSnapshotSchema) is OQ4, deferred; bind current.
-	bound, err := iceberg.BindExpr(req.Metadata.CurrentSchema(), req.RowFilter, caseSensitive)
+	schema := req.Schema
+	if schema == nil {
+		if req.Metadata == nil {
+			return nil, fmt.Errorf("%w: cannot encode scan filter without table metadata", iceberg.ErrInvalidArgument)
+		}
+		schema = req.Metadata.CurrentSchema()
+	}
+	if schema == nil {
+		return nil, fmt.Errorf("%w: cannot encode scan filter without a scan schema", iceberg.ErrInvalidArgument)
+	}
+
+	bound, err := iceberg.BindExpr(schema, req.RowFilter, caseSensitive)
 	if err != nil {
 		return nil, fmt.Errorf("%w: binding scan filter: %s", iceberg.ErrInvalidArgument, err)
 	}

@@ -19,10 +19,14 @@ package rest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -47,20 +51,26 @@ const (
 // resolveStorageCredentials finds the best-matching credential for the given
 // location using longest-prefix match, mirroring the Java and Python implementations.
 func resolveStorageCredentials(creds []StorageCredential, location string) iceberg.Properties {
-	var best *StorageCredential
-	for i := range creds {
-		c := &creds[i]
-		if strings.HasPrefix(location, c.Prefix) {
-			if best == nil || len(c.Prefix) > len(best.Prefix) {
-				best = c
-			}
-		}
-	}
-	if best == nil {
+	index := matchingStorageCredentialIndex(creds, location)
+	if index < 0 {
 		return nil
 	}
 
-	return best.Config
+	return creds[index].Config
+}
+
+func matchingStorageCredentialIndex(creds []StorageCredential, location string) int {
+	best := -1
+	for i := range creds {
+		if !strings.HasPrefix(location, creds[i].Prefix) {
+			continue
+		}
+		if best == -1 || len(creds[i].Prefix) > len(creds[best].Prefix) {
+			best = i
+		}
+	}
+
+	return best
 }
 
 var credentialExpiryKeys = []string{
@@ -83,6 +93,20 @@ func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+func earliestCredentialExpiry(creds []StorageCredential) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, credential := range creds {
+		expiresAt, ok := parseCredentialExpiry(credential.Config)
+		if ok && (!found || expiresAt.Before(earliest)) {
+			earliest = expiresAt
+			found = true
+		}
+	}
+
+	return earliest, found
+}
+
 type vendedCredentialRefresher struct {
 	// Use a weighted semaphore with a single unit to use as an exclusive lock
 	// but cancellation (via context) is supported. This is important as we do IO
@@ -94,6 +118,10 @@ type vendedCredentialRefresher struct {
 	identifier []string
 	location   string
 	props      iceberg.Properties
+	// credentials is populated only for scan-plan IO. Unlike table-load
+	// credentials, which are already resolved against the metadata location,
+	// plan credentials must be selected against every file path opened later.
+	credentials []StorageCredential
 
 	fetchCreds func(ctx context.Context, ident []string) (iceberg.Properties, error)
 
@@ -125,8 +153,12 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 		// Plan creds can already be past their expiry by the time we first use
 		// them, so check before building an IO we'd only hand back 403s from.
 		if v.fetchCreds == nil {
-			if exp, ok := parseCredentialExpiry(config); ok && v.now().After(exp) {
-				return nil, v.expiredError(exp)
+			expiresAt, ok := parseCredentialExpiry(config)
+			if len(v.credentials) > 0 {
+				expiresAt, ok = earliestCredentialExpiry(v.credentials)
+			}
+			if ok && v.now().After(expiresAt) {
+				return nil, v.expiredError(expiresAt)
 			}
 		}
 	case v.fetchCreds == nil:
@@ -141,6 +173,13 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 
 		config = maps.Clone(v.props)
 		maps.Copy(config, freshCreds)
+	}
+
+	if len(v.credentials) > 0 {
+		v.cachedIO = newPrefixScopedIO(ctx, v.props, v.credentials)
+		v.expiresAt = v.expiresAtFromConfig(config)
+
+		return v.cachedIO, nil
 	}
 
 	newIO, err := iceio.LoadFS(ctx, config, v.location)
@@ -170,6 +209,14 @@ func (v *vendedCredentialRefresher) expired() bool {
 }
 
 func (v *vendedCredentialRefresher) expiresAtFromConfig(config iceberg.Properties) time.Time {
+	if len(v.credentials) > 0 {
+		if exp, ok := earliestCredentialExpiry(v.credentials); ok {
+			return exp
+		}
+
+		return time.Time{}
+	}
+
 	if exp, ok := parseCredentialExpiry(config); ok {
 		return exp
 	}
@@ -196,4 +243,111 @@ func (v *vendedCredentialRefresher) close() error {
 	}
 
 	return nil
+}
+
+// prefixScopedIO selects a plan credential using the actual object location
+// passed to Open/Remove. A single plan may cover metadata, data, and delete
+// files in different storage prefixes, so resolving credentials once at plan
+// creation would be incorrect.
+type prefixScopedIO struct {
+	ctx         context.Context
+	baseProps   iceberg.Properties
+	credentials []StorageCredential
+
+	mu          sync.Mutex
+	filesystems map[string]iceio.IO
+	closed      bool
+}
+
+func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, credentials []StorageCredential) *prefixScopedIO {
+	return &prefixScopedIO{
+		ctx:         context.WithoutCancel(ctx),
+		baseProps:   maps.Clone(baseProps),
+		credentials: slices.Clone(credentials),
+		filesystems: make(map[string]iceio.IO),
+	}
+}
+
+func (p *prefixScopedIO) Open(name string) (iceio.File, error) {
+	fs, err := p.filesystemFor(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return fs.Open(name)
+}
+
+func (p *prefixScopedIO) Remove(name string) error {
+	fs, err := p.filesystemFor(name)
+	if err != nil {
+		return err
+	}
+
+	return fs.Remove(name)
+}
+
+func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
+	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	key := scopedFilesystemKey(credentialIndex, name)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil, errors.New("prefix-scoped IO is closed")
+	}
+	if fs, ok := p.filesystems[key]; ok {
+		return fs, nil
+	}
+
+	props := p.propertiesForLocation(name)
+
+	fs, err := iceio.LoadFS(p.ctx, props, name)
+	if err != nil {
+		return nil, err
+	}
+
+	p.filesystems[key] = fs
+
+	return fs, nil
+}
+
+func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
+	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	props := make(iceberg.Properties, len(p.baseProps))
+	maps.Copy(props, p.baseProps)
+	if credentialIndex >= 0 {
+		maps.Copy(props, p.credentials[credentialIndex].Config)
+	}
+
+	return props
+}
+
+func scopedFilesystemKey(credentialIndex int, location string) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return fmt.Sprintf("%d:%s", credentialIndex, location)
+	}
+
+	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, parsed.Host)
+}
+
+func (p *prefixScopedIO) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+
+	var closeErr error
+	for _, fs := range p.filesystems {
+		if closer, ok := fs.(interface{ Close() error }); ok {
+			closeErr = errors.Join(closeErr, closer.Close())
+		}
+	}
+	p.filesystems = nil
+
+	return closeErr
 }
