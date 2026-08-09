@@ -502,8 +502,8 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, err
 	}
 
-	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
-		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		return ret, err
 	}
 
 	return ret, err
@@ -570,11 +570,29 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, err
 	}
 
-	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
-		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		return ret, err
 	}
 
 	return ret, err
+}
+
+func decodeJSONResponse(body io.Reader, dst any) error {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(dst); err != nil {
+		return fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	}
+
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("%w: response contains multiple JSON values", ErrRESTError)
+		}
+
+		return fmt.Errorf("%w: error decoding trailing json payload: `%s`", ErrRESTError, err.Error())
+	}
+
+	return nil
 }
 
 func setRequestHeaders(req *http.Request, headers map[string]string) {
