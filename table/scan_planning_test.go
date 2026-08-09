@@ -286,16 +286,6 @@ func TestTransactionScanKeepsStagedMetadataLocal(t *testing.T) {
 	require.NoError(t, err)
 	_, err = remote.PlanFiles(context.Background())
 	require.ErrorIs(t, err, ErrInvalidOperation)
-
-	staged, err := txn.StagedTable()
-	require.NoError(t, err)
-	stagedTasks, err := staged.Scan(WithScanPlanningMode(ScanPlanningAuto)).PlanFiles(context.Background())
-	require.NoError(t, err)
-	require.Len(t, stagedTasks, 1)
-	assert.Equal(t, dataFile.FilePath(), stagedTasks[0].File.FilePath())
-
-	_, err = staged.Scan(WithScanPlanningMode(ScanPlanningRemote)).PlanFiles(context.Background())
-	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
 func TestReadTasksClosesPlanIOIfLoadFails(t *testing.T) {

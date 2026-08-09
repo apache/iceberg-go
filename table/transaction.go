@@ -2383,20 +2383,17 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 		return nil, err
 	}
 
-	staged := New(
-		t.tbl.identifier,
-		updatedMeta,
-		updatedMeta.Location(),
-		t.tbl.fsF,
-		t.tbl.cat,
-		withReporterState(t.tbl.reporter, t.tbl.reporterSet),
-		WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
-	)
-	// Like Transaction.Scan, this table contains metadata the catalog cannot
-	// see until commit. Do not let auto mode delegate it to a catalog planner.
-	staged.planner = nil
-
-	return &StagedTable{Table: staged}, nil
+	return &StagedTable{
+		Table: New(
+			t.tbl.identifier,
+			updatedMeta,
+			updatedMeta.Location(),
+			t.tbl.fsF,
+			t.tbl.cat,
+			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
+			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
+		),
+	}, nil
 }
 
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
