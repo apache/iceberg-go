@@ -2126,6 +2126,84 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	m.Require().ErrorIs(err, io.EOF)
 }
 
+func (m *ManifestTestSuite) TestManifestReaderRejectsInvalidEntries() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+	invalidContentEntry := deleteEntry
+	invalidContentFile := cloneDataFileAvroFields(deleteFile)
+	invalidContentFile.Content = ManifestEntryContent(3)
+	invalidContentEntry.Data = invalidContentFile
+
+	tests := []struct {
+		name            string
+		manifestContent ManifestContent
+		entry           *manifestEntry
+		errorContains   string
+	}{
+		{
+			name:            "unknown status",
+			manifestContent: ManifestContentData,
+			entry: func() *manifestEntry {
+				entry := *manifestEntryV2Records[0]
+				entry.EntryStatus = ManifestEntryStatus(3)
+
+				return &entry
+			}(),
+			errorContains: "invalid status",
+		},
+		{
+			name:            "data file in delete manifest",
+			manifestContent: ManifestContentDeletes,
+			entry:           manifestEntryV2Records[0],
+			errorContains:   "data file found in delete manifest",
+		},
+		{
+			name:            "delete file in data manifest",
+			manifestContent: ManifestContentData,
+			entry:           &deleteEntry,
+			errorContains:   "delete file found in data manifest",
+		},
+		{
+			name:            "unknown content",
+			manifestContent: ManifestContentDeletes,
+			entry:           &invalidContentEntry,
+			errorContains:   "invalid content",
+		},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			mw := ManifestWriter{version: 2, spec: partitionSpec, schema: testSchema, content: tt.manifestContent}
+			metadata, err := mw.meta()
+			m.Require().NoError(err)
+
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, entrySchema,
+				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Encode(tt.entry))
+			m.Require().NoError(writer.Close())
+
+			manifest := &manifestFile{version: 2, SpecID: 1, Content: tt.manifestContent}
+			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
+			m.Require().NoError(err)
+			defer reader.Close()
+
+			_, err = reader.ReadEntry()
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
