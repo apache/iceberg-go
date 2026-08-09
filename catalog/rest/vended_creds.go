@@ -75,22 +75,31 @@ func matchingStorageCredentialIndex(creds []StorageCredential, location string) 
 
 var credentialExpiryKeys = []string{
 	keyS3TokenExpiresAtMs,
-	keyAdlsSasExpiresAtMs,
 	keyGcsOAuthExpiresAt,
 	keyExpirationTime,
 }
 
 func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
-	for _, key := range credentialExpiryKeys {
-		if v, ok := config[key]; ok {
-			ms, err := strconv.ParseInt(v, 10, 64)
-			if err == nil && ms > 0 {
-				return time.UnixMilli(ms), true
+	var earliest time.Time
+	found := false
+	for key, value := range config {
+		if !slices.Contains(credentialExpiryKeys, key) &&
+			key != keyAdlsSasExpiresAtMs &&
+			!strings.HasPrefix(key, keyAdlsSasExpiresAtMs+".") {
+			continue
+		}
+
+		ms, err := strconv.ParseInt(value, 10, 64)
+		if err == nil && ms > 0 {
+			expiresAt := time.UnixMilli(ms)
+			if !found || expiresAt.Before(earliest) {
+				earliest = expiresAt
+				found = true
 			}
 		}
 	}
 
-	return time.Time{}, false
+	return earliest, found
 }
 
 func earliestCredentialExpiry(creds []StorageCredential) (time.Time, bool) {
@@ -317,10 +326,48 @@ func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
 	props := make(iceberg.Properties, len(p.baseProps))
 	maps.Copy(props, p.baseProps)
 	if credentialIndex >= 0 {
-		maps.Copy(props, p.credentials[credentialIndex].Config)
+		credentialConfig := p.credentials[credentialIndex].Config
+		clearOverriddenCredentialProperties(props, credentialConfig)
+		maps.Copy(props, credentialConfig)
 	}
 
 	return props
+}
+
+// clearOverriddenCredentialProperties prevents a matched credential from being
+// combined with optional fields from another credential. In particular, an S3
+// access/secret pair without a session token must not inherit a stale token
+// from the table or catalog configuration.
+func clearOverriddenCredentialProperties(props, credentialConfig iceberg.Properties) {
+	_, hasS3AccessKey := credentialConfig[iceio.S3AccessKeyID]
+	_, hasS3SecretKey := credentialConfig[iceio.S3SecretAccessKey]
+	_, hasS3SessionToken := credentialConfig[iceio.S3SessionToken]
+	if hasS3AccessKey || hasS3SecretKey || hasS3SessionToken {
+		delete(props, iceio.S3AccessKeyID)
+		delete(props, iceio.S3SecretAccessKey)
+		delete(props, iceio.S3SessionToken)
+		delete(props, keyS3TokenExpiresAtMs)
+	}
+
+	_, hasGCSOAuthToken := credentialConfig[iceio.GCSOAuthToken]
+	_, hasGCSOAuthExpiry := credentialConfig[iceio.GCSOAuthExpiresAt]
+	if hasGCSOAuthToken || hasGCSOAuthExpiry {
+		delete(props, iceio.GCSOAuthToken)
+		delete(props, iceio.GCSOAuthExpiresAt)
+	}
+
+	for key := range credentialConfig {
+		switch {
+		case strings.HasPrefix(key, iceio.ADLSSasTokenPrefix):
+			suffix := strings.TrimPrefix(key, iceio.ADLSSasTokenPrefix)
+			delete(props, iceio.ADLSSasTokenPrefix+suffix)
+			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
+		case strings.HasPrefix(key, keyAdlsSasExpiresAtMs+"."):
+			suffix := strings.TrimPrefix(key, keyAdlsSasExpiresAtMs+".")
+			delete(props, iceio.ADLSSasTokenPrefix+suffix)
+			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
+		}
+	}
 }
 
 func scopedFilesystemKey(credentialIndex int, location string) string {

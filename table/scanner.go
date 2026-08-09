@@ -256,8 +256,19 @@ type Scan struct {
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
-	out := *scan
+	out := scan.refinedCopy()
 	out.limit = n
+
+	return out
+}
+
+// refinedCopy returns a shallow scan refinement while transferring ownership
+// of any plan-scoped IO to the returned scan. PlanIO is a single-owner lease:
+// copying it would let either scan close the filesystem while the other is
+// still reading.
+func (scan *Scan) refinedCopy() *Scan {
+	out := *scan
+	scan.planIO = nil
 
 	return &out
 }
@@ -279,7 +290,7 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	}
 
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
-		out := *scan
+		out := scan.refinedCopy()
 		out.snapshotID = &snap.SnapshotID
 		out.asOfTimestamp = nil
 		useSnapshotSchema := true
@@ -292,7 +303,7 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 		}
 		out.useSnapshotSchema = &useSnapshotSchema
 
-		return &out, nil
+		return out, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
@@ -832,6 +843,10 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	// Starting a new plan abandons any prior plan whose IO was not handed to
+	// ReadTasks. Close that single-owner lease before replacing it.
+	scan.discardPlanIO()
+
 	if scan.asOfTimestamp != nil {
 		snapshot, err := scan.ResolveSnapshot()
 		if err != nil {
@@ -901,7 +916,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 // table's default FileIO. It returns a nil slice (not an empty one) when there
 // is no snapshot or every manifest is pruned.
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
-	scan.planIO = nil
+	scan.discardPlanIO()
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
@@ -975,6 +990,15 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	return results, nil
 }
 
+func (scan *Scan) discardPlanIO() {
+	if scan.planIO == nil {
+		return
+	}
+
+	_ = scan.planIO.Close()
+	scan.planIO = nil
+}
+
 func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	if scan.requiresLastUpdatedSequenceNumber() {
 		return nil, fmt.Errorf(
@@ -1000,7 +1024,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	caseSensitive := scan.caseSensitive
 	useSnapshotSchema := scan.snapshotSchemaEnabled()
 	var minRowsRequested *int64
-	if scan.limit != ScanNoLimit {
+	if scan.limit >= 0 {
 		minRows := scan.limit
 		minRowsRequested = &minRows
 	}

@@ -115,6 +115,22 @@ func TestScanPlanningRemoteResolvesDefaultProjectionAndSchema(t *testing.T) {
 	assert.Nil(t, planner.receivedRequest.MinRowsRequested)
 }
 
+func TestScanPlanningRemoteOmitsNegativeRowLimit(t *testing.T) {
+	t.Parallel()
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		planner:        planner,
+		planningMode:   ScanPlanningRemote,
+		selectedFields: []string{"*"},
+		limit:          -2,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, planner.receivedRequest.MinRowsRequested)
+}
+
 func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -300,6 +316,39 @@ func TestReadTasksClosesPlanIOIfLoadFails(t *testing.T) {
 	require.ErrorIs(t, err, loadErr)
 	assert.True(t, planIO.closed)
 	assert.Nil(t, scan.planIO)
+}
+
+func TestUseRowLimitTransfersPlanIOOwnership(t *testing.T) {
+	t.Parallel()
+
+	planIO := &failingPlanIO{}
+	scan := &Scan{planIO: planIO}
+
+	refined := scan.UseRowLimit(10)
+
+	assert.Nil(t, scan.planIO)
+	assert.Same(t, planIO, refined.planIO)
+	assert.Equal(t, int64(10), refined.limit)
+}
+
+func TestRepeatedScanPlanningClosesPreviousPlanIO(t *testing.T) {
+	t.Parallel()
+
+	previousPlanIO := &failingPlanIO{}
+	currentPlanIO := &failingPlanIO{}
+	scan := &Scan{
+		planner: &fakeScanPlanner{
+			result:   ScanPlanningResult{IO: currentPlanIO},
+			supports: true,
+		},
+		planningMode: ScanPlanningRemote,
+		planIO:       previousPlanIO,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.True(t, previousPlanIO.closed)
+	assert.Same(t, currentPlanIO, scan.planIO)
 }
 
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
