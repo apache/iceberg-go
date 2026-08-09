@@ -319,19 +319,12 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 
 func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 	aux := struct {
-		OrderID *int         `json:"order-id"`
+		OrderID *int               `json:"order-id"`
 		Fields  *[]json.RawMessage `json:"fields"`
 	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
-	}
-
-	fields := make([]SortField, len(*aux.Fields))
-	for i, rawField := range *aux.Fields {
-		if err := fields[i].unmarshal(rawField, binding); err != nil {
-			return err
-		}
 	}
 
 	if aux.OrderID == nil {
@@ -342,7 +335,14 @@ func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 		return fmt.Errorf("%w: sort order is missing required 'fields' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	newOrder, err := newSortOrder(*aux.OrderID, *aux.Fields, false)
+	fields := make([]SortField, len(*aux.Fields))
+	for i, rawField := range *aux.Fields {
+		if err := fields[i].unmarshal(rawField, binding); err != nil {
+			return err
+		}
+	}
+
+	newOrder, err := newSortOrder(*aux.OrderID, fields, false)
 	if err != nil {
 		return err
 	}
@@ -356,6 +356,7 @@ func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 //
 // The orderID must be greater than or equal to 0.
 // If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
+// If fields is empty, orderID must be 0.
 // Fields need to have non-nil Transform, valid Direction and NullOrder values,
 // and non-empty source IDs.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
@@ -370,6 +371,10 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 
 	if orderID == 0 && len(fields) != 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
+	}
+
+	if orderID != UnsortedSortOrderID && len(fields) == 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID %d requires at least one sort field", ErrInvalidSortOrderID, orderID)
 	}
 
 	if fields == nil {
