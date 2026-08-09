@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -27,8 +28,28 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/require"
 )
+
+func TestYieldAllManifestsReturnsErrorAfterResultsClose(t *testing.T) {
+	results := make(chan tblutils.Enumerated[[]iceberg.ManifestFile])
+	close(results)
+
+	manifestErr := errors.New("manifest list read failed")
+	errch := make(chan error, 1)
+	errch <- manifestErr
+	close(errch)
+
+	var got error
+	yieldAllManifests(results, errch, func(_ iceberg.ManifestFile, err error) bool {
+		got = err
+
+		return true
+	})
+
+	require.ErrorIs(t, got, manifestErr)
+}
 
 func TestAllManifestsCompletesAfterErrorChannelCloses(t *testing.T) {
 	const snapshotCount = 8
