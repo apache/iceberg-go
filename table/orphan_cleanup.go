@@ -597,6 +597,11 @@ func isFileOrphan(
 		if err != nil {
 			return false, err
 		}
+		if decision == prefixMatch {
+			// Matching prefixes with different normalized URLs are distinct
+			// object keys, for example key%2Fpart and key/part.
+			continue
+		}
 		if decision == prefixMismatchKeep {
 			return false, nil
 		}
@@ -807,9 +812,13 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
 
 	// Object-store paths are opaque keys. Keep their spelling exactly as
-	// supplied: escaped separators, duplicate slashes, and dot segments can
-	// all be meaningful parts of a key. Only the explicitly configured scheme
-	// and authority equivalences are normalized here.
+	// supplied: escaped separators, duplicate slashes, dot segments, queries,
+	// and fragments can all be meaningful parts of a key. Only the explicitly
+	// configured scheme and authority equivalences are normalized here.
+	//
+	// This intentionally differs from iceberg-java's Hadoop Path-based
+	// normalization, which resolves dot segments. The Go object-store FileIO
+	// preserves raw keys, so resolving them here would conflate distinct files.
 	normalizedURL := *parsedURL
 	normalizedURL.Scheme = normalizedScheme
 	normalizedURL.Host = normalizedAuthority
@@ -831,6 +840,9 @@ func normalizeNonURLPath(path string) string {
 	if volume == "" {
 		return normalizeWindowsLocalPathCase(pathpkg.Clean(normalized))
 	}
+	if remainder == "" {
+		return normalizeWindowsLocalPathCase(volume)
+	}
 
 	if rooted {
 		cleaned := pathpkg.Clean("/" + remainder)
@@ -838,14 +850,14 @@ func normalizeNonURLPath(path string) string {
 		return normalizeWindowsLocalPathCase(volume + "/" + strings.TrimPrefix(cleaned, "/"))
 	}
 
-	if remainder == "" {
-		return normalizeWindowsLocalPathCase(volume)
-	}
-
 	return normalizeWindowsLocalPathCase(volume + pathpkg.Clean(remainder))
 }
 
 func normalizeWindowsLocalPathCase(path string) string {
+	// A Windows-shaped path can come from metadata written on another host, so
+	// runtime.GOOS alone cannot determine its case semantics. Conservatively
+	// fold it on every host to avoid deleting a live Windows file. On a
+	// case-sensitive POSIX mount this may retain a case-distinct orphan.
 	if isWindowsLocalPath(path) {
 		return strings.ToLower(path)
 	}
@@ -896,8 +908,8 @@ func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
 	return "//" + unc[:shareEnd], unc[shareEnd+1:], true
 }
 
-func isDriveLetter(r byte) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // filePathKey returns the path component used to compare listed files with
@@ -908,12 +920,8 @@ func filePathKey(file string) string {
 	// remain part of the comparison key.
 	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
 		if parsedURL, err := url.Parse(file); err == nil {
-			if parsedURL.Scheme != "" && !strings.EqualFold(parsedURL.Scheme, "file") {
-				// Keep remote object-key spelling, including escaped separators,
-				// when grouping candidates for prefix-mismatch checks.
-				return parsedURL.EscapedPath()
-			}
-
+			// This key only groups possible prefix mismatches. Exact normalized
+			// URL matching above preserves opaque remote object-key spelling.
 			return normalizeNonURLPath(parsedURL.Path)
 		}
 	}
@@ -991,7 +999,8 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 type prefixMismatchDecision int
 
 const (
-	prefixMismatchKeep prefixMismatchDecision = iota
+	prefixMatch prefixMismatchDecision = iota
+	prefixMismatchKeep
 	prefixMismatchDeleteCandidate
 )
 
@@ -1015,7 +1024,7 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 	authMismatch := refAuth != fsAuth
 
 	if !schemeMismatch && !authMismatch {
-		return prefixMismatchKeep, nil
+		return prefixMatch, nil
 	}
 
 	switch cfg.prefixMismatchMode {

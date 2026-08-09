@@ -23,6 +23,7 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +220,11 @@ func TestNormalizeFilePath(t *testing.T) {
 			expected: "c:/warehouse/file.parquet",
 		},
 		{
+			name:     "uppercase_windows_file_uri",
+			input:    "FILE:///C:/warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
 			name:     "unc_file_uri",
 			input:    "file://server/share/data/../file.parquet",
 			expected: "//server/share/file.parquet",
@@ -294,6 +300,11 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			input:    `//server/share/../file.parquet`,
 			expected: "//server/share/file.parquet",
 		},
+		{
+			name:     "bare_unc_share_root",
+			input:    `//server/share`,
+			expected: "//server/share",
+		},
 	}
 
 	for _, tt := range tests {
@@ -305,20 +316,29 @@ func TestNormalizeNonURLPath(t *testing.T) {
 }
 
 func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
-	tests := map[string]string{
-		"windows_drive":          `C:\warehouse\data\..\file.parquet`,
-		"windows_drive_relative": `C:foo\..\bar`,
-		"unc":                    `\\server\share\data\..\file.parquet`,
-		"forward_slash_unc":      `//server/share/../file.parquet`,
-		"unix":                   "/warehouse/data/../file.parquet",
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "windows_drive", input: `C:\warehouse\data\..\file.parquet`},
+		{name: "windows_drive_relative", input: `C:foo\..\bar`},
+		{name: "unc", input: `\\server\share\data\..\file.parquet`},
+		{name: "forward_slash_unc", input: `//server/share/../file.parquet`},
+		{name: "bare_unc_share_root", input: `//server/share`},
+		{name: "unix", input: "/warehouse/data/../file.parquet"},
 	}
 
-	for name, input := range tests {
-		t.Run(name, func(t *testing.T) {
-			normalized := normalizeNonURLPath(input)
-			assert.Equal(t, normalized, normalizeNonURLPath(normalized))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized := normalizeNonURLPath(tt.input)
+			secondPass := normalizeNonURLPath(normalized)
+			assert.Equal(t, normalized, secondPass, "normalizeNonURLPath must be idempotent")
 		})
 	}
+}
+
+func TestFilePathKeyHandlesUppercaseFileScheme(t *testing.T) {
+	assert.Equal(t, "/warehouse/file.parquet", filePathKey("FILE:///warehouse/file.parquet"))
 }
 
 func TestIsFileOrphanDoesNotAliasWindowsDrivePaths(t *testing.T) {
@@ -349,6 +369,20 @@ func TestIsFileOrphanMatchesWindowsCaseInsensitivePaths(t *testing.T) {
 	isOrphan, err := isFileOrphan(`c:\warehouse\data\FILE.PARQUET`, referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.False(t, isOrphan)
+}
+
+func TestIsFileOrphanConservativelyMatchesUNCCaseOnNonWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("covers the conservative non-Windows UNC behavior")
+	}
+
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"//nas/share/Data/file.parquet": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan("//nas/share/data/file.parquet", referencedFiles, index, cfg)
+	require.NoError(t, err)
+	assert.False(t, isOrphan, "ambiguous UNC casing must retain the candidate for deletion safety")
 }
 
 func TestIsFileOrphanPreservesObjectStoreKeyCase(t *testing.T) {
@@ -527,6 +561,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 		referencedPath string
 		filesystemPath string
 		mode           PrefixMismatchMode
+		expectDecision prefixMismatchDecision
 		expectError    bool
 		errorContains  string
 	}{
@@ -535,6 +570,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			referencedPath: "s3://bucket/path/file.txt",
 			filesystemPath: "s3://bucket/path/file.txt",
 			mode:           PrefixMismatchError,
+			expectDecision: prefixMatch,
 			expectError:    false,
 		},
 		{
@@ -550,6 +586,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			referencedPath: "s3://bucket/path/file.txt",
 			filesystemPath: "gs://bucket/path/file.txt",
 			mode:           PrefixMismatchIgnore,
+			expectDecision: prefixMismatchKeep,
 			expectError:    false,
 		},
 		{
@@ -557,6 +594,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			referencedPath: "s3://bucket/path/file.txt",
 			filesystemPath: "gs://bucket/path/file.txt",
 			mode:           PrefixMismatchDelete,
+			expectDecision: prefixMismatchDeleteCandidate,
 			expectError:    false,
 		},
 		{
@@ -564,6 +602,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			referencedPath: "s3://bucket/path/file.txt",
 			filesystemPath: "s3a://bucket/path/file.txt",
 			mode:           PrefixMismatchError,
+			expectDecision: prefixMatch,
 			expectError:    false,
 		},
 		{
@@ -571,6 +610,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			referencedPath: "/local/path/file.txt",
 			filesystemPath: "/local/path/file.txt",
 			mode:           PrefixMismatchError,
+			expectDecision: prefixMatch,
 			expectError:    false,
 		},
 	}
@@ -589,11 +629,7 @@ func TestCheckPrefixMismatch(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				if tt.mode == PrefixMismatchDelete && tt.referencedPath != tt.filesystemPath {
-					assert.Equal(t, prefixMismatchDeleteCandidate, decision)
-				} else {
-					assert.Equal(t, prefixMismatchKeep, decision)
-				}
+				assert.Equal(t, tt.expectDecision, decision)
 			}
 		})
 	}
@@ -751,6 +787,36 @@ func TestIsFileOrphanPreservesRemoteObjectKeySpelling(t *testing.T) {
 	isOrphan, err := isFileOrphan("s3://bucket/path/file.txt", referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.True(t, isOrphan)
+}
+
+func TestIsFileOrphanPreservesRemoteQueryAndFragment(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"s3://bucket/path/file.txt?version=1#metadata": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan(
+		"s3://bucket/path/file.txt?version=2#data",
+		referencedFiles,
+		index,
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.True(t, isOrphan, "query and fragment are part of the raw object key")
+}
+
+func TestIsFileOrphanAppliesPrefixMismatchPolicyToEncodedPaths(t *testing.T) {
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	referencedFiles := map[string]bool{"file:///path%20to/file.parquet": true}
+	index := newReferencedFileIndex(referencedFiles, cfg)
+
+	isOrphan, err := isFileOrphan(
+		"s3://bucket/path%20to/file.parquet",
+		referencedFiles,
+		index,
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.False(t, isOrphan, "encoded paths must still honor prefix-mismatch safety policy")
 }
 
 func TestOrphanCleanup_EdgeCases(t *testing.T) {
@@ -1042,6 +1108,54 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		`C:\Warehouse`,
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetStatistics(StatisticsFile{
+		SnapshotID:      1,
+		StatisticsPath:  `C:\Warehouse\Data\File.parquet`,
+		BlobMetadata:    []BlobMetadata{},
+		FileSizeInBytes: 4,
+	}))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	const listedPath = `c:\warehouse\data\FILE.PARQUET`
+	fsys := &mockListableIO{
+		entries: []mockWalkEntry{{
+			path: listedPath,
+			info: mockFileInfo{name: "FILE.PARQUET", size: 4},
+		}},
+	}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		`C:\Warehouse\metadata\v1.metadata.json`,
+		func(context.Context) (io.IO, error) { return fsys, nil },
+		nil,
+	)
+
+	result, err := tbl.DeleteOrphanFiles(
+		context.Background(),
+		WithFilesOlderThan(0),
+		WithDryRun(true),
+	)
+	require.NoError(t, err)
+	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.DeletedFiles)
 }
 
 func TestDeleteFilesFallsBackToExistingBehavior(t *testing.T) {
