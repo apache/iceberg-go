@@ -47,7 +47,7 @@ func newDataManifest(minSeqNum int64) iceberg.ManifestFile {
 		Content(iceberg.ManifestContentData).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
-}
+		}
 
 func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
@@ -276,7 +276,6 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 
 func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {
 	negativeZero := math.Copysign(0, -1)
-
 	negative, err := newEqualityDeletePartitionKey(1, map[int]any{1000: negativeZero})
 	require.NoError(t, err)
 	positive, err := newEqualityDeletePartitionKey(1, map[int]any{1000: float64(0)})
@@ -383,6 +382,87 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 			assert.Len(t, entries, tt.wantEntries)
 		})
 	}
+}
+
+func TestPartitionsMatchUsesFloatSemantics(t *testing.T) {
+	tests := []struct {
+		name  string
+		left  any
+		right any
+		match bool
+	}{
+		{name: "float32 NaN values", left: float32(math.NaN()), right: float32(math.NaN()), match: true},
+		{name: "float64 NaN values", left: math.NaN(), right: math.NaN(), match: true},
+		{name: "float32 NaN payloads", left: math.Float32frombits(0x7fc00001), right: math.Float32frombits(0x7fc00002), match: true},
+		{name: "float64 NaN payloads", left: math.Float64frombits(0x7ff8000000000001), right: math.Float64frombits(0x7ff8000000000002), match: true},
+		{name: "float32 signed zero", left: float32(math.Copysign(0, -1)), right: float32(0), match: false},
+		{name: "float64 signed zero", left: math.Copysign(0, -1), right: float64(0), match: false},
+		{name: "float widths differ", left: float32(1), right: float64(1), match: false},
+		{name: "pass-through integer", left: int64(42), right: int64(42), match: true},
+		{name: "pass-through strings differ", left: "a", right: "b", match: false},
+		{name: "nil values", left: nil, right: nil, match: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.match,
+				partitionsMatch(map[int]any{1000: tt.left}, map[int]any{1000: tt.right}))
+		})
+	}
+}
+
+func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
+	dataSeqNum := int64(1)
+	deleteSeqNum := int64(2)
+	dataFile := &mockDataFile{
+		path:      "data.parquet",
+		partition: map[int]any{1000: []byte{0xde, 0xad}},
+	}
+	matchingDelete := &mockDataFile{
+		path:      "matching-delete.parquet",
+		partition: map[int]any{1000: []byte{0xde, 0xad}},
+	}
+	nonMatchingDelete := &mockDataFile{
+		path:      "non-matching-delete.parquet",
+		partition: map[int]any{1000: []byte{0xbe, 0xef}},
+	}
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
+	deleteEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+	}
+
+	assert.Equal(t, []iceberg.DataFile{matchingDelete},
+		matchEqualityDeletesToData(dataEntry, deleteEntries))
+}
+
+func TestMatchEqualityDeletesToDataHandlesFloatPartitions(t *testing.T) {
+	dataSeqNum := int64(1)
+	deleteSeqNum := int64(2)
+	dataFile := &mockDataFile{
+		path:      "data.parquet",
+		partition: map[int]any{1000: math.Float64frombits(0x7ff8000000000001)},
+	}
+	matchingDelete := &mockDataFile{
+		path:      "matching-delete.parquet",
+		partition: map[int]any{1000: math.Float64frombits(0x7ff8000000000002)},
+	}
+	nonMatchingDelete := &mockDataFile{
+		path:      "non-matching-delete.parquet",
+		partition: map[int]any{1000: math.Copysign(0, -1)},
+	}
+
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
+	deleteEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+	}
+
+	assert.Equal(t, []iceberg.DataFile{matchingDelete},
+		matchEqualityDeletesToData(dataEntry, deleteEntries))
 }
 
 func TestMinSequenceNum(t *testing.T) {
