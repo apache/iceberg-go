@@ -693,6 +693,14 @@ func TestReaderInvalidFile(t *testing.T) {
 	})
 }
 
+func TestReaderRejectsNegativeFooterPayloadSize(t *testing.T) {
+	data := validFile()
+	binary.LittleEndian.PutUint32(data[len(data)-12:len(data)-8], ^uint32(0))
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid footer payload size -1")
+}
+
 func TestReaderRejectsTrailingFooterData(t *testing.T) {
 	t.Parallel()
 
@@ -729,6 +737,19 @@ func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "lz4", r.Properties()["source"])
 	assert.Empty(t, r.Blobs())
+}
+
+func TestReaderReadsLZ4CompressedFooterWithBlockChecksums(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	data := fileWithCompressedFooterPayloadWithOptions(
+		t,
+		payload,
+		lz4.SizeOption(uint64(len(payload))),
+		lz4.BlockChecksumOption(true),
+	)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
 }
 
 func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
@@ -814,6 +835,12 @@ func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
 		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
 		data := fileWithFooterPayload(payload)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.NoError(t, err)
+	})
+
+	t.Run("invalid limit is ignored for uncompressed JSON", func(t *testing.T) {
+		data := fileWithFooterPayload([]byte(`{"blobs":[]}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(0))
 		require.NoError(t, err)
 	})
 

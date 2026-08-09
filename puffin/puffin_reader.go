@@ -81,7 +81,8 @@ func WithMaxBlobSize(size int64) ReaderOption {
 // WithMaxFooterSize sets the maximum decompressed size allowed for compressed
 // footer payloads when reading. This bounds memory used by JSON decoding and
 // decompression of untrusted Puffin metadata. The default is
-// DefaultMaxFooterSize (64 MB).
+// DefaultMaxFooterSize (64 MB). A non-positive size is rejected for compressed
+// footer payloads.
 func WithMaxFooterSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxFooterSize = size
@@ -201,35 +202,42 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// readLZ4FrameContentSize validates a single LZ4 frame envelope without
+type lz4FrameHeader struct {
+	flags          byte
+	headerSize     int
+	contentSize    uint64
+	hasContentSize bool
+}
+
+// readLZ4FrameHeader reads and validates the LZ4 frame descriptor without
 // consuming the payload. The content size is required by the Puffin format
 // for compressed footer payloads.
-func readLZ4FrameContentSize(r io.ReaderAt, payloadSize int64) (uint64, bool, error) {
+func readLZ4FrameHeader(r io.ReaderAt) (lz4FrameHeader, error) {
 	var header [lz4FrameHeaderSizeWithContent]byte
 	if _, err := r.ReadAt(header[:lz4FrameHeaderSize], 0); err != nil {
-		return 0, false, err
+		return lz4FrameHeader{}, err
 	}
 
 	if binary.LittleEndian.Uint32(header[:4]) != lz4FrameMagic {
-		return 0, false, errors.New("invalid LZ4 frame magic")
+		return lz4FrameHeader{}, errors.New("invalid LZ4 frame magic")
 	}
 
 	hasContentSize := header[4]&lz4FrameContentSizeFlag != 0
 	if header[4]&lz4FrameVersionMask != lz4FrameVersionOne {
-		return 0, false, errors.New("invalid LZ4 frame version")
+		return lz4FrameHeader{}, errors.New("invalid LZ4 frame version")
 	}
 	if header[4]&lz4FrameReservedFLGFlag != 0 {
-		return 0, false, errors.New("invalid LZ4 frame reserved flag")
+		return lz4FrameHeader{}, errors.New("invalid LZ4 frame reserved flag")
 	}
 	if header[4]&lz4FrameDictionaryIDFlag != 0 {
-		return 0, false, errors.New("LZ4 frame dictionary ID is not supported")
+		return lz4FrameHeader{}, errors.New("LZ4 frame dictionary ID is not supported")
 	}
 	if header[5]&lz4FrameReservedBDFlags != 0 {
-		return 0, false, errors.New("invalid LZ4 frame reserved block descriptor flags")
+		return lz4FrameHeader{}, errors.New("invalid LZ4 frame reserved block descriptor flags")
 	}
 	if hasContentSize {
 		if _, err := r.ReadAt(header[lz4FrameHeaderSize:], lz4FrameHeaderSize); err != nil {
-			return 0, false, err
+			return lz4FrameHeader{}, err
 		}
 	}
 
@@ -239,19 +247,22 @@ func readLZ4FrameContentSize(r io.ReaderAt, payloadSize int64) (uint64, bool, er
 	}
 	valid, err := lz4.ValidFrameHeader(header[:headerSize])
 	if err != nil {
-		return 0, false, err
+		return lz4FrameHeader{}, err
 	}
 	if !valid {
-		return 0, false, errors.New("invalid frame header")
-	}
-	if !hasContentSize {
-		return 0, false, nil
-	}
-	if err := validateLZ4FrameEnvelope(r, payloadSize, header[4], headerSize); err != nil {
-		return 0, false, err
+		return lz4FrameHeader{}, errors.New("invalid frame header")
 	}
 
-	return binary.LittleEndian.Uint64(header[lz4FrameHeaderPrefixSize : lz4FrameHeaderPrefixSize+8]), true, nil
+	frameHeader := lz4FrameHeader{
+		flags:          header[4],
+		headerSize:     headerSize,
+		hasContentSize: hasContentSize,
+	}
+	if hasContentSize {
+		frameHeader.contentSize = binary.LittleEndian.Uint64(header[lz4FrameHeaderPrefixSize : lz4FrameHeaderPrefixSize+8])
+	}
+
+	return frameHeader, nil
 }
 
 func validateLZ4FrameEnvelope(r io.ReaderAt, payloadSize int64, flags byte, headerSize int) error {
@@ -322,7 +333,7 @@ func (r *Reader) readFooter() error {
 	}
 
 	// Extract payload size and flags
-	payloadSize := int64(binary.LittleEndian.Uint32(trailer[0:4]))
+	payloadSize := int64(int32(binary.LittleEndian.Uint32(trailer[0:4])))
 	flags := binary.LittleEndian.Uint32(trailer[4:8])
 
 	// Check for unknown flags
@@ -333,9 +344,6 @@ func (r *Reader) readFooter() error {
 	// Validate payload size
 	if payloadSize < 0 {
 		return fmt.Errorf("puffin: invalid footer payload size %d", payloadSize)
-	}
-	if r.maxFooterSize <= 0 {
-		return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
 	}
 
 	// Calculate footer start position
@@ -378,18 +386,30 @@ func (r *Reader) readFooter() error {
 	var compressedContentSize uint64
 	var limitedFooter *io.LimitedReader
 	if flags&FooterFlagCompressed != 0 {
-		contentSize, hasContentSize, err := readLZ4FrameContentSize(payloadReader, payloadSize)
+		if r.maxFooterSize <= 0 {
+			return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
+		}
+
+		frameHeader, err := readLZ4FrameHeader(payloadReader)
 		if err != nil {
 			return fmt.Errorf("puffin: inspect compressed footer LZ4 frame: %w", err)
 		}
-		if !hasContentSize {
+		if !frameHeader.hasContentSize {
 			return errors.New("puffin: compressed footer LZ4 frame is missing content size")
 		}
-		if contentSize > uint64(r.maxFooterSize) {
+		if frameHeader.contentSize > uint64(r.maxFooterSize) {
 			return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
 		}
+		if err := validateLZ4FrameEnvelope(
+			payloadReader,
+			payloadSize,
+			frameHeader.flags,
+			frameHeader.headerSize,
+		); err != nil {
+			return fmt.Errorf("puffin: inspect compressed footer LZ4 frame: %w", err)
+		}
 
-		compressedContentSize = contentSize
+		compressedContentSize = frameHeader.contentSize
 		compressedFooter = &countingReader{reader: lz4.NewReader(payloadReader)}
 		footerReader = compressedFooter
 
