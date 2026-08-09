@@ -3233,9 +3233,6 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	if t.committed {
 		return nil, errors.New("transaction has already been committed")
 	}
-	if err := validateSnapshotExpirationGC(meta); err != nil {
-		return nil, err
-	}
 
 	if len(meta.updates) > 0 {
 		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
@@ -3279,16 +3276,6 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 func validateGCEnabledForSnapshotExpiration(props iceberg.Properties) error {
 	if !props.GetBool(GCEnabledKey, GCEnabledDefault) {
 		return errors.New("cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
-	}
-
-	return nil
-}
-
-func validateSnapshotExpirationGC(meta *MetadataBuilder) error {
-	for _, update := range meta.updates {
-		if _, ok := update.(*removeSnapshotsUpdate); ok {
-			return validateGCEnabledForSnapshotExpiration(meta.props)
-		}
 	}
 
 	return nil
