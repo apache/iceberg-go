@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"reflect"
 	"slices"
 	"sync"
 
@@ -76,25 +77,39 @@ type partitionExtractionPlan struct {
 
 type binaryPartitionKey string
 
-type nanPartitionKey struct {
-	bits int
-}
+type float32PartitionKey uint32
+type float64PartitionKey uint64
+
+const (
+	canonicalFloat32NaNBits uint32 = 0x7fc00000
+	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
+)
 
 func comparablePartitionKey(value any) any {
 	switch value := value.(type) {
 	case []byte:
 		return binaryPartitionKey(value)
 	case float32:
+		bits := math.Float32bits(value)
 		if math.IsNaN(float64(value)) {
-			return nanPartitionKey{bits: 32}
+			bits = canonicalFloat32NaNBits
 		}
+
+		return float32PartitionKey(bits)
 	case float64:
+		bits := math.Float64bits(value)
 		if math.IsNaN(value) {
-			return nanPartitionKey{bits: 64}
+			bits = canonicalFloat64NaNBits
 		}
+
+		return float64PartitionKey(bits)
 	}
 
 	return value
+}
+
+func partitionValuesEqual(left, right any) bool {
+	return reflect.DeepEqual(comparablePartitionKey(left), comparablePartitionKey(right))
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {
@@ -102,7 +117,7 @@ func partitionRecordsEqual(left, right partitionRecord) bool {
 		return false
 	}
 	for i := range left {
-		if comparablePartitionKey(left[i]) != comparablePartitionKey(right[i]) {
+		if !partitionValuesEqual(left[i], right[i]) {
 			return false
 		}
 	}

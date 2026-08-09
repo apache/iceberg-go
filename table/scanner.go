@@ -609,7 +609,7 @@ func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries
 }
 
 func partitionsMatch(a, b map[int]any) bool {
-	return maps.EqualFunc(a, b, reflect.DeepEqual)
+	return maps.EqualFunc(a, b, partitionValuesEqual)
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.

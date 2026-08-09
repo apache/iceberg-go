@@ -349,6 +349,35 @@ func (s *FanoutWriterTestSuite) TestNaNPartitionValuesUseStableKeys() {
 	s.True(math.IsNaN(partitions[0].partitionRec[0].(float64)))
 }
 
+func (s *FanoutWriterTestSuite) TestFloatPartitionValuesUseIcebergKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Copysign(0, -1)},
+		{0.0},
+		{math.Float64frombits(0x7ff8000000000001)},
+		{math.Float64frombits(0x7ff8000000000002)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float64})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByBits := make(map[uint64]int)
+	for _, partition := range partitions {
+		value := partition.partitionRec[0].(float64)
+		rowsByBits[math.Float64bits(value)] = len(partition.rows)
+	}
+	s.Equal(1, rowsByBits[math.Float64bits(math.Copysign(0, -1))])
+	s.Equal(1, rowsByBits[math.Float64bits(0)])
+	s.Equal(2, rowsByBits[math.Float64bits(math.Float64frombits(0x7ff8000000000001))])
+}
+
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
