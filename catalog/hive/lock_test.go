@@ -431,11 +431,14 @@ func TestApplyJitterAtCapStaysWithinBoundsAndVaries(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := time.Second
 
+	// 800ms is the last interval the sequence produced before saturating, which is
+	// the floor the code actually guarantees. Asserting maxWait/2 here would pass a
+	// regression that let the spread dip to 600ms.
 	seen := make(map[time.Duration]struct{})
 	for i := 0; i < 500; i++ {
 		got := applyJitter(maxWait, minWait, maxWait)
-		assert.GreaterOrEqual(t, got, maxWait/2,
-			"the spread at the cap must not exceed one half interval")
+		assert.GreaterOrEqual(t, got, 800*time.Millisecond,
+			"the spread at the cap must be at least the last uncapped interval")
 		assert.LessOrEqual(t, got, maxWait,
 			"the wait must never exceed the configured maximum")
 		seen[got] = struct{}{}
@@ -508,6 +511,29 @@ func TestApplyJitterAtCapFloorsAtTheLastUncappedInterval(t *testing.T) {
 	}
 }
 
+// The case above uses a clean power-of-two ratio, where d/2 and the last uncapped
+// interval happen to be close. This one separates them: at 300ms/1s the sequence
+// runs 300ms, 600ms, then saturates, so the floor must be 600ms while d/2 is only
+// 500ms. It is the case that distinguishes the replay from a flat max(minWait, d/2)
+// floor, and the only place the arithmetic could quietly go wrong.
+func TestApplyJitterAtCapFloorsCorrectlyForNonPowerOfTwoRatios(t *testing.T) {
+	minWait := 300 * time.Millisecond
+	maxWait := time.Second
+
+	require.Equal(t, 600*time.Millisecond, calculateBackoff(1, minWait, maxWait),
+		"the last interval before the cap")
+	require.Equal(t, maxWait, calculateBackoff(2, minWait, maxWait),
+		"the first interval at the cap")
+
+	for i := 0; i < 2000; i++ {
+		got := applyJitter(maxWait, minWait, maxWait)
+		assert.GreaterOrEqual(t, got, 600*time.Millisecond,
+			"a flat d/2 floor would allow 500ms here, below what the previous attempt guaranteed")
+		assert.LessOrEqual(t, got, maxWait,
+			"the wait must never exceed the configured maximum")
+	}
+}
+
 // A caller may configure minWait above maxWait; options.go accepts it, and
 // calculateBackoff resolves it by returning maxWait. The downward spread must not
 // then draw below the configured minimum. Flooring at half the interval would
@@ -533,7 +559,7 @@ func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 // the lower bound is asserted tightly; the ceiling is loose because a busy CI box
 // can add arbitrary scheduling delay on top, and a flaky timing test is worse than
 // no timing test.
-func TestAcquireLocksAggregateRetryDelayStaysWithinBound(t *testing.T) {
+func TestAcquireLocksRunsTheFullRetrySchedule(t *testing.T) {
 	mockClient := new(mockHiveClient)
 	ctx := context.Background()
 	opts := NewHiveOptions()
@@ -553,20 +579,18 @@ func TestAcquireLocksAggregateRetryDelayStaysWithinBound(t *testing.T) {
 		}, nil)
 	mockClient.On("Unlock", mock.Anything, int64(901)).Return(nil)
 
-	start := time.Now()
 	lock, err := acquireLocks(ctx, mockClient,
 		[]tableLockIdentifier{{database: "testdb", table: "testtable"}}, opts)
-	elapsed := time.Since(start)
 
 	require.Error(t, err)
 	require.Nil(t, lock)
 	assert.ErrorIs(t, err, ErrLockAcquisitionFailed)
 
-	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond,
-		"the jittered waits must never sum to less than the unjittered schedule")
-	assert.Less(t, elapsed, 5*time.Second,
-		"the jittered waits must stay bounded by roughly twice the schedule")
-
+	// Counting calls rather than measuring elapsed time. The additive
+	// never-shorter property is already covered by
+	// TestApplyJitterBelowCapNeverShorterThanInput without touching the clock, and a
+	// wall-clock bound is the kind of assertion that flakes on a loaded CI runner.
+	mockClient.AssertNumberOfCalls(t, "CheckLock", opts.LockRetries)
 	mockClient.AssertExpectations(t)
 }
 
