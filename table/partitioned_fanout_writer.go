@@ -195,6 +195,7 @@ func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, err
 			case inputRecordsCh <- record:
 			}
 		}
+
 		return nil
 	})
 }
