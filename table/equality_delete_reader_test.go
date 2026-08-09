@@ -125,6 +125,64 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
 }
 
+func TestEqualityDeleteReadResolvesRenamedDataColumnByFieldID(t *testing.T) {
+	tbl := newEqDeleteReadTestTable(t)
+
+	dataSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, true, false)
+	require.NoError(t, err)
+	dataFields := dataSchema.Fields()
+	dataFields[0].Name = "legacy_id"
+	dataMetadata := dataSchema.Metadata()
+	dataSchema = arrow.NewSchema(dataFields, &dataMetadata)
+
+	dataPath := tbl.Location() + "/data/data-renamed.parquet"
+	writeParquetFile(t, dataPath, dataSchema, `[
+		{"legacy_id": 1, "data": "one"},
+		{"legacy_id": 2, "data": "two"},
+		{"legacy_id": 3, "data": "three"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	deletePath := tbl.Location() + "/data/delete-renamed.parquet"
+	writeParquetFile(t, deletePath, deleteSchema, `[{"id": 2}]`)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, records, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.Equal(t, []int64{1, 3}, ids)
+}
+
 func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	tbl := newEqDeleteReadTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)

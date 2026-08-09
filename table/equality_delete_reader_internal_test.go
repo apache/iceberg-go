@@ -247,15 +247,26 @@ func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
 	first.Release()
 	second.Release()
 
-	process, err := processEqualityDeletesColumnar(context.Background(), []*equalityDeleteSet{{
+	process, err := processEqualityDeletesColumnarForFile(context.Background(), []*equalityDeleteSet{{
 		keys:     make(set[string]),
 		fieldIDs: []int{1},
 		colNames: []string{"id"},
-	}})
+	}}, "data.parquet")
 	require.NoError(t, err)
 
 	_, err = process(record)
 	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
+}
+
+func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
+	process, err := processEqualityDeletesColumnarForFile(context.Background(), []*equalityDeleteSet{{
+		keys:     make(set[string]),
+		fieldIDs: []int{1},
+		colNames: []string{"id", "other"},
+	}}, "data.parquet")
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.Nil(t, process)
 }
 
 func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {

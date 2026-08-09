@@ -49,7 +49,7 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				defer rec.Release()
 
 				delSet := buildDel(nDel)
-				filterFn, err := processEqualityDeletes(ctx, []*equalityDeleteSet{delSet})
+				filterFn, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{delSet}, "data.parquet")
 				if err != nil {
 					b.Fatal(err)
 				}

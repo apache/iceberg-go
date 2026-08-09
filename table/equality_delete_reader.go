@@ -106,11 +106,10 @@ func resolveArrowField(schema *arrow.Schema, fieldID int, fieldName, filePath st
 	}
 
 	if fieldID > 0 {
-		switch len(idMatches) {
-		case 1:
+		if len(idMatches) == 1 {
 			return idMatches[0].ref, nil
-		case 0:
-		default:
+		}
+		if len(idMatches) > 1 {
 			return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields",
 				ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(idMatches))
 		}
@@ -503,13 +502,6 @@ func encodeArrowValue(buf *bytes.Buffer, arr arrow.Array, idx int) {
 	}
 }
 
-// processEqualityDeletes returns a pipeline function that filters out
-// rows whose equality key columns match any entry in the delete sets.
-// Each set is applied independently (they may have different field IDs).
-func processEqualityDeletes(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
-	return processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, "")
-}
-
 // colEncoder writes the value at row idx to buf. Resolved once per column
 // to avoid per-row type switches.
 type colEncoder func(buf *bytes.Buffer, row int)
@@ -681,15 +673,40 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 	}
 }
 
-// processEqualityDeletesColumnar resolves typed column encoders once per
-// batch, then iterates rows without per-row type switches.
-func processEqualityDeletesColumnar(ctx context.Context, eqDeleteSets []*equalityDeleteSet) (recProcessFn, error) {
-	return processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, "")
-}
-
+// processEqualityDeletesColumnarForFile resolves field paths once per file and
+// typed column encoders once per batch, then iterates rows without per-row type
+// switches. Each delete set is applied independently because sets may have
+// different field IDs.
 func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, dataFilePath string) (recProcessFn, error) {
+	fieldRefs := make([][]arrowFieldRef, len(eqDeleteSets))
+	for i, eqDel := range eqDeleteSets {
+		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
+			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
+				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
+		}
+
+		fieldRefs[i] = make([]arrowFieldRef, len(eqDel.fieldIDs))
+	}
+
+	fieldsResolved := false
+
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
+
+		if !fieldsResolved {
+			for setIdx, eqDel := range eqDeleteSets {
+				for fieldIdx, fieldID := range eqDel.fieldIDs {
+					ref, err := resolveArrowField(r.Schema(), fieldID, eqDel.colNames[fieldIdx], dataFilePath)
+					if err != nil {
+						return nil, err
+					}
+
+					fieldRefs[setIdx][fieldIdx] = ref
+				}
+			}
+
+			fieldsResolved = true
+		}
 
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
@@ -705,19 +722,11 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 
 		var keyBuf bytes.Buffer
 
-		for _, eqDel := range eqDeleteSets {
+		for setIdx, eqDel := range eqDeleteSets {
 			encoders := make([]colEncoder, len(eqDel.colNames))
 			for i, name := range eqDel.colNames {
-				fieldID := 0
-				if i < len(eqDel.fieldIDs) {
-					fieldID = eqDel.fieldIDs[i]
-				}
-
-				ref, err := resolveArrowField(r.Schema(), fieldID, name, dataFilePath)
-				if err != nil {
-					return nil, err
-				}
-				encoders[i], err = makeArrowFieldEncoder(r, ref, fieldID, name, dataFilePath)
+				var err error
+				encoders[i], err = makeArrowFieldEncoder(r, fieldRefs[setIdx][i], eqDel.fieldIDs[i], name, dataFilePath)
 				if err != nil {
 					return nil, err
 				}
