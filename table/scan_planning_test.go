@@ -169,6 +169,40 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	assert.Equal(t, int64(25), *historicalPlanner.receivedRequest.MinRowsRequested)
 }
 
+func TestScanPlanningRemoteRejectsLastUpdatedSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		planner:        planner,
+		planningMode:   ScanPlanningRemote,
+		selectedFields: []string{iceberg.LastUpdatedSequenceNumberColumnName},
+		caseSensitive:  true,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Empty(t, planner.receivedIdentifier)
+}
+
+func TestScanPlanningAutoFallsBackForLastUpdatedSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	planner := &fakeScanPlanner{supports: true}
+	scan := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningAuto),
+		WithRowLineage(),
+	)
+	scan.planner = planner
+
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Empty(t, planner.receivedIdentifier)
+}
+
 func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	t.Parallel()
 

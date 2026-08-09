@@ -956,6 +956,15 @@ func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot             { return
 func (m scanTestMetadata) SnapshotByID(int64) *table.Snapshot           { return nil }
 func (m scanTestMetadata) Properties() iceberg.Properties               { return nil }
 
+type scanPlanningSchemaMetadata struct {
+	*scanTaskDecoderMetadata
+	current *iceberg.Schema
+	schemas []*iceberg.Schema
+}
+
+func (m scanPlanningSchemaMetadata) CurrentSchema() *iceberg.Schema { return m.current }
+func (m scanPlanningSchemaMetadata) Schemas() []*iceberg.Schema     { return m.schemas }
+
 // planFilesReq is a minimal planner request naming the test table.
 func planFilesReq() table.ScanPlanningRequest {
 	return table.ScanPlanningRequest{
@@ -1138,6 +1147,103 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 	_, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.ErrorIs(t, err, ErrServiceUnavailable)
 	assert.Equal(t, int32(1), cancels.Load())
+}
+
+func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
+	t.Parallel()
+
+	var cancels atomic.Int32
+	cat := newScanPlanningTestCatalog(t, []endpoint{
+		endpointPlanTableScan,
+		endpointFetchScanTasks,
+		endpointCancelPlanning,
+	}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			require.Equal(t, "h1", body.PlanTask)
+			_, err := w.Write([]byte(`{"file-scan-tasks":[]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
+			require.Equal(t, http.MethodDelete, req.Method)
+			cancels.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	result, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.NoError(t, err)
+	assert.Empty(t, result.Tasks)
+	assert.Equal(t, int32(1), cancels.Load())
+}
+
+func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {
+	t.Parallel()
+
+	var cancels atomic.Int32
+	cat := newScanPlanningTestCatalog(t, []endpoint{
+		endpointPlanTableScan,
+		endpointFetchScanTasks,
+		endpointCancelPlanning,
+	}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+			require.Equal(t, "h1", body.PlanTask)
+			_, err := w.Write([]byte(`{"file-scan-tasks":[{}]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
+			require.Equal(t, http.MethodDelete, req.Method)
+			cancels.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	_, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.ErrorIs(t, err, ErrRESTError)
+	assert.Equal(t, int32(1), cancels.Load())
+}
+
+func TestRemoteScanTasksUsesResolvedSchemaForResiduals(t *testing.T) {
+	t.Parallel()
+
+	decoderMetadata := newScanTaskDecoderMetadata()
+	oldSchema := decoderMetadata.schema
+	currentFields := append([]iceberg.NestedField(nil), oldSchema.Fields()...)
+	currentFields[1].Name = "new_category"
+	currentSchema := iceberg.NewSchema(11, currentFields...)
+	metadata := scanPlanningSchemaMetadata{
+		scanTaskDecoderMetadata: decoderMetadata,
+		current:                 currentSchema,
+		schemas:                 []*iceberg.Schema{currentSchema, oldSchema},
+	}
+	req := table.ScanPlanningRequest{
+		Metadata: metadata,
+		Schema:   oldSchema,
+		RowFilter: iceberg.GreaterThan(
+			iceberg.Reference("category"),
+			"old",
+		),
+	}
+	wireReq, err := planTableScanRequestFrom(req)
+	require.NoError(t, err)
+
+	wire := validScanTasksWire()
+	wire.FileScanTasks[0].ResidualFilter = wireReq.Filter
+	tasks, err := remoteScanTasks([]ScanTasks{wire}, req)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.True(t, tasks[0].Residual.Equals(req.RowFilter))
 }
 
 // TestPlanFilesDecodesFanoutTaskEnvelopes exercises the Phase 5 boundary from

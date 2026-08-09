@@ -206,6 +206,11 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 	if resp.PlanID != nil {
 		planID = *resp.PlanID
 	}
+	cleanup := func() {
+		if planID != "" {
+			r.abandonPlan(ctx, req.Identifier, planID, DefaultWaitForPlanOptions.CancelGracePeriod)
+		}
+	}
 
 	// Resolve to a completed plan: use an inline result as-is, or poll a
 	// submitted one to completion. PlanTableScan maps failed to an error and
@@ -229,22 +234,25 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
 	if err != nil {
-		if planID != "" {
-			r.abandonPlan(ctx, req.Identifier, planID, DefaultWaitForPlanOptions.CancelGracePeriod)
-		}
+		cleanup()
 
 		return table.ScanPlanningResult{}, err
 	}
 
 	tasks, err := remoteScanTasks(envelopes, req)
 	if err != nil {
+		cleanup()
+
 		return table.ScanPlanningResult{}, err
 	}
 
-	return table.ScanPlanningResult{
+	result := table.ScanPlanningResult{
 		Tasks: tasks,
 		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req.Metadata)),
-	}, nil
+	}
+	cleanup()
+
+	return result, nil
 }
 
 // planIOBaseProps rebuilds the props the table's own FileIO was built with, so a
@@ -301,7 +309,7 @@ func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]ta
 			continue
 		}
 
-		tasks, err := DecodeScanTasks(envelope, req.Metadata, nil, req.RowFilter)
+		tasks, err := DecodeScanTasks(envelope, req.Metadata, req.Schema, req.RowFilter)
 		if err != nil {
 			return nil, fmt.Errorf("decoding remote scan task envelope %d: %w", i, err)
 		}
