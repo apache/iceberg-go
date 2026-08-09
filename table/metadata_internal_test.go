@@ -412,6 +412,19 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			reducedData, err := json.Marshal(reduced)
 			require.NoError(t, err)
 
+			if tt.name != "v1" {
+				before, err := json.Marshal(tt.target)
+				require.NoError(t, err)
+
+				err = json.Unmarshal(reducedData, tt.target)
+				require.ErrorContains(t, err, "last-sequence-number is required")
+
+				after, err := json.Marshal(tt.target)
+				require.NoError(t, err)
+				assert.Equal(t, before, after)
+				return
+			}
+
 			require.NoError(t, json.Unmarshal(reducedData, tt.target))
 
 			common = metadataCommon(tt.target)
@@ -425,17 +438,7 @@ func TestMetadataUnmarshalReplacesReceiverState(t *testing.T) {
 			assert.Empty(t, common.StatisticsList)
 			assert.Empty(t, common.PartitionStatsList)
 			assert.Empty(t, common.EncryptionKeyList)
-			// With no snapshots, an omitted last-sequence-number retains the
-			// legacy -1 sentinel. This documents current behavior, not the
-			// desired metadata normalization.
-			switch metadata := tt.target.(type) {
-			case *metadataV1:
-				assert.Equal(t, int64(0), metadata.LastSequenceNumber())
-			case *metadataV2:
-				assert.Equal(t, int64(-1), metadata.LastSeqNum)
-			case *metadataV3:
-				assert.Equal(t, int64(-1), metadata.LastSeqNum)
-			}
+			assert.Equal(t, int64(0), tt.target.(*metadataV1).LastSequenceNumber())
 		})
 	}
 }
@@ -826,6 +829,7 @@ func TestInvalidFormatVersion(t *testing.T) {
 func TestCurrentSchemaNotFound(t *testing.T) {
 	schemaNotFound := `{
         "format-version": 2,
+        "last-sequence-number": 34,
         "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
         "location": "s3://bucket/test/location",
         "last-updated-ms": 1602638573874,
@@ -966,6 +970,7 @@ func TestRejectsStoredPartitionSpecWithoutID(t *testing.T) {
 func TestSortOrderNotFound(t *testing.T) {
 	metadataSortOrderNotFound := `{
         "format-version": 2,
+        "last-sequence-number": 34,
         "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
         "location": "s3://bucket/test/location",
         "last-updated-ms": 1602638573874,
@@ -1010,6 +1015,7 @@ func TestSortOrderNotFound(t *testing.T) {
 func TestSortOrderUnsorted(t *testing.T) {
 	sortOrderUnsorted := `{
         "format-version": 2,
+        "last-sequence-number": 34,
         "table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
         "location": "s3://bucket/test/location",
         "last-updated-ms": 1602638573874,
@@ -1649,6 +1655,7 @@ func TestMetadataV2Validation(t *testing.T) {
 	// Test case 2: JSON with explicit last-column-id field
 	withColumnID := `{
 		"format-version": 2,
+		"last-sequence-number": 34,
 		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
 		"location": "s3://bucket/test/location",
 		"last-updated-ms": 1602638573874,

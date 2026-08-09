@@ -2762,10 +2762,15 @@ type SequenceNumberValidator interface {
 
 // checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
 func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
+	lastSequenceNumber := validator.LastSequenceNumber()
+	if lastSequenceNumber == -1 {
+		return fmt.Errorf("%w: last-sequence-number is required for format versions greater than 1", ErrInvalidMetadata)
+	}
+
 	for _, snap := range snapshotList {
-		if snap.SequenceNumber > validator.LastSequenceNumber() {
+		if snap.SequenceNumber > lastSequenceNumber {
 			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, validator.LastSequenceNumber())
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, lastSequenceNumber)
 		}
 	}
 
