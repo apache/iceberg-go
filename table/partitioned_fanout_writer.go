@@ -75,10 +75,11 @@ type partitionExtractionPlan struct {
 	fields       []partitionFieldInfo
 }
 
-type binaryPartitionKey string
-
-type float32PartitionKey uint32
-type float64PartitionKey uint64
+type (
+	binaryPartitionKey  string
+	float32PartitionKey uint32
+	float64PartitionKey uint64
+)
 
 const (
 	canonicalFloat32NaNBits uint32 = 0x7fc00000
@@ -191,7 +192,6 @@ func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, err
 			case inputRecordsCh <- record:
 			}
 		}
-
 		return nil
 	})
 }
