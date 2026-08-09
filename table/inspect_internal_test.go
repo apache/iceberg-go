@@ -25,6 +25,7 @@ import (
 	"math"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -33,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/dv"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -2866,6 +2868,208 @@ func TestAllEntriesSchemaMatchesEntries(t *testing.T) {
 		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 	}}
 	require.True(t, EntriesSchema(partitionType).Equals(AllEntriesSchema(partitionType)))
+}
+
+func newInspectPositionDeletesMetadata(t *testing.T, formatVersion int) *MetadataBuilder {
+	t.Helper()
+
+	mb, err := NewMetadataBuilder(formatVersion)
+	require.NoError(t, err)
+	require.NoError(t, mb.AddSchema(simpleSchema()))
+	require.NoError(t, mb.SetCurrentSchemaID(0))
+	require.NoError(t, mb.AddPartitionSpec(iceberg.UnpartitionedSpec, true))
+	require.NoError(t, mb.SetDefaultSpecID(0))
+	require.NoError(t, mb.SetLoc("mem://position-deletes/table"))
+	addUnsortedSortOrder(t, mb)
+	metadata, err := mb.Build()
+	require.NoError(t, err)
+	mb, err = MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	return mb
+}
+
+func inspectPositionDeletesTable(
+	t *testing.T,
+	formatVersion int,
+	mb *MetadataBuilder,
+	fs iceio.WriteFileIO,
+	files []iceberg.DataFile,
+) *Table {
+	t.Helper()
+
+	snapshotID := int64(1)
+	sequenceNumber := int64(1)
+	manifestPath := "mem://position-deletes/table/metadata/deletes.avro"
+	manifestBuffer := &bytes.Buffer{}
+	writer, err := iceberg.NewManifestWriter(
+		formatVersion, manifestBuffer, *iceberg.UnpartitionedSpec,
+		simpleSchema(), snapshotID,
+		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes),
+	)
+	require.NoError(t, err)
+	for _, file := range files {
+		require.NoError(t, writer.Add(iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, &sequenceNumber, file)))
+	}
+	manifest, err := writer.ToManifestFile(
+		manifestPath, int64(manifestBuffer.Len()),
+		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes),
+	)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
+
+	manifestListPath := "mem://position-deletes/table/metadata/snap.avro"
+	manifestListBuffer := &bytes.Buffer{}
+	require.NoError(t, iceberg.WriteManifestList(
+		formatVersion, manifestListBuffer, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest},
+	))
+	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
+
+	schemaID := 0
+	snapshot := &Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: sequenceNumber,
+		TimestampMs:    time.Now().UnixMilli(),
+		ManifestList:   manifestListPath,
+		SchemaID:       &schemaID,
+	}
+	if formatVersion >= 3 {
+		firstRowID, addedRows := int64(0), int64(0)
+		snapshot.FirstRowID = &firstRowID
+		snapshot.AddedRows = &addedRows
+	}
+	require.NoError(t, mb.AddSnapshot(snapshot))
+	require.NoError(t, mb.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	metadata, err := mb.Build()
+	require.NoError(t, err)
+
+	return New(
+		Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return fs, nil }, nil,
+	)
+}
+
+func TestInspectPositionDeletesParquet(t *testing.T) {
+	ctx := context.Background()
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 1},
+		{"file_path": "`+dataPath+`", "pos": 3}
+	]`)
+	deleteFile := newPosDeleteFile(t, deletePath, 2, 128)
+	tbl := inspectPositionDeletesTable(
+		t, 2, newInspectPositionDeletesMetadata(t, 2), memFS,
+		[]iceberg.DataFile{deleteFile},
+	)
+
+	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	require.NoError(t, err)
+	defer rr.Release()
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+	require.EqualValues(t, 5, rec.NumCols())
+	filePaths := rec.Column(0).(*array.String)
+	require.Equal(t, dataPath, filePaths.Value(0))
+	require.Equal(t, dataPath, filePaths.Value(1))
+	require.Equal(t, []int64{1, 3}, rec.Column(1).(*array.Int64).Int64Values())
+	require.EqualValues(t, 2, rec.Column(2).NullN())
+	require.Equal(t, []int32{0, 0}, rec.Column(3).(*array.Int32).Int32Values())
+	deleteFilePaths := rec.Column(4).(*array.String)
+	require.Equal(t, deletePath, deleteFilePaths.Value(0))
+	require.Equal(t, deletePath, deleteFilePaths.Value(1))
+}
+
+func TestInspectPositionDeletesDeletionVector(t *testing.T) {
+	ctx := context.Background()
+	memFS := iceio.NewMemFS()
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	dvPath := "mem://position-deletes/table/metadata/deletes.puffin"
+	dvWriter := dv.NewDVWriter(memFS, func(id int32) *iceberg.PartitionSpec {
+		if id == 0 {
+			return iceberg.UnpartitionedSpec
+		}
+
+		return nil
+	})
+	require.NoError(t, dvWriter.Add(dataPath, []int64{1, 3}, 0, nil))
+	deleteFiles, err := dvWriter.Flush(ctx, dvPath)
+	require.NoError(t, err)
+	require.Len(t, deleteFiles, 1)
+	tbl := inspectPositionDeletesTable(
+		t, 3, newInspectPositionDeletesMetadata(t, 3), memFS, deleteFiles,
+	)
+
+	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	require.NoError(t, err)
+	defer rr.Release()
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+	require.EqualValues(t, 7, rec.NumCols())
+	filePaths := rec.Column(0).(*array.String)
+	require.Equal(t, dataPath, filePaths.Value(0))
+	require.Equal(t, dataPath, filePaths.Value(1))
+	require.Equal(t, []int64{1, 3}, rec.Column(1).(*array.Int64).Int64Values())
+	deleteFilePaths := rec.Column(4).(*array.String)
+	require.Equal(t, dvPath, deleteFilePaths.Value(0))
+	require.Equal(t, dvPath, deleteFilePaths.Value(1))
+	offset := *deleteFiles[0].ContentOffset()
+	size := *deleteFiles[0].ContentSizeInBytes()
+	require.Equal(t, []int64{offset, offset}, rec.Column(5).(*array.Int64).Int64Values())
+	require.Equal(t, []int64{size, size}, rec.Column(6).(*array.Int64).Int64Values())
+}
+
+func TestPositionDeletesSchema(t *testing.T) {
+	v2 := PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 2)
+	v2Fields := v2.Fields()
+	require.Equal(t,
+		[]string{"file_path", "pos", "row", "spec_id", "delete_file_path"},
+		testFieldNames(v2),
+	)
+	require.Equal(t, []int{
+		positionDeleteFilePathID,
+		positionDeletePosID,
+		positionDeleteRowID,
+		positionDeleteSpecID,
+		positionDeletePhysicalPathID,
+	}, []int{
+		v2Fields[0].ID,
+		v2Fields[1].ID,
+		v2Fields[2].ID,
+		v2Fields[3].ID,
+		v2Fields[4].ID,
+	})
+
+	v3 := PositionDeletesSchema(simpleSchema(), &iceberg.StructType{}, 3)
+	v3Fields := v3.Fields()
+	require.Equal(t,
+		[]string{"file_path", "pos", "row", "spec_id", "delete_file_path", "content_offset", "content_size_in_bytes"},
+		testFieldNames(v3),
+	)
+	require.Equal(t, positionDeleteContentOffsetID, v3Fields[5].ID)
+	require.Equal(t, positionDeleteContentSizeID, v3Fields[6].ID)
+
+	spec := partitionedSpec()
+	metadata, err := NewMetadata(
+		simpleSchema(), &spec, UnsortedSortOrder, "mem://position-deletes/table", nil,
+	)
+	require.NoError(t, err)
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadata)
+	require.NoError(t, err)
+	require.Equal(t, map[int]int{1000: 2}, partitionIDs)
+	require.Equal(t, 2, partitionType.FieldList[0].ID)
+	partitioned := PositionDeletesSchema(simpleSchema(), partitionType, 2)
+	require.Equal(t,
+		[]string{"file_path", "pos", "row", "partition", "spec_id", "delete_file_path"},
+		testFieldNames(partitioned),
+	)
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
