@@ -276,7 +276,29 @@ func (s Snapshot) MarshalJSON() ([]byte, error) {
 		s.ManifestLocations = nil
 	}
 
-	return json.Marshal((*Alias)(&s))
+	data, err := json.Marshal((*Alias)(&s))
+	if err != nil {
+		return nil, err
+	}
+	if s.ManifestLocations == nil {
+		return data, nil
+	}
+
+	// A non-nil slice represents the V1 embedded-manifest form, including an
+	// explicitly empty manifests array. V1 snapshots do not serialize a
+	// sequence number.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	locations, err := json.Marshal(s.ManifestLocations)
+	if err != nil {
+		return nil, err
+	}
+	fields["manifests"] = locations
+	delete(fields, "sequence-number")
+
+	return json.Marshal(fields)
 }
 
 func (s Snapshot) String() string {
@@ -297,6 +319,9 @@ func (s Snapshot) String() string {
 }
 
 func (s Snapshot) Equals(other Snapshot) bool {
+	manifestLocationsEqual := (s.ManifestLocations == nil) == (other.ManifestLocations == nil) &&
+		slices.Equal(s.ManifestLocations, other.ManifestLocations)
+
 	switch {
 	case s.ParentSnapshotID == nil && other.ParentSnapshotID != nil:
 		fallthrough
@@ -324,7 +349,7 @@ func (s Snapshot) Equals(other Snapshot) bool {
 		s.SequenceNumber == other.SequenceNumber &&
 		s.TimestampMs == other.TimestampMs &&
 		s.ManifestList == other.ManifestList &&
-		slices.Equal(s.ManifestLocations, other.ManifestLocations) &&
+		manifestLocationsEqual &&
 		s.Summary.Equals(other.Summary)
 }
 
@@ -352,10 +377,15 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 
 		return iceberg.ReadManifestList(f)
 	}
-	if len(s.ManifestLocations) > 0 {
+	if s.ManifestLocations != nil {
 		manifests := make([]iceberg.ManifestFile, len(s.ManifestLocations))
 		for i, path := range s.ManifestLocations {
-			manifests[i] = iceberg.NewManifestFile(1, path, -1, 0, s.SnapshotID).
+			length, err := embeddedManifestLength(fio, path)
+			if err != nil {
+				return nil, err
+			}
+
+			manifests[i] = iceberg.NewManifestFile(1, path, length, 0, s.SnapshotID).
 				AddedFiles(-1).
 				ExistingFiles(-1).
 				DeletedFiles(-1).
@@ -369,6 +399,34 @@ func (s Snapshot) Manifests(fio iceio.IO) (_ []iceberg.ManifestFile, err error) 
 	}
 
 	return nil, nil
+}
+
+func embeddedManifestLength(fio iceio.IO, path string) (_ int64, err error) {
+	if fio == nil {
+		return 0, fmt.Errorf("cannot stat embedded manifest %q without IO", path)
+	}
+
+	if statIO, ok := fio.(iceio.StatIO); ok {
+		info, err := statIO.Stat(path)
+		if err != nil {
+			return 0, fmt.Errorf("could not stat embedded manifest %q: %w", path, err)
+		}
+
+		return info.Size(), nil
+	}
+
+	f, err := fio.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("could not open embedded manifest %q: %w", path, err)
+	}
+	defer internal.CheckedClose(f, &err)
+
+	info, err := f.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("could not stat embedded manifest %q: %w", path, err)
+	}
+
+	return info.Size(), nil
 }
 
 func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryContent]) iter.Seq2[iceberg.DataFile, error] {

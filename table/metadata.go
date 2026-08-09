@@ -2064,7 +2064,10 @@ func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	clone := snapshot
-	clone.ManifestLocations = slices.Clone(snapshot.ManifestLocations)
+	if snapshot.ManifestLocations != nil {
+		clone.ManifestLocations = make([]string, len(snapshot.ManifestLocations))
+		copy(clone.ManifestLocations, snapshot.ManifestLocations)
+	}
 	if snapshot.ParentSnapshotID != nil {
 		value := *snapshot.ParentSnapshotID
 		clone.ParentSnapshotID = &value
