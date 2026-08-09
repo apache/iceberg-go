@@ -64,6 +64,122 @@ func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
 	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
 }
 
+func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {
+	tests := []struct {
+		name            string
+		props           iceberg.Properties
+		oldSnapshotKept bool
+	}{
+		{
+			name: "standard properties",
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey: "1",
+				MaxSnapshotAgeMsKey:   "0",
+			},
+		},
+		{
+			name: "legacy properties",
+			props: iceberg.Properties{
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
+		{
+			name: "standard max age takes precedence",
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "1",
+				MaxSnapshotAgeMsKey:         "0",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "1000000000000000000",
+			},
+		},
+		{
+			name:            "standard minimum takes precedence",
+			oldSnapshotKept: true,
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "2",
+				MaxSnapshotAgeMsKey:         "0",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.meta.props = tt.props
+			txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-time.Hour).UnixMilli()
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, err := txn.meta.SnapshotByID(10)
+			if tt.oldSnapshotKept {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestExpireSnapshotsUsesStandardRetentionDefaults(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-6 * 24 * time.Hour).UnixMilli()
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+
+	require.NoError(t, txn.ExpireSnapshots())
+	_, err := txn.meta.SnapshotByID(10)
+	require.Error(t, err)
+}
+
+func TestExpireSnapshotsUsesStandardMaxRefAgeProperty(t *testing.T) {
+	tests := []struct {
+		name    string
+		props   iceberg.Properties
+		refKept bool
+	}{
+		{
+			name: "standard property",
+			props: iceberg.Properties{
+				MaxRefAgeMsKey: "0",
+			},
+		},
+		{
+			name: "legacy property",
+			props: iceberg.Properties{
+				legacyMaxRefAgeMsKey: "0",
+			},
+		},
+		{
+			name:    "standard property takes precedence",
+			refKept: true,
+			props: iceberg.Properties{
+				MaxRefAgeMsKey:       "1000000000000000000",
+				legacyMaxRefAgeMsKey: "0",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.meta.props = tt.props
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+			require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 10, BranchRef))
+			txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-time.Hour).UnixMilli()
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, refKept := txn.meta.refs["old-branch"]
+			if tt.refKept {
+				require.True(t, refKept)
+			} else {
+				require.False(t, refKept)
+			}
+		})
+	}
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 

@@ -99,14 +99,18 @@ const (
 	ParquetVariantBufferSizeKey     = internal.ParquetVariantBufferSizeKey
 	ParquetVariantBufferSizeDefault = internal.ParquetVariantBufferSizeDefault
 
-	MinSnapshotsToKeepKey     = "min-snapshots-to-keep"
-	MinSnapshotsToKeepDefault = math.MaxInt
+	MinSnapshotsToKeepKey     = "history.expire.min-snapshots-to-keep"
+	MinSnapshotsToKeepDefault = 1
 
-	MaxSnapshotAgeMsKey     = "max-snapshot-age-ms"
-	MaxSnapshotAgeMsDefault = int64(math.MaxInt64)
+	MaxSnapshotAgeMsKey     = "history.expire.max-snapshot-age-ms"
+	MaxSnapshotAgeMsDefault = int64(5 * 24 * 60 * 60 * 1000)
 
-	MaxRefAgeMsKey     = "max-ref-age-ms"
+	MaxRefAgeMsKey     = "history.expire.max-ref-age-ms"
 	MaxRefAgeMsDefault = int64(math.MaxInt64)
+
+	legacyMinSnapshotsToKeepKey = "min-snapshots-to-keep"
+	legacyMaxSnapshotAgeMsKey   = "max-snapshot-age-ms"
+	legacyMaxRefAgeMsKey        = "max-ref-age-ms"
 
 	// CommitNumRetriesKey is the number of commit retry attempts before
 	// giving up on ErrCommitFailed from the catalog.
