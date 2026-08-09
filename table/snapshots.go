@@ -268,6 +268,18 @@ type Snapshot struct {
 	AddedRows         *int64   `json:"added-rows,omitempty"`   // V3: Number of rows added by this snapshot
 }
 
+func (s *Snapshot) UnmarshalJSON(data []byte) error {
+	type Alias Snapshot
+	var next Alias
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+
+	*s = Snapshot(next)
+
+	return nil
+}
+
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type Alias Snapshot
 	if s.ManifestList != "" {
