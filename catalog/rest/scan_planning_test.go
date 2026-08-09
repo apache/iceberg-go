@@ -121,8 +121,7 @@ func TestScanPlanningCapabilities(t *testing.T) {
 		t.Parallel()
 
 		// A plan-only server can plan inline, but a `submitted` reply could not
-		// be polled, so it is not full-remote capable. SupportsRemoteScanPlanning
-		// is false here too (gated off while PlanFiles is a stub).
+		// be polled, so it is not full-remote capable.
 		cat := &Catalog{endpoints: newEndpointSet([]endpoint{endpointPlanTableScan})}
 		assert.True(t, cat.SupportsPlanTableScan())
 		assert.False(t, cat.SupportsFullRemoteScanPlanning())
@@ -140,11 +139,7 @@ func TestScanPlanningCapabilities(t *testing.T) {
 		})}
 		assert.True(t, cat.SupportsPlanTableScan())
 		assert.True(t, cat.SupportsFullRemoteScanPlanning())
-		// SupportsRemoteScanPlanning stays false while PlanFiles is a stub, even
-		// when all four endpoints are advertised, so auto mode falls back to
-		// local instead of routing into ErrNotImplemented. Flips on with the
-		// PlanFiles phase.
-		assert.False(t, cat.SupportsRemoteScanPlanning())
+		assert.True(t, cat.SupportsRemoteScanPlanning())
 	})
 
 	t.Run("default fallback does not advertise scan planning", func(t *testing.T) {
@@ -997,10 +992,9 @@ func TestPlanFilesEncodesFilter(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestPlanFilesTasksNotYetDecodable documents the one stubbed boundary: a plan
-// that returns actual file-scan-tasks surfaces ErrNotImplemented until the
-// scan-task decoder phase fills in RESTFileScanTask.
-func TestPlanFilesTasksNotYetDecodable(t *testing.T) {
+// TestPlanFilesRejectsMalformedScanTasks makes sure remote planning validates
+// the task payload instead of returning partially decoded tasks.
+func TestPlanFilesRejectsMalformedScanTasks(t *testing.T) {
 	t.Parallel()
 
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
@@ -1011,7 +1005,7 @@ func TestPlanFilesTasksNotYetDecodable(t *testing.T) {
 	})
 
 	_, err := cat.PlanFiles(context.Background(), planFilesReq())
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.ErrorIs(t, err, ErrRESTError)
 }
 
 // TestPlanFilesPollsSubmittedPlan covers the async arm: a submitted plan is
@@ -1091,6 +1085,57 @@ func TestPlanFilesFanoutCycleTerminates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
 	assert.Equal(t, int32(1), calls.Load())
+}
+
+// TestPlanFilesDecodesFanoutTaskEnvelopes exercises the Phase 5 boundary from
+// REST wire tasks to table.FileScanTask. In particular, each fetchScanTasks
+// response has its own delete-file reference namespace; decoding after
+// flattening the responses would attach the second task to the first delete.
+func TestPlanFilesDecodesFanoutTaskEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	first := validScanTasksWire()
+	first.FileScanTasks[0].DataFile.FilePath = "s3://bucket/table/first-data.parquet"
+	first.DeleteFiles[0].FilePath = "s3://bucket/table/first-delete.parquet"
+	first.PlanTasks = []string{"h1"}
+
+	second := validScanTasksWire()
+	second.FileScanTasks[0].DataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	second.DeleteFiles[0].FilePath = "s3://bucket/table/second-delete.parquet"
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			response := struct {
+				Status PlanStatus `json:"status"`
+				PlanID string     `json:"plan-id"`
+				ScanTasks
+			}{
+				Status:    PlanStatusCompleted,
+				PlanID:    "plan-1",
+				ScanTasks: first,
+			}
+			require.NoError(t, json.NewEncoder(w).Encode(response))
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var got FetchScanTasksRequest
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&got))
+			require.Equal(t, "h1", got.PlanTask)
+			require.NoError(t, json.NewEncoder(w).Encode(FetchScanTasksResponse{ScanTasks: second}))
+		})
+	})
+
+	req := planFilesReq()
+	req.Metadata = newScanTaskDecoderMetadata()
+	req.RowFilter = iceberg.GreaterThan(iceberg.Reference("id"), int64(10))
+
+	result, err := cat.PlanFiles(context.Background(), req)
+	require.NoError(t, err)
+	require.Len(t, result.Tasks, 2)
+	assert.Equal(t, "s3://bucket/table/first-data.parquet", result.Tasks[0].File.FilePath())
+	assert.Equal(t, "s3://bucket/table/first-delete.parquet", result.Tasks[0].DeleteFiles[0].FilePath())
+	assert.Equal(t, "s3://bucket/table/second-data.parquet", result.Tasks[1].File.FilePath())
+	assert.Equal(t, "s3://bucket/table/second-delete.parquet", result.Tasks[1].DeleteFiles[0].FilePath())
+	assert.Same(t, req.RowFilter, result.Tasks[0].Residual)
 }
 
 // TestPlanFilesSurfacesVendedCredentials checks a plan that vends storage
