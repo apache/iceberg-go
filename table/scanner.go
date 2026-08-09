@@ -224,12 +224,13 @@ func IsDeletionVector(df iceberg.DataFile) bool {
 }
 
 type Scan struct {
-	identifier       Identifier
-	metadata         Metadata
-	metadataLocation string
-	ioF              FSysF
-	planner          ScanPlanner
-	planningMode     ScanPlanningMode
+	identifier          Identifier
+	metadata            Metadata
+	metadataLocation    string
+	ioF                 FSysF
+	planner             ScanPlanner
+	scanPlanningIOProps iceberg.Properties
+	planningMode        ScanPlanningMode
 	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
 	// planning; ReadTasks loads from it instead of ioF and closes it after the
 	// returned iterator finishes. See PlanIO.
@@ -1009,6 +1010,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		Metadata:          scan.metadata,
 		Schema:            schema,
 		MetadataLocation:  scan.metadataLocation,
+		FileIOProperties:  maps.Clone(scan.scanPlanningIOProps),
 		SnapshotID:        scan.snapshotID,
 		SelectedFields:    scan.remoteSelectedFields(schema),
 		RowFilter:         scan.rowFilter,
@@ -1109,6 +1111,17 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // scan's projection, row filters, and positional delete handling. This is useful when
 // the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	// Transfer ownership out of the Scan before setup. Every error below closes
+	// the plan-scoped IO; a successful return hands it to the record iterator.
+	planIO := scan.planIO
+	scan.planIO = nil
+	planIOHandedOff := false
+	defer func() {
+		if planIO != nil && !planIOHandedOff {
+			_ = planIO.Close()
+		}
+	}()
+
 	var (
 		boundFilter iceberg.BooleanExpression
 		err         error
@@ -1134,8 +1147,8 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	// A plan-scoped FileIO (from remote planning) takes precedence over the
 	// table's default FileIO and is closed once the returned iterator finishes.
 	var fs io.IO
-	if scan.planIO != nil {
-		fs, err = scan.planIO.Load(ctx)
+	if planIO != nil {
+		fs, err = planIO.Load(ctx)
 	} else {
 		fs, err = scan.ioF(ctx)
 	}
@@ -1154,16 +1167,12 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		concurrency:     scan.concurrency,
 	}).GetRecords(ctx, tasks)
 	if err != nil {
-		// No iterator to drive cleanup on a setup error, so close here.
-		if scan.planIO != nil {
-			_ = scan.planIO.Close()
-		}
-
 		return nil, nil, err
 	}
 
-	if scan.planIO != nil {
-		records = closePlanIOAfter(records, scan.planIO)
+	if planIO != nil {
+		records = closePlanIOAfter(records, planIO)
+		planIOHandedOff = true
 	}
 
 	return outSchema, records, nil

@@ -1151,6 +1151,7 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF,
 		r,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(config),
 	), nil
 }
 

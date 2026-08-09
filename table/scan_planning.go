@@ -91,6 +91,11 @@ type ScanPlanningRequest struct {
 	Metadata         ScanPlanningMetadata
 	Schema           *iceberg.Schema
 	MetadataLocation string
+	// FileIOProperties are the table-scoped properties used to build the
+	// table's normal FileIO. A remote planner can overlay plan-scoped
+	// credentials on these properties without serializing them into the plan
+	// request.
+	FileIOProperties iceberg.Properties
 	SnapshotID       *int64
 	SelectedFields   []string
 	RowFilter        iceberg.BooleanExpression

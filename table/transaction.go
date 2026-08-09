@@ -2352,7 +2352,10 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
-		planner:          t.tbl.planner,
+		// Catalog planners can only see committed table state, not metadata
+		// staged inside this transaction. Keep transaction scans local so auto
+		// mode cannot silently return stale tasks.
+		planner: nil,
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
@@ -2380,16 +2383,20 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 		return nil, err
 	}
 
-	return &StagedTable{
-		Table: New(
-			t.tbl.identifier,
-			updatedMeta,
-			updatedMeta.Location(),
-			t.tbl.fsF,
-			t.tbl.cat,
-			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
-		),
-	}, nil
+	staged := New(
+		t.tbl.identifier,
+		updatedMeta,
+		updatedMeta.Location(),
+		t.tbl.fsF,
+		t.tbl.cat,
+		withReporterState(t.tbl.reporter, t.tbl.reporterSet),
+		WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
+	)
+	// Like Transaction.Scan, this table contains metadata the catalog cannot
+	// see until commit. Do not let auto mode delegate it to a catalog planner.
+	staged.planner = nil
+
+	return &StagedTable{Table: staged}, nil
 }
 
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {

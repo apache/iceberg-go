@@ -434,3 +434,13 @@ func TestPrefixScopedIOUsesLongestCredentialPerLocation(t *testing.T) {
 	assert.Equal(t, "private", p.propertiesForLocation("s3://data/table/private/file.parquet")["credential"])
 	assert.Equal(t, "yes", p.propertiesForLocation("s3://other/table/file.parquet")["base"])
 }
+
+func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := newPrefixScopedIO(ctx, nil, nil)
+
+	cancel()
+	require.ErrorIs(t, p.ctx.Err(), context.Canceled)
+}

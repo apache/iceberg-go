@@ -203,6 +203,31 @@ func TestScanPlanningAutoFallsBackForLastUpdatedSequenceNumber(t *testing.T) {
 	assert.Empty(t, planner.receivedIdentifier)
 }
 
+func TestScanPlanningRemotePassesFileIOProperties(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	props := iceberg.Properties{"s3.endpoint": "https://table.local"}
+	planner := &fakeScanPlanner{supports: true}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		metadata,
+		"s3://bucket/db/tbl/metadata/v1.json",
+		nil,
+		nil,
+		WithScanPlanningIOProperties(props),
+	)
+	tbl.planner = planner
+
+	_, err = tbl.Scan(WithScanPlanningMode(ScanPlanningRemote)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, props, planner.receivedRequest.FileIOProperties)
+
+	planner.receivedRequest.FileIOProperties["s3.endpoint"] = "https://mutated.local"
+	assert.Equal(t, "https://table.local", props["s3.endpoint"])
+}
+
 func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	t.Parallel()
 
@@ -227,18 +252,64 @@ func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 
 func TestTransactionScanCopiesIdentifier(t *testing.T) {
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
-	txn.tbl.planner = &fakeScanPlanner{
+
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.identifier[0] = "corrupt"
+	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+}
+
+func TestTransactionScanKeepsStagedMetadataLocal(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	planner := &fakeScanPlanner{
 		result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
 		supports: true,
 	}
+	txn.tbl.planner = planner
+	dataFile := newTestDataFile(
+		t,
+		*iceberg.UnpartitionedSpec,
+		"mem://default/table-location/data.parquet",
+		nil,
+	)
+	require.NoError(t, txn.AddDataFiles(context.Background(), []iceberg.DataFile{dataFile}, nil))
 
 	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningAuto))
 	require.NoError(t, err)
-	_, err = scan.PlanFiles(context.Background())
+	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, dataFile.FilePath(), tasks[0].File.FilePath())
+	assert.Empty(t, planner.receivedIdentifier)
 
-	scan.identifier[0] = "corrupt"
-	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+	remote, err := txn.Scan(WithScanPlanningMode(ScanPlanningRemote))
+	require.NoError(t, err)
+	_, err = remote.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	stagedTasks, err := staged.Scan(WithScanPlanningMode(ScanPlanningAuto)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, stagedTasks, 1)
+	assert.Equal(t, dataFile.FilePath(), stagedTasks[0].File.FilePath())
+
+	_, err = staged.Scan(WithScanPlanningMode(ScanPlanningRemote)).PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+}
+
+func TestReadTasksClosesPlanIOIfLoadFails(t *testing.T) {
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	loadErr := errors.New("load failed")
+	planIO := &failingPlanIO{loadErr: loadErr}
+	scan := (&Table{metadata: metadata}).Scan()
+	scan.planIO = planIO
+
+	_, _, err = scan.ReadTasks(context.Background(), nil)
+	require.ErrorIs(t, err, loadErr)
+	assert.True(t, planIO.closed)
+	assert.Nil(t, scan.planIO)
 }
 
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
@@ -272,3 +343,15 @@ type fakePlanIO struct{}
 
 func (fakePlanIO) Load(context.Context) (icebergio.IO, error) { return nil, nil }
 func (fakePlanIO) Close() error                               { return nil }
+
+type failingPlanIO struct {
+	loadErr error
+	closed  bool
+}
+
+func (f *failingPlanIO) Load(context.Context) (icebergio.IO, error) { return nil, f.loadErr }
+func (f *failingPlanIO) Close() error {
+	f.closed = true
+
+	return nil
+}
