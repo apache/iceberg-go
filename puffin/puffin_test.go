@@ -775,6 +775,26 @@ func TestReaderPreservesLZ4ChecksumError(t *testing.T) {
 	require.ErrorContains(t, err, "invalid frame checksum")
 }
 
+func TestReaderPreservesLZ4BlockChecksumError(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	frame := compressedLZ4Frame(
+		t,
+		payload,
+		lz4.SizeOption(uint64(len(payload))),
+		lz4.BlockChecksumOption(true),
+		lz4.ChecksumOption(false),
+	)
+	const lz4FrameHeaderSizeWithContentExternal = 15
+	const lz4FrameBlockSizeMaskExternal = 0x7fffffff
+	blockSize := binary.LittleEndian.Uint32(frame[lz4FrameHeaderSizeWithContentExternal:]) & lz4FrameBlockSizeMaskExternal
+	blockChecksumOffset := lz4FrameHeaderSizeWithContentExternal + 4 + int(blockSize)
+	frame[blockChecksumOffset] ^= 0xff
+	data := fileWithCompressedFooterFrames(frame)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid block checksum")
+}
+
 func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
 	payload := []byte(`{"blobs":[]}`)
 	data := fileWithCompressedFooterPayloadNoSize(t, payload)

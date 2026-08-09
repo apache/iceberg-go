@@ -38,19 +38,22 @@ func (r *recordingReaderAt) ReadAt(p []byte, offset int64) (int, error) {
 	return bytes.NewReader(r.data).ReadAt(p, offset)
 }
 
-func TestValidateLZ4FrameEnvelopeUsesBufferedReads(t *testing.T) {
-	payload := []byte(`{"blobs":[]}`)
+func compressedReaderTestFrame(t *testing.T, payload []byte, options ...lz4.Option) []byte {
+	t.Helper()
+
 	var compressed bytes.Buffer
 	writer := lz4.NewWriter(&compressed)
-	require.NoError(t, writer.Apply(
-		lz4.SizeOption(uint64(len(payload))),
-		lz4.ChecksumOption(false),
-	))
+	options = append([]lz4.Option{lz4.SizeOption(uint64(len(payload)))}, options...)
+	require.NoError(t, writer.Apply(options...))
 	_, err := writer.Write(payload)
 	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 
-	frame := compressed.Bytes()
+	return compressed.Bytes()
+}
+
+func TestValidateLZ4FrameEnvelopeUsesBufferedReads(t *testing.T) {
+	frame := compressedReaderTestFrame(t, []byte(`{"blobs":[]}`), lz4.ChecksumOption(false))
 	endMark := frame[len(frame)-4:]
 	frame = frame[:len(frame)-4]
 	emptyBlock := make([]byte, 4)
@@ -66,11 +69,14 @@ func TestValidateLZ4FrameEnvelopeUsesBufferedReads(t *testing.T) {
 
 	reader := &recordingReaderAt{data: data.Bytes()}
 	frameReader := io.NewSectionReader(reader, 0, int64(data.Len()))
+	frameHeader, err := readLZ4FrameHeader(bytes.NewReader(data.Bytes()))
+	require.NoError(t, err)
 	require.NoError(t, validateLZ4FrameEnvelope(
 		frameReader,
 		int64(data.Len()),
-		data.Bytes()[4],
-		lz4FrameHeaderSizeWithContent,
+		frameHeader.flags,
+		frameHeader.headerSize,
+		frameHeader.blockMaxSize,
 	))
 
 	require.NotEmpty(t, reader.readLengths)
@@ -78,4 +84,34 @@ func TestValidateLZ4FrameEnvelopeUsesBufferedReads(t *testing.T) {
 	for _, length := range reader.readLengths {
 		require.Greater(t, length, len(emptyBlock))
 	}
+}
+
+func TestValidateLZ4FrameEnvelopeRejectsOversizedBlock(t *testing.T) {
+	frame := compressedReaderTestFrame(
+		t,
+		[]byte(`{"blobs":[]}`),
+		lz4.BlockSizeOption(lz4.Block64Kb),
+		lz4.ChecksumOption(false),
+	)
+
+	frame = frame[:lz4FrameHeaderSizeWithContent]
+	blockHeader := make([]byte, 4)
+	binary.LittleEndian.PutUint32(blockHeader, uint32(64<<10)+1)
+	frame = append(frame, blockHeader...)
+	frame = append(frame, bytes.Repeat([]byte{0}, (64<<10)+1)...)
+	frame = append(frame, []byte{0, 0, 0, 0}...)
+
+	frameHeader, err := readLZ4FrameHeader(bytes.NewReader(frame))
+	require.NoError(t, err)
+	reader := &recordingReaderAt{data: frame}
+
+	err = validateLZ4FrameEnvelope(
+		reader,
+		int64(len(frame)),
+		frameHeader.flags,
+		frameHeader.headerSize,
+		frameHeader.blockMaxSize,
+	)
+	require.ErrorContains(t, err, "exceeds declared maximum")
+	require.Equal(t, []int{frameHeader.headerSize + 4}, reader.readLengths)
 }
