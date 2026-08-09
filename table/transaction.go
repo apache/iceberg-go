@@ -705,7 +705,7 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		return err
 	}
 	if !meta.props.GetBool(GCEnabledKey, GCEnabledDefault) {
-		return errors.New("Cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
+		return errors.New("cannot expire snapshots: GC is disabled (deleting files may corrupt other tables)")
 	}
 
 	// Read table-level retention properties as the last-resort defaults,
