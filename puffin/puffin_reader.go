@@ -212,7 +212,23 @@ type lz4FrameHeader struct {
 	flags          byte
 	headerSize     int
 	contentSize    uint64
+	blockMaxSize   int64
 	hasContentSize bool
+}
+
+func lz4BlockMaxSize(bd byte) (int64, error) {
+	switch (bd >> 4) & 0x7 {
+	case 4:
+		return 64 << 10, nil
+	case 5:
+		return 256 << 10, nil
+	case 6:
+		return 1 << 20, nil
+	case 7:
+		return 4 << 20, nil
+	default:
+		return 0, errors.New("invalid LZ4 frame block maximum size")
+	}
 }
 
 // readLZ4FrameHeader reads and validates the LZ4 frame descriptor without
@@ -241,6 +257,10 @@ func readLZ4FrameHeader(r io.ReaderAt) (lz4FrameHeader, error) {
 	if header[5]&lz4FrameReservedBDFlags != 0 {
 		return lz4FrameHeader{}, errors.New("invalid LZ4 frame reserved block descriptor flags")
 	}
+	blockMaxSize, err := lz4BlockMaxSize(header[5])
+	if err != nil {
+		return lz4FrameHeader{}, err
+	}
 	if hasContentSize {
 		if _, err := r.ReadAt(header[lz4FrameHeaderSize:], lz4FrameHeaderSize); err != nil {
 			return lz4FrameHeader{}, err
@@ -262,6 +282,7 @@ func readLZ4FrameHeader(r io.ReaderAt) (lz4FrameHeader, error) {
 	frameHeader := lz4FrameHeader{
 		flags:          header[4],
 		headerSize:     headerSize,
+		blockMaxSize:   blockMaxSize,
 		hasContentSize: hasContentSize,
 	}
 	if hasContentSize {
@@ -271,33 +292,38 @@ func readLZ4FrameHeader(r io.ReaderAt) (lz4FrameHeader, error) {
 	return frameHeader, nil
 }
 
-func validateLZ4FrameEnvelope(r io.Reader, payloadSize int64, flags byte, headerSize int) error {
+func validateLZ4FrameEnvelope(
+	r io.ReaderAt,
+	payloadSize int64,
+	flags byte,
+	headerSize int,
+	blockMaxSize int64,
+) error {
 	if payloadSize < int64(headerSize) {
 		return errors.New("LZ4 frame is shorter than its header")
 	}
-
-	reader := bufio.NewReaderSize(io.LimitReader(r, payloadSize), lz4FrameReadBufferSize)
-	if _, err := io.CopyN(io.Discard, reader, int64(headerSize)); err != nil {
-		return fmt.Errorf("read LZ4 frame header: %w", err)
+	if payloadSize-int64(headerSize) < 4 {
+		return errors.New("LZ4 frame is missing its end mark")
 	}
 
-	offset := int64(headerSize)
+	firstBlock := make([]byte, headerSize+4)
+	if _, err := r.ReadAt(firstBlock, 0); err != nil {
+		return fmt.Errorf("read LZ4 frame header and block header: %w", err)
+	}
+
+	blockSize := binary.LittleEndian.Uint32(firstBlock[headerSize:])
+	offset := int64(headerSize + 4)
+	reader := bufio.NewReaderSize(
+		io.NewSectionReader(r, offset, payloadSize-offset),
+		lz4FrameReadBufferSize,
+	)
 	var blockHeader [4]byte
-	for {
-		if payloadSize-offset < int64(len(blockHeader)) {
-			return errors.New("LZ4 frame is missing its end mark")
-		}
-		if _, err := io.ReadFull(reader, blockHeader[:]); err != nil {
-			return fmt.Errorf("read LZ4 frame block header: %w", err)
-		}
-		offset += int64(len(blockHeader))
 
-		blockSize := binary.LittleEndian.Uint32(blockHeader[:])
-		if blockSize == 0 {
-			break
-		}
-
+	for blockSize != 0 {
 		dataSize := int64(blockSize & lz4FrameBlockSizeMask)
+		if dataSize > blockMaxSize {
+			return errors.New("LZ4 frame block exceeds declared maximum")
+		}
 		if dataSize > payloadSize-offset {
 			return errors.New("LZ4 frame block exceeds its payload")
 		}
@@ -315,6 +341,16 @@ func validateLZ4FrameEnvelope(r io.Reader, payloadSize int64, flags byte, header
 			}
 			offset += 4
 		}
+
+		if payloadSize-offset < int64(len(blockHeader)) {
+			return errors.New("LZ4 frame is missing its end mark")
+		}
+		if _, err := io.ReadFull(reader, blockHeader[:]); err != nil {
+			return fmt.Errorf("read LZ4 frame block header: %w", err)
+		}
+		offset += int64(len(blockHeader))
+
+		blockSize = binary.LittleEndian.Uint32(blockHeader[:])
 	}
 
 	if flags&lz4FrameContentChecksumFlag != 0 {
@@ -415,10 +451,11 @@ func (r *Reader) readFooter() error {
 			return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
 		}
 		if err := validateLZ4FrameEnvelope(
-			io.NewSectionReader(payloadReader, 0, payloadSize),
+			payloadReader,
 			payloadSize,
 			frameHeader.flags,
 			frameHeader.headerSize,
+			frameHeader.blockMaxSize,
 		); err != nil {
 			return fmt.Errorf("puffin: inspect compressed footer LZ4 frame: %w", err)
 		}
