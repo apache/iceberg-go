@@ -91,6 +91,43 @@ func (r *RestCatalogSuite) TearDownTest() {
 	r.configVals = nil
 }
 
+func TestRESTRejectsTrailingJSONInGetResponse(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":[]} {}`))
+		require.NoError(t, err)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.ErrorIs(t, err, rest.ErrRESTError)
+	require.ErrorContains(t, err, "multiple JSON values")
+}
+
+func TestRESTRejectsTrailingJSONInPostResponse(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+			"endpoints": rest.AllEndpointStrings,
+		}))
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, _ *http.Request) {
+		_, err := w.Write([]byte(createTableRestExample + `{}`))
+		require.NoError(t, err)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	require.ErrorIs(t, err, rest.ErrRESTError)
+	require.ErrorContains(t, err, "multiple JSON values")
+}
+
 func (r *RestCatalogSuite) TestToken200() {
 	const scope = "myscope"
 	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
