@@ -285,6 +285,7 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 		for refName, ref := range scan.metadata.Refs() {
 			if refName == name {
 				useSnapshotSchema = ref.SnapshotRefType == TagRef
+
 				break
 			}
 		}
@@ -843,7 +844,8 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
-		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() {
+		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() &&
+			!scan.requiresLastUpdatedSequenceNumber() {
 			return scan.planFilesRemote(ctx)
 		}
 	case ScanPlanningLocal:
@@ -973,6 +975,14 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 }
 
 func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
+	if scan.requiresLastUpdatedSequenceNumber() {
+		return nil, fmt.Errorf(
+			"%w: remote scan planning cannot populate %s",
+			ErrInvalidOperation,
+			iceberg.LastUpdatedSequenceNumberColumnName,
+		)
+	}
+
 	if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
@@ -1013,6 +1023,30 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	scan.planIO = result.IO
 
 	return result.Tasks, nil
+}
+
+// requiresLastUpdatedSequenceNumber reports whether the scan projection needs
+// the manifest-entry data sequence number. The REST FileScanTask payload does
+// not carry that value, so remote planning cannot safely synthesize the
+// _last_updated_sequence_number metadata column for files that do not store it
+// physically. Auto mode falls back to local planning; explicit remote mode
+// fails before making a request rather than returning silently incomplete data.
+func (scan *Scan) requiresLastUpdatedSequenceNumber() bool {
+	if scan.includeRowLineage {
+		return true
+	}
+
+	for _, field := range scan.selectedFields {
+		if scan.caseSensitive {
+			if field == iceberg.LastUpdatedSequenceNumberColumnName {
+				return true
+			}
+		} else if strings.EqualFold(field, iceberg.LastUpdatedSequenceNumberColumnName) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (scan *Scan) remoteSelectedFields(schema *iceberg.Schema) []string {
