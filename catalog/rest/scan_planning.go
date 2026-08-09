@@ -225,6 +225,20 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 	case PlanStatusSubmitted:
 		completed, err = r.WaitForPlan(ctx, req.Identifier, *resp.PlanID, WaitForPlanOptions{})
 		if err != nil {
+			// WaitForPlan already abandons plans when its retry budget or the
+			// caller's context is exhausted. Other terminal client/transport
+			// errors can leave a submitted plan active, so release it here.
+			if !errors.Is(err, context.Canceled) &&
+				!errors.Is(err, context.DeadlineExceeded) &&
+				!errors.Is(err, ErrPlanPollExhausted) &&
+				!errors.Is(err, ErrPlanFailed) &&
+				!errors.Is(err, ErrPlanCancelled) &&
+				!errors.Is(err, ErrPlanExpired) &&
+				!errors.Is(err, catalog.ErrNoSuchTable) &&
+				!errors.Is(err, catalog.ErrNoSuchNamespace) {
+				cleanup()
+			}
+
 			return table.ScanPlanningResult{}, err
 		}
 	default:
@@ -248,22 +262,24 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 
 	result := table.ScanPlanningResult{
 		Tasks: tasks,
-		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req.Metadata)),
+		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req)),
 	}
 	cleanup()
 
 	return result, nil
 }
 
-// planIOBaseProps rebuilds the props the table's own FileIO was built with, so a
-// plan-scoped IO keeps settings like a custom S3 endpoint or region. loadTable's
-// config block never reaches the planner seam, so it isn't included.
-func (r *Catalog) planIOBaseProps(meta table.ScanPlanningMetadata) iceberg.Properties {
+// planIOBaseProps rebuilds the props the table's own FileIO was built with, so
+// a plan-scoped IO keeps settings like a custom S3 endpoint or region. The
+// table-scoped properties take precedence over catalog and metadata defaults;
+// this mirrors the merge order used by LoadTable.
+func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Properties {
 	props := make(iceberg.Properties, len(r.props))
 	maps.Copy(props, r.props)
-	if meta != nil {
-		maps.Copy(props, meta.Properties())
+	if req.Metadata != nil {
+		maps.Copy(props, req.Metadata.Properties())
 	}
+	maps.Copy(props, req.FileIOProperties)
 
 	return props
 }

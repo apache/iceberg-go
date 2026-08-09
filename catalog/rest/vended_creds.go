@@ -261,7 +261,7 @@ type prefixScopedIO struct {
 
 func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, credentials []StorageCredential) *prefixScopedIO {
 	return &prefixScopedIO{
-		ctx:         context.WithoutCancel(ctx),
+		ctx:         ctx,
 		baseProps:   maps.Clone(baseProps),
 		credentials: slices.Clone(credentials),
 		filesystems: make(map[string]iceio.IO),

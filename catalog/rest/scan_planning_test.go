@@ -1214,6 +1214,37 @@ func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load())
 }
 
+func TestPlanFilesCancelsAfterTerminalPollError(t *testing.T) {
+	t.Parallel()
+
+	var cancels atomic.Int32
+	cat := newScanPlanningTestCatalog(t, []endpoint{
+		endpointPlanTableScan,
+		endpointFetchPlanResult,
+		endpointCancelPlanning,
+	}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"submitted","plan-id":"plan-1"}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
+			switch req.Method {
+			case http.MethodGet:
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			case http.MethodDelete:
+				cancels.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			}
+		})
+	})
+
+	_, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.Error(t, err)
+	assert.Equal(t, int32(1), cancels.Load())
+}
+
 func TestRemoteScanTasksUsesResolvedSchemaForResiduals(t *testing.T) {
 	t.Parallel()
 
@@ -1298,7 +1329,7 @@ func TestPlanFilesDecodesFanoutTaskEnvelopes(t *testing.T) {
 }
 
 // TestPlanFilesSurfacesVendedCredentials checks a plan that vends storage
-// credentials yields a plan-scoped IO that keeps the catalog's IO props (the
+// credentials yields a plan-scoped IO that keeps the table's IO props (the
 // custom endpoint here) rather than running on the vended creds alone, with the
 // vended values winning where they overlap.
 func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
@@ -1310,11 +1341,15 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 			require.NoError(t, err)
 		})
 	})
-	cat.props["s3.endpoint"] = "https://minio.local"
-	cat.props["s3.access-key-id"] = "static"
+	cat.props["s3.endpoint"] = "https://catalog.local"
+	cat.props["s3.access-key-id"] = "catalog-static"
 
 	req := planFilesReq()
 	req.MetadataLocation = "s3://bucket/db/tbl/metadata/v1.json"
+	req.FileIOProperties = iceberg.Properties{
+		"s3.endpoint":      "https://table.local",
+		"s3.access-key-id": "table-static",
+	}
 
 	result, err := cat.PlanFiles(context.Background(), req)
 	require.NoError(t, err)
@@ -1322,7 +1357,8 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 
 	planIO, ok := result.IO.(*planScopedIO)
 	require.True(t, ok)
-	assert.Equal(t, "https://minio.local", planIO.refresher.props["s3.endpoint"])
+	assert.Equal(t, "https://table.local", planIO.refresher.props["s3.endpoint"])
+	assert.Equal(t, "table-static", planIO.refresher.props["s3.access-key-id"])
 	require.Len(t, planIO.refresher.credentials, 1)
 	assert.Equal(t, "vended", planIO.refresher.credentials[0].Config["s3.access-key-id"])
 }
