@@ -195,6 +195,20 @@ func TestSnapshotUnmarshalManifestListReplacesEmbeddedManifests(t *testing.T) {
 	assert.Nil(t, snapshot.ManifestLocations)
 }
 
+func TestSnapshotUnmarshalPrefersManifestListOverEmbeddedManifests(t *testing.T) {
+	var snapshot table.Snapshot
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "new-manifest-list.avro",
+		"manifests": ["old-manifest.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "new-manifest-list.avro", snapshot.ManifestList)
+	assert.Nil(t, snapshot.ManifestLocations)
+}
+
 func TestSerializeSnapshotPrefersManifestListOverEmbeddedManifestLocations(t *testing.T) {
 	snapshot := table.Snapshot{
 		SnapshotID:        25,

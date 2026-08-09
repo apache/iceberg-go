@@ -274,6 +274,9 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &next); err != nil {
 		return err
 	}
+	if next.ManifestList != "" {
+		next.ManifestLocations = nil
+	}
 
 	*s = Snapshot(next)
 
