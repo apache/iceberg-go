@@ -16,9 +16,8 @@
 // under the License.
 
 // This file contains the REST server-side scan planning client surface for
-// apache/iceberg-go#1178. Low-level client methods and endpoint capability
-// checks are implemented here; higher-level orchestration, scanner delegation,
-// expression wrappers, and scan-task content decoding land in follow-up phases.
+// apache/iceberg-go#1178. It includes the low-level endpoint methods and the
+// end-to-end planner implementation used by table.Scan.
 
 package rest
 
@@ -153,10 +152,8 @@ const headerIdempotencyKey = "Idempotency-Key"
 // count as end-to-end capable.
 //
 // SupportsRemoteScanPlanning is the table.ScanPlanner-facing predicate that
-// table.Scan's auto mode routes on. It is deliberately gated to false while
-// PlanFiles is an unimplemented stub: routing on endpoint capability alone would
-// send an auto-mode scan into PlanFiles and surface ErrNotImplemented instead of
-// falling back to local planning. It flips on with the PlanFiles phase.
+// table.Scan's auto mode routes on. It requires all four endpoints because an
+// accepted plan may be asynchronous or return opaque plan-task handles.
 
 // SupportsPlanTableScan reports whether the server advertised the synchronous
 // plan endpoint.
@@ -178,15 +175,9 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 
 // SupportsRemoteScanPlanning reports whether this catalog can complete a remote
 // plan end-to-end. table.Scan's auto mode routes on it, calling PlanFiles when it
-// is true, so it must stay false until PlanFiles is implemented — otherwise an
-// auto-mode scan against a server advertising all four endpoints would fail with
-// ErrNotImplemented instead of falling back to local planning.
-//
-// TODO(#1178): return SupportsFullRemoteScanPlanning() once PlanFiles is wired
-// end-to-end. Until then, callers probing endpoint capability should use
-// SupportsFullRemoteScanPlanning / SupportsPlanTableScan directly.
+// is true.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
-	return false
+	return r.SupportsFullRemoteScanPlanning()
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
@@ -194,11 +185,10 @@ func (r *Catalog) SupportsRemoteScanPlanning() bool {
 // submitted plan to completion, and expands any plan-task handles into their
 // tasks before returning.
 //
-// Decoding the returned tasks into table.FileScanTask is the one piece still
-// stubbed: RESTFileScanTask/RESTDeleteFile are empty pending the scan-task
-// decoder phase, so a plan that yields any task surfaces ErrNotImplemented (see
-// remoteScanTasks). SupportsRemoteScanPlanning therefore stays false until that
-// lands, so auto-mode scans keep planning locally rather than routing here.
+// Each response is decoded as its own ScanTasks envelope before the results are
+// combined. Delete-file references are scoped to the envelope that returned
+// them, so flattening all responses first would attach deletes to the wrong
+// data files when the server uses plan-task fanout.
 func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) (table.ScanPlanningResult, error) {
 	wire, err := planTableScanRequestFrom(req)
 	if err != nil {
@@ -230,12 +220,12 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 			"%w: unexpected plan status %q from planTableScan", ErrRESTError, resp.Status)
 	}
 
-	files, deletes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
+	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
 	if err != nil {
 		return table.ScanPlanningResult{}, err
 	}
 
-	tasks, err := remoteScanTasks(files, deletes)
+	tasks, err := remoteScanTasks(envelopes, req)
 	if err != nil {
 		return table.ScanPlanningResult{}, err
 	}
@@ -259,14 +249,13 @@ func (r *Catalog) planIOBaseProps(meta table.ScanPlanningMetadata) iceberg.Prope
 	return props
 }
 
-// collectScanTasks expands plan-task handles into their tasks, walking the
-// fanout: a fetchScanTasks response can itself return more plan-tasks. It
-// accumulates the file-scan-tasks and delete-files reachable from the initial
-// set. A handle is fetched at most once; a server that re-issues one would
-// otherwise loop forever.
-func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]RESTFileScanTask, []RESTDeleteFile, error) {
-	files := append([]RESTFileScanTask(nil), tasks.FileScanTasks...)
-	deletes := append([]RESTDeleteFile(nil), tasks.DeleteFiles...)
+// collectScanTasks expands plan-task handles into their task envelopes, walking
+// the fanout: a fetchScanTasks response can itself return more plan-tasks. A
+// handle is fetched at most once; a server that re-issues one would otherwise
+// loop forever. The envelope boundaries are retained because delete-file
+// references are local to each response.
+func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
+	envelopes := []ScanTasks{tasks}
 
 	queue := append([]string(nil), tasks.PlanTasks...)
 	seen := make(map[string]bool, len(queue))
@@ -280,26 +269,35 @@ func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, 
 
 		resp, err := r.FetchScanTasks(ctx, ident, FetchScanTasksRequest{PlanTask: handle})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		files = append(files, resp.FileScanTasks...)
-		deletes = append(deletes, resp.DeleteFiles...)
+		envelopes = append(envelopes, resp.ScanTasks)
 		queue = append(queue, resp.PlanTasks...)
 	}
 
-	return files, deletes, nil
+	return envelopes, nil
 }
 
-// remoteScanTasks decodes the server's task payload into domain FileScanTasks.
-// Blocked for now: RESTFileScanTask/RESTDeleteFile are empty pending the
-// scan-task decoder phase, so an empty plan decodes to no tasks while any actual
-// task surfaces ErrNotImplemented. The decoder phase replaces this body.
-func remoteScanTasks(files []RESTFileScanTask, deletes []RESTDeleteFile) ([]table.FileScanTask, error) {
-	if len(files) == 0 && len(deletes) == 0 {
-		return nil, nil
+// remoteScanTasks decodes each server task envelope into domain FileScanTasks.
+// The decoder must run before envelopes are combined because delete-file
+// references are indexes into the envelope-local delete-files array.
+func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]table.FileScanTask, error) {
+	var result []table.FileScanTask
+	for i, envelope := range envelopes {
+		// Keep empty completed plans cheap and allow the low-level planner method
+		// to return no tasks even when a caller did not provide metadata.
+		if len(envelope.FileScanTasks) == 0 && len(envelope.DeleteFiles) == 0 {
+			continue
+		}
+
+		tasks, err := DecodeScanTasks(envelope, req.Metadata, nil, req.RowFilter)
+		if err != nil {
+			return nil, fmt.Errorf("decoding remote scan task envelope %d: %w", i, err)
+		}
+		result = append(result, tasks...)
 	}
 
-	return nil, fmt.Errorf("%w: decoding remote scan tasks", iceberg.ErrNotImplemented)
+	return result, nil
 }
 
 // planIOFromCredentials wraps a plan's vended storage credentials in a lazy

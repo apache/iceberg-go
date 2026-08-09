@@ -15,13 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). It defines the table-side seam — the
-// option, request/result types, and the ScanPlanner interface (implemented by
-// catalog/rest) — so it can be reviewed as Go rather than prose.
-// WithScanPlanningMode records the requested mode on the Scan; the delegation
-// skeleton rejects unavailable remote planning so the exported option is not a
-// silent no-op if this surface is released before the full implementation lands.
+// This file contains the table-side seam for REST server-side scan planning
+// (apache/iceberg-go#1178): the scan option, request/result types, and the
+// ScanPlanner interface implemented by catalog/rest.
 
 package table
 
@@ -51,13 +47,13 @@ const (
 	// ScanPlanningRemote requires a planner that advertises remote capability
 	// and fails loudly if remote planning is unavailable.
 	ScanPlanningRemote ScanPlanningMode = "remote"
-	// ScanPlanningAuto uses remote planning when available and allowed by the
-	// table config, otherwise falls back to local.
+	// ScanPlanningAuto uses remote planning when available, otherwise it falls
+	// back to local.
 	ScanPlanningAuto ScanPlanningMode = "auto"
 )
 
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
-// ScanPlanningLocal unless the REST table config requires server planning.
+// ScanPlanningLocal.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
 	return func(scan *Scan) { scan.planningMode = mode }
 }
@@ -141,8 +137,7 @@ type ScanPlanner interface {
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
 
-// Scan integration, added here as a delegation skeleton and completed in the
-// scanner-delegation phase:
+// Scan integration:
 //
 //	type Scan struct {
 //		// ...existing fields...
