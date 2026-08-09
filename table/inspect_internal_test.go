@@ -1729,6 +1729,97 @@ func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
 	require.ErrorContains(t, err, "has unknown content 2")
 }
 
+func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	snapshotOne, snapshotTwo := int64(1), int64(2)
+	sequenceOne, sequenceTwo := int64(1), int64(2)
+
+	sharedAdded := newTestDataFile(t, spec,
+		"mem://default/table-location/data/shared-added.parquet", nil)
+	sharedDeleted := newTestDataFile(t, spec,
+		"mem://default/table-location/data/shared-deleted.parquet", nil)
+	newFile := newTestDataFile(t, spec,
+		"mem://default/table-location/data/new.parquet", nil)
+	sharedEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotOne,
+			&sequenceOne, &sequenceOne, sharedAdded),
+		iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &snapshotOne,
+			&sequenceOne, &sequenceOne, sharedDeleted),
+	}
+	newEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotTwo,
+			&sequenceTwo, &sequenceTwo, newFile),
+	}
+
+	writeManifest := func(path string, snapshotID int64, entries []iceberg.ManifestEntry) iceberg.ManifestFile {
+		var buf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+		require.NoError(t, err)
+		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+
+		return manifest
+	}
+	sharedManifest := writeManifest(
+		"mem://default/table-location/metadata/shared.avro", snapshotOne, sharedEntries)
+	newManifest := writeManifest(
+		"mem://default/table-location/metadata/new.avro", snapshotTwo, newEntries)
+
+	writeList := func(path string, snapshotID int64, parent *int64, sequenceNumber int64,
+		manifests []iceberg.ManifestFile,
+	) []iceberg.ManifestFile {
+		var buf bytes.Buffer
+		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, parent,
+			&sequenceNumber, 0, manifests))
+		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+		written, err := iceberg.ReadManifestList(bytes.NewReader(buf.Bytes()))
+		require.NoError(t, err)
+
+		return written
+	}
+	listOne := "mem://default/table-location/metadata/snap-1.avro"
+	listTwo := "mem://default/table-location/metadata/snap-2.avro"
+	writtenOne := writeList(listOne, snapshotOne, nil, sequenceOne,
+		[]iceberg.ManifestFile{sharedManifest})
+	writeList(listTwo, snapshotTwo, &snapshotOne, sequenceTwo,
+		[]iceberg.ManifestFile{writtenOne[0], newManifest})
+
+	txn.meta.snapshotList = []Snapshot{
+		{SnapshotID: snapshotOne, ManifestList: listOne, SequenceNumber: sequenceOne},
+		{
+			SnapshotID: snapshotTwo, ParentSnapshotID: &snapshotOne,
+			ManifestList: listTwo, SequenceNumber: sequenceTwo,
+		},
+	}
+	txn.meta.currentSnapshotID = &snapshotTwo
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+
+	rr, err := tbl.Inspect().AllEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 3, record.NumRows())
+	status := record.Column(0).(*array.Int32)
+	require.Equal(t, []int32{
+		int32(iceberg.EntryStatusADDED),
+		int32(iceberg.EntryStatusDELETED),
+		int32(iceberg.EntryStatusADDED),
+	}, status.Int32Values())
+	dataFiles := record.Column(4).(*array.Struct)
+	paths := dataFiles.Field(1).(*array.String)
+	require.Equal(t, []string{
+		sharedAdded.FilePath(),
+		sharedDeleted.FilePath(),
+		newFile.FilePath(),
+	}, []string{paths.Value(0), paths.Value(1), paths.Value(2)})
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -2677,6 +2768,13 @@ func TestInspectEntriesIncludesDeletedEntries(t *testing.T) {
 	paths := dataFiles.Field(1).(*array.String)
 	require.Equal(t, addedFile.FilePath(), paths.Value(0))
 	require.Equal(t, deletedFile.FilePath(), paths.Value(1))
+}
+
+func TestAllEntriesSchemaMatchesEntries(t *testing.T) {
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	}}
+	require.True(t, EntriesSchema(partitionType).Equals(AllEntriesSchema(partitionType)))
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations

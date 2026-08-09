@@ -39,34 +39,41 @@ func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
 		return nil, fmt.Errorf("inspect entries: build arrow schema: %w", err)
 	}
 
-	var current *array.RecordBuilder
-	var contentFileBuilder inspectContentFileBuilder
-	var bindErr error
+	appendEntry := newInspectEntryAppender(partitionType)
 	rr, err := i.manifestEntryReader(ctx, arrowSchema, false, nil,
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			dataFileBuilder := bldr.Field(4).(*array.StructBuilder)
-			if bldr != current {
-				contentFileBuilder, bindErr = newInspectContentFileStructBuilder(dataFileBuilder, partitionType)
-				current = bldr
-			}
-			if bindErr != nil {
-				return bindErr
-			}
-
-			bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
-			appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
-			appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
-			appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
-
-			dataFileBuilder.Append(true)
-
-			return contentFileBuilder.append(entry.DataFile())
-		})
+		appendEntry)
 	if err != nil {
 		return nil, fmt.Errorf("inspect entries: %w", err)
 	}
 
 	return rr, nil
+}
+
+func newInspectEntryAppender(
+	partitionType *iceberg.StructType,
+) func(*array.RecordBuilder, iceberg.ManifestEntry) error {
+	var current *array.RecordBuilder
+	var contentFileBuilder inspectContentFileBuilder
+	var bindErr error
+
+	return func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+		dataFileBuilder := bldr.Field(4).(*array.StructBuilder)
+		if bldr != current {
+			contentFileBuilder, bindErr = newInspectContentFileStructBuilder(dataFileBuilder, partitionType)
+			current = bldr
+		}
+		if bindErr != nil {
+			return bindErr
+		}
+
+		bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
+		appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
+		appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
+		appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
+		dataFileBuilder.Append(true)
+
+		return contentFileBuilder.append(entry.DataFile())
+	}
 }
 
 // EntriesSchema returns the schema of the entries metadata table.
