@@ -449,29 +449,42 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 			}()
 		}()
 
-		for {
-			select {
-			case err, ok := <-errch:
-				if !ok {
-					errch = nil
+		yieldAllManifests(results, errch, yield)
+	}
+}
 
-					continue
-				}
-				if err != nil {
-					yield(nil, err)
+func yieldAllManifests(
+	results <-chan tblutils.Enumerated[[]iceberg.ManifestFile],
+	errch <-chan error,
+	yield func(iceberg.ManifestFile, error) bool,
+) {
+	for results != nil || errch != nil {
+		select {
+		case err, ok := <-errch:
+			if !ok {
+				errch = nil
 
+				continue
+			}
+			if err != nil {
+				yield(nil, err)
+
+				return
+			}
+		case next, ok := <-results:
+			if !ok {
+				results = nil
+
+				continue
+			}
+			for _, mf := range next.Value {
+				if !yield(mf, nil) {
 					return
 				}
-			case next, ok := <-results:
-				for _, mf := range next.Value {
-					if !yield(mf, nil) {
-						return
-					}
-				}
+			}
 
-				if next.Last || !ok {
-					return
-				}
+			if next.Last {
+				return
 			}
 		}
 	}
