@@ -375,38 +375,41 @@ func defaultValueToJSON(typ Type, value any) any {
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
+	var next NestedField
 	aux := struct {
 		ID       *int      `json:"id"`
 		Required *bool     `json:"required"`
 		Type     typeIFace `json:"type"`
 		*Alias
 	}{
-		Alias: (*Alias)(n),
+		Alias: (*Alias)(&next),
 	}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	n.Type = aux.Type.Type
+	next.Type = aux.Type.Type
 
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
-	n.ID = *aux.ID
+	next.ID = *aux.ID
 
-	if n.Name == "" {
+	if next.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
 	}
 
-	if n.Type == nil {
-		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, n.Name)
+	if next.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, next.Name)
 	}
 
 	if aux.Required == nil {
 		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
 	}
-	n.Required = *aux.Required
+	next.Required = *aux.Required
+
+	*n = next
 
 	return nil
 }

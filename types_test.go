@@ -660,6 +660,23 @@ func TestNestedFieldUnmarshalMissingRequired(t *testing.T) {
 	assert.ErrorContains(t, err, "missing required 'required'")
 }
 
+func TestNestedFieldUnmarshalMissingRequiredPreservesState(t *testing.T) {
+	field := iceberg.NestedField{
+		ID:             7,
+		Name:           "old",
+		Type:           iceberg.PrimitiveTypes.Int32,
+		Required:       true,
+		Doc:            "old doc",
+		InitialDefault: "old initial default",
+		WriteDefault:   "old write default",
+	}
+	original := field
+
+	err := json.Unmarshal([]byte(`{"id":1,"name":"new","type":"string"}`), &field)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Equal(t, original, field)
+}
+
 func TestListTypeUnmarshalMissingElementRequired(t *testing.T) {
 	data := []byte(`{"type":"list","element-id":1,"element":"string"}`)
 
