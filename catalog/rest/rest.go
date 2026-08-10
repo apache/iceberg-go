@@ -117,16 +117,12 @@ var (
 )
 
 // SnapshotMode controls which snapshots are included in a loadTable response.
-// The default (no parameter) is equivalent to SnapshotModeAll.
 type SnapshotMode string
 
 const (
-	// SnapshotModeAll requests all currently valid snapshots. This is the
-	// server default when the query parameter is omitted.
+	// SnapshotModeAll requests all currently valid snapshots (server default).
 	SnapshotModeAll SnapshotMode = "all"
-	// SnapshotModeRefs requests only the snapshots that are referenced by a
-	// named branch or tag. Servers may return a smaller response when only
-	// snapshot metadata for active refs is needed.
+	// SnapshotModeRefs requests only snapshots referenced by a named branch or tag.
 	SnapshotModeRefs SnapshotMode = "refs"
 )
 
@@ -398,9 +394,7 @@ func requireBody() reqOption {
 	return func(c *reqConfig) { c.requireBody = true }
 }
 
-// withQueryParams appends the given URL query parameters to the request. Values
-// accumulate so options compose; later calls for the same key overwrite earlier
-// ones via url.Values.Set semantics.
+// withQueryParams appends query parameters to the request.
 func withQueryParams(params url.Values) reqOption {
 	return func(c *reqConfig) {
 		if c.queryParams == nil {
@@ -1638,19 +1632,13 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
-// LoadTable loads a table from the catalog using the default snapshot mode
-// (all snapshots). It implements [catalog.Catalog].
+// LoadTable loads a table from the catalog. It implements [catalog.Catalog].
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, "")
 }
 
-// LoadTableWithSnapshotMode loads a table and controls which snapshots are
-// included in the returned metadata via the ?snapshots query parameter.
-//
-// Use [SnapshotModeRefs] to request only snapshots referenced by a named branch
-// or tag, which can significantly reduce response size for tables with long
-// snapshot histories. Use [SnapshotModeAll] (or [LoadTable]) to get all
-// currently valid snapshots (the server default).
+// LoadTableWithSnapshotMode loads a table, passing ?snapshots=<mode> to control
+// which snapshots are included in the response.
 func (r *Catalog) LoadTableWithSnapshotMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, mode)
 }
