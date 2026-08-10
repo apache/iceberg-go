@@ -145,20 +145,15 @@ const headerIdempotencyKey = "Idempotency-Key"
 // --- Capability gating -------------------------------------------------------
 //
 // Capability is split into two predicates. SupportsPlanTableScan is the narrow
-// "server can plan inline" check (plan endpoint only). SupportsFullRemoteScanPlanning
-// is the endpoint-level execution check: an
-// end-to-end plan can come back `submitted` or with `plan-tasks` that need the
-// poll/fetch endpoints to finish, and auto mode has no second chance to fall
-// back to local once it commits to remote, so a plan-only server must not count
-// as end-to-end capable. The cancel endpoint is best-effort cleanup rather than
-// an execution dependency.
-//
-// SupportsRemoteScanPlanning is the table.ScanPlanner-facing predicate that
-// table.Scan's auto mode routes on. It requires the execution endpoints because
-// an accepted plan may be asynchronous or return opaque plan-task handles.
+// "server can plan" check (plan endpoint only). SupportsFullRemoteScanPlanning
+// reports whether every continuation endpoint is also advertised. A plan-only
+// server can still complete a remote scan synchronously with inline file tasks,
+// so table.Scan routes on the narrow predicate and PlanFiles checks continuation
+// endpoints only when the response requires polling or task expansion. The
+// cancel endpoint is best-effort cleanup rather than an execution dependency.
 
-// SupportsPlanTableScan reports whether the server advertised the synchronous
-// plan endpoint.
+// SupportsPlanTableScan reports whether the server advertised the plan
+// submission endpoint.
 func (r *Catalog) SupportsPlanTableScan() bool {
 	return r.endpoints.contains(endpointPlanTableScan)
 }
@@ -175,11 +170,11 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 
 // --- table.ScanPlanner implementation ---------------------------------------
 
-// SupportsRemoteScanPlanning reports whether this catalog can complete a remote
-// plan end-to-end. table.Scan's auto mode routes on it, calling PlanFiles when it
-// is true.
+// SupportsRemoteScanPlanning reports whether this catalog can submit a remote
+// plan. Any continuation capability is validated against the response returned
+// by the server.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
-	return r.SupportsFullRemoteScanPlanning()
+	return r.SupportsPlanTableScan()
 }
 
 // PlanFiles plans a scan server-side and returns tasks (and, optionally, a
@@ -260,13 +255,10 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 		return table.ScanPlanningResult{}, err
 	}
 
-	result := table.ScanPlanningResult{
+	return table.ScanPlanningResult{
 		Tasks: tasks,
 		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req)),
-	}
-	cleanup()
-
-	return result, nil
+	}, nil
 }
 
 // planIOBaseProps rebuilds the props the table's own FileIO was built with, so

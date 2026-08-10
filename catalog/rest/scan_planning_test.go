@@ -120,12 +120,12 @@ func TestScanPlanningCapabilities(t *testing.T) {
 	t.Run("plan only", func(t *testing.T) {
 		t.Parallel()
 
-		// A plan-only server can plan inline, but a `submitted` reply could not
-		// be polled, so it is not full-remote capable.
+		// A plan-only server can plan inline even though it cannot handle response
+		// shapes that require polling or task expansion.
 		cat := &Catalog{endpoints: newEndpointSet([]endpoint{endpointPlanTableScan})}
 		assert.True(t, cat.SupportsPlanTableScan())
 		assert.False(t, cat.SupportsFullRemoteScanPlanning())
-		assert.False(t, cat.SupportsRemoteScanPlanning())
+		assert.True(t, cat.SupportsRemoteScanPlanning())
 	})
 
 	t.Run("full remote planning", func(t *testing.T) {
@@ -992,6 +992,65 @@ func TestPlanFilesCompletedEmpty(t *testing.T) {
 	assert.Nil(t, result.IO)
 }
 
+func TestScanPlanningRemoteSupportsSynchronousPlanOnlyServer(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			planID := "plan-1"
+			require.NoError(t, json.NewEncoder(w).Encode(PlanTableScanResponse{
+				Status:    PlanStatusCompleted,
+				PlanID:    &planID,
+				ScanTasks: validScanTasksWire(),
+			}))
+		})
+	})
+
+	assert.True(t, cat.SupportsRemoteScanPlanning())
+	assert.False(t, cat.SupportsFullRemoteScanPlanning())
+
+	req := planFilesReq()
+	req.Metadata = metadata
+	req.Schema = metadata.schema
+	result, err := cat.PlanFiles(context.Background(), req)
+	require.NoError(t, err)
+	require.Len(t, result.Tasks, 1)
+	assert.Equal(t, "s3://bucket/table/data.parquet", result.Tasks[0].File.FilePath())
+}
+
+func TestPlanFilesRequiresAdvertisedResponseContinuation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		response string
+	}{
+		{
+			name:     "submitted plan requires result fetch",
+			response: `{"status":"submitted","plan-id":"plan-1"}`,
+		},
+		{
+			name:     "plan task requires task fetch",
+			response: `{"status":"completed","plan-id":"plan-1","plan-tasks":["task-1"]}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+				mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+					_, err := w.Write([]byte(test.response))
+					require.NoError(t, err)
+				})
+			})
+
+			_, err := cat.PlanFiles(context.Background(), planFilesReq())
+			require.ErrorIs(t, err, ErrEndpointNotSupported)
+		})
+	}
+}
+
 // TestPlanFilesEncodesFilter checks the row filter reaches the plan request body
 // as ExpressionParser JSON.
 func TestPlanFilesEncodesFilter(t *testing.T) {
@@ -1149,7 +1208,7 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load())
 }
 
-func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
+func TestPlanFilesDoesNotCancelAfterSuccessfulMaterialization(t *testing.T) {
 	t.Parallel()
 
 	var cancels atomic.Int32
@@ -1179,7 +1238,7 @@ func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
 	result, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
-	assert.Equal(t, int32(1), cancels.Load())
+	assert.Zero(t, cancels.Load())
 }
 
 func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {

@@ -134,21 +134,45 @@ func TestScanPlanningRemoteOmitsNegativeRowLimit(t *testing.T) {
 func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	t.Parallel()
 
+	snapshotTime := time.Now().UnixMilli()
 	schemaID := 0
 	metadata, err := createTestMetadata([]Snapshot{{
 		SnapshotID:  10,
-		TimestampMs: time.Now().Add(time.Hour).UnixMilli(),
+		TimestampMs: snapshotTime,
 		SchemaID:    &schemaID,
-	}}, nil)
+	}}, []SnapshotLogEntry{{SnapshotID: 10, TimestampMs: snapshotTime}})
 	require.NoError(t, err)
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	require.NoError(t, builder.AddSchema(currentSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
 	require.NoError(t, builder.SetSnapshotRef("branch", 10, BranchRef))
 	require.NoError(t, builder.SetSnapshotRef("tag", 10, TagRef))
 	metadata, err = builder.Build()
 	require.NoError(t, err)
 
+	var snapshotSchema *iceberg.Schema
+	for _, schema := range metadata.Schemas() {
+		if schema.ID == schemaID {
+			snapshotSchema = schema
+
+			break
+		}
+	}
+	require.NotNil(t, snapshotSchema)
+	require.False(t, snapshotSchema.Equals(metadata.CurrentSchema()))
+
 	base := (&Table{metadata: metadata}).Scan(WithScanPlanningMode(ScanPlanningRemote))
+	livePlanner := &fakeScanPlanner{supports: true}
+	base.planner = livePlanner
+	_, err = base.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.True(t, livePlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	assert.Equal(t, []string{"id", "category"}, livePlanner.receivedRequest.SelectedFields)
 
 	branch, err := base.UseRef("branch")
 	require.NoError(t, err)
@@ -159,6 +183,7 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	require.NotNil(t, branchPlanner.receivedRequest.UseSnapshotSchema)
 	assert.False(t, *branchPlanner.receivedRequest.UseSnapshotSchema)
 	assert.True(t, branchPlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	assert.Equal(t, []string{"id", "category"}, branchPlanner.receivedRequest.SelectedFields)
 
 	tag, err := base.UseRef("tag")
 	require.NoError(t, err)
@@ -168,7 +193,8 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, tagPlanner.receivedRequest.UseSnapshotSchema)
 	assert.True(t, *tagPlanner.receivedRequest.UseSnapshotSchema)
-	assert.True(t, tagPlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	assert.True(t, tagPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, tagPlanner.receivedRequest.SelectedFields)
 
 	historical := (&Table{metadata: metadata}).Scan(
 		WithScanPlanningMode(ScanPlanningRemote),
@@ -181,8 +207,23 @@ func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, historicalPlanner.receivedRequest.UseSnapshotSchema)
 	assert.True(t, *historicalPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, historicalPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, historicalPlanner.receivedRequest.SelectedFields)
 	require.NotNil(t, historicalPlanner.receivedRequest.MinRowsRequested)
 	assert.Equal(t, int64(25), *historicalPlanner.receivedRequest.MinRowsRequested)
+
+	asOf := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningRemote),
+		WithSnapshotAsOf(snapshotTime),
+	)
+	asOfPlanner := &fakeScanPlanner{supports: true}
+	asOf.planner = asOfPlanner
+	_, err = asOf.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, asOfPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, *asOfPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, asOfPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, asOfPlanner.receivedRequest.SelectedFields)
 }
 
 func TestScanPlanningRemoteRejectsLastUpdatedSequenceNumber(t *testing.T) {
@@ -327,8 +368,66 @@ func TestUseRowLimitTransfersPlanIOOwnership(t *testing.T) {
 	refined := scan.UseRowLimit(10)
 
 	assert.Nil(t, scan.planIO)
+	assert.True(t, scan.planIOConsumed)
 	assert.Same(t, planIO, refined.planIO)
+	assert.False(t, refined.planIOConsumed)
 	assert.Equal(t, int64(10), refined.limit)
+
+	_, _, err := scan.ReadTasks(context.Background(), nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+}
+
+func TestRepeatedReadTasksAfterRemotePlan(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	planIO := &trackingPlanIO{fs: icebergio.NewMemFS()}
+	fallbackCalls := 0
+	scan := (&Table{
+		metadata: metadata,
+		fsF: func(context.Context) (icebergio.IO, error) {
+			fallbackCalls++
+
+			return icebergio.NewMemFS(), nil
+		},
+	}).Scan()
+	scan.planIO = planIO
+
+	_, records, err := scan.ReadTasks(context.Background(), nil)
+	require.NoError(t, err)
+	for _, recordErr := range records {
+		require.NoError(t, recordErr)
+	}
+
+	_, _, err = scan.ReadTasks(context.Background(), nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Equal(t, 1, planIO.loadCount)
+	assert.True(t, planIO.closed)
+	assert.Zero(t, fallbackCalls)
+}
+
+func TestFailedReplanningKeepsPlanIOConsumed(t *testing.T) {
+	t.Parallel()
+
+	plannerErr := errors.New("planning failed")
+	fallbackCalls := 0
+	scan := &Scan{
+		planner:        &fakeScanPlanner{supports: true, err: plannerErr},
+		planningMode:   ScanPlanningRemote,
+		planIOConsumed: true,
+		ioF: func(context.Context) (icebergio.IO, error) {
+			fallbackCalls++
+
+			return icebergio.NewMemFS(), nil
+		},
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, plannerErr)
+	_, _, err = scan.ReadTasks(context.Background(), nil)
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Zero(t, fallbackCalls)
 }
 
 func TestRepeatedScanPlanningClosesPreviousPlanIO(t *testing.T) {
@@ -386,6 +485,24 @@ func (fakePlanIO) Close() error                               { return nil }
 type failingPlanIO struct {
 	loadErr error
 	closed  bool
+}
+
+type trackingPlanIO struct {
+	fs        icebergio.IO
+	loadCount int
+	closed    bool
+}
+
+func (p *trackingPlanIO) Load(context.Context) (icebergio.IO, error) {
+	p.loadCount++
+
+	return p.fs, nil
+}
+
+func (p *trackingPlanIO) Close() error {
+	p.closed = true
+
+	return nil
 }
 
 func (f *failingPlanIO) Load(context.Context) (icebergio.IO, error) { return nil, f.loadErr }
