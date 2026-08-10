@@ -38,6 +38,15 @@ const (
 // the same unpartitioned spec object.
 var UnpartitionedSpec = &PartitionSpec{id: 0}
 
+// specBinding tells the decoder whether the spec it reads is already bound to
+// a schema, which decides how strictly source IDs are validated.
+type specBinding bool
+
+const (
+	boundSpec   specBinding = true
+	unboundSpec specBinding = false
+)
+
 // PartitionField represents how one partition value is derived from the
 // source column by transformation.
 type PartitionField struct {
@@ -112,6 +121,10 @@ func (p *PartitionField) String() string {
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
+	return p.unmarshal(b, boundSpec)
+}
+
+func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("%w: failed to unmarshal partition field", err)
@@ -151,24 +164,24 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	if hasSourceIDs && len(aux.SourceIDs) == 0 {
 		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
 	}
-	if !hasSourceID && !hasSourceIDs {
+	switch {
+	case hasSourceIDs:
+		p.SourceIDs = aux.SourceIDs
+	case hasSourceID:
+		p.SourceIDs = []int{aux.SourceID}
+	default:
 		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
 			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 		}
-		// Preserve compatibility with historical source-less void tombstones.
+		// Preserve compatibility with historical source-less void tombstones,
+		// which carry no source column to validate.
 		p.SourceIDs = []int{0}
-	} else if len(aux.SourceIDs) > 0 {
-		p.SourceIDs = aux.SourceIDs
-	} else {
-		p.SourceIDs = []int{aux.SourceID}
 	}
-	// Positivity only holds for specs already bound to a schema. Decoding also
-	// covers unbound specs from create-table and commit requests, whose source
-	// IDs are client ordinal placeholders starting at 0, remapped by name at
-	// bind time.
-	for _, sourceID := range p.SourceIDs {
-		if sourceID < 0 {
-			return fmt.Errorf("%w: partition source ID must be non-negative: %d", ErrInvalidPartitionSpec, sourceID)
+	if hasSourceID || hasSourceIDs {
+		for _, sourceID := range p.SourceIDs {
+			if err := validatePartitionSourceID(sourceID, binding); err != nil {
+				return err
+			}
 		}
 	}
 	if p.Name == "" {
@@ -186,6 +199,24 @@ type PartitionSpec struct {
 
 	// this is populated by initialize after creation
 	sourceIdToFields map[int][]PartitionField
+}
+
+// UnboundPartitionSpec decodes a partition spec that a client sent in a
+// create-table request, before it has been bound to a schema. Such a spec
+// carries the client's placeholder source IDs rather than schema field IDs, and
+// those placeholders start at zero: Spark numbers the columns of a new table
+// from zero, so partitioning by the first column arrives as source-id 0.
+// Binding the embedded spec to a schema resolves the placeholders to field IDs.
+//
+// Use PartitionSpec for specs read from table metadata, where source IDs are
+// bound field IDs and must be positive. Catalog implementations that serve the
+// REST create-table request should decode its partition spec into this type.
+type UnboundPartitionSpec struct {
+	PartitionSpec
+}
+
+func (u *UnboundPartitionSpec) UnmarshalJSON(b []byte) error {
+	return u.unmarshal(b, unboundSpec)
 }
 
 type PartitionOption func(*PartitionSpec) error
@@ -457,6 +488,10 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 }
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
+	return ps.unmarshal(b, boundSpec)
+}
+
+func (ps *PartitionSpec) unmarshal(b []byte, binding specBinding) error {
 	aux := struct {
 		ID     int               `json:"spec-id"`
 		Fields []json.RawMessage `json:"fields"`
@@ -484,7 +519,7 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 				return fmt.Errorf("%w: partition field ID cannot be null", ErrInvalidPartitionSpec)
 			}
 		}
-		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
+		if err := fields[i].unmarshal(rawField, binding); err != nil {
 			return err
 		}
 	}
@@ -497,6 +532,19 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 	ps.initialize()
+
+	return nil
+}
+
+// Source IDs are schema field IDs, and therefore positive, once a spec is bound
+// to a schema. Unbound specs carry client placeholders that start at zero.
+func validatePartitionSourceID(sourceID int, binding specBinding) error {
+	if binding == boundSpec && sourceID <= 0 {
+		return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+	}
+	if sourceID < 0 {
+		return fmt.Errorf("%w: partition source ID must be non-negative: %d", ErrInvalidPartitionSpec, sourceID)
+	}
 
 	return nil
 }

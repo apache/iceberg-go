@@ -713,79 +713,236 @@ func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
 
 // A create-table request carries unbound placeholder IDs rather than final
 // field IDs. Spark numbers the root struct's fields by ordinal, so the first
-// column is field-id 0 and partitioning or sorting by it yields source-id 0.
-// NewMetadata must accept that and remap every source ID by name, matching
-// Java's TableMetadata.newTableMetadata.
+// column is field-id 0 and partitioning by it yields source-id 0. NewMetadata
+// must accept an unbound spec and order and remap every source ID by name,
+// matching Java's TableMetadata.newTableMetadata.
+//
+// The schema and specs below are the bodies Spark 3.5 with
+// iceberg-spark-runtime posts to /v1/namespaces/{ns}/tables for
+// CREATE TABLE t (ints INT, floats DOUBLE, strings STRING) USING iceberg
+// PARTITIONED BY (...).
 func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 	const requestSchema = `{
 		"type": "struct", "schema-id": 0,
 		"fields": [
-			{"id": 0, "name": "my_ints", "required": false, "type": "int"},
-			{"id": 1, "name": "my_floats", "required": false, "type": "double"},
+			{"id": 0, "name": "ints", "required": false, "type": "int"},
+			{"id": 1, "name": "floats", "required": false, "type": "double"},
 			{"id": 2, "name": "strings", "required": false, "type": "string"}
 		]
 	}`
 
 	for _, tt := range []struct {
-		name         string
-		spec         string
-		wantSourceID int
-		wantName     string
+		name          string
+		spec          string
+		wantSourceIDs []int
+		wantNames     []string
 	}{
 		{
-			name:         "identity on first column",
-			spec:         `{"spec-id":0,"fields":[{"name":"my_ints","transform":"identity","source-id":0,"field-id":1000}]}`,
-			wantSourceID: 1,
-			wantName:     "my_ints",
+			// PARTITIONED BY (ints)
+			name:          "identity on first column",
+			spec:          `{"spec-id":0,"fields":[{"name":"ints","transform":"identity","source-id":0,"field-id":1000}]}`,
+			wantSourceIDs: []int{1},
+			wantNames:     []string{"ints"},
 		},
 		{
-			name:         "bucket on first column",
-			spec:         `{"spec-id":0,"fields":[{"name":"my_ints_bucket","transform":"bucket[16]","source-id":0,"field-id":1000}]}`,
-			wantSourceID: 1,
-			wantName:     "my_ints_bucket",
+			// PARTITIONED BY (bucket(16, ints))
+			name:          "bucket on first column",
+			spec:          `{"spec-id":0,"fields":[{"name":"ints_bucket","transform":"bucket[16]","source-id":0,"field-id":1000}]}`,
+			wantSourceIDs: []int{1},
+			wantNames:     []string{"ints_bucket"},
 		},
 		{
-			name:         "identity on last column",
-			spec:         `{"spec-id":0,"fields":[{"name":"strings","transform":"identity","source-id":2,"field-id":1000}]}`,
-			wantSourceID: 3,
-			wantName:     "strings",
+			// PARTITIONED BY (strings)
+			name:          "identity on last column",
+			spec:          `{"spec-id":0,"fields":[{"name":"strings","transform":"identity","source-id":2,"field-id":1000}]}`,
+			wantSourceIDs: []int{3},
+			wantNames:     []string{"strings"},
+		},
+		{
+			// PARTITIONED BY (strings, ints): each placeholder maps to the column
+			// that carries it, not to the position of the field referencing it.
+			name: "columns out of schema order",
+			spec: `{"spec-id":0,"fields":[
+				{"name":"strings","transform":"identity","source-id":2,"field-id":1000},
+				{"name":"ints","transform":"identity","source-id":0,"field-id":1001}
+			]}`,
+			wantSourceIDs: []int{3, 1},
+			wantNames:     []string{"strings", "ints"},
+		},
+		{
+			// PARTITIONED BY (ints, bucket(16, ints)): partition fields with
+			// different transforms share one source column, so 0 repeats.
+			name: "repeated placeholder",
+			spec: `{"spec-id":0,"fields":[
+				{"name":"ints","transform":"identity","source-id":0,"field-id":1000},
+				{"name":"ints_bucket","transform":"bucket[16]","source-id":0,"field-id":1001}
+			]}`,
+			wantSourceIDs: []int{1, 1},
+			wantNames:     []string{"ints", "ints_bucket"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var sc iceberg.Schema
 			require.NoError(t, json.Unmarshal([]byte(requestSchema), &sc))
 
-			var spec iceberg.PartitionSpec
+			var spec iceberg.UnboundPartitionSpec
 			require.NoError(t, json.Unmarshal([]byte(tt.spec), &spec))
 
-			var order SortOrder
+			var order UnboundSortOrder
 			require.NoError(t, json.Unmarshal([]byte(
 				`{"order-id":1,"fields":[{"transform":"identity","source-id":0,"direction":"asc","null-order":"nulls-first"}]}`,
 			), &order))
 
-			meta, err := NewMetadata(&sc, &spec, order, "s3://bucket/tbl", nil)
+			meta, err := NewMetadata(&sc, &spec.PartitionSpec, order.SortOrder, "s3://bucket/tbl", nil)
 			require.NoError(t, err)
 
 			gotSpec := meta.PartitionSpec()
-			require.Equal(t, 1, gotSpec.NumFields())
-
-			assert.Equal(t, tt.wantSourceID, gotSpec.Field(0).SourceID())
-			assert.Equal(t, tt.wantName, gotSpec.Field(0).Name)
+			require.Equal(t, len(tt.wantSourceIDs), gotSpec.NumFields())
+			for i, wantSourceID := range tt.wantSourceIDs {
+				assert.Equal(t, wantSourceID, gotSpec.Field(i).SourceID())
+				assert.Equal(t, tt.wantNames[i], gotSpec.Field(i).Name)
+			}
 
 			// The sort order references the first column, so it remaps to 1.
+			require.Equal(t, 1, meta.SortOrder().Len())
 			for _, field := range meta.SortOrder().Fields() {
 				assert.Equal(t, 1, field.SourceID())
 			}
 
-			// Metadata must survive a serialize/parse round trip.
+			// Written metadata carries bound IDs only, so it parses back as
+			// persisted metadata, which rejects placeholders.
 			data, err := json.Marshal(meta)
 			require.NoError(t, err)
 			reparsed, err := ParseMetadataBytes(data)
 			require.NoError(t, err)
 			reparsedSpec := reparsed.PartitionSpec()
-			assert.Equal(t, tt.wantSourceID, reparsedSpec.Field(0).SourceID())
+			for i, wantSourceID := range tt.wantSourceIDs {
+				assert.Equal(t, wantSourceID, reparsedSpec.Field(i).SourceID())
+			}
 		})
 	}
+}
+
+// Persisted metadata is bound to a schema, so its source IDs are field IDs and
+// placeholders are invalid — in historical specs and orders as much as in the
+// default ones, which are the only ones metadata validation binds.
+func TestRejectZeroSourceIDInPersistedMetadata(t *testing.T) {
+	zeroSpecField := map[string]any{
+		"name": "zero", "transform": "identity",
+		"source-id": json.Number("0"), "field-id": json.Number("1001"),
+	}
+	boundSpecField := map[string]any{
+		"name": "x", "transform": "identity",
+		"source-id": json.Number("1"), "field-id": json.Number("1000"),
+	}
+	zeroOrderField := map[string]any{
+		"transform": "identity", "source-id": json.Number("0"),
+		"direction": "asc", "null-order": "nulls-first",
+	}
+	boundOrderField := map[string]any{
+		"transform": "identity", "source-id": json.Number("1"),
+		"direction": "asc", "null-order": "nulls-first",
+	}
+
+	for _, version := range []struct {
+		name     string
+		metadata string
+	}{
+		{name: "v1", metadata: ExampleTableMetadataV1},
+		{name: "v2", metadata: ExampleTableMetadataV2},
+		{name: "v3", metadata: ExampleTableMetadataV3},
+	} {
+		for _, tt := range []struct {
+			name    string
+			mutate  func(map[string]any)
+			wantErr error
+			message string
+		}{
+			{
+				name: "default partition spec",
+				mutate: func(m map[string]any) {
+					m["default-spec-id"] = json.Number("0")
+					m["partition-specs"] = []any{
+						map[string]any{"spec-id": json.Number("0"), "fields": []any{zeroSpecField}},
+					}
+				},
+				wantErr: iceberg.ErrInvalidPartitionSpec,
+				message: "partition source ID must be positive: 0",
+			},
+			{
+				name: "historical partition spec",
+				mutate: func(m map[string]any) {
+					m["default-spec-id"] = json.Number("0")
+					m["partition-specs"] = []any{
+						map[string]any{"spec-id": json.Number("0"), "fields": []any{boundSpecField}},
+						map[string]any{"spec-id": json.Number("1"), "fields": []any{zeroSpecField}},
+					}
+				},
+				wantErr: iceberg.ErrInvalidPartitionSpec,
+				message: "partition source ID must be positive: 0",
+			},
+			{
+				name: "default sort order",
+				mutate: func(m map[string]any) {
+					m["default-sort-order-id"] = json.Number("1")
+					m["sort-orders"] = []any{
+						map[string]any{"order-id": json.Number("1"), "fields": []any{zeroOrderField}},
+					}
+				},
+				wantErr: ErrInvalidSortSourceID,
+				message: "source ID must be positive: 0",
+			},
+			{
+				name: "historical sort order",
+				mutate: func(m map[string]any) {
+					m["default-sort-order-id"] = json.Number("1")
+					m["sort-orders"] = []any{
+						map[string]any{"order-id": json.Number("1"), "fields": []any{boundOrderField}},
+						map[string]any{"order-id": json.Number("2"), "fields": []any{zeroOrderField}},
+					}
+				},
+				wantErr: ErrInvalidSortSourceID,
+				message: "source ID must be positive: 0",
+			},
+		} {
+			t.Run(version.name+"/"+tt.name, func(t *testing.T) {
+				var metadata map[string]any
+				decoder := json.NewDecoder(strings.NewReader(version.metadata))
+				decoder.UseNumber()
+				require.NoError(t, decoder.Decode(&metadata))
+				// V1 also accepts the legacy bare field list, which the
+				// partition-specs the mutations install would shadow.
+				delete(metadata, "partition-spec")
+				tt.mutate(metadata)
+
+				data, err := json.Marshal(metadata)
+				require.NoError(t, err)
+
+				_, err = ParseMetadataBytes(data)
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.ErrorContains(t, err, tt.message)
+			})
+		}
+	}
+}
+
+// V1 metadata may carry the default spec as a bare field list.
+func TestRejectZeroSourceIDInV1LegacyPartitionSpec(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV1))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+
+	metadata["partition-spec"] = []any{map[string]any{
+		"name": "zero", "transform": "identity",
+		"source-id": json.Number("0"), "field-id": json.Number("1000"),
+	}}
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "partition source ID must be positive: 0")
 }
 
 func TestSortOrderNotFound(t *testing.T) {
