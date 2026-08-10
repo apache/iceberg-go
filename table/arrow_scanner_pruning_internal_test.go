@@ -18,12 +18,17 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
@@ -31,8 +36,10 @@ import (
 )
 
 type pruningFilterTestReader struct {
-	schema *arrow.Schema
-	tester *tblutils.ParquetRowGroupTester
+	schema      *arrow.Schema
+	tester      *tblutils.ParquetRowGroupTester
+	rowGroup    *metadata.RowGroupMetaData
+	statsResult bool
 }
 
 func (r *pruningFilterTestReader) Close() error { return nil }
@@ -51,11 +58,29 @@ func (r *pruningFilterTestReader) PrunedSchema(map[int]struct{}, iceberg.NameMap
 
 func (r *pruningFilterTestReader) GetRecords(_ context.Context, _ []int, tester any) (array.RecordReader, error) {
 	r.tester = tester.(*tblutils.ParquetRowGroupTester)
+	if r.rowGroup != nil {
+		var err error
+		r.statsResult, err = r.tester.StatsFn(r.rowGroup, []int{0})
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	builder := array.NewInt64Builder(memory.DefaultAllocator)
-	builder.Append(1)
-	values := builder.NewArray()
-	builder.Release()
+	var values arrow.Array
+	switch r.schema.Field(0).Type.ID() {
+	case arrow.INT32:
+		builder := array.NewInt32Builder(memory.DefaultAllocator)
+		builder.Append(1)
+		values = builder.NewArray()
+		builder.Release()
+	case arrow.INT64:
+		builder := array.NewInt64Builder(memory.DefaultAllocator)
+		builder.Append(1)
+		values = builder.NewArray()
+		builder.Release()
+	default:
+		panic("unsupported pruning test type")
+	}
 
 	record := array.NewRecordBatch(r.schema, []arrow.Array{values}, 1)
 	values.Release()
@@ -96,6 +121,68 @@ func TestProcessRecordsUsesRowGroupFilterForPruning(t *testing.T) {
 	require.Len(t, reader.tester.BloomPreds, 1)
 	assert.Equal(t, 1, reader.tester.BloomPreds[0].FieldID)
 	assert.Len(t, reader.tester.BloomPreds[0].PhysBytes, 1)
+
+	result := <-out
+	result.Record.Value.Release()
+}
+
+func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
+	ctx := context.Background()
+	fileSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	currentSchema := iceberg.NewSchema(2, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	rowGroupFilter, err := iceberg.BindExpr(currentSchema,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)), true)
+	require.NoError(t, err)
+
+	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	require.NoError(t, err)
+	builder := array.NewInt32Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	values := builder.NewArray()
+	builder.Release()
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{values}, 1)
+	values.Release()
+
+	var buf bytes.Buffer
+	writer, err := pqarrow.NewFileWriter(arrowSchema, &buf,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, writer.Write(record))
+	record.Release()
+	require.NoError(t, writer.Close())
+
+	parquetReader, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	defer parquetReader.Close()
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		"file:///test.parquet", iceberg.ParquetFile, nil, nil, nil, 1, int64(buf.Len()))
+	require.NoError(t, err)
+
+	reader := &pruningFilterTestReader{
+		schema:   arrowSchema,
+		rowGroup: parquetReader.MetaData().RowGroup(0),
+	}
+	out := make(chan enumeratedRecord, 1)
+	err = (&arrowScan{
+		rowGroupFilter:  rowGroupFilter,
+		projectedSchema: currentSchema,
+		caseSensitive:   true,
+	}).processRecords(
+		ctx,
+		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+	require.NoError(t, err)
+
+	assert.True(t, reader.statsResult, "matching INT32 row-group stats should be retained")
+	require.Len(t, reader.tester.BloomPreds, 1)
+	assert.Equal(t, []byte{1, 0, 0, 0}, reader.tester.BloomPreds[0].PhysBytes[0],
+		"the bloom predicate should use the INT32 file encoding")
 
 	result := <-out
 	result.Record.Value.Release()

@@ -1167,12 +1167,22 @@ func (as *arrowScan) processRecords(
 	// stays enabled.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile:
-		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, pruningFilter, false)
+		filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
 		if err != nil {
 			return err
 		}
 
-		bloomPreds, err := newBloomFilterPredicates(pruningFilter)
+		filePruningFilter, err = iceberg.BindExpr(fileSchema, filePruningFilter, as.caseSensitive)
+		if err != nil {
+			return err
+		}
+
+		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, filePruningFilter, false)
+		if err != nil {
+			return err
+		}
+
+		bloomPreds, err := newBloomFilterPredicates(filePruningFilter)
 		if err != nil {
 			return err
 		}
