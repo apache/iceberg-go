@@ -122,7 +122,7 @@ type SnapshotMode string
 const (
 	// All currently valid snapshots (server default).
 	SnapshotModeAll SnapshotMode = "all"
-	// Only snapshots referenced by a named branch or tag.
+	// Snapshots that are referenced by at least one named branch or tag.
 	SnapshotModeRefs SnapshotMode = "refs"
 )
 
