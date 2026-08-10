@@ -450,12 +450,22 @@ func TestUnboundTransformBind(t *testing.T) {
 	assert.True(t, bound.Type().Equals(iceberg.PrimitiveTypes.Int32))
 }
 
-// TestUnmarshalExpressionTransformTermInvalid rejects an unparseable transform
+// TestUnmarshalExpressionTransformTermInvalid rejects an invalid transform
 // string rather than panicking or binding nonsense.
 func TestUnmarshalExpressionTransformTermInvalid(t *testing.T) {
 	_, err := iceberg.ParseExpr(
-		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bogus[16]","term":"id"},"value":1}`), nil)
+		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bucket[0]","term":"id"},"value":1}`), nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "cannot parse transform term")
+}
+
+// An unknown transform parses fine, but a filter expression over one can't be
+// evaluated, so the term is rejected rather than silently mis-bound.
+func TestUnmarshalExpressionTransformTermUnknown(t *testing.T) {
+	_, err := iceberg.ParseExpr(
+		[]byte(`{"type":"eq","term":{"type":"transform","transform":"custom_transform[42]","term":"id"},"value":1}`), nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "unknown transform in expression term")
 }
 
 // TestUnmarshalExpressionFixedLength rejects a fixed value whose decoded length

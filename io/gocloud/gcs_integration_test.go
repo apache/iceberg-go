@@ -115,7 +115,9 @@ func (s *GCSIOTestSuite) TestGCSWarehouse() {
 		"type":            "sql",
 		"warehouse":       fmt.Sprintf("gs://%s/iceberg/", gcsBucketName),
 		io.GCSEndpoint:    fmt.Sprintf("http://%s/", gcsEndpoint),
-		io.GCSUseJSONAPI:  "true",
+		// The local fake-gcs-server intentionally has no application credentials.
+		io.GCSNoAuth:     "true",
+		io.GCSUseJSONAPI: "true",
 	}
 
 	cat, err := catalog.Load(context.Background(), "default", properties)

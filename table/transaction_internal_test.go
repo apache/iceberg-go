@@ -97,6 +97,63 @@ func TestNewTransactionOnBranchWithErrorReturnsTransactionInitError(t *testing.T
 	require.Nil(t, txn)
 }
 
+func TestNewTransactionOnBranchRejectsTags(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	require.NoError(t, txn.meta.SetSnapshotRef("release", 10, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
+
+	before := tbl.Metadata()
+	transaction, err := tbl.NewTransactionOnBranchWithError("release")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.Nil(t, transaction)
+	require.True(t, before.Equals(tbl.Metadata()))
+
+	legacyTransaction := tbl.NewTransactionOnBranch("release")
+	require.ErrorIs(t, legacyTransaction.initErr, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, legacyTransaction.SetProperties(iceberg.Properties{"k": "v"}), "tags cannot be transaction targets")
+}
+
+func TestTransactionCommitRejectsSameIDTagRace(t *testing.T) {
+	seed := newTransactionWithSnapshotRefs(t)
+	baseMeta, err := seed.meta.Build()
+	require.NoError(t, err)
+
+	head := baseMeta.SnapshotByName(MainBranch)
+	require.NotNil(t, head)
+	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.SetSnapshotRef(MainBranch, head.SnapshotID, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	cat := &headTrackingCatalog{metadata: tagMeta}
+	tbl := New(Identifier{"db", "tag-race"}, baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.SetProperties(iceberg.Properties{"k": "v"}))
+
+	_, err = txn.Commit(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load())
+}
+
+func TestNewTransactionOnBranchAllowsBranchesAndNewRefs(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "table"}, meta, "metadata.json", nil, nil)
+
+	for _, branch := range []string{MainBranch, "feature", "new-branch"} {
+		transaction, err := tbl.NewTransactionOnBranchWithError(branch)
+		require.NoError(t, err, branch)
+		require.NotNil(t, transaction, branch)
+	}
+}
+
 func TestNewTransactionOnBranchKeepsLegacySignatureAndFailsOnUse(t *testing.T) {
 	baseMeta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder, "table-location", nil)
 	require.NoError(t, err, "new metadata")

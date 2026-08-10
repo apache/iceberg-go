@@ -19,11 +19,41 @@ package codec
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateScanRange(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		start, length     int64
+		fileSize          int64
+		shouldReturnError bool
+	}{
+		{name: "full file", length: 100, fileSize: 100},
+		{name: "empty range at EOF", start: 100, fileSize: 100},
+		{name: "empty file", fileSize: 0},
+		{name: "one byte at EOF", start: 100, length: 1, fileSize: 100, shouldReturnError: true},
+		{name: "maximum file size with empty range", start: math.MaxInt64, fileSize: math.MaxInt64},
+		{name: "maximum file size boundary", start: math.MaxInt64 - 1, length: 1, fileSize: math.MaxInt64},
+		{name: "start after EOF", start: 101, fileSize: 100, shouldReturnError: true},
+		{name: "end after EOF", start: 99, length: 2, fileSize: 100, shouldReturnError: true},
+		{name: "start plus length overflows", start: math.MaxInt64 - 1, length: 2, fileSize: math.MaxInt64, shouldReturnError: true},
+		{name: "negative file size", fileSize: -1, shouldReturnError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScanRange(tt.start, tt.length, tt.fileSize)
+			if tt.shouldReturnError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestDecodeFileScanTaskInnerErrorCarriesMarker covers an inner decode path:
 // the outer Avro envelope decodes fine, but the framed primary-file blob is not
@@ -109,4 +139,22 @@ func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
 		require.Contains(t, err.Error(), "codec: DecodeFileScanTask:")
 		require.Contains(t, err.Error(), "length must be non-negative")
 	})
+}
+
+func TestDecodeFileScanTaskAllowsRangeBeyondFileSize(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		"data.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 100)
+	require.NoError(t, err)
+	file, err := EncodeDataFile(builder.Build(), spec, nil, 2)
+	require.NoError(t, err)
+	envelope, err := fileScanTaskSchema.Encode(&fileScanTaskEnvelope{
+		File: file, Start: 90, Length: 11,
+	})
+	require.NoError(t, err)
+
+	decoded, err := DecodeFileScanTask(envelope, spec, nil, 2)
+	require.NoError(t, err)
+	require.Equal(t, int64(90), decoded.Start)
+	require.Equal(t, int64(11), decoded.Length)
 }

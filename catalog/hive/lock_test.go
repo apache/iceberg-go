@@ -404,3 +404,195 @@ func TestLockConfigurationDefaults(t *testing.T) {
 	assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
 	assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
 }
+
+func TestApplyJitterBelowCapNeverShorterThanInput(t *testing.T) {
+	minWait := time.Millisecond
+	maxWait := time.Minute
+
+	for _, d := range []time.Duration{
+		time.Millisecond,
+		100 * time.Millisecond,
+		time.Second,
+	} {
+		for i := 0; i < 500; i++ {
+			got := applyJitter(d, minWait, maxWait)
+			assert.GreaterOrEqual(t, got, d,
+				"jitter must never wait less than the configured interval")
+			assert.LessOrEqual(t, got, min(2*d, maxWait),
+				"jitter must not exceed one extra interval or the configured maximum")
+		}
+	}
+}
+
+// Once calculateBackoff tops out there is no headroom to add into, so the wait
+// is spread downwards. It must still vary, or every retry after the sequence
+// saturates puts contending clients back in lockstep.
+func TestApplyJitterAtCapStaysWithinBoundsAndVaries(t *testing.T) {
+	minWait := 100 * time.Millisecond
+	maxWait := time.Second
+
+	seen := make(map[time.Duration]struct{})
+	for i := 0; i < 500; i++ {
+		got := applyJitter(maxWait, minWait, maxWait)
+		assert.GreaterOrEqual(t, got, maxWait/2,
+			"the spread at the cap must not exceed one half interval")
+		assert.LessOrEqual(t, got, maxWait,
+			"the wait must never exceed the configured maximum")
+		seen[got] = struct{}{}
+	}
+
+	assert.Greater(t, len(seen), 1,
+		"waits at the cap must vary so contending clients do not poll in lockstep")
+}
+
+// The spread at the cap must never poll sooner than a configured minimum wait,
+// which is reachable whenever minWait is more than half of maxWait.
+func TestApplyJitterAtCapNeverPollsSoonerThanMinWait(t *testing.T) {
+	minWait := 40 * time.Second
+	maxWait := time.Minute
+
+	for i := 0; i < 500; i++ {
+		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), minWait,
+			"a caller who configures a minimum wait must never poll sooner than it")
+	}
+}
+
+// The guaranteed minimum must not fall as the sequence saturates. The attempt
+// before the cap waits for its own full interval, so flooring the spread at half
+// the cap would let the first saturated attempt poll sooner than the one before
+// it, which inverts the property that the wait between checks only ever grows.
+//
+// Reaching the cap takes a lowered lock-check-max-wait-time or a raised retry
+// count; the defaults (100ms, 1 minute, 4 retries) top out at 800ms and never
+// saturate. The values below are the smallest that put the boundary in range.
+func TestApplyJitterMinimumIsMonotonicAcrossTheCap(t *testing.T) {
+	minWait := 100 * time.Millisecond
+	maxWait := time.Second
+
+	// The sequence runs 100ms, 200ms, 400ms, 800ms, then saturates at 1s.
+	// Attempt 3 draws from [800ms, 1s]; attempt 4 is the first capped one.
+	//
+	// The bound compared against is exact, not sampled. Below the cap the jitter is
+	// added on top, so the interval itself is the floor and no estimate is needed.
+	// Sampling both sides instead would compare two noisy minima that sit a hair
+	// above the same true floor, and which of them lands lower is chance.
+	var floor time.Duration
+	for attempt := 0; attempt < 8; attempt++ {
+		d := calculateBackoff(attempt, minWait, maxWait)
+
+		for i := 0; i < 2000; i++ {
+			assert.GreaterOrEqual(t, applyJitter(d, minWait, maxWait), floor,
+				"attempt %d may not be allowed to wait less than an earlier attempt", attempt)
+		}
+
+		if d < maxWait {
+			floor = d
+		}
+	}
+}
+
+// The specific boundary above, pinned so a future change to the floor cannot
+// quietly reintroduce the dip without failing on the exact numbers.
+func TestApplyJitterAtCapFloorsAtTheLastUncappedInterval(t *testing.T) {
+	minWait := 100 * time.Millisecond
+	maxWait := time.Second
+
+	assert.Equal(t, 800*time.Millisecond, calculateBackoff(3, minWait, maxWait),
+		"the last interval before the cap")
+	assert.Equal(t, maxWait, calculateBackoff(4, minWait, maxWait),
+		"the first interval at the cap")
+
+	for i := 0; i < 2000; i++ {
+		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), 800*time.Millisecond,
+			"the spread at the cap must not reach below the last uncapped interval")
+	}
+}
+
+// A caller may configure minWait above maxWait; options.go accepts it, and
+// calculateBackoff resolves it by returning maxWait. The downward spread must not
+// then draw below the configured minimum. Flooring at half the interval would
+// permit a third of it, because the replay loop cannot run when minWait is already
+// past the cap.
+func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
+	minWait := 90 * time.Second
+	maxWait := 60 * time.Second
+
+	d := calculateBackoff(0, minWait, maxWait)
+	require.Equal(t, maxWait, d, "calculateBackoff resolves this configuration to the cap")
+
+	for i := 0; i < 2000; i++ {
+		got := applyJitter(d, minWait, maxWait)
+		assert.Equal(t, maxWait, got,
+			"with minWait past the cap the wait cannot be spread at all without breaking it")
+	}
+}
+
+// Exercises the wiring at the acquireLocks call site rather than the helper alone,
+// and pins the aggregate delay. The schedule is 10ms, 20ms, 40ms, 80ms, and each
+// draw adds up to one further interval, so the total falls in [150ms, 300ms]. Only
+// the lower bound is asserted tightly; the ceiling is loose because a busy CI box
+// can add arbitrary scheduling delay on top, and a flaky timing test is worse than
+// no timing test.
+func TestAcquireLocksAggregateRetryDelayStaysWithinBound(t *testing.T) {
+	mockClient := new(mockHiveClient)
+	ctx := context.Background()
+	opts := NewHiveOptions()
+	opts.LockMinWaitTime = 10 * time.Millisecond
+	opts.LockMaxWaitTime = time.Second
+	opts.LockRetries = 4
+
+	mockClient.On("Lock", ctx, mock.AnythingOfType("*hive_metastore.LockRequest")).
+		Return(&hive_metastore.LockResponse{
+			Lockid: 901,
+			State:  hive_metastore.LockState_WAITING,
+		}, nil)
+	mockClient.On("CheckLock", ctx, int64(901)).
+		Return(&hive_metastore.LockResponse{
+			Lockid: 901,
+			State:  hive_metastore.LockState_WAITING,
+		}, nil)
+	mockClient.On("Unlock", mock.Anything, int64(901)).Return(nil)
+
+	start := time.Now()
+	lock, err := acquireLocks(ctx, mockClient,
+		[]tableLockIdentifier{{database: "testdb", table: "testtable"}}, opts)
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	require.Nil(t, lock)
+	assert.ErrorIs(t, err, ErrLockAcquisitionFailed)
+
+	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond,
+		"the jittered waits must never sum to less than the unjittered schedule")
+	assert.Less(t, elapsed, 5*time.Second,
+		"the jittered waits must stay bounded by roughly twice the schedule")
+
+	mockClient.AssertExpectations(t)
+}
+
+func TestApplyJitterRespectsMaxWait(t *testing.T) {
+	minWait := 100 * time.Millisecond
+	maxWait := 1 * time.Second
+
+	for i := 0; i < 500; i++ {
+		// d above the cap should not be inflated further.
+		assert.Equal(t, 2*time.Second, applyJitter(2*time.Second, minWait, maxWait))
+	}
+}
+
+func TestApplyJitterVaries(t *testing.T) {
+	seen := make(map[time.Duration]struct{})
+	for i := 0; i < 500; i++ {
+		seen[applyJitter(time.Second, time.Millisecond, time.Minute)] = struct{}{}
+	}
+
+	// A deterministic implementation returns one value. The range here is a
+	// second wide, so observing a single value across 500 draws is not chance.
+	assert.Greater(t, len(seen), 1,
+		"waits must vary so that clients contending for the same lock do not poll in lockstep")
+}
+
+func TestApplyJitterNonPositive(t *testing.T) {
+	assert.Equal(t, time.Duration(0), applyJitter(0, time.Millisecond, time.Minute))
+	assert.Equal(t, -time.Second, applyJitter(-time.Second, time.Millisecond, time.Minute))
+}

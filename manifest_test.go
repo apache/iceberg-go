@@ -514,6 +514,41 @@ type ManifestTestSuite struct {
 	v3ManifestEntries bytes.Buffer
 }
 
+type manifestFailingWriter struct {
+	err error
+}
+
+func (w manifestFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type manifestCloseErrorCodec struct {
+	ocf.Codec
+	err error
+}
+
+func (c manifestCloseErrorCodec) Close() error {
+	return c.err
+}
+
+func (m *ManifestTestSuite) setManifestWriterCloseError(writer *ManifestWriter, closeErr error) {
+	m.T().Helper()
+
+	avroSchema := writer.writer.Schema()
+	m.Require().NoError(writer.writer.Close())
+
+	replacement, err := ocf.NewWriter(
+		io.Discard,
+		avroSchema,
+		ocf.WithCodec(manifestCloseErrorCodec{
+			Codec: ocf.DeflateCodec(flate.DefaultCompression),
+			err:   closeErr,
+		}),
+	)
+	m.Require().NoError(err)
+	writer.writer = replacement
+}
+
 func (m *ManifestTestSuite) writeManifestList() {
 	err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
 	m.Require().NoError(err)
@@ -2150,6 +2185,160 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	m.NotEqual("null", string(md["partition-spec"]))
 	m.Equal("[]", string(md["partition-spec"]))
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+			writer, err := NewManifestWriter(version, &out, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorContains(writer.Add(manifestEntryV2Records[0]), "closed manifest writer")
+			m.Same(firstErr, writer.Close())
+
+			_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
+			m.Same(firstErr, err)
+
+			manifest := NewManifestFile(
+				version,
+				"manifest.avro",
+				int64(out.Len()),
+				int32(UnpartitionedSpec.ID()),
+				snapshotID,
+			).Build()
+			entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+			m.Require().NoError(err)
+			m.Empty(entries)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterSuccessfulCloseIsTerminal() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.NoError(writer.Close())
+			m.NoError(writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseAfterConstructionFailure() {
+	writeErr := errors.New("write failed")
+
+	writer, err := NewManifestWriter(
+		2,
+		manifestFailingWriter{err: writeErr},
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().ErrorIs(err, writeErr)
+	m.Require().NotNil(writer)
+
+	var closeErr error
+	m.NotPanics(func() {
+		closeErr = writer.Close()
+	})
+	m.ErrorIs(closeErr, ErrEmptyManifest)
+
+	m.Same(closeErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseJoinsUnderlyingError() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(
+				version,
+				io.Discard,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+			)
+			m.Require().NoError(err)
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorIs(firstErr, underlyingErr)
+			m.EqualError(
+				firstErr,
+				"empty manifest file has been written\nunderlying close failed",
+			)
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCloseAfterAddEntryFailure() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.Require().Error(writer.addEntry(&manifestEntry{EntryStatus: ManifestEntryStatus(-1)}))
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().Same(underlyingErr, firstErr)
+			m.False(errors.Is(firstErr, ErrEmptyManifest))
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestWriteManifestEmptyErrorIsNotDuplicated() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+
+			_, err := WriteManifest(
+				"manifest.avro",
+				&out,
+				version,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+				nil,
+			)
+			m.ErrorIs(err, ErrEmptyManifest)
+			m.Same(ErrEmptyManifest, err)
+		})
+	}
+
+	var out bytes.Buffer
+	_, _, err := WriteManifestV3(
+		"manifest.avro",
+		&out,
+		0,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.ErrorIs(err, ErrEmptyManifest)
+	m.Same(ErrEmptyManifest, err)
 }
 
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
