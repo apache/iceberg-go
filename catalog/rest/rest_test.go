@@ -1571,6 +1571,73 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 	}))
 }
 
+func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("refs", req.URL.Query().Get("snapshots"))
+
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00001-5f2f8166-244c-4eae-ac36-384ecdec81fc.gz.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {
+					"type": "struct",
+					"schema-id": 0,
+					"fields": [
+						{"id": 1, "name": "id", "required": false, "type": "int"},
+						{"id": 2, "name": "data", "required": false, "type": "string"}
+					]
+				},
+				"current-schema-id": 0,
+				"schemas": [
+					{
+						"type": "struct",
+						"schema-id": 0,
+						"fields": [
+							{"id": 1, "name": "id", "required": false, "type": "int"},
+							{"id": 2, "name": "data", "required": false, "type": "string"}
+						]
+					}
+				],
+				"partition-spec": [],
+				"default-spec-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"last-partition-id": 999,
+				"default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"properties": {"owner": "bryan"},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": {"main": {"snapshot-id": 3497810964824022504, "type": "branch"}},
+				"snapshots": [
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504-1-c4f68204-666b-4e50-a9df-b10c34bf6b82.avro",
+						"schema-id": 0
+					}
+				],
+				"snapshot-log": [],
+				"metadata-log": []
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTableWithSnapshotMode(context.Background(), catalog.ToIdentifier("fokko", "table"), rest.SnapshotModeRefs)
+	r.Require().NoError(err)
+
+	r.Equal(catalog.ToIdentifier("fokko", "table"), tbl.Identifier())
+	r.Equal("b55d9dda-6561-423a-8bfc-787980ce421f", tbl.Metadata().TableUUID().String())
+	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
+}
+
 func (r *RestCatalogSuite) TestRenameTable204() {
 	// Mock the rename table endpoint
 	r.mux.HandleFunc("/v1/tables/rename", func(w http.ResponseWriter, req *http.Request) {
