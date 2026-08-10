@@ -234,7 +234,10 @@ type Scan struct {
 	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
 	// planning; ReadTasks loads from it instead of ioF and closes it after the
 	// returned iterator finishes. See PlanIO.
-	planIO         PlanIO
+	planIO PlanIO
+	// planIOConsumed prevents a second ReadTasks call from silently falling back
+	// to table credentials after the plan-scoped IO lease has been handed off.
+	planIOConsumed bool
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -268,7 +271,10 @@ func (scan *Scan) UseRowLimit(n int64) *Scan {
 // still reading.
 func (scan *Scan) refinedCopy() *Scan {
 	out := *scan
-	scan.planIO = nil
+	if scan.planIO != nil {
+		scan.planIO = nil
+		scan.planIOConsumed = true
+	}
 
 	return &out
 }
@@ -883,6 +889,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if err != nil {
 		return nil, err
 	}
+	scan.planIOConsumed = false
 	// Snap the elapsed time right after planning so total-planning-duration
 	// reflects planning alone, not the report assembly below.
 	planningDuration := time.Since(start)
@@ -991,12 +998,11 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 }
 
 func (scan *Scan) discardPlanIO() {
-	if scan.planIO == nil {
-		return
+	if scan.planIO != nil {
+		_ = scan.planIO.Close()
+		scan.planIO = nil
+		scan.planIOConsumed = true
 	}
-
-	_ = scan.planIO.Close()
-	scan.planIO = nil
 }
 
 func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
@@ -1047,6 +1053,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	}
 
 	scan.planIO = result.IO
+	scan.planIOConsumed = false
 
 	return result.Tasks, nil
 }
@@ -1133,12 +1140,21 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
 // scan's projection, row filters, and positional delete handling. This is useful when
-// the caller has already planned or selected specific tasks to read.
+// the caller has already planned or selected specific tasks to read. When the most
+// recent remote plan returned plan-scoped IO, ReadTasks may be called once for that
+// plan; callers must plan again before reading another task subset.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if scan.planIO == nil && scan.planIOConsumed {
+		return nil, nil, fmt.Errorf("%w: remote plan IO has already been consumed", ErrInvalidOperation)
+	}
+
 	// Transfer ownership out of the Scan before setup. Every error below closes
 	// the plan-scoped IO; a successful return hands it to the record iterator.
 	planIO := scan.planIO
-	scan.planIO = nil
+	if planIO != nil {
+		scan.planIO = nil
+		scan.planIOConsumed = true
+	}
 	planIOHandedOff := false
 	defer func() {
 		if planIO != nil && !planIOHandedOff {
