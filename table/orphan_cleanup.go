@@ -939,8 +939,16 @@ func normalizeNonURLPath(path string) string {
 
 	if rooted {
 		cleaned := pathpkg.Clean("/" + remainder)
+		cleaned = strings.TrimPrefix(cleaned, "/")
+		if cleaned == "" {
+			if isWindowsDriveVolume(volume) {
+				return normalizeWindowsLocalPathCase(volume + "/")
+			}
 
-		return normalizeWindowsLocalPathCase(volume + "/" + strings.TrimPrefix(cleaned, "/"))
+			return normalizeWindowsLocalPathCase(volume)
+		}
+
+		return normalizeWindowsLocalPathCase(volume + "/" + cleaned)
 	}
 
 	return normalizeWindowsLocalPathCase(volume + pathpkg.Clean(remainder))

@@ -350,6 +350,21 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			input:    `//server/share`,
 			expected: "//server/share",
 		},
+		{
+			name:     "unc_parent_to_share_root",
+			input:    `\\server\share\foo\..`,
+			expected: "//server/share",
+		},
+		{
+			name:     "forward_slash_unc_parent_to_share_root",
+			input:    `//server/share/foo/..`,
+			expected: "//server/share",
+		},
+		{
+			name:     "forward_slash_unc_dot_share_root",
+			input:    `//server/share/.`,
+			expected: "//server/share",
+		},
 	}
 
 	for _, tt := range tests {
@@ -373,6 +388,9 @@ func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
 		{name: "unc", input: `\\server\share\data\..\file.parquet`},
 		{name: "forward_slash_unc", input: `//server/share/../file.parquet`},
 		{name: "bare_unc_share_root", input: `//server/share`},
+		{name: "unc_parent_to_share_root", input: `\\server\share\foo\..`},
+		{name: "forward_slash_unc_parent_to_share_root", input: `//server/share/foo/..`},
+		{name: "forward_slash_unc_dot_share_root", input: `//server/share/.`},
 		{name: "unix", input: "/warehouse/data/../file.parquet"},
 	}
 
