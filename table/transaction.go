@@ -313,6 +313,19 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	return nil
 }
 
+// RemoveProperties removes the given property keys from the table. Keys that
+// are not currently set are ignored.
+func (t *Transaction) RemoveProperties(keys []string) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if len(keys) > 0 {
+		return t.apply([]Update{NewRemovePropertiesUpdate(keys)}, nil)
+	}
+
+	return nil
+}
+
 // UpgradeFormatVersion upgrades the table to the given format version. Downgrading
 // is not allowed. If the table is already at the given version, this is a no-op.
 func (t *Transaction) UpgradeFormatVersion(version int) error {

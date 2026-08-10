@@ -3218,6 +3218,35 @@ func (t *TableTestSuite) TestRefresh() {
 	t.Equal(originalSpec, tbl.Spec())
 }
 
+func (t *TableTestSuite) TestTransactionRemoveProperties() {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.T().TempDir(),
+	})
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"test", "remove_properties_table"}
+	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
+
+	tbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+		catalog.WithProperties(iceberg.Properties{"keep": "true", "drop": "true"}))
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl)
+
+	txn := tbl.NewTransaction()
+	t.Require().NoError(txn.RemoveProperties([]string{"drop", "absent"}))
+
+	updated, err := txn.Commit(context.Background())
+	t.Require().NoError(err)
+
+	t.Equal("true", updated.Properties()["keep"])
+	_, ok := updated.Properties()["drop"]
+	t.False(ok)
+}
+
 func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
 	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
 		"uri":          ":memory:",
