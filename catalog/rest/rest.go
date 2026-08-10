@@ -98,6 +98,7 @@ const (
 	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
+	keySnapshotLoadingMode    = "snapshot-loading-mode"
 )
 
 var (
@@ -116,13 +117,13 @@ var (
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
 )
 
-// Controls which snapshots are included in a loadTable response.
+// SnapshotMode controls which snapshots are included in a loadTable response.
 type SnapshotMode string
 
 const (
-	// All currently valid snapshots (server default).
+	// SnapshotModeAll requests all currently valid snapshots (server default).
 	SnapshotModeAll SnapshotMode = "all"
-	// Snapshots that are referenced by at least one named branch or tag.
+	// SnapshotModeRefs requests only snapshots that are referenced by at least one named branch or tag.
 	SnapshotModeRefs SnapshotMode = "refs"
 )
 
@@ -444,7 +445,13 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 
 	u := baseURI.JoinPath(path...)
 	if len(cfg.queryParams) > 0 {
-		u.RawQuery = cfg.queryParams.Encode()
+		q := u.Query()
+		for k, vs := range cfg.queryParams {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
 	}
 	uri := u.String()
 	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
@@ -805,6 +812,7 @@ type Catalog struct {
 	endpoints endpointSet
 
 	namespaceSeparator string
+	snapshotMode       SnapshotMode
 
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
@@ -1079,6 +1087,7 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
+	r.snapshotMode = SnapshotMode(cfg.Get(keySnapshotLoadingMode, ""))
 
 	// Negotiate capabilities from the endpoints the server advertises, falling
 	// back to a backward-compatible default set when none are provided.
@@ -1632,14 +1641,11 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
-// Loads a table from the catalog. It implements [catalog.Catalog].
+// LoadTable loads a table from the catalog. It implements [catalog.Catalog].
+// When snapshot-loading-mode is set to "refs" in the catalog properties, only
+// snapshots referenced by a named branch or tag are included in the response.
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
-	return r.loadTableWithMode(ctx, identifier, "")
-}
-
-// Loads a table, passing ?snapshots=<mode> to control which snapshots are included in the response.
-func (r *Catalog) LoadTableWithSnapshotMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
-	return r.loadTableWithMode(ctx, identifier, mode)
+	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
 }
 
 func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
