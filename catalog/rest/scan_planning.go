@@ -255,10 +255,13 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 		return table.ScanPlanningResult{}, err
 	}
 
-	return table.ScanPlanningResult{
+	result := table.ScanPlanningResult{
 		Tasks: tasks,
 		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req)),
-	}, nil
+	}
+	cleanup()
+
+	return result, nil
 }
 
 // planIOBaseProps rebuilds the props the table's own FileIO was built with, so
