@@ -208,6 +208,44 @@ func (s *WriteRecordsTestSuite) TestWriteRecordsResolvesProjJSONCRSFromTableProp
 	s.Equal("projjson:geo.crs", readGeom.CRS())
 }
 
+func (s *WriteRecordsTestSuite) TestUnknownPartitionTransformRejected() {
+	loc := filepath.ToSlash(s.T().TempDir())
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	s.Require().NoError(err)
+
+	iceSch := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: iceberg.PartitionDataIDStart,
+		Name: "id_custom", Transform: unknown,
+	})
+	meta, err := table.NewMetadata(iceSch, &spec, table.UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	tbl := table.New(
+		table.Identifier{"test", "unknown_spec"}, meta,
+		filepath.Join(loc, "metadata", "v1.metadata.json"),
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		nil,
+	)
+
+	schema := s.arrowSchema()
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		rec := s.buildRecords(schema, 10)
+		defer rec.Release()
+		yield(rec, nil)
+	}
+
+	var got error
+	for _, err := range table.WriteRecords(s.ctx, tbl, schema, records) {
+		got = err
+	}
+	s.Require().ErrorIs(got, iceberg.ErrInvalidTransform)
+	s.ErrorContains(got, "custom_transform[42]")
+}
+
 func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {
 	loc := filepath.ToSlash(s.T().TempDir())
 	tbl := s.newTable(loc)

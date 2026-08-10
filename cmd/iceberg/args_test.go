@@ -18,6 +18,9 @@
 package main
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,6 +383,149 @@ func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, string(out), "configuration error")
 	assert.Contains(t, string(out), path)
+}
+
+func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	restMux := http.NewServeMux()
+	restMux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":["GET /v1/{prefix}/namespaces"]}`))
+	})
+	restMux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespaces":[]}`))
+	})
+	restSrv := httptest.NewServer(restMux)
+	defer restSrv.Close()
+
+	glueMux := http.NewServeMux()
+	glueMux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"DatabaseList":[]}`))
+	})
+	glueSrv := httptest.NewServer(glueMux)
+	defer glueSrv.Close()
+
+	hadoopWarehouse := t.TempDir()
+
+	// A raw TCP listener stands in for a Hive metastore: the CLI only needs to
+	// get far enough to open a connection to prove "HIVE"/"Hive" were recognized
+	// as the Hive catalog type. It has no Thrift handshake, so the command still
+	// fails, but with an EOF/protocol error rather than "unrecognized catalog type".
+	hiveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer hiveLn.Close()
+	go func() {
+		for {
+			conn, err := hiveLn.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	hiveURI := "thrift://" + hiveLn.Addr().String()
+
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+		// wantErr is set for cases where the catalog type is recognized but the
+		// backend call itself is expected to fail (e.g. no real Hive metastore
+		// behind the raw TCP listener).
+		wantErr bool
+		// wantUnrecognized is set only for catalog type values that must still be
+		// rejected outright, to keep that failure mode distinguishable from
+		// wantErr above.
+		wantUnrecognized bool
+	}{
+		{
+			name: "rest lowercase",
+			args: []string{"list", "--catalog", "rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest uppercase",
+			args: []string{"list", "--catalog", "REST", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest mixed case",
+			args: []string{"list", "--catalog", "Rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "glue uppercase",
+			args: []string{"list", "--catalog", "GLUE"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "glue mixed case",
+			args: []string{"list", "--catalog", "Glue"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "hadoop uppercase",
+			args: []string{"list", "--catalog", "HADOOP", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name: "hadoop mixed case",
+			args: []string{"list", "--catalog", "Hadoop", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name:    "hive uppercase",
+			args:    []string{"list", "--catalog", "HIVE", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name:    "hive mixed case",
+			args:    []string{"list", "--catalog", "Hive", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name:             "unknown catalog type is still rejected",
+			args:             []string{"list", "--catalog", "RESTX", "--uri", restSrv.URL},
+			wantUnrecognized: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tt.args...)
+			cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+			cmd.Env = append(cmd.Env, tt.env...)
+			out, err := cmd.CombinedOutput()
+
+			if tt.wantUnrecognized {
+				require.Error(t, err, "output: %s", out)
+				require.Contains(t, string(out), "unrecognized catalog type")
+
+				return
+			}
+
+			if tt.wantErr {
+				require.Error(t, err, "output: %s", out)
+				require.NotContains(t, string(out), "unrecognized catalog type")
+
+				return
+			}
+
+			require.NoError(t, err, "output: %s", out)
+		})
+	}
 }
 
 func TestMergeConfAwsProfile(t *testing.T) {

@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -29,6 +30,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/apache/iceberg-go/internal"
 )
 
 // Schema is an Iceberg table schema, represented as a struct with
@@ -181,7 +184,13 @@ func (s *Schema) FlatFields() (iter.Seq[NestedField], error) {
 		return nil, err
 	}
 
-	return maps.Values(fields), nil
+	return func(yield func(NestedField) bool) {
+		for field := range maps.Values(fields) {
+			if !yield(cloneField(field)) {
+				return
+			}
+		}
+	}, nil
 }
 
 func (s *Schema) lazyIDToField() (map[int]NestedField, error) {
@@ -267,8 +276,8 @@ func (s *Schema) AsStruct() StructType { return StructType{FieldList: cloneField
 func (s *Schema) asStructRef() StructType { return StructType{FieldList: s.fields} }
 
 func (s *Schema) NumFields() int          { return len(s.fields) }
-func (s *Schema) Field(i int) NestedField { return s.fields[i] }
-func (s *Schema) Fields() []NestedField   { return slices.Clone(s.fields) }
+func (s *Schema) Field(i int) NestedField { return cloneField(s.fields[i]) }
+func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
 func (s *Schema) FieldIDs() []int {
 	idx, _ := s.lazyNameToID()
 
@@ -277,25 +286,50 @@ func (s *Schema) FieldIDs() []int {
 
 func (s *Schema) UnmarshalJSON(b []byte) error {
 	type Alias Schema
+	var decoded Schema
 	aux := struct {
-		Fields []NestedField `json:"fields"`
+		Type   *string         `json:"type"`
+		Fields json.RawMessage `json:"fields"`
 		*Alias
-	}{Alias: (*Alias)(s)}
+	}{Alias: (*Alias)(&decoded)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
+	if aux.Type == nil {
+		return fmt.Errorf("%w: schema type is required", ErrInvalidSchema)
+	}
+	if *aux.Type != "struct" {
+		return fmt.Errorf("%w: schema type must be struct, got %q", ErrInvalidSchema, *aux.Type)
+	}
+	fieldsJSON := bytes.TrimSpace(aux.Fields)
+	if len(fieldsJSON) == 0 || bytes.Equal(fieldsJSON, []byte("null")) {
+		return fmt.Errorf("%w: schema fields are required", ErrInvalidSchema)
+	}
 
-	if err := checkDuplicateFieldIDs(nil, aux.Fields); err != nil {
+	var fields []NestedField
+	if err := json.Unmarshal(fieldsJSON, &fields); err != nil {
+		return fmt.Errorf("%w: invalid schema fields: %w", ErrInvalidSchema, err)
+	}
+
+	if err := checkDuplicateFieldIDs(nil, fields); err != nil {
 		return err
 	}
 
-	s.init()
-
-	s.fields = aux.Fields
-	if s.IdentifierFieldIDs == nil {
-		s.IdentifierFieldIDs = []int{}
+	decoded.fields = fields
+	if decoded.IdentifierFieldIDs == nil {
+		decoded.IdentifierFieldIDs = []int{}
 	}
+
+	s.ID = decoded.ID
+	s.IdentifierFieldIDs = decoded.IdentifierFieldIDs
+	s.fields = decoded.fields
+	s.idToName.Store(nil)
+	s.idToField.Store(nil)
+	s.nameToID.Store(nil)
+	s.nameToIDLower.Store(nil)
+	s.idToAccessor.Store(nil)
+	s.init()
 
 	return nil
 }
@@ -304,6 +338,10 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 	ids := s.IdentifierFieldIDs
 	if ids == nil {
 		ids = []int{}
+	}
+	fields := s.fields
+	if fields == nil {
+		fields = []NestedField{}
 	}
 
 	type Alias Schema
@@ -315,7 +353,7 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 		Type   string        `json:"type"`
 		Fields []NestedField `json:"fields"`
 		*Alias
-	}{Type: "struct", Fields: s.fields, Alias: &aliasCopy})
+	}{Type: "struct", Fields: fields, Alias: &aliasCopy})
 }
 
 func cloneFields(fields []NestedField) []NestedField {
@@ -325,11 +363,52 @@ func cloneFields(fields []NestedField) []NestedField {
 
 	cloned := make([]NestedField, len(fields))
 	for i, field := range fields {
-		cloned[i] = field
-		cloned[i].Type = cloneType(field.Type)
+		cloned[i] = cloneField(field)
 	}
 
 	return cloned
+}
+
+func cloneField(field NestedField) NestedField {
+	return NestedField{
+		ID:             field.ID,
+		Name:           field.Name,
+		Type:           cloneType(field.Type),
+		Required:       field.Required,
+		Doc:            field.Doc,
+		InitialDefault: cloneDefault(field.InitialDefault),
+		WriteDefault:   cloneDefault(field.WriteDefault),
+	}
+}
+
+func cloneDefault(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return slices.Clone(value)
+	case BinaryLiteral:
+		return BinaryLiteral(slices.Clone([]byte(value)))
+	case FixedLiteral:
+		return FixedLiteral(slices.Clone([]byte(value)))
+	case []any:
+		cloned := make([]any, len(value))
+		for i, item := range value {
+			cloned[i] = cloneDefault(item)
+		}
+
+		return cloned
+	case map[string]any:
+		cloned := make(map[string]any, len(value))
+		for key, item := range value {
+			cloned[key] = cloneDefault(item)
+		}
+
+		return cloned
+	default:
+		// Iceberg scalar defaults are value types (bool, numeric values,
+		// strings, UUIDs, and Decimals). Any mutable reference type must get
+		// an explicit deep-copy case above.
+		return value
+	}
 }
 
 func cloneType(t Type) Type {
@@ -407,6 +486,19 @@ func (s *Schema) FindFieldByNameCaseInsensitive(name string) (NestedField, bool)
 // FindFieldByID is like [*Schema.FindColumnName], but returns the whole
 // field rather than just the field name.
 func (s *Schema) FindFieldByID(id int) (NestedField, bool) {
+	f, ok := s.FindFieldByIDRef(id, internal.SchemaRef{})
+	if ok {
+		f = cloneField(f)
+	}
+
+	return f, ok
+}
+
+// FindFieldByIDRef returns a schema-owned field without cloning it. The returned
+// field is a value copy, but its Type and everything reachable from that Type
+// are shared with the schema and must be treated as read-only. This method is
+// limited to internal callers that need to avoid clone-on-read overhead.
+func (s *Schema) FindFieldByIDRef(id int, _ internal.SchemaRef) (NestedField, bool) {
 	idx, _ := s.lazyIDToField()
 	f, ok := idx[id]
 

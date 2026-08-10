@@ -1696,6 +1696,56 @@ func (t *closeTrackingTransport) CloseIdleConnections() {
 	t.closed.Store(true)
 }
 
+func TestCatalogCloseReleasesOwnedSessionOnce(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	var transports []*closeTrackingTransport
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithTransportFactory(func(*tls.Config) (http.RoundTripper, func()) {
+		transport := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+		transports = append(transports, transport)
+
+		return transport, transport.CloseIdleConnections
+	}))
+	require.NoError(t, err)
+	require.Len(t, transports, 2)
+	assert.True(t, transports[0].closed.Load(), "bootstrap transport should be closed after config fetch")
+	assert.False(t, transports[1].closed.Load(), "catalog transport should remain open until Close")
+
+	require.NoError(t, cat.Close())
+	require.NoError(t, cat.Close())
+	assert.True(t, transports[1].closed.Load())
+}
+
+func TestCatalogCloseDoesNotReleaseCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	require.NoError(t, cat.Close())
+	assert.False(t, base.closed.Load(), "user-provided transports must remain caller-owned")
+}
+
 func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -1828,6 +1878,31 @@ func TestEncodeNamespace(t *testing.T) {
 			r := &Catalog{namespaceSeparator: tt.separator}
 			assert.Equal(t, tt.wantPath, r.encodeNamespace(tt.namespace))
 			assert.Equal(t, tt.wantQueryPart, r.namespaceToQueryParam(tt.namespace))
+		})
+	}
+}
+
+func TestCheckValidNamespaceRejectsDecodedSeparator(t *testing.T) {
+	tests := []struct {
+		name      string
+		separator string
+		namespace table.Identifier
+		wantErr   bool
+	}{
+		{name: "default separator in component", namespace: table.Identifier{"a\x1fb"}, wantErr: true},
+		{name: "configured separator in component", separator: "%2E", namespace: table.Identifier{"a.b"}, wantErr: true},
+		{name: "separator between components", namespace: table.Identifier{"a", "b"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := &Catalog{namespaceSeparator: tt.separator}
+			err := cat.checkValidNamespace(tt.namespace)
+			if tt.wantErr {
+				require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }

@@ -159,6 +159,10 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int           `json:"source-id"`
 		SourceIDs       []int         `json:"source-ids,omitempty"`
@@ -283,6 +287,13 @@ func (s SortOrder) Fields() iter.Seq2[int, SortField] {
 
 func (s SortOrder) Len() int {
 	return len(s.fields)
+}
+
+// Field returns a copy of the sort field at index i, like Fields does, so a
+// caller can't reach the sort order's internals through SortField.SourceIDs.
+// It panics if i is out of range.
+func (s SortOrder) Field(i int) SortField {
+	return cloneSortField(s.fields[i])
 }
 
 func (s SortOrder) MarshalJSON() ([]byte, error) {

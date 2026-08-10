@@ -158,7 +158,7 @@ func Load(ctx context.Context, name string, props iceberg.Properties) (Catalog, 
 		}
 	}
 
-	cat, ok := defaultRegistry.get(catalogType)
+	cat, ok := defaultRegistry.get(strings.ToLower(catalogType))
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrCatalogNotFound, catalogType)
 	}
