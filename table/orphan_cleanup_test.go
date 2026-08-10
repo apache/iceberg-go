@@ -281,6 +281,21 @@ func TestNormalizeNonURLPath(t *testing.T) {
 			expected: "c:/file.parquet",
 		},
 		{
+			name:     "windows_drive_root_only",
+			input:    `C:\`,
+			expected: "c:/",
+		},
+		{
+			name:     "windows_forward_slash_drive_root_only",
+			input:    "C:/",
+			expected: "c:/",
+		},
+		{
+			name:     "windows_drive_relative_root_only",
+			input:    "C:",
+			expected: "c:",
+		},
+		{
 			name:     "windows_drive_root_with_multiple_parent_segments",
 			input:    `C:\warehouse\..\..\file.parquet`,
 			expected: "c:/file.parquet",
@@ -321,6 +336,9 @@ func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
 		input string
 	}{
 		{name: "windows_drive", input: `C:\warehouse\data\..\file.parquet`},
+		{name: "windows_drive_root", input: `C:\`},
+		{name: "windows_forward_slash_drive_root", input: "C:/"},
+		{name: "windows_drive_relative_root", input: "C:"},
 		{name: "windows_drive_relative", input: `C:foo\..\bar`},
 		{name: "unc", input: `\\server\share\data\..\file.parquet`},
 		{name: "forward_slash_unc", input: `//server/share/../file.parquet`},
@@ -383,6 +401,41 @@ func TestIsFileOrphanConservativelyMatchesUNCCaseOnNonWindows(t *testing.T) {
 	isOrphan, err := isFileOrphan("//nas/share/data/file.parquet", referencedFiles, index, cfg)
 	require.NoError(t, err)
 	assert.False(t, isOrphan, "ambiguous UNC casing must retain the candidate for deletion safety")
+}
+
+func TestIsFileOrphanConservativelyMatchesAmbiguousPOSIXDoubleSlash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX double-slash paths are ambiguous only on non-Windows hosts")
+	}
+
+	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
+	tests := []struct {
+		name       string
+		referenced string
+		listed     string
+	}{
+		{
+			name:       "double_slash_reference",
+			referenced: "//tmp/table/data.parquet",
+			listed:     "/tmp/table/data.parquet",
+		},
+		{
+			name:       "double_slash_listing",
+			referenced: "/tmp/table/data.parquet",
+			listed:     "//tmp/table/data.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			referencedFiles := map[string]bool{tt.referenced: true}
+			index := newReferencedFileIndex(referencedFiles, cfg)
+
+			isOrphan, err := isFileOrphan(tt.listed, referencedFiles, index, cfg)
+			require.NoError(t, err)
+			assert.False(t, isOrphan, "either POSIX interpretation must retain the referenced file")
+		})
+	}
 }
 
 func TestIsFileOrphanPreservesObjectStoreKeyCase(t *testing.T) {
@@ -761,6 +814,21 @@ func TestNormalizeURLPath(t *testing.T) {
 			input:    "s3://bucket/path//file.txt",
 			expected: "s3://bucket/path//file.txt",
 		},
+		{
+			name:     "literal_space_is_opaque",
+			input:    "s3://bucket/a b",
+			expected: "s3://bucket/a b",
+		},
+		{
+			name:     "literal_unicode_is_opaque",
+			input:    "s3://bucket/café",
+			expected: "s3://bucket/café",
+		},
+		{
+			name:     "empty_fragment_marker_is_opaque",
+			input:    "s3://bucket/file#",
+			expected: "s3://bucket/file#",
+		},
 	}
 
 	for _, tt := range tests {
@@ -781,12 +849,43 @@ func TestNormalizeURLPath_InvalidURL(t *testing.T) {
 
 func TestIsFileOrphanPreservesRemoteObjectKeySpelling(t *testing.T) {
 	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
-	referencedFiles := map[string]bool{"s3://bucket/path%2Ffile.txt": true}
-	index := newReferencedFileIndex(referencedFiles, cfg)
+	tests := []struct {
+		name       string
+		referenced string
+		listed     string
+	}{
+		{
+			name:       "escaped_separator",
+			referenced: "s3://bucket/path%2Ffile.txt",
+			listed:     "s3://bucket/path/file.txt",
+		},
+		{
+			name:       "literal_space",
+			referenced: "s3://bucket/a b",
+			listed:     "s3://bucket/a%20b",
+		},
+		{
+			name:       "literal_unicode",
+			referenced: "s3://bucket/café",
+			listed:     "s3://bucket/caf%C3%A9",
+		},
+		{
+			name:       "empty_fragment_marker",
+			referenced: "s3://bucket/file#",
+			listed:     "s3://bucket/file",
+		},
+	}
 
-	isOrphan, err := isFileOrphan("s3://bucket/path/file.txt", referencedFiles, index, cfg)
-	require.NoError(t, err)
-	assert.True(t, isOrphan)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			referencedFiles := map[string]bool{tt.referenced: true}
+			index := newReferencedFileIndex(referencedFiles, cfg)
+
+			isOrphan, err := isFileOrphan(tt.listed, referencedFiles, index, cfg)
+			require.NoError(t, err)
+			assert.True(t, isOrphan)
+		})
+	}
 }
 
 func TestIsFileOrphanPreservesRemoteQueryAndFragment(t *testing.T) {

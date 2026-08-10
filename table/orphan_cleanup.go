@@ -572,7 +572,8 @@ func isFileOrphan(
 	referencedIndex referencedFileIndex,
 	cfg *orphanCleanupConfig,
 ) (bool, error) {
-	normalizedFile := normalizeFilePathWithConfig(file, cfg)
+	normalizedFiles := normalizedFilePathAliases(file, cfg)
+	normalizedFile := normalizedFiles[0]
 
 	// Any presence in referencedFiles means referenced;
 	// the bool distinguishes data vs metadata for gc.enabled, not membership"
@@ -583,8 +584,10 @@ func isFileOrphan(
 		return false, nil
 	}
 
-	if _, exists := referencedIndex.normalized[normalizedFile]; exists {
-		return false, nil
+	for _, candidate := range normalizedFiles {
+		if _, exists := referencedIndex.normalized[candidate]; exists {
+			return false, nil
+		}
 	}
 
 	references := referencedIndex.byPath[filePathKey(normalizedFile)]
@@ -616,10 +619,12 @@ func newReferencedFileIndex(referencedFiles map[string]bool, cfg *orphanCleanupC
 		byPath:     make(map[string][]string, len(referencedFiles)),
 	}
 	for referencedPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(referencedPath, cfg)
-		index.normalized[normalizedPath] = struct{}{}
+		normalizedPaths := normalizedFilePathAliases(referencedPath, cfg)
+		for _, normalizedPath := range normalizedPaths {
+			index.normalized[normalizedPath] = struct{}{}
+		}
 		index.normalized[referencedPath] = struct{}{}
-		pathKey := filePathKey(normalizedPath)
+		pathKey := filePathKey(normalizedPaths[0])
 		index.byPath[pathKey] = append(index.byPath[pathKey], referencedPath)
 	}
 	for pathKey := range index.byPath {
@@ -772,6 +777,34 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 	return normalizeNonURLPath(path)
 }
 
+func normalizedFilePathAliases(path string, cfg *orphanCleanupConfig) []string {
+	normalized := normalizeFilePathWithConfig(path, cfg)
+	aliases := []string{normalized}
+
+	// A forward-slash //server/share path is both a valid POSIX path and a
+	// Windows UNC path. On non-Windows hosts, retain either interpretation so
+	// filepath.WalkDir collapsing the leading // cannot expose a live file to
+	// deletion. Backslash UNC paths are unambiguously Windows paths.
+	if runtime.GOOS != "windows" && isForwardSlashUNCPath(path) {
+		posixPath := pathpkg.Clean(path)
+		if posixPath != normalized {
+			aliases = append(aliases, posixPath)
+		}
+	}
+
+	return aliases
+}
+
+func isForwardSlashUNCPath(path string) bool {
+	if strings.Contains(path, `\`) {
+		return false
+	}
+
+	volume, _, rooted := splitPortableVolume(path)
+
+	return rooted && strings.HasPrefix(volume, "//")
+}
+
 func versionHintLocation(tableLocation string) (string, error) {
 	if strings.Contains(tableLocation, "://") || strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
 		return url.JoinPath(tableLocation, "metadata", "version-hint.text")
@@ -796,8 +829,23 @@ func versionHintLocation(tableLocation string) (string, error) {
 // Based on Apache Iceberg Java's DeleteOrphanFilesSparkAction.toFileURI() normalization (lines 542-548).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
-	parsedURL, err := url.Parse(path)
-	if err != nil {
+	schemeEnd := strings.Index(path, "://")
+	if schemeEnd <= 0 {
+		return normalizeNonURLPath(path)
+	}
+
+	remainder := path[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	rawAuthority := remainder[:authorityEnd]
+	rawSuffix := remainder[authorityEnd:]
+
+	// Parse only the prefix. The suffix is an opaque object key and may contain
+	// characters or escapes that net/url would otherwise rewrite or reject.
+	parsedPrefix, err := url.Parse(path[:schemeEnd+3+authorityEnd])
+	if err != nil || parsedPrefix.Scheme == "" {
 		return normalizeNonURLPath(path)
 	}
 
@@ -808,8 +856,15 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 		equalAuthorities = cfg.equalAuthorities
 	}
 
-	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
+	normalizedScheme := applySchemeEquivalence(parsedPrefix.Scheme, equalSchemes)
+	normalizedAuthority := applyAuthorityEquivalence(parsedPrefix.Host, equalAuthorities)
+	if parsedPrefix.User != nil {
+		// Preserve the raw userinfo spelling while maintaining the existing Host-
+		// based authority equivalence behavior.
+		if userInfoEnd := strings.LastIndexByte(rawAuthority, '@'); userInfoEnd >= 0 {
+			normalizedAuthority = rawAuthority[:userInfoEnd+1] + normalizedAuthority
+		}
+	}
 
 	// Object-store paths are opaque keys. Keep their spelling exactly as
 	// supplied: escaped separators, duplicate slashes, dot segments, queries,
@@ -819,11 +874,7 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	// This intentionally differs from iceberg-java's Hadoop Path-based
 	// normalization, which resolves dot segments. The Go object-store FileIO
 	// preserves raw keys, so resolving them here would conflate distinct files.
-	normalizedURL := *parsedURL
-	normalizedURL.Scheme = normalizedScheme
-	normalizedURL.Host = normalizedAuthority
-
-	return normalizedURL.String()
+	return normalizedScheme + "://" + normalizedAuthority + rawSuffix
 }
 
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
@@ -841,6 +892,10 @@ func normalizeNonURLPath(path string) string {
 		return normalizeWindowsLocalPathCase(pathpkg.Clean(normalized))
 	}
 	if remainder == "" {
+		if rooted && isWindowsDriveVolume(volume) {
+			return normalizeWindowsLocalPathCase(volume + "/")
+		}
+
 		return normalizeWindowsLocalPathCase(volume)
 	}
 
@@ -910,6 +965,10 @@ func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
 
 func isDriveLetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isWindowsDriveVolume(volume string) bool {
+	return len(volume) == 2 && isDriveLetter(volume[0]) && volume[1] == ':'
 }
 
 // filePathKey returns the path component used to compare listed files with
