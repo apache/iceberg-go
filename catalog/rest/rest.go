@@ -116,13 +116,13 @@ var (
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
 )
 
-// SnapshotMode controls which snapshots are included in a loadTable response.
+// Controls which snapshots are included in a loadTable response.
 type SnapshotMode string
 
 const (
-	// SnapshotModeAll requests all currently valid snapshots (server default).
+	// All currently valid snapshots (server default).
 	SnapshotModeAll SnapshotMode = "all"
-	// SnapshotModeRefs requests only snapshots referenced by a named branch or tag.
+	// Only snapshots referenced by a named branch or tag.
 	SnapshotModeRefs SnapshotMode = "refs"
 )
 
@@ -394,7 +394,7 @@ func requireBody() reqOption {
 	return func(c *reqConfig) { c.requireBody = true }
 }
 
-// withQueryParams appends query parameters to the request.
+// Appends query parameters to the request.
 func withQueryParams(params url.Values) reqOption {
 	return func(c *reqConfig) {
 		if c.queryParams == nil {
@@ -1632,13 +1632,12 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
 }
 
-// LoadTable loads a table from the catalog. It implements [catalog.Catalog].
+// Loads a table from the catalog. It implements [catalog.Catalog].
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, "")
 }
 
-// LoadTableWithSnapshotMode loads a table, passing ?snapshots=<mode> to control
-// which snapshots are included in the response.
+// Loads a table, passing ?snapshots=<mode> to control which snapshots are included in the response.
 func (r *Catalog) LoadTableWithSnapshotMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, mode)
 }
