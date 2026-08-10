@@ -20,10 +20,11 @@ package io
 import (
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/apache/iceberg-go/internal/fileuri"
 )
 
 // LocalFS is an implementation of IO that implements interaction with
@@ -52,44 +53,19 @@ func localPath(name string) (string, error) {
 		return "", fmt.Errorf("unsupported local filesystem scheme %q", scheme)
 	}
 
-	parsed, err := url.Parse(name)
+	parsed, err := fileuri.Parse(name)
 	if err != nil {
 		return "", fmt.Errorf("invalid local file path %q: %w", name, err)
 	}
-	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
-		if filepath.Separator != '\\' || !isWindowsDriveHost(parsed.Host) {
-			return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
+	if parsed.Host() != "" && !strings.EqualFold(parsed.Host(), "localhost") {
+		if filepath.Separator != '\\' || !fileuri.IsWindowsDriveHost(parsed.Host()) {
+			return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host())
 		}
 	}
 
-	path := parsed.Path
-	if parsed.Opaque != "" {
-		var err error
-		path, err = url.PathUnescape(parsed.Opaque)
-		if err != nil {
-			return "", fmt.Errorf("invalid local file path %q: %w", name, err)
-		}
-	}
-
-	if filepath.Separator == '\\' && isWindowsDriveHost(parsed.Host) {
-		path = parsed.Host + path
-	} else if filepath.Separator == '\\' && isWindowsDrivePath(path) {
-		path = path[1:]
-	}
+	path := parsed.LocalPath(filepath.Separator == '\\')
 
 	return filepath.FromSlash(path), nil
-}
-
-func isWindowsDrivePath(path string) bool {
-	return len(path) >= 3 && path[0] == '/' &&
-		((path[1] >= 'a' && path[1] <= 'z') || (path[1] >= 'A' && path[1] <= 'Z')) &&
-		path[2] == ':'
-}
-
-func isWindowsDriveHost(host string) bool {
-	return len(host) == 2 &&
-		((host[0] >= 'a' && host[0] <= 'z') || (host[0] >= 'A' && host[0] <= 'Z')) &&
-		host[1] == ':'
 }
 
 func (LocalFS) Open(name string) (File, error) {

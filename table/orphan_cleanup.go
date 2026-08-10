@@ -35,6 +35,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/fileuri"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/errgroup"
 )
@@ -752,20 +753,24 @@ func normalizeFilePath(path string) string {
 }
 
 func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
-	if strings.HasPrefix(strings.ToLower(path), "file:") {
-		if u, err := url.Parse(path); err == nil {
-			host := strings.ToLower(u.Host)
-			if host == "" || host == "localhost" {
-				pathStr := u.Path
-				// Intercept Windows drive letters (e.g., /C:/) and strip the leading slash
-				if len(pathStr) >= 3 && pathStr[0] == '/' && pathStr[2] == ':' {
-					pathStr = pathStr[1:]
-				}
+	normalizedSeparators := strings.ReplaceAll(path, "\\", "/")
+	// Native Windows volumes take precedence over URI parsing, matching LocalFS.
+	// A path such as C://warehouse is drive-shaped even though it contains ://.
+	if fileuri.HasWindowsDrivePrefix(normalizedSeparators) {
+		return normalizeNonURLPath(path)
+	}
 
-				return normalizeNonURLPath(pathStr)
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		if fileURI, err := fileuri.Parse(path); err == nil {
+			host := strings.ToLower(fileURI.Host())
+			if host == "" || host == "localhost" {
+				return normalizeNonURLPath(fileURI.LocalPath(true))
+			}
+			if fileuri.IsWindowsDriveHost(fileURI.Host()) {
+				return normalizeNonURLPath(fileURI.LocalPath(true))
 			}
 			// Remote authority – keep it as //host/path
-			return normalizeNonURLPath("//" + u.Host + u.Path)
+			return normalizeNonURLPath("//" + fileURI.Host() + fileURI.LocalPath(false))
 		}
 	}
 
@@ -807,7 +812,12 @@ func isForwardSlashUNCPath(path string) bool {
 
 func versionHintLocation(tableLocation string) (string, error) {
 	if strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
-		return url.JoinPath(tableLocation, "metadata", "version-hint.text")
+		fileURI, err := fileuri.Parse(tableLocation)
+		if err != nil {
+			return "", err
+		}
+
+		return fileURI.JoinPath("metadata", "version-hint.text"), nil
 	}
 
 	if strings.Contains(tableLocation, "://") {
@@ -1005,8 +1015,8 @@ func filePathKey(file string) string {
 	// Local file URIs use decoded path semantics. Handle them separately so
 	// remote object-store suffixes can retain their raw spelling below.
 	if strings.HasPrefix(strings.ToLower(file), "file:") {
-		if parsedURL, err := url.Parse(file); err == nil {
-			return normalizeNonURLPath(parsedURL.Path)
+		if fileURI, err := fileuri.Parse(file); err == nil {
+			return normalizeNonURLPath(fileURI.LocalPath(true))
 		}
 	}
 

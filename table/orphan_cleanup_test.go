@@ -225,6 +225,36 @@ func TestNormalizeFilePath(t *testing.T) {
 			expected: "c:/warehouse/file.parquet",
 		},
 		{
+			name:     "opaque_windows_file_uri",
+			input:    "file:C:/Warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "uppercase_opaque_windows_file_uri",
+			input:    "FILE:C:/Warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "windows_drive_authority_file_uri",
+			input:    "file://C:/Warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "windows_drive_double_slash",
+			input:    "C://warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "windows_drive_triple_slash",
+			input:    "C:///warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "lowercase_windows_drive_double_slash",
+			input:    "c://warehouse/file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
 			name:     "unc_file_uri",
 			input:    "file://server/share/data/../file.parquet",
 			expected: "//server/share/file.parquet",
@@ -370,6 +400,16 @@ func TestFilePathKey(t *testing.T) {
 			name:     "encoded local file path",
 			input:    "file:///warehouse%20space/file.parquet",
 			expected: "/warehouse space/file.parquet",
+		},
+		{
+			name:     "opaque Windows file URI",
+			input:    "file:C:/Warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "Windows drive authority file URI",
+			input:    "file://C:/Warehouse/data/../file.parquet",
+			expected: "c:/warehouse/file.parquet",
 		},
 		{
 			name:     "escaped remote separator",
@@ -549,6 +589,16 @@ func TestVersionHintLocation(t *testing.T) {
 			name:     "uppercase_file_uri",
 			location: "FILE:///tmp/table",
 			expected: "file:///tmp/table/metadata/version-hint.text",
+		},
+		{
+			name:     "opaque_windows_file_uri",
+			location: "file:C:/warehouse/table",
+			expected: "file:C:/warehouse/table/metadata/version-hint.text",
+		},
+		{
+			name:     "uppercase_opaque_windows_file_uri",
+			location: "FILE:C:/warehouse/table",
+			expected: "file:C:/warehouse/table/metadata/version-hint.text",
 		},
 		{
 			name:     "local_path",
@@ -1391,6 +1441,82 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, result.OrphanFileLocations)
 	assert.Empty(t, result.DeletedFiles)
+}
+
+func TestDeleteOrphanFilesDryRunKeepsPortableWindowsReferences(t *testing.T) {
+	tests := []struct {
+		name           string
+		tableLocation  string
+		referencedPath string
+		listedPaths    []string
+	}{
+		{
+			name:           "opaque file URI and version hint",
+			tableLocation:  "file:C:/Warehouse/Table",
+			referencedPath: "FILE:C:/Warehouse/Table/Data/../File.parquet",
+			listedPaths: []string{
+				`C:\Warehouse\Table\File.parquet`,
+				`C:\Warehouse\Table\metadata\version-hint.text`,
+			},
+		},
+		{
+			name:           "redundant drive separators",
+			tableLocation:  `C:\Warehouse\Table`,
+			referencedPath: "C://Warehouse/Table/Data/File.parquet",
+			listedPaths:    []string{`C:\Warehouse\Table\Data\File.parquet`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+			})
+			meta, err := NewMetadata(
+				schema,
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				tt.tableLocation,
+				iceberg.Properties{PropertyFormatVersion: "2"},
+			)
+			require.NoError(t, err)
+			builder, err := MetadataBuilderFromBase(meta, "")
+			require.NoError(t, err)
+			require.NoError(t, builder.SetStatistics(StatisticsFile{
+				SnapshotID:      1,
+				StatisticsPath:  tt.referencedPath,
+				BlobMetadata:    []BlobMetadata{},
+				FileSizeInBytes: 4,
+			}))
+			meta, err = builder.Build()
+			require.NoError(t, err)
+
+			entries := make([]mockWalkEntry, 0, len(tt.listedPaths))
+			for _, path := range tt.listedPaths {
+				entries = append(entries, mockWalkEntry{
+					path: path,
+					info: mockFileInfo{name: filepath.Base(path), size: 4},
+				})
+			}
+			fsys := &mockListableIO{entries: entries}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				tt.tableLocation+"/metadata/v1.metadata.json",
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
+
+			result, err := tbl.DeleteOrphanFiles(
+				context.Background(),
+				WithFilesOlderThan(0),
+				WithDryRun(true),
+			)
+			require.NoError(t, err)
+			assert.Empty(t, result.OrphanFileLocations)
+			assert.Empty(t, result.DeletedFiles)
+		})
+	}
 }
 
 func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
