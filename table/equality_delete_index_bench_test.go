@@ -33,6 +33,7 @@ func BenchmarkEqualityDeleteIndex(b *testing.B) {
 		for _, partitionCount := range []int{1, 10, 100} {
 			name := fmt.Sprintf("deletes=%d/partitions=%d", deleteFileCount, partitionCount)
 			b.Run(name, func(b *testing.B) {
+				specs := equalityDeleteIndexTestSpecs()
 				deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
 				for i := range deleteEntries {
 					deleteEntries[i] = newEqualityDeleteIndexTestEntry(
@@ -58,7 +59,7 @@ func BenchmarkEqualityDeleteIndex(b *testing.B) {
 				b.ReportMetric(float64(deleteFileCount), "delete_files")
 				b.ResetTimer()
 				for range b.N {
-					idx, err := buildEqualityDeleteIndex(deleteEntries)
+					idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
 					if err != nil {
 						b.Fatal(err)
 					}

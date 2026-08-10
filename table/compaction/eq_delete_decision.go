@@ -19,7 +19,6 @@ package compaction
 
 import (
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 
@@ -30,21 +29,22 @@ import (
 // AFTER a planned rewrite has logically removed its rewrite set. It
 // is the input to [DecideDeadEqualityDeletes].
 //
-// EmptyPartMinSeq is the smallest sequence number among unpartitioned
-// surviving data files. The cleanup conservatively considers it for every
-// equality delete, even though scan planning only applies partitioned deletes
-// within the same spec. This may retain a dead delete but cannot remove a live
-// one.
+// MinSeq is the smallest sequence number among all surviving data files. It is
+// used for equality deletes whose partition spec is unpartitioned, including
+// specs made entirely of void transforms.
 //
-// PartMinSeq maps the partition tuple (encoded via partitionMatchKey)
-// to the smallest sequence number among surviving partitioned data
-// files in that tuple. The key intentionally does NOT include SpecID, making
-// cleanup conservative across partition evolution.
+// PartMinSeq maps each (spec ID, partition tuple) to the smallest sequence
+// number among surviving data files in that bucket.
 //
 // Sentinel "no survivor in this bucket" is math.MaxInt64.
 type SurvivorSurvey struct {
-	EmptyPartMinSeq int64
-	PartMinSeq      map[string]int64
+	MinSeq     int64
+	PartMinSeq map[string]int64
+}
+
+// PartitionSpecLookup resolves the partition spec used to write a data file.
+type PartitionSpecLookup interface {
+	PartitionSpecByID(int) *iceberg.PartitionSpec
 }
 
 // NewSurvivorSurvey returns a survey initialized with the no-survivor
@@ -52,58 +52,52 @@ type SurvivorSurvey struct {
 // map. Callers populate via AddSurvivor.
 func NewSurvivorSurvey() *SurvivorSurvey {
 	return &SurvivorSurvey{
-		EmptyPartMinSeq: math.MaxInt64,
-		PartMinSeq:      make(map[string]int64),
+		MinSeq:     math.MaxInt64,
+		PartMinSeq: make(map[string]int64),
 	}
 }
 
-// AddSurvivor records a surviving data file's (partition, seq) into
-// the survey. partition is the data file's partition tuple from
-// iceberg.DataFile.Partition() (nil/empty for unpartitioned tables);
-// seq is the data file's sequence number from the manifest entry.
+// AddSurvivor records a surviving data file's (spec ID, partition, seq) into
+// the survey.
 //
 // Defensive: if seq < 0 (sentinel for "unset"), the file is recorded
 // with seq=0 (smallest real value), which keeps it permanently alive
 // against every eq-delete. Better to preserve uncertain state than to
 // drop deletes that may still apply.
 //
-// Pointer receiver: EmptyPartMinSeq is int64 (value type) and we need
+// Pointer receiver: MinSeq is int64 (value type) and we need
 // updates to persist. Callers must hold the survey by value or pointer
 // consistently — typical pattern is `survey := NewSurvivorSurvey()`
 // followed by `survey.AddSurvivor(...)` which Go auto-addresses.
-func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
+func (s *SurvivorSurvey) AddSurvivor(specID int32, partition map[int]any, seq int64) {
 	if seq < 0 {
 		seq = 0
 	}
-	if len(partition) == 0 {
-		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
+	s.MinSeq = min(seq, s.MinSeq)
 
-		return
-	}
-	key := partitionMatchKey(partition)
+	key := partitionBucketKey(specID, partition)
 	if cur, ok := s.PartMinSeq[key]; ok {
 		seq = min(seq, cur)
 	}
 	s.PartMinSeq[key] = seq
 }
 
-// applicableMinSeq returns the smallest sequence number among the conservative
-// superset of survivors an equality delete could apply to. EmptyPartMinSeq is
-// always included; an unpartitioned equality delete also includes every
-// partition bucket.
-func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
-	if len(eqPartition) == 0 {
-		if len(s.PartMinSeq) == 0 {
-			return s.EmptyPartMinSeq
-		}
-
-		return min(s.EmptyPartMinSeq, slices.Min(slices.Collect(maps.Values(s.PartMinSeq))))
+// applicableMinSeq returns the smallest sequence number among survivors an
+// equality delete could apply to. An unpartitioned delete applies globally;
+// otherwise the data file must have the same spec ID and partition tuple.
+func (s *SurvivorSurvey) applicableMinSeq(
+	eqSpecID int32,
+	eqPartition map[int]any,
+	isUnpartitioned bool,
+) int64 {
+	if isUnpartitioned {
+		return s.MinSeq
 	}
-	if v, ok := s.PartMinSeq[partitionMatchKey(eqPartition)]; ok {
-		return min(s.EmptyPartMinSeq, v)
+	if v, ok := s.PartMinSeq[partitionBucketKey(eqSpecID, eqPartition)]; ok {
+		return v
 	}
 
-	return s.EmptyPartMinSeq
+	return math.MaxInt64
 }
 
 // DecideDeadEqualityDeletes is the pure spec-correctness predicate for
@@ -112,21 +106,15 @@ func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 // list of equality-delete manifest entries, it returns the eq-delete
 // files that no surviving data file could ever apply to.
 //
-// The conservative cleanup rule is:
+// The cleanup rule is:
 //
 //	E applies to D iff E.seq > D.seq AND (
-//	    len(E.partition) == 0 ||
-//	    len(D.partition) == 0 ||
-//	    partitionsMatch(E.partition, D.partition)
+//	    E.spec.isUnpartitioned() ||
+//	    (E.specID == D.specID && E.partition == D.partition)
 //	)
 //
 // E is dead iff no applicable surviving D has D.seq < E.seq —
 // equivalently, the applicable min-seq is >= E.seq.
-//
-// SpecID is intentionally NOT part of this cleanup predicate. Scan planning
-// uses the stricter Java-aligned (spec ID, partition) match, so cleanup can
-// retain extra deletes across spec evolution but cannot drop a delete the
-// reader still needs.
 //
 // Defensive: candidates with sequence number < 0 (sentinel for unset)
 // are skipped — preserved rather than risk dropping an unidentifiable
@@ -134,13 +122,18 @@ func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 //
 // Dedup by file path: the same eq-delete file may appear in multiple
 // manifest entries after manifest merging.
-func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.ManifestEntry) []iceberg.DataFile {
+func DecideDeadEqualityDeletes(
+	survey *SurvivorSurvey,
+	candidates []iceberg.ManifestEntry,
+	specs PartitionSpecLookup,
+) ([]iceberg.DataFile, error) {
 	if survey == nil || len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	dead := make([]iceberg.DataFile, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
+	unpartitionedBySpecID := make(map[int32]bool)
 	for _, e := range candidates {
 		df := e.DataFile()
 		path := df.FilePath()
@@ -150,13 +143,23 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 		if e.SequenceNum() < 0 {
 			continue
 		}
-		if survey.applicableMinSeq(df.Partition()) >= e.SequenceNum() {
+		isUnpartitioned, ok := unpartitionedBySpecID[df.SpecID()]
+		if !ok {
+			spec := specs.PartitionSpecByID(int(df.SpecID()))
+			if spec == nil {
+				return nil, fmt.Errorf("deciding equality delete file %s: partition spec ID %d not found",
+					path, df.SpecID())
+			}
+			isUnpartitioned = spec.IsUnpartitioned()
+			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
+		}
+		if survey.applicableMinSeq(df.SpecID(), df.Partition(), isUnpartitioned) >= e.SequenceNum() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
 	}
 
-	return dead
+	return dead, nil
 }
 
 // partitionBucketKey returns a deterministic string key for a
@@ -169,20 +172,6 @@ func partitionBucketKey(specID int32, part map[int]any) string {
 	}
 
 	return string(appendPartitionTuple(fmt.Appendf(nil, "%d:", specID), part))
-}
-
-// partitionMatchKey returns a deterministic string key for a
-// partition tuple alone (no spec id). Used by equality-delete cleanup
-// to conservatively bucket survivors and candidates across partition specs.
-//
-// Empty / nil partition → empty string sentinel. Callers must
-// special-case empty partitions per the global-applicability rule.
-func partitionMatchKey(part map[int]any) string {
-	if len(part) == 0 {
-		return ""
-	}
-
-	return string(appendPartitionTuple(nil, part))
 }
 
 // appendPartitionTuple emits the sorted "id=value;" tuple into dst.

@@ -50,6 +50,7 @@ import (
 func CollectDeadEqualityDeletes(
 	ctx context.Context,
 	fs iceio.IO,
+	specs PartitionSpecLookup,
 	snap *table.Snapshot,
 	rewrittenPaths map[string]struct{},
 ) ([]iceberg.DataFile, error) {
@@ -105,9 +106,9 @@ func CollectDeadEqualityDeletes(
 			if _, beingRewritten := rewrittenPaths[df.FilePath()]; beingRewritten {
 				continue
 			}
-			survey.AddSurvivor(df.Partition(), e.SequenceNum())
+			survey.AddSurvivor(df.SpecID(), df.Partition(), e.SequenceNum())
 		}
 	}
 
-	return DecideDeadEqualityDeletes(survey, candidates), nil
+	return DecideDeadEqualityDeletes(survey, candidates, specs)
 }

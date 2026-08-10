@@ -177,7 +177,7 @@ func TestCDCStress(t *testing.T) {
 	}
 	fs := iceio.LocalFS{}
 	deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(
-		t.Context(), fs, tbl.CurrentSnapshot(), rewrittenSet)
+		t.Context(), fs, tbl.Metadata(), tbl.CurrentSnapshot(), rewrittenSet)
 	require.NoError(t, err)
 
 	tx = tbl.NewTransaction()

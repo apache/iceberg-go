@@ -69,10 +69,9 @@ type Config struct {
 
 	// PreserveDeadEqualityDeletes, when true, retains equality delete
 	// files that are provably dead after the rewrite. The cleanup
-	// predicate is conservative across partition specs (see
-	// DecideDeadEqualityDeletes): it may retain an equality delete that
-	// scan planning would not apply, but never removes one that could
-	// still affect a surviving data file.
+	// predicate follows scan planning's partition-spec applicability rule
+	// (see DecideDeadEqualityDeletes) and never removes one that could still
+	// affect a surviving data file.
 	//
 	// Zero value (false) is the recommended default: dead eq-deletes are
 	// expunged during the rewrite commit, which keeps manifest fanout

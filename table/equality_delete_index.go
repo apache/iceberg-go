@@ -36,6 +36,10 @@ type equalityDeleteIndex struct {
 	byPartition map[equalityDeletePartitionKey][]iceberg.ManifestEntry
 }
 
+type partitionSpecLookup interface {
+	PartitionSpecByID(int) *iceberg.PartitionSpec
+}
+
 type equalityDeletePartitionKey struct {
 	specID  int32
 	fieldID int
@@ -46,7 +50,7 @@ type equalityDeletePartitionKey struct {
 
 type (
 	equalityDeleteIntegerPartitionValue int64
-	equalityDeleteFloatPartitionValue   float64
+	equalityDeleteFloatPartitionValue   uint64
 	equalityDeleteStringPartitionValue  string
 	equalityDeleteEncodedPartitionValue string
 	equalityDeleteBinaryPartitionValue  string
@@ -103,17 +107,18 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	case iceberg.TimestampNano:
 		return equalityDeleteIntegerPartitionValue(value), nil
 	case float32:
-		if math.IsNaN(float64(value)) {
+		value64 := float64(value)
+		if math.IsNaN(value64) {
 			return equalityDeleteNaNPartitionValue{}, nil
 		}
 
-		return equalityDeleteFloatPartitionValue(value), nil
+		return equalityDeleteFloatPartitionValue(math.Float64bits(value64)), nil
 	case float64:
 		if math.IsNaN(value) {
 			return equalityDeleteNaNPartitionValue{}, nil
 		}
 
-		return equalityDeleteFloatPartitionValue(value), nil
+		return equalityDeleteFloatPartitionValue(math.Float64bits(value)), nil
 	case string:
 		return equalityDeleteStringPartitionValue(value), nil
 	case []byte:
@@ -130,17 +135,31 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	}
 }
 
-func buildEqualityDeleteIndex(entries []iceberg.ManifestEntry) (*equalityDeleteIndex, error) {
+func buildEqualityDeleteIndex(
+	entries []iceberg.ManifestEntry,
+	specs partitionSpecLookup,
+) (*equalityDeleteIndex, error) {
 	idx := &equalityDeleteIndex{}
+	unpartitionedBySpecID := make(map[int32]bool)
 	for _, entry := range entries {
 		df := entry.DataFile()
-		partition := df.Partition()
-		if len(partition) == 0 {
+		isUnpartitioned, ok := unpartitionedBySpecID[df.SpecID()]
+		if !ok {
+			spec := specs.PartitionSpecByID(int(df.SpecID()))
+			if spec == nil {
+				return nil, fmt.Errorf("indexing equality delete file %s: %w: id %d",
+					df.FilePath(), ErrPartitionSpecNotFound, df.SpecID())
+			}
+			isUnpartitioned = spec.IsUnpartitioned()
+			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
+		}
+		if isUnpartitioned {
 			idx.global = append(idx.global, entry)
 
 			continue
 		}
 
+		partition := df.Partition()
 		key, err := newEqualityDeletePartitionKey(df.SpecID(), partition)
 		if err != nil {
 			return nil, fmt.Errorf("indexing equality delete file %s: %w", df.FilePath(), err)
