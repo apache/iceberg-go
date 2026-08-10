@@ -224,6 +224,7 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 		t.Context(),
 		iceio.NewMemFS(),
 		schema,
+		nil,
 		[]FileScanTask{{EqualityDeleteFiles: []iceberg.DataFile{deleteFile}}},
 		1,
 	)
@@ -231,13 +232,15 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
 }
 
-func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
+func TestProcessEqualityDeletesUsesStructuralFieldPaths(t *testing.T) {
 	builder := array.NewInt64Builder(memory.DefaultAllocator)
 	builder.Append(1)
 	first := builder.NewArray()
 	builder.Append(2)
 	second := builder.NewArray()
 	builder.Release()
+	var key bytes.Buffer
+	encodeArrowValue(&key, first, 0)
 
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
@@ -247,15 +250,21 @@ func TestProcessEqualityDeletesRejectsAmbiguousDataColumns(t *testing.T) {
 	first.Release()
 	second.Release()
 
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "left", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "right", Type: iceberg.PrimitiveTypes.Int64},
+	)
 	process, err := processEqualityDeletesColumnarForFile(context.Background(), []*equalityDeleteSet{{
-		keys:     make(set[string]),
+		keys:     set[string]{key.String(): {}},
 		fieldIDs: []int{1},
 		colNames: []string{"id"},
-	}}, "data.parquet")
+	}}, fileSchema, "data.parquet")
 	require.NoError(t, err)
 
-	_, err = process(record)
-	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
+	result, err := process(record)
+	require.NoError(t, err)
+	assert.Zero(t, result.NumRows())
+	result.Release()
 }
 
 func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
@@ -263,39 +272,27 @@ func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
 		keys:     make(set[string]),
 		fieldIDs: []int{1},
 		colNames: []string{"id", "other"},
-	}}, "data.parquet")
+	}}, iceberg.NewSchema(0), "data.parquet")
 
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.Nil(t, process)
 }
 
 func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {
-	schema := arrow.NewSchema([]arrow.Field{
-		{
-			Name:     "id",
-			Type:     arrow.PrimitiveTypes.Int64,
-			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
-		},
-		{
-			Name:     "id",
-			Type:     arrow.PrimitiveTypes.Int64,
-			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
-		},
-		{
-			Name: "record",
-			Type: arrow.StructOf(arrow.Field{
-				Name:     "value",
-				Type:     arrow.PrimitiveTypes.Int64,
-				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "3"}),
-			}),
-		},
-	}, nil)
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "renamed", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 4, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "value", Type: iceberg.PrimitiveTypes.Int64},
+		}}},
+	)
 
-	ref, err := resolveArrowField(schema, 2, "id", "data.parquet")
+	refs := indexArrowFields(schema)
+	ref, err := resolveArrowField(refs, 2, "id", "data.parquet")
 	require.NoError(t, err)
 	assert.Equal(t, []int{1}, ref.path)
 
-	ref, err = resolveArrowField(schema, 3, "record.value", "data.parquet")
+	ref, err = resolveArrowField(refs, 3, "record.value", "data.parquet")
 	require.NoError(t, err)
 	assert.Equal(t, []int{2, 0}, ref.path)
 }
@@ -303,7 +300,7 @@ func TestResolveArrowFieldUsesFieldIDBeforeName(t *testing.T) {
 func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
 	tests := []struct {
 		name      string
-		schema    *arrow.Schema
+		schema    *iceberg.Schema
 		fieldID   int
 		fieldName string
 		wantPath  []int
@@ -311,49 +308,33 @@ func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
 	}{
 		{
 			name: "renamed field uses matching ID",
-			schema: arrow.NewSchema([]arrow.Field{{
-				Name: "renamed", Type: arrow.PrimitiveTypes.Int64,
-				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "7"}),
-			}}, nil),
+			schema: iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 7, Name: "renamed", Type: iceberg.PrimitiveTypes.Int64,
+			}),
 			fieldID: 7, fieldName: "old_name", wantPath: []int{0},
 		},
 		{
-			name: "unique name with wrong ID is rejected",
-			schema: arrow.NewSchema([]arrow.Field{{
-				Name: "id", Type: arrow.PrimitiveTypes.Int64,
-				Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
-			}}, nil),
+			name: "missing ID is rejected even if a name matches",
+			schema: iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
+			}),
 			fieldID: 1, fieldName: "id", wantErr: errors.New("not found"),
 		},
 		{
-			name: "duplicate IDs are rejected",
-			schema: arrow.NewSchema([]arrow.Field{
-				{Name: "left", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
-				{Name: "right", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
-			}, nil),
-			fieldID: 1, fieldName: "left", wantErr: ErrAmbiguousEqualityColumn,
-		},
-		{
-			name: "repeated nested leaf names are ambiguous without IDs",
-			schema: arrow.NewSchema([]arrow.Field{
-				{Name: "left", Type: arrow.StructOf(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64})},
-				{Name: "right", Type: arrow.StructOf(arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int64})},
-			}, nil),
-			fieldName: "value", wantErr: ErrAmbiguousEqualityColumn,
-		},
-		{
-			name: "case-sensitive name fallback remains unique",
-			schema: arrow.NewSchema([]arrow.Field{
-				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-				{Name: "ID", Type: arrow.PrimitiveTypes.Int64},
-			}, nil),
-			fieldName: "id", wantPath: []int{0},
+			name: "literal dotted name is distinct from nested path",
+			schema: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "user.id", Type: iceberg.PrimitiveTypes.Int64},
+				iceberg.NestedField{ID: 2, Name: "user", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+				}}},
+			),
+			fieldID: 1, fieldName: "user.id", wantPath: []int{0},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ref, err := resolveArrowField(test.schema, test.fieldID, test.fieldName, "data.parquet")
+			ref, err := resolveArrowField(indexArrowFields(test.schema), test.fieldID, test.fieldName, "data.parquet")
 			if test.wantErr != nil {
 				require.Error(t, err)
 				if test.wantErr == ErrAmbiguousEqualityColumn {
@@ -369,4 +350,15 @@ func TestResolveArrowFieldRejectsAmbiguousOrMismatchedIDs(t *testing.T) {
 			assert.Equal(t, test.wantPath, ref.path)
 		})
 	}
+}
+
+func TestResolveArrowFieldRejectsDuplicateMetadataIDs(t *testing.T) {
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "left", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
+		{Name: "right", Type: arrow.PrimitiveTypes.Int64, Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})},
+	}, nil)
+
+	_, err := resolveArrowField(indexArrowFieldsByMetadata(schema), 1, "id", "data.parquet")
+	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
+	require.ErrorContains(t, err, "data.parquet")
 }

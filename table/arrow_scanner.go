@@ -1167,7 +1167,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}
 
 	if len(eqDeleteSets) > 0 {
-		eqFn, eqErr := processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, task.Value.File.FilePath())
+		eqFn, eqErr := processEqualityDeletesColumnarForFile(ctx, eqDeleteSets, iceSchema, task.Value.File.FilePath())
 		if eqErr != nil {
 			return eqErr
 		}
@@ -1481,7 +1481,7 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
-		as.metadata.CurrentSchema(), tasks, as.concurrency)
+		as.metadata.CurrentSchema(), as.metadata.NameMapping(), tasks, as.concurrency)
 	if err != nil {
 		// Positional deletes were fully loaded; release them before aborting.
 		releasePerFilePosDeletes(deletesPerFile)

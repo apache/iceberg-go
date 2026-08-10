@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -54,93 +53,73 @@ type arrowFieldRef struct {
 	path []int
 }
 
-func resolveArrowField(schema *arrow.Schema, fieldID int, fieldName, filePath string) (arrowFieldRef, error) {
-	type candidate struct {
-		ref           arrowFieldRef
-		pathName      string
-		hasIDMetadata bool
-	}
+type arrowFieldRefsByID map[int][]arrowFieldRef
 
-	var (
-		idMatches   []candidate
-		nameMatches []candidate
-		pathMatches []candidate
-	)
-	targetName := fieldName
-	if dot := strings.LastIndexByte(targetName, '.'); dot >= 0 {
-		targetName = targetName[dot+1:]
-	}
-
-	var visit func([]arrow.Field, []int, string)
-	visit = func(fields []arrow.Field, parentPath []int, parentName string) {
-		for i, field := range fields {
-			path := append(append([]int(nil), parentPath...), i)
-			pathName := field.Name
-			if parentName != "" {
-				pathName = parentName + "." + field.Name
-			}
-			fieldIDValue := getFieldID(field)
-			fieldHasIDMetadata := fieldIDValue != nil
-
-			if fieldIDValue != nil && *fieldIDValue == fieldID {
-				idMatches = append(idMatches, candidate{ref: arrowFieldRef{path: path}, pathName: pathName, hasIDMetadata: fieldHasIDMetadata})
-			}
-			if field.Name == targetName {
-				match := candidate{ref: arrowFieldRef{path: path}, pathName: pathName, hasIDMetadata: fieldHasIDMetadata}
-				nameMatches = append(nameMatches, match)
-				if pathName == fieldName {
-					pathMatches = append(pathMatches, match)
-				}
-			}
-
-			if nested, ok := field.Type.(*arrow.StructType); ok {
-				visit(nested.Fields(), path, pathName)
-			}
-		}
-	}
-	visit(schema.Fields(), nil, "")
-
+func equalityFieldLocation(filePath string) string {
 	location := filePath
 	if location == "" {
 		location = "data record"
 	}
 
-	if fieldID > 0 {
-		if len(idMatches) == 1 {
-			return idMatches[0].ref, nil
-		}
-		if len(idMatches) > 1 {
-			return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields",
-				ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(idMatches))
-		}
-	}
-	if len(pathMatches) == 1 {
-		if pathMatches[0].hasIDMetadata {
-			return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
-		}
+	return location
+}
 
-		return pathMatches[0].ref, nil
+// indexArrowFields derives Arrow child paths from the structurally aligned,
+// ID-resolved Iceberg file schema. It deliberately ignores names: dots in an
+// Iceberg name are literal and must not be interpreted as a path.
+func indexArrowFields(schema *iceberg.Schema) arrowFieldRefsByID {
+	refs := make(arrowFieldRefsByID)
+	if schema == nil {
+		return refs
 	}
-	if len(pathMatches) > 1 {
-		return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields named %q",
-			ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(pathMatches), fieldName)
-	}
-	if len(nameMatches) == 1 {
-		if nameMatches[0].hasIDMetadata {
-			return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
-		}
 
-		return nameMatches[0].ref, nil
-	}
-	if len(nameMatches) > 1 {
-		for _, match := range nameMatches {
-			if match.hasIDMetadata {
-				return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
+	var visit func([]iceberg.NestedField, []int)
+	visit = func(fields []iceberg.NestedField, parentPath []int) {
+		for i, field := range fields {
+			path := append(append([]int(nil), parentPath...), i)
+			refs[field.ID] = append(refs[field.ID], arrowFieldRef{path: path})
+
+			if nested, ok := field.Type.(*iceberg.StructType); ok {
+				visit(nested.Fields(), path)
 			}
 		}
+	}
+	visit(schema.Fields(), nil)
 
-		return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields named %q",
-			ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(nameMatches), targetName)
+	return refs
+}
+
+// indexArrowFieldsByMetadata is used for delete files whose Arrow fields carry
+// IDs directly, before any name mapping is needed.
+func indexArrowFieldsByMetadata(schema *arrow.Schema) arrowFieldRefsByID {
+	refs := make(arrowFieldRefsByID)
+	var visit func([]arrow.Field, []int)
+	visit = func(fields []arrow.Field, parentPath []int) {
+		for i, field := range fields {
+			path := append(append([]int(nil), parentPath...), i)
+			if id := getFieldID(field); id != nil {
+				refs[*id] = append(refs[*id], arrowFieldRef{path: path})
+			}
+
+			if nested, ok := field.Type.(*arrow.StructType); ok {
+				visit(nested.Fields(), path)
+			}
+		}
+	}
+	visit(schema.Fields(), nil)
+
+	return refs
+}
+
+func resolveArrowField(refs arrowFieldRefsByID, fieldID int, fieldName, filePath string) (arrowFieldRef, error) {
+	matches := refs[fieldID]
+	location := equalityFieldLocation(filePath)
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return arrowFieldRef{}, fmt.Errorf("%w: equality field ID %d (%s) in %s: found %d fields",
+			ErrAmbiguousEqualityColumn, fieldID, fieldName, location, len(matches))
 	}
 
 	return arrowFieldRef{}, fmt.Errorf("equality field ID %d (%s) not found in %s", fieldID, fieldName, location)
@@ -203,7 +182,7 @@ func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID 
 // the tasks and builds per-task delete key sets. Returns nil if there are
 // no equality deletes. Delete files with different equality field IDs are
 // kept as separate sets (not merged).
-func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
+func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, nameMapping iceberg.NameMapping, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
 	type deleteFileInfo struct {
 		file     iceberg.DataFile
 		fieldIDs []int
@@ -253,7 +232,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 		for _, info := range uniqueDeletes {
 			g.Go(func() error {
-				keys, colNames, err := readEqualityDeleteFile(ctx, fs, schema, info.file, info.fieldIDs)
+				keys, colNames, err := readEqualityDeleteFile(ctx, fs, schema, nameMapping, info.file, info.fieldIDs)
 				if err != nil {
 					return err
 				}
@@ -340,7 +319,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 // readEqualityDeleteFile reads a single equality delete file and returns
 // the set of encoded delete keys and the column names used.
-func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *iceberg.Schema, dataFile iceberg.DataFile, fieldIDs []int) (set[string], []string, error) {
+func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *iceberg.Schema, nameMapping iceberg.NameMapping, dataFile iceberg.DataFile, fieldIDs []int) (set[string], []string, error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, nil, err
@@ -358,6 +337,33 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	}
 	defer tbl.Release()
 
+	hasFieldIDs, err := VisitArrowSchema(tbl.Schema(), hasIDs{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var fileSchema *iceberg.Schema
+	if !hasFieldIDs {
+		if nameMapping == nil {
+			nameMapping = tableSchema.NameMapping()
+		}
+
+		fileSchema, err = ArrowSchemaToIcebergWithOptions(tbl.Schema(), ArrowToIcebergOptions{
+			NameMapping: nameMapping,
+			TableSchema: tableSchema,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var fieldRefsByID arrowFieldRefsByID
+	if hasFieldIDs {
+		fieldRefsByID = indexArrowFieldsByMetadata(tbl.Schema())
+	} else {
+		fieldRefsByID = indexArrowFields(fileSchema)
+	}
+
 	// Resolve column names from field IDs.
 	colNames := make([]string, len(fieldIDs))
 	fieldRefs := make([]arrowFieldRef, len(fieldIDs))
@@ -368,7 +374,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 			return nil, nil, fmt.Errorf("equality delete field ID %d not found in table schema for %s", fid, dataFile.FilePath())
 		}
 
-		ref, err := resolveArrowField(tbl.Schema(), fid, name, dataFile.FilePath())
+		ref, err := resolveArrowField(fieldRefsByID, fid, name, dataFile.FilePath())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -677,7 +683,8 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 // typed column encoders once per batch, then iterates rows without per-row type
 // switches. Each delete set is applied independently because sets may have
 // different field IDs.
-func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, dataFilePath string) (recProcessFn, error) {
+func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) (recProcessFn, error) {
+	fieldRefsByID := indexArrowFields(fileSchema)
 	fieldRefs := make([][]arrowFieldRef, len(eqDeleteSets))
 	for i, eqDel := range eqDeleteSets {
 		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
@@ -686,27 +693,18 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		}
 
 		fieldRefs[i] = make([]arrowFieldRef, len(eqDel.fieldIDs))
-	}
+		for fieldIdx, fieldID := range eqDel.fieldIDs {
+			ref, err := resolveArrowField(fieldRefsByID, fieldID, eqDel.colNames[fieldIdx], dataFilePath)
+			if err != nil {
+				return nil, err
+			}
 
-	fieldsResolved := false
+			fieldRefs[i][fieldIdx] = ref
+		}
+	}
 
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
-
-		if !fieldsResolved {
-			for setIdx, eqDel := range eqDeleteSets {
-				for fieldIdx, fieldID := range eqDel.fieldIDs {
-					ref, err := resolveArrowField(r.Schema(), fieldID, eqDel.colNames[fieldIdx], dataFilePath)
-					if err != nil {
-						return nil, err
-					}
-
-					fieldRefs[setIdx][fieldIdx] = ref
-				}
-			}
-
-			fieldsResolved = true
-		}
 
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
