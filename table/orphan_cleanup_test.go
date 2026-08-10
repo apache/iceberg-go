@@ -480,6 +480,26 @@ func TestVersionHintLocation(t *testing.T) {
 			expected: "s3://bucket/table/metadata/version-hint.text",
 		},
 		{
+			name:     "s3_literal_space",
+			location: "s3://bucket/table space",
+			expected: "s3://bucket/table space/metadata/version-hint.text",
+		},
+		{
+			name:     "s3_literal_unicode",
+			location: "s3://bucket/café",
+			expected: "s3://bucket/café/metadata/version-hint.text",
+		},
+		{
+			name:     "s3_duplicate_slashes_and_dot_segments",
+			location: "s3://bucket/table//part/../current",
+			expected: "s3://bucket/table//part/../current/metadata/version-hint.text",
+		},
+		{
+			name:     "s3_raw_percent_escape",
+			location: "s3://bucket/%zz",
+			expected: "s3://bucket/%zz/metadata/version-hint.text",
+		},
+		{
 			name:     "file_uri",
 			location: "file:///tmp/table",
 			expected: "file:///tmp/table/metadata/version-hint.text",
@@ -510,8 +530,8 @@ func TestVersionHintLocation(t *testing.T) {
 	}
 }
 
-func TestVersionHintLocationRejectsInvalidURL(t *testing.T) {
-	_, err := versionHintLocation("s3://bucket/%zz")
+func TestVersionHintLocationRejectsInvalidPrefix(t *testing.T) {
+	_, err := versionHintLocation("s3://[invalid/table")
 	assert.Error(t, err)
 }
 
@@ -918,6 +938,40 @@ func TestIsFileOrphanAppliesPrefixMismatchPolicyToEncodedPaths(t *testing.T) {
 	assert.False(t, isOrphan, "encoded paths must still honor prefix-mismatch safety policy")
 }
 
+func TestIsFileOrphanAppliesPrefixMismatchPolicyToRawPercentKeys(t *testing.T) {
+	const (
+		referencedPath = "s3a://bucket/path%zz/file.parquet"
+		listedPath     = "s3://bucket/path%zz/file.parquet"
+	)
+
+	for _, tt := range []struct {
+		name         string
+		mode         PrefixMismatchMode
+		expectOrphan bool
+		expectError  bool
+	}{
+		{name: "error", mode: PrefixMismatchError, expectError: true},
+		{name: "ignore", mode: PrefixMismatchIgnore},
+		{name: "delete", mode: PrefixMismatchDelete, expectOrphan: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &orphanCleanupConfig{prefixMismatchMode: tt.mode}
+			referencedFiles := map[string]bool{referencedPath: true}
+			index := newReferencedFileIndex(referencedFiles, cfg)
+
+			isOrphan, err := isFileOrphan(listedPath, referencedFiles, index, cfg)
+			if tt.expectError {
+				require.ErrorContains(t, err, "prefix mismatch detected")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectOrphan, isOrphan)
+		})
+	}
+}
+
 func TestOrphanCleanup_EdgeCases(t *testing.T) {
 	t.Run("prefix_mismatch_unknown_mode", func(t *testing.T) {
 		cfg := &orphanCleanupConfig{
@@ -1253,6 +1307,46 @@ func TestDeleteOrphanFilesDryRunKeepsMixedCaseWindowsReference(t *testing.T) {
 		WithDryRun(true),
 	)
 	require.NoError(t, err)
+	assert.Empty(t, result.OrphanFileLocations)
+	assert.Empty(t, result.DeletedFiles)
+}
+
+func TestDeleteOrphanFilesDryRunKeepsOpaqueVersionHint(t *testing.T) {
+	const tableLocation = "s3://bucket/table space"
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		tableLocation,
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(t, err)
+
+	const versionHintPath = tableLocation + "/metadata/version-hint.text"
+	fsys := &mockListableIO{
+		entries: []mockWalkEntry{{
+			path: versionHintPath,
+			info: mockFileInfo{name: "version-hint.text", size: 2},
+		}},
+	}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		tableLocation+"/metadata/v1.metadata.json",
+		func(context.Context) (io.IO, error) { return fsys, nil },
+		nil,
+	)
+
+	result, err := tbl.DeleteOrphanFiles(
+		context.Background(),
+		WithFilesOlderThan(0),
+		WithDryRun(true),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, tableLocation, fsys.root)
 	assert.Empty(t, result.OrphanFileLocations)
 	assert.Empty(t, result.DeletedFiles)
 }

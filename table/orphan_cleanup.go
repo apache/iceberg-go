@@ -806,8 +806,24 @@ func isForwardSlashUNCPath(path string) bool {
 }
 
 func versionHintLocation(tableLocation string) (string, error) {
-	if strings.Contains(tableLocation, "://") || strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
+	if strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
 		return url.JoinPath(tableLocation, "metadata", "version-hint.text")
+	}
+
+	if strings.Contains(tableLocation, "://") {
+		if _, ok := splitURLPath(tableLocation); !ok {
+			return "", fmt.Errorf("invalid table location: %s", tableLocation)
+		}
+
+		// Remote object keys are opaque. Append the suffix without URL or path
+		// joining, which would escape characters or clean duplicate slashes and
+		// dot segments that may be meaningful parts of the key.
+		separator := "/"
+		if strings.HasSuffix(tableLocation, separator) {
+			separator = ""
+		}
+
+		return tableLocation + separator + "metadata/version-hint.text", nil
 	}
 
 	return filepath.Join(tableLocation, "metadata", "version-hint.text"), nil
@@ -829,23 +845,8 @@ func versionHintLocation(tableLocation string) (string, error) {
 // Based on Apache Iceberg Java's DeleteOrphanFilesSparkAction.toFileURI() normalization (lines 542-548).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
-	schemeEnd := strings.Index(path, "://")
-	if schemeEnd <= 0 {
-		return normalizeNonURLPath(path)
-	}
-
-	remainder := path[schemeEnd+3:]
-	authorityEnd := strings.IndexAny(remainder, "/?#")
-	if authorityEnd < 0 {
-		authorityEnd = len(remainder)
-	}
-	rawAuthority := remainder[:authorityEnd]
-	rawSuffix := remainder[authorityEnd:]
-
-	// Parse only the prefix. The suffix is an opaque object key and may contain
-	// characters or escapes that net/url would otherwise rewrite or reject.
-	parsedPrefix, err := url.Parse(path[:schemeEnd+3+authorityEnd])
-	if err != nil || parsedPrefix.Scheme == "" {
+	parts, ok := splitURLPath(path)
+	if !ok {
 		return normalizeNonURLPath(path)
 	}
 
@@ -856,13 +857,13 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 		equalAuthorities = cfg.equalAuthorities
 	}
 
-	normalizedScheme := applySchemeEquivalence(parsedPrefix.Scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parsedPrefix.Host, equalAuthorities)
-	if parsedPrefix.User != nil {
+	normalizedScheme := applySchemeEquivalence(parts.scheme, equalSchemes)
+	normalizedAuthority := applyAuthorityEquivalence(parts.authority, equalAuthorities)
+	if parts.hasUserInfo {
 		// Preserve the raw userinfo spelling while maintaining the existing Host-
 		// based authority equivalence behavior.
-		if userInfoEnd := strings.LastIndexByte(rawAuthority, '@'); userInfoEnd >= 0 {
-			normalizedAuthority = rawAuthority[:userInfoEnd+1] + normalizedAuthority
+		if userInfoEnd := strings.LastIndexByte(parts.rawAuthority, '@'); userInfoEnd >= 0 {
+			normalizedAuthority = parts.rawAuthority[:userInfoEnd+1] + normalizedAuthority
 		}
 	}
 
@@ -874,7 +875,45 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	// This intentionally differs from iceberg-java's Hadoop Path-based
 	// normalization, which resolves dot segments. The Go object-store FileIO
 	// preserves raw keys, so resolving them here would conflate distinct files.
-	return normalizedScheme + "://" + normalizedAuthority + rawSuffix
+	return normalizedScheme + "://" + normalizedAuthority + parts.rawSuffix
+}
+
+type urlPathParts struct {
+	scheme       string
+	authority    string
+	rawAuthority string
+	rawSuffix    string
+	hasUserInfo  bool
+}
+
+// splitURLPath parses only a URL's scheme and authority. The remaining suffix
+// is returned unchanged because object-store FileIO implementations treat it as
+// an opaque object key, including invalid URL escapes such as %zz.
+func splitURLPath(path string) (urlPathParts, bool) {
+	schemeEnd := strings.Index(path, "://")
+	if schemeEnd <= 0 {
+		return urlPathParts{}, false
+	}
+
+	remainder := path[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	rawAuthority := remainder[:authorityEnd]
+
+	parsedPrefix, err := url.Parse(path[:schemeEnd+3+authorityEnd])
+	if err != nil || parsedPrefix.Scheme == "" {
+		return urlPathParts{}, false
+	}
+
+	return urlPathParts{
+		scheme:       parsedPrefix.Scheme,
+		authority:    parsedPrefix.Host,
+		rawAuthority: rawAuthority,
+		rawSuffix:    remainder[authorityEnd:],
+		hasUserInfo:  parsedPrefix.User != nil,
+	}, true
 }
 
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
@@ -983,6 +1022,11 @@ func filePathKey(file string) string {
 			// URL matching above preserves opaque remote object-key spelling.
 			return normalizeNonURLPath(parsedURL.Path)
 		}
+		if parts, ok := splitURLPath(file); ok {
+			// A raw object key may contain URL-invalid percent escapes. Strip the
+			// prefix without parsing the key so prefix mismatch policy still runs.
+			return normalizeNonURLPath(parts.rawSuffix)
+		}
 	}
 
 	return normalizeNonURLPath(file)
@@ -1065,18 +1109,16 @@ const (
 
 // checkPrefixMismatch decides how to handle prefix mismatches between referenced files and filesystem files.
 func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanCleanupConfig) (prefixMismatchDecision, error) {
-	// Parse both paths as URLs to compare schemes and authorities
-	refURL, refErr := url.Parse(referencedPath)
-	fsURL, fsErr := url.Parse(filesystemPath)
-
-	if refErr != nil || fsErr != nil {
+	refScheme, refAuth, refOK := pathPrefix(referencedPath)
+	fsScheme, fsAuth, fsOK := pathPrefix(filesystemPath)
+	if !refOK || !fsOK {
 		return prefixMismatchKeep, nil
 	}
 
-	refScheme := applySchemeEquivalence(refURL.Scheme, cfg.equalSchemes)
-	fsScheme := applySchemeEquivalence(fsURL.Scheme, cfg.equalSchemes)
-	refAuth := applyAuthorityEquivalence(refURL.Host, cfg.equalAuthorities)
-	fsAuth := applyAuthorityEquivalence(fsURL.Host, cfg.equalAuthorities)
+	refScheme = applySchemeEquivalence(refScheme, cfg.equalSchemes)
+	fsScheme = applySchemeEquivalence(fsScheme, cfg.equalSchemes)
+	refAuth = applyAuthorityEquivalence(refAuth, cfg.equalAuthorities)
+	fsAuth = applyAuthorityEquivalence(fsAuth, cfg.equalAuthorities)
 
 	// Check for mismatches
 	schemeMismatch := refScheme != fsScheme
@@ -1097,6 +1139,24 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 	default:
 		return prefixMismatchKeep, fmt.Errorf("unknown prefix mismatch mode: %d", cfg.prefixMismatchMode)
 	}
+}
+
+func pathPrefix(path string) (scheme, authority string, ok bool) {
+	if strings.Contains(path, "://") {
+		parts, ok := splitURLPath(path)
+		if !ok {
+			return "", "", false
+		}
+
+		return parts.scheme, parts.authority, true
+	}
+
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return "", "", false
+	}
+
+	return parsed.Scheme, parsed.Host, true
 }
 
 // PurgeFiles physically deletes all files under the table's warehouse location
