@@ -356,6 +356,7 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	batch.Release()
 	file, err := iceio.LocalFS{}.Create(deletePath)
 	require.NoError(t, err)
+	defer file.Close()
 	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,
 		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
 	deleteTable.Release()
