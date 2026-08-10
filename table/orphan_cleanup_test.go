@@ -355,8 +355,44 @@ func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestFilePathKeyHandlesUppercaseFileScheme(t *testing.T) {
-	assert.Equal(t, "/warehouse/file.parquet", filePathKey("FILE:///warehouse/file.parquet"))
+func TestFilePathKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "uppercase file scheme",
+			input:    "FILE:///warehouse/file.parquet",
+			expected: "/warehouse/file.parquet",
+		},
+		{
+			name:     "encoded local file path",
+			input:    "file:///warehouse%20space/file.parquet",
+			expected: "/warehouse space/file.parquet",
+		},
+		{
+			name:     "escaped remote separator",
+			input:    "s3://bucket/path%2Ffile.parquet",
+			expected: "/path%2Ffile.parquet",
+		},
+		{
+			name:     "duplicate remote separator",
+			input:    "s3://bucket/path//file.parquet",
+			expected: "/path//file.parquet",
+		},
+		{
+			name:     "remote dot segment",
+			input:    "s3://bucket/path/../file.parquet",
+			expected: "/path/../file.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, filePathKey(tt.input))
+		})
+	}
 }
 
 func TestIsFileOrphanDoesNotAliasWindowsDrivePaths(t *testing.T) {
@@ -612,6 +648,11 @@ func TestApplyAuthorityEquivalence(t *testing.T) {
 			authority: "unknown",
 			expected:  "unknown",
 		},
+		{
+			name:      "ADLS container with equivalent host",
+			authority: "container@host1",
+			expected:  "container@canonical",
+		},
 	}
 
 	for _, tt := range tests {
@@ -674,6 +715,14 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			name:           "equivalent_schemes",
 			referencedPath: "s3://bucket/path/file.txt",
 			filesystemPath: "s3a://bucket/path/file.txt",
+			mode:           PrefixMismatchError,
+			expectDecision: prefixMatch,
+			expectError:    false,
+		},
+		{
+			name:           "equivalent_ADLS_hosts",
+			referencedPath: "abfs://container@host1/path/file.txt",
+			filesystemPath: "abfs://container@host2/path/file.txt",
 			mode:           PrefixMismatchError,
 			expectDecision: prefixMatch,
 			expectError:    false,
@@ -815,6 +864,11 @@ func TestNormalizeURLPath(t *testing.T) {
 			expected: "s3://canonical/path/file.txt",
 		},
 		{
+			name:     "ADLS_host_authority_equivalence",
+			input:    "abfs://container@host1/path/file.txt",
+			expected: "abfs://container@canonical/path/file.txt",
+		},
+		{
 			name:     "complex_path_cleaning",
 			input:    "s3://bucket/path/../other/./file.txt",
 			expected: "s3://bucket/path/../other/./file.txt",
@@ -925,7 +979,7 @@ func TestIsFileOrphanPreservesRemoteQueryAndFragment(t *testing.T) {
 
 func TestIsFileOrphanAppliesPrefixMismatchPolicyToEncodedPaths(t *testing.T) {
 	cfg := &orphanCleanupConfig{prefixMismatchMode: PrefixMismatchIgnore}
-	referencedFiles := map[string]bool{"file:///path%20to/file.parquet": true}
+	referencedFiles := map[string]bool{"s3a://bucket/path%20to/file.parquet": true}
 	index := newReferencedFileIndex(referencedFiles, cfg)
 
 	isOrphan, err := isFileOrphan(
@@ -936,6 +990,29 @@ func TestIsFileOrphanAppliesPrefixMismatchPolicyToEncodedPaths(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.False(t, isOrphan, "encoded paths must still honor prefix-mismatch safety policy")
+}
+
+func TestIsFileOrphanDoesNotApplyPrefixMismatchPolicyToDistinctOpaqueKeys(t *testing.T) {
+	const (
+		referencedPath = "s3a://bucket/path%2Ffile.parquet"
+		listedPath     = "s3://bucket/path/file.parquet"
+	)
+
+	for _, mode := range []PrefixMismatchMode{
+		PrefixMismatchError,
+		PrefixMismatchIgnore,
+		PrefixMismatchDelete,
+	} {
+		t.Run(mode.String(), func(t *testing.T) {
+			cfg := &orphanCleanupConfig{prefixMismatchMode: mode}
+			referencedFiles := map[string]bool{referencedPath: true}
+			index := newReferencedFileIndex(referencedFiles, cfg)
+
+			isOrphan, err := isFileOrphan(listedPath, referencedFiles, index, cfg)
+			require.NoError(t, err)
+			assert.True(t, isOrphan, "distinct object keys must not invoke prefix-mismatch policy")
+		})
+	}
 }
 
 func TestIsFileOrphanAppliesPrefixMismatchPolicyToRawPercentKeys(t *testing.T) {
@@ -1184,6 +1261,11 @@ func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 			name:           "authority mismatch",
 			referencedPath: "s3://bucket-a/path/file.parquet",
 			listedPath:     "s3://bucket-b/path/file.parquet",
+		},
+		{
+			name:           "ADLS container mismatch",
+			referencedPath: "abfs://container-a@acct.dfs.core.windows.net/path/file.parquet",
+			listedPath:     "abfs://container-b@acct.dfs.core.windows.net/path/file.parquet",
 		},
 	}
 

@@ -858,14 +858,7 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	}
 
 	normalizedScheme := applySchemeEquivalence(parts.scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parts.authority, equalAuthorities)
-	if parts.hasUserInfo {
-		// Preserve the raw userinfo spelling while maintaining the existing Host-
-		// based authority equivalence behavior.
-		if userInfoEnd := strings.LastIndexByte(parts.rawAuthority, '@'); userInfoEnd >= 0 {
-			normalizedAuthority = parts.rawAuthority[:userInfoEnd+1] + normalizedAuthority
-		}
-	}
+	normalizedAuthority := applyAuthorityEquivalence(parts.rawAuthority, equalAuthorities)
 
 	// Object-store paths are opaque keys. Keep their spelling exactly as
 	// supplied: escaped separators, duplicate slashes, dot segments, queries,
@@ -880,10 +873,8 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 
 type urlPathParts struct {
 	scheme       string
-	authority    string
 	rawAuthority string
 	rawSuffix    string
-	hasUserInfo  bool
 }
 
 // splitURLPath parses only a URL's scheme and authority. The remaining suffix
@@ -909,10 +900,8 @@ func splitURLPath(path string) (urlPathParts, bool) {
 
 	return urlPathParts{
 		scheme:       parsedPrefix.Scheme,
-		authority:    parsedPrefix.Host,
 		rawAuthority: rawAuthority,
 		rawSuffix:    remainder[authorityEnd:],
-		hasUserInfo:  parsedPrefix.User != nil,
 	}, true
 }
 
@@ -1013,19 +1002,20 @@ func isWindowsDriveVolume(volume string) bool {
 // filePathKey returns the path component used to compare listed files with
 // references before applying scheme and authority mismatch policy.
 func filePathKey(file string) string {
-	// A bare Windows path such as C:/data/file.parquet is parsed as a URL
-	// with scheme "c". Only parse URL-shaped values here so drive letters
-	// remain part of the comparison key.
-	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
+	// Local file URIs use decoded path semantics. Handle them separately so
+	// remote object-store suffixes can retain their raw spelling below.
+	if strings.HasPrefix(strings.ToLower(file), "file:") {
 		if parsedURL, err := url.Parse(file); err == nil {
-			// This key only groups possible prefix mismatches. Exact normalized
-			// URL matching above preserves opaque remote object-key spelling.
 			return normalizeNonURLPath(parsedURL.Path)
 		}
+	}
+
+	if strings.Contains(file, "://") {
 		if parts, ok := splitURLPath(file); ok {
-			// A raw object key may contain URL-invalid percent escapes. Strip the
-			// prefix without parsing the key so prefix mismatch policy still runs.
-			return normalizeNonURLPath(parts.rawSuffix)
+			// Prefix-mismatch policy applies only when the object key itself is
+			// identical. Keep the raw suffix so escaped separators, duplicate
+			// slashes, and dot segments remain distinct object keys.
+			return parts.rawSuffix
 		}
 	}
 
@@ -1096,6 +1086,16 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 		}
 	}
 
+	// ADLS authorities use container@host. Preserve the container while still
+	// allowing endpoint-only equivalence mappings to normalize the host.
+	if userInfoEnd := strings.LastIndexByte(authority, '@'); userInfoEnd >= 0 {
+		host := authority[userInfoEnd+1:]
+		normalizedHost := applyAuthorityEquivalence(host, equalAuthorities)
+		if normalizedHost != host {
+			return authority[:userInfoEnd+1] + normalizedHost
+		}
+	}
+
 	return authority
 }
 
@@ -1148,7 +1148,7 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 			return "", "", false
 		}
 
-		return parts.scheme, parts.authority, true
+		return parts.scheme, parts.rawAuthority, true
 	}
 
 	parsed, err := url.Parse(path)
