@@ -26,10 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDecideDeadEqualityDeletes_PredicateMatchesScanner exercises the
+// TestDecideDeadEqualityDeletes_ConservativePredicate exercises the
 // pure decision logic against the scenarios that earlier code reviews
-// flagged as silent-data-loss risks. The scanner predicate
-// (table/scanner.go matchEqualityDeletesToData) is:
+// flagged as silent-data-loss risks. The cleanup predicate is:
 //
 //	E applies to D iff E.seq > D.seq AND (
 //	    len(E.partition) == 0 ||
@@ -37,9 +36,9 @@ import (
 //	    partitionsMatch(E.partition, D.partition)
 //	)
 //
-// Critically: SpecID is NOT part of the predicate, and either-side
-// empty-partition makes it apply globally. The cleanup must agree.
-func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
+// SpecID is intentionally not part of this conservative predicate, and an
+// empty partition on either side keeps the delete alive.
+func TestDecideDeadEqualityDeletes_ConservativePredicate(t *testing.T) {
 	type tc struct {
 		name        string
 		survivors   []survivor

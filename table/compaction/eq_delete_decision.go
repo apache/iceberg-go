@@ -31,16 +31,15 @@ import (
 // is the input to [DecideDeadEqualityDeletes].
 //
 // EmptyPartMinSeq is the smallest sequence number among unpartitioned
-// surviving data files. Per the Iceberg v2 reader predicate (see
-// table/scanner.go matchEqualityDeletesToData), an unpartitioned data
-// file applies to every equality delete — so it is always part of an
-// eq-delete's "applicable survivors" minimum.
+// surviving data files. The cleanup conservatively considers it for every
+// equality delete, even though scan planning only applies partitioned deletes
+// within the same spec. This may retain a dead delete but cannot remove a live
+// one.
 //
 // PartMinSeq maps the partition tuple (encoded via partitionMatchKey)
 // to the smallest sequence number among surviving partitioned data
-// files in that tuple. The key intentionally does NOT include
-// SpecID — the reader's predicate ignores SpecID, so the writer-side
-// cleanup must too.
+// files in that tuple. The key intentionally does NOT include SpecID, making
+// cleanup conservative across partition evolution.
 //
 // Sentinel "no survivor in this bucket" is math.MaxInt64.
 type SurvivorSurvey struct {
@@ -88,11 +87,10 @@ func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
 	s.PartMinSeq[key] = seq
 }
 
-// applicableMinSeq returns the smallest surviving-D seq number that
-// the eq-delete with the given partition could apply to. Mirrors the
-// scanner's predicate: an unpartitioned surviving D applies to every
-// E (so EmptyPartMinSeq is always in the min); an unpartitioned E
-// applies to every surviving D (so we min across every PartMinSeq).
+// applicableMinSeq returns the smallest sequence number among the conservative
+// superset of survivors an equality delete could apply to. EmptyPartMinSeq is
+// always included; an unpartitioned equality delete also includes every
+// partition bucket.
 func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 	if len(eqPartition) == 0 {
 		if len(s.PartMinSeq) == 0 {
@@ -114,8 +112,7 @@ func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 // list of equality-delete manifest entries, it returns the eq-delete
 // files that no surviving data file could ever apply to.
 //
-// The rule is identical to scanner.matchEqualityDeletesToData (the
-// reader-side filter):
+// The conservative cleanup rule is:
 //
 //	E applies to D iff E.seq > D.seq AND (
 //	    len(E.partition) == 0 ||
@@ -126,10 +123,10 @@ func (s *SurvivorSurvey) applicableMinSeq(eqPartition map[int]any) int64 {
 // E is dead iff no applicable surviving D has D.seq < E.seq —
 // equivalently, the applicable min-seq is >= E.seq.
 //
-// SpecID is intentionally NOT part of the predicate. The Iceberg-go
-// reader does not consult it; if the executor used a stricter
-// predicate it could drop eq-deletes the reader still applies, causing
-// silent data loss under partition-spec evolution.
+// SpecID is intentionally NOT part of this cleanup predicate. Scan planning
+// uses the stricter Java-aligned (spec ID, partition) match, so cleanup can
+// retain extra deletes across spec evolution but cannot drop a delete the
+// reader still needs.
 //
 // Defensive: candidates with sequence number < 0 (sentinel for unset)
 // are skipped — preserved rather than risk dropping an unidentifiable
@@ -175,14 +172,11 @@ func partitionBucketKey(specID int32, part map[int]any) string {
 }
 
 // partitionMatchKey returns a deterministic string key for a
-// partition tuple alone (no spec id). Used by the eq-delete cleanup
-// to bucket survivors and candidates by the same key the reader uses
-// for applicability matching.
+// partition tuple alone (no spec id). Used by equality-delete cleanup
+// to conservatively bucket survivors and candidates across partition specs.
 //
 // Empty / nil partition → empty string sentinel. Callers must
-// special-case empty partitions per the global-applicability rule;
-// this helper does NOT collapse empty partitions into a fake
-// per-spec bucket because that would break the reader-equivalence.
+// special-case empty partitions per the global-applicability rule.
 func partitionMatchKey(part map[int]any) string {
 	if len(part) == 0 {
 		return ""
