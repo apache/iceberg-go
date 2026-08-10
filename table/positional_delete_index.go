@@ -47,7 +47,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 			continue
 		}
 
-		partitionKey, err := partitionConflictKey(deleteFile.SpecID(), deleteFile.Partition())
+		partitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), deleteFile.Partition())
 		if err != nil {
 			return nil, fmt.Errorf("indexing positional delete file %s: %w", deleteFile.FilePath(), err)
 		}
@@ -73,17 +73,17 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 }
 
 // forDataFile returns positional deletes with a greater than or equal sequence
-// number. Partition-scoped deletes are returned before path-scoped deletes,
-// matching Java's DeleteFileIndex ordering.
+// number. Partition-scoped candidates are pruned using file_path metrics and
+// returned before path-scoped deletes, matching Java's ordering.
 func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
 	if len(idx.byPath) == 0 && len(idx.byPartition) == 0 {
 		return nil, nil
 	}
 
+	dataFile := dataEntry.DataFile()
 	var partitionEntries []iceberg.ManifestEntry
 	if len(idx.byPartition) > 0 {
-		dataFile := dataEntry.DataFile()
-		partitionKey, err := partitionConflictKey(dataFile.SpecID(), dataFile.Partition())
+		partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), dataFile.Partition())
 		if err != nil {
 			return nil, fmt.Errorf("matching positional deletes to data file %s: %w", dataFile.FilePath(), err)
 		}
@@ -91,9 +91,49 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 	}
 
 	dataSeqNum := dataEntry.SequenceNum()
-	out := appendPositionalDeletesFromSequence(nil, partitionEntries, dataSeqNum)
+	out, err := appendPartitionDeletesFromSequence(
+		nil, partitionEntries, dataSeqNum, dataFile.FilePath())
+	if err != nil {
+		return nil, err
+	}
 	out = appendPositionalDeletesFromSequence(
-		out, idx.byPath[dataEntry.DataFile().FilePath()], dataSeqNum)
+		out, idx.byPath[dataFile.FilePath()], dataSeqNum)
+
+	return out, nil
+}
+
+func appendPartitionDeletesFromSequence(
+	out []iceberg.DataFile,
+	entries []iceberg.ManifestEntry,
+	dataSeqNum int64,
+	dataFilePath string,
+) ([]iceberg.DataFile, error) {
+	start := sort.Search(len(entries), func(i int) bool {
+		return entries[i].SequenceNum() >= dataSeqNum
+	})
+	if start == len(entries) {
+		return out, nil
+	}
+
+	evaluator, err := newInclusiveMetricsEvaluator(
+		iceberg.PositionalDeleteSchema,
+		iceberg.EqualTo(iceberg.Reference("file_path"), dataFilePath),
+		true,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries[start:] {
+		matches, err := evaluator(entry.DataFile())
+		if err != nil {
+			return nil, err
+		}
+		if matches {
+			out = append(out, entry.DataFile())
+		}
+	}
 
 	return out, nil
 }

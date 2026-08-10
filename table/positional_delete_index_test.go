@@ -42,11 +42,25 @@ func newPositionalDeleteIndexTestEntry(
 	referencedDataFile *string,
 	boundPath string,
 ) iceberg.ManifestEntry {
-	lowerBounds := map[int][]byte(nil)
-	upperBounds := map[int][]byte(nil)
-	if boundPath != "" {
-		lowerBounds = map[int][]byte{filePathFieldID: []byte(boundPath)}
-		upperBounds = map[int][]byte{filePathFieldID: []byte(boundPath)}
+	return newPositionalDeleteIndexTestEntryWithBounds(
+		path, specID, partition, sequenceNumber, referencedDataFile, boundPath, boundPath)
+}
+
+func newPositionalDeleteIndexTestEntryWithBounds(
+	path string,
+	specID int32,
+	partition map[int]any,
+	sequenceNumber int64,
+	referencedDataFile *string,
+	lowerPath string,
+	upperPath string,
+) iceberg.ManifestEntry {
+	var lowerBounds, upperBounds map[int][]byte
+	if lowerPath != "" {
+		lowerBounds = map[int][]byte{filePathFieldID: []byte(lowerPath)}
+	}
+	if upperPath != "" {
+		upperBounds = map[int][]byte{filePathFieldID: []byte(upperPath)}
 	}
 
 	file := &positionalDeleteIndexTestFile{
@@ -84,9 +98,9 @@ func TestPositionalDeleteIndexMatchesPathPartitionAndSequence(t *testing.T) {
 	otherPath := "other.parquet"
 	deleteEntries := []iceberg.ManifestEntry{
 		newPositionalDeleteIndexTestEntry(
-			"path-same-sequence.parquet", 9, map[int]any{1000: "other"}, 5, &dataPath, ""),
+			"path-same-sequence.parquet", 1, partition, 5, &dataPath, ""),
 		newPositionalDeleteIndexTestEntry(
-			"path-newer-from-bounds.parquet", 9, nil, 7, nil, dataPath),
+			"path-newer-from-bounds.parquet", 1, partition, 7, nil, dataPath),
 		newPositionalDeleteIndexTestEntry(
 			"other-path.parquet", 1, partition, 8, &otherPath, ""),
 		newPositionalDeleteIndexTestEntry(
@@ -115,6 +129,29 @@ func TestPositionalDeleteIndexMatchesPathPartitionAndSequence(t *testing.T) {
 		"path-same-sequence.parquet",
 		"path-newer-from-bounds.parquet",
 	}, positionalDeletePaths(matched))
+}
+
+func TestPositionalDeleteIndexPrunesPartitionEntriesUsingPathMetrics(t *testing.T) {
+	partition := map[int]any{1000: "partition"}
+	deleteEntries := []iceberg.ManifestEntry{
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"matching-range.parquet", 1, partition, 5, nil, "data-a.parquet", "data-z.parquet"),
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"range-before.parquet", 1, partition, 5, nil, "data-a.parquet", "data-b.parquet"),
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"range-after.parquet", 1, partition, 5, nil, "data-x.parquet", "data-z.parquet"),
+		newPositionalDeleteIndexTestEntry(
+			"no-metrics.parquet", 1, partition, 5, nil, ""),
+	}
+
+	idx, err := buildPositionalDeleteIndex(deleteEntries)
+	require.NoError(t, err)
+
+	dataEntry := newPositionalDeleteIndexDataEntry("data-m.parquet", 1, partition, 5)
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"matching-range.parquet", "no-metrics.parquet"},
+		positionalDeletePaths(matched))
 }
 
 func TestPositionalDeleteIndexHandlesUnknownSequenceNumbers(t *testing.T) {

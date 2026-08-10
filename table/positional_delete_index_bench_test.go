@@ -18,8 +18,8 @@
 package table
 
 import (
+	"fmt"
 	"sort"
-	"strconv"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -52,14 +52,41 @@ func BenchmarkPositionalDeletePlanningSparsePaths(b *testing.B) {
 		deleteFileCount = 500
 	)
 	dataEntries, deleteEntries := positionalDeleteBenchmarkEntries(dataFileCount, deleteFileCount)
+	benchmarkPositionalDeletePlanningVariants(b, dataEntries, deleteEntries, deleteFileCount)
+}
 
+func BenchmarkPositionalDeletePlanningSelectivePartition(b *testing.B) {
+	const (
+		dataFileCount   = 2_000
+		deleteFileCount = 500
+	)
+	dataEntries, deleteEntries := positionalDeletePartitionBenchmarkEntries(
+		dataFileCount, deleteFileCount)
+	benchmarkPositionalDeletePlanningVariants(b, dataEntries, deleteEntries, dataFileCount)
+}
+
+func BenchmarkPositionalDeletePlanningMixed(b *testing.B) {
+	const (
+		dataFileCount   = 2_000
+		deleteFileCount = 500
+	)
+	dataEntries, deleteEntries, expectedMatches := positionalDeleteMixedBenchmarkEntries(
+		dataFileCount, deleteFileCount)
+	benchmarkPositionalDeletePlanningVariants(b, dataEntries, deleteEntries, expectedMatches)
+}
+
+func benchmarkPositionalDeletePlanningVariants(
+	b *testing.B,
+	dataEntries, deleteEntries []iceberg.ManifestEntry,
+	expectedMatches int,
+) {
 	b.Run("indexed", func(b *testing.B) {
 		b.ReportAllocs()
 		for range b.N {
 			positionalDeleteBenchmarkSink = benchmarkPositionalDeleteIndex(b, dataEntries, deleteEntries)
 		}
-		if positionalDeleteBenchmarkSink != deleteFileCount {
-			b.Fatalf("expected %d matches, got %d", deleteFileCount, positionalDeleteBenchmarkSink)
+		if positionalDeleteBenchmarkSink != expectedMatches {
+			b.Fatalf("expected %d matches, got %d", expectedMatches, positionalDeleteBenchmarkSink)
 		}
 	})
 
@@ -76,8 +103,8 @@ func BenchmarkPositionalDeletePlanningSparsePaths(b *testing.B) {
 			}
 			positionalDeleteBenchmarkSink = matched
 		}
-		if positionalDeleteBenchmarkSink != deleteFileCount {
-			b.Fatalf("expected %d matches, got %d", deleteFileCount, positionalDeleteBenchmarkSink)
+		if positionalDeleteBenchmarkSink != expectedMatches {
+			b.Fatalf("expected %d matches, got %d", expectedMatches, positionalDeleteBenchmarkSink)
 		}
 	})
 }
@@ -85,11 +112,7 @@ func BenchmarkPositionalDeletePlanningSparsePaths(b *testing.B) {
 func positionalDeleteBenchmarkEntries(
 	dataFileCount, deleteFileCount int,
 ) ([]iceberg.ManifestEntry, []iceberg.ManifestEntry) {
-	dataEntries := make([]iceberg.ManifestEntry, dataFileCount)
-	for i := range dataEntries {
-		path := positionalDeleteBenchmarkPath(i)
-		dataEntries[i] = newPositionalDeleteIndexDataEntry(path, 0, nil, 1)
-	}
+	dataEntries := positionalDeleteBenchmarkDataEntries(dataFileCount)
 
 	deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
 	for i := range deleteEntries {
@@ -99,6 +122,74 @@ func positionalDeleteBenchmarkEntries(
 	}
 
 	return dataEntries, deleteEntries
+}
+
+func positionalDeletePartitionBenchmarkEntries(
+	dataFileCount, deleteFileCount int,
+) ([]iceberg.ManifestEntry, []iceberg.ManifestEntry) {
+	dataEntries := positionalDeleteBenchmarkDataEntries(dataFileCount)
+	deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
+	filesPerDelete := dataFileCount / deleteFileCount
+	for i := range deleteEntries {
+		first := i * filesPerDelete
+		last := first + filesPerDelete - 1
+		deleteEntries[i] = newPositionalDeleteIndexTestEntryWithBounds(
+			fmt.Sprintf("partition-delete-%06d.parquet", i),
+			0,
+			nil,
+			2,
+			nil,
+			positionalDeleteBenchmarkPath(first),
+			positionalDeleteBenchmarkPath(last),
+		)
+	}
+
+	return dataEntries, deleteEntries
+}
+
+func positionalDeleteMixedBenchmarkEntries(
+	dataFileCount, deleteFileCount int,
+) ([]iceberg.ManifestEntry, []iceberg.ManifestEntry, int) {
+	dataEntries := positionalDeleteBenchmarkDataEntries(dataFileCount)
+	fileScopedCount := deleteFileCount / 2
+	partitionScopedCount := deleteFileCount - fileScopedCount
+	deleteEntries := make([]iceberg.ManifestEntry, 0, deleteFileCount)
+
+	fileScopedDataCount := dataFileCount / 2
+	fileStride := fileScopedDataCount / fileScopedCount
+	for i := range fileScopedCount {
+		path := positionalDeleteBenchmarkPath(i * fileStride)
+		deleteEntries = append(deleteEntries, newPositionalDeleteIndexTestEntry(
+			"file-delete-"+path, 0, nil, 2, &path, path))
+	}
+
+	partitionDataCount := dataFileCount - fileScopedDataCount
+	partitionStride := partitionDataCount / partitionScopedCount
+	for i := range partitionScopedCount {
+		first := fileScopedDataCount + i*partitionStride
+		last := first + partitionStride - 1
+		deleteEntries = append(deleteEntries, newPositionalDeleteIndexTestEntryWithBounds(
+			fmt.Sprintf("partition-delete-%06d.parquet", i),
+			0,
+			nil,
+			2,
+			nil,
+			positionalDeleteBenchmarkPath(first),
+			positionalDeleteBenchmarkPath(last),
+		))
+	}
+
+	return dataEntries, deleteEntries, fileScopedCount + partitionDataCount
+}
+
+func positionalDeleteBenchmarkDataEntries(dataFileCount int) []iceberg.ManifestEntry {
+	dataEntries := make([]iceberg.ManifestEntry, dataFileCount)
+	for i := range dataEntries {
+		path := positionalDeleteBenchmarkPath(i)
+		dataEntries[i] = newPositionalDeleteIndexDataEntry(path, 0, nil, 1)
+	}
+
+	return dataEntries
 }
 
 func benchmarkPositionalDeleteIndex(
@@ -151,5 +242,5 @@ func matchPositionalDeletesByMetrics(
 }
 
 func positionalDeleteBenchmarkPath(i int) string {
-	return "data-" + strconv.Itoa(i) + ".parquet"
+	return fmt.Sprintf("data-%06d.parquet", i)
 }
