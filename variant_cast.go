@@ -31,7 +31,7 @@ const (
 	nanosPerMicro = int64(1_000)
 )
 
-// CastVariantLiteral casts a leaf variant value to typ and wraps it as a Literal.
+// CastVariantLiteral casts a leaf variant value to typ and wraps it as a Literal. Exported for table/internal; not part of the stable public API.
 func CastVariantLiteral(v variant.Value, typ PrimitiveType) (Literal, bool) {
 	result, ok := castVariantValue(v, typ)
 	if !ok {
@@ -96,10 +96,14 @@ func castVariantValue(v variant.Value, typ PrimitiveType) (any, bool) {
 		if b, ok := raw.(bool); ok {
 			return b, true
 		}
-	case TimestampType, TimestampTzType:
-		return castVariantToMicros(v.Type(), raw)
-	case TimestampNsType, TimestampTzNsType:
-		return castVariantToNanos(v.Type(), raw)
+	case TimestampType:
+		return castVariantToMicros(v.Type(), raw, false)
+	case TimestampTzType:
+		return castVariantToMicros(v.Type(), raw, true)
+	case TimestampNsType:
+		return castVariantToNanos(v.Type(), raw, false)
+	case TimestampTzNsType:
+		return castVariantToNanos(v.Type(), raw, true)
 	case DateType:
 		return castVariantToDate(v.Type(), raw)
 	}
@@ -192,33 +196,36 @@ func castVariantDecimal(raw any, typ DecimalType) (any, bool) {
 	return nil, false
 }
 
-func castVariantToMicros(pt variant.Type, raw any) (any, bool) {
-	switch pt {
-	case variant.TimestampNanos, variant.TimestampNanosNTZ:
+// castVariantToMicros converts a nanosecond or date leaf to a microsecond timestamp; the source's tz-awareness must match the target's (tz).
+func castVariantToMicros(pt variant.Type, raw any, tz bool) (any, bool) {
+	switch {
+	case tz && pt == variant.TimestampNanos, !tz && pt == variant.TimestampNanosNTZ:
 		return Timestamp(floorDiv(int64(raw.(arrow.Timestamp)), nanosPerMicro)), true
-	case variant.Date:
+	case !tz && pt == variant.Date:
 		return Timestamp(int64(raw.(arrow.Date32)) * microsPerDay), true
 	}
 
 	return nil, false
 }
 
-func castVariantToNanos(pt variant.Type, raw any) (any, bool) {
-	switch pt {
-	case variant.TimestampMicros, variant.TimestampMicrosNTZ:
+// castVariantToNanos converts a microsecond or date leaf to a nanosecond timestamp; the source's tz-awareness must match the target's (tz).
+func castVariantToNanos(pt variant.Type, raw any, tz bool) (any, bool) {
+	switch {
+	case tz && pt == variant.TimestampMicros, !tz && pt == variant.TimestampMicrosNTZ:
 		return TimestampNano(int64(raw.(arrow.Timestamp)) * nanosPerMicro), true
-	case variant.Date:
+	case !tz && pt == variant.Date:
 		return TimestampNano(int64(raw.(arrow.Date32)) * nanosPerDay), true
 	}
 
 	return nil, false
 }
 
+// castVariantToDate converts a zoneless timestamp leaf to a date; a tz-aware instant needs a zone and is rejected.
 func castVariantToDate(pt variant.Type, raw any) (any, bool) {
 	switch pt {
-	case variant.TimestampMicros, variant.TimestampMicrosNTZ:
+	case variant.TimestampMicrosNTZ:
 		return Date(floorDiv(int64(raw.(arrow.Timestamp)), microsPerDay)), true
-	case variant.TimestampNanos, variant.TimestampNanosNTZ:
+	case variant.TimestampNanosNTZ:
 		return Date(floorDiv(int64(raw.(arrow.Timestamp)), nanosPerDay)), true
 	}
 

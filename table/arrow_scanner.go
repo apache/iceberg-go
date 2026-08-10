@@ -745,10 +745,7 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 
 	filterSchema := fileSchema
 	if len(extracts) > 0 {
-		filterSchema, err = augmentSchemaWithExtracts(fileSchema, extracts)
-		if err != nil {
-			return nil, false, err
-		}
+		filterSchema = augmentSchemaWithExtracts(fileSchema, extracts)
 	}
 
 	translatedFilter, err = iceberg.BindExpr(filterSchema, translatedFilter, as.caseSensitive)

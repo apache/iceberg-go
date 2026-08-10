@@ -592,13 +592,15 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 	}
 
 	// fast case optimizations
+	// An extract term's Ref() is the variant column, not the addressed sub-path; skip the required-field fast path.
+	_, isExtract := bound.(BoundExtract)
 	switch up.op {
 	case OpIsNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if !isExtract && bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
 			return AlwaysFalse{}, nil
 		}
 	case OpNotNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if !isExtract && bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
 			return AlwaysTrue{}, nil
 		}
 	case OpIsNan:

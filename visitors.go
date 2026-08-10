@@ -637,6 +637,16 @@ func (t *scanTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 
 	var ref Reference
 	if ext, ok := pred.Term().(BoundExtract); ok {
+		// If the variant column is absent from this file, the extracted path is null
+		// for every row: IsNull matches, everything else cannot. Handle it here rather
+		// than fabricating an all-null derived column downstream.
+		if _, found := t.fileSchema.FindColumnName(ext.Ref().Field().ID); !found {
+			if pred.Op() == OpIsNull {
+				return AlwaysTrue{}
+			}
+
+			return AlwaysFalse{}
+		}
 		ref = t.extractRef(ext)
 	} else {
 		fileColName, found := t.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
@@ -700,6 +710,11 @@ func (sanitizeVisitor) VisitOr(left, right BooleanExpression) BooleanExpression 
 }
 
 func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+	// An extract term has no REST expression-JSON form; keeping it would fail json.Marshal. Collapse it like bbox (mirrors VisitBound).
+	if _, ok := pred.Term().(*unboundExtract); ok {
+		return AlwaysTrue{}
+	}
+
 	switch p := pred.(type) {
 	case *unboundBBoxPredicate:
 		// A bbox predicate carries query-box coordinates, not a per-row user
@@ -727,6 +742,11 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	// nothing user-provided leaks. Matched before ref is taken and on the exported
 	// BoundBBoxPredicate interface (mirrors scanTranslator).
 	if _, ok := pred.(BoundBBoxPredicate); ok {
+		return AlwaysTrue{}
+	}
+
+	// An extract term has no reference form; rebuilding over its Ref() would leak the whole variant column name. Collapse it like bbox.
+	if _, ok := pred.Term().(BoundExtract); ok {
 		return AlwaysTrue{}
 	}
 

@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -32,7 +33,7 @@ import (
 )
 
 // augmentSchemaWithExtracts returns fileSchema plus one primitive column per variant extract term.
-func augmentSchemaWithExtracts(fileSchema *iceberg.Schema, cols []iceberg.VariantExtractColumn) (*iceberg.Schema, error) {
+func augmentSchemaWithExtracts(fileSchema *iceberg.Schema, cols []iceberg.VariantExtractColumn) *iceberg.Schema {
 	fields := fileSchema.Fields()
 	for _, c := range cols {
 		fields = append(fields, iceberg.NestedField{
@@ -42,7 +43,7 @@ func augmentSchemaWithExtracts(fileSchema *iceberg.Schema, cols []iceberg.Varian
 		})
 	}
 
-	return iceberg.NewSchema(fileSchema.ID, fields...), nil
+	return iceberg.NewSchemaWithIdentifiers(fileSchema.ID, fileSchema.IdentifierFieldIDs, fields...)
 }
 
 // buildExtractColumn materializes one variant extract term into a typed Arrow array over rec.
@@ -57,11 +58,24 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 	defer bldr.Release()
 
 	n := int(rec.NumRows())
+	varName := col.Term.Ref().Field().Name
 	varIdx := fieldIndexByID(rec.Schema(), col.Term.Ref().Field().ID)
-	varr, _ := columnAt(rec, varIdx).(*extensions.VariantArray)
+	if varIdx < 0 {
+		// Arrow field may lack PARQUET:field_id metadata on name-mapping reads; fall back to the column name.
+		if idxs := rec.Schema().FieldIndices(varName); len(idxs) == 1 {
+			varIdx = idxs[0]
+		}
+	}
+	if varIdx < 0 {
+		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q not found in file", iceberg.ErrInvalidArgument, varName)
+	}
+	varr, ok := rec.Column(varIdx).(*extensions.VariantArray)
+	if !ok {
+		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q is not a VariantArray (got %T)", iceberg.ErrInvalidArgument, varName, rec.Column(varIdx))
+	}
 
 	for i := 0; i < n; i++ {
-		if varr == nil || varr.IsNull(i) {
+		if varr.IsNull(i) {
 			bldr.AppendNull()
 
 			continue
@@ -69,6 +83,7 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 
 		v, verr := varr.Value(i)
 		if verr != nil {
+			slog.Warn("variant extract: skipping undecodable variant value", "column", varName, "row", i, "err", verr)
 			bldr.AppendNull()
 
 			continue
@@ -94,14 +109,6 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 	}
 
 	return bldr.NewArray(), field, nil
-}
-
-func columnAt(rec arrow.RecordBatch, idx int) arrow.Array {
-	if idx < 0 {
-		return nil
-	}
-
-	return rec.Column(idx)
 }
 
 // appendExtractLiteral appends a decoded extract literal to its typed builder.

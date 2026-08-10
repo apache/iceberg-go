@@ -39,6 +39,54 @@ func scalarVariant(t *testing.T, build func(*variant.Builder) error) variant.Val
 	return v
 }
 
+// TestCastVariantTimestampTZ pins tz-aware vs zoneless timestamp casting: a source's
+// tz-awareness must match the target's, or the value is not castable.
+func TestCastVariantTimestampTZ(t *testing.T) {
+	// AppendTimestamp(value, isMicros, isTz).
+	nanosNTZ := func(b *variant.Builder) error { return b.AppendTimestamp(arrow.Timestamp(1500), false, false) }
+	nanosTZ := func(b *variant.Builder) error { return b.AppendTimestamp(arrow.Timestamp(1500), false, true) }
+	microsNTZ := func(b *variant.Builder) error { return b.AppendTimestamp(arrow.Timestamp(5), true, false) }
+	microsTZ := func(b *variant.Builder) error { return b.AppendTimestamp(arrow.Timestamp(5), true, true) }
+	date := func(b *variant.Builder) error { return b.AppendDate(arrow.Date32(10)) }
+
+	for _, tt := range []struct {
+		name  string
+		build func(*variant.Builder) error
+		typ   PrimitiveType
+		want  any // nil means not castable
+	}{
+		// zoneless nanos leaf -> micros: only the zoneless target accepts it.
+		{"nanos NTZ to zoneless micros", nanosNTZ, PrimitiveTypes.Timestamp, Timestamp(1)},
+		{"nanos NTZ to tz micros REJECTED", nanosNTZ, PrimitiveTypes.TimestampTz, nil},
+		// tz nanos leaf -> micros: only the tz target accepts it.
+		{"nanos TZ to tz micros", nanosTZ, PrimitiveTypes.TimestampTz, Timestamp(1)},
+		{"nanos TZ to zoneless micros REJECTED", nanosTZ, PrimitiveTypes.Timestamp, nil},
+		// zoneless micros leaf -> nanos: only the zoneless target accepts it.
+		{"micros NTZ to zoneless nanos", microsNTZ, PrimitiveTypes.TimestampNs, TimestampNano(5000)},
+		{"micros NTZ to tz nanos REJECTED", microsNTZ, PrimitiveTypes.TimestampTzNs, nil},
+		// tz micros leaf -> nanos: only the tz target accepts it.
+		{"micros TZ to tz nanos", microsTZ, PrimitiveTypes.TimestampTzNs, TimestampNano(5000)},
+		{"micros TZ to zoneless nanos REJECTED", microsTZ, PrimitiveTypes.TimestampNs, nil},
+		// date -> timestamp is zoneless-only; a tz target needs a zone.
+		{"date to zoneless micros", date, PrimitiveTypes.Timestamp, Timestamp(10 * 86_400_000_000)},
+		{"date to tz micros REJECTED", date, PrimitiveTypes.TimestampTz, nil},
+		// timestamp -> date is zoneless-only.
+		{"zoneless micros to date", microsNTZ, PrimitiveTypes.Date, Date(0)},
+		{"tz micros to date REJECTED", microsTZ, PrimitiveTypes.Date, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			lit, ok := CastVariantLiteral(scalarVariant(t, tt.build), tt.typ)
+			if tt.want == nil {
+				assert.False(t, ok, "expected not castable")
+
+				return
+			}
+			require.True(t, ok)
+			assert.Equal(t, tt.want, lit.Any())
+		})
+	}
+}
+
 func TestCastVariantLiteral(t *testing.T) {
 	testUUID := uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 

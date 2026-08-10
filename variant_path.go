@@ -19,10 +19,11 @@ package iceberg
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
-// NormalizeVariantPath renders member names as the spec's RFC-9535 normalized JSON path.
+// NormalizeVariantPath renders member names as the spec's RFC-9535 normalized JSON path. Exported for table/internal; not part of the stable public API.
 func NormalizeVariantPath(fields []string) string {
 	if len(fields) == 0 {
 		return "$"
@@ -76,31 +77,105 @@ func rfc9535Escape(name string) string {
 	return b.String()
 }
 
-// parseVariantPath parses a dot-shorthand variant path ($.a.b) into its member names.
+// parseVariantPath parses a variant path into its member names. It accepts both
+// dot shorthand ($.a.b) and RFC-9535 bracket notation ($['a']['b']) so a path
+// emitted by NormalizeVariantPath round-trips. Array indices and wildcards are unsupported.
 func parseVariantPath(path string) ([]string, error) {
-	if strings.ContainsAny(path, "[]") {
-		return nil, fmt.Errorf("%w: unsupported variant path, contains bracket: %q", ErrInvalidArgument, path)
-	}
-	if strings.Contains(path, "*") {
-		return nil, fmt.Errorf("%w: unsupported variant path, contains wildcard: %q", ErrInvalidArgument, path)
-	}
-	if strings.Contains(path, "..") {
-		return nil, fmt.Errorf("%w: unsupported variant path, contains recursive descent: %q", ErrInvalidArgument, path)
-	}
-
-	parts := strings.Split(path, ".")
-	if parts[0] != "$" {
+	if !strings.HasPrefix(path, "$") {
 		return nil, fmt.Errorf("%w: invalid variant path, does not start with $: %q", ErrInvalidArgument, path)
 	}
 
-	names := parts[1:]
-	for _, name := range names {
-		if !isRFC9535MemberName(name) {
-			return nil, fmt.Errorf("%w: invalid variant path %q (%q has invalid characters)", ErrInvalidArgument, path, name)
+	rest := path[len("$"):]
+	names := []string{}
+	for len(rest) > 0 {
+		switch rest[0] {
+		case '.':
+			if strings.HasPrefix(rest, "..") {
+				return nil, fmt.Errorf("%w: unsupported variant path, contains recursive descent: %q", ErrInvalidArgument, path)
+			}
+			rest = rest[1:]
+			name := rest
+			if end := strings.IndexAny(rest, ".["); end >= 0 {
+				name, rest = rest[:end], rest[end:]
+			} else {
+				rest = ""
+			}
+			if !isRFC9535MemberName(name) {
+				return nil, fmt.Errorf("%w: invalid variant path %q (%q has invalid characters)", ErrInvalidArgument, path, name)
+			}
+			names = append(names, name)
+		case '[':
+			name, consumed, err := parseBracketSelector(rest, path)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, name)
+			rest = rest[consumed:]
+		default:
+			return nil, fmt.Errorf("%w: invalid variant path %q (expected '.' or '[' near %q)", ErrInvalidArgument, path, rest)
 		}
 	}
 
 	return names, nil
+}
+
+// parseBracketSelector parses one `['name']` selector at the start of s (the RFC-9535
+// inverse of rfc9535Escape), returning the unescaped member and bytes consumed.
+func parseBracketSelector(s, path string) (string, int, error) {
+	if len(s) < 2 || s[1] != '\'' {
+		return "", 0, fmt.Errorf("%w: unsupported variant path %q (only quoted member selectors like ['name'] are supported)", ErrInvalidArgument, path)
+	}
+
+	var b strings.Builder
+	for i := 2; i < len(s); {
+		c := s[i]
+		switch c {
+		case '\'':
+			if i+1 >= len(s) || s[i+1] != ']' {
+				return "", 0, fmt.Errorf("%w: invalid variant path %q (expected ']' after quoted member)", ErrInvalidArgument, path)
+			}
+
+			return b.String(), i + 2, nil
+		case '\\':
+			if i+1 >= len(s) {
+				return "", 0, fmt.Errorf("%w: invalid variant path %q (dangling escape)", ErrInvalidArgument, path)
+			}
+			switch e := s[i+1]; e {
+			case 'b':
+				b.WriteByte('\b')
+			case 't':
+				b.WriteByte('\t')
+			case 'f':
+				b.WriteByte('\f')
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case '\'', '\\', '/':
+				b.WriteByte(e)
+			case 'u':
+				if i+6 > len(s) {
+					return "", 0, fmt.Errorf("%w: invalid variant path %q (truncated \\u escape)", ErrInvalidArgument, path)
+				}
+				r, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
+				if err != nil {
+					return "", 0, fmt.Errorf("%w: invalid variant path %q (bad \\u escape)", ErrInvalidArgument, path)
+				}
+				b.WriteRune(rune(r))
+				i += 6
+
+				continue
+			default:
+				return "", 0, fmt.Errorf("%w: invalid variant path %q (unknown escape \\%c)", ErrInvalidArgument, path, e)
+			}
+			i += 2
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+
+	return "", 0, fmt.Errorf("%w: invalid variant path %q (unterminated member selector)", ErrInvalidArgument, path)
 }
 
 // isRFC9535MemberName reports whether name is a valid RFC-9535 member-name shorthand.

@@ -56,6 +56,14 @@ func TestParseVariantPath(t *testing.T) {
 		{"nested members", "$.location.latitude", []string{"location", "latitude"}},
 		{"underscore and digits", "$._a1.b2", []string{"_a1", "b2"}},
 		{"non-ascii first char", "$.naïve", []string{"naïve"}},
+		{"bracket notation", "$['event_id']", []string{"event_id"}},
+		{"bracket nested", "$['location']['latitude']", []string{"location", "latitude"}},
+		{"bracket dotted name", "$['user.name']", []string{"user.name"}},
+		{"bracket leading digit", "$['1abc']", []string{"1abc"}},
+		{"bracket escaped quote", `$['o\'brien']`, []string{"o'brien"}},
+		{"bracket escaped backslash", `$['a\\b']`, []string{`a\b`}},
+		{"bracket star is literal", "$['a*b']", []string{"a*b"}},
+		{"mixed dot and bracket", "$['a'].b", []string{"a", "b"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseVariantPath(tt.path)
@@ -65,17 +73,40 @@ func TestParseVariantPath(t *testing.T) {
 	}
 }
 
+// TestParseVariantPathRoundTrip proves NormalizeVariantPath output parses back to the same members.
+func TestParseVariantPathRoundTrip(t *testing.T) {
+	for _, fields := range [][]string{
+		{"event_id"},
+		{"location", "latitude"},
+		{"user.name"},
+		{"o'brien"},
+		{`a\b`},
+		{"a\nb"},
+		{"a\x01b"},
+		{"a*b"},
+		{"1abc"},
+	} {
+		got, err := parseVariantPath(NormalizeVariantPath(fields))
+		require.NoError(t, err)
+		assert.Equal(t, fields, got)
+	}
+}
+
 func TestParseVariantPathRejects(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		path string
 	}{
-		{"bracket notation", "$['event_id']"},
 		{"wildcard", "$.*"},
 		{"recursive descent", "$..event_id"},
 		{"missing root", "event_id"},
 		{"leading digit member", "$.1abc"},
 		{"empty member", "$."},
+		{"array index", "$[0]"},
+		{"bracket wildcard", "$[*]"},
+		{"unquoted bracket", "$[event_id]"},
+		{"unterminated bracket", "$['event_id"},
+		{"missing close bracket", "$['event_id'"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parseVariantPath(tt.path)

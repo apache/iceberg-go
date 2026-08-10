@@ -20,9 +20,27 @@ package iceberg
 import (
 	"testing"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// rowStruct is a minimal StructLike backing one row for eval tests.
+type rowStruct []any
+
+func (r rowStruct) Size() int            { return len(r) }
+func (r rowStruct) Get(pos int) any      { return r[pos] }
+func (r rowStruct) Set(pos int, val any) { r[pos] = val }
+
+func variantObject(t *testing.T, m map[string]any) variant.Value {
+	t.Helper()
+	var b variant.Builder
+	require.NoError(t, b.Append(m))
+	v, err := b.Build()
+	require.NoError(t, err)
+
+	return v
+}
 
 func extractBindSchema() *Schema {
 	return NewSchema(0,
@@ -42,6 +60,16 @@ func TestExtractBind(t *testing.T) {
 	assert.Equal(t, 1, be.Ref().Field().ID)
 }
 
+// TestExtractBindBracketPath proves a bracket-notation path binds and round-trips through Path().
+func TestExtractBindBracketPath(t *testing.T) {
+	term, err := Extract("payload", "$['a']['b']", PrimitiveTypes.Int64).Bind(extractBindSchema(), true)
+	require.NoError(t, err)
+
+	be, ok := term.(BoundExtract)
+	require.True(t, ok)
+	assert.Equal(t, "$['a']['b']", be.Path())
+}
+
 func TestExtractBindRejects(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -50,7 +78,7 @@ func TestExtractBindRejects(t *testing.T) {
 		{"non-variant source", Extract("name", "$.a", PrimitiveTypes.Int64)},
 		{"nil target type", Extract("payload", "$.a", nil)},
 		{"unknown target type", Extract("payload", "$.a", UnknownType{})},
-		{"bracket path", Extract("payload", "$['a']", PrimitiveTypes.Int64)},
+		{"array index path", Extract("payload", "$[0]", PrimitiveTypes.Int64)},
 		{"unknown field", Extract("missing", "$.a", PrimitiveTypes.Int64)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,4 +86,79 @@ func TestExtractBindRejects(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// TestExtractBindRequiredColumnNoFastPath: IsNull/NotNull over an extract on a required
+// variant column must not collapse via the required-field fast path, since the column
+// being required says nothing about the sub-path.
+func TestExtractBindRequiredColumnNoFastPath(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "payload", Type: VariantType{}, Required: true},
+	)
+	ext := Extract("payload", "$.a", PrimitiveTypes.Int64)
+
+	isNull, err := IsNull(ext).Bind(schema, true)
+	require.NoError(t, err)
+	assert.NotEqual(t, AlwaysFalse{}, isNull, "IsNull(extract) on a required column must not bind to AlwaysFalse")
+	_, ok := isNull.(BoundPredicate)
+	assert.True(t, ok, "IsNull(extract) should remain a bound predicate")
+
+	notNull, err := NotNull(ext).Bind(schema, true)
+	require.NoError(t, err)
+	assert.NotEqual(t, AlwaysTrue{}, notNull, "NotNull(extract) on a required column must not bind to AlwaysTrue")
+	_, ok = notNull.(BoundPredicate)
+	assert.True(t, ok, "NotNull(extract) should remain a bound predicate")
+}
+
+// TestBoundExtractEval covers the StructLike row-evaluation path: eval, evalToLiteral, evalIsNull.
+func TestBoundExtractEval(t *testing.T) {
+	schema := extractBindSchema()
+	term, err := Extract("payload", "$.a", PrimitiveTypes.Int64).Bind(schema, true)
+	require.NoError(t, err)
+	be := term.(*boundExtract[int64])
+
+	present := rowStruct{variantObject(t, map[string]any{"a": int64(42)}), "x"}
+	absent := rowStruct{variantObject(t, map[string]any{"b": int64(1)}), "x"}
+
+	// present path
+	got := be.eval(present)
+	require.True(t, got.Valid)
+	assert.Equal(t, int64(42), got.Val)
+
+	lit := be.evalToLiteral(present)
+	require.True(t, lit.Valid)
+	assert.Equal(t, int64(42), lit.Val.Any())
+	assert.False(t, be.evalIsNull(present))
+
+	// absent path -> not valid, IsNull true
+	assert.False(t, be.eval(absent).Valid)
+	assert.False(t, be.evalToLiteral(absent).Valid)
+	assert.True(t, be.evalIsNull(absent))
+}
+
+// TestExtractFieldIDsIncludesVariantColumn proves a filter over an extract term reports
+// the variant column's field id, so scan projection pulls the column into the read set.
+func TestExtractFieldIDsIncludesVariantColumn(t *testing.T) {
+	schema := extractBindSchema()
+	pred := LiteralPredicate(OpEQ, Extract("payload", "$.a", PrimitiveTypes.Int64), NewLiteral(int64(5)))
+	bound, err := BindExpr(schema, pred, true)
+	require.NoError(t, err)
+
+	ids, err := ExtractFieldIDs(bound)
+	require.NoError(t, err)
+	assert.Contains(t, ids, 1, "variant column field id (payload=1) must be in the projected read set")
+}
+
+func TestBoundExtractExtractValue(t *testing.T) {
+	schema := extractBindSchema()
+	term, err := Extract("payload", "$.a.b", PrimitiveTypes.String).Bind(schema, true)
+	require.NoError(t, err)
+	be := term.(BoundExtract)
+
+	lit, ok := be.ExtractValue(variantObject(t, map[string]any{"a": map[string]any{"b": "deep"}}))
+	require.True(t, ok)
+	assert.Equal(t, "deep", lit.Any())
+
+	_, ok = be.ExtractValue(variantObject(t, map[string]any{"a": map[string]any{"c": "other"}}))
+	assert.False(t, ok, "absent nested path is not extractable")
 }

@@ -3169,7 +3169,7 @@ func TestStrictMetricsExtractNeverMatches(t *testing.T) {
 	require.NoError(t, err)
 	bound := append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
 
-	// A file whose variant column carries bounds is what triggered the LiteralFromBytes(variant) error.
+	// A variant column carrying bounds: boundFor must decode it without erroring.
 	file := &mockDataFile{
 		count:       10,
 		valueCounts: map[int]int64{2: 10},
@@ -3185,4 +3185,82 @@ func TestStrictMetricsExtractNeverMatches(t *testing.T) {
 	res, err := eval(file)
 	require.NoError(t, err)
 	assert.Equal(t, rowsMightNotMatch, res)
+}
+
+// TestInclusiveMetricsExtractPrunes proves the actual pushdown skip: a file whose shredded
+// $.a bounds exclude the queried value is pruned (rowsCannotMatch), not merely residual-filtered.
+func TestInclusiveMetricsExtractPrunes(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	// A shredded variant bound is a variant object keyed by the normalized sub-path.
+	mkBound := func(val int64) []byte {
+		var b variant.Builder
+		start := b.Offset()
+		entries := []variant.FieldEntry{b.NextField(start, "$['a']")}
+		require.NoError(t, b.AppendInt(val))
+		require.NoError(t, b.FinishObject(start, entries))
+		v, err := b.Build()
+		require.NoError(t, err)
+
+		return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+	}
+	// File carries $.a in [10, 100].
+	file := &mockDataFile{
+		count:       10,
+		valueCounts: map[int]int64{2: 10},
+		nullCounts:  map[int]int64{2: 0},
+		lowerBounds: map[int][]byte{2: mkBound(10)},
+		upperBounds: map[int][]byte{2: mkBound(100)},
+	}
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+
+	for _, tt := range []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want bool
+	}{
+		{"eq below lower prunes", iceberg.EqualTo(ext, int64(5)), rowsCannotMatch},
+		{"eq above upper prunes", iceberg.EqualTo(ext, int64(500)), rowsCannotMatch},
+		{"eq within bounds keeps", iceberg.EqualTo(ext, int64(50)), rowsMightMatch},
+		{"less below lower prunes", iceberg.LessThan(ext, int64(5)), rowsCannotMatch},
+		{"greater above upper prunes", iceberg.GreaterThan(ext, int64(500)), rowsCannotMatch},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := newInclusiveMetricsEvaluator(sc, tt.expr, true, true)
+			require.NoError(t, err)
+			res, err := eval(file)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, res)
+		})
+	}
+}
+
+// TestInclusiveMetricsExtractNotNull pins the VisitNotNull asymmetry: NotNull(extract) may
+// prune only when the whole variant column is null, and must keep an otherwise-populated one.
+func TestInclusiveMetricsExtractNotNull(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	ext := iceberg.NotNull(iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64))
+
+	// All-null variant column: no row has any sub-path, so NotNull cannot match -> prune.
+	allNull := &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nullCounts: map[int]int64{2: 10}}
+	eval, err := newInclusiveMetricsEvaluator(sc, ext, true, true)
+	require.NoError(t, err)
+	res, err := eval(allNull)
+	require.NoError(t, err)
+	assert.Equal(t, rowsCannotMatch, res, "all-null variant column prunes NotNull(extract)")
+
+	// Populated column: the sub-path may be present, so the file must be kept even though
+	// the column has zero nulls (the column being non-null says nothing about $.a).
+	populated := &mockDataFile{count: 10, valueCounts: map[int]int64{2: 10}, nullCounts: map[int]int64{2: 0}}
+	eval, err = newInclusiveMetricsEvaluator(sc, ext, true, true)
+	require.NoError(t, err)
+	res, err = eval(populated)
+	require.NoError(t, err)
+	assert.Equal(t, rowsMightMatch, res, "populated variant column must not prune NotNull(extract)")
 }

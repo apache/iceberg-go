@@ -277,6 +277,45 @@ func TestMarshalExpressionNonFiniteFloat(t *testing.T) {
 	}
 }
 
+// TestMarshalExpressionExtractNotSerializable proves an extract term errors on JSON
+// marshal (both unbound and bound) rather than silently encoding to "term":{}.
+func TestMarshalExpressionExtractNotSerializable(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	unbound := iceberg.LiteralPredicate(iceberg.OpEQ,
+		iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64), iceberg.NewLiteral(int64(5)))
+	_, err := json.Marshal(unbound)
+	require.ErrorIs(t, err, iceberg.ErrExtractNotSerializable)
+
+	bound, err := iceberg.BindExpr(schema, unbound, true)
+	require.NoError(t, err)
+	_, err = json.Marshal(bound)
+	require.ErrorIs(t, err, iceberg.ErrExtractNotSerializable)
+}
+
+// TestSanitizeExpressionExtractCollapses proves an unbound extract term collapses to always-true so the sanitized scan-report filter still marshals.
+func TestSanitizeExpressionExtractCollapses(t *testing.T) {
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+
+	sanitized, err := iceberg.SanitizeExpression(
+		iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5))))
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.AlwaysTrue{}, sanitized)
+	_, err = json.Marshal(sanitized)
+	require.NoError(t, err)
+
+	mixed := iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("id"), int32(5)),
+		iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5))))
+	sanitized, err = iceberg.SanitizeExpression(mixed)
+	require.NoError(t, err)
+	raw, err := json.Marshal(sanitized)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"id"`, "the non-extract predicate survives in the sanitized filter")
+}
+
 func mustLit(t *testing.T, s string, typ iceberg.Type) iceberg.Literal {
 	t.Helper()
 	lit, err := iceberg.NewLiteral(s).To(typ)

@@ -890,7 +890,8 @@ func (m *inclusiveMetricsEval) boundFor(t iceberg.BoundTerm, raw []byte) (iceber
 	if ext, ok := t.(iceberg.BoundExtract); ok {
 		lit, found, err := internal.VariantBoundLiteral(raw, ext.Path(), ext.Type().(iceberg.PrimitiveType))
 		if err != nil {
-			panic(err)
+			// Best-effort pruning: an undecodable bound means we cannot prune, not that the scan fails.
+			return nil, false
 		}
 
 		return lit, found

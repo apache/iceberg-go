@@ -506,7 +506,7 @@ func TestVariantBoundLiteralTypeMismatch(t *testing.T) {
 }
 
 func TestVariantBoundLiteralMalformed(t *testing.T) {
-	// Malformed / truncated bytes must return an error, never panic (arrow-go A2 hardening).
+	// Malformed / truncated bytes must return an error, never panic.
 	for _, raw := range [][]byte{{}, {0x01}, {0xff, 0xff, 0xff}, {0x01, 0x00, 0x00, 0x7f, 0x7f}} {
 		require.NotPanics(t, func() {
 			_, _, _ = VariantBoundLiteral(raw, "$['a']", iceberg.PrimitiveTypes.Int64)

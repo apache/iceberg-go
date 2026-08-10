@@ -53,6 +53,9 @@ func (u *unboundExtract) Ref() Reference      { return u.ref }
 func (u *unboundExtract) Path() string        { return u.path }
 func (u *unboundExtract) Type() PrimitiveType { return u.typ }
 
+// MarshalJSON reports that extract terms have no REST expression-JSON form (see ErrExtractNotSerializable), rather than silently encoding to {}.
+func (*unboundExtract) MarshalJSON() ([]byte, error) { return nil, ErrExtractNotSerializable }
+
 func (u *unboundExtract) Equals(other UnboundTerm) bool {
 	rhs, ok := other.(*unboundExtract)
 	if !ok {
@@ -155,6 +158,9 @@ func (b *boundExtract[T]) String() string {
 func (b *boundExtract[T]) Ref() BoundReference { return b.ref }
 func (b *boundExtract[T]) Type() Type          { return b.typ }
 func (b *boundExtract[T]) Path() string        { return b.path }
+
+// MarshalJSON reports that extract terms have no REST expression-JSON form (see ErrExtractNotSerializable), rather than silently encoding to {}.
+func (*boundExtract[T]) MarshalJSON() ([]byte, error) { return nil, ErrExtractNotSerializable }
 
 func (b *boundExtract[T]) Equals(other BoundTerm) bool {
 	rhs, ok := other.(*boundExtract[T])
