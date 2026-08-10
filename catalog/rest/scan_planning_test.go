@@ -1208,7 +1208,7 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load())
 }
 
-func TestPlanFilesDoesNotCancelAfterSuccessfulMaterialization(t *testing.T) {
+func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
 	t.Parallel()
 
 	var cancels atomic.Int32
@@ -1238,7 +1238,7 @@ func TestPlanFilesDoesNotCancelAfterSuccessfulMaterialization(t *testing.T) {
 	result, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
-	assert.Zero(t, cancels.Load())
+	assert.Equal(t, int32(1), cancels.Load())
 }
 
 func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {
@@ -1423,7 +1423,8 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 }
 
 // TestPlanScopedIOExpiredCredentials checks a plan whose creds state an expiry
-// fails loudly once past it, since plan creds can't be renewed.
+// fails loudly for a matching location once past it, since plan creds can't be
+// renewed.
 func TestPlanScopedIOExpiredCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -1444,20 +1445,26 @@ func TestPlanScopedIOExpiredCredentials(t *testing.T) {
 	require.True(t, ok)
 	p.refresher.nowFunc = func() time.Time { return now }
 
-	// The first load caches an IO and picks up the stated expiry.
+	// The first load caches the prefix resolver rather than treating the plan's
+	// location-specific credentials as one global credential set.
 	fs, err := p.Load(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, fs)
-	assert.Equal(t, now.Add(time.Hour).UnixMilli(), p.refresher.expiresAt.UnixMilli())
+	assert.True(t, p.refresher.expiresAt.IsZero())
+	prefixIO, ok := fs.(*prefixScopedIO)
+	require.True(t, ok)
+	_, err = prefixIO.filesystemFor("file:///bucket/data.parquet")
+	require.NoError(t, err)
 
-	// Past the expiry, with no endpoint to renew from, the load fails.
+	// Past the expiry, access under the credential's prefix fails even though
+	// its filesystem was already cached.
 	p.refresher.nowFunc = func() time.Time { return now.Add(2 * time.Hour) }
-	_, err = p.Load(context.Background())
+	_, err = prefixIO.filesystemFor("file:///bucket/data.parquet")
 	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
 }
 
 // TestPlanScopedIOAlreadyExpiredCredentials checks creds that are already past
-// their expiry on the very first load fail loudly instead of yielding an IO.
+// their expiry fail loudly when a matching location is first opened.
 func TestPlanScopedIOAlreadyExpiredCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -1474,7 +1481,43 @@ func TestPlanScopedIOAlreadyExpiredCredentials(t *testing.T) {
 	require.True(t, ok)
 	p.refresher.nowFunc = func() time.Time { return now }
 
-	_, err := p.Load(context.Background())
+	fs, err := p.Load(context.Background())
+	require.NoError(t, err)
+	_, err = fs.Open("file:///bucket/data.parquet")
+	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
+}
+
+func TestPlanScopedIOIgnoresExpiredCredentialForUnrelatedPrefix(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	creds := []StorageCredential{
+		{
+			Prefix: "file:///archive/",
+			Config: iceberg.Properties{
+				keyS3TokenExpiresAtMs: strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10),
+			},
+		},
+		{
+			Prefix: "file:///current/",
+			Config: iceberg.Properties{
+				keyS3TokenExpiresAtMs: strconv.FormatInt(now.Add(time.Hour).UnixMilli(), 10),
+			},
+		},
+	}
+
+	p, ok := planIOFromCredentials(creds, "file:///metadata/v1.json", nil).(*planScopedIO)
+	require.True(t, ok)
+	p.refresher.nowFunc = func() time.Time { return now }
+
+	fs, err := p.Load(context.Background())
+	require.NoError(t, err)
+	prefixIO, ok := fs.(*prefixScopedIO)
+	require.True(t, ok)
+	_, err = prefixIO.filesystemFor("file:///current/data.parquet")
+	require.NoError(t, err)
+
+	_, err = prefixIO.filesystemFor("file:///archive/data.parquet")
 	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
 }
 

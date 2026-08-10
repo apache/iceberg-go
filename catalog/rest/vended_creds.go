@@ -102,20 +102,6 @@ func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
 	return earliest, found
 }
 
-func earliestCredentialExpiry(creds []StorageCredential) (time.Time, bool) {
-	var earliest time.Time
-	found := false
-	for _, credential := range creds {
-		expiresAt, ok := parseCredentialExpiry(credential.Config)
-		if ok && (!found || expiresAt.Before(earliest)) {
-			earliest = expiresAt
-			found = true
-		}
-	}
-
-	return earliest, found
-}
-
 type vendedCredentialRefresher struct {
 	// Use a weighted semaphore with a single unit to use as an exclusive lock
 	// but cancellation (via context) is supported. This is important as we do IO
@@ -159,13 +145,12 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	switch {
 	case v.cachedIO == nil:
 		config = v.props
-		// Plan creds can already be past their expiry by the time we first use
-		// them, so check before building an IO we'd only hand back 403s from.
-		if v.fetchCreds == nil {
+		// A single resolved credential can already be past its expiry by the
+		// time we first use it, so check before building an IO we'd only hand
+		// back 403s from. Plan credentials are resolved later, per location, by
+		// prefixScopedIO and must not be rejected as one global credential set.
+		if v.fetchCreds == nil && len(v.credentials) == 0 {
 			expiresAt, ok := parseCredentialExpiry(config)
-			if len(v.credentials) > 0 {
-				expiresAt, ok = earliestCredentialExpiry(v.credentials)
-			}
 			if ok && v.now().After(expiresAt) {
 				return nil, v.expiredError(expiresAt)
 			}
@@ -185,8 +170,12 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	}
 
 	if len(v.credentials) > 0 {
-		v.cachedIO = newPrefixScopedIO(ctx, v.props, v.credentials)
-		v.expiresAt = v.expiresAtFromConfig(config)
+		prefixIO := newPrefixScopedIO(ctx, v.props, v.credentials)
+		prefixIO.nowFunc = v.now
+		v.cachedIO = prefixIO
+		// Expiry is enforced by prefixScopedIO against only the credential
+		// selected for each object location.
+		v.expiresAt = time.Time{}
 
 		return v.cachedIO, nil
 	}
@@ -219,10 +208,6 @@ func (v *vendedCredentialRefresher) expired() bool {
 
 func (v *vendedCredentialRefresher) expiresAtFromConfig(config iceberg.Properties) time.Time {
 	if len(v.credentials) > 0 {
-		if exp, ok := earliestCredentialExpiry(v.credentials); ok {
-			return exp
-		}
-
 		return time.Time{}
 	}
 
@@ -266,6 +251,7 @@ type prefixScopedIO struct {
 	mu          sync.Mutex
 	filesystems map[string]iceio.IO
 	closed      bool
+	nowFunc     func() time.Time
 }
 
 func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, credentials []StorageCredential) *prefixScopedIO {
@@ -297,6 +283,14 @@ func (p *prefixScopedIO) Remove(name string) error {
 
 func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	if credentialIndex >= 0 {
+		if expiresAt, ok := parseCredentialExpiry(p.credentials[credentialIndex].Config); ok &&
+			p.now().After(expiresAt) {
+			return nil, fmt.Errorf("%w: %s expired at %s",
+				ErrVendedCredentialsExpired, name, expiresAt.Format(time.RFC3339))
+		}
+	}
+
 	key := scopedFilesystemKey(credentialIndex, name)
 
 	p.mu.Lock()
@@ -319,6 +313,14 @@ func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 	p.filesystems[key] = fs
 
 	return fs, nil
+}
+
+func (p *prefixScopedIO) now() time.Time {
+	if p.nowFunc != nil {
+		return p.nowFunc()
+	}
+
+	return time.Now()
 }
 
 func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
