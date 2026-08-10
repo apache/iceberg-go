@@ -569,19 +569,20 @@ func (m *mergeAppendFiles) needsValidation() bool { return false }
 type snapshotProducer struct {
 	producerImpl
 
-	commitUuid         uuid.UUID
-	io                 iceio.WriteFileIO
-	txn                *Transaction
-	op                 Operation
-	snapshotID         int64
-	parentSnapshotID   int64
-	addedFiles         []iceberg.DataFile
-	addedDeleteFiles   []deleteFileAddition
-	manifestCount      atomic.Int32
-	deletedFiles       map[string]iceberg.DataFile
-	deletedDeleteFiles map[string]iceberg.DataFile
-	deletedDVsByRef    map[string]iceberg.DataFile
-	snapshotProps      iceberg.Properties
+	commitUuid              uuid.UUID
+	io                      iceio.WriteFileIO
+	txn                     *Transaction
+	op                      Operation
+	snapshotID              int64
+	parentSnapshotID        int64
+	addedFiles              []iceberg.DataFile
+	addedDataSequenceNumber *int64
+	addedDeleteFiles        []deleteFileAddition
+	manifestCount           atomic.Int32
+	deletedFiles            map[string]iceberg.DataFile
+	deletedDeleteFiles      map[string]iceberg.DataFile
+	deletedDVsByRef         map[string]iceberg.DataFile
+	snapshotProps           iceberg.Properties
 }
 
 // deleteFileAddition carries the data sequence number of a rewritten delete
@@ -635,6 +636,13 @@ func (sp *snapshotProducer) spec(id int) iceberg.PartitionSpec {
 
 func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProducer {
 	sp.addedFiles = append(sp.addedFiles, df)
+
+	return sp
+}
+
+func (sp *snapshotProducer) setNewDataFilesDataSequenceNumber(seq int64) *snapshotProducer {
+	seqCopy := seq
+	sp.addedDataSequenceNumber = &seqCopy
 
 	return sp
 }
@@ -977,7 +985,7 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 
 	for _, df := range files {
 		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
-			nil, nil, df))
+			sp.addedDataSequenceNumber, nil, df))
 		if err != nil {
 			return nil, err
 		}

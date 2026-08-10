@@ -180,6 +180,16 @@ func TestRewriteFiles_EmptyCommit_Errors(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one file change")
 }
 
+func TestRewriteFiles_RejectsNegativeDataSequenceNumber(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	rewrite := tbl.NewTransaction().NewRewrite(nil).DataSequenceNumber(-1)
+
+	err := rewrite.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "invalid rewrite data sequence number")
+}
+
 func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 	tx := tbl.NewTransaction()

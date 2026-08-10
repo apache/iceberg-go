@@ -1103,7 +1103,7 @@ type deleteFilesToAddSet struct {
 	regularPaths map[string]struct{}
 	dvPaths      map[string]struct{}
 	dvBlobs      map[deletionVectorBlobKey]struct{}
-	dvRefs       map[string]struct{}
+	dvsByRef     map[string]rewriteDeleteFileAddition
 }
 
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
@@ -1120,7 +1120,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		regularPaths: make(map[string]struct{}, len(deleteFiles)),
 		dvPaths:      make(map[string]struct{}, len(deleteFiles)),
 		dvBlobs:      make(map[deletionVectorBlobKey]struct{}, len(deleteFiles)),
-		dvRefs:       make(map[string]struct{}, len(deleteFiles)),
+		dvsByRef:     make(map[string]rewriteDeleteFileAddition, len(deleteFiles)),
 	}
 	if len(deleteFiles) == 0 {
 		return setToAdd, nil
@@ -1217,7 +1217,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
 					operation, path, *offset, *length)
 			}
-			if _, ok := setToAdd.dvRefs[*ref]; ok {
+			if _, ok := setToAdd.dvsByRef[*ref]; ok {
 				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
 					operation, *ref)
 			}
@@ -1227,7 +1227,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 			setToAdd.dvPaths[path] = struct{}{}
 			setToAdd.dvBlobs[blob] = struct{}{}
-			setToAdd.dvRefs[*ref] = struct{}{}
+			setToAdd.dvsByRef[*ref] = addition
 		}
 	}
 
@@ -1261,29 +1261,64 @@ func validateRewriteEqualityFieldIDs(schemas []*iceberg.Schema, fieldIDs []int) 
 	return nil
 }
 
-// validateAddedDeletionVectorTargets guarantees that a new DV cannot suppress
-// a surviving position-delete file that may still apply to the same data file.
-// File-scoped deletes are matched by referenced_data_file or file_path bounds;
+type rewriteFileState struct {
+	file               iceberg.DataFile
+	dataSequenceNumber int64
+}
+
+// validateAddedDeletionVectorTargets guarantees that each new DV has the same
+// partition as its target, applies to the target by sequence number, and cannot
+// suppress a surviving position-delete file that may still apply. File-scoped
+// deletes are matched by referenced_data_file or file_path bounds;
 // partition-scoped deletes use the same spec/partition tuple fallback as scan
 // and rewrite conflict planning.
 func validateAddedDeletionVectorTargets(
-	dvRefs map[string]struct{},
-	liveDataFiles map[string]iceberg.DataFile,
-	survivingPositionDeletes []iceberg.DataFile,
+	dvsByRef map[string]rewriteDeleteFileAddition,
+	liveDataFiles map[string]rewriteFileState,
+	survivingPositionDeletes []rewriteFileState,
+	defaultDeleteSequenceNumber int64,
 ) error {
-	for ref := range dvRefs {
-		dataFile, ok := liveDataFiles[ref]
+	for ref, addition := range dvsByRef {
+		dataState, ok := liveDataFiles[ref]
 		if !ok {
 			return fmt.Errorf("%w: deletion vector references data file that will not exist in the rewritten snapshot: %s",
 				ErrInvalidOperation, ref)
 		}
+		dataFile := dataState.file
 
 		partitionKey, err := partitionConflictKey(dataFile.SpecID(), dataFile.Partition())
 		if err != nil {
 			return fmt.Errorf("building partition key for deletion vector target %s (spec %d): %w",
 				ref, dataFile.SpecID(), err)
 		}
-		for _, deleteFile := range survivingPositionDeletes {
+		dvPartitionKey, err := partitionConflictKey(addition.file.SpecID(), addition.file.Partition())
+		if err != nil {
+			return fmt.Errorf("building partition key for deletion vector %s (spec %d): %w",
+				addition.file.FilePath(), addition.file.SpecID(), err)
+		}
+		if dvPartitionKey != partitionKey {
+			return fmt.Errorf("%w: deletion vector %s has partition spec or values that do not match referenced data file %s",
+				ErrInvalidOperation, addition.file.FilePath(), ref)
+		}
+
+		dvSequenceNumber := defaultDeleteSequenceNumber
+		if addition.dataSequenceNumber != nil {
+			dvSequenceNumber = *addition.dataSequenceNumber
+		}
+		if dataState.dataSequenceNumber < 0 {
+			return fmt.Errorf("%w: referenced data file %s has no data sequence number",
+				ErrInvalidOperation, ref)
+		}
+		if dataState.dataSequenceNumber > dvSequenceNumber {
+			return fmt.Errorf("%w: deletion vector %s with data sequence number %d does not apply to referenced data file %s with data sequence number %d",
+				ErrInvalidOperation, addition.file.FilePath(), dvSequenceNumber, ref, dataState.dataSequenceNumber)
+		}
+
+		for _, deleteState := range survivingPositionDeletes {
+			if deleteState.dataSequenceNumber >= 0 && dataState.dataSequenceNumber > deleteState.dataSequenceNumber {
+				continue
+			}
+			deleteFile := deleteState.file
 			if target := referencedDataFilePath(deleteFile); target != "" {
 				if target == ref {
 					return fmt.Errorf("%w: adding a deletion vector for %s requires replacing all applicable position-delete files; %s would survive",
@@ -1315,6 +1350,7 @@ type dataFileCfg struct {
 	skipAutoNameMapping bool
 	skipDuplicateCheck  bool
 	rewriteSemantics    bool
+	dataSequenceNumber  *int64
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -1330,6 +1366,13 @@ type dataFileCfg struct {
 func withRewriteSemantics() WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.rewriteSemantics = true
+	}
+}
+
+func withDataSequenceNumber(seq int64) WriteOption {
+	return func(cfg *dataFileCfg) {
+		seqCopy := seq
+		cfg.dataSequenceNumber = &seqCopy
 	}
 }
 
@@ -1583,6 +1626,9 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
 	}
+	if cfg.dataSequenceNumber != nil {
+		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
+	}
 
 	for _, df := range markedForDeletion {
 		updater.deleteDataFile(df)
@@ -1769,8 +1815,8 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
 	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
-	liveDataFiles := make(map[string]iceberg.DataFile)
-	survivingPositionDeletes := make([]iceberg.DataFile, 0)
+	liveDataFiles := make(map[string]rewriteFileState)
+	survivingPositionDeletes := make([]rewriteFileState, 0)
 	for entry, err := range s.entries(fs, -1) {
 		if err != nil {
 			return err
@@ -1780,7 +1826,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		isData := df.ContentType() == iceberg.EntryContentData
 		isLive := entry.Status() != iceberg.EntryStatusDELETED
 		if isData && isLive {
-			liveDataFiles[path] = df
+			liveDataFiles[path] = rewriteFileState{file: df, dataSequenceNumber: entry.SequenceNum()}
 		}
 		if _, ok := setToDelete[path]; ok && isData {
 			markedDataForDeletion = append(markedDataForDeletion, df)
@@ -1837,7 +1883,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			if ref == nil {
 				continue
 			}
-			if _, addingReplacement := setDeleteFilesToAdd.dvRefs[*ref]; !addingReplacement {
+			if _, addingReplacement := setDeleteFilesToAdd.dvsByRef[*ref]; !addingReplacement {
 				continue
 			}
 			if _, explicitlyRemoved := dvRefsToRemove[*ref]; explicitlyRemoved {
@@ -1853,24 +1899,28 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if df.ContentType() == iceberg.EntryContentPosDeletes {
 			if _, removed := setDeleteFilesToRemove[path]; !removed {
 				if _, automaticallyRemoved := autoSetDeleteFilesToRemove[path]; !automaticallyRemoved {
-					survivingPositionDeletes = append(survivingPositionDeletes, df)
+					survivingPositionDeletes = append(survivingPositionDeletes, rewriteFileState{
+						file: df, dataSequenceNumber: entry.SequenceNum(),
+					})
 				}
 			}
 		}
 	}
 
+	addedDataSequenceNumber := meta.nextSequenceNumber()
+	if cfg.dataSequenceNumber != nil {
+		addedDataSequenceNumber = *cfg.dataSequenceNumber
+	}
 	for _, df := range dataFilesToAdd {
-		liveDataFiles[df.FilePath()] = df
+		liveDataFiles[df.FilePath()] = rewriteFileState{
+			file: df, dataSequenceNumber: addedDataSequenceNumber,
+		}
 	}
 	for path := range setToDelete {
 		if _, replacement := setToAdd[path]; !replacement {
 			delete(liveDataFiles, path)
 		}
 	}
-	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvRefs, liveDataFiles, survivingPositionDeletes); err != nil {
-		return err
-	}
-
 	if len(markedDataForDeletion) != len(setToDelete) {
 		return errors.New("cannot delete data files that do not belong to the table")
 	}
@@ -1932,6 +1982,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			}
 		}
 	}
+	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvsByRef, liveDataFiles,
+		survivingPositionDeletes, deleteSequenceNumber); err != nil {
+		return err
+	}
 
 	if !cfg.skipAutoNameMapping {
 		if err := t.ensureNameMapping(); err != nil {
@@ -1949,6 +2003,9 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
+	}
+	if cfg.dataSequenceNumber != nil {
+		updater.setNewDataFilesDataSequenceNumber(*cfg.dataSequenceNumber)
 	}
 
 	for _, df := range markedDataForDeletion {

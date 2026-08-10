@@ -64,6 +64,7 @@ type RewriteFiles struct {
 	deleteFilesToAdd        []rewriteDeleteFileAddition
 	deleteFilesToRemove     []iceberg.DataFile
 	autoDeleteFilesToRemove []iceberg.DataFile
+	dataSequenceNumber      *int64
 	snapshotProps           iceberg.Properties
 	err                     error
 	committed               bool
@@ -165,6 +166,26 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 		return r
 	}
 	r.dataFilesToAdd = append(r.dataFilesToAdd, df)
+
+	return r
+}
+
+// DataSequenceNumber configures the data sequence number used for every data
+// file added by this rewrite. This is useful when replacement data files must
+// retain the applicability of delete files committed before the rewrite
+// snapshot.
+func (r *RewriteFiles) DataSequenceNumber(seq int64) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
+	if seq < 0 {
+		r.err = fmt.Errorf("%w: invalid rewrite data sequence number %d", ErrInvalidOperation, seq)
+
+		return r
+	}
+
+	seqCopy := seq
+	r.dataSequenceNumber = &seqCopy
 
 	return r
 }
@@ -342,9 +363,13 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
+	opts := []WriteOption{withRewriteSemantics()}
+	if r.dataSequenceNumber != nil {
+		opts = append(opts, withDataSequenceNumber(*r.dataSequenceNumber))
+	}
 	if err := r.txn.replaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd,
 		r.deleteFilesToRemove, r.autoDeleteFilesToRemove, r.deleteFilesToAdd,
-		r.snapshotProps, withRewriteSemantics()); err != nil {
+		r.snapshotProps, opts...); err != nil {
 		return err
 	}
 
