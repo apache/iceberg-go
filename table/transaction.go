@@ -1092,23 +1092,43 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	return setToAdd, nil
 }
 
+type deletionVectorBlobKey struct {
+	path   string
+	offset int64
+	length int64
+}
+
+type deleteFilesToAddSet struct {
+	paths        map[string]struct{}
+	regularPaths map[string]struct{}
+	dvPaths      map[string]struct{}
+	dvBlobs      map[deletionVectorBlobKey]struct{}
+	dvRefs       map[string]struct{}
+}
+
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
 // supplied to a rewrite. Delete files may use an older partition spec, so the
 // partition values are checked against the spec carried by each file rather
 // than only against the table's current spec.
-func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAddition, operation string) (map[string]struct{}, error) {
+func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAddition, operation string) (*deleteFilesToAddSet, error) {
 	meta, err := t.txnMeta()
 	if err != nil {
 		return nil, err
 	}
+	setToAdd := &deleteFilesToAddSet{
+		paths:        make(map[string]struct{}, len(deleteFiles)),
+		regularPaths: make(map[string]struct{}, len(deleteFiles)),
+		dvPaths:      make(map[string]struct{}, len(deleteFiles)),
+		dvBlobs:      make(map[deletionVectorBlobKey]struct{}, len(deleteFiles)),
+		dvRefs:       make(map[string]struct{}, len(deleteFiles)),
+	}
 	if len(deleteFiles) == 0 {
-		return map[string]struct{}{}, nil
+		return setToAdd, nil
 	}
 	if meta.formatVersion < 2 {
 		return nil, fmt.Errorf("delete files require table format version >= 2, got v%d", meta.formatVersion)
 	}
 
-	setToAdd := make(map[string]struct{}, len(deleteFiles))
 	for i, addition := range deleteFiles {
 		df := addition.file
 		if df == nil {
@@ -1122,10 +1142,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		if path == "" {
 			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
 		}
-		if _, ok := setToAdd[path]; ok {
-			return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
-		}
-		setToAdd[path] = struct{}{}
+		setToAdd.paths[path] = struct{}{}
 
 		switch df.ContentType() {
 		case iceberg.EntryContentPosDeletes, iceberg.EntryContentEqDeletes:
@@ -1149,22 +1166,146 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			if len(eqIDs) == 0 {
 				return nil, fmt.Errorf("equality delete file must have non-empty EqualityFieldIDs: %s", path)
 			}
-			if _, err := validateEqualityFieldIDs(meta.CurrentSchema(), eqIDs); err != nil {
+			if err := validateRewriteEqualityFieldIDs(meta.schemaList, eqIDs); err != nil {
 				return nil, fmt.Errorf("invalid equality delete file %s: %w", path, err)
 			}
 		}
+
+		if !IsDeletionVector(df) {
+			if meta.formatVersion >= 3 && df.ContentType() == iceberg.EntryContentPosDeletes {
+				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
+					path, meta.formatVersion, operation)
+			}
+			if _, ok := setToAdd.regularPaths[path]; ok {
+				return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
+			}
+			if _, ok := setToAdd.dvPaths[path]; ok {
+				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+					path, operation)
+			}
+			setToAdd.regularPaths[path] = struct{}{}
+
+			continue
+		}
+
 		if IsDeletionVector(df) {
 			if meta.formatVersion < 3 {
 				return nil, fmt.Errorf("deletion vector %s requires table format version >= 3 for %s",
 					path, operation)
 			}
-			if df.ReferencedDataFile() == nil {
+			ref := df.ReferencedDataFile()
+			if ref == nil || *ref == "" {
 				return nil, fmt.Errorf("deletion vector to add is missing referenced_data_file for %s", operation)
 			}
+			offset := df.ContentOffset()
+			if offset == nil {
+				return nil, fmt.Errorf("deletion vector %s is missing content_offset for %s", path, operation)
+			}
+			if *offset < 0 {
+				return nil, fmt.Errorf("deletion vector %s has invalid content_offset %d for %s", path, *offset, operation)
+			}
+			length := df.ContentSizeInBytes()
+			if length == nil {
+				return nil, fmt.Errorf("deletion vector %s is missing content_size_in_bytes for %s", path, operation)
+			}
+			if *length <= 0 {
+				return nil, fmt.Errorf("deletion vector %s has invalid content_size_in_bytes %d for %s", path, *length, operation)
+			}
+
+			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+			if _, ok := setToAdd.dvBlobs[blob]; ok {
+				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
+					operation, path, *offset, *length)
+			}
+			if _, ok := setToAdd.dvRefs[*ref]; ok {
+				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
+					operation, *ref)
+			}
+			if _, ok := setToAdd.regularPaths[path]; ok {
+				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+					path, operation)
+			}
+			setToAdd.dvPaths[path] = struct{}{}
+			setToAdd.dvBlobs[blob] = struct{}{}
+			setToAdd.dvRefs[*ref] = struct{}{}
 		}
 	}
 
 	return setToAdd, nil
+}
+
+// validateRewriteEqualityFieldIDs accepts fields retained only in schema
+// history. Rewriting an existing equality delete must preserve its original
+// key even after a key column has been dropped from the current schema.
+func validateRewriteEqualityFieldIDs(schemas []*iceberg.Schema, fieldIDs []int) error {
+	for _, id := range fieldIDs {
+		var field iceberg.NestedField
+		found := false
+		for _, schema := range schemas {
+			if candidate, ok := schema.FindFieldByID(id); ok {
+				field = candidate
+				found = true
+
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: field ID %d not found in table schema history", iceberg.ErrInvalidSchema, id)
+		}
+		if isFloatingPointType(field.Type) {
+			return fmt.Errorf("%w: equality field ID %d (%s) has unsupported floating-point type %s: floating-point columns cannot be used as equality delete keys",
+				iceberg.ErrInvalidSchema, id, field.Name, field.Type)
+		}
+	}
+
+	return nil
+}
+
+// validateAddedDeletionVectorTargets guarantees that a new DV cannot suppress
+// a surviving position-delete file that may still apply to the same data file.
+// File-scoped deletes are matched by referenced_data_file or file_path bounds;
+// partition-scoped deletes use the same spec/partition tuple fallback as scan
+// and rewrite conflict planning.
+func validateAddedDeletionVectorTargets(
+	dvRefs map[string]struct{},
+	liveDataFiles map[string]iceberg.DataFile,
+	survivingPositionDeletes []iceberg.DataFile,
+) error {
+	for ref := range dvRefs {
+		dataFile, ok := liveDataFiles[ref]
+		if !ok {
+			return fmt.Errorf("%w: deletion vector references data file that will not exist in the rewritten snapshot: %s",
+				ErrInvalidOperation, ref)
+		}
+
+		partitionKey, err := partitionConflictKey(dataFile.SpecID(), dataFile.Partition())
+		if err != nil {
+			return fmt.Errorf("building partition key for deletion vector target %s (spec %d): %w",
+				ref, dataFile.SpecID(), err)
+		}
+		for _, deleteFile := range survivingPositionDeletes {
+			if target := referencedDataFilePath(deleteFile); target != "" {
+				if target == ref {
+					return fmt.Errorf("%w: adding a deletion vector for %s requires replacing all applicable position-delete files; %s would survive",
+						ErrInvalidOperation, ref, deleteFile.FilePath())
+				}
+
+				continue
+			}
+
+			deletePartitionKey, err := partitionConflictKey(deleteFile.SpecID(), deleteFile.Partition())
+			if err != nil {
+				return fmt.Errorf("building partition key for surviving position-delete file %s (spec %d): %w",
+					deleteFile.FilePath(), deleteFile.SpecID(), err)
+			}
+			if deletePartitionKey == partitionKey {
+				return fmt.Errorf("%w: adding a deletion vector for %s requires replacing all applicable position-delete files; partition-scoped file %s would survive",
+					ErrInvalidOperation, ref, deleteFile.FilePath())
+			}
+		}
+	}
+
+	return nil
 }
 
 // WriteOption is an option for methods that operate on pre-built DataFile objects.
@@ -1461,7 +1602,11 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 
 // DeleteFileAddition is a delete file added by a rewrite. The data sequence
 // number must be copied from the delete files being replaced so the new file
-// has the same applicability boundary as the old files.
+// has the same applicability boundary as the old files. When one rewrite
+// contains multiple replacement groups, callers are responsible for assigning
+// each output the maximum sequence number of the exact source files it replaces;
+// the transaction can validate membership in the overall source sequence set,
+// but the grouping is not represented by this API.
 type DeleteFileAddition struct {
 	File               iceberg.DataFile
 	DataSequenceNumber int64
@@ -1520,7 +1665,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if err != nil {
 		return err
 	}
-	for path := range setDeleteFilesToAdd {
+	for path := range setDeleteFilesToAdd.paths {
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("data and delete file paths must be unique for ReplaceFiles: %s", path)
 		}
@@ -1624,6 +1769,8 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	markedDVsForRemoval := make(map[string]iceberg.DataFile, len(dvRefsToRemove))
 	removedDeleteSequenceNumbers := make([]int64, 0, len(deleteFilesToRemove))
 	removedDeleteContents := make(map[iceberg.ManifestEntryContent]struct{})
+	liveDataFiles := make(map[string]iceberg.DataFile)
+	survivingPositionDeletes := make([]iceberg.DataFile, 0)
 	for entry, err := range s.entries(fs, -1) {
 		if err != nil {
 			return err
@@ -1631,6 +1778,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		df := entry.DataFile()
 		path := df.FilePath()
 		isData := df.ContentType() == iceberg.EntryContentData
+		isLive := entry.Status() != iceberg.EntryStatusDELETED
+		if isData && isLive {
+			liveDataFiles[path] = df
+		}
 		if _, ok := setToDelete[path]; ok && isData {
 			markedDataForDeletion = append(markedDataForDeletion, df)
 		}
@@ -1662,9 +1813,62 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
-		if _, ok := setDeleteFilesToAdd[path]; ok {
+		if _, ok := setDeleteFilesToAdd.regularPaths[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
+		if _, ok := setDeleteFilesToAdd.dvPaths[path]; ok && isLive {
+			if !IsDeletionVector(df) {
+				return fmt.Errorf("cannot add deletion vector container path already referenced by a non-DV file: %s", path)
+			}
+			if offset, length := df.ContentOffset(), df.ContentSizeInBytes(); offset != nil && length != nil {
+				blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+				if _, duplicate := setDeleteFilesToAdd.dvBlobs[blob]; duplicate {
+					return fmt.Errorf("cannot add deletion vector blob already referenced by table: %s at offset %d with length %d",
+						path, *offset, *length)
+				}
+			}
+		}
+
+		if !isLive || isData {
+			continue
+		}
+		if IsDeletionVector(df) {
+			ref := df.ReferencedDataFile()
+			if ref == nil {
+				continue
+			}
+			if _, addingReplacement := setDeleteFilesToAdd.dvRefs[*ref]; !addingReplacement {
+				continue
+			}
+			if _, explicitlyRemoved := dvRefsToRemove[*ref]; explicitlyRemoved {
+				continue
+			}
+			if _, automaticallyRemoved := autoDVRefsToRemove[*ref]; automaticallyRemoved {
+				continue
+			}
+
+			return fmt.Errorf("%w: deletion vector for data file %s already exists and must be replaced",
+				ErrInvalidOperation, *ref)
+		}
+		if df.ContentType() == iceberg.EntryContentPosDeletes {
+			if _, removed := setDeleteFilesToRemove[path]; !removed {
+				if _, automaticallyRemoved := autoSetDeleteFilesToRemove[path]; !automaticallyRemoved {
+					survivingPositionDeletes = append(survivingPositionDeletes, df)
+				}
+			}
+		}
+	}
+
+	for _, df := range dataFilesToAdd {
+		liveDataFiles[df.FilePath()] = df
+	}
+	for path := range setToDelete {
+		if _, replacement := setToAdd[path]; !replacement {
+			delete(liveDataFiles, path)
+		}
+	}
+	if err := validateAddedDeletionVectorTargets(setDeleteFilesToAdd.dvRefs, liveDataFiles, survivingPositionDeletes); err != nil {
+		return err
 	}
 
 	if len(markedDataForDeletion) != len(setToDelete) {

@@ -194,7 +194,8 @@ func (r *RewriteFiles) AddDeleteFile(df iceberg.DataFile) *RewriteFiles {
 }
 
 // AddDeleteFileWithDataSequenceNumber is a convenience form of
-// [RewriteFiles.AddDeleteFile].
+// [RewriteFiles.AddDeleteFile]. The caller must assign the maximum data
+// sequence number of the exact source delete files represented by df.
 func (r *RewriteFiles) AddDeleteFileWithDataSequenceNumber(df iceberg.DataFile, seq int64) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -227,6 +228,9 @@ func (r *RewriteFiles) AddDeleteFileWithDataSequenceNumber(df iceberg.DataFile, 
 // AddFile queues a file according to its content type. It is useful for
 // coordinators that carry data and delete files in one result slice.
 func (r *RewriteFiles) AddFile(df iceberg.DataFile) *RewriteFiles {
+	if r.err != nil {
+		return r
+	}
 	if df == nil {
 		r.err = fmt.Errorf("%w: AddFile got nil data file", ErrInvalidOperation)
 

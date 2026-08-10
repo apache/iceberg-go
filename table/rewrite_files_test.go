@@ -195,6 +195,19 @@ func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
 		"error must name the offending file path")
 }
 
+func TestRewriteFiles_AddFile_PreservesFirstError(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	tx := tbl.NewTransaction()
+
+	err := tx.NewRewrite(nil).
+		AddDataFile(newPosDeleteFile(t, "first-error.parquet")).
+		AddFile(nil).
+		Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AddDataFile only supports data files")
+	assert.NotContains(t, err.Error(), "AddFile got nil")
+}
+
 func TestRewriteFiles_RejectsAddOnlyDeleteFile(t *testing.T) {
 	tbl := newRewriteTestTable(t)
 	deleteFile := newPosDeleteFile(t, tbl.Location()+"/data/pos-delete.parquet")
