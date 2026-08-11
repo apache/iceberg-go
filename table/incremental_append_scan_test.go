@@ -152,7 +152,9 @@ func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	require.Len(t, tasks, 1)
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[0].File.FilePath())
 	require.NotNil(t, tasks[0].Residual)
-	require.True(t, tasks[0].Residual.Equals(filter))
+	fieldIDs, err := iceberg.ExtractFieldIDs(tasks[0].Residual)
+	require.NoError(t, err)
+	require.Equal(t, []int{1}, fieldIDs)
 }
 
 func TestIncrementalAppendScanSkipsOverwriteSnapshots(t *testing.T) {
@@ -211,6 +213,16 @@ func TestIncrementalAppendScanAllowsExpiredExclusiveParent(t *testing.T) {
 	scan := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(expiredSnapshotID)
 	scan = scan.ToSnapshot(3)
 	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Equal(t, "mem://default/table-location/data-b.parquet", tasks[0].File.FilePath())
+	require.Equal(t, "mem://default/table-location/data-c.parquet", tasks[1].File.FilePath())
+}
+
+func TestIncrementalAppendScanFollowsSelectedRootWithMultipleRoots(t *testing.T) {
+	tbl := incrementalAppendExpiredExclusiveTable(t)
+
+	tasks, err := tbl.NewIncrementalAppendScan().ToSnapshot(3).PlanFiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
 	require.Equal(t, "mem://default/table-location/data-b.parquet", tasks[0].File.FilePath())
@@ -557,6 +569,9 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 	manifestC := writeManifest(3,
 		"mem://default/table-location/metadata/manifest-c.avro",
 		"mem://default/table-location/data-c.parquet")
+	manifestOtherRoot := writeManifest(10,
+		"mem://default/table-location/metadata/manifest-other-root.avro",
+		"mem://default/table-location/data-other-root.parquet")
 
 	writeManifestList := func(snapshotID int64, path string, manifests []iceberg.ManifestFile) {
 		var listBuf bytes.Buffer
@@ -574,10 +589,21 @@ func incrementalAppendExpiredExclusiveTable(t *testing.T) *Table {
 
 	manifestListCPath := "mem://default/table-location/metadata/snap-c.avro"
 	writeManifestList(3, manifestListCPath, []iceberg.ManifestFile{manifestListB[0], manifestC})
+	manifestListOtherRootPath := "mem://default/table-location/metadata/snap-other-root.avro"
+	writeManifestList(10, manifestListOtherRootPath, []iceberg.ManifestFile{manifestOtherRoot})
 
 	expiredParentID := int64(1)
 	currentSnapshotID := int64(3)
 	txn.meta.snapshotList = []Snapshot{
+		{
+			SnapshotID:       10,
+			ParentSnapshotID: &expiredParentID,
+			TimestampMs:      1500,
+			ManifestList:     manifestListOtherRootPath,
+			SequenceNumber:   10,
+			SchemaID:         &schema.ID,
+			Summary:          &Summary{Operation: OpAppend},
+		},
 		{
 			SnapshotID:       2,
 			ParentSnapshotID: &expiredParentID,

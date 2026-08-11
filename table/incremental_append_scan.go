@@ -123,6 +123,10 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if err != nil {
 		return nil, err
 	}
+	residual, err := bindTaskFilter(schema, planningScan.rowFilter, planningScan.caseSensitive)
+	if err != nil {
+		return nil, fmt.Errorf("bind incremental scan residual: %w", err)
+	}
 	var acc scanMetricsAccumulator
 	finish := func(tasks []FileScanTask) ([]FileScanTask, error) {
 		acc.resultDataFiles = int64(len(tasks))
@@ -215,7 +219,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		}
 		file := entry.DataFile()
 		task := FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
-		task.Residual = s.scan.rowFilter
+		task.Residual = residual
 		task.FirstRowID = file.FirstRowID()
 		if sequenceNumber := entry.SequenceNum(); sequenceNumber >= 0 {
 			task.DataSequenceNumber = &sequenceNumber
