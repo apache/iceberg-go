@@ -250,6 +250,14 @@ func TestListType(t *testing.T) {
 	assert.True(t, typ.Equals(&actual))
 }
 
+func TestListTypeUnmarshalRequiresElement(t *testing.T) {
+	var typ iceberg.ListType
+	err := json.Unmarshal([]byte(`{"element-id": 1, "element-required": false}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'element' key")
+}
+
 func TestMapType(t *testing.T) {
 	typ := &iceberg.MapType{
 		KeyID:         1,
