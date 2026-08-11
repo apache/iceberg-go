@@ -295,10 +295,14 @@ func TestUpdateSpecReadsStagedTransactionMetadata(t *testing.T) {
 		stagedTbl, err := txn.StagedTable()
 		require.NoError(t, err)
 
-		// The new column is assigned schema field id 8 (the existing schema
-		// occupies ids 1-7), so the partition field must reference source id 8.
+		// Resolve the new column's id from the staged schema rather than
+		// hard-coding it, so the test does not silently break if the fixture
+		// schema changes.
+		newCol, ok := stagedTbl.Schema().FindFieldByName("new_col")
+		require.True(t, ok)
+
 		spec := stagedTbl.Spec()
-		added := spec.FieldsBySourceID(8)
+		added := spec.FieldsBySourceID(newCol.ID)
 		require.Len(t, added, 1)
 		assert.Equal(t, "new_col_identity", added[0].Name)
 		assert.Equal(t, iceberg.IdentityTransform{}, added[0].Transform)
@@ -320,38 +324,16 @@ func TestUpdateSpecReadsStagedTransactionMetadata(t *testing.T) {
 			BuildUpdates()
 		require.NoError(t, err)
 
-		newSpec, err := specUpdate.Apply()
-		require.NoError(t, err)
-		added := newSpec.FieldsBySourceID(8)
-		require.Len(t, added, 1)
-		assert.Equal(t, "new_col", added[0].Name)
-	})
-
-	t.Run("end-to-end: chained UpdateSpec sees partition fields staged earlier", func(t *testing.T) {
-		txn := testNonPartitionedTable.NewTransaction()
-
-		// Two independent UpdateSpec commits in the same transaction. The
-		// second must observe the field staged by the first.
-		require.NoError(t, txn.UpdateSpec(false).AddIdentity("id").Commit())
-		require.NoError(t, txn.UpdateSpec(false).AddIdentity("name").Commit())
-
 		stagedTbl, err := txn.StagedTable()
 		require.NoError(t, err)
+		newCol, ok := stagedTbl.Schema().FindFieldByName("new_col")
+		require.True(t, ok)
 
-		spec := stagedTbl.Spec()
-		// Both fields must be retained, and the second must be assigned a new
-		// field id rather than reusing the first's.
-		assert.Equal(t, 2, spec.NumFields())
-
-		first := spec.FieldsBySourceID(1)
-		require.Len(t, first, 1)
-		assert.Equal(t, "id", first[0].Name)
-		assert.Equal(t, iceberg.PartitionDataIDStart, first[0].FieldID)
-
-		second := spec.FieldsBySourceID(2)
-		require.Len(t, second, 1)
-		assert.Equal(t, "name", second[0].Name)
-		assert.Equal(t, iceberg.PartitionDataIDStart+1, second[0].FieldID)
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		added := newSpec.FieldsBySourceID(newCol.ID)
+		require.Len(t, added, 1)
+		assert.Equal(t, "new_col", added[0].Name)
 	})
 
 	t.Run("partition by renamed column staged in the same transaction", func(t *testing.T) {

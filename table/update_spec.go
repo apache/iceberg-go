@@ -34,7 +34,11 @@ import (
 type UpdateSpec struct {
 	operations []updateSpecOp
 
-	txn                   *Transaction
+	txn *Transaction
+	// meta is an immutable snapshot of the transaction's staged metadata, frozen
+	// when this UpdateSpec is constructed. Schema and partition-spec resolution
+	// read from it so partitioning can reference columns/specs staged earlier in
+	// the transaction; concurrency assertions are handled separately (BuildUpdates).
 	meta                  Metadata
 	err                   error
 	nameToField           map[string]iceberg.PartitionField
@@ -74,9 +78,10 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 
 		return us
 	}
-	// Read table state from the transaction's staged metadata builder rather
-	// than the frozen table snapshot captured when the transaction began.
-	// So, columns and specs added earlier in the same transaction can now be observed.
+	// Resolve schema and partition state from the transaction's staged metadata
+	// rather than the frozen table snapshot captured when the transaction began,
+	// so that columns and specs added earlier in the same transaction are
+	// visible immediately.
 	meta, err := t.txnMeta()
 	if err != nil {
 		us.err = err
@@ -161,8 +166,18 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 		} else {
 			updates = append(updates, NewSetDefaultSpecUpdate(newSpec.ID()))
 		}
-		requiredLastAssignedPartitionId := us.meta.LastPartitionSpecID()
-		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionId))
+		// Read the staged value so Transaction.apply (which validates against
+		// staged metadata) accepts each chained commit. requirementSemanticKey
+		// keeps this assertion a type-keyed singleton, retaining the first one
+		// (the base value), so one non-contradictory assertion reaches the catalog.
+		requiredLastAssignedPartitionID := us.meta.LastPartitionSpecID()
+		if requiredLastAssignedPartitionID == nil {
+			// Mirror the constructor's guard: an unpartitioned table may not
+			// have a last-assigned partition id yet.
+			base := iceberg.PartitionDataIDStart - 1
+			requiredLastAssignedPartitionID = &base
+		}
+		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionID))
 	}
 
 	return updates, requirements, nil

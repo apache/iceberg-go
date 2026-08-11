@@ -227,9 +227,16 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 // assertions for the same ref against the pre-transaction metadata. Keying by
 // ref name keeps only the first assertion for each ref while still letting
 // assertions for different refs survive dedupe.
+//
+// assert-last-assigned-partition-id is special-cased for the same reason:
+// chained UpdateSpec calls read the staged, advancing partition id, so keying
+// by JSON would send several contradictory values to one catalog snapshot.
 func requirementSemanticKey(r Requirement) (string, error) {
 	if ref, ok := r.(*assertRefSnapshotID); ok {
 		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
+	}
+	if _, ok := r.(*assertLastAssignedPartitionId); ok {
+		return reqAssertLastAssignedPartitionID, nil
 	}
 
 	data, err := json.Marshal(r)
