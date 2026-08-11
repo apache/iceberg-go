@@ -923,6 +923,80 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecor
 	s.ElementsMatch([]int32{7, 8}, values)
 }
 
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{{int64(0)}, {int64(1)}, {int64(2)}, {int64(3)}, {int64(4)}})
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+
+	full, err := partitionBatch(record, []int64{0, 1, 2, 3, 4})
+	s.Require().NoError(err)
+	s.Same(record, full)
+	full.Release()
+
+	contiguous, err := partitionBatch(record, []int64{1, 2, 3})
+	s.Require().NoError(err)
+	defer contiguous.Release()
+	s.Equal(int64(3), contiguous.NumRows())
+	contiguousValues := contiguous.Column(0).(*array.Int64)
+	s.Equal([]int64{1, 2, 3}, []int64{
+		contiguousValues.Value(0), contiguousValues.Value(1), contiguousValues.Value(2),
+	})
+
+	scattered, err := partitionBatch(record, []int64{0, 2, 4})
+	s.Require().NoError(err)
+	defer scattered.Release()
+	s.Equal(int64(3), scattered.NumRows())
+	scatteredValues := scattered.Column(0).(*array.Int64)
+	s.Equal([]int64{0, 2, 4}, []int64{
+		scatteredValues.Value(0), scatteredValues.Value(1), scatteredValues.Value(2),
+	})
+
+	empty, err := partitionBatch(record, nil)
+	s.Require().NoError(err)
+	defer empty.Release()
+	s.Zero(empty.NumRows())
+
+	emptyRecord := s.createCustomTestRecord(arrowSchema, nil)
+	defer emptyRecord.Release()
+	emptyFull, err := partitionBatch(emptyRecord, nil)
+	s.Require().NoError(err)
+	s.Same(emptyRecord, emptyFull)
+	emptyFull.Release()
+
+	_, err = partitionBatch(record, []int64{4, 5})
+	s.Error(err)
+}
+
+func (s *FanoutWriterTestSuite) TestContiguousRowRangeRejectsInvalidRanges() {
+	tests := []struct {
+		name    string
+		indices []int64
+		rows    int64
+		start   int64
+		end     int64
+		ok      bool
+	}{
+		{name: "empty", rows: 5},
+		{name: "single", indices: []int64{2}, rows: 5, start: 2, end: 3, ok: true},
+		{name: "full", indices: []int64{0, 1, 2, 3, 4}, rows: 5, start: 0, end: 5, ok: true},
+		{name: "gap", indices: []int64{1, 3}, rows: 5},
+		{name: "descending", indices: []int64{2, 1}, rows: 5},
+		{name: "negative", indices: []int64{-1}, rows: 5},
+		{name: "past end", indices: []int64{4, 5}, rows: 5},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			start, end, ok := contiguousRowRange(test.indices, test.rows)
+			s.Equal(test.ok, ok)
+			s.Equal(test.start, start)
+			s.Equal(test.end, end)
+		})
+	}
+}
+
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
