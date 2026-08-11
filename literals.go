@@ -424,15 +424,13 @@ func (b BoolLiteral) Equals(l Literal) bool {
 	return literalEq(b, l)
 }
 
-var falseBin, trueBin = [1]byte{0x0}, [1]byte{0x1}
-
 func (b BoolLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as 0x00 for false, and anything non-zero for True
 	if b {
-		return trueBin[:], nil
+		return []byte{0x1}, nil
 	}
 
-	return falseBin[:], nil
+	return []byte{0x0}, nil
 }
 
 func (b *BoolLiteral) UnmarshalBinary(data []byte) error {
