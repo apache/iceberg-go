@@ -78,3 +78,82 @@ func BenchmarkEqualityDeleteIndex(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkEqualityDeleteIndexOldData(b *testing.B) {
+	const (
+		deleteFileCount = 1_000
+		dataFileCount   = 100
+		partitionCount  = 10
+	)
+
+	specs := equalityDeleteIndexTestSpecs()
+	deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
+	for i := range deleteEntries {
+		deleteEntries[i] = newEqualityDeleteIndexTestEntry(
+			fmt.Sprintf("delete-%d.parquet", i),
+			1,
+			map[int]any{1000: int32(i % partitionCount)},
+			int64(i+1),
+		)
+	}
+	dataEntries := make([]iceberg.ManifestEntry, dataFileCount)
+	for i := range dataEntries {
+		dataEntries[i] = newEqualityDeleteIndexTestEntry(
+			fmt.Sprintf("data-%d.parquet", i),
+			1,
+			map[int]any{1000: int32(i % partitionCount)},
+			0,
+		)
+	}
+
+	b.ReportAllocs()
+	b.ReportMetric(dataFileCount, "data_files")
+	b.ReportMetric(deleteFileCount, "delete_files")
+	b.ResetTimer()
+	for range b.N {
+		idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		matched := 0
+		for _, dataEntry := range dataEntries {
+			files, err := idx.forDataFile(dataEntry)
+			if err != nil {
+				b.Fatal(err)
+			}
+			matched += len(files)
+		}
+		equalityDeleteBenchmarkSink = matched
+	}
+}
+
+func BenchmarkEqualityDeleteIndexNoDataFiles(b *testing.B) {
+	const (
+		deleteFileCount = 10_000
+		partitionCount  = 100
+	)
+
+	specs := equalityDeleteIndexTestSpecs()
+	deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
+	for i := range deleteEntries {
+		deleteEntries[i] = newEqualityDeleteIndexTestEntry(
+			fmt.Sprintf("delete-%d.parquet", i),
+			1,
+			map[int]any{1000: int32(i % partitionCount)},
+			int64(i+1),
+		)
+	}
+
+	b.ReportAllocs()
+	b.ReportMetric(0, "data_files")
+	b.ReportMetric(deleteFileCount, "delete_files")
+	b.ResetTimer()
+	for range b.N {
+		idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
+		if err != nil {
+			b.Fatal(err)
+		}
+		equalityDeleteBenchmarkSink = len(idx.global) + len(idx.byPartition)
+	}
+}

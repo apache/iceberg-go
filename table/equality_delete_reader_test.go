@@ -376,6 +376,104 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	require.ErrorIs(t, err, table.ErrAmbiguousEqualityColumn)
 }
 
+func TestEqualityDeleteMatchingAcrossPartitionSpecEvolution(t *testing.T) {
+	ctx := t.Context()
+	tbl := newEqDeleteReadTestTable(t)
+
+	// Keep spec 0 available for the global delete, then write data under a
+	// partitioned spec and rename that partition field to create a second spec
+	// with the same field ID and identical-looking partition tuple.
+	tx := tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(tx, false).
+		AddField("data", iceberg.IdentityTransform{}, "data_partition").Commit())
+	var err error
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	dataSpec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 1, dataSpec.ID())
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSc, strings.NewReader(`[
+		{"id": 1, "data": "books"},
+		{"id": 2, "data": "books"}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+	data := array.NewTableFromRecords(arrowSc, []arrow.RecordBatch{rec})
+	defer data.Release()
+
+	tbl, err = tbl.AppendTable(ctx, data, rec.NumRows(), nil)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(tx, false).
+		RenameField("data_partition", "renamed_data_partition").Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	deleteSpec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 2, deleteSpec.ID())
+
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+	partitionedRecords, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"id": 1, "data": "books"}]`)
+	defer release()
+
+	tx = tbl.NewTransaction()
+	partitionedDeletes, err := tx.WriteEqualityDeletes(ctx, []int{1}, partitionedRecords)
+	require.NoError(t, err)
+	require.Len(t, partitionedDeletes, 1)
+	require.EqualValues(t, 2, partitionedDeletes[0].SpecID())
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(partitionedDeletes...).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	globalDeletePath := tbl.Location() + "/data/global-eq-delete.parquet"
+	globalArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, globalDeletePath, globalArrowSc, `[{"id": 2}]`)
+	globalBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		globalDeletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	globalBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(globalBuilder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.EqualValues(t, 1, tasks[0].File.SpecID())
+	require.Equal(t, partitionedDeletes[0].Partition(), tasks[0].File.Partition(),
+		"the data and partitioned delete must have identical tuples under different specs")
+	require.Len(t, tasks[0].EqualityDeleteFiles, 1)
+	assert.Equal(t, globalDeletePath, tasks[0].EqualityDeleteFiles[0].FilePath())
+
+	_, itr, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(ctx)
+	require.NoError(t, err)
+	var ids []int64
+	for record, err := range itr {
+		require.NoError(t, err)
+		col := record.Column(0).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		record.Release()
+	}
+	assert.Equal(t, []int64{1}, ids)
+}
+
 func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 	tbl := newEqDeleteReadTestTable(t)
 
