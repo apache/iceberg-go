@@ -18,6 +18,10 @@
 package table
 
 import (
+	"bytes"
+	"fmt"
+	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -129,6 +133,133 @@ func TestPositionalDeleteIndexMatchesPathPartitionAndSequence(t *testing.T) {
 		"path-same-sequence.parquet",
 		"path-newer-from-bounds.parquet",
 	}, positionalDeletePaths(matched))
+}
+
+func TestPositionalDeleteIndexMatchesReferenceApplicability(t *testing.T) {
+	dataA := "data-a.parquet"
+	dataB := "data-b.parquet"
+	otherData := "other-data.parquet"
+	usPartition := map[int]any{1000: "us", 1001: int32(7)}
+	euPartition := map[int]any{1000: "eu", 1001: int32(7)}
+
+	// Keep the input deliberately out of sequence and bucket order. The
+	// reference below applies the Iceberg rules directly rather than calling
+	// the previous scanner matcher or any index classification helper.
+	deleteEntries := []iceberg.ManifestEntry{
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"partition-us-after.parquet", 1, usPartition, 8, nil,
+			"data-x.parquet", "data-z.parquet"),
+		newPositionalDeleteIndexTestEntry(
+			"path-explicit-a-same-sequence.parquet", 99, euPartition, 5, &dataA, ""),
+		newPositionalDeleteIndexTestEntry(
+			"partition-eu-newer.parquet", 1, euPartition, 6, nil, ""),
+		newPositionalDeleteIndexTestEntry(
+			"path-inferred-b-newer.parquet", 2, euPartition, 7, nil, dataB),
+		newPositionalDeleteIndexTestEntry(
+			"partition-us-older.parquet", 1, usPartition, 4, nil, ""),
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"partition-us-range.parquet", 1, usPartition, 7, nil, dataA, dataB),
+		newPositionalDeleteIndexTestEntry(
+			"path-explicit-other.parquet", 1, usPartition, 9, &otherData, ""),
+		newPositionalDeleteIndexTestEntry(
+			"partition-other-spec.parquet", 2, usPartition, 6, nil, ""),
+		newPositionalDeleteIndexTestEntry(
+			"path-explicit-a-older.parquet", 1, usPartition, 4, &dataA, ""),
+		newPositionalDeleteIndexTestEntryWithBounds(
+			"partition-us-before.parquet", 1, usPartition, 8, nil,
+			"data-0.parquet", "data-9.parquet"),
+		newPositionalDeleteIndexTestEntry(
+			"path-inferred-a-newer.parquet", 2, euPartition, 7, nil, dataA),
+		newPositionalDeleteIndexTestEntry(
+			"partition-us-same-sequence.parquet", 1, usPartition, 5, nil, ""),
+		newPositionalDeleteIndexTestEntry(
+			"path-explicit-a-unknown-sequence.parquet", 1, usPartition, -1, &dataA, ""),
+	}
+
+	dataEntries := []iceberg.ManifestEntry{
+		newPositionalDeleteIndexDataEntry(dataA, 1, usPartition, 5),
+		newPositionalDeleteIndexDataEntry(dataB, 1, usPartition, 6),
+		newPositionalDeleteIndexDataEntry("data-c.parquet", 1, euPartition, 5),
+		newPositionalDeleteIndexDataEntry("data-d.parquet", 2, usPartition, 5),
+		newPositionalDeleteIndexDataEntry(dataA, 1, usPartition, -1),
+		newPositionalDeleteIndexDataEntry(dataA, 1, usPartition, 8),
+	}
+
+	pathField, ok := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	require.True(t, ok)
+	idx, err := buildPositionalDeleteIndex(deleteEntries)
+	require.NoError(t, err)
+
+	for _, dataEntry := range dataEntries {
+		dataEntry := dataEntry
+		t.Run(fmt.Sprintf("%s/spec=%d/sequence=%d",
+			dataEntry.DataFile().FilePath(), dataEntry.DataFile().SpecID(), dataEntry.SequenceNum()), func(t *testing.T) {
+			matched, err := idx.forDataFile(dataEntry)
+			require.NoError(t, err)
+
+			got := positionalDeletePaths(matched)
+			want := make([]string, 0)
+			for _, deleteEntry := range deleteEntries {
+				if referencePositionalDeleteApplies(dataEntry, deleteEntry, pathField.ID) {
+					want = append(want, deleteEntry.DataFile().FilePath())
+				}
+			}
+			sort.Strings(got)
+			sort.Strings(want)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func referencePositionalDeleteApplies(
+	dataEntry iceberg.ManifestEntry,
+	deleteEntry iceberg.ManifestEntry,
+	pathFieldID int,
+) bool {
+	if deleteEntry.SequenceNum() < dataEntry.SequenceNum() {
+		return false
+	}
+
+	dataFile := dataEntry.DataFile()
+	deleteFile := deleteEntry.DataFile()
+	if referencedPath := deleteFile.ReferencedDataFile(); referencedPath != nil {
+		return *referencedPath == dataFile.FilePath()
+	}
+
+	lower, hasLower := deleteFile.LowerBoundValues()[pathFieldID]
+	upper, hasUpper := deleteFile.UpperBoundValues()[pathFieldID]
+	if hasLower && len(lower) > 0 && bytes.Equal(lower, upper) {
+		return string(lower) == dataFile.FilePath()
+	}
+
+	if deleteFile.SpecID() != dataFile.SpecID() ||
+		!referencePartitionsEqual(deleteFile.Partition(), dataFile.Partition()) {
+		return false
+	}
+
+	path := []byte(dataFile.FilePath())
+	if hasLower && bytes.Compare(path, lower) < 0 {
+		return false
+	}
+	if hasUpper && bytes.Compare(path, upper) > 0 {
+		return false
+	}
+
+	return true
+}
+
+func referencePartitionsEqual(left, right map[int]any) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for fieldID, leftValue := range left {
+		rightValue, ok := right[fieldID]
+		if !ok || !reflect.DeepEqual(leftValue, rightValue) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func TestPositionalDeleteIndexPrunesPartitionEntriesUsingPathMetrics(t *testing.T) {
