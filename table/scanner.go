@@ -1080,6 +1080,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	outSchema, records, err := (&arrowScan{
 		metadata:        scan.metadata,
 		fs:              fs,
+		scanSchema:      effectiveSchema,
 		projectedSchema: schema,
 		boundRowFilter:  boundFilter,
 		caseSensitive:   scan.caseSensitive,

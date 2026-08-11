@@ -677,6 +677,7 @@ func filterRecords(ctx context.Context, recordFilter expr.Expression) recProcess
 type arrowScan struct {
 	fs              iceio.IO
 	metadata        Metadata
+	scanSchema      *iceberg.Schema
 	projectedSchema *iceberg.Schema
 	boundRowFilter  iceberg.BooleanExpression
 	caseSensitive   bool
@@ -858,6 +859,14 @@ func bindTaskFilter(schema *iceberg.Schema, filter iceberg.BooleanExpression, ca
 	}
 
 	return iceberg.BindExpr(schema, filter, caseSensitive)
+}
+
+func (as *arrowScan) rowFilterForTask(task FileScanTask) (iceberg.BooleanExpression, error) {
+	if task.Residual == nil {
+		return as.boundRowFilter, nil
+	}
+
+	return bindTaskFilter(as.scanSchema, task.Residual, as.caseSensitive)
 }
 
 // fieldIndexByID returns the index of the field carrying fieldID in its Arrow
@@ -1154,10 +1163,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		dropFile   bool
 	)
 
-	rowFilter, err = bindTaskFilter(as.metadata.CurrentSchema(), task.Value.Residual, as.caseSensitive)
-	if task.Value.Residual == nil {
-		rowFilter = as.boundRowFilter
-	}
+	rowFilter, err = as.rowFilterForTask(task.Value)
 	if err != nil {
 		return err
 	}

@@ -53,6 +53,22 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
+func TestArrowScanBindsTaskResidualAgainstScanSchema(t *testing.T) {
+	const historicalFieldID = 7
+	scanSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: historicalFieldID, Name: "historical", Type: iceberg.PrimitiveTypes.String,
+	})
+	scanner := arrowScan{scanSchema: scanSchema, caseSensitive: true}
+
+	filter, err := scanner.rowFilterForTask(FileScanTask{Residual: iceberg.EqualTo(
+		iceberg.Reference("historical"), "value",
+	)})
+	require.NoError(t, err)
+	fieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	require.NoError(t, err)
+	require.Equal(t, []int{historicalFieldID}, fieldIDs)
+}
+
 func TestPartitionsMatchHandlesBinaryValues(t *testing.T) {
 	tests := []struct {
 		name  string

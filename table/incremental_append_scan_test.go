@@ -7,12 +7,20 @@
 // with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 package table
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -22,27 +30,51 @@ import (
 
 func TestIncrementalAppendScanSnapshotBoundaries(t *testing.T) {
 	scan := snapshotsTestTable().NewIncrementalAppendScan()
-	inclusive, err := scan.FromSnapshotInclusive(101)
-	require.NoError(t, err)
-	inclusive, err = inclusive.ToSnapshot(102)
-	require.NoError(t, err)
+	inclusive := scan.FromSnapshotInclusive(101).ToSnapshot(102)
 
 	snapshots, err := inclusive.snapshotsBetween(102)
 	require.NoError(t, err)
 	require.Len(t, snapshots, 1)
 	require.EqualValues(t, 101, snapshots[0].SnapshotID)
 
-	exclusive := scan.FromSnapshotExclusive(101)
-	exclusive, err = exclusive.ToSnapshot(102)
-	require.NoError(t, err)
+	exclusive := scan.FromSnapshotExclusive(101).ToSnapshot(102)
 	snapshots, err = exclusive.snapshotsBetween(102)
 	require.NoError(t, err)
 	require.Empty(t, snapshots, "the only snapshot after 101 is not an append")
 }
 
 func TestIncrementalAppendScanRejectsUnknownStart(t *testing.T) {
-	_, err := snapshotsTestTable().NewIncrementalAppendScan().FromSnapshotInclusive(999)
-	require.Error(t, err)
+	const nonExistentSnapshotID = int64(999)
+
+	scan := snapshotsTestTable().NewIncrementalAppendScan().
+		FromSnapshotInclusive(nonExistentSnapshotID)
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "starting snapshot not found")
+}
+
+func TestIncrementalAppendScanRejectsUnknownEnd(t *testing.T) {
+	const nonExistentSnapshotID = int64(999)
+
+	scan := snapshotsTestTable().NewIncrementalAppendScan().ToSnapshot(nonExistentSnapshotID)
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "ending snapshot not found")
+}
+
+func TestIncrementalAppendScanEqualBoundaries(t *testing.T) {
+	tbl := incrementalAppendTestTable(t)
+
+	inclusive := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(1).ToSnapshot(1)
+	tasks, err := inclusive.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "mem://default/table-location/data-1.parquet", tasks[0].File.FilePath())
+
+	exclusive := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(1).ToSnapshot(1)
+	_, err = exclusive.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "must be a parent ancestor")
 }
 
 func TestIncrementalAppendScanRejectsUnsupportedPlanningModes(t *testing.T) {
@@ -69,8 +101,7 @@ func TestIncrementalAppendScanAutoFallsBackToLocal(t *testing.T) {
 func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	tbl := incrementalAppendTestTable(t)
 
-	scan, err := tbl.NewIncrementalAppendScan().ToSnapshot(2)
-	require.NoError(t, err)
+	scan := tbl.NewIncrementalAppendScan().ToSnapshot(2)
 	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
@@ -78,14 +109,26 @@ func TestIncrementalAppendScanPlansEachInheritedManifestOnce(t *testing.T) {
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[1].File.FilePath())
 
 	filter := iceberg.EqualTo(iceberg.Reference("id"), int32(2))
-	filtered, err := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
-	require.NoError(t, err)
+	filtered := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
 	tasks, err = filtered.PlanFiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, "mem://default/table-location/data-2.parquet", tasks[0].File.FilePath())
 	require.NotNil(t, tasks[0].Residual)
 	require.True(t, tasks[0].Residual.Equals(filter))
+}
+
+func TestIncrementalAppendScanSkipsOverwriteSnapshots(t *testing.T) {
+	tbl := incrementalAppendMixedOperationTable(t)
+
+	tasks, err := tbl.NewIncrementalAppendScan().
+		FromSnapshotInclusive(1).
+		ToSnapshot(3).
+		PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Equal(t, "mem://default/mixed/data-a.parquet", tasks[0].File.FilePath())
+	require.Equal(t, "mem://default/mixed/data-c.parquet", tasks[1].File.FilePath())
 }
 
 func TestIncrementalAppendScanHonorsSnapshotOptions(t *testing.T) {
@@ -107,8 +150,7 @@ func TestIncrementalAppendScanAllowsExpiredExclusiveParent(t *testing.T) {
 	tbl := incrementalAppendExpiredExclusiveTable(t)
 
 	scan := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(expiredSnapshotID)
-	scan, err := scan.ToSnapshot(3)
-	require.NoError(t, err)
+	scan = scan.ToSnapshot(3)
 	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
@@ -119,17 +161,13 @@ func TestIncrementalAppendScanAllowsExpiredExclusiveParent(t *testing.T) {
 func TestIncrementalAppendScanRejectsDivergentStart(t *testing.T) {
 	tbl := incrementalAppendDivergentTable(t)
 
-	inclusive, err := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(10)
-	require.NoError(t, err)
-	inclusive, err = inclusive.ToSnapshot(22)
-	require.NoError(t, err)
-	_, err = inclusive.PlanFiles(context.Background())
+	inclusive := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(10).ToSnapshot(22)
+	_, err := inclusive.PlanFiles(context.Background())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "not an ancestor")
 
 	exclusive := tbl.NewIncrementalAppendScan().FromSnapshotExclusive(10)
-	exclusive, err = exclusive.ToSnapshot(22)
-	require.NoError(t, err)
+	exclusive = exclusive.ToSnapshot(22)
 	_, err = exclusive.PlanFiles(context.Background())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "not an ancestor")
@@ -152,9 +190,8 @@ func TestIncrementalAppendScanUsesSnapshotSchemaForExplicitEnd(t *testing.T) {
 	tbl := incrementalAppendSchemaEvolutionTable(t)
 	filter := iceberg.EqualTo(iceberg.Reference("category"), "new")
 
-	scan, err := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
-	require.NoError(t, err)
-	_, err = scan.PlanFiles(context.Background())
+	scan := tbl.NewIncrementalAppendScan(WithRowFilter(filter)).ToSnapshot(2)
+	_, err := scan.PlanFiles(context.Background())
 	require.Error(t, err)
 	require.ErrorContains(t, err, "category")
 }
@@ -162,9 +199,8 @@ func TestIncrementalAppendScanUsesSnapshotSchemaForExplicitEnd(t *testing.T) {
 func TestIncrementalAppendScanRejectsMissingImplicitEnd(t *testing.T) {
 	tbl := incrementalAppendTableWithoutCurrentSnapshot(t)
 
-	inclusive, err := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(1)
-	require.NoError(t, err)
-	_, err = inclusive.PlanFiles(context.Background())
+	inclusive := tbl.NewIncrementalAppendScan().FromSnapshotInclusive(1)
+	_, err := inclusive.PlanFiles(context.Background())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "no ending snapshot")
 
@@ -289,6 +325,69 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	require.NoError(t, err)
 
 	return New(Identifier{"incremental"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	}, nil)
+}
+
+func incrementalAppendMixedOperationTable(t *testing.T) *Table {
+	t.Helper()
+	spec := partitionedSpec()
+	txn, fs := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+
+	writeManifest := func(snapshotID int64, suffix string) iceberg.ManifestFile {
+		dataPath := fmt.Sprintf("mem://default/mixed/data-%s.parquet", suffix)
+		manifestPath := fmt.Sprintf("mem://default/mixed/metadata/manifest-%s.avro", suffix)
+		file := newTestDataFile(t, spec, dataPath, map[int]any{1000: int32(snapshotID)})
+		entry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, file)
+		var manifestBuf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema,
+			snapshotID, []iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, fs.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+		return manifest
+	}
+
+	writeManifestList := func(snapshotID int64, manifests []iceberg.ManifestFile) (string, []iceberg.ManifestFile) {
+		path := fmt.Sprintf("mem://default/mixed/metadata/snap-%d.avro", snapshotID)
+		var listBuf bytes.Buffer
+		sequenceNumber := snapshotID
+		require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil,
+			&sequenceNumber, 0, manifests))
+		require.NoError(t, fs.WriteFile(path, listBuf.Bytes()))
+		listFile, err := fs.Open(path)
+		require.NoError(t, err)
+		manifestList, err := iceberg.ReadManifestList(listFile)
+		require.NoError(t, err)
+		require.NoError(t, listFile.Close())
+
+		return path, manifestList
+	}
+
+	manifestA := writeManifest(1, "a")
+	listAPath, listA := writeManifestList(1, []iceberg.ManifestFile{manifestA})
+	manifestB := writeManifest(2, "b")
+	listBPath, listB := writeManifestList(2, append(listA, manifestB))
+	manifestC := writeManifest(3, "c")
+	listCPath, _ := writeManifestList(3, append(listB, manifestC))
+
+	txn.meta.snapshotList = []Snapshot{
+		{SnapshotID: 1, TimestampMs: 1000, ManifestList: listAPath, SequenceNumber: 1, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+		{SnapshotID: 2, ParentSnapshotID: int64Ptr(1), TimestampMs: 2000, ManifestList: listBPath, SequenceNumber: 2, SchemaID: &schema.ID, Summary: &Summary{Operation: OpOverwrite}},
+		{SnapshotID: 3, ParentSnapshotID: int64Ptr(2), TimestampMs: 3000, ManifestList: listCPath, SequenceNumber: 3, SchemaID: &schema.ID, Summary: &Summary{Operation: OpAppend}},
+	}
+	txn.meta.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: 1, TimestampMs: 1000},
+		{SnapshotID: 2, TimestampMs: 2000},
+		{SnapshotID: 3, TimestampMs: 3000},
+	}
+	currentSnapshotID := int64(3)
+	txn.meta.currentSnapshotID = &currentSnapshotID
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"incremental-mixed"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
 		return fs, nil
 	}, nil)
 }

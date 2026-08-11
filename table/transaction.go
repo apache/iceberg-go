@@ -1994,6 +1994,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              args.fs,
+		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: projectedSchema,
 		boundRowFilter:  scanFilter,
 		caseSensitive:   args.caseSensitive,
@@ -2238,6 +2239,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              fs,
+		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: meta.CurrentSchema(),
 		boundRowFilter:  boundFilter,
 		caseSensitive:   caseSensitive,

@@ -18,10 +18,11 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
-	"sort"
 
 	"github.com/apache/iceberg-go"
 )
@@ -46,15 +47,13 @@ func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendSc
 }
 
 // FromSnapshotInclusive includes files added by the starting snapshot.
-func (s *IncrementalAppendScan) FromSnapshotInclusive(snapshotID int64) (*IncrementalAppendScan, error) {
-	if s.scan.metadata.SnapshotByID(snapshotID) == nil {
-		return nil, fmt.Errorf("%w: starting snapshot not found: %d", iceberg.ErrInvalidArgument, snapshotID)
-	}
+// The snapshot is validated when files are planned.
+func (s *IncrementalAppendScan) FromSnapshotInclusive(snapshotID int64) *IncrementalAppendScan {
 	out := *s
 	out.fromSnapshotID = &snapshotID
 	out.fromInclusive = true
 
-	return &out, nil
+	return &out
 }
 
 // FromSnapshotExclusive starts after the given snapshot. The starting
@@ -67,15 +66,13 @@ func (s *IncrementalAppendScan) FromSnapshotExclusive(snapshotID int64) *Increme
 	return &out
 }
 
-// ToSnapshot sets the inclusive ending snapshot.
-func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) (*IncrementalAppendScan, error) {
-	if s.scan.metadata.SnapshotByID(snapshotID) == nil {
-		return nil, fmt.Errorf("%w: ending snapshot not found: %d", iceberg.ErrInvalidArgument, snapshotID)
-	}
+// ToSnapshot sets the inclusive ending snapshot. The snapshot is validated
+// when files are planned.
+func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) *IncrementalAppendScan {
 	out := *s
 	out.toSnapshotID = &snapshotID
 
-	return &out, nil
+	return &out
 }
 
 // PlanFiles returns one task per newly added data file. Delete files are not
@@ -111,12 +108,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	}
 	appendSnapshots := make(map[int64]struct{}, len(snapshots))
 	for _, snapshot := range snapshots {
-		if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
-			appendSnapshots[snapshot.SnapshotID] = struct{}{}
-		}
-	}
-	if len(appendSnapshots) == 0 {
-		return nil, nil
+		appendSnapshots[snapshot.SnapshotID] = struct{}{}
 	}
 
 	if s.scan.ioF == nil {
@@ -154,13 +146,16 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	for path := range manifestsByPath {
 		paths = append(paths, path)
 	}
-	sort.Strings(paths)
+	slices.Sort(paths)
 	manifestList := make([]iceberg.ManifestFile, 0, len(paths))
 	for _, path := range paths {
 		manifestList = append(manifestList, manifestsByPath[path])
 	}
 
 	planningScan := *s.scan
+	planningScan.identifier = slices.Clone(s.scan.identifier)
+	planningScan.selectedFields = slices.Clone(s.scan.selectedFields)
+	planningScan.options = maps.Clone(s.scan.options)
 	if s.toSnapshotID != nil {
 		// An explicit end snapshot is a historical scan and must use that
 		// snapshot's schema. An implicit current end remains a live scan so a
@@ -201,8 +196,8 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		}
 		tasks = append(tasks, task)
 	}
-	sort.Slice(tasks, func(left, right int) bool {
-		return tasks[left].File.FilePath() < tasks[right].File.FilePath()
+	slices.SortFunc(tasks, func(left, right FileScanTask) int {
+		return cmp.Compare(left.File.FilePath(), right.File.FilePath())
 	})
 
 	return tasks, nil
@@ -210,7 +205,12 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 
 func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
 	if s.toSnapshotID != nil {
-		return s.scan.metadata.SnapshotByID(*s.toSnapshotID), nil
+		snapshot := s.scan.metadata.SnapshotByID(*s.toSnapshotID)
+		if snapshot == nil {
+			return nil, fmt.Errorf("%w: ending snapshot not found: %d", iceberg.ErrInvalidArgument, *s.toSnapshotID)
+		}
+
+		return snapshot, nil
 	}
 
 	return s.scan.ResolveSnapshot()
@@ -230,6 +230,10 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 
 	fromID := *s.fromSnapshotID
 	if !s.fromInclusive {
+		if fromID == toSnapshotID {
+			return nil, fmt.Errorf("%w: starting snapshot %d must be a parent ancestor of ending snapshot %d for an exclusive scan",
+				iceberg.ErrInvalidArgument, fromID, toSnapshotID)
+		}
 		between, found := AncestorsBetween(toSnapshotID, fromID, s.scan.metadata.SnapshotByID)
 		if !found {
 			return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
@@ -239,7 +243,10 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 		return appendOnlySnapshots(between), nil
 	}
 
-	if s.scan.metadata.SnapshotByID(fromID) == nil || !IsAncestorOf(toSnapshotID, fromID, s.scan.metadata.SnapshotByID) {
+	if s.scan.metadata.SnapshotByID(fromID) == nil {
+		return nil, fmt.Errorf("%w: starting snapshot not found: %d", iceberg.ErrInvalidArgument, fromID)
+	}
+	if !IsAncestorOf(toSnapshotID, fromID, s.scan.metadata.SnapshotByID) {
 		return nil, fmt.Errorf("%w: starting snapshot %d is not an ancestor of ending snapshot %d", iceberg.ErrInvalidArgument, fromID, toSnapshotID)
 	}
 	selected := make([]Snapshot, 0, len(ancestors))
