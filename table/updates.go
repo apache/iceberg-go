@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -73,6 +74,79 @@ type Update interface {
 
 type Updates []Update
 
+var requiredUpdateFields = map[string][]string{
+	UpdateAssignUUID:                {"uuid"},
+	UpdateUpgradeFormatVersion:      {"format-version"},
+	UpdateAddSchema:                 {"schema"},
+	UpdateSetCurrentSchema:          {"schema-id"},
+	UpdateAddSpec:                   {"spec"},
+	UpdateSetDefaultSpec:            {"spec-id"},
+	UpdateAddSortOrder:              {"sort-order"},
+	UpdateSetDefaultSortOrder:       {"sort-order-id"},
+	UpdateAddSnapshot:               {"snapshot"},
+	UpdateSetSnapshotRef:            {"ref-name", "type", "snapshot-id"},
+	UpdateRemoveSnapshots:           {"snapshot-ids"},
+	UpdateRemoveSnapshotRef:         {"ref-name"},
+	UpdateSetLocation:               {"location"},
+	UpdateSetProperties:             {"updates"},
+	UpdateRemoveProperties:          {"removals"},
+	UpdateRemoveSpec:                {"spec-ids"},
+	UpdateRemoveSchemas:             {"schema-ids"},
+	UpdateSetStatistics:             {"statistics"},
+	UpdateRemoveStatistics:          {"snapshot-id"},
+	UpdateSetPartitionStatistics:    {"partition-statistics"},
+	UpdateRemovePartitionStatistics: {"snapshot-id"},
+	UpdateAddEncryptionKey:          {"encryption-key"},
+	UpdateRemoveEncryptionKey:       {"key-id"},
+}
+
+func normalizeLegacyPropertyFields(action string, raw json.RawMessage) (json.RawMessage, error) {
+	var modern, legacy string
+	switch action {
+	case UpdateSetProperties:
+		modern, legacy = "updates", "updated"
+	case UpdateRemoveProperties:
+		modern, legacy = "removals", "removed"
+	default:
+		return raw, nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+
+	if _, ok := object[modern]; !ok {
+		if value, ok := object[legacy]; ok {
+			object[modern] = value
+		}
+	}
+	delete(object, legacy)
+
+	return json.Marshal(object)
+}
+
+func validateRequiredUpdateFields(action string, raw json.RawMessage) error {
+	fields := requiredUpdateFields[action]
+	if len(fields) == 0 {
+		return nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return err
+	}
+
+	for _, field := range fields {
+		value, ok := object[field]
+		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("%w: update %q requires field %q", iceberg.ErrInvalidArgument, action, field)
+		}
+	}
+
+	return nil
+}
+
 func (u *Updates) UnmarshalJSON(data []byte) error {
 	var rawUpdates []json.RawMessage
 	if err := json.Unmarshal(data, &rawUpdates); err != nil {
@@ -84,10 +158,17 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		updates = make(Updates, 0, len(rawUpdates))
 	}
 	for _, raw := range rawUpdates {
-		var base baseUpdate
-		if err := json.Unmarshal(raw, &base); err != nil {
+		var baseWire struct {
+			Action *string `json:"action"`
+		}
+		if err := json.Unmarshal(raw, &baseWire); err != nil {
 			return err
 		}
+		if baseWire.Action == nil {
+			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+		}
+
+		base := baseUpdate{ActionName: *baseWire.Action}
 
 		var upd Update
 		switch base.ActionName {
@@ -139,6 +220,14 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			upd = &removeEncryptionKeyUpdate{}
 		default:
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
+		}
+		normalized, err := normalizeLegacyPropertyFields(base.ActionName, raw)
+		if err != nil {
+			return err
+		}
+		raw = normalized
+		if err := validateRequiredUpdateFields(base.ActionName, raw); err != nil {
+			return err
 		}
 
 		if err := json.Unmarshal(raw, upd); err != nil {

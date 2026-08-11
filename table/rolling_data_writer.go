@@ -152,14 +152,24 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 		return nil, err
 	}
+	if fileFormat == iceberg.ParquetFile {
+		if err := tblutils.ValidateParquetWriteProperties(meta.props); err != nil {
+			stopCount()
+
+			return nil, err
+		}
+	}
 
 	format := tblutils.GetFileFormat(fileFormat)
 
-	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(meta.props)
-	if err != nil {
-		stopCount()
+	var rowGroupTargetSizeBytes int64
+	if fileFormat == iceberg.ParquetFile {
+		rowGroupTargetSizeBytes, err = tblutils.ParquetRowGroupTargetSizeBytes(meta.props)
+		if err != nil {
+			stopCount()
 
-		return nil, err
+			return nil, err
+		}
 	}
 
 	arrowSchema, err := SchemaToArrowSchemaWithOptions(fileSchema, ArrowSchemaOptions{

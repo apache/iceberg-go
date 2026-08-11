@@ -624,11 +624,16 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 }
 
 func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
-	identifierFieldNames := make(map[string]struct{})
-	for _, path := range paths {
-		identifierFieldNames[strings.Join(path, ".")] = struct{}{}
-	}
-	u.identifierFieldNames = identifierFieldNames
+	// Defer the mutation so it runs during Apply() in the order it was chained.
+	u.ops = append(u.ops, func() error {
+		identifierFieldNames := make(map[string]struct{})
+		for _, path := range paths {
+			identifierFieldNames[strings.Join(path, ".")] = struct{}{}
+		}
+		u.identifierFieldNames = identifierFieldNames
+
+		return nil
+	})
 
 	return u
 }

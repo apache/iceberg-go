@@ -140,6 +140,31 @@ func TestDecodeScanTasksFullPayload(t *testing.T) {
 	assert.Equal(t, int64Ptr(50), dv.ContentSizeInBytes())
 }
 
+func TestDecodeScanTasksAcceptsLegacyJavaContentValues(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	for _, tt := range []struct {
+		name       string
+		deleteType string
+		equalityID []int
+	}{
+		{name: "position deletes", deleteType: "POSITION_DELETES"},
+		{name: "equality deletes", deleteType: "EQUALITY_DELETES", equalityID: []int{1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			wire := validScanTasksWire()
+			wire.FileScanTasks[0].DataFile.Content = "DATA"
+			wire.DeleteFiles[0].Content = tt.deleteType
+			wire.DeleteFiles[0].EqualityIDs = tt.equalityID
+
+			tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+		})
+	}
+}
+
 func TestDecodeScanTasksUsesFallbackAndAcceptsSpecConstants(t *testing.T) {
 	t.Parallel()
 
@@ -306,6 +331,13 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 				w.FileScanTasks[0].DataFile.SpecID = 99
 			},
 			want: "unknown partition spec ID 99",
+		},
+		{
+			name: "unknown content",
+			mutate: func(w *ScanTasks) {
+				w.FileScanTasks[0].DataFile.Content = "Data"
+			},
+			want: `content is "Data", want "data"`,
 		},
 		{
 			name: "wrong partition width",

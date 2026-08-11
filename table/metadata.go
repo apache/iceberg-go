@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -1524,12 +1525,44 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requirePartitionSpecIDs(normalized); err != nil {
+		return nil, err
+	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	return ret, nil
+}
+
+func requirePartitionSpecIDs(b []byte) error {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	rawSpecs, ok := metadata["partition-specs"]
+	if !ok {
+		return nil
+	}
+
+	var specs []json.RawMessage
+	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
+	}
+	for i, rawSpec := range specs {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(rawSpec, &spec); err != nil {
+			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
+		}
+		rawID, ok := spec["spec-id"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
+		}
+	}
+
+	return nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
@@ -1884,6 +1917,10 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
 	return maps.Clone(c.Props)
 }
 

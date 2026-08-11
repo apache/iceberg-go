@@ -59,6 +59,13 @@ type transformKey struct {
 	Transform string
 }
 
+// NewUpdateSpec starts a partition spec evolution.
+//
+// If the table's current spec contains an unknown transform, the returned
+// UpdateSpec carries an error and no evolution is possible -- including
+// renaming or dropping an unrelated field. That matches Java's
+// BaseUpdatePartitionSpec, which rejects at construction rather than at commit.
+// Loading such a table is still fine; only evolving its spec is blocked.
 func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	us := &UpdateSpec{
 		txn:                   t,
@@ -100,6 +107,12 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	nameToField := make(map[string]iceberg.PartitionField)
 	partitionSpec := us.meta.PartitionSpec()
 	for _, partitionField := range partitionSpec.Fields() {
+		if _, ok := partitionField.Transform.(iceberg.UnknownTransform); ok {
+			us.err = fmt.Errorf("%w: cannot update partition spec with unknown transform: %s",
+				iceberg.ErrInvalidTransform, partitionField.Transform)
+
+			return us
+		}
 		transformToField[transformKey{
 			SourceId:  partitionField.SourceID(),
 			Transform: partitionField.Transform.String(),
@@ -268,6 +281,9 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 		}
 
 		// Validate the transform
+		if _, ok := transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot add partition field with unknown transform: %s", iceberg.ErrInvalidTransform, transform)
+		}
 		outputType := boundTerm.Type()
 		if !transform.CanTransform(outputType) {
 			return fmt.Errorf("%s cannot transform %s values from %s", transform.String(), outputType.String(), boundTerm.Ref().Field().Name)

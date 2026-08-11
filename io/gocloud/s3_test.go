@@ -19,10 +19,13 @@ package gocloud
 
 import (
 	"context"
+	"fmt"
+	stdio "io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -685,4 +688,378 @@ func TestStripS3InputChecksumAlgorithmMiddleware(t *testing.T) {
 				"strip middleware must run before AWSChecksum:SetupInputContext so the SDK observes an empty algorithm")
 		})
 	}
+}
+
+// compatModeTestConfig builds the AWS config used by the compat-mode wire tests.
+// RequestChecksumCalculation is resolved explicitly to WhenSupported, the value
+// config.LoadDefaultConfig would resolve (the aws.Config zero value is Unset), so
+// these tests exercise checksum suppression rather than an unset default.
+func compatModeTestConfig(srv *httptest.Server) aws.Config {
+	return aws.Config{
+		Region:                     "auto",
+		Credentials:                credentials.NewStaticCredentialsProvider("AKIA-TEST", "secret-test", ""),
+		HTTPClient:                 srv.Client(),
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
+	}
+}
+
+// assertNoChecksumHeaders asserts a single request carried none of the checksum
+// headers GCS's S3 interop endpoint rejects, including x-amz-checksum-type.
+//
+// The header map must be non-nil: an absent capture means the request never
+// reached the server (or was classified under a different operation name), which
+// would otherwise let every assertion below pass vacuously.
+func assertNoChecksumHeaders(t *testing.T, captured http.Header, op string) {
+	t.Helper()
+
+	require.NotNilf(t, captured, "no request captured for %s", op)
+
+	for header := range captured {
+		h := strings.ToLower(header)
+		assert.Falsef(t, strings.HasPrefix(h, "x-amz-checksum-"),
+			"%s must not send checksum headers against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+		assert.NotEqualf(t, "x-amz-trailer", h,
+			"%s must not declare a SigV4 trailer against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+		assert.NotEqualf(t, "x-amz-sdk-checksum-algorithm", h,
+			"%s must not declare an SDK checksum algorithm against custom endpoints, got %s=%q",
+			op, header, captured.Get(header))
+	}
+
+	if ce := captured.Get("Content-Encoding"); ce != "" {
+		assert.NotContainsf(t, ce, "aws-chunked",
+			"%s must not use aws-chunked transfer encoding against custom endpoints, got Content-Encoding=%q", op, ce)
+	}
+	if sha := captured.Get("X-Amz-Content-Sha256"); sha != "" {
+		assert.NotContainsf(t, sha, "STREAMING-",
+			"%s must use a precomputed payload hash against custom endpoints, got X-Amz-Content-Sha256=%q", op, sha)
+	}
+}
+
+// s3OpName classifies a multipart-upload request by method and query string.
+func s3OpName(r *http.Request) string {
+	q := r.URL.Query()
+	switch {
+	case r.Method == http.MethodPost && q.Has("uploads"):
+		return "CreateMultipartUpload"
+	case r.Method == http.MethodPut && q.Has("partNumber"):
+		return "UploadPart"
+	case r.Method == http.MethodPost && q.Has("uploadId"):
+		return "CompleteMultipartUpload"
+	default:
+		return r.Method
+	}
+}
+
+// newMultipartUploadServer serves the minimal multipart-upload responses the SDK
+// needs, recording the headers of every request it receives.
+func newMultipartUploadServer(t *testing.T, record func(op string, h http.Header)) *httptest.Server {
+	t.Helper()
+
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op := s3OpName(r)
+
+		mu.Lock()
+		record(op, r.Header.Clone())
+		mu.Unlock()
+
+		// Drain the body before responding. Part uploads are megabytes, and
+		// replying without consuming them closes the connection while the
+		// client is still writing, which surfaces as a broken pipe. Discard
+		// rather than buffer: the bodies are never inspected here.
+		_, _ = stdio.Copy(stdio.Discard, r.Body)
+
+		w.Header().Set("Content-Type", "application/xml")
+		switch op {
+		case "CreateMultipartUpload":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+				`<InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+				`<Bucket>test-bucket</Bucket><Key>test-key</Key><UploadId>test-upload-id</UploadId>` +
+				`</InitiateMultipartUploadResult>`))
+		case "UploadPart":
+			w.Header().Set("ETag", `"test-part-etag"`)
+			w.WriteHeader(http.StatusOK)
+		case "CompleteMultipartUpload":
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+				`<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+				`<Location>http://example.com/test-bucket/test-key</Location>` +
+				`<Bucket>test-bucket</Bucket><Key>test-key</Key><ETag>"test-final-etag"</ETag>` +
+				`</CompleteMultipartUploadResult>`))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// A real multipart upload in compat mode must be checksum-free on every leg:
+// CreateMultipartUpload and CompleteMultipartUpload register no checksum setup
+// middleware in the SDK, so they are only covered by the input-clearing pass.
+//
+// Every request is asserted individually rather than one per operation kind, so
+// a checksum leaking onto only some of the parts cannot slip through.
+func TestCompatModeMultipartUploadNoChecksumHeaders(t *testing.T) {
+	t.Parallel()
+
+	const (
+		partSize = 5 * 1024 * 1024
+		bodySize = 12 * 1024 * 1024
+		// 12MiB in 5MiB parts: two full parts plus a 2MiB remainder.
+		wantParts = 3
+	)
+
+	type request struct {
+		op     string
+		header http.Header
+	}
+
+	var requests []request
+	srv := newMultipartUploadServer(t, func(op string, h http.Header) {
+		requests = append(requests, request{op: op, header: h})
+	})
+
+	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	tm := transfermanager.New(client, func(o *transfermanager.Options) {
+		o.PartSizeBytes = partSize
+		o.MultipartUploadThreshold = partSize
+	})
+
+	// Exceeds the threshold above, so this is a genuine multipart upload.
+	body := strings.NewReader(strings.Repeat("x", bodySize))
+	_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test-key"),
+		Body:   body,
+	})
+	require.NoError(t, err)
+
+	// Parts upload concurrently, so only the create/complete bookends have a
+	// fixed position. Assert the exact operation counts instead of a sequence.
+	counts := map[string]int{}
+	for _, req := range requests {
+		counts[req.op]++
+	}
+	assert.Equalf(t, map[string]int{
+		"CreateMultipartUpload":   1,
+		"UploadPart":              wantParts,
+		"CompleteMultipartUpload": 1,
+	}, counts, "unexpected multipart request mix, got %d requests", len(requests))
+
+	require.NotEmpty(t, requests)
+	assert.Equal(t, "CreateMultipartUpload", requests[0].op,
+		"the upload must begin with CreateMultipartUpload")
+	assert.Equal(t, "CompleteMultipartUpload", requests[len(requests)-1].op,
+		"the upload must end with CompleteMultipartUpload")
+
+	// Assert every individual request, including each part.
+	partsSeen := 0
+	for i, req := range requests {
+		if req.op == "UploadPart" {
+			partsSeen++
+		}
+		assertNoChecksumHeaders(t, req.header, fmt.Sprintf("%s (request %d of %d)", req.op, i+1, len(requests)))
+	}
+	assert.Equalf(t, wantParts, partsSeen, "expected %d UploadPart requests", wantParts)
+}
+
+// Caller-supplied checksum values and ChecksumType are bound straight to headers
+// by the serializers, bypassing the checksum context entirely, so compat mode
+// must clear them off the input too.
+func TestCompatModeExplicitChecksumFieldsStripped(t *testing.T) {
+	t.Parallel()
+
+	const crc32Value = "NhCmhg=="
+
+	t.Run("PutObject", func(t *testing.T) {
+		t.Parallel()
+
+		var captured http.Header
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured = r.Header.Clone()
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+
+		client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+		_, err := client.PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket:        aws.String("test-bucket"),
+			Key:           aws.String("test-key"),
+			Body:          strings.NewReader("hello"),
+			ChecksumCRC32: aws.String(crc32Value),
+		})
+		require.NoError(t, err)
+
+		require.NotNil(t, captured)
+		assertNoChecksumHeaders(t, captured, "PutObject with explicit checksum")
+	})
+
+	t.Run("CreateAndCompleteMultipartUpload", func(t *testing.T) {
+		t.Parallel()
+
+		captured := map[string]http.Header{}
+		srv := newMultipartUploadServer(t, func(op string, h http.Header) {
+			captured[op] = h
+		})
+
+		client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+
+		_, err := client.CreateMultipartUpload(context.Background(), &s3.CreateMultipartUploadInput{
+			Bucket:            aws.String("test-bucket"),
+			Key:               aws.String("test-key"),
+			ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
+			ChecksumType:      s3types.ChecksumTypeFullObject,
+		})
+		require.NoError(t, err)
+		// Require the capture first: a missing entry would make every absence
+		// assertion below pass vacuously.
+		require.Contains(t, captured, "CreateMultipartUpload")
+		assertNoChecksumHeaders(t, captured["CreateMultipartUpload"],
+			"CreateMultipartUpload with explicit checksum")
+
+		_, err = client.CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+			Bucket:        aws.String("test-bucket"),
+			Key:           aws.String("test-key"),
+			UploadId:      aws.String("test-upload-id"),
+			ChecksumCRC32: aws.String(crc32Value),
+			ChecksumType:  s3types.ChecksumTypeFullObject,
+			MultipartUpload: &s3types.CompletedMultipartUpload{
+				Parts: []s3types.CompletedPart{{
+					ETag:          aws.String(`"test-part-etag"`),
+					PartNumber:    aws.Int32(1),
+					ChecksumCRC32: aws.String(crc32Value),
+				}},
+			},
+		})
+		require.NoError(t, err)
+		require.Contains(t, captured, "CompleteMultipartUpload")
+		assertNoChecksumHeaders(t, captured["CompleteMultipartUpload"],
+			"CompleteMultipartUpload with explicit checksum")
+	})
+}
+
+// Per-part checksums live in the CompleteMultipartUpload XML body rather than in
+// headers, so they are legitimate and must survive compat-mode clearing.
+func TestCompatModeKeepsCompletedPartBodyChecksums(t *testing.T) {
+	t.Parallel()
+
+	const crc32Value = "NhCmhg=="
+
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = stdio.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+			`<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+			`<Location>http://example.com/test-bucket/test-key</Location>` +
+			`<Bucket>test-bucket</Bucket><Key>test-key</Key><ETag>"test-final-etag"</ETag>` +
+			`</CompleteMultipartUploadResult>`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	_, err := client.CompleteMultipartUpload(context.Background(), &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String("test-bucket"),
+		Key:      aws.String("test-key"),
+		UploadId: aws.String("test-upload-id"),
+		MultipartUpload: &s3types.CompletedMultipartUpload{
+			Parts: []s3types.CompletedPart{{
+				ETag:          aws.String(`"test-part-etag"`),
+				PartNumber:    aws.Int32(1),
+				ChecksumCRC32: aws.String(crc32Value),
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), "<ChecksumCRC32>"+crc32Value+"</ChecksumCRC32>",
+		"per-part checksums are body elements, not headers, and must not be stripped")
+}
+
+// Over-suppression guard: DeleteObjects is modeled with RequireChecksum, so S3
+// rejects it without a checksum. Compat mode must leave it alone.
+func TestCompatModeKeepsRequiredChecksumForDeleteObjects(t *testing.T) {
+	t.Parallel()
+
+	var captured http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>` +
+			`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></DeleteResult>`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := s3.NewFromConfig(compatModeTestConfig(srv), compatModeS3Options(srv.URL))
+	_, err := client.DeleteObjects(context.Background(), &s3.DeleteObjectsInput{
+		Bucket: aws.String("test-bucket"),
+		Delete: &s3types.Delete{
+			Objects: []s3types.ObjectIdentifier{{Key: aws.String("test-key")}},
+		},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, captured)
+	assert.NotEmpty(t, captured.Get("X-Amz-Checksum-Crc32"),
+		"DeleteObjects requires a checksum, so compat mode must not suppress it")
+}
+
+// Clients without compat mode must be untouched: checksums still apply for real AWS.
+func TestNonCompatModeStillSendsChecksums(t *testing.T) {
+	t.Parallel()
+
+	newClient := func(srv *httptest.Server) *s3.Client {
+		return s3.NewFromConfig(compatModeTestConfig(srv), func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(srv.URL)
+			o.UsePathStyle = true
+		})
+	}
+
+	t.Run("PutObject", func(t *testing.T) {
+		t.Parallel()
+
+		var captured http.Header
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured = r.Header.Clone()
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+
+		_, err := newClient(srv).PutObject(context.Background(), &s3.PutObjectInput{
+			Bucket: aws.String("test-bucket"),
+			Key:    aws.String("test-key"),
+			Body:   strings.NewReader("hello"),
+		})
+		require.NoError(t, err)
+
+		require.NotNil(t, captured)
+		assert.NotEmpty(t, captured.Get("X-Amz-Checksum-Crc32"),
+			"non-compat PutObject must still send the SDK-computed checksum")
+	})
+
+	t.Run("TransferManager", func(t *testing.T) {
+		t.Parallel()
+
+		var captured http.Header
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			captured = r.Header.Clone()
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+
+		tm := transfermanager.New(newClient(srv))
+		_, err := tm.UploadObject(context.Background(), &transfermanager.UploadObjectInput{
+			Bucket: aws.String("test-bucket"),
+			Key:    aws.String("test-key"),
+			Body:   strings.NewReader("hello"),
+		})
+		require.NoError(t, err)
+
+		require.NotNil(t, captured)
+		assert.NotEmpty(t, captured.Get("X-Amz-Checksum-Crc32"),
+			"non-compat transfer-manager upload must still send a checksum")
+	})
 }
