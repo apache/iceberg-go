@@ -565,6 +565,29 @@ catalog:
 <tr><td>Pass-through</td><td><code>WithAdditionalProps</code></td></tr>
 </tbody></table>
 </div>
+<h4 id="metrics-reporting"><a class="header" href="#metrics-reporting">Metrics reporting</a></h4>
+<p>The REST catalog can POST scan and commit metrics to the catalog's
+<code>.../tables/{table}/metrics</code> endpoint. These properties are passed as
+client-supplied catalog properties.</p>
+<div class="table-wrapper"><table><thead><tr><th>Property</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>rest-metrics-reporting-enabled</code></td><td>Opt into POSTing metrics reports. <strong>Off by default.</strong></td></tr>
+<tr><td><code>rest.metrics-reporting-enabled</code></td><td>Legacy dotted alias; consulted only when the canonical key above is absent.</td></tr>
+<tr><td><code>rest-metrics-reporting-timeout-ms</code></td><td>Per-report request/response deadline in milliseconds. Default <code>10000</code>.</td></tr>
+</tbody></table>
+</div>
+<blockquote>
+<p><strong>Note on cross-client parity.</strong> Iceberg Java defaults metrics reporting to
+<em>on</em> (<code>METRICS_REPORTING_ENABLED_DEFAULT=true</code>); iceberg-go deliberately
+defaults it <em>off</em>, so no client emits new outbound telemetry unless it
+explicitly opts in. A Java client that never set the flag will therefore stop
+reporting when ported here until <code>rest-metrics-reporting-enabled=true</code> is set.
+Enablement is read from client properties only — a server cannot turn on
+reporting the client never asked for — but an explicit server override setting
+the flag to <code>false</code> <em>is</em> honored (disabling is always safe), so an operator can
+suppress reporting fleet-wide. <code>rest-metrics-reporting-timeout-ms</code> is a
+Go-specific extension with no Java, PyIceberg, or Rust equivalent; do not
+assume parity on it in multi-client deployments.</p>
+</blockquote>
 <h3 id="hive-cataloghive"><a class="header" href="#hive-cataloghive">Hive (<code>catalog/hive</code>)</a></h3>
 <p>Source: <a href="https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go"><code>catalog/hive/options.go</code></a>.</p>
 <ul>
