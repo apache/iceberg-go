@@ -1278,7 +1278,7 @@ type BoundBBoxPredicate interface {
 // as a generic unary predicate (it would reach substrait and error, or be
 // dropped to AlwaysFalse when a column is absent). It has no record-filter or
 // REST-JSON form at all, so the two visitors that would otherwise rebuild a bound
-// predicate - columnNameTranslator.VisitBound and sanitizeVisitor.VisitBound -
+// predicate - scanTranslator.VisitBound and sanitizeVisitor.VisitBound -
 // special-case *boundBBoxPredicate and collapse it to AlwaysTrue. Data-file
 // pruning is done separately by inclusiveMetricsEval.
 type boundBBoxPredicate struct {

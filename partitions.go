@@ -291,6 +291,9 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	if err := validateTransform(transform); err != nil {
 		return err
 	}
+	if _, ok := field.Type.(VariantType); ok {
+		return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, targetName)
+	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)

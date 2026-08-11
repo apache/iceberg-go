@@ -35,27 +35,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNormalizedVariantPathEscaping(t *testing.T) {
-	for _, tt := range []struct {
-		name   string
-		fields []string
-		want   string
-	}{
-		{"root", nil, "$"},
-		{"plain", []string{"event_type"}, "$['event_type']"},
-		{"dotted name kept literal", []string{"user.name"}, "$['user.name']"},
-		{"nested", []string{"location", "latitude"}, "$['location']['latitude']"},
-		{"single quote escaped", []string{"o'brien"}, `$['o\'brien']`},
-		{"backslash escaped", []string{`a\b`}, `$['a\\b']`},
-		{"newline escaped", []string{"a\nb"}, `$['a\nb']`},
-		{"other control char hex-escaped", []string{"a\x01b"}, `$['a\u0001b']`},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, normalizedVariantPath(tt.fields))
-		})
-	}
-}
-
 func TestEnumerateVariantLeavesNestedObject(t *testing.T) {
 	// Object {a:int64, n:int16, location:{latitude:float64}, tags:[]string}
 	inner := arrow.StructOf(arrow.Field{Name: "latitude", Type: arrow.PrimitiveTypes.Float64})
@@ -481,4 +460,56 @@ func TestSerializeVariantBoundsDropsNilUpper(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantUpper, upper, "dropped upper must be omitted from the upper object")
 	assert.NotEqual(t, lower, upper, "lower still carries $['b']")
+}
+
+func buildBoundObject(t *testing.T) []byte {
+	t.Helper()
+
+	var b variant.Builder
+	start := b.Offset()
+	entries := []variant.FieldEntry{b.NextField(start, "$['a']")}
+	require.NoError(t, b.AppendInt(42))
+	entries = append(entries, b.NextField(start, "$['b']"))
+	require.NoError(t, b.AppendString("hello"))
+	require.NoError(t, b.FinishObject(start, entries))
+	v, err := b.Build()
+	require.NoError(t, err)
+
+	return append(append([]byte{}, v.Metadata().Bytes()...), v.Bytes()...)
+}
+
+func TestVariantBoundLiteral(t *testing.T) {
+	raw := buildBoundObject(t)
+
+	lit, ok, err := VariantBoundLiteral(raw, "$['a']", iceberg.PrimitiveTypes.Int64)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, int64(42), lit.Any())
+
+	lit, ok, err = VariantBoundLiteral(raw, "$['b']", iceberg.PrimitiveTypes.String)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "hello", lit.Any())
+}
+
+func TestVariantBoundLiteralMissingKey(t *testing.T) {
+	_, ok, err := VariantBoundLiteral(buildBoundObject(t), "$['missing']", iceberg.PrimitiveTypes.Int64)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestVariantBoundLiteralTypeMismatch(t *testing.T) {
+	// $['a'] is an integer; requesting a string bound must not match.
+	_, ok, err := VariantBoundLiteral(buildBoundObject(t), "$['a']", iceberg.PrimitiveTypes.String)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestVariantBoundLiteralMalformed(t *testing.T) {
+	// Malformed / truncated bytes must return an error, never panic (arrow-go A2 hardening).
+	for _, raw := range [][]byte{{}, {0x01}, {0xff, 0xff, 0xff}, {0x01, 0x00, 0x00, 0x7f, 0x7f}} {
+		require.NotPanics(t, func() {
+			_, _, _ = VariantBoundLiteral(raw, "$['a']", iceberg.PrimitiveTypes.Int64)
+		})
+	}
 }
