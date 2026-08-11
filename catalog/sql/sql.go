@@ -1721,10 +1721,6 @@ func (c *Catalog) DropView(ctx context.Context, identifier table.Identifier) err
 		return errViewsUnsupportedOnV0
 	}
 
-	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
-		return err
-	}
-
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
 	if err != nil {
 		return err

@@ -2274,9 +2274,6 @@ func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
 			err := cat.CreateView(context.Background(), test.identifier, nil, "", nil)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
-			err = cat.DropView(context.Background(), test.identifier)
-			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
-
 			_, err = cat.CheckViewExists(context.Background(), test.identifier)
 			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
 
@@ -2458,6 +2455,36 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	err = db.DropView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchView)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropViewRemovesLegacyInvalidView() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(ctx))
+
+	nsName := databaseName()
+	viewName := "nested/view"
+	s.Require().NoError(db.CreateNamespace(ctx, []string{nsName}, nil))
+
+	sqldb := s.getDB()
+	defer sqldb.Close()
+
+	_, err := sqldb.ExecContext(ctx,
+		`INSERT INTO iceberg_tables `+
+			`(catalog_name, table_namespace, table_name, iceberg_type) VALUES (?, ?, ?, ?)`,
+		db.Name(), nsName, viewName, sqlcat.ViewType,
+	)
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.DropView(ctx, table.Identifier{nsName, viewName}))
+
+	var count int
+	s.Require().NoError(sqldb.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM iceberg_tables `+
+			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ? AND iceberg_type = ?`,
+		db.Name(), nsName, viewName, sqlcat.ViewType,
+	).Scan(&count))
+	s.Zero(count)
 }
 
 func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
