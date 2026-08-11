@@ -1952,8 +1952,8 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsNoOpWhenNothingToExpire() {
 }
 
 // TestExpireSnapshotsUsesTableProperties verifies that ExpireSnapshots reads
-// min-snapshots-to-keep and max-snapshot-age-ms from table properties when
-// no explicit options are provided by the caller (mirrors Java behaviour).
+// the standard history.expire.* properties when no explicit options are
+// provided by the caller (mirrors Java behaviour).
 func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
 	fs := iceio.LocalFS{}
 
@@ -1973,7 +1973,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
 			table.MinSnapshotsToKeepKey: "2",
 			table.MaxSnapshotAgeMsKey:   "0", // expire everything older than "now"
 			// max-ref-age-ms is intentionally absent to prove that a missing
-			// property correctly falls back to the math.MaxInt default.
+			// property correctly falls back to the standard forever default.
 		})
 	t.Require().NoError(err)
 
