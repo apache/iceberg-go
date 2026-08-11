@@ -23,49 +23,37 @@ import (
 )
 
 const (
-	// EnvironmentContextEngineNameKey identifies the engine name property.
-	EnvironmentContextEngineNameKey = "engine-name"
-	// EnvironmentContextEngineVersionKey identifies the engine version property.
-	EnvironmentContextEngineVersionKey = "engine-version"
+	// EnvironmentEngineNameKey identifies the engine name property.
+	EnvironmentEngineNameKey = "engine-name"
+	// EnvironmentEngineVersionKey identifies the engine version property.
+	EnvironmentEngineVersionKey = "engine-version"
 
 	environmentContextIcebergVersionKey = "iceberg-version"
 )
 
 var environmentContext = struct {
-	sync.RWMutex
+	mu         sync.RWMutex
 	properties map[string]string
 }{
-	properties: make(map[string]string),
-}
-
-var environmentContextInit sync.Once
-
-func initializeEnvironmentContext() {
-	environmentContextInit.Do(func() {
-		environmentContext.Lock()
-		environmentContext.properties[environmentContextIcebergVersionKey] = Version()
-		environmentContext.Unlock()
-	})
+	properties: map[string]string{
+		environmentContextIcebergVersionKey: fullVersion(),
+	},
 }
 
 // EnvironmentContext returns an independent snapshot of the process-wide
 // context used to populate report metadata. The returned map may be modified
 // by the caller without changing the stored context.
 func EnvironmentContext() map[string]string {
-	initializeEnvironmentContext()
-
-	environmentContext.RLock()
-	defer environmentContext.RUnlock()
+	environmentContext.mu.RLock()
+	defer environmentContext.mu.RUnlock()
 
 	return maps.Clone(environmentContext.properties)
 }
 
 // SetEnvironmentProperty sets one process-wide environment context property.
 func SetEnvironmentProperty(key, value string) {
-	initializeEnvironmentContext()
-
-	environmentContext.Lock()
-	defer environmentContext.Unlock()
+	environmentContext.mu.Lock()
+	defer environmentContext.mu.Unlock()
 
 	environmentContext.properties[key] = value
 }
@@ -73,10 +61,8 @@ func SetEnvironmentProperty(key, value string) {
 // RemoveEnvironmentProperty removes one process-wide environment context
 // property.
 func RemoveEnvironmentProperty(key string) {
-	initializeEnvironmentContext()
-
-	environmentContext.Lock()
-	defer environmentContext.Unlock()
+	environmentContext.mu.Lock()
+	defer environmentContext.mu.Unlock()
 
 	delete(environmentContext.properties, key)
 }

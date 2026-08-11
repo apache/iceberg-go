@@ -104,15 +104,8 @@ func TestBuildScanReport(t *testing.T) {
 
 func TestBuildScanReportIncludesEnvironmentContext(t *testing.T) {
 	meta := metricsTestMetadata(t)
-	key := iceberg.EnvironmentContextEngineNameKey
-	previous, hadPrevious := iceberg.EnvironmentContext()[key]
-	t.Cleanup(func() {
-		if hadPrevious {
-			iceberg.SetEnvironmentProperty(key, previous)
-		} else {
-			iceberg.RemoveEnvironmentProperty(key)
-		}
-	})
+	key := iceberg.EnvironmentEngineNameKey
+	preserveEnvironmentProperties(t, key)
 
 	iceberg.SetEnvironmentProperty(key, "iceberg-go-test")
 	scan := &Scan{
@@ -130,7 +123,7 @@ func TestBuildScanReportIncludesEnvironmentContext(t *testing.T) {
 
 	assert.Equal(t, "iceberg-go-test", sr.Metadata[key], "environment context overrides scan options")
 	assert.Equal(t, "present", sr.Metadata["scan-option"])
-	assert.Equal(t, iceberg.Version(), sr.Metadata["iceberg-version"])
+	assert.Equal(t, "Apache Iceberg Go "+iceberg.Version(), sr.Metadata["iceberg-version"])
 
 	sr.Metadata[key] = "changed"
 	assert.Equal(t, "iceberg-go-test", iceberg.EnvironmentContext()[key])

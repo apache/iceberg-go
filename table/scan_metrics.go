@@ -107,9 +107,11 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 // are left unset and omitted.
 func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected *iceberg.Schema, planning time.Duration) metrics.ScanReport {
 	ids, names := projectedFields(projected)
-	metadata := make(map[string]string, len(scan.options)+1)
+	envCtx := iceberg.EnvironmentContext()
+	metadata := make(map[string]string, len(scan.options)+len(envCtx))
 	maps.Copy(metadata, scan.options)
-	maps.Copy(metadata, iceberg.EnvironmentContext())
+	// Match Java's precedence: process-wide context overrides scan options.
+	maps.Copy(metadata, envCtx)
 
 	var snapshotID int64
 	if snap := scan.Snapshot(); snap != nil {

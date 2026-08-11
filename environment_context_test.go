@@ -49,7 +49,7 @@ func TestEnvironmentContextCopiesValues(t *testing.T) {
 	context[key] = "changed"
 
 	assert.Equal(t, "go", EnvironmentContext()[key])
-	assert.Equal(t, Version(), EnvironmentContext()[environmentContextIcebergVersionKey])
+	assert.Equal(t, fullVersion(), EnvironmentContext()[environmentContextIcebergVersionKey])
 
 	RemoveEnvironmentProperty(key)
 	assert.NotContains(t, EnvironmentContext(), key)
@@ -91,4 +91,36 @@ func TestEnvironmentContextConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestEnvironmentContextSnapshotConcurrentMutation(t *testing.T) {
+	const key = "test-snapshot-concurrent"
+	const iterations = 100
+	preserveEnvironmentProperties(t, key)
+
+	SetEnvironmentProperty(key, "initial")
+	snapshot := EnvironmentContext()
+	start := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for iteration := range iterations {
+			snapshot[key] = strconv.Itoa(iteration)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for iteration := range iterations {
+			SetEnvironmentProperty(key, strconv.Itoa(iteration))
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, strconv.Itoa(iterations-1), EnvironmentContext()[key])
 }

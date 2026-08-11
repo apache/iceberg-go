@@ -27,6 +27,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func preserveEnvironmentProperties(t *testing.T, keys ...string) {
+	t.Helper()
+	previous := iceberg.EnvironmentContext()
+	t.Cleanup(func() {
+		for _, key := range keys {
+			if value, ok := previous[key]; ok {
+				iceberg.SetEnvironmentProperty(key, value)
+			} else {
+				iceberg.RemoveEnvironmentProperty(key)
+			}
+		}
+	})
+}
+
 func TestBuildCommitReport(t *testing.T) {
 	snap := &Snapshot{
 		SnapshotID:     42,
@@ -117,26 +131,17 @@ func TestBuildCommitReport(t *testing.T) {
 
 func TestBuildCommitReportIncludesEnvironmentContext(t *testing.T) {
 	keys := []string{
-		iceberg.EnvironmentContextEngineNameKey,
-		iceberg.EnvironmentContextEngineVersionKey,
+		iceberg.EnvironmentEngineNameKey,
+		iceberg.EnvironmentEngineVersionKey,
 	}
-	previous := iceberg.EnvironmentContext()
-	t.Cleanup(func() {
-		for _, key := range keys {
-			if value, ok := previous[key]; ok {
-				iceberg.SetEnvironmentProperty(key, value)
-			} else {
-				iceberg.RemoveEnvironmentProperty(key)
-			}
-		}
-	})
+	preserveEnvironmentProperties(t, keys...)
 
-	iceberg.SetEnvironmentProperty(iceberg.EnvironmentContextEngineNameKey, "iceberg-go-test")
-	iceberg.SetEnvironmentProperty(iceberg.EnvironmentContextEngineVersionKey, "1.0")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineNameKey, "iceberg-go-test")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineVersionKey, "1.0")
 
 	cr := buildCommitReport("db.tbl", nil, 1, time.Millisecond)
 	assert.Equal(t, map[string]string{
-		"iceberg-version": iceberg.Version(),
+		"iceberg-version": "Apache Iceberg Go " + iceberg.Version(),
 		"engine-name":     "iceberg-go-test",
 		"engine-version":  "1.0",
 	}, cr.Metadata)
