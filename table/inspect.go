@@ -296,17 +296,16 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 		default:
 			return nil, fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
 		}
+		snapshotID := manifest.SnapshotID()
+		if snapshotID < 0 {
+			return nil, fmt.Errorf("manifest %s has negative added_snapshot_id %d", manifest.FilePath(), snapshotID)
+		}
 
 		content.Append(int32(manifestContent))
 		path.Append(manifest.FilePath())
 		length.Append(manifest.Length())
 		partitionSpecID.Append(manifest.PartitionSpecID())
-		snapshotID := manifest.SnapshotID()
-		if snapshotID == -1 {
-			addedSnapshotID.AppendNull()
-		} else {
-			addedSnapshotID.Append(snapshotID)
-		}
+		addedSnapshotID.Append(snapshotID)
 		appendCount := func(builder *array.Int32Builder, name string, count int32) error {
 			if err := appendManifestCount(builder, manifest.Version(), name, count); err != nil {
 				return fmt.Errorf("manifest %s: %w", manifest.FilePath(), err)
@@ -398,9 +397,9 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
 	if count < 0 {
 		if version == 1 {
-			// V1 counts are optional. Normalize an absent count to zero so the
-			// metadata table's required count columns remain non-nullable.
-			builder.Append(0)
+			// V1 counts are optional, and an absent count means unknown rather
+			// than zero. Preserve that distinction in the metadata table.
+			builder.AppendNull()
 
 			return nil
 		}
@@ -633,13 +632,13 @@ func ManifestsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 1, Name: "path", Type: iceberg.PrimitiveTypes.String, Required: true},
 		iceberg.NestedField{ID: 2, Name: "length", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "partition_spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
-		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: &iceberg.ListType{
 			ElementID:       9,
 			ElementRequired: true,

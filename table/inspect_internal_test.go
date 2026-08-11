@@ -727,19 +727,21 @@ func TestInspectManifestsSchema(t *testing.T) {
 	require.Equal(t, 1, fields[1].ID)
 	require.Equal(t, 17, fields[10].ID)
 	require.Equal(t, 8, fields[11].ID)
-	require.False(t, fields[4].Required)
-	for _, idx := range []int{5, 6, 7, 8, 9, 10, 11} {
-		require.True(t, fields[idx].Required)
+	require.True(t, fields[4].Required)
+	for _, idx := range []int{5, 6, 7, 8, 9, 10} {
+		require.False(t, fields[idx].Required)
 	}
+	require.True(t, fields[11].Required)
 	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
 	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
 
 	arrowSchema, err := SchemaToArrowSchema(sc, nil, true, false)
 	require.NoError(t, err)
-	require.True(t, arrowSchema.Field(4).Nullable)
-	for _, idx := range []int{5, 6, 7, 8, 9, 10, 11} {
-		require.False(t, arrowSchema.Field(idx).Nullable)
+	require.False(t, arrowSchema.Field(4).Nullable)
+	for _, idx := range []int{5, 6, 7, 8, 9, 10} {
+		require.True(t, arrowSchema.Field(idx).Nullable)
 	}
+	require.False(t, arrowSchema.Field(11).Nullable)
 
 	partitionSummary := fields[11].Type.(*iceberg.ListType).Element.(*iceberg.StructType)
 	require.Equal(t,
@@ -970,11 +972,12 @@ func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 	defer record.Release()
 
 	for _, col := range []int{5, 6, 7} {
-		require.False(t, record.Column(col).(*array.Int32).IsNull(0))
-		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
+		require.True(t, record.Column(col).(*array.Int32).IsNull(0))
 	}
 	for _, col := range []int{8, 9, 10} {
-		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
+		values := record.Column(col).(*array.Int32)
+		require.False(t, values.IsNull(0))
+		require.EqualValues(t, 0, values.Value(0))
 	}
 	summaries := record.Column(11).(*array.List)
 	require.False(t, summaries.IsNull(0))
@@ -982,20 +985,15 @@ func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 	require.EqualValues(t, 0, end-start)
 }
 
-func TestInspectManifestsMissingAddedSnapshotID(t *testing.T) {
+func TestInspectManifestsRejectsNegativeAddedSnapshotID(t *testing.T) {
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
 		100, int32(spec.ID()), -1).
 		Build()
 	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
 
-	rr, err := tbl.Inspect().Manifests(context.Background())
-	require.NoError(t, err)
-	defer rr.Release()
-	record := collectRecord(t, rr)
-	defer record.Release()
-
-	require.True(t, record.Column(4).(*array.Int64).IsNull(0))
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.ErrorContains(t, err, "negative added_snapshot_id -1")
 }
 
 func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
