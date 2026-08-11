@@ -263,14 +263,22 @@ func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
 		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
 
 	const numData = 3
-	for i := range numData {
-		filePath := fmt.Sprintf("%s/branch-%d.parquet", dir, i)
-		writeOneRowParquet(t, fs, filePath)
+	for range numData {
+		bldr := array.NewInt32Builder(memory.DefaultAllocator)
+		bldr.AppendValues([]int32{1}, nil)
+		col := bldr.NewArray()
+		rec := array.NewRecordBatch(rewriteArrowSchema, []arrow.Array{col}, 1)
+		arrTbl := array.NewTableFromRecords(rewriteArrowSchema, []arrow.RecordBatch{rec})
 
 		txn := tbl.NewTransactionOnBranch("feature")
-		require.NoError(t, txn.AddFiles(ctx, []string{filePath}, nil, false))
+		require.NoError(t, txn.AppendTable(ctx, arrTbl, 1024, nil))
 		tbl, err = txn.Commit(ctx)
 		require.NoError(t, err)
+
+		arrTbl.Release()
+		rec.Release()
+		col.Release()
+		bldr.Release()
 	}
 
 	require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")

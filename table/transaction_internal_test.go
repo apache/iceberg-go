@@ -480,6 +480,45 @@ func TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics(t *testing.T) {
 	})
 }
 
+// TestBranchWritePlanningRejected enforces the scope boundary in code: until
+// read-side planning is branch-aware (#1638).
+func TestBranchWritePlanningRejected(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	df := newTestDataFile(t, spec, "file://x.parquet", nil)
+
+	ops := []struct {
+		name string
+		run  func(txn *Transaction) error
+	}{
+		{"Delete", func(txn *Transaction) error { return txn.Delete(ctx, iceberg.AlwaysTrue{}, nil) }},
+		{"Overwrite", func(txn *Transaction) error { return txn.Overwrite(ctx, nil, nil) }},
+		{"ReplaceDataFiles", func(txn *Transaction) error {
+			return txn.ReplaceDataFiles(ctx, []string{"file://x.parquet"}, nil, nil)
+		}},
+		{"ReplaceDataFilesWithDataFiles", func(txn *Transaction) error {
+			return txn.ReplaceDataFilesWithDataFiles(ctx, []iceberg.DataFile{df}, nil, nil)
+		}},
+		{"ReplaceFiles", func(txn *Transaction) error {
+			return txn.ReplaceFiles(ctx, []iceberg.DataFile{df}, nil, nil, nil)
+		}},
+		{"AddDataFiles", func(txn *Transaction) error { return txn.AddDataFiles(ctx, []iceberg.DataFile{df}, nil) }},
+		{"AddFiles", func(txn *Transaction) error { return txn.AddFiles(ctx, []string{"file://x.parquet"}, nil, false) }},
+	}
+
+	for _, tc := range ops {
+		t.Run(tc.name, func(t *testing.T) {
+			base, _ := createTestTransactionWithMemIO(t, spec)
+			txnFeat, err := base.tbl.NewTransactionOnBranchWithError("feature")
+			require.NoError(t, err)
+
+			err = tc.run(txnFeat)
+			require.ErrorIs(t, err, ErrInvalidOperation, "%s must be rejected on a branch transaction", tc.name)
+			require.ErrorContains(t, err, "branch transaction")
+		})
+	}
+}
+
 // TestBranchMultipleStagedSnapshotsChainOnRetry is the branch counterpart of
 // OCCScenarioTestSuite.TestMultipleStagedSnapshotsChainOnRetry: it combines the
 // two fixes. Two snapshots are staged on a not-yet-created branch (both fork
