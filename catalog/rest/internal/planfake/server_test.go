@@ -21,7 +21,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"github.com/goccy/go-json"
 	"io"
 	"net"
 	"net/http"
@@ -29,6 +28,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/goccy/go-json"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

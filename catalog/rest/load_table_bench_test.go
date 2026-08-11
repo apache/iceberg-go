@@ -35,75 +35,75 @@ func BenchmarkDecodeTableMetadata(b *testing.B) {
 	snapshotCounts := []struct {
 		name          string
 		snapshotCount int64
-		decode        func(body []byte, v interface{}) error
+		decode        func(body []byte, v any) error
 	}{
 		{
 			name:          "1 snapshot, encoding/json",
 			snapshotCount: 1,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return stdjson.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "1 snapshot, goccy/go-json",
 			snapshotCount: 1,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return json.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "10 snapshots, encoding/json",
 			snapshotCount: 10,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return stdjson.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "10 snapshots, goccy/go-json",
 			snapshotCount: 10,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return json.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "100 snapshots, encoding/json",
 			snapshotCount: 100,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return stdjson.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "100 snapshots, goccy/go-json",
 			snapshotCount: 100,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return json.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "1000 snapshots, encoding/json",
 			snapshotCount: 1000,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return stdjson.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "1000 snapshots, goccy/go-json",
 			snapshotCount: 1000,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return json.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "10000 snapshots, encoding/json",
 			snapshotCount: 10000,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return stdjson.Unmarshal(body, v)
 			},
 		},
 		{
 			name:          "10000 snapshots, goccy/go-json",
 			snapshotCount: 10000,
-			decode: func(body []byte, v interface{}) error {
+			decode: func(body []byte, v any) error {
 				return json.Unmarshal(body, v)
 			},
 		},

@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/goccy/go-json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/goccy/go-json"
 )
 
 // Request is one request captured by the fake server. Path is the escaped wire
