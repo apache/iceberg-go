@@ -63,7 +63,7 @@ func localPath(name string) (string, error) {
 		}
 	}
 
-	path := parsed.LocalPath(filepath.Separator == '\\')
+	path := parsed.LocalPathForOS()
 
 	return filepath.FromSlash(path), nil
 }

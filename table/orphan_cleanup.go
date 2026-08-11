@@ -424,17 +424,18 @@ func (t Table) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan,
 // otherwise grow as O(snapshots × manifests-per-snapshot).
 //
 // If the table has snapshots, fs must not be nil, otherwise an error is returned.
-// All returned paths are normalized using the package-level normalizeFilePath function.
-// The bool value distinguishes data files (true) from metadata files (false), which
-// is used by PurgeFiles to respect gc.enabled.
+// Paths retain their original spelling so consumers can derive every applicable
+// comparison identity before normalization discards information. The bool value
+// distinguishes data files (true) from metadata files (false), which is used by
+// PurgeFiles to respect gc.enabled.
 func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
 	for entry := range metadata.PreviousFiles() {
-		referenced[normalizeFilePath(entry.MetadataFile)] = false
+		referenced[entry.MetadataFile] = false
 	}
-	referenced[normalizeFilePath(t.metadataLocation)] = false
+	referenced[t.metadataLocation] = false
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
@@ -442,18 +443,18 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 	if err != nil {
 		return nil, fmt.Errorf("failed to build version hint path: %w", err)
 	}
-	referenced[normalizeFilePath(versionHintPath)] = false
+	referenced[versionHintPath] = false
 
 	for sf := range metadata.Statistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if sf.StatisticsPath != "" {
-			referenced[normalizeFilePath(sf.StatisticsPath)] = false
+			referenced[sf.StatisticsPath] = false
 		}
 	}
 	for psf := range metadata.PartitionStatistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if psf.StatisticsPath != "" {
-			referenced[normalizeFilePath(psf.StatisticsPath)] = false
+			referenced[psf.StatisticsPath] = false
 		}
 	}
 
@@ -465,7 +466,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 	uniqueManifests := make(map[string]iceberg.ManifestFile)
 	for _, snapshot := range metadata.Snapshots() {
 		if snapshot.ManifestList != "" {
-			referenced[normalizeFilePath(snapshot.ManifestList)] = false
+			referenced[snapshot.ManifestList] = false
 		}
 
 		manifestFiles, err := snapshot.Manifests(fs)
@@ -477,7 +478,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 			path := manifest.FilePath()
 			if _, ok := uniqueManifests[path]; !ok {
 				uniqueManifests[path] = manifest
-				referenced[normalizeFilePath(path)] = false
+				referenced[path] = false
 			}
 		}
 	}
@@ -513,7 +514,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 				// All files tracked within a manifest (data files, equality deletes, position deletes)
 				// are considered "data files" for the purposes of gc.enabled.
 				entries = append(entries, refEntry{
-					path:   normalizeFilePath(entry.DataFile().FilePath()),
+					path:   entry.DataFile().FilePath(),
 					isData: true,
 				})
 				if ref := iceberginternal.BorrowedDataFileReferencedDataFile(entry.DataFile()); ref != nil {
@@ -521,7 +522,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.
 					entries = append(entries, refEntry{
-						path:   normalizeFilePath(*ref),
+						path:   *ref,
 						isData: true,
 					})
 				}
@@ -764,7 +765,7 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 		if fileURI, err := fileuri.Parse(path); err == nil {
 			host := strings.ToLower(fileURI.Host())
 			if host == "" || host == "localhost" {
-				return normalizeNonURLPath(fileURI.LocalPath(true))
+				return normalizeNonURLPath(fileURI.LocalPathForOS())
 			}
 			if fileuri.IsWindowsDriveHost(fileURI.Host()) {
 				return normalizeNonURLPath(fileURI.LocalPath(true))
@@ -791,19 +792,44 @@ func normalizedFilePathAliases(path string, cfg *orphanCleanupConfig) []string {
 		}
 	}
 
-	// A forward-slash //server/share path is both a valid POSIX path and a
-	// Windows UNC path. On non-Windows hosts, retain the exact-case POSIX
-	// interpretation before adding case-folded Windows comparison aliases.
-	// filepath.WalkDir may collapse the leading // for child paths.
-	if runtime.GOOS != "windows" && isForwardSlashUNCPath(normalized) {
-		appendAlias(pathpkg.Clean(normalized))
+	appendWindowsAliases := func(windowsPath string, collapseUNC bool) {
+		appendAlias(windowsPath)
+		appendAlias(strings.ToLower(windowsPath))
+		if collapseUNC {
+			collapsed := pathpkg.Clean(windowsPath)
+			appendAlias(collapsed)
+			appendAlias(strings.ToLower(collapsed))
+		}
+	}
+
+	// Local file URIs use the same host interpretation as LocalFS. A portable
+	// Windows interpretation is retained only as a conservative comparison
+	// alias when it differs from the native path.
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		if fileURI, err := fileuri.Parse(path); err == nil {
+			host := strings.ToLower(fileURI.Host())
+			if host == "" || host == "localhost" {
+				appendWindowsAliases(normalizeNonURLPath(fileURI.LocalPath(true)), false)
+
+				return aliases
+			}
+		}
+	}
+
+	// A path originally written as //server/share is ambiguous on non-Windows:
+	// derive its POSIX and UNC identities independently before either cleaner
+	// can discard dot segments or separator evidence. filepath.WalkDir may also
+	// collapse the UNC identity's leading // for child paths.
+	if runtime.GOOS != "windows" && isForwardSlashUNCPath(path) {
+		posixPath := pathpkg.Clean(path)
+		aliases = []string{posixPath}
+		appendWindowsAliases(normalizeNonURLPath(path), true)
+
+		return aliases
 	}
 
 	if isWindowsLocalPath(normalized) {
-		aliasCount := len(aliases)
-		for i := range aliasCount {
-			appendAlias(strings.ToLower(aliases[i]))
-		}
+		appendWindowsAliases(normalized, false)
 	}
 
 	return aliases
@@ -1036,8 +1062,8 @@ func filePathKey(file string) string {
 	// Local file URIs use decoded path semantics. Handle them separately so
 	// remote object-store suffixes can retain their raw spelling below.
 	if strings.HasPrefix(strings.ToLower(file), "file:") {
-		if fileURI, err := fileuri.Parse(file); err == nil {
-			return normalizeNonURLPath(fileURI.LocalPath(true))
+		if _, err := fileuri.Parse(file); err == nil {
+			return normalizeFilePath(file)
 		}
 	}
 
@@ -1228,7 +1254,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 					return err
 				}
 				if !d.IsDir() {
-					fileSet[normalizeFilePath(path)] = path
+					fileSet[normalizedFilePathAliases(path, nil)[0]] = path
 				}
 
 				return nil
@@ -1252,7 +1278,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 			continue
 		}
 
-		norm := normalizeFilePath(path)
+		norm := normalizedFilePathAliases(path, nil)[0]
 		if _, ok := fileSet[norm]; !ok {
 			fileSet[norm] = path
 		}

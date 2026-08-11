@@ -18,6 +18,7 @@
 package fileuri_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal/fileuri"
@@ -61,6 +62,12 @@ func TestParseFileURI(t *testing.T) {
 			assert.Equal(t, tt.host, fileURI.Host())
 			assert.Equal(t, tt.windowsPath, fileURI.LocalPath(true))
 			assert.Equal(t, tt.posixPath, fileURI.LocalPath(false))
+
+			nativePath := tt.posixPath
+			if filepath.Separator == '\\' {
+				nativePath = tt.windowsPath
+			}
+			assert.Equal(t, nativePath, fileURI.LocalPathForOS())
 		})
 	}
 }

@@ -183,52 +183,122 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 	assert.Equal(t, []OrphanFile{{Path: oldPath, SizeBytes: 10}}, plan.OrphanFiles())
 }
 
-func TestPlanOrphanFilesPreservesPOSIXCaseForAmbiguousUNCReference(t *testing.T) {
+func TestPlanOrphanFilesPreservesPOSIXInterpretationOfAmbiguousUNCReference(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX double-slash paths are ambiguous only on non-Windows hosts")
 	}
 
+	for _, tt := range []struct {
+		name           string
+		tableLocation  string
+		metadataPath   string
+		referencedPath string
+		listedPath     string
+	}{
+		{
+			name:           "case",
+			tableLocation:  "//nas/share/table",
+			metadataPath:   "//nas/share/table/metadata/v1.metadata.json",
+			referencedPath: "//nas/share/table/Data/file.parquet",
+			listedPath:     "/nas/share/table/Data/file.parquet",
+		},
+		{
+			name:           "dot segment",
+			tableLocation:  "//nas/share",
+			metadataPath:   "//nas/share/metadata/v1.metadata.json",
+			referencedPath: "//nas/share/../live.parquet",
+			listedPath:     "/nas/live.parquet",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tt.tableLocation, nil)
+			require.NoError(t, err)
+			builder, err := MetadataBuilderFromBase(meta, tt.metadataPath)
+			require.NoError(t, err)
+			require.NoError(t, builder.SetStatistics(StatisticsFile{
+				SnapshotID:      1,
+				StatisticsPath:  tt.referencedPath,
+				BlobMetadata:    []BlobMetadata{},
+				FileSizeInBytes: 4,
+			}))
+			meta, err = builder.Build()
+			require.NoError(t, err)
+
+			fsys := &mockListableIO{entries: []mockWalkEntry{{
+				path: tt.listedPath,
+				info: mockFileInfo{name: "file.parquet", size: 4},
+			}}}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				tt.metadataPath,
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
+
+			plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
+			require.NoError(t, err)
+			assert.Empty(t, plan.Files())
+		})
+	}
+}
+
+func TestPlanOrphanFilesMatchesNativeHierarchicalFileURIPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("covers the native POSIX interpretation of hierarchical file URIs")
+	}
+
 	const (
-		tableLocation  = "//nas/share/table"
-		metadataPath   = "//nas/share/table/metadata/v1.metadata.json"
-		referencedPath = "//nas/share/table/Data/file.parquet"
-		listedPath     = "/nas/share/table/Data/file.parquet"
+		tableLocation = "/C:/Warehouse/Table"
+		metadataPath  = "/C:/Warehouse/Table/metadata/v1.metadata.json"
+		listedPath    = "/C:/Warehouse/Table/Data/file.parquet"
 	)
 
-	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tableLocation, nil)
-	require.NoError(t, err)
-	builder, err := MetadataBuilderFromBase(meta, metadataPath)
-	require.NoError(t, err)
-	require.NoError(t, builder.SetStatistics(StatisticsFile{
-		SnapshotID:      1,
-		StatisticsPath:  referencedPath,
-		BlobMetadata:    []BlobMetadata{},
-		FileSizeInBytes: 4,
-	}))
-	meta, err = builder.Build()
-	require.NoError(t, err)
+	for _, reference := range []string{
+		"file:///C:/Warehouse/Table/Data/file.parquet",
+		"file://localhost/C:/Warehouse/Table/Data/file.parquet",
+	} {
+		t.Run(reference, func(t *testing.T) {
+			meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tableLocation, nil)
+			require.NoError(t, err)
+			builder, err := MetadataBuilderFromBase(meta, metadataPath)
+			require.NoError(t, err)
+			require.NoError(t, builder.SetStatistics(StatisticsFile{
+				SnapshotID:      1,
+				StatisticsPath:  reference,
+				BlobMetadata:    []BlobMetadata{},
+				FileSizeInBytes: 4,
+			}))
+			meta, err = builder.Build()
+			require.NoError(t, err)
 
-	fsys := &mockListableIO{entries: []mockWalkEntry{{
-		path: listedPath,
-		info: mockFileInfo{name: "file.parquet", size: 4},
-	}}}
-	tbl := New(
-		Identifier{"db", "tbl"},
-		meta,
-		metadataPath,
-		func(context.Context) (io.IO, error) { return fsys, nil },
-		nil,
-	)
+			fsys := &mockListableIO{entries: []mockWalkEntry{{
+				path: listedPath,
+				info: mockFileInfo{name: "file.parquet", size: 4},
+			}}}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				metadataPath,
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
 
-	plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
-	require.NoError(t, err)
-	assert.Empty(t, plan.Files())
+			plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
+			require.NoError(t, err)
+			assert.Empty(t, plan.Files())
+		})
+	}
 }
 
 func TestNormalizeFilePath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
 		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
 		equalAuthorities: map[string]string{"endpoint1,endpoint2": "canonical"},
+	}
+	hierarchicalWindowsFileURI := "c:/warehouse/file.parquet"
+	if runtime.GOOS != "windows" {
+		hierarchicalWindowsFileURI = "/C:/warehouse/file.parquet"
 	}
 
 	tests := []struct {
@@ -259,12 +329,12 @@ func TestNormalizeFilePath(t *testing.T) {
 		{
 			name:     "windows_file_uri",
 			input:    "file:///C:/warehouse/data/../file.parquet",
-			expected: "c:/warehouse/file.parquet",
+			expected: hierarchicalWindowsFileURI,
 		},
 		{
 			name:     "uppercase_windows_file_uri",
 			input:    "FILE:///C:/warehouse/data/../file.parquet",
-			expected: "c:/warehouse/file.parquet",
+			expected: hierarchicalWindowsFileURI,
 		},
 		{
 			name:     "opaque_windows_file_uri",
@@ -446,6 +516,11 @@ func TestNormalizeNonURLPathIsIdempotent(t *testing.T) {
 }
 
 func TestFilePathKey(t *testing.T) {
+	hierarchicalWindowsFileURI := "c:/warehouse/file.parquet"
+	if runtime.GOOS != "windows" {
+		hierarchicalWindowsFileURI = "/C:/Warehouse/file.parquet"
+	}
+
 	tests := []struct {
 		name     string
 		input    string
@@ -465,6 +540,11 @@ func TestFilePathKey(t *testing.T) {
 			name:     "opaque Windows file URI",
 			input:    "file:C:/Warehouse/data/../file.parquet",
 			expected: "c:/warehouse/file.parquet",
+		},
+		{
+			name:     "hierarchical Windows file URI",
+			input:    "file:///C:/Warehouse/data/../file.parquet",
+			expected: hierarchicalWindowsFileURI,
 		},
 		{
 			name:     "Windows drive authority file URI",
@@ -572,6 +652,40 @@ func TestIsFileOrphanConservativelyMatchesAmbiguousPOSIXDoubleSlash(t *testing.T
 			assert.False(t, isOrphan, "either POSIX interpretation must retain the referenced file")
 		})
 	}
+}
+
+func TestNormalizedFilePathAliasesPreserveOriginalPOSIXDotSegments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX double-slash paths are ambiguous only on non-Windows hosts")
+	}
+
+	aliases := normalizedFilePathAliases("//nas/share/../live.parquet", nil)
+	assert.Contains(t, aliases, "//nas/share/live.parquet")
+	assert.Contains(t, aliases, "/nas/live.parquet")
+}
+
+func TestNormalizedFilePathAliasesDoNotTreatBackslashUNCAsPOSIX(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX aliases are only generated on non-Windows hosts")
+	}
+
+	aliases := normalizedFilePathAliases(`\\server\share\Data.parquet`, nil)
+	assert.Contains(t, aliases, "//server/share/Data.parquet")
+	assert.NotContains(t, aliases, "/server/share/Data.parquet")
+}
+
+func TestIsFileOrphanMatchesOriginalPOSIXInterpretationOfUNCPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX double-slash paths are ambiguous only on non-Windows hosts")
+	}
+
+	const reference = "//nas/share/../live.parquet"
+	referencedFiles := map[string]bool{reference: true}
+	index := newReferencedFileIndex(referencedFiles, &orphanCleanupConfig{})
+
+	isOrphan, err := isFileOrphan("/nas/live.parquet", referencedFiles, index, &orphanCleanupConfig{})
+	require.NoError(t, err)
+	assert.False(t, isOrphan)
 }
 
 func TestIsFileOrphanPreservesObjectStoreKeyCase(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/url"
 	pathpkg "path"
+	"path/filepath"
 	"strings"
 )
 
@@ -72,6 +73,12 @@ func (f FileURI) LocalPath(windows bool) string {
 	}
 
 	return f.path
+}
+
+// LocalPathForOS returns the decoded local path using the running host's file
+// system semantics.
+func (f FileURI) LocalPathForOS() string {
+	return f.LocalPath(filepath.Separator == '\\')
 }
 
 // JoinPath appends path elements while retaining the URI's hierarchical or
