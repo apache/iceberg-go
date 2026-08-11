@@ -785,15 +785,24 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 func normalizedFilePathAliases(path string, cfg *orphanCleanupConfig) []string {
 	normalized := normalizeFilePathWithConfig(path, cfg)
 	aliases := []string{normalized}
+	appendAlias := func(alias string) {
+		if !slices.Contains(aliases, alias) {
+			aliases = append(aliases, alias)
+		}
+	}
 
 	// A forward-slash //server/share path is both a valid POSIX path and a
-	// Windows UNC path. On non-Windows hosts, retain either interpretation so
-	// filepath.WalkDir collapsing the leading // cannot expose a live file to
-	// deletion. Backslash UNC paths are unambiguously Windows paths.
-	if runtime.GOOS != "windows" && isForwardSlashUNCPath(path) {
-		posixPath := pathpkg.Clean(path)
-		if posixPath != normalized {
-			aliases = append(aliases, posixPath)
+	// Windows UNC path. On non-Windows hosts, retain the exact-case POSIX
+	// interpretation before adding case-folded Windows comparison aliases.
+	// filepath.WalkDir may collapse the leading // for child paths.
+	if runtime.GOOS != "windows" && isForwardSlashUNCPath(normalized) {
+		appendAlias(pathpkg.Clean(normalized))
+	}
+
+	if isWindowsLocalPath(normalized) {
+		aliasCount := len(aliases)
+		for i := range aliasCount {
+			appendAlias(strings.ToLower(aliases[i]))
 		}
 	}
 
@@ -955,15 +964,19 @@ func normalizeNonURLPath(path string) string {
 }
 
 func normalizeWindowsLocalPathCase(path string) string {
-	// A Windows-shaped path can come from metadata written on another host, so
-	// runtime.GOOS alone cannot determine its case semantics. Conservatively
-	// fold it on every host to avoid deleting a live Windows file. On a
-	// case-sensitive POSIX mount this may retain a case-distinct orphan.
-	if isWindowsLocalPath(path) {
-		return strings.ToLower(path)
+	if !isWindowsLocalPath(path) {
+		return path
 	}
 
-	return path
+	// A slash-normalized UNC path can also name a case-sensitive POSIX path.
+	// Keep its exact spelling on non-Windows hosts; comparison aliases provide
+	// conservative Windows case folding without losing the POSIX identity.
+	volume, _, rooted := splitPortableVolume(path)
+	if runtime.GOOS != "windows" && rooted && strings.HasPrefix(volume, "//") {
+		return path
+	}
+
+	return strings.ToLower(path)
 }
 
 func isWindowsLocalPath(path string) bool {

@@ -183,6 +183,48 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 	assert.Equal(t, []OrphanFile{{Path: oldPath, SizeBytes: 10}}, plan.OrphanFiles())
 }
 
+func TestPlanOrphanFilesPreservesPOSIXCaseForAmbiguousUNCReference(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX double-slash paths are ambiguous only on non-Windows hosts")
+	}
+
+	const (
+		tableLocation  = "//nas/share/table"
+		metadataPath   = "//nas/share/table/metadata/v1.metadata.json"
+		referencedPath = "//nas/share/table/Data/file.parquet"
+		listedPath     = "/nas/share/table/Data/file.parquet"
+	)
+
+	meta, err := NewMetadata(iceberg.NewSchema(0), nil, UnsortedSortOrder, tableLocation, nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, metadataPath)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetStatistics(StatisticsFile{
+		SnapshotID:      1,
+		StatisticsPath:  referencedPath,
+		BlobMetadata:    []BlobMetadata{},
+		FileSizeInBytes: 4,
+	}))
+	meta, err = builder.Build()
+	require.NoError(t, err)
+
+	fsys := &mockListableIO{entries: []mockWalkEntry{{
+		path: listedPath,
+		info: mockFileInfo{name: "file.parquet", size: 4},
+	}}}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		metadataPath,
+		func(context.Context) (io.IO, error) { return fsys, nil },
+		nil,
+	)
+
+	plan, err := tbl.PlanOrphanFiles(context.Background(), WithFilesOlderThan(0))
+	require.NoError(t, err)
+	assert.Empty(t, plan.Files())
+}
+
 func TestNormalizeFilePath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
 		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
