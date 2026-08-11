@@ -74,6 +74,30 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
 | Pass-through | `WithAdditionalProps` |
 
+#### Metrics reporting
+
+The REST catalog can POST scan and commit metrics to the catalog's
+`.../tables/{table}/metrics` endpoint. These properties are passed as
+client-supplied catalog properties.
+
+| Property | Description |
+|---|---|
+| `rest-metrics-reporting-enabled` | Opt into POSTing metrics reports. **Off by default.** |
+| `rest.metrics-reporting-enabled` | Legacy dotted alias; consulted only when the canonical key above is absent. |
+| `rest-metrics-reporting-timeout-ms` | Per-report request/response deadline in milliseconds. Default `10000`. |
+
+> **Note on cross-client parity.** Iceberg Java defaults metrics reporting to
+> *on* (`METRICS_REPORTING_ENABLED_DEFAULT=true`); iceberg-go deliberately
+> defaults it *off*, so no client emits new outbound telemetry unless it
+> explicitly opts in. A Java client that never set the flag will therefore stop
+> reporting when ported here until `rest-metrics-reporting-enabled=true` is set.
+> Enablement is read from client properties only — a server cannot turn on
+> reporting the client never asked for — but an explicit server override setting
+> the flag to `false` *is* honored (disabling is always safe), so an operator can
+> suppress reporting fleet-wide. `rest-metrics-reporting-timeout-ms` is a
+> Go-specific extension with no Java, PyIceberg, or Rust equivalent; do not
+> assume parity on it in multi-client deployments.
+
 ### Hive (`catalog/hive`)
 
 Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go).
