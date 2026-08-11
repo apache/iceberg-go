@@ -54,14 +54,56 @@ func NewRoaringPositionBitmap() *RoaringPositionBitmap {
 
 // Set marks a position in the bitmap.
 func (b *RoaringPositionBitmap) Set(pos uint64) {
-	key := uint32(pos >> 32)
-	low := uint32(pos)
+	b.bucket(uint32(pos >> 32)).Add(uint32(pos))
+}
+
+// SetRange marks every position in [startInclusive, endExclusive), like Java's
+// setRange. An empty or inverted range is a no-op (no mutator on this type
+// panics or reports errors).
+func (b *RoaringPositionBitmap) SetRange(startInclusive, endExclusive uint64) {
+	if startInclusive >= endExclusive {
+		return
+	}
+
+	// Bucket off the last included position: a range ending exactly on a
+	// bucket boundary must not allocate an empty bitmap for the bucket above.
+	lastPos := endExclusive - 1
+	startKey, endKey := uint32(startInclusive>>32), uint32(lastPos>>32)
+
+	// roaring's AddRange is [start, end) over 32-bit values but takes uint64
+	// bounds so that a whole bucket can be expressed as [0, 1<<32).
+	if startKey == endKey {
+		b.bucket(startKey).AddRange(uint64(uint32(startInclusive)), uint64(uint32(lastPos))+1)
+
+		return
+	}
+
+	b.bucket(startKey).AddRange(uint64(uint32(startInclusive)), 1<<32)
+	for key := startKey + 1; key < endKey; key++ {
+		b.bucket(key).AddRange(0, 1<<32)
+	}
+	b.bucket(endKey).AddRange(0, uint64(uint32(lastPos))+1)
+}
+
+// RunLengthEncode re-encodes each bucket's containers as runs wherever runs
+// are more compact, like Java's runLengthEncode. Membership and cardinality
+// are unchanged.
+func (b *RoaringPositionBitmap) RunLengthEncode() {
+	for _, bm := range b.bitmaps {
+		bm.RunOptimize()
+	}
+}
+
+// bucket returns the 32-bit bitmap holding the low bits for key, allocating it
+// on first use.
+func (b *RoaringPositionBitmap) bucket(key uint32) *roaring.Bitmap {
 	bm, ok := b.bitmaps[key]
 	if !ok {
 		bm = roaring.New()
 		b.bitmaps[key] = bm
 	}
-	bm.Add(low)
+
+	return bm
 }
 
 // Or merges every position set in other into b. Buckets present only in
