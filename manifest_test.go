@@ -486,10 +486,14 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	})
 	schema := NewSchema(0)
 
-	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
+	stats, err := newPartitionSummaryStats(spec, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := stats.update(map[int]any{1000: "historical-value"}); err != nil {
+		t.Fatal(err)
+	}
+	summaries := stats.summaries()
 	if len(summaries) != 1 {
 		t.Fatalf("expected one partition summary, got %d", len(summaries))
 	}
@@ -499,6 +503,102 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
 	}
+}
+
+func TestManifestWriterUpdatesPartitionSummariesIncrementally(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "region", Type: PrimitiveTypes.String},
+		NestedField{ID: 2, Name: "temperature", Type: PrimitiveTypes.Float64},
+		NestedField{ID: 3, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "temperature", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+
+	newEntry := func(path string, partition map[int]any) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []ManifestEntry{
+		newEntry("east.parquet", map[int]any{1000: "east", 1001: 1.0, 1002: []byte{2}}),
+		newEntry("null.parquet", map[int]any{1000: nil, 1001: math.NaN(), 1002: []byte{1}}),
+		newEntry("west.parquet", map[int]any{1000: "west", 1001: 3.0, 1002: []byte{3}}),
+	}
+	if err := writer.Add(entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Existing(entries[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Delete(entries[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 3 {
+		t.Fatalf("expected three partition summaries, got %d", len(summaries))
+	}
+
+	assertSummary := func(index int, containsNull, containsNaN bool, lower, upper Literal) {
+		t.Helper()
+		lowerBytes, err := lower.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upperBytes, err := upper.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		summary := summaries[index]
+		if summary.ContainsNull != containsNull || summary.ContainsNaN == nil || *summary.ContainsNaN != containsNaN {
+			t.Fatalf("summary %d flags = (%v, %v), want (%v, %v)", index, summary.ContainsNull, summary.ContainsNaN, containsNull, containsNaN)
+		}
+		if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, lowerBytes) {
+			t.Fatalf("summary %d lower bound = %v, want %v", index, summary.LowerBound, lowerBytes)
+		}
+		if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, upperBytes) {
+			t.Fatalf("summary %d upper bound = %v, want %v", index, summary.UpperBound, upperBytes)
+		}
+	}
+
+	assertSummary(0, true, false, NewLiteral("east"), NewLiteral("west"))
+	assertSummary(1, false, true, NewLiteral(1.0), NewLiteral(3.0))
+	assertSummary(2, false, false, NewLiteral([]byte{1}), NewLiteral([]byte{3}))
 }
 
 type ManifestTestSuite struct {
@@ -3015,12 +3115,13 @@ func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() 
 	m.Zero(writer.existingRows)
 	m.Zero(writer.deletedFiles)
 	m.Zero(writer.deletedRows)
-	m.Empty(writer.partitions)
+	m.NoError(writer.partitionStatsErr)
+	m.Equal([]FieldSummary{{ContainsNaN: &falseBool}}, writer.partitionStats.summaries())
 	m.Equal(int64(-1), writer.minSeqNum)
 	m.Equal(originalPartitionData, dataFile.PartitionData)
 }
 
-func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionBeforeRetaining() {
+func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionSummaryBounds() {
 	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
 	partitionSpec := NewPartitionSpecID(
 		1,
@@ -3050,7 +3151,14 @@ func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionBeforeRetai
 	borrowed[1000].([]byte)[0] = 0xff
 	borrowed[1000] = []byte{0xff, 0xff}
 
-	m.Equal([]byte{0x01, 0x02}, writer.partitions[0][1000])
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	m.Require().NoError(err)
+	summaries := manifest.Partitions()
+	m.Require().Len(summaries, 1)
+	m.Require().NotNil(summaries[0].LowerBound)
+	m.Require().NotNil(summaries[0].UpperBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].LowerBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].UpperBound)
 }
 
 func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
