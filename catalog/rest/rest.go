@@ -124,6 +124,9 @@ const (
 	// SnapshotModeAll requests all currently valid snapshots (server default).
 	SnapshotModeAll SnapshotMode = "all"
 	// SnapshotModeRefs requests only snapshots that are referenced by at least one named branch or tag.
+	// The server omits unreferenced historical snapshots, which reduces response size for tables
+	// with long snapshot histories. Note: time-travel to a snapshot not referenced by any branch
+	// or tag will fail, as that snapshot will not be present in the returned metadata.
 	SnapshotModeRefs SnapshotMode = "refs"
 )
 
@@ -1644,6 +1647,8 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 // LoadTable loads a table from the catalog. It implements [catalog.Catalog].
 // When snapshot-loading-mode is set to "refs" in the catalog properties, only
 // snapshots referenced by a named branch or tag are included in the response.
+// Callers that need to time-travel to an unreferenced snapshot should use
+// snapshot-loading-mode "all" or omit the property entirely.
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
 	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
 }
