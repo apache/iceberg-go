@@ -762,12 +762,13 @@ func init() {
 </div>
 <h3 id="snapshot-retention"><a class="header" href="#snapshot-retention">Snapshot retention</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>min-snapshots-to-keep</code></td><td>Minimum snapshots to retain when expiring.</td></tr>
-<tr><td><code>max-snapshot-age-ms</code></td><td>Maximum age of retained snapshots.</td></tr>
-<tr><td><code>max-ref-age-ms</code></td><td>Maximum age of branch/tag refs that are not the main branch.</td></tr>
+<tr><td><code>history.expire.min-snapshots-to-keep</code></td><td>Minimum snapshots to retain when expiring. Default <code>1</code>.</td></tr>
+<tr><td><code>history.expire.max-snapshot-age-ms</code></td><td>Maximum age of retained snapshots. Default <code>432000000</code> (5 days).</td></tr>
+<tr><td><code>history.expire.max-ref-age-ms</code></td><td>Maximum age of branch/tag refs that are not the main branch. Default <code>Long.MAX_VALUE</code> (forever).</td></tr>
 <tr><td><code>gc.enabled</code></td><td>Gate for orphan-file cleanup.</td></tr>
 </tbody></table>
 </div>
+<p>The unprefixed retention property names are accepted as compatibility fallbacks. The <code>history.expire.*</code> properties take precedence when both forms are set.</p>
 <h3 id="delete-mode"><a class="header" href="#delete-mode">Delete mode</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.delete.mode</code></td><td>Delete strategy used by row-level delete writers.</td></tr>
@@ -1412,7 +1413,7 @@ err := txn.ExpireSnapshots(/* options */)
 // Roll back to a previous snapshot
 err = txn.RollbackToSnapshot(targetSnapshotID)
 </code></pre>
-<p>Tune retention with the <code>min-snapshots-to-keep</code>, <code>max-snapshot-age-ms</code>, and <code>max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
+<p>Tune retention with the <code>history.expire.min-snapshots-to-keep</code>, <code>history.expire.max-snapshot-age-ms</code>, and <code>history.expire.max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (

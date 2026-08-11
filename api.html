@@ -574,7 +574,7 @@ err := txn.ExpireSnapshots(/* options */)
 // Roll back to a previous snapshot
 err = txn.RollbackToSnapshot(targetSnapshotID)
 </code></pre>
-<p>Tune retention with the <code>min-snapshots-to-keep</code>, <code>max-snapshot-age-ms</code>, and <code>max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
+<p>Tune retention with the <code>history.expire.min-snapshots-to-keep</code>, <code>history.expire.max-snapshot-age-ms</code>, and <code>history.expire.max-ref-age-ms</code> table properties (see <a href="./configuration.html">Configuration</a>).</p>
 <h2 id="maintenance"><a class="header" href="#maintenance">Maintenance</a></h2>
 <h3 id="orphan-file-cleanup"><a class="header" href="#orphan-file-cleanup">Orphan file cleanup</a></h3>
 <pre><code class="language-go">import (
