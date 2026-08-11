@@ -461,6 +461,22 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	mem := compute.GetAllocator(ctx)
 
 	return func(record arrow.RecordBatch, rowIndices []int64) (arrow.RecordBatch, error) {
+		if len(rowIndices) == 0 && record.NumRows() == 0 {
+			record.Retain()
+
+			return record, nil
+		}
+
+		if start, end, ok := contiguousRowRange(rowIndices, record.NumRows()); ok {
+			if start == 0 && end == record.NumRows() {
+				record.Retain()
+
+				return record, nil
+			}
+
+			return record.NewSlice(start, end), nil
+		}
+
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
 
@@ -480,6 +496,26 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 
 		return partitionedRecord.(*compute.RecordDatum).Value, nil
 	}
+}
+
+func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {
+	if len(rowIndices) == 0 {
+		return 0, 0, false
+	}
+
+	start = rowIndices[0]
+	length := int64(len(rowIndices))
+	if start < 0 || length > numRows || start > numRows-length {
+		return 0, 0, false
+	}
+
+	for offset, row := range rowIndices[1:] {
+		if row != start+int64(offset)+1 {
+			return 0, 0, false
+		}
+	}
+
+	return start, start + length, true
 }
 
 func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
