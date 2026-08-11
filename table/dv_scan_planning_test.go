@@ -152,6 +152,20 @@ func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 			path:        "s3://bucket/data/pos-del-001.parquet",
 			contentType: iceberg.EntryContentPosDeletes,
 		}),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+			path:        "s3://bucket/data/eq-del-001.parquet",
+			contentType: iceberg.EntryContentEqDeletes,
+		}),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &dvMockDataFile{
+			mockDataFile: mockDataFile{
+				path:        "s3://bucket/data/dv-001.puffin",
+				contentType: iceberg.EntryContentPosDeletes,
+				format:      iceberg.PuffinFile,
+			},
+			referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
+			contentOffset:      int64Ptr(0),
+			contentSizeInBytes: int64Ptr(128),
+		}),
 	}
 
 	const manifestCount = 64
@@ -168,6 +182,8 @@ func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 
 	assert.Len(t, entries.dataEntries, manifestCount)
 	assert.Len(t, entries.positionalDeleteEntries, manifestCount)
+	assert.Len(t, entries.equalityDeleteEntries, manifestCount)
+	assert.Len(t, entries.dvEntries, manifestCount)
 }
 
 func TestDVMatchingToDataFiles(t *testing.T) {
