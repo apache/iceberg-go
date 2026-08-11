@@ -985,6 +985,46 @@ func TestInspectManifestsV1UnknownCounts(t *testing.T) {
 	require.EqualValues(t, 0, end-start)
 }
 
+func TestAppendManifestCountValidatesNegativeSentinels(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  int
+		count    int32
+		wantNull bool
+		wantErr  bool
+	}{
+		{name: "v1 absent count", version: 1, count: -1, wantNull: true},
+		{name: "v1 invalid negative count", version: 1, count: -2, wantErr: true},
+		{name: "v2 negative count", version: 2, count: -1, wantErr: true},
+		{name: "v3 negative count", version: 3, count: -1, wantErr: true},
+		{name: "non-negative count", version: 2, count: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := array.NewInt32Builder(memory.DefaultAllocator)
+			defer builder.Release()
+
+			err := appendManifestCount(builder, tt.version, "added_data_files", tt.count)
+			if tt.wantErr {
+				require.ErrorContains(t, err, fmt.Sprintf("negative added_data_files count %d", tt.count))
+				require.ErrorContains(t, err, fmt.Sprintf("manifest list version %d", tt.version))
+				require.Zero(t, builder.Len())
+
+				return
+			}
+
+			require.NoError(t, err)
+			values := builder.NewInt32Array()
+			defer values.Release()
+			require.Equal(t, tt.wantNull, values.IsNull(0))
+			if !tt.wantNull {
+				require.Equal(t, tt.count, values.Value(0))
+			}
+		})
+	}
+}
+
 func TestInspectManifestsRejectsNegativeAddedSnapshotID(t *testing.T) {
 	spec := partitionedSpec()
 	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",

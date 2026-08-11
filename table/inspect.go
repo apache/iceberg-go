@@ -396,9 +396,9 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 
 func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
 	if count < 0 {
-		if version == 1 {
+		if version == 1 && count == -1 {
 			// V1 counts are optional, and an absent count means unknown rather
-			// than zero. Preserve that distinction in the metadata table.
+			// than zero. The V1 decoder represents that absent value as -1.
 			builder.AppendNull()
 
 			return nil
