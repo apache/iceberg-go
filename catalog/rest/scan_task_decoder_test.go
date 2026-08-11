@@ -18,6 +18,8 @@
 package rest
 
 import (
+	"math"
+	"strconv"
 	"testing"
 
 	"github.com/goccy/go-json"
@@ -483,27 +485,30 @@ func TestDecodePartitionLiteralCoversPrimitiveWireTypes(t *testing.T) {
 	decimalType := iceberg.DecimalTypeOf(9, 2)
 	fixedType := iceberg.FixedTypeOf(4)
 	tests := []struct {
-		name string
-		raw  string
-		typ  iceberg.Type
-		want iceberg.Literal
+		name        string
+		raw         string
+		typ         iceberg.Type
+		want        iceberg.Literal
+		expectedErr error
 	}{
-		{"boolean", `true`, iceberg.PrimitiveTypes.Bool, iceberg.BoolLiteral(true)},
-		{"int", `2147483647`, iceberg.PrimitiveTypes.Int32, iceberg.Int32Literal(2147483647)},
-		{"long above JSON exact float range", `9007199254740993`, iceberg.PrimitiveTypes.Int64, iceberg.Int64Literal(9007199254740993)},
-		{"float", `1.25`, iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(1.25)},
-		{"double", `1.25`, iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(1.25)},
-		{"string", `"hello"`, iceberg.PrimitiveTypes.String, iceberg.StringLiteral("hello")},
-		{"date", `"2026-07-17"`, iceberg.PrimitiveTypes.Date, mustLiteral(t, "2026-07-17", iceberg.PrimitiveTypes.Date)},
-		{"time", `"10:15:30.123456"`, iceberg.PrimitiveTypes.Time, mustLiteral(t, "10:15:30.123456", iceberg.PrimitiveTypes.Time)},
-		{"timestamp", `"2026-07-17T10:15:30.123456"`, iceberg.PrimitiveTypes.Timestamp, mustLiteral(t, "2026-07-17T10:15:30.123456", iceberg.PrimitiveTypes.Timestamp)},
-		{"timestamptz", `"2026-07-17T10:15:30.123456+00:00"`, iceberg.PrimitiveTypes.TimestampTz, mustLiteral(t, "2026-07-17T10:15:30.123456+00:00", iceberg.PrimitiveTypes.TimestampTz)},
-		{"timestamp nanos", `"2026-07-17T10:15:30.123456789"`, iceberg.PrimitiveTypes.TimestampNs, mustLiteral(t, "2026-07-17T10:15:30.123456789", iceberg.PrimitiveTypes.TimestampNs)},
-		{"timestamptz nanos", `"2026-07-17T10:15:30.123456789+00:00"`, iceberg.PrimitiveTypes.TimestampTzNs, mustLiteral(t, "2026-07-17T10:15:30.123456789+00:00", iceberg.PrimitiveTypes.TimestampTzNs)},
-		{"decimal", `"12.34"`, decimalType, mustLiteral(t, "12.34", decimalType)},
-		{"uuid", `"f79c3e09-677c-4bbd-a479-3f349cb785e7"`, iceberg.PrimitiveTypes.UUID, mustLiteral(t, "f79c3e09-677c-4bbd-a479-3f349cb785e7", iceberg.PrimitiveTypes.UUID)},
-		{"fixed", `"78797A21"`, fixedType, iceberg.FixedLiteral([]byte("xyz!"))},
-		{"binary", `"00FF10"`, iceberg.PrimitiveTypes.Binary, iceberg.BinaryLiteral([]byte{0, 255, 16})},
+		{"boolean", `true`, iceberg.PrimitiveTypes.Bool, iceberg.BoolLiteral(true), nil},
+		{"int", `2147483647`, iceberg.PrimitiveTypes.Int32, iceberg.Int32Literal(2147483647), nil},
+		{"long above JSON exact float range", `9007199254740993`, iceberg.PrimitiveTypes.Int64, iceberg.Int64Literal(9007199254740993), nil},
+		{"max int64", `9223372036854775807`, iceberg.PrimitiveTypes.Int64, iceberg.Int64Literal(math.MaxInt64), nil},
+		{"above max int64", `9223372036854775808`, iceberg.PrimitiveTypes.Int64, iceberg.Int64Literal(0), strconv.ErrRange},
+		{"float", `1.25`, iceberg.PrimitiveTypes.Float32, iceberg.Float32Literal(1.25), nil},
+		{"double", `1.25`, iceberg.PrimitiveTypes.Float64, iceberg.Float64Literal(1.25), nil},
+		{"string", `"hello"`, iceberg.PrimitiveTypes.String, iceberg.StringLiteral("hello"), nil},
+		{"date", `"2026-07-17"`, iceberg.PrimitiveTypes.Date, mustLiteral(t, "2026-07-17", iceberg.PrimitiveTypes.Date), nil},
+		{"time", `"10:15:30.123456"`, iceberg.PrimitiveTypes.Time, mustLiteral(t, "10:15:30.123456", iceberg.PrimitiveTypes.Time), nil},
+		{"timestamp", `"2026-07-17T10:15:30.123456"`, iceberg.PrimitiveTypes.Timestamp, mustLiteral(t, "2026-07-17T10:15:30.123456", iceberg.PrimitiveTypes.Timestamp), nil},
+		{"timestamptz", `"2026-07-17T10:15:30.123456+00:00"`, iceberg.PrimitiveTypes.TimestampTz, mustLiteral(t, "2026-07-17T10:15:30.123456+00:00", iceberg.PrimitiveTypes.TimestampTz), nil},
+		{"timestamp nanos", `"2026-07-17T10:15:30.123456789"`, iceberg.PrimitiveTypes.TimestampNs, mustLiteral(t, "2026-07-17T10:15:30.123456789", iceberg.PrimitiveTypes.TimestampNs), nil},
+		{"timestamptz nanos", `"2026-07-17T10:15:30.123456789+00:00"`, iceberg.PrimitiveTypes.TimestampTzNs, mustLiteral(t, "2026-07-17T10:15:30.123456789+00:00", iceberg.PrimitiveTypes.TimestampTzNs), nil},
+		{"decimal", `"12.34"`, decimalType, mustLiteral(t, "12.34", decimalType), nil},
+		{"uuid", `"f79c3e09-677c-4bbd-a479-3f349cb785e7"`, iceberg.PrimitiveTypes.UUID, mustLiteral(t, "f79c3e09-677c-4bbd-a479-3f349cb785e7", iceberg.PrimitiveTypes.UUID), nil},
+		{"fixed", `"78797A21"`, fixedType, iceberg.FixedLiteral([]byte("xyz!")), nil},
+		{"binary", `"00FF10"`, iceberg.PrimitiveTypes.Binary, iceberg.BinaryLiteral([]byte{0, 255, 16}), nil},
 	}
 
 	for _, tt := range tests {
@@ -511,6 +516,11 @@ func TestDecodePartitionLiteralCoversPrimitiveWireTypes(t *testing.T) {
 			t.Parallel()
 
 			got, err := decodePartitionLiteral(json.RawMessage(tt.raw), tt.typ)
+			if tt.expectedErr != nil {
+				require.ErrorIs(t, err, tt.expectedErr)
+
+				return
+			}
 			require.NoError(t, err)
 			assert.Truef(t, got.Equals(tt.want), "got %s (%T), want %s (%T)", got, got, tt.want, tt.want)
 		})
