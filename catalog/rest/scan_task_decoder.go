@@ -305,13 +305,8 @@ func decodeRESTDeleteFile(
 	metadata table.ScanPlanningMetadata,
 	referencedDataFile string,
 ) (iceberg.DataFile, error) {
-	var content iceberg.ManifestEntryContent
-	switch wire.Content {
-	case "position-deletes":
-		content = iceberg.EntryContentPosDeletes
-	case "equality-deletes":
-		content = iceberg.EntryContentEqDeletes
-	default:
+	content, ok := parseRESTFileContent(wire.Content)
+	if !ok || content == iceberg.EntryContentData {
 		return nil, fmt.Errorf("unknown delete content %q", wire.Content)
 	}
 
@@ -387,12 +382,13 @@ func contentFileBuilder(
 	expectedContent iceberg.ManifestEntryContent,
 	metadata table.ScanPlanningMetadata,
 ) (*iceberg.DataFileBuilder, iceberg.FileFormat, error) {
+	actualContent, ok := parseRESTFileContent(wire.Content)
 	wantContent := map[iceberg.ManifestEntryContent]string{
 		iceberg.EntryContentData:       "data",
 		iceberg.EntryContentPosDeletes: "position-deletes",
 		iceberg.EntryContentEqDeletes:  "equality-deletes",
 	}[expectedContent]
-	if wire.Content != wantContent {
+	if !ok || actualContent != expectedContent {
 		return nil, "", fmt.Errorf("content is %q, want %q", wire.Content, wantContent)
 	}
 	if wire.RecordCount <= 0 {
@@ -456,6 +452,19 @@ func contentFileBuilder(
 	}
 
 	return builder, format, nil
+}
+
+func parseRESTFileContent(value string) (iceberg.ManifestEntryContent, bool) {
+	switch value {
+	case "data", "DATA":
+		return iceberg.EntryContentData, true
+	case "position-deletes", "POSITION_DELETES":
+		return iceberg.EntryContentPosDeletes, true
+	case "equality-deletes", "EQUALITY_DELETES":
+		return iceberg.EntryContentEqDeletes, true
+	default:
+		return 0, false
+	}
 }
 
 func decodePartition(

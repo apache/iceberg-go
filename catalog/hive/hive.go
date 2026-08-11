@@ -150,7 +150,13 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		for _, tableName := range tableNames {
 			tbl, err := c.client.GetTable(ctx, database, tableName)
 			if err != nil {
-				continue
+				if isNoSuchObjectError(err) {
+					continue
+				}
+
+				yield(table.Identifier{}, fmt.Errorf("failed to load table %s.%s while listing: %w", database, tableName, err))
+
+				return
 			}
 			if isIcebergTable(tbl) {
 				if !yield(TableIdentifier(database, tableName), nil) {
@@ -675,8 +681,13 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 		for _, viewName := range viewNames {
 			tbl, err := c.client.GetTable(ctx, database, viewName)
 			if err != nil {
-				// Skip tables we fail to load, mirroring table listing behavior.
-				continue
+				if isNoSuchObjectError(err) {
+					continue
+				}
+
+				yield(table.Identifier{}, fmt.Errorf("failed to load view %s.%s while listing: %w", database, viewName, err))
+
+				return
 			}
 			if isIcebergView(tbl) {
 				if !yield(TableIdentifier(database, viewName), nil) {
@@ -1027,11 +1038,12 @@ func isNoSuchObjectError(err error) bool {
 		return false
 	}
 
-	errStr := err.Error()
+	var noSuchObjectErr *hive_metastore.NoSuchObjectException
+	if errors.As(err, &noSuchObjectErr) {
+		return true
+	}
 
-	return strings.Contains(errStr, "NoSuchObjectException") ||
-		strings.Contains(errStr, "not found") ||
-		strings.Contains(errStr, "does not exist")
+	return strings.Contains(err.Error(), "NoSuchObjectException")
 }
 
 func isAlreadyExistsError(err error) bool {

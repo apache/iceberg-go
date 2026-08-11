@@ -19,6 +19,7 @@ package gocloud
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2/google"
 )
 
 // Both parse without a real RSA key (the private key is only read lazily when a
@@ -137,6 +139,53 @@ func TestGCSCredentialsIgnoresUnknownCredType(t *testing.T) {
 
 // gcs.no-auth yields nil credentials so the client is built anonymously.
 func TestGCSCredentialsNoAuth(t *testing.T) {
+	creds, err := gcsCredentials(context.Background(), map[string]string{io.GCSNoAuth: "true"})
+	require.NoError(t, err)
+	assert.Nil(t, creds)
+}
+
+func TestGCSCredentialsPropagatesADCError(t *testing.T) {
+	t.Run("missing configured file", func(t *testing.T) {
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "missing.json"))
+
+		creds, err := gcsCredentials(context.Background(), nil)
+		require.ErrorContains(t, err, "gcs: no credentials found")
+		require.ErrorContains(t, err, io.GCSNoAuth)
+		assert.Nil(t, creds)
+	})
+
+	t.Run("no configured credentials", func(t *testing.T) {
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+
+		creds, err := gcsCredentialsWithDefault(context.Background(), nil,
+			func(context.Context) (*google.Credentials, error) {
+				return nil, errors.New("application default credentials unavailable")
+			})
+		require.ErrorContains(t, err, "gcs: no credentials found")
+		require.ErrorContains(t, err, io.GCSNoAuth)
+		assert.Nil(t, creds)
+	})
+
+	t.Run("nil credentials", func(t *testing.T) {
+		creds, err := gcsCredentialsWithDefault(context.Background(), nil,
+			func(context.Context) (*google.Credentials, error) { return nil, nil })
+		require.ErrorContains(t, err, "gcs: no credentials found")
+		assert.Nil(t, creds)
+	})
+
+	t.Run("no-auth skips default credentials", func(t *testing.T) {
+		called := false
+		creds, err := gcsCredentialsWithDefault(context.Background(), map[string]string{io.GCSNoAuth: "true"},
+			func(context.Context) (*google.Credentials, error) {
+				called = true
+
+				return nil, errors.New("default credentials should not be requested")
+			})
+		require.NoError(t, err)
+		assert.Nil(t, creds)
+		assert.False(t, called)
+	})
+
 	creds, err := gcsCredentials(context.Background(), map[string]string{io.GCSNoAuth: "true"})
 	require.NoError(t, err)
 	assert.Nil(t, creds)

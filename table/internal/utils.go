@@ -538,15 +538,25 @@ func TruncateUpperBoundText(s string, trunc int) string {
 
 	result := []rune(s)[:trunc]
 	for i := len(result) - 1; i >= 0; i-- {
-		next := result[i] + 1
-		if utf8.ValidRune(next) {
+		if next, ok := nextValidRune(result[i]); ok {
 			result[i] = next
 
-			return string(result)
+			return string(result[:i+1])
 		}
 	}
 
 	return ""
+}
+
+func nextValidRune(r rune) (rune, bool) {
+	switch {
+	case r == '\uD7FF':
+		return '\uE000', true
+	case r >= utf8.MaxRune:
+		return 0, false
+	default:
+		return r + 1, true
+	}
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {

@@ -870,7 +870,7 @@ func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ st
 		return nil
 	}
 
-	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	field, ok := a.fileSchema.FindFieldByIDRef(fieldID, internal.SchemaRef{})
 	if !ok {
 		return nil
 	}
@@ -1062,7 +1062,7 @@ func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType 
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
-	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	fileField, ok := a.fileSchema.FindFieldByIDRef(field.ID, internal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
 	}
@@ -1715,6 +1715,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1837,7 +1841,54 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1976,6 +2027,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}
@@ -2183,9 +2243,12 @@ func isWKT2CRSString(crs string) bool {
 	return false
 }
 
+// geoArrowCRSToIcebergCRS maps GeoArrow CRS metadata to an Iceberg CRS string.
+// Absent CRS metadata means the default CRS OGC:CRS84, matching the Parquet
+// geospatial spec and Iceberg's default geometry/geography types.
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
-		return "srid:0", nil
+		return iceberg.DefaultGeoCRS, nil
 	}
 
 	switch {
@@ -2199,8 +2262,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(crs, iceberg.DefaultGeoCRS) || strings.EqualFold(crs, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		switch meta.CRSType {
@@ -2217,6 +2280,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errWKT2CRSNotSupported
 		}
 		if meta.CRSType == geoarrow.CRSTypeSRID {
+			// Some writers store the identifier already prefixed; don't prefix twice.
+			if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+				return crs, nil
+			}
+
 			return "srid:" + crs, nil
 		}
 
@@ -2274,8 +2342,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 
 		authorityCode := authority + ":" + code
-		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(authorityCode, iceberg.DefaultGeoCRS) || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		return authorityCode, nil
@@ -2340,10 +2408,6 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
-		if id == "0" {
-			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
-		}
-
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
@@ -2382,7 +2446,7 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 
 	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
-		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+		raw, _ = json.Marshal(iceberg.DefaultGeoCRS) //nolint:errcheck // Marshalling a string can't fail
 	} else {
 		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}

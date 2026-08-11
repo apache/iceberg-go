@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -32,6 +33,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -522,12 +527,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
 		},
-		// Geometry with srid:0 should result in an unset (omitted) CRS
-		{
-			name:             "geometry_srid_0",
-			ice:              geomSRID0,
-			geoarrowMetaJSON: `{}`,
-		},
 		// Geometry with custom CRSes (authority:code and partial projjson)
 		{
 			name:             "geometry_epsg_4267",
@@ -571,12 +570,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              geogThomas,
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
 		},
-		// Geography with srid:0 should result in an unset (omitted) CRS and spherical edges
-		{
-			name:             "geography_srid_0",
-			ice:              geogSRID0,
-			geoarrowMetaJSON: `{"edges":"spherical"}`,
-		},
 		// Geography with custom CRSes (authority:code and partial projjson)
 		{
 			name:             "geography_epsg_4267",
@@ -589,6 +582,18 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              geomSRID,
 			geoarrowMetaJSON: `{"crs":"4326", "crs_type":"srid"}`,
 		},
+		// srid:0 means an unknown CRS, which must be written explicitly: an omitted
+		// CRS means OGC:CRS84 per the Parquet geospatial spec.
+		{
+			name:             "geometry_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		{
+			name:             "geography_srid_0",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+		},
 	}
 
 	// The following tests focus on edge cases and pinning specific behavior for read case
@@ -598,9 +603,9 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		geoarrowMetaJSON string
 	}{
 		{
-			// Pin that a present crs_type without CRS still follows the srid:0 default.
-			name:             "geometry_srid_0_with_crs_type",
-			ice:              geomSRID0,
+			// Pin that a present crs_type without CRS still follows the default CRS.
+			name:             "geometry_no_crs_with_crs_type",
+			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
 		},
 		{
@@ -631,10 +636,10 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		},
 
 		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
-		// Geometry with no CRS should be GEOMETRY(srid:0)
+		// An omitted CRS means the default CRS, so this is plain GEOMETRY
 		{
 			name:             "geometry_no_crs",
-			ice:              geomSRID0,
+			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{}`,
 		},
 		// Geometry with string CRS
@@ -676,11 +681,29 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":{"id":{"authority":"OGC","code":"CRS84"}}}`,
 		},
-		// Geography with no CRS, spherical edges
+		// An explicit srid CRS is preserved; only an absent CRS means the default
+		{
+			name:             "geometry_explicit_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		// A writer that stores the srid already prefixed keeps a single prefix
+		{
+			name:             "geometry_prefixed_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"srid:0","crs_type":"srid"}`,
+		},
+		// Geography with no CRS, spherical edges: both are the Iceberg defaults
 		{
 			name:             "geography_no_crs_spherical",
-			ice:              geogSRID0,
+			ice:              iceberg.GeographyType{},
 			geoarrowMetaJSON: `{"edges":"spherical"}`,
+		},
+		// Geography with no CRS keeps its explicit edge algorithm
+		{
+			name:             "geography_no_crs_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"edges":"karney"}`,
 		},
 		// Geography with OGC:CRS84 and spherical edges
 		{
@@ -2622,19 +2645,25 @@ func singleColumnRecord(field arrow.Field, arr arrow.Array) arrow.RecordBatch {
 	return array.NewRecordBatch(sc, []arrow.Array{arr}, int64(arr.Len()))
 }
 
+// wkbPointRows returns POINT(1 2), NULL and POINT(3 4) as little-endian WKB.
+func wkbPointRows() [][]byte {
+	return [][]byte{
+		{
+			0x01, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+		},
+		nil,
+		{
+			0x01, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
+		},
+	}
+}
+
 func TestToRequestedSchemaGeoExtensionRewrap(t *testing.T) {
-	// POINT(1 2) and POINT(3 4) little-endian WKB.
-	point12 := []byte{
-		0x01, 0x01, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
-	}
-	point34 := []byte{
-		0x01, 0x01, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40,
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
-	}
-	values := [][]byte{point12, nil, point34}
+	values := wkbPointRows()
 
 	geography, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
 	require.NoError(t, err)
@@ -2755,4 +2784,399 @@ func TestToRequestedSchemaMismatchedExtensionNameNotRewrapped(t *testing.T) {
 	// stable surface; what matters is that mismatched extension names are not
 	// silently rewrapped.
 	require.Error(t, err)
+}
+
+// absentCRSWKBType returns the geoarrow.wkb type a reader reconstructs for a
+// column whose stored GeoArrow metadata carries no CRS. Omitted edges mean
+// planar, so the geography cases must state their edge algorithm.
+func absentCRSWKBType(edges geoarrow.EdgeInterpolation) arrow.ExtensionType {
+	return geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(),
+		geoarrow.WKBWithMetadata(geoarrow.Metadata{Edges: edges}))
+}
+
+func TestArrowGeoAbsentCRSMetadataToIcebergDefaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		edges    geoarrow.EdgeInterpolation
+		want     iceberg.Type
+		wantType string
+	}{
+		{
+			name:     "geometry_crs_omitted",
+			want:     iceberg.GeometryType{},
+			wantType: "geometry",
+		},
+		{
+			name:     "geography_crs_omitted",
+			edges:    geoarrow.EdgeSpherical,
+			want:     iceberg.GeographyType{},
+			wantType: "geography",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dt := absentCRSWKBType(tt.edges)
+
+			sc, err := table.ArrowSchemaToIceberg(arrow.NewSchema([]arrow.Field{{
+				Name: "geom", Type: dt, Nullable: true, Metadata: fieldIDMeta("1"),
+			}}, nil), false, nil)
+			require.NoError(t, err)
+
+			field, ok := sc.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantType, field.Type.String())
+			assert.True(t, tt.want.Equals(field.Type), "expected %s, got %s", tt.want, field.Type)
+		})
+	}
+}
+
+func TestToRequestedSchemaGeoAbsentCRSProjection(t *testing.T) {
+	values := wkbPointRows()
+
+	tests := []struct {
+		name        string
+		edges       geoarrow.EdgeInterpolation
+		icebergType iceberg.Type
+	}{
+		{
+			name:        "geometry_crs_omitted",
+			icebergType: iceberg.GeometryType{},
+		},
+		{
+			name:        "geography_crs_omitted",
+			edges:       geoarrow.EdgeSpherical,
+			icebergType: iceberg.GeographyType{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := absentCRSWKBType(tt.edges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			storage := got.Storage()
+			require.Equal(t, len(values), storage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, storage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, storage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, storage, i))
+			}
+		})
+	}
+}
+
+// roundTripWKBType returns the Arrow type a reader reconstructs for a column
+// written from icebergType, i.e. what a table sees reading its own files.
+func roundTripWKBType(t *testing.T, icebergType iceberg.Type) arrow.ExtensionType {
+	t.Helper()
+
+	written, err := table.TypeToArrowType(icebergType, true, false)
+	require.NoError(t, err)
+
+	wkb, ok := written.(*geoarrow.WKBType)
+	require.True(t, ok, "expected geoarrow.wkb, got %T", written)
+
+	dt, err := geoarrow.NewWKBType().Deserialize(wkb.StorageType(), wkb.Serialize())
+	require.NoError(t, err)
+
+	return dt
+}
+
+func TestToRequestedSchemaGeoSRID0Projection(t *testing.T) {
+	values := wkbPointRows()
+
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		icebergType iceberg.Type
+		wantType    string
+	}{
+		{
+			name:        "geometry_srid_0",
+			icebergType: geomSRID0,
+			wantType:    "geometry(srid:0)",
+		},
+		{
+			name:        "geography_srid_0",
+			icebergType: geogSRID0,
+			wantType:    "geography(srid:0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := roundTripWKBType(t, tt.icebergType)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			fileField, ok := fileSchema.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantType, fileField.Type.String())
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			storage := got.Storage()
+			require.Equal(t, len(values), storage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, storage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, storage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, storage, i))
+			}
+		})
+	}
+}
+
+func TestToRequestedSchemaGeoMismatchedCRSFails(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	sourceType := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(geoarrow.Metadata{
+		CRS:     jsonCRS("EPSG:3857"),
+		CRSType: geoarrow.CRSTypeAuthorityCode,
+	}))
+	source := newExtensionArrayOverBinary(t, mem, sourceType, wkbPointRows())
+	defer source.Release()
+
+	rec := singleColumnRecord(arrow.Field{
+		Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+	}, source)
+	defer rec.Release()
+
+	fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+	require.NoError(t, err)
+
+	fileField, ok := fileSchema.FindFieldByID(1)
+	require.True(t, ok)
+	require.Equal(t, "geometry(EPSG:3857)", fileField.Type.String())
+
+	requested := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false,
+	})
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	_, err = table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "cannot promote geometry(EPSG:3857) to geometry")
+}
+
+// A file whose CRS is absent reads as the default CRS, so a table declaring
+// srid:0 rejects it: CRS is not a promotable difference under the Iceberg spec.
+func TestToRequestedSchemaGeoAbsentCRSAgainstSRID0SchemaFails(t *testing.T) {
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		edges       geoarrow.EdgeInterpolation
+		icebergType iceberg.Type
+		wantErr     string
+	}{
+		{
+			name:        "geometry_crs_omitted",
+			icebergType: geomSRID0,
+			wantErr:     "cannot promote geometry to geometry(srid:0)",
+		},
+		{
+			name:        "geography_crs_omitted",
+			edges:       geoarrow.EdgeSpherical,
+			icebergType: geogSRID0,
+			wantErr:     "cannot promote geography to geography(srid:0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := absentCRSWKBType(tt.edges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, wkbPointRows())
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			_, err = table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// TestGeoTypeParquetRoundTrip pins the CRS a geo column carries on the Parquet
+// wire. arrow-go writes no GEOMETRY or GEOGRAPHY logical type, so the CRS
+// travels in the GeoArrow metadata of the stored Arrow schema.
+func TestGeoTypeParquetRoundTrip(t *testing.T) {
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+	geomSRID, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		icebergType      iceberg.Type
+		geoarrowMetaJSON string
+	}{
+		{
+			name:             "geometry_default_crs",
+			icebergType:      iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+		},
+		{
+			name:             "geometry_srid_0",
+			icebergType:      geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		{
+			name:             "geography_srid_0",
+			icebergType:      geogSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+		},
+		{
+			name:             "geometry_srid_4326",
+			icebergType:      geomSRID,
+			geoarrowMetaJSON: `{"crs":"4326","crs_type":"srid"}`,
+		},
+		{
+			name:             "geometry_authority_code",
+			icebergType:      geomEPSG3857,
+			geoarrowMetaJSON: `{"crs":"EPSG:3857","crs_type":"authority_code"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewGoAllocator()
+
+			dt, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			wkb, ok := dt.(*geoarrow.WKBType)
+			require.True(t, ok, "expected geoarrow.wkb, got %T", dt)
+			assert.JSONEq(t, tt.geoarrowMetaJSON, wkb.Serialize())
+
+			source := newExtensionArrayOverBinary(t, mem, wkb, wkbPointRows())
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: wkb, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			var buf bytes.Buffer
+			writer, err := pqarrow.NewFileWriter(rec.Schema(), &buf,
+				parquet.NewWriterProperties(parquet.WithAllocator(mem)),
+				pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema()))
+			require.NoError(t, err)
+			require.NoError(t, writer.Write(rec))
+			require.NoError(t, writer.Close())
+
+			rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			// Revisit the CRS spelling once arrow-go emits the geo logical types:
+			// the Parquet CRS field takes the prefixed srid:<id> form.
+			logical := rdr.MetaData().Schema.Column(0).LogicalType()
+			assert.True(t, logical.Equals(schema.NoLogicalType{}), "unexpected logical type %s", logical)
+
+			arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
+			require.NoError(t, err)
+
+			readSchema, err := arrRdr.Schema()
+			require.NoError(t, err)
+
+			readIceberg, err := table.ArrowSchemaToIceberg(readSchema, false, nil)
+			require.NoError(t, err)
+
+			field, ok := readIceberg.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.icebergType.String(), field.Type.String())
+			assert.True(t, tt.icebergType.Equals(field.Type), "expected %s, got %s", tt.icebergType, field.Type)
+		})
+	}
 }

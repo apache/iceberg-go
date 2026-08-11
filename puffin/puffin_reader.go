@@ -224,9 +224,20 @@ func (r *Reader) readFooter() error {
 	}
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
+	decoder := json.NewDecoder(payloadReader)
 	var footer Footer
-	if err := json.NewDecoder(payloadReader).Decode(&footer); err != nil {
+	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
+	}
+
+	// FooterPayloadSize defines a single JSON footer object. Reject trailing
+	// content deliberately, even though some other Iceberg implementations
+	// accept padding or additional values inside the footer payload.
+	if decoder.More() {
+		return errors.New("puffin: unexpected content after footer JSON")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("puffin: unexpected content after footer JSON")
 	}
 
 	// Validate blob metadata

@@ -46,12 +46,13 @@ func newTestRefresher(fetchCreds func(ctx context.Context, ident []string) (iceb
 func TestVendedCredsCachedIOReturnedWhenNotExpired(t *testing.T) {
 	t.Parallel()
 
+	refreshErr := errors.New("refresh unavailable")
 	var callCount atomic.Int32
 
 	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
 		callCount.Add(1)
 
-		return iceberg.Properties{}, nil
+		return nil, refreshErr
 	})
 
 	// Seed cached IO and set expiry in the future.
@@ -153,7 +154,7 @@ func TestVendedCredsConcurrentAccess(t *testing.T) {
 	assert.NotNil(t, r.cachedIO, "cachedIO should be set after initial load")
 }
 
-func TestVendedCredsGracefulDegradation(t *testing.T) {
+func TestVendedCredsReturnsRefreshFailureForExpiredCredentials(t *testing.T) {
 	t.Parallel()
 
 	fetchErr := errors.New("network error")
@@ -170,8 +171,27 @@ func TestVendedCredsGracefulDegradation(t *testing.T) {
 	r.expiresAt = now.Add(-time.Second)
 
 	got, err := r.loadFS(context.Background())
-	require.NoError(t, err, "should not return error when cached IO exists and refresh fails")
-	assert.Equal(t, existingIO, got, "should return cached IO on refresh failure")
+	require.ErrorIs(t, err, fetchErr)
+	require.ErrorContains(t, err, "refresh vended credentials for file:///tmp/test")
+	assert.Nil(t, got)
+}
+
+func TestVendedCredsReturnsLoadFailureForExpiredCredentials(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		return iceberg.Properties{}, nil
+	})
+	r.nowFunc = func() time.Time { return now }
+	r.location = "notascheme://bucket/path"
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(-time.Second)
+
+	got, err := r.loadFS(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "load filesystem with refreshed credentials for notascheme://bucket/path")
+	assert.Nil(t, got)
 }
 
 func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
@@ -185,6 +205,7 @@ func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
 
 	got, err := r.loadFS(context.Background())
 	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "refreshed credentials")
 	assert.Nil(t, got)
 }
 
