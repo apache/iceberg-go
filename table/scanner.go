@@ -230,10 +230,10 @@ type Scan struct {
 	ioF              FSysF
 	planner          ScanPlanner
 	planningMode     ScanPlanningMode
-	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
-	// planning; ReadTasks loads from it instead of ioF and closes it after the
-	// returned iterator finishes. See PlanIO.
-	planIO         PlanIO
+	// planIO, when non-nil, owns the plan-scoped FileIO loader set by remote
+	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
+	// the plan retires it after all active readers finish. See PlanIO.
+	planIO         *planIOState
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -250,11 +250,22 @@ type Scan struct {
 	reporter metrics.Reporter
 }
 
-func (scan *Scan) UseRowLimit(n int64) *Scan {
+// clone copies the scan configuration and gives the copy its own ownership
+// reference to any remote plan.
+func (scan *Scan) clone() *Scan {
 	out := *scan
-	out.limit = n
+	if out.planIO != nil {
+		out.planIO.retain()
+	}
 
 	return &out
+}
+
+func (scan *Scan) UseRowLimit(n int64) *Scan {
+	out := scan.clone()
+	out.limit = n
+
+	return out
 }
 
 // Reporter returns the metrics reporter for this scan, never nil. The
@@ -273,9 +284,7 @@ func (scan *Scan) Reporter() metrics.Reporter {
 // recorded by scan options are still surfaced by scan execution.
 func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if name == MainBranch {
-		out := *scan
-
-		return &out, nil
+		return scan.clone(), nil
 	}
 	if scan.selectorErr != nil {
 		return nil, scan.selectorErr
@@ -291,10 +300,10 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	}
 
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
-		out := *scan
+		out := scan.clone()
 		out.snapshotID = &snap.SnapshotID
 
-		return &out, nil
+		return out, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
@@ -904,12 +913,16 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 
 // planFilesLocal performs local scan planning: it reads and filters the
 // snapshot's manifests using schema, builds the matching FileScanTasks, and
-// records planning metrics into acc for the caller to report. It resets the
-// plan-scoped scan.planIO to nil, since local planning reads through the
-// table's default FileIO. It returns a nil slice (not an empty one) when there
-// is no snapshot or every manifest is pruned.
-func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
-	scan.closePlanIO()
+// records planning metrics into acc for the caller to report. A successful
+// local plan retires any previous remote plan; a failed local plan leaves it
+// usable. It returns a nil slice (not an empty one) when there is no snapshot
+// or every manifest is pruned.
+func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
+	defer func() {
+		if err == nil {
+			scan.closePlanIO()
+		}
+	}()
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
@@ -933,7 +946,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		return nil, err
 	}
 
-	results := make([]FileScanTask, 0, len(entries.dataEntries))
+	results = make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
 		// Spec §Scan Planning: when a deletion vector applies to a data
 		// file, positional-delete files must NOT be applied. The DV is
@@ -1002,34 +1015,106 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
-	// Replace an unconsumed plan only after the new plan is available. A
-	// planner failure must not destroy a previously usable plan.
-	if scan.planIO != nil && !samePlanIO(scan.planIO, result.IO) {
-		_ = scan.planIO.Close()
+	planIO, err := newPlanIOState(result.IO)
+	if err != nil {
+		return nil, err
 	}
-	scan.planIO = result.IO
+
+	// Replace the current plan only after the new plan is available. A planner
+	// failure or invalid PlanIO must not destroy a previously usable plan.
+	if scan.planIO != nil && scan.planIO.matches(result.IO) {
+		return result.Tasks, nil
+	}
+
+	oldPlanIO := scan.planIO
+	scan.planIO = planIO
+	if oldPlanIO != nil {
+		oldPlanIO.releaseOwner()
+	}
 
 	return result.Tasks, nil
 }
 
-// samePlanIO compares plan-scoped IO handles without comparing interfaces
-// directly. PlanIO implementations are allowed to contain slices or maps and
-// therefore may be non-comparable interface values.
-func samePlanIO(left, right PlanIO) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
+type planIOState struct {
+	io PlanIO
+
+	mu        sync.Mutex
+	owners    int
+	readers   int
+	closeOnce sync.Once
+}
+
+func newPlanIOState(planIO PlanIO) (*planIOState, error) {
+	if planIO == nil {
+		return nil, nil
 	}
 
-	lv, rv := reflect.ValueOf(left), reflect.ValueOf(right)
-	if lv.Type() != rv.Type() {
-		return false
+	value := reflect.ValueOf(planIO)
+	if !value.Comparable() {
+		return nil, fmt.Errorf("%w: PlanIO type %T must be comparable", iceberg.ErrInvalidArgument, planIO)
+	}
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, fmt.Errorf("%w: PlanIO must not be nil", iceberg.ErrInvalidArgument)
+		}
 	}
 
-	if lv.Comparable() {
-		return lv.Interface() == rv.Interface()
+	return &planIOState{io: planIO, owners: 1}, nil
+}
+
+func (p *planIOState) matches(planIO PlanIO) bool {
+	return planIO != nil && p.io == planIO
+}
+
+func (p *planIOState) retain() {
+	p.mu.Lock()
+	p.owners++
+	p.mu.Unlock()
+}
+
+func (p *planIOState) acquire(ctx context.Context) (io.IO, func(), error) {
+	p.mu.Lock()
+	if p.owners == 0 {
+		p.mu.Unlock()
+
+		return nil, nil, fmt.Errorf("%w: remote scan plan is no longer current", ErrInvalidOperation)
+	}
+	p.readers++
+	p.mu.Unlock()
+
+	fs, err := p.io.Load(ctx)
+	if err != nil {
+		p.release()
+
+		return nil, nil, err
 	}
 
-	return false
+	var releaseOnce sync.Once
+
+	return fs, func() { releaseOnce.Do(p.release) }, nil
+}
+
+func (p *planIOState) release() {
+	p.mu.Lock()
+	p.readers--
+	closeNow := p.owners == 0 && p.readers == 0
+	p.mu.Unlock()
+
+	if closeNow {
+		p.closeOnce.Do(func() { _ = p.io.Close() })
+	}
+}
+
+func (p *planIOState) releaseOwner() {
+	p.mu.Lock()
+	p.owners--
+	closeNow := p.owners == 0 && p.readers == 0
+	p.mu.Unlock()
+
+	if closeNow {
+		p.closeOnce.Do(func() { _ = p.io.Close() })
+	}
 }
 
 type FileScanTask struct {
@@ -1102,16 +1187,14 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	}
 
 	// A plan-scoped FileIO (from remote planning) takes precedence over the
-	// table's default FileIO and is closed once the returned iterator finishes.
-	// Transfer ownership out of Scan before loading so replanning cannot close
-	// resources used by an active iterator.
+	// table's default FileIO. The iterator keeps a reader lease so replanning
+	// cannot close the old plan's resources while records are still being read.
 	planIO := scan.planIO
-	scan.planIO = nil
 	var fs io.IO
+	var releasePlanIO func()
 	if planIO != nil {
-		fs, err = planIO.Load(ctx)
+		fs, releasePlanIO, err = planIO.acquire(ctx)
 		if err != nil {
-			_ = planIO.Close()
 			return nil, nil, err
 		}
 	} else {
@@ -1132,16 +1215,16 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		concurrency:     scan.concurrency,
 	}).GetRecords(ctx, tasks)
 	if err != nil {
-		// No iterator to drive cleanup on a setup error, so close here.
-		if planIO != nil {
-			_ = planIO.Close()
+		// No iterator to drive cleanup on a setup error, so release here.
+		if releasePlanIO != nil {
+			releasePlanIO()
 		}
 
 		return nil, nil, err
 	}
 
-	if planIO != nil {
-		records = closePlanIOAfter(records, planIO)
+	if releasePlanIO != nil {
+		records = releasePlanIOAfter(records, releasePlanIO)
 	}
 
 	return outSchema, records, nil
@@ -1154,18 +1237,18 @@ func (scan *Scan) closePlanIO() {
 		return
 	}
 
-	_ = scan.planIO.Close()
+	planIO := scan.planIO
 	scan.planIO = nil
+	planIO.releaseOwner()
 }
 
-// closePlanIOAfter wraps an arrow record iterator so the plan-scoped IO is
-// closed once iteration ends — whether the consumer exhausts the iterator or
-// stops early. A caller that never ranges over the iterator does not trigger
-// the close; that is an accepted edge for an unread result.
-func closePlanIOAfter(seq iter.Seq2[arrow.RecordBatch, error], pio PlanIO) iter.Seq2[arrow.RecordBatch, error] {
-	var closeOnce sync.Once
+// releasePlanIOAfter wraps an arrow record iterator so its plan-scoped IO lease
+// is released once iteration ends, whether the consumer exhausts the iterator
+// or stops early. A caller that never ranges over the iterator does not release
+// the lease; that is an accepted edge for an unread result.
+func releasePlanIOAfter(seq iter.Seq2[arrow.RecordBatch, error], release func()) iter.Seq2[arrow.RecordBatch, error] {
 	return func(yield func(arrow.RecordBatch, error) bool) {
-		defer closeOnce.Do(func() { _ = pio.Close() })
+		defer release()
 		for rec, err := range seq {
 			if !yield(rec, err) {
 				return

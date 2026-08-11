@@ -40,7 +40,7 @@ func TestScanPlanningRemoteRequiresPlanner(t *testing.T) {
 func TestScanPlanningRemoteStoresPlanIO(t *testing.T) {
 	t.Parallel()
 
-	pio := fakePlanIO{}
+	pio := &fakePlanIO{}
 	planner := &fakeScanPlanner{
 		result:   ScanPlanningResult{IO: pio},
 		supports: true,
@@ -53,7 +53,7 @@ func TestScanPlanningRemoteStoresPlanIO(t *testing.T) {
 	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
-	assert.Equal(t, pio, scan.planIO)
+	assert.Same(t, pio, scan.planIO.io)
 }
 
 func TestScanPlanningRemoteClosesPreviousPlanIO(t *testing.T) {
@@ -76,45 +76,207 @@ func TestScanPlanningRemoteClosesPreviousPlanIO(t *testing.T) {
 
 	assert.Equal(t, 1, first.closeCalls)
 	assert.Equal(t, 0, second.closeCalls)
-	assert.Same(t, second, scan.planIO)
+	assert.Same(t, second, scan.planIO.io)
 }
 
-func TestReadTasksClosesPlanIOWhenLoadFails(t *testing.T) {
+func TestRefinedScanRetainsPlanIOOwnership(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]func(*Scan) (*Scan, error){
+		"row limit": func(scan *Scan) (*Scan, error) {
+			return scan.UseRowLimit(10), nil
+		},
+		"main ref": func(scan *Scan) (*Scan, error) {
+			return scan.UseRef(MainBranch)
+		},
+	}
+
+	for name, refine := range tests {
+		t.Run(name, func(t *testing.T) {
+			first := &countingPlanIO{}
+			second := &countingPlanIO{}
+			planner := &sequenceScanPlanner{
+				results: []ScanPlanningResult{{IO: first}, {IO: second}},
+			}
+			scan := &Scan{
+				planner:      planner,
+				planningMode: ScanPlanningRemote,
+			}
+
+			_, err := scan.PlanFiles(context.Background())
+			require.NoError(t, err)
+
+			refined, err := refine(scan)
+			require.NoError(t, err)
+			assert.Same(t, scan.planIO, refined.planIO)
+
+			_, err = refined.PlanFiles(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, 0, first.closeCalls)
+			assert.Same(t, first, scan.planIO.io)
+			assert.Same(t, second, refined.planIO.io)
+
+			scan.closePlanIO()
+			refined.closePlanIO()
+			assert.Equal(t, 1, first.closeCalls)
+			assert.Equal(t, 1, second.closeCalls)
+		})
+	}
+}
+
+func TestScanPlanningRemoteFailurePreservesPreviousPlanIO(t *testing.T) {
+	t.Parallel()
+
+	want := errors.New("replacement plan")
+	first := &countingPlanIO{}
+	planner := &sequenceScanPlanner{
+		results: []ScanPlanningResult{{IO: first}, {}},
+		errors:  []error{nil, want},
+	}
+	scan := &Scan{
+		planner:      planner,
+		planningMode: ScanPlanningRemote,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	_, err = scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, want)
+
+	assert.Equal(t, 0, first.closeCalls)
+	assert.Same(t, first, scan.planIO.io)
+}
+
+func TestScanPlanningRemoteKeepsSamePlanIO(t *testing.T) {
+	t.Parallel()
+
+	pio := &countingPlanIO{}
+	planner := &sequenceScanPlanner{
+		results: []ScanPlanningResult{{IO: pio}, {IO: pio}},
+	}
+	scan := &Scan{planner: planner, planningMode: ScanPlanningRemote}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	state := scan.planIO
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	assert.Same(t, state, scan.planIO)
+	assert.Equal(t, 0, pio.closeCalls)
+}
+
+func TestScanPlanningRemoteRejectsNonComparablePlanIO(t *testing.T) {
+	t.Parallel()
+
+	pio := &countingPlanIO{}
+	planner := &sequenceScanPlanner{
+		results: []ScanPlanningResult{{IO: pio}, {IO: slicePlanIO{1, 2, 3}}},
+	}
+	scan := &Scan{planner: planner, planningMode: ScanPlanningRemote}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	state := scan.planIO
+	_, err = scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	assert.Same(t, state, scan.planIO)
+	assert.Equal(t, 0, pio.closeCalls)
+}
+
+func TestReadTasksRetainsPlanIOWhenLoadFails(t *testing.T) {
 	want := errors.New("load plan io")
-	pio := &countingPlanIO{loadErr: want}
+	pio := &countingPlanIO{
+		loadErrs: []error{want, nil},
+		fs:       icebergio.LocalFS{},
+	}
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 	scan, err := txn.Scan()
 	require.NoError(t, err)
-	scan.planIO = pio
+	scan.planIO = mustPlanIOState(t, pio)
+	scan.ioF = func(context.Context) (icebergio.IO, error) {
+		return nil, errors.New("table IO must not be used")
+	}
 
 	_, _, err = scan.ReadTasks(context.Background(), nil)
 	require.ErrorIs(t, err, want)
-	assert.Equal(t, 1, pio.closeCalls)
-	assert.Nil(t, scan.planIO)
+	assert.Equal(t, 0, pio.closeCalls)
+	assert.NotNil(t, scan.planIO)
+
+	_, records, err := scan.ReadTasks(context.Background(), nil)
+	require.NoError(t, err)
+	for _, err := range records {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 2, pio.loadCalls)
+	assert.Equal(t, 0, pio.closeCalls)
 }
 
-func TestReadTasksTransfersPlanIOOwnershipToIterator(t *testing.T) {
+func TestReadTasksReusesPlanIO(t *testing.T) {
 	pio := &countingPlanIO{fs: icebergio.LocalFS{}}
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 	scan, err := txn.Scan()
 	require.NoError(t, err)
-	scan.planIO = pio
+	scan.planIO = mustPlanIOState(t, pio)
+	scan.ioF = func(context.Context) (icebergio.IO, error) {
+		return nil, errors.New("table IO must not be used")
+	}
 
-	_, records, err := scan.ReadTasks(context.Background(), nil)
+	for range 2 {
+		_, records, err := scan.ReadTasks(context.Background(), nil)
+		require.NoError(t, err)
+		for _, err := range records {
+			require.NoError(t, err)
+		}
+	}
+
+	assert.Equal(t, 2, pio.loadCalls)
+	assert.Equal(t, 0, pio.closeCalls)
+	assert.Same(t, pio, scan.planIO.io)
+}
+
+func TestReadTasksKeepsRetiredPlanIOAliveForIterator(t *testing.T) {
+	first := &countingPlanIO{fs: icebergio.LocalFS{}}
+	second := &countingPlanIO{}
+	planner := &sequenceScanPlanner{
+		results: []ScanPlanningResult{{IO: first}, {IO: second}},
+	}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningRemote))
 	require.NoError(t, err)
+	scan.planner = planner
+
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	_, records, err := scan.ReadTasks(context.Background(), tasks)
+	require.NoError(t, err)
+	assert.Equal(t, 0, first.closeCalls)
+
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, first.closeCalls)
+	assert.Same(t, second, scan.planIO.io)
+
+	for _, err := range records {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, first.closeCalls)
+	assert.Equal(t, 0, second.closeCalls)
+}
+
+func TestScanPlanningLocalClosesPreviousPlanIOAfterSuccess(t *testing.T) {
+	pio := &countingPlanIO{}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.planIO = mustPlanIOState(t, pio)
+
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
 	assert.Nil(t, scan.planIO)
-
-	for _, err := range records {
-		require.NoError(t, err)
-	}
 	assert.Equal(t, 1, pio.closeCalls)
-
-	_, records, err = scan.ReadTasks(context.Background(), nil)
-	require.NoError(t, err)
-	for _, err := range records {
-		require.NoError(t, err)
-	}
-	assert.Equal(t, 1, pio.closeCalls, "the second read uses the table IO and must not close the transferred PlanIO again")
 }
 
 func TestScanPlanningRemoteRejectsIncapablePlanner(t *testing.T) {
@@ -250,13 +412,19 @@ func (fakePlanIO) Load(context.Context) (icebergio.IO, error) { return nil, nil 
 func (fakePlanIO) Close() error                               { return nil }
 
 type countingPlanIO struct {
-	loadErr    error
+	loadErrs   []error
 	fs         icebergio.IO
+	loadCalls  int
 	closeCalls int
 }
 
 func (p *countingPlanIO) Load(context.Context) (icebergio.IO, error) {
-	return p.fs, p.loadErr
+	p.loadCalls++
+	if p.loadCalls <= len(p.loadErrs) {
+		return p.fs, p.loadErrs[p.loadCalls-1]
+	}
+
+	return p.fs, nil
 }
 
 func (p *countingPlanIO) Close() error {
@@ -266,6 +434,7 @@ func (p *countingPlanIO) Close() error {
 
 type sequenceScanPlanner struct {
 	results []ScanPlanningResult
+	errors  []error
 	index   int
 }
 
@@ -273,6 +442,25 @@ func (p *sequenceScanPlanner) SupportsRemoteScanPlanning() bool { return true }
 
 func (p *sequenceScanPlanner) PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error) {
 	result := p.results[p.index]
+	var err error
+	if p.index < len(p.errors) {
+		err = p.errors[p.index]
+	}
 	p.index++
-	return result, nil
+
+	return result, err
+}
+
+type slicePlanIO []int
+
+func (slicePlanIO) Load(context.Context) (icebergio.IO, error) { return nil, nil }
+func (slicePlanIO) Close() error                               { return nil }
+
+func mustPlanIOState(t *testing.T, planIO PlanIO) *planIOState {
+	t.Helper()
+
+	state, err := newPlanIOState(planIO)
+	require.NoError(t, err)
+
+	return state
 }
