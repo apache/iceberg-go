@@ -1200,6 +1200,38 @@ func TestSummary_InheritsPreviousSnapshotTotals(t *testing.T) {
 	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
 }
 
+func TestCommitPersistsEnvironmentContextInSnapshotSummary(t *testing.T) {
+	keys := []string{
+		iceberg.EnvironmentEngineNameKey,
+		iceberg.EnvironmentEngineVersionKey,
+	}
+	preserveEnvironmentProperties(t, keys...)
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineNameKey, "iceberg-go-test")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineVersionKey, "1.0")
+
+	spec := iceberg.NewPartitionSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, iceberg.Properties{
+		iceberg.EnvironmentEngineNameKey: "snapshot-property",
+		"user-summary":                   "present",
+	})
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	updates, requirements, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(updates, requirements))
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	snapshot := meta.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	require.NotNil(t, snapshot.Summary)
+	require.Equal(t, "Apache Iceberg Go "+iceberg.Version(), snapshot.Summary.Properties["iceberg-version"])
+	require.Equal(t, "iceberg-go-test", snapshot.Summary.Properties[iceberg.EnvironmentEngineNameKey])
+	require.Equal(t, "1.0", snapshot.Summary.Properties[iceberg.EnvironmentEngineVersionKey])
+	require.Equal(t, "present", snapshot.Summary.Properties["user-summary"])
+}
+
 // TestSummary_ParentSnapshotWithoutSummary verifies that summary computation
 // does not panic when the parent snapshot exists but has no summary (V1 /
 // omitempty). Totals fall back to the zero baseline like a new table.

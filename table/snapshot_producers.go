@@ -1023,10 +1023,19 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 func (sp *snapshotProducer) rebaseSummary(delta, previousSummary, props iceberg.Properties) (Summary, error) {
 	maps.Copy(delta, props)
 
-	return updateSnapshotSummaries(Summary{
+	summary, err := updateSnapshotSummaries(Summary{
 		Operation:  sp.op,
 		Properties: delta,
 	}, previousSummary)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	// Match Java's SnapshotProducer.summary precedence: environment context is
+	// applied after user properties and computed totals.
+	maps.Copy(summary.Properties, iceberg.EnvironmentContext())
+
+	return summary, nil
 }
 
 // removedFilePresence records which of a producer's to-be-removed delete files

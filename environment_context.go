@@ -41,8 +41,9 @@ var environmentContext = struct {
 }
 
 // EnvironmentContext returns an independent snapshot of the process-wide
-// context used to populate report metadata. The returned map may be modified
-// by the caller without changing the stored context.
+// context used to populate report metadata and persisted snapshot summaries.
+// The returned map may be modified by the caller without changing the stored
+// context.
 func EnvironmentContext() map[string]string {
 	environmentContext.mu.RLock()
 	defer environmentContext.mu.RUnlock()
