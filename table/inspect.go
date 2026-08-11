@@ -301,7 +301,12 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 		path.Append(manifest.FilePath())
 		length.Append(manifest.Length())
 		partitionSpecID.Append(manifest.PartitionSpecID())
-		addedSnapshotID.Append(manifest.SnapshotID())
+		snapshotID := manifest.SnapshotID()
+		if snapshotID == -1 {
+			addedSnapshotID.AppendNull()
+		} else {
+			addedSnapshotID.Append(snapshotID)
+		}
 		appendCount := func(builder *array.Int32Builder, name string, count int32) error {
 			if err := appendManifestCount(builder, manifest.Version(), name, count); err != nil {
 				return fmt.Errorf("manifest %s: %w", manifest.FilePath(), err)
@@ -328,6 +333,8 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			addedDataFiles.Append(0)
 			existingDataFiles.Append(0)
 			deletedDataFiles.Append(0)
+			// ManifestFile's data-file accessors expose the generic manifest-list
+			// file counts, which represent delete files for delete manifests.
 			if err := appendCount(addedDeleteFiles, "added_delete_files", manifest.AddedDataFiles()); err != nil {
 				return nil, err
 			}
@@ -339,18 +346,19 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			}
 		}
 
+		partitions := manifest.Partitions()
+		if partitions == nil {
+			partitionSummaries.Append(true)
+
+			continue
+		}
+
 		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
 		if spec == nil {
 			return nil, fmt.Errorf("manifest %s references missing partition spec %d",
 				manifest.FilePath(), manifest.PartitionSpecID())
 		}
 		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
-		partitions := manifest.Partitions()
-		if partitions == nil {
-			partitionSummaries.AppendNull()
-
-			continue
-		}
 		if len(partitions) > spec.NumFields() {
 			return nil, fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
 				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
@@ -369,10 +377,12 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 			fieldType := partType.FieldList[idx].Type
 			transform := spec.Field(idx).Transform
 			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
-				return nil, fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
+				return nil, fmt.Errorf("manifest %s partition field %q lower bound: %w",
+					manifest.FilePath(), partType.FieldList[idx].Name, err)
 			}
 			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
-				return nil, fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
+				return nil, fmt.Errorf("manifest %s partition field %q upper bound: %w",
+					manifest.FilePath(), partType.FieldList[idx].Name, err)
 			}
 		}
 	}
@@ -388,7 +398,9 @@ func (i InspectTable) Manifests(ctx context.Context) (array.RecordReader, error)
 func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
 	if count < 0 {
 		if version == 1 {
-			builder.AppendNull()
+			// V1 counts are optional. Normalize an absent count to zero so the
+			// metadata table's required count columns remain non-nullable.
+			builder.Append(0)
 
 			return nil
 		}
@@ -412,7 +424,7 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get file IO: %w", err)
 	}
 
 	return snapshot.Manifests(fs)
@@ -621,7 +633,7 @@ func ManifestsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 1, Name: "path", Type: iceberg.PrimitiveTypes.String, Required: true},
 		iceberg.NestedField{ID: 2, Name: "length", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "partition_spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
 		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
