@@ -288,6 +288,14 @@ func TestMapType(t *testing.T) {
 	assert.True(t, typ.Equals(&actual))
 }
 
+func TestMapTypeUnmarshalRequiresKey(t *testing.T) {
+	var typ iceberg.MapType
+	err := json.Unmarshal([]byte(`{"key-id": 1, "value-id": 2, "value": "string"}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'key' key")
+}
+
 var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Bool,
 	iceberg.PrimitiveTypes.Int32,
