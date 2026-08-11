@@ -802,13 +802,16 @@ func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata)
 	return nil
 }
 
+// latestSnapshotForBranch returns the head a write targeting branch is parented
+// on: a branch that does not exist yet resolves to nil here and falls back to
+// main's head so the first write to a new branch forks from main. The two must
+// stay in sync — the replay path uses this one, and a divergence would reparent
+// a retried snapshot somewhere its first attempt never pointed.
 func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	if branch == "" || branch == MainBranch {
 		return meta.CurrentSnapshot()
 	}
 
-	// A not-yet-created branch resolves to nil here and falls back to main's head so a new
-	// branch forks from main
 	if s := meta.SnapshotByName(branch); s != nil {
 		return s
 	}

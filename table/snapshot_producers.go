@@ -1339,13 +1339,23 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		}
 
 		// Derive the sequence number from the fresh table-wide last-sequence-number.
-		// Using freshParent.SequenceNumber + 1 would violate the spec when a
+		// Using freshParent.SequenceNumber + 1 alone would violate the spec when a
 		// concurrent writer on a different branch bumps last-sequence-number
 		// without advancing this branch's parent — MetadataBuilder.AddSnapshot
 		// rejects SequenceNumber <= lastSequenceNumber.
+		//
+		// When this snapshot is chained behind a sibling staged in the same
+		// transaction (e.g. an append followed by a delete), that sibling has
+		// already been rebuilt and is passed here as freshParent with
+		// SequenceNumber == lastSequenceNumber + 1. Taking the max keeps the
+		// chain strictly increasing so the sibling's own AddSnapshot is not
+		// rejected for a duplicate sequence number on apply.
 		var newSeq int64
 		if formatVersion >= 2 {
 			newSeq = freshMeta.LastSequenceNumber() + 1
+			if freshParent != nil && freshParent.SequenceNumber >= newSeq {
+				newSeq = freshParent.SequenceNumber + 1
+			}
 		}
 
 		var parentID *int64
@@ -1377,7 +1387,19 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			// Derive firstRowID from the fresh metadata so the manifest-list
 			// first-row-id field is consistent with the catalog's nextRowID
 			// after concurrent writers have advanced it since attempt 0.
+			//
+			// A sibling snapshot chained ahead of this one in the same
+			// transaction has already claimed the row-id range starting at
+			// freshMeta.NextRowID(); begin after it (freshParent.FirstRowID +
+			// freshParent.AddedRows) so the two ranges do not overlap. For an
+			// external peer parent this term never exceeds freshMeta.NextRowID(),
+			// so the max leaves the single-snapshot behavior unchanged.
 			firstRowID = freshMeta.NextRowID()
+			if freshParent != nil && freshParent.FirstRowID != nil && freshParent.AddedRows != nil {
+				if parentNext := *freshParent.FirstRowID + *freshParent.AddedRows; parentNext > firstRowID {
+					firstRowID = parentNext
+				}
+			}
 		}
 		addedRows, writeErr := writeManifestListFile(
 			fio,

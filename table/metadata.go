@@ -387,11 +387,14 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
-// currentSnapshotForRef resolves the parent for createSnapshotProducer and mergeOverwrite.
-// An unknown branch falls back to currentSnapshot() so a new
-// branch forks from main — the opposite of currentSnapshotIDForRef,
-// which must return nil there so AssertRefSnapshotID can prove the branch is absent;
-// never derive one from the other. A present-but-dangling ref also yields nil.
+// currentSnapshotForRef returns the snapshot a write targeting ref must be
+// parented on (createSnapshotProducer and mergeOverwrite). An unknown branch
+// falls back to currentSnapshot() so a new branch forks from main — the
+// opposite of currentSnapshotIDForRef, which must return nil there so
+// AssertRefSnapshotID can prove the branch is absent; never derive one from the
+// other. A ref cannot outlive its snapshot: SetSnapshotRef rejects unknown
+// snapshot ids and checkRefsExist rejects loaded metadata whose ref dangles, so
+// the lookup below cannot turn a dangling ref into a parentless write.
 func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 	if ref == "" || ref == MainBranch {
 		return b.currentSnapshot()
@@ -407,11 +410,12 @@ func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
 	return s
 }
 
-// currentSnapshotIDForRef returns the commit's AssertRefSnapshotID id (its only caller).
-// An unknown branch returns nil so the requirement proves the branch is absent —
-// unlike currentSnapshotForRef, whose parent lookup falls back to main's head
-// so a new branch can fork from it;
-// the two must not be conflated or new-branch creates get a false OCC rejection.
+// currentSnapshotIDForRef returns the id for the commit's AssertRefSnapshotID
+// requirement (its only caller). An unknown branch returns nil so the
+// requirement asserts the branch is absent — unlike currentSnapshotForRef,
+// whose parent lookup falls back to main's head so a new branch can fork from
+// it. Conflating the two makes every new-branch write assert main's head and
+// fail optimistic concurrency against a branch that does not exist yet.
 func (b *MetadataBuilder) currentSnapshotIDForRef(ref string) *int64 {
 	if ref == "" || ref == MainBranch {
 		return b.currentSnapshotID

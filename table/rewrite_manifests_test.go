@@ -241,6 +241,64 @@ func TestRewriteManifestsNoSnapshot(t *testing.T) {
 		"a missing snapshot must be distinguishable from an already-optimal layout")
 }
 
+// TestRewriteManifestsOnBranchOnlyTable pins the head lookup to the target
+// branch. The manifests the rewrite actually reads come from the producer's
+// parent snapshot (the branch head), so a main-only no-op check reported
+// NoOpNoSnapshot — and silently skipped the rewrite — on a table whose writes
+// all went to a branch and whose main has no head of its own.
+func TestRewriteManifestsOnBranchOnlyTable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fs := iceio.LocalFS{}
+
+	// Merge disabled, so each append leaves its own manifest behind.
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, iceberg.Properties{
+			table.ManifestMergeEnabledKey: "false",
+		})
+	require.NoError(t, err)
+
+	cat := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "branch_only"}, meta, dir+"/metadata/00000.json",
+		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+	const numData = 3
+	for i := range numData {
+		filePath := fmt.Sprintf("%s/branch-%d.parquet", dir, i)
+		writeOneRowParquet(t, fs, filePath)
+
+		txn := tbl.NewTransactionOnBranch("feature")
+		require.NoError(t, txn.AddFiles(ctx, []string{filePath}, nil, false))
+		tbl, err = txn.Commit(ctx)
+		require.NoError(t, err)
+	}
+
+	require.Nil(t, tbl.CurrentSnapshot(), "fixture must leave main without a head")
+	head := tbl.SnapshotByName("feature")
+	require.NotNil(t, head)
+	before, err := head.Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, before, numData)
+
+	txn := tbl.NewTransactionOnBranch("feature")
+	res, err := txn.RewriteManifests(ctx)
+	require.NoError(t, err)
+	require.False(t, res.IsNoOp(),
+		"the branch has %d manifests to merge; a main-only head check reports NoOpNoSnapshot", numData)
+	assert.Len(t, res.RewrittenManifests, numData)
+
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	rewritten := tbl.SnapshotByName("feature")
+	require.NotNil(t, rewritten)
+	after, err := rewritten.Manifests(fs)
+	require.NoError(t, err)
+	assert.Len(t, after, 1, "the branch's manifests must merge into one")
+	assert.Equal(t, numData, activeFiles(t, after), "rewrite must preserve the data file count")
+	assert.Nil(t, tbl.CurrentSnapshot(), "rewriting a branch must not create a main head")
+}
+
 // TestRewriteManifestsAlreadyOptimal is a no-op when a single data manifest
 // already holds everything: there is nothing to merge, so the rewrite writes no
 // manifest list, stages nothing, and a following Commit leaves the snapshot

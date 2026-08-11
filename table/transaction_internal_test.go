@@ -290,6 +290,263 @@ func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
 		"a new branch must inherit main's data even when the commit retries and rebuilds")
 }
 
+// TestBranchRetryParentsOnPeerAdvancedBranchHead covers the retry path that
+// TestBranchCreateForksFromMainHeadAcrossRetry does not: the target branch
+// already exists and a concurrent peer advances THAT branch (not main)
+// between attempts. On retry latestSnapshotForBranch must resolve the branch's
+// own fresh head via SnapshotByName and reparent the staged snapshot onto it,
+// rather than falling back to main's head.
+func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	// Seed main -> S0.
+	seedTbl := New(ident, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil }, nil)
+	seedTxn := seedTbl.NewTransaction()
+	seedSp := newFastAppendFilesProducer(OpAppend, seedTxn, wfs, nil, nil)
+	seedSp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/seed.parquet", nil))
+	upS, rqS, err := seedSp.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, seedTxn.apply(upS, rqS))
+	baseMeta, err := seedTxn.meta.Build()
+	require.NoError(t, err)
+	s0 := baseMeta.CurrentSnapshot().SnapshotID
+
+	// Create a "feature" branch pointing at S0 (same head as main for now).
+	fb, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, fb.SetSnapshotRef("feature", s0, BranchRef))
+	baseMeta, err = fb.Build()
+	require.NoError(t, err)
+
+	// A concurrent peer advances the FEATURE branch (not main) between attempts.
+	cat := &progressingRebuildCatalog{
+		metadata:  baseMeta,
+		wfs:       wfs,
+		location:  "mem://default/table-location",
+		branch:    "feature",
+		failTimes: 1, // 1 conflict (peer graft) + 1 success
+	}
+	tbl := New(ident, baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, wfs, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	_, err = txnFeat.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), cat.commitTableCalls.Load(),
+		"commit must fail once (peer advances feature) then succeed on retry")
+
+	// graftPeer assigns the peer feature head id 9000 + peerCount(1) = 9001.
+	const peerFeatureHead = int64(9_001)
+	committed := cat.committedSnapshot
+	require.NotNil(t, committed)
+	require.NotNil(t, committed.ParentSnapshotID)
+	require.Equal(t, peerFeatureHead, *committed.ParentSnapshotID,
+		"retry must reparent onto the peer-advanced feature head, not main")
+	require.NotEqual(t, s0, *committed.ParentSnapshotID,
+		"a fallback to main's head would (wrongly) parent on S0")
+}
+
+// TestBranchCommitRejectsNameThatBecomesATagOnRetry covers the absent-branch to
+// tag race. "feature" does not exist when the transaction is constructed, so
+// the ref-type guard in NewTransactionOnBranchWithError has nothing to reject
+// and the commit carries an "assert this ref is absent" requirement
+// (currentSnapshotIDForRef returns nil for an unknown branch). If a peer
+// creates that name as a TAG before the retry, the replay must fail: without
+// the check, commitManifests emits a BranchRef update that would advance the
+// tag onto a new snapshot and strip its immutability.
+func TestBranchCommitRejectsNameThatBecomesATagOnRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// The peer's view: same table, "feature" created as a TAG.
+	tagBuilder, err := MetadataBuilderFromBase(mainMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.SetSnapshotRef("feature", mainHead, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	// The table's base is mainMeta (feature absent), while the catalog serves
+	// the post-race tagMeta on refresh: attempt 0 fails with a retryable
+	// conflict, and the retry reloads the tag before the replay runs.
+	cat := &flakyCatalog{metadata: tagMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err, "the name is still absent here, so construction cannot reject it")
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	requireContainsRefSnapshotRequirement(t, rqF, "feature", nil)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	_, err = txnFeat.Commit(ctx)
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load(),
+		"the replay must be rejected before a second CommitTable call")
+
+	var featureRef SnapshotRef
+	for name, ref := range tagMeta.Refs() {
+		if name == "feature" {
+			featureRef = ref
+		}
+	}
+	require.Equal(t, TagRef, featureRef.SnapshotRefType, "the tag must not be converted into a branch")
+	require.Equal(t, mainHead, featureRef.SnapshotID, "the tag must not advance")
+}
+
+// TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics pins the branch-aware
+// lookup in mergeOverwrite. A table whose only writes went to a branch has a
+// branch head but no main head, so the old currentSnapshot() lookup returned
+// nil and silently downgraded an overwrite to an append: the branch's existing
+// files were never marked deleted.
+func TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// The first write on a fresh table goes to "feature": the branch gets a
+	// head while main has none — the state that separates the two lookups.
+	txn.branch = "feature"
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+	up, rq, err := sp.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(up, rq))
+	branchOnlyMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Nil(t, branchOnlyMeta.CurrentSnapshot(), "fixture must leave main empty")
+	require.NotNil(t, branchOnlyMeta.SnapshotByName("feature"))
+
+	t.Run("branch with a head overwrites", func(t *testing.T) {
+		tbl := New(ident, branchOnlyMeta, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+		txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		prod := txnFeat.updateSnapshot(memIO, nil, OpOverwrite).mergeOverwrite(nil, nil)
+		prod.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+		ups, _, err := prod.commit(ctx)
+		require.NoError(t, err)
+		add, ok := ups[0].(*addSnapshotUpdate)
+		require.True(t, ok)
+		require.NotNil(t, add.Snapshot.Summary)
+		require.Equal(t, OpOverwrite, add.Snapshot.Summary.Operation,
+			"the branch has files to overwrite, so the operation must stay an overwrite")
+	})
+
+	t.Run("branch with no head still degrades to append", func(t *testing.T) {
+		emptyTxn, emptyIO := createTestTransactionWithMemIO(t, spec)
+		emptyTxn.branch = "feature"
+
+		prod := emptyTxn.updateSnapshot(emptyIO, nil, OpOverwrite).mergeOverwrite(nil, nil)
+		prod.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+		ups, _, err := prod.commit(ctx)
+		require.NoError(t, err)
+		add, ok := ups[0].(*addSnapshotUpdate)
+		require.True(t, ok)
+		require.NotNil(t, add.Snapshot.Summary)
+		require.Equal(t, OpAppend, add.Snapshot.Summary.Operation,
+			"an overwrite with nothing to overwrite must still be recorded as an append")
+	})
+}
+
+// TestBranchMultipleStagedSnapshotsChainOnRetry is the branch counterpart of
+// OCCScenarioTestSuite.TestMultipleStagedSnapshotsChainOnRetry: it combines the
+// two fixes. Two snapshots are staged on a not-yet-created branch (both fork
+// from main's head) and a forced retry replays them. The replay must keep them
+// chained A1 <- A2; rebuilding both against the same fresh head makes them
+// siblings, and the branch ref then advances only to A2, dropping A1's file.
+func TestBranchMultipleStagedSnapshotsChainOnRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+
+	// A1 forks from main's head; A2 is staged on top of A1.
+	sp1 := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+	up1, rq1, err := sp1.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(up1, rq1))
+
+	sp2 := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+	up2, rq2, err := sp2.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(up2, rq2))
+
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err,
+		"both staged snapshots must survive the retry; siblings share a sequence number and AddSnapshot rejects the second")
+	require.Equal(t, int32(2), cat.attempts.Load(), "commit must fail once then succeed on retry")
+
+	head := committed.Metadata().SnapshotByName("feature")
+	require.NotNil(t, head)
+	require.NotNil(t, head.ParentSnapshotID, "the branch head (A2) must have a parent")
+	a1 := committed.Metadata().SnapshotByID(*head.ParentSnapshotID)
+	require.NotNil(t, a1, "A2's parent (A1) must stay reachable, not be orphaned by a sibling rebuild")
+	require.NotNil(t, a1.ParentSnapshotID)
+	require.Equal(t, mainHead, *a1.ParentSnapshotID, "A1 must fork from main's head")
+	require.Greater(t, head.SequenceNumber, a1.SequenceNumber,
+		"the chained snapshot must have a strictly greater sequence number")
+
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature-1.parquet", "file://feature-2.parquet"},
+		liveDataFilePathsForSnapshot(t, head, memIO),
+		"the branch head must inherit main's file plus both staged files")
+}
+
 func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 	now := time.Now().UnixMilli()
