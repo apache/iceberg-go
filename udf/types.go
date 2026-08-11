@@ -18,13 +18,12 @@
 package udf
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"unicode"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 )

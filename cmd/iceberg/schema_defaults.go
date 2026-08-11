@@ -18,11 +18,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/pterm/pterm"

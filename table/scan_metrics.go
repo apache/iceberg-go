@@ -18,11 +18,10 @@
 package table
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/metrics"

@@ -20,14 +20,13 @@ package puffin
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
 	"sort"
-
-	"github.com/goccy/go-json"
 )
 
 // ReaderAtSeeker combines io.ReaderAt and io.Seeker for reading Puffin files.

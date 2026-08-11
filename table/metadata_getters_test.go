@@ -18,10 +18,9 @@
 package table
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"

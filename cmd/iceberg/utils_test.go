@@ -19,12 +19,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"

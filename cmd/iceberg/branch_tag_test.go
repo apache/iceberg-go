@@ -20,12 +20,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strconv"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/table"

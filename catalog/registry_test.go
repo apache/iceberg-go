@@ -19,6 +19,7 @@ package catalog_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,7 +30,6 @@ import (
 	_ "github.com/apache/iceberg-go/catalog/glue"
 	"github.com/apache/iceberg-go/catalog/rest"
 	"github.com/apache/iceberg-go/config"
-	"github.com/goccy/go-json"
 	"github.com/stretchr/testify/assert"
 )
 

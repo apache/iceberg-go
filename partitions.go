@@ -18,14 +18,13 @@
 package iceberg
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
 	"net/url"
 	"slices"
 	"strings"
-
-	"github.com/goccy/go-json"
 )
 
 const (

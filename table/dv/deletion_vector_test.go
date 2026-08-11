@@ -20,13 +20,12 @@ package dv
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"

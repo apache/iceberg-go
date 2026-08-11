@@ -17,7 +17,7 @@
 
 package metrics
 
-import "github.com/goccy/go-json"
+import "encoding/json"
 
 // alwaysTrueFilter is the structured Expression emitted for ScanReport.filter
 // when no filter is set. Iceberg serializes the always-true expression as the

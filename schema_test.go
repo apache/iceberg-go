@@ -18,13 +18,14 @@
 package iceberg_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
-	"github.com/goccy/go-json"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

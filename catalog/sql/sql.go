@@ -20,6 +20,7 @@ package sql
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -30,8 +31,6 @@ import (
 	"sync"
 	"time"
 	_ "unsafe"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"

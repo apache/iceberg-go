@@ -18,12 +18,11 @@
 package view
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"

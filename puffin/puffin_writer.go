@@ -18,6 +18,7 @@ package puffin
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,8 +26,6 @@ import (
 	"math"
 	"slices"
 	"strconv"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 )

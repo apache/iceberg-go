@@ -20,6 +20,7 @@ package table
 import (
 	"cmp"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,8 +30,6 @@ import (
 	"slices"
 	"strconv"
 	"time"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"

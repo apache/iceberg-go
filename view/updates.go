@@ -18,9 +18,8 @@
 package view
 
 import (
+	"encoding/json"
 	"fmt"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
