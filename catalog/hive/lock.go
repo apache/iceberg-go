@@ -222,11 +222,11 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	}
 
 	// Everything below this point is unreachable under the default configuration.
-	// lock-check-min-wait-time=100ms, lock-check-max-wait-time=1m and
-	// lock-check-retries=4 top the sequence out at 337.5ms, so it never saturates and
-	// the branch above always wins. Getting here needs a lowered maximum or a raised
-	// retry count. Stated plainly because this is the most intricate part of the
-	// helper and the least exercised in practice.
+	// iceberg.hive.lock-check-min-wait-ms=50, iceberg.hive.lock-check-max-wait-ms=5000
+	// and lock-check-retries=4 top the sequence out at 168.75ms (50×1.5³), so it never
+	// saturates and the branch above always wins. Getting here needs a lowered
+	// maximum or a raised retry count. Stated plainly because this is the most
+	// intricate part of the helper and the least exercised in practice.
 	//
 	// Replay the 1.5× backoff sequence and keep the largest interval that still
 	// fitted under the cap. The guard on scheduled keeps a non-positive or
@@ -239,9 +239,9 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	// than the one before it.
 	//
 	// minWait is applied before the replay rather than relying on it. When minWait
-	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
-	// configuration, so leaving the floor at d/scale there would allow a wait below
-	// the configured minimum.
+	// is itself >= maxWait the loop cannot run at all. ApplyProperties ignores that
+	// configuration, but direct callers can still pass it, so leaving the floor at
+	// d/scale there would allow a wait below the configured minimum.
 	floor := max(minWait, time.Duration(float64(d)/lockCheckBackoffScale))
 	for scheduled := float64(minWait); scheduled > 0 && scheduled < float64(maxWait); {
 		if s := time.Duration(scheduled); s > floor {
