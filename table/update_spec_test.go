@@ -695,7 +695,7 @@ func TestUpdateSpecReuseSameUpdate(t *testing.T) {
 		specUpdate := table.NewUpdateSpec(testPartitionedTable.NewTransaction(), false)
 		_, _, err := specUpdate.
 			RemoveField("id_identity").
-			AddField("id", iceberg.IdentityTransform{}, ""). // reuse -> 1000
+			AddField("id", iceberg.IdentityTransform{}, "").                      // reuse -> 1000
 			AddField("address.zip_code", iceberg.IdentityTransform{}, "zip_new"). // new -> 1002
 			BuildUpdates()
 		require.NoError(t, err)
