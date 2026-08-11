@@ -105,20 +105,13 @@ func (i InspectTable) manifestEntryReader(
 			batch := bldr.NewRecordBatch()
 			rows = 0
 			emitted = true
-			if yield(batch, nil) {
-				return true
-			}
 
-			batch.Release()
-
-			return false
+			return yield(batch, nil)
 		}
 		emitEmpty := func() {
 			batch := bldr.NewRecordBatch()
 			emitted = true
-			if !yield(batch, nil) {
-				batch.Release()
-			}
+			_ = yield(batch, nil)
 		}
 		yieldError := func(err error) {
 			_ = yield(nil, err)
@@ -171,9 +164,7 @@ func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.
 		defer bldr.Release()
 
 		batch := bldr.NewRecordBatch()
-		if !yield(batch, nil) {
-			batch.Release()
-		}
+		_ = yield(batch, nil)
 	}
 }
 
