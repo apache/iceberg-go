@@ -42,6 +42,8 @@ import (
 	"github.com/apache/iceberg-go/table"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	// The default CLI binary only compiles in sqliteshim. Other database/sql
+	// drivers (postgres, mysql, mssql, oracle) require a custom build.
 	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
@@ -202,7 +204,7 @@ type Args struct {
 	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
 	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
-	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql)"`
+	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql; dynamodb recognized but not implemented)"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
 	URI         string `arg:"--uri" help:"catalog URI"`
 	Output      string `arg:"--output" default:"text" help:"output type (json/text)"`
@@ -212,8 +214,8 @@ type Args struct {
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
 	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
-	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; e.g. sqliteshim)"`
-	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog: postgres, mysql, sqlite, mssql, oracle)"`
+	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; default binary includes sqliteshim only)"`
+	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog; default binary includes sqlite via sqliteshim; other dialects need a custom build with their drivers)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -292,6 +294,13 @@ func main() {
 			output.Error(err)
 			os.Exit(1)
 		}
+	}
+
+	// Reject known-but-unimplemented catalog types through the same output path
+	// as other user-facing errors (respects --output).
+	if catalog.Type(strings.ToLower(args.Catalog)) == catalog.DynamoDB {
+		output.Error(errors.New("dynamodb catalog is not implemented"))
+		os.Exit(1)
 	}
 
 	cat := initCatalog(ctx, args)
@@ -427,12 +436,15 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.SQL:
-		// Always set uri/warehouse keys (even when empty) so catalog.Load does not
-		// fill them from EnvConfig for a differently typed catalog of the same name.
+		// Always set uri/warehouse/credential keys (even when empty) so
+		// catalog.Load does not fill them from EnvConfig for a differently typed
+		// catalog of the same name. mergeConf populates these from the config
+		// file before initCatalog runs when the flags were omitted.
 		props := iceberg.Properties{
-			"type":      string(catalog.SQL),
-			"uri":       args.URI,
-			"warehouse": args.Warehouse,
+			"type":       string(catalog.SQL),
+			"uri":        args.URI,
+			"warehouse":  args.Warehouse,
+			"credential": args.Credential,
 		}
 		if len(args.SQLDriver) > 0 {
 			props[sqlcat.DriverKey] = args.SQLDriver
@@ -444,8 +456,6 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		if cat, err = catalog.Load(ctx, args.CatalogName, props); err != nil {
 			log.Fatal(err)
 		}
-	case catalog.DynamoDB:
-		log.Fatal("dynamodb catalog is not implemented")
 	default:
 		log.Fatal("unrecognized catalog type")
 	}

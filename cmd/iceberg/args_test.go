@@ -534,6 +534,19 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 			},
 		},
 		{
+			// Missing --sql-driver must reach the SQL registrar (catalog.Load),
+			// not fail as an unrecognized catalog type.
+			name: "sql without sql-driver reaches registrar",
+			args: []string{
+				"list", "--catalog", "sql",
+				"--uri", sqlURI,
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+			wantErr:      true,
+			wantContains: "must provide driver",
+		},
+		{
 			name:         "dynamodb is recognized but not implemented",
 			args:         []string{"list", "--catalog", "dynamodb"},
 			wantErr:      true,
@@ -583,20 +596,42 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 
 func TestMergeConfSQLOptions(t *testing.T) {
 	fileCfg := &config.CatalogConfig{
-		SQLDriver:  "sqliteshim",
-		SQLDialect: "sqlite",
+		CatalogType: "sql",
+		URI:         "file:from-config.db",
+		Warehouse:   "file:///tmp/from-config-wh",
+		Credential:  "config-credential",
+		SQLDriver:   "sqliteshim",
+		SQLDialect:  "sqlite",
 	}
 
 	t.Run("file values applied when flags absent", func(t *testing.T) {
 		var a Args
 		mergeConf(fileCfg, &a, map[string]bool{})
+		assert.Equal(t, "sql", a.Catalog)
+		assert.Equal(t, "file:from-config.db", a.URI)
+		assert.Equal(t, "file:///tmp/from-config-wh", a.Warehouse)
+		assert.Equal(t, "config-credential", a.Credential)
 		assert.Equal(t, "sqliteshim", a.SQLDriver)
 		assert.Equal(t, "sqlite", a.SQLDialect)
 	})
 
 	t.Run("explicit flags win over file", func(t *testing.T) {
-		a := Args{SQLDriver: "mysql", SQLDialect: "mysql"}
-		mergeConf(fileCfg, &a, map[string]bool{"sql-driver": true, "sql-dialect": true})
+		a := Args{
+			Catalog:    "rest",
+			URI:        "file:cli.db",
+			Warehouse:  "file:///tmp/cli-wh",
+			Credential: "cli-credential",
+			SQLDriver:  "mysql",
+			SQLDialect: "mysql",
+		}
+		mergeConf(fileCfg, &a, map[string]bool{
+			"catalog": true, "uri": true, "warehouse": true, "credential": true,
+			"sql-driver": true, "sql-dialect": true,
+		})
+		assert.Equal(t, "rest", a.Catalog)
+		assert.Equal(t, "file:cli.db", a.URI)
+		assert.Equal(t, "file:///tmp/cli-wh", a.Warehouse)
+		assert.Equal(t, "cli-credential", a.Credential)
 		assert.Equal(t, "mysql", a.SQLDriver)
 		assert.Equal(t, "mysql", a.SQLDialect)
 	})

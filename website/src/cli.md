@@ -53,8 +53,8 @@ Catalog connection flags are global and apply to every subcommand:
 | `--catalog-name` | Catalog name to load from config file (default `default`) |
 | `--config` | Path to a config file |
 | `--aws-profile` | AWS named profile to use (Glue catalog); overrides `aws-profile` in the config file |
-| `--sql-driver` | `database/sql` driver name for the SQL catalog (e.g. `sqliteshim`) |
-| `--sql-dialect` | SQL dialect for the SQL catalog: `postgres`, `mysql`, `sqlite`, `mssql`, `oracle` |
+| `--sql-driver` | `database/sql` driver name for the SQL catalog. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
+| `--sql-dialect` | SQL dialect for the SQL catalog. The SQL catalog library supports `postgres`, `mysql`, `sqlite`, `mssql`, and `oracle`, but the default CLI binary only ships the `sqlite` dialect via `sqliteshim`. Other dialects need a custom build that blank-imports their `database/sql` drivers. |
 
 To avoid passing flags every time, define a config file at `~/.iceberg-go.yaml`:
 ```yaml
