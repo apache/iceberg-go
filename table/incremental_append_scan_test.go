@@ -25,22 +25,23 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/stretchr/testify/require"
 )
 
 func TestIncrementalAppendScanSnapshotBoundaries(t *testing.T) {
-	scan := snapshotsTestTable().NewIncrementalAppendScan()
-	inclusive := scan.FromSnapshotInclusive(101).ToSnapshot(102)
+	scan := incrementalAppendMixedOperationTable(t).NewIncrementalAppendScan()
+	inclusive := scan.FromSnapshotInclusive(1).ToSnapshot(2)
 
-	snapshots, err := inclusive.snapshotsBetween(102)
+	snapshots, err := inclusive.snapshotsBetween(2)
 	require.NoError(t, err)
 	require.Len(t, snapshots, 1)
-	require.EqualValues(t, 101, snapshots[0].SnapshotID)
+	require.EqualValues(t, 1, snapshots[0].SnapshotID)
 
-	exclusive := scan.FromSnapshotExclusive(101).ToSnapshot(102)
-	snapshots, err = exclusive.snapshotsBetween(102)
+	exclusive := scan.FromSnapshotExclusive(1).ToSnapshot(2)
+	snapshots, err = exclusive.snapshotsBetween(2)
 	require.NoError(t, err)
-	require.Empty(t, snapshots, "the only snapshot after 101 is not an append")
+	require.Empty(t, snapshots, "the only snapshot after 1 is not an append")
 }
 
 func TestIncrementalAppendScanRejectsUnknownStart(t *testing.T) {
@@ -75,6 +76,42 @@ func TestIncrementalAppendScanEqualBoundaries(t *testing.T) {
 	_, err = exclusive.PlanFiles(context.Background())
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	require.ErrorContains(t, err, "must be a parent ancestor")
+}
+
+func TestIncrementalAppendScanRejectsMissingSnapshotOperation(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary *Summary
+	}{
+		{name: "missing summary"},
+		{name: "empty summary", summary: &Summary{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := incrementalAppendTestTable(t)
+			setIncrementalSnapshotSummary(t, tbl, 1, tt.summary)
+
+			_, err := tbl.NewIncrementalAppendScan().
+				FromSnapshotInclusive(1).
+				ToSnapshot(1).
+				PlanFiles(context.Background())
+			require.ErrorIs(t, err, ErrMissingOperation)
+			require.ErrorContains(t, err, "cannot determine operation for snapshot 1")
+		})
+	}
+}
+
+func TestIncrementalAppendScanRejectsInvalidSnapshotOperation(t *testing.T) {
+	tbl := incrementalAppendTestTable(t)
+	setIncrementalSnapshotSummary(t, tbl, 1, &Summary{Operation: Operation("unknown")})
+
+	_, err := tbl.NewIncrementalAppendScan().
+		FromSnapshotInclusive(1).
+		ToSnapshot(1).
+		PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	require.ErrorContains(t, err, `snapshot 1 has operation "unknown"`)
 }
 
 func TestIncrementalAppendScanRejectsUnsupportedPlanningModes(t *testing.T) {
@@ -129,6 +166,28 @@ func TestIncrementalAppendScanSkipsOverwriteSnapshots(t *testing.T) {
 	require.Len(t, tasks, 2)
 	require.Equal(t, "mem://default/mixed/data-a.parquet", tasks[0].File.FilePath())
 	require.Equal(t, "mem://default/mixed/data-c.parquet", tasks[1].File.FilePath())
+}
+
+func TestIncrementalAppendScanEmitsScanReport(t *testing.T) {
+	reporter := &metrics.InMemoryReporter{}
+	tbl := incrementalAppendTestTable(t)
+
+	tasks, err := tbl.NewIncrementalAppendScan(
+		WithSelectedFields("id"),
+		WithReporter(reporter),
+	).ToSnapshot(2).PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	reports := reporter.Reports()
+	require.Len(t, reports, 1)
+	report, ok := reports[0].(metrics.ScanReport)
+	require.True(t, ok)
+	require.Equal(t, int64(2), report.SnapshotID)
+	require.Equal(t, []string{"id"}, report.ProjectedFieldNames)
+	require.Equal(t, int64(2), report.Metrics.ResultDataFiles.Value)
+	require.Equal(t, int64(2), report.Metrics.TotalDataManifests.Value)
+	require.Equal(t, int64(2), report.Metrics.ScannedDataManifests.Value)
 }
 
 func TestIncrementalAppendScanHonorsSnapshotOptions(t *testing.T) {
@@ -327,6 +386,22 @@ func incrementalAppendTestTable(t *testing.T) *Table {
 	return New(Identifier{"incremental"}, meta, "metadata.json", func(context.Context) (iceio.IO, error) {
 		return fs, nil
 	}, nil)
+}
+
+func setIncrementalSnapshotSummary(t *testing.T, tbl *Table, snapshotID int64, summary *Summary) {
+	t.Helper()
+	builder, err := MetadataBuilderFromBase(tbl.metadata, "")
+	require.NoError(t, err)
+	for i := range builder.snapshotList {
+		if builder.snapshotList[i].SnapshotID == snapshotID {
+			builder.snapshotList[i].Summary = summary
+			tbl.metadata, err = builder.Build()
+			require.NoError(t, err)
+
+			return
+		}
+	}
+	require.Failf(t, "snapshot not found", "snapshot %d", snapshotID)
 }
 
 func incrementalAppendMixedOperationTable(t *testing.T) *Table {

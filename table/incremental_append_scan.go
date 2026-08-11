@@ -23,13 +23,18 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/metrics"
 )
 
 // IncrementalAppendScan plans data files added by append snapshots between a
 // starting snapshot and an ending snapshot. It follows one snapshot ancestry
-// chain and never returns files inherited from an earlier snapshot.
+// chain and never returns files inherited from an earlier snapshot. Every
+// selected snapshot must identify a recognized operation; planning fails with
+// [ErrMissingOperation] or [ErrInvalidOperation] rather than silently omitting
+// snapshots whose operation cannot be determined.
 type IncrementalAppendScan struct {
 	scan           *Scan
 	fromSnapshotID *int64
@@ -37,11 +42,13 @@ type IncrementalAppendScan struct {
 	toSnapshotID   *int64
 }
 
-// NewIncrementalAppendScan creates an incremental append scan. Scan options
-// configure the underlying table scan and are retained for callers that pass
-// snapshot, projection, filter, or concurrency options before planning.
-// Auto planning falls back to local planning. Remote planning returns
-// ErrInvalidOperation until incremental remote planning is implemented.
+// NewIncrementalAppendScan creates an incremental append file planner.
+// Planning-related ScanOptions configure snapshot selection, filtering, case
+// sensitivity, concurrency, planning mode, and reporting. Projection and row
+// limits are not applied to the returned file tasks; callers can read planned
+// tasks with a separately configured [Scan.ReadTasks]. Auto planning falls back
+// to local planning. Remote planning returns ErrInvalidOperation until
+// incremental remote planning is implemented.
 func (t Table) NewIncrementalAppendScan(opts ...ScanOption) *IncrementalAppendScan {
 	return &IncrementalAppendScan{scan: t.Scan(opts...)}
 }
@@ -57,7 +64,7 @@ func (s *IncrementalAppendScan) FromSnapshotInclusive(snapshotID int64) *Increme
 }
 
 // FromSnapshotExclusive starts after the given snapshot. The starting
-// snapshot must be an ancestor of the ending snapshot when planning.
+// snapshot must be a parent ancestor of the ending snapshot when planning.
 func (s *IncrementalAppendScan) FromSnapshotExclusive(snapshotID int64) *IncrementalAppendScan {
 	out := *s
 	out.fromSnapshotID = &snapshotID
@@ -75,7 +82,8 @@ func (s *IncrementalAppendScan) ToSnapshot(snapshotID int64) *IncrementalAppendS
 	return &out
 }
 
-// PlanFiles returns one task per newly added data file. Delete files are not
+// PlanFiles returns one task per newly added data file and emits a ScanReport
+// through the configured reporter on successful planning. Delete files are not
 // applied because appended files are not present before the append snapshot.
 func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	switch s.scan.planningMode {
@@ -85,6 +93,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	default:
 		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, s.scan.planningMode)
 	}
+	start := time.Now()
 
 	toSnapshot, err := s.toSnapshot()
 	if err != nil {
@@ -99,12 +108,44 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		return nil, nil
 	}
 
+	planningScan := *s.scan
+	planningScan.identifier = slices.Clone(s.scan.identifier)
+	planningScan.selectedFields = slices.Clone(s.scan.selectedFields)
+	planningScan.options = maps.Clone(s.scan.options)
+	if s.toSnapshotID != nil {
+		// An explicit end snapshot is a historical scan and must use that
+		// snapshot's schema. An implicit current end remains a live scan so a
+		// schema-only metadata update is visible during pruning.
+		planningScan.snapshotID = &toSnapshot.SnapshotID
+		planningScan.asOfTimestamp = nil
+	}
+	schema, err := planningScan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+	var acc scanMetricsAccumulator
+	finish := func(tasks []FileScanTask) ([]FileScanTask, error) {
+		acc.resultDataFiles = int64(len(tasks))
+		for _, task := range tasks {
+			acc.totalFileSize += task.File.FileSizeBytes()
+		}
+		acc.applyResultDeleteMetrics(tasks)
+		planningDuration := time.Since(start)
+
+		if rep := planningScan.Reporter(); !metrics.IsNop(rep) {
+			projected, _ := planningScan.Projection()
+			safeReport(ctx, rep, planningScan.buildScanReport(&acc, schema, projected, planningDuration))
+		}
+
+		return tasks, nil
+	}
+
 	snapshots, err := s.snapshotsBetween(toSnapshot.SnapshotID)
 	if err != nil {
 		return nil, err
 	}
 	if len(snapshots) == 0 {
-		return nil, nil
+		return finish(nil)
 	}
 	appendSnapshots := make(map[int64]struct{}, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -152,27 +193,12 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		manifestList = append(manifestList, manifestsByPath[path])
 	}
 
-	planningScan := *s.scan
-	planningScan.identifier = slices.Clone(s.scan.identifier)
-	planningScan.selectedFields = slices.Clone(s.scan.selectedFields)
-	planningScan.options = maps.Clone(s.scan.options)
-	if s.toSnapshotID != nil {
-		// An explicit end snapshot is a historical scan and must use that
-		// snapshot's schema. An implicit current end remains a live scan so a
-		// schema-only metadata update is visible during pruning.
-		planningScan.snapshotID = &toSnapshot.SnapshotID
-		planningScan.asOfTimestamp = nil
-	}
-	schema, err := planningScan.effectiveSchema()
-	if err != nil {
-		return nil, err
-	}
-	manifestList, err = planningScan.filterManifestsWithSchema(manifestList, schema, &scanMetricsAccumulator{})
+	manifestList, err = planningScan.filterManifestsWithSchema(manifestList, schema, &acc)
 	if err != nil {
 		return nil, err
 	}
 	if len(manifestList) == 0 {
-		return nil, nil
+		return finish(nil)
 	}
 	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
@@ -200,7 +226,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		return cmp.Compare(left.File.FilePath(), right.File.FilePath())
 	})
 
-	return tasks, nil
+	return finish(tasks)
 }
 
 func (s *IncrementalAppendScan) toSnapshot() (*Snapshot, error) {
@@ -225,7 +251,7 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 	if s.fromSnapshotID == nil {
 		slices.Reverse(ancestors)
 
-		return appendOnlySnapshots(ancestors), nil
+		return appendOnlySnapshots(ancestors)
 	}
 
 	fromID := *s.fromSnapshotID
@@ -240,7 +266,7 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 		}
 		slices.Reverse(between)
 
-		return appendOnlySnapshots(between), nil
+		return appendOnlySnapshots(between)
 	}
 
 	if s.scan.metadata.SnapshotByID(fromID) == nil {
@@ -258,16 +284,26 @@ func (s *IncrementalAppendScan) snapshotsBetween(toSnapshotID int64) ([]Snapshot
 	}
 	slices.Reverse(selected)
 
-	return appendOnlySnapshots(selected), nil
+	return appendOnlySnapshots(selected)
 }
 
-func appendOnlySnapshots(snapshots []Snapshot) []Snapshot {
+func appendOnlySnapshots(snapshots []Snapshot) ([]Snapshot, error) {
 	result := make([]Snapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		if snapshot.Summary != nil && snapshot.Summary.Operation == OpAppend {
+		if snapshot.Summary == nil || snapshot.Summary.Operation == "" {
+			return nil, fmt.Errorf("%w: cannot determine operation for snapshot %d",
+				ErrMissingOperation, snapshot.SnapshotID)
+		}
+
+		switch snapshot.Summary.Operation {
+		case OpAppend:
 			result = append(result, snapshot)
+		case OpReplace, OpOverwrite, OpDelete:
+		default:
+			return nil, fmt.Errorf("%w: snapshot %d has operation %q",
+				ErrInvalidOperation, snapshot.SnapshotID, snapshot.Summary.Operation)
 		}
 	}
 
-	return result
+	return result, nil
 }
