@@ -683,6 +683,28 @@ func (s *FanoutWriterTestSuite) TestGetRecordPartitionsWithDroppedLeadingSourceC
 	s.Equal("foo=null/bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
 }
 
+func (s *FanoutWriterTestSuite) TestInitialPartitionRowCapacity() {
+	tests := []struct {
+		name           string
+		rows           int64
+		partitionCount int
+		expected       int
+	}{
+		{name: "first low cardinality partition", rows: 32_768, expected: 128},
+		{name: "keep cap for 256 partitions", rows: 32_768, partitionCount: 255, expected: 128},
+		{name: "reduce after 256 partitions", rows: 32_768, partitionCount: 256, expected: 127},
+		{name: "estimate 32 rows per partition", rows: 32_768, partitionCount: 1023, expected: 32},
+		{name: "one row per partition", rows: 32_768, partitionCount: 32_767, expected: 1},
+		{name: "more partitions than rows", rows: 10, partitionCount: 100, expected: 1},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			s.Equal(test.expected, initialPartitionRowCapacity(test.rows, test.partitionCount))
+		})
+	}
+}
+
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
