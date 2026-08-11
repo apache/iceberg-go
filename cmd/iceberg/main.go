@@ -358,7 +358,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		err error
 	)
 
-	switch catalog.Type(args.Catalog) {
+	switch catalog.Type(strings.ToLower(args.Catalog)) {
 	case catalog.REST:
 		opts := []rest.Option{}
 		if len(args.Token) > 0 {
@@ -462,11 +462,11 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		ns := cmd.Namespace
 		props := iceberg.Properties{}
 		if ns.Description != "" {
-			props["Description"] = ns.Description
+			props["comment"] = ns.Description
 		}
 
 		if ns.LocationURI != "" {
-			props["Location"] = ns.LocationURI
+			props["location"] = ns.LocationURI
 		}
 
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)

@@ -41,6 +41,7 @@ import (
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
@@ -65,6 +66,12 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // errors.Is(err, iceberg.ErrNotImplemented) for compatibility with older
 // WriteRecords behavior.
 var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
+
+const allManifestsMaxWorkers = 16
+
+func allManifestsWorkerCount(snapshotCount int) int {
+	return max(1, min(snapshotCount, allManifestsMaxWorkers))
+}
 
 // requireWriteFileIO should run immediately after resolving the table FS and
 // before mutating transaction state such as automatic name mapping.
@@ -183,6 +190,18 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 // callers to receive the precise initialization error instead of hitting
 // panic/undefined behavior later.
 func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	for name, ref := range t.metadata.Refs() {
+		if name != branch {
+			continue
+		}
+		if ref.SnapshotRefType != BranchRef {
+			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
+				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+		}
+
+		break
+	}
+
 	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 	if err != nil {
 		return nil, err
@@ -202,6 +221,11 @@ func (t *Table) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if t.metadata != nil && fresh.metadata != nil {
+		if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+			return err
+		}
+	}
 
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
@@ -218,6 +242,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func validateTableUUID(identifier Identifier, expected, actual uuid.UUID) error {
+	if expected == uuid.Nil || actual == uuid.Nil || expected == actual {
+		return nil
+	}
+
+	return fmt.Errorf("%w: table %s UUID changed during refresh or commit: expected %s, got %s; load a new table handle",
+		ErrInvalidMetadata, strings.Join(identifier, "."), expected, actual)
 }
 
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
@@ -327,23 +360,53 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	}
 
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
-	g := errgroup.Group{}
+	snapshots := t.metadata.Snapshots()
+	n := len(snapshots)
+	workCtx, cancel := context.WithCancel(ctx)
+	jobs := make(chan int)
+	// This buffer lets workers finish after an early consumer stop. The result
+	// channel created below still retains all snapshot results, so this is not a
+	// memory bound; all remote reads are bounded by allManifestsMaxWorkers.
+	ch := make(chan list, allManifestsWorkerCount(n))
+	workers := allManifestsWorkerCount(n)
+	g, groupCtx := errgroup.WithContext(workCtx)
 
-	n := len(t.metadata.Snapshots())
-	ch := make(chan list, n)
-
-	for i, sn := range t.metadata.Snapshots() {
+	for range workers {
 		g.Go(func() error {
-			manifests, err := sn.Manifests(fs)
-			if err != nil {
-				return err
+			for {
+				select {
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case i, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+
+					manifests, err := snapshots[i].Manifests(fs)
+					if err != nil {
+						return err
+					}
+
+					select {
+					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
+					case <-groupCtx.Done():
+						return groupCtx.Err()
+					}
+				}
 			}
-
-			ch <- list{Index: i, Value: manifests, Last: i == n-1}
-
-			return nil
 		})
 	}
+
+	go func() {
+		defer close(jobs)
+		for i := range snapshots {
+			select {
+			case jobs <- i:
+			case <-groupCtx.Done():
+				return
+			}
+		}
+	}()
 
 	errch := make(chan error, 1)
 	go func() {
@@ -373,6 +436,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 		}, list{Index: -1})
 
 	return func(yield func(iceberg.ManifestFile, error) bool) {
+		defer cancel()
 		defer func() {
 			// drain channels if we exited early
 			go func() {
@@ -487,7 +551,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		newLoc            string
 		timer             *time.Timer
 		orphanedManifests []string // manifest-list files orphaned by rebuilds
+		commitDuration    time.Duration
 	)
+
+	// attemptsUsed initializes to 1: the emit block below is reached only via the
+	// success break, which always runs at least one attempt. Deriving it from a
+	// 0-based counter risks emitting 0 if a second success exit is ever added.
+	var attemptsUsed int64 = 1
 
 	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
 	// files on exit. It defaults to true (clean on all safe exits) and is set to
@@ -514,6 +584,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	// numRetries counts retries; total attempts = 1 initial + numRetries.
 	totalAttempts := cfg.numRetries + 1
+
+	// commitStart brackets the commit loop itself (not FS resolution above or
+	// metadata cleanup below) so TotalDuration times only the CommitTable
+	// submission loop, matching Java's CommitReport.
+	commitStart := time.Now()
 
 	for attempt := range totalAttempts {
 		if attempt != 0 {
@@ -542,8 +617,16 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
+			if t.metadata != nil && fresh.metadata != nil {
+				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+					return nil, err
+				}
+			}
 			current = fresh.metadata
 			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+				return nil, err
+			}
 
 			// Rebuild snapshot manifest lists to inherit all files committed
 			// by concurrent writers since the snapshot was originally built.
@@ -556,6 +639,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
+		}
+
+		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+			return nil, err
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -596,6 +683,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			attemptsUsed = int64(attempt) + 1
+			// Capture elapsed time at the commit boundary, before orphan
+			// cleanup and deleteOldMetadata below (both can do I/O).
+			commitDuration = time.Since(commitStart)
+
 			break
 		}
 
@@ -632,6 +724,29 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
+	// Emit a commit report on success. Prefer the just-committed branch head
+	// over the table's current snapshot so commits to a non-default branch
+	// report the snapshot they actually created.
+	//
+	// Mirrors the scan path: building the report is skipped for a no-op
+	// reporter (the opt-in default), since a nop discards it and assembling one
+	// would be pure overhead. A metadata-only commit produces no snapshot and
+	// must be skipped too — its branch head is unchanged, so reporting it would
+	// attribute a prior snapshot's metrics to this commit.
+	if rep := t.MetricsReporter(); !metrics.IsNop(rep) && commitAddedSnapshot(updates) {
+		committed := newMeta.CurrentSnapshot()
+		if co.branch != "" {
+			// A nil lookup means the branch head could not be resolved (e.g. a
+			// fresh non-default branch); attributing CurrentSnapshot() would
+			// carry the wrong snapshot, so skip emission entirely.
+			committed = newMeta.SnapshotByName(co.branch)
+		}
+		if committed != nil {
+			safeReport(ctx, rep,
+				buildCommitReport(strings.Join(t.identifier, "."), committed, attemptsUsed, commitDuration))
+		}
+	}
+
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
@@ -663,7 +778,11 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
 			newID := head.SnapshotID
-			out[i] = AssertRefSnapshotID(branch, &newID)
+			if a.requireBranch {
+				out[i] = assertBranchRefSnapshotID(branch, &newID)
+			} else {
+				out[i] = AssertRefSnapshotID(branch, &newID)
+			}
 
 			continue
 		}
@@ -673,15 +792,25 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	return out
 }
 
+func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
+	for _, req := range reqs {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.requireBranch && ref.Ref == branch {
+			return ref.Validate(meta)
+		}
+	}
+
+	return nil
+}
+
 func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	if branch == "" || branch == MainBranch {
 		return meta.CurrentSnapshot()
 	}
 
-	for name, ref := range meta.Refs() {
-		if name == branch {
-			return meta.SnapshotByID(ref.SnapshotID)
-		}
+	// A not-yet-created branch resolves to nil here and falls back to main's head so a new
+	// branch forks from main
+	if s := meta.SnapshotByName(branch); s != nil {
+		return s
 	}
 
 	return meta.CurrentSnapshot()
@@ -713,15 +842,31 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	result := make([]Update, len(updates))
 	copy(result, updates)
 
+	// A single transaction can stage several snapshots on the same branch (an
+	// append followed by a delete, say). They were chained at build time so
+	// snapshot[n].parent == snapshot[n-1]; on retry they must be replayed as a
+	// chain, each rebuilt snapshot becoming the parent of the next. Feeding
+	// every staged snapshot the same fresh branch head would turn the chain
+	// into siblings — the branch ref advances only to the last one, silently
+	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
+	// after the first rebuild to rebuild too: its recorded parent is an earlier
+	// staged snapshot that has itself just been reparented onto the fresh head.
+	chainRebuilt := false
 	for i, u := range result {
 		su, ok := u.(*addSnapshotUpdate)
 		if !ok || su.rebuildManifestList == nil {
 			continue
 		}
 
-		// Skip if the parent has not changed — saves an unnecessary S3 write.
-		if freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
+		// Skip only when nothing upstream changed: the running head still
+		// matches this snapshot's recorded parent and no earlier snapshot in
+		// this chain was rebuilt. Saves an unnecessary S3 write.
+		if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
 			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID {
+			// Already parented on the running head; it becomes the parent of
+			// the next staged snapshot in the chain.
+			freshHead = su.Snapshot
+
 			continue
 		}
 
@@ -742,6 +887,10 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		// The old manifest list is now an orphaned object in object storage.
 		orphanedPaths = append(orphanedPaths, oldManifestList)
+
+		// Chain the next staged snapshot onto the one just rebuilt.
+		freshHead = newSnap
+		chainRebuilt = true
 	}
 
 	return result, orphanedPaths, nil
@@ -864,12 +1013,9 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
 func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entries := slices.Collect(t.metadata.SnapshotLogs())
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := entries[i]
-		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
-			return t.metadata.SnapshotByID(entry.SnapshotID)
-		}
+	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+	if ok {
+		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
 
 	return nil

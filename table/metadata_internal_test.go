@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"path"
 	"slices"
@@ -36,6 +37,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSnapshotIDFromUUIDClearsSignBit(t *testing.T) {
+	for _, id := range []uuid.UUID{
+		{7: 0x80},
+		{15: 0x80},
+	} {
+		require.Zero(t, snapshotIDFromUUID(id))
+	}
+
+	require.Equal(t, int64(math.MaxInt64), snapshotIDFromUUID(uuid.UUID{
+		0: 0xff, 1: 0xff, 2: 0xff, 3: 0xff, 4: 0xff, 5: 0xff, 6: 0xff, 7: 0xff,
+	}))
+}
 
 const ExampleTableMetadataV2 = `{
     "format-version": 2,
@@ -386,6 +400,38 @@ func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
 	assert.ErrorContains(t, err, "last-updated-ms is absent or null")
 }
 
+// A full v3 metadata document must load when its partition spec and sort order
+// use unknown transforms — nothing on the metadata path may trip a guard.
+func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
+	j := strings.NewReplacer(
+		`{"name": "x", "transform": "identity", "source-id": 1, "field-id": 1000}`,
+		`{"name": "x", "transform": "custom_transform[42]", "source-id": 1, "field-id": 1000}`,
+		`{"transform": "bucket[4]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
+		`{"transform": "custom_sort[7]", "source-id": 3, "direction": "desc", "null-order": "nulls-last"}`,
+	).Replace(ExampleTableMetadataV3)
+
+	meta, err := ParseMetadataBytes([]byte(j))
+	require.NoError(t, err)
+
+	spec := meta.PartitionSpec()
+	pf := spec.Field(0)
+	_, ok := pf.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown partition transform should load")
+	assert.Equal(t, "custom_transform[42]", pf.Transform.String())
+
+	sf := meta.SortOrder().Field(1)
+	_, ok = sf.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown sort transform should load")
+	assert.Equal(t, "custom_sort[7]", sf.Transform.String())
+
+	// Marshalling back must preserve the unknown transforms verbatim, proving
+	// no write-path guard strips or rewrites them.
+	out, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "custom_transform[42]")
+	assert.Contains(t, string(out), "custom_sort[7]")
+}
+
 func TestMetadataEqualsIncludesStatistics(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	base, err := builder.Build()
@@ -695,6 +741,22 @@ func TestRejectStructurallyInvalidHistoricalPartitionSpec(t *testing.T) {
 	_, err = ParseMetadataBytes(data)
 	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 	assert.ErrorContains(t, err, "spec ID must be non-negative")
+}
+
+func TestRejectsStoredPartitionSpecWithoutID(t *testing.T) {
+	var metadata map[string]any
+	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+	decoder.UseNumber()
+	require.NoError(t, decoder.Decode(&metadata))
+	specs := metadata["partition-specs"].([]any)
+	delete(specs[0].(map[string]any), "spec-id")
+
+	data, err := json.Marshal(metadata)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "missing required spec-id")
 }
 
 func TestSortOrderNotFound(t *testing.T) {
@@ -1312,7 +1374,7 @@ func TestMetadataV1Validation(t *testing.T) {
 		"table-uuid": "d20125c8-7284-442c-9aea-15fee620737c",
 		"location": "s3://bucket/test/location",
 		"last-updated-ms": 1602638573874,
-		"schema": {},
+		"schema": {"type": "struct", "fields": []},
 		"partition-spec": [],
 		"properties": {},
 		"current-snapshot-id": -1,
@@ -1326,7 +1388,7 @@ func TestMetadataV1Validation(t *testing.T) {
 		"location": "s3://bucket/test/location",
 		"last-updated-ms": 1602638573874,
 		"last-column-id": 5,
-		"schema": {},
+		"schema": {"type": "struct", "fields": []},
 		"partition-spec": [],
 		"properties": {},
 		"current-snapshot-id": -1,
@@ -1340,7 +1402,7 @@ func TestMetadataV1Validation(t *testing.T) {
 		"location": "s3://bucket/test/location",
 		"last-updated-ms": 1602638573874,
 		"last-column-id": 0,
-		"schema": {},
+		"schema": {"type": "struct", "fields": []},
 		"partition-spec": [],
 		"properties": {},
 		"current-snapshot-id": -1,
@@ -2399,4 +2461,19 @@ func TestMetadataV3EmitsNullCurrentSnapshotID(t *testing.T) {
 		require.True(t, ok)
 		assert.Nil(t, v3.CurrentSnapshotID, "explicit null must parse back to nil")
 	})
+}
+
+func TestPropertiesRoundTripToEmptyMap(t *testing.T) {
+	meta, err := NewMetadata(iceberg.NewSchema(0), iceberg.UnpartitionedSpec,
+		UnsortedSortOrder, "s3://bucket/test/location", nil)
+	require.NoError(t, err)
+	assert.NotNil(t, meta.Properties())
+
+	raw, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"properties"`)
+
+	parsed, err := ParseMetadataBytes(raw)
+	require.NoError(t, err)
+	assert.NotNil(t, parsed.Properties(), "omitted properties must parse back to an empty map, not nil")
 }

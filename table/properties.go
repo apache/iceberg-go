@@ -111,12 +111,13 @@ const (
 	// CommitNumRetriesKey is the number of commit retry attempts before
 	// giving up on ErrCommitFailed from the catalog.
 	//
-	// The default is 0 (no retries) until refresh-and-replay lands; a
-	// retry loop that reuses the original updates/requirements will
-	// fail deterministically on genuine OCC conflicts and only slow
-	// down the final error. Callers that observe transient catalog
-	// flakiness (dropped connections, brief 409 during leader
-	// election) can raise this to recover.
+	// The default is 0 (no retries). Each retry attempt reloads the
+	// current catalog state and replays the update against it (see
+	// doCommit's refresh-and-replay loop), so raising this can resolve
+	// both transient catalog flakiness (dropped connections, brief 409
+	// during leader election) and genuine OCC conflicts from concurrent
+	// writers. It stays opt-in by default because a retry rebuilds the
+	// snapshot's manifest list and adds latency.
 	CommitNumRetriesKey     = "commit.retry.num-retries"
 	CommitNumRetriesDefault = 0
 

@@ -514,6 +514,41 @@ type ManifestTestSuite struct {
 	v3ManifestEntries bytes.Buffer
 }
 
+type manifestFailingWriter struct {
+	err error
+}
+
+func (w manifestFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type manifestCloseErrorCodec struct {
+	ocf.Codec
+	err error
+}
+
+func (c manifestCloseErrorCodec) Close() error {
+	return c.err
+}
+
+func (m *ManifestTestSuite) setManifestWriterCloseError(writer *ManifestWriter, closeErr error) {
+	m.T().Helper()
+
+	avroSchema := writer.writer.Schema()
+	m.Require().NoError(writer.writer.Close())
+
+	replacement, err := ocf.NewWriter(
+		io.Discard,
+		avroSchema,
+		ocf.WithCodec(manifestCloseErrorCodec{
+			Codec: ocf.DeflateCodec(flate.DefaultCompression),
+			err:   closeErr,
+		}),
+	)
+	m.Require().NoError(err)
+	writer.writer = replacement
+}
+
 func (m *ManifestTestSuite) writeManifestList() {
 	err := WriteManifestList(1, &m.v1ManifestList, snapshotID, nil, nil, 0, manifestFileRecordsV1)
 	m.Require().NoError(err)
@@ -1026,6 +1061,23 @@ func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 	m.Empty(files) // the file has no entries, just headers
 }
 
+func (m *ManifestTestSuite) TestReadManifestListRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			fileSchema, err := internal.NewManifestFileSchema(2)
+			m.Require().NoError(err)
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, fileSchema,
+				ocf.WithMetadata(map[string][]byte{"format-version": []byte(strconv.Itoa(version))}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = ReadManifestList(&buf)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
+}
+
 // writeManifestNoFormatVersion writes a valid v1 manifest entry Avro file that
 // omits the "format-version" metadata key, simulating files produced by the Java
 // Iceberg library (format-version is optional for v1 per the Iceberg spec).
@@ -1077,6 +1129,34 @@ func (m *ManifestTestSuite) TestNewManifestReaderMissingFormatVersion() {
 	m.Require().NoError(err)
 	m.Equal(1, reader.Version())
 	m.NoError(reader.Close())
+}
+
+func (m *ManifestTestSuite) TestNewManifestReaderRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			spec := NewPartitionSpec()
+			partitionSchema, err := partitionTypeToAvroSchema(spec.PartitionType(testSchema))
+			m.Require().NoError(err)
+			entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 1)
+			m.Require().NoError(err)
+			schemaJSON, err := json.Marshal(testSchema)
+			m.Require().NoError(err)
+			var manifest bytes.Buffer
+			writer, err := ocf.NewWriter(&manifest, entrySchema, ocf.WithMetadata(map[string][]byte{
+				"format-version":    []byte(strconv.Itoa(version)),
+				"schema":            schemaJSON,
+				"schema-id":         []byte(strconv.Itoa(testSchema.ID)),
+				"partition-spec":    []byte("[]"),
+				"partition-spec-id": []byte("0"),
+				"content":           []byte("data"),
+			}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = NewManifestReader(&manifestFile{version: version}, &manifest)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
 }
 
 func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
@@ -1233,6 +1313,22 @@ func (m *ManifestTestSuite) TestWriteManifestV3() {
 		_, nextID, err := WriteManifestV3("/manifest.avro", &buf, 500, partitionSpec, testSchema, entrySnapshotID, entries)
 		m.Require().NoError(err)
 		m.EqualValues(520, nextID) // 500 + 10 + 10
+	})
+
+	m.Run("rejects negative first row ID", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3("/manifest.avro", &buf, -1, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("rejects next row ID overflow", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3(
+			"/manifest.avro", &buf, math.MaxInt64-count, partitionSpec, testSchema, entrySnapshotID, entries,
+		)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
 	})
 
 	m.Run("read inheritance from manifest", func() {
@@ -2091,6 +2187,160 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Equal("[]", string(md["partition-spec"]))
 }
 
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+			writer, err := NewManifestWriter(version, &out, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorContains(writer.Add(manifestEntryV2Records[0]), "closed manifest writer")
+			m.Same(firstErr, writer.Close())
+
+			_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
+			m.Same(firstErr, err)
+
+			manifest := NewManifestFile(
+				version,
+				"manifest.avro",
+				int64(out.Len()),
+				int32(UnpartitionedSpec.ID()),
+				snapshotID,
+			).Build()
+			entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+			m.Require().NoError(err)
+			m.Empty(entries)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterSuccessfulCloseIsTerminal() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.NoError(writer.Close())
+			m.NoError(writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseAfterConstructionFailure() {
+	writeErr := errors.New("write failed")
+
+	writer, err := NewManifestWriter(
+		2,
+		manifestFailingWriter{err: writeErr},
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().ErrorIs(err, writeErr)
+	m.Require().NotNil(writer)
+
+	var closeErr error
+	m.NotPanics(func() {
+		closeErr = writer.Close()
+	})
+	m.ErrorIs(closeErr, ErrEmptyManifest)
+
+	m.Same(closeErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseJoinsUnderlyingError() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(
+				version,
+				io.Discard,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+			)
+			m.Require().NoError(err)
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorIs(firstErr, underlyingErr)
+			m.EqualError(
+				firstErr,
+				"empty manifest file has been written\nunderlying close failed",
+			)
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCloseAfterAddEntryFailure() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.Require().Error(writer.addEntry(&manifestEntry{EntryStatus: ManifestEntryStatus(-1)}))
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().Same(underlyingErr, firstErr)
+			m.False(errors.Is(firstErr, ErrEmptyManifest))
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestWriteManifestEmptyErrorIsNotDuplicated() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+
+			_, err := WriteManifest(
+				"manifest.avro",
+				&out,
+				version,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+				nil,
+			)
+			m.ErrorIs(err, ErrEmptyManifest)
+			m.Same(ErrEmptyManifest, err)
+		})
+	}
+
+	var out bytes.Buffer
+	_, _, err := WriteManifestV3(
+		"manifest.avro",
+		&out,
+		0,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.ErrorIs(err, ErrEmptyManifest)
+	m.Same(ErrEmptyManifest, err)
+}
+
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
 	schema := NewSchema(
 		0,
@@ -2428,6 +2678,82 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	m.EqualValues(int64(3800), *writer.NextRowID()-firstRowID)
 	err = writer.Close()
 	m.Require().NoError(err)
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() {
+	m.Run("negative first row ID", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, -1, nil)
+		m.Nil(writer)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("negative row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative.avro", 100, 1, snapshotID).AddedRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("negative existing row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative-existing.avro", 100, 1, snapshotID).ExistingRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("existing row count overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow-existing.avro", 100, 1, snapshotID).ExistingRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("later validation failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 10, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorContains(err, "unassigned sequence number")
+		m.EqualValues(10, *writer.NextRowID())
+	})
+
+	m.Run("batch failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		startRowID := int64(math.MaxInt64 - 5)
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, startRowID, nil)
+		m.Require().NoError(err)
+		manifests := []ManifestFile{
+			NewManifestFile(3, "valid.avro", 100, 1, snapshotID).AddedRows(5).Build(),
+			NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build(),
+		}
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(startRowID, *writer.NextRowID())
+	})
 }
 
 func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
@@ -3088,6 +3414,25 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
 	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
 	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListAssignsZeroForV1ManifestWithUnknownRowCounts() {
+	legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+	legacy.AddedRowsCount = -1
+	legacy.ExistingRowsCount = -1
+
+	var v1Buf bytes.Buffer
+	m.Require().NoError(WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
+	manifests, err := ReadManifestList(&v1Buf)
+	m.Require().NoError(err)
+	m.Require().Len(manifests, 1)
+
+	var v3Buf bytes.Buffer
+	writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.AddManifests(manifests))
+	m.EqualValues(1000, *writer.NextRowID())
+	m.Require().NoError(writer.Close())
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still

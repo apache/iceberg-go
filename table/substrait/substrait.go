@@ -21,6 +21,7 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"strings"
 	"unsafe"
 
@@ -314,6 +315,16 @@ func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 		}
 
 		return toPrimitiveSubstraitLiteral(types.Timestamp(lit))
+	case iceberg.TimestampNsLiteral:
+		if typ.Equals(iceberg.PrimitiveTypes.TimestampTzNs) {
+			return expr.NewPrecisionTimestampTzLiteral(
+				int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+			)
+		}
+
+		return expr.NewPrecisionTimestampLiteral(
+			int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+		)
 	case iceberg.DateLiteral:
 		return toPrimitiveSubstraitLiteral(types.Date(lit))
 	case iceberg.TimeLiteral:
@@ -334,6 +345,10 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 	if len(lits) == 0 {
 		return nil
 	}
+
+	sort.Slice(lits, func(i, j int) bool {
+		return lits[i].String() < lits[j].String()
+	})
 
 	out := make([]expr.Literal, len(lits))
 	for i, l := range lits {

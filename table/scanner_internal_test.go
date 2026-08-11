@@ -1148,3 +1148,67 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 		assert.Contains(t, seen, iceberg.RowIDFieldID, "_row_id must survive projection")
 	})
 }
+
+// A filter on the source column of an unknown partition field must not prune:
+// the same manifest summary would prune under an identity transform.
+func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	lower, upper := int32Bound(10), int32Bound(20)
+	dataPath := "mem://default/table/data.parquet"
+	manifestPath := "mem://default/table/metadata/manifest.avro"
+	manifestListPath := "mem://default/table/metadata/snap-7.avro"
+
+	plan := func(t *testing.T, transform iceberg.Transform) []FileScanTask {
+		t.Helper()
+
+		spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: transform,
+		})
+		memIO := iceio.NewMemFS()
+		scan, oldSchema, snapshotID := newSchemaEvolutionScanWithSnapshot(t, &spec, memIO, manifestListPath, nil)
+
+		// Metrics bounds cover the filter value so only partition pruning is
+		// in play.
+		dataFile, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, dataPath,
+			iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+		require.NoError(t, err)
+		entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID,
+			dataFile.LowerBoundValues(map[int][]byte{1: int32Bound(5)}).
+				UpperBoundValues(map[int][]byte{1: int32Bound(5)}).
+				Build(),
+		).SequenceNum(1).Build()
+
+		var manifestBytes bytes.Buffer
+		_, err = iceberg.WriteManifest(manifestPath, &manifestBytes, 2, spec, oldSchema, snapshotID,
+			[]iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+		// Partition summary excludes the filter value (id == 5).
+		manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
+			Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}}).
+			SequenceNum(1, 1).
+			Build()
+
+		var listBytes bytes.Buffer
+		seqNum := int64(1)
+		require.NoError(t, iceberg.WriteManifestList(2, &listBytes, snapshotID, nil, &seqNum, 0,
+			[]iceberg.ManifestFile{manifest}))
+		require.NoError(t, memIO.WriteFile(manifestListPath, listBytes.Bytes()))
+
+		tasks, err := scan.PlanFiles(context.Background())
+		require.NoError(t, err)
+
+		return tasks
+	}
+
+	t.Run("identity prunes", func(t *testing.T) {
+		assert.Empty(t, plan(t, iceberg.IdentityTransform{}))
+	})
+
+	t.Run("unknown does not prune", func(t *testing.T) {
+		assert.Len(t, plan(t, unknown), 1)
+	})
+}

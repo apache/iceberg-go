@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -45,22 +46,18 @@ const (
 )
 
 func generateSnapshotID() int64 {
-	var (
-		rndUUID = uuid.New()
-		out     [8]byte
-	)
+	return snapshotIDFromUUID(uuid.New())
+}
+
+func snapshotIDFromUUID(id uuid.UUID) int64 {
+	var out [8]byte
 
 	for i := range 8 {
-		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		lhs, rhs := id[i], id[i+8]
 		out[i] = lhs ^ rhs
 	}
 
-	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
-	if snapshotID < 0 {
-		snapshotID = -snapshotID
-	}
-
-	return snapshotID
+	return int64(binary.LittleEndian.Uint64(out[:]) & math.MaxInt64)
 }
 
 // Metadata for an iceberg table as specified in the Iceberg spec
@@ -1567,12 +1564,44 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requirePartitionSpecIDs(normalized); err != nil {
+		return nil, err
+	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	return ret, nil
+}
+
+func requirePartitionSpecIDs(b []byte) error {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	rawSpecs, ok := metadata["partition-specs"]
+	if !ok {
+		return nil
+	}
+
+	var specs []json.RawMessage
+	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
+	}
+	for i, rawSpec := range specs {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(rawSpec, &spec); err != nil {
+			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
+		}
+		rawID, ok := spec["spec-id"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
+		}
+	}
+
+	return nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
@@ -1927,6 +1956,10 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
 	return maps.Clone(c.Props)
 }
 

@@ -193,6 +193,15 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		assert.Contains(t, err.Error(), "missing referenced_data_file")
 	})
 
+	t.Run("DV identity mismatch propagates from ReadDV", func(t *testing.T) {
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0}, "file:///table/data/data-001.parquet")
+		dvFile := newDVMockDataFile(puffinPath, "file:///table/data/data-002.parquet", offset, length, card)
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
+		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
+		assert.Contains(t, err.Error(), "manifest referenced_data_file")
+	})
+
 	t.Run("DV missing content_offset is rejected", func(t *testing.T) {
 		// content_offset is required by spec; without it ReadDV can't
 		// locate the blob. Pinned at the pre-pass so two such entries
@@ -346,4 +355,63 @@ func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
 	require.NoError(t, err)
 	defer out.Release()
 	assert.Equal(t, []int64{0, 1, 2}, out.Column(0).(*array.Int64).Int64Values())
+}
+
+func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewGoAllocator()
+
+	mkBatch := func(values ...int64) arrow.RecordBatch {
+		bldr := array.NewInt64Builder(mem)
+		defer bldr.Release()
+		bldr.AppendValues(values, nil)
+		col := bldr.NewArray()
+		defer col.Release()
+		schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+
+		return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
+	}
+
+	bitmap := dv.NewRoaringPositionBitmap()
+	bitmap.Set(1)
+	bitmap.Set(3)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+
+	withinCount, err := filter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer withinCount.Release()
+	assert.Equal(t, []int64{0}, withinCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryCount, err := filter(mkBatch(2, 3))
+	require.NoError(t, err)
+	defer boundaryCount.Release()
+	assert.Equal(t, []int64{2}, boundaryCount.Column(0).(*array.Int64).Int64Values())
+
+	straddlingFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	straddlingPrefix, err := straddlingFilter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer straddlingPrefix.Release()
+	assert.Equal(t, []int64{0}, straddlingPrefix.Column(0).(*array.Int64).Int64Values())
+
+	straddlingCount, err := straddlingFilter(mkBatch(2, 3, 4, 5))
+	require.NoError(t, err)
+	defer straddlingCount.Release()
+	assert.Equal(t, []int64{2, 4, 5}, straddlingCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	boundaryBatch, err := boundaryFilter(mkBatch(0, 1, 2, 3))
+	require.NoError(t, err)
+	defer boundaryBatch.Release()
+	assert.Equal(t, []int64{0, 2}, boundaryBatch.Column(0).(*array.Int64).Int64Values())
+
+	afterBoundary, err := boundaryFilter(mkBatch(4, 5))
+	require.NoError(t, err)
+	defer afterBoundary.Release()
+	assert.Equal(t, []int64{4, 5}, afterBoundary.Column(0).(*array.Int64).Int64Values())
+
+	zeroRowCountFilter := filterByDeletionVector(ctx, bitmap, 0, (&rowPositionSource{}).cursor())
+	zeroRowCount, err := zeroRowCountFilter(mkBatch(6, 7))
+	require.NoError(t, err)
+	defer zeroRowCount.Release()
+	assert.Equal(t, []int64{6, 7}, zeroRowCount.Column(0).(*array.Int64).Int64Values())
 }
