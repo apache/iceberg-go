@@ -2366,6 +2366,9 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.selectorErr != nil {
+		return nil, s.selectorErr
+	}
 
 	return s, nil
 }
