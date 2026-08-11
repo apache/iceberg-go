@@ -233,9 +233,10 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 		return nil
 	}
 
-	if s.Operation, err = ValidOperation(op); err != nil {
-		return err
+	if op == "" {
+		return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
 	}
+	s.Operation = Operation(op)
 
 	delete(alias, operationKey)
 	s.Properties = alias
