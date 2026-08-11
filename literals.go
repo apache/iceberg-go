@@ -321,7 +321,7 @@ type belowMinLiteral[T int32 | int64 | float32 | float64] struct {
 }
 
 func (bm belowMinLiteral[T]) MarshalBinary() (data []byte, err error) {
-	return nil, fmt.Errorf("%w: cannot marshal above max literal",
+	return nil, fmt.Errorf("%w: cannot marshal below min literal",
 		ErrInvalidBinSerialization)
 }
 

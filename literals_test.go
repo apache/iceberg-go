@@ -347,6 +347,12 @@ func TestInt64ToInt32OutsideBound(t *testing.T) {
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, belowMin.Type())
 }
 
+func TestBelowMinLiteralMarshalBinary(t *testing.T) {
+	_, err := iceberg.Int32BelowMinLiteral().MarshalBinary()
+	require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+	assert.EqualError(t, err, "invalid binary serialization: cannot marshal below min literal")
+}
+
 func TestFloatConversions(t *testing.T) {
 	n1, _ := decimal128.FromFloat32(34.56, 9, 1)
 	n2, _ := decimal128.FromFloat32(34.56, 9, 2)
