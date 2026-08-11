@@ -188,6 +188,50 @@ func TestProcessRecordsRebindsRowGroupFilterToPromotedFileSchema(t *testing.T) {
 	result.Record.Value.Release()
 }
 
+func TestProcessRecordsDoesNotPruneMissingInitialDefault(t *testing.T) {
+	ctx := context.Background()
+	fileSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	currentSchema := iceberg.NewSchema(2,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{
+			ID: 2, Name: "flag", Type: iceberg.PrimitiveTypes.Int32,
+			InitialDefault: int32(1),
+		},
+	)
+	rowGroupFilter, err := iceberg.BindExpr(currentSchema, iceberg.NewAnd(
+		iceberg.GreaterThan(iceberg.Reference("id"), int64(5)),
+		iceberg.NotNull(iceberg.Reference("flag"))), true)
+	require.NoError(t, err)
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		"file:///test.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	arrowSchema, err := SchemaToArrowSchema(fileSchema, nil, true, false)
+	require.NoError(t, err)
+	reader := &pruningFilterTestReader{schema: arrowSchema}
+	out := make(chan enumeratedRecord, 1)
+	err = (&arrowScan{
+		rowGroupFilter:  rowGroupFilter,
+		projectedSchema: currentSchema,
+		caseSensitive:   true,
+	}).processRecords(
+		ctx,
+		tblutils.Enumerated[FileScanTask]{Value: FileScanTask{File: dataFileBuilder.Build()}},
+		fileSchema, iceberg.AlwaysTrue{}, reader, []int{0}, nil, nil, out)
+	require.NoError(t, err)
+
+	require.NotNil(t, reader.tester)
+	assert.Empty(t, reader.tester.BloomPreds,
+		"a missing field with an initial-default must disable bloom pruning")
+
+	result := <-out
+	result.Record.Value.Release()
+}
+
 func TestBindTaskFilterValidatesBoundSchema(t *testing.T) {
 	int64Schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},

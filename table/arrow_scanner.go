@@ -1167,6 +1167,24 @@ func (as *arrowScan) processRecords(
 	// stays enabled.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile:
+		logicalSchema := as.filterSchema
+		if logicalSchema == nil {
+			logicalSchema = as.projectedSchema
+		}
+
+		hasMissingDefault, err := pruningFilterHasMissingInitialDefault(
+			pruningFilter, logicalSchema, fileSchema)
+		if err != nil {
+			return err
+		}
+		if hasMissingDefault {
+			// TranslateColumnNames treats fields missing from the physical file
+			// as null. That is unsafe for fields added with a non-null
+			// initial-default because Iceberg materializes the default on read.
+			// Keep the actual row filter, but conservatively skip early pruning.
+			pruningFilter = iceberg.AlwaysTrue{}
+		}
+
 		filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
 		if err != nil {
 			return err
@@ -1252,6 +1270,33 @@ func (as *arrowScan) processRecords(
 	}
 
 	return err
+}
+
+func pruningFilterHasMissingInitialDefault(
+	filter iceberg.BooleanExpression,
+	logicalSchema, fileSchema *iceberg.Schema,
+) (bool, error) {
+	if logicalSchema == nil || fileSchema == nil {
+		return false, nil
+	}
+
+	fieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	if err != nil {
+		return false, err
+	}
+
+	for _, fieldID := range fieldIDs {
+		if _, found := fileSchema.FindFieldByID(fieldID); found {
+			continue
+		}
+
+		field, found := logicalSchema.FindFieldByID(fieldID)
+		if found && field.InitialDefault != nil {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet) (err error) {

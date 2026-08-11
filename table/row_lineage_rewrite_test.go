@@ -252,6 +252,54 @@ func TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis(t *testing.T) {
 	}, readRowIDsByID(t, ctx, tbl))
 }
 
+func TestCoWRewriteDoesNotPruneMissingInitialDefault(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV3RowLineageTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{
+		table.ParquetRowGroupLimitKey: "5",
+	}))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, parquetRowGroupCount(t, tbl), "fixture must have two row groups")
+
+	// The existing file has no flag column, but its rows logically read flag=1.
+	// The survivor complement is id > 5 AND flag IS NOT NULL, so pruning must
+	// not translate the missing physical column to false before projection.
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"flag"}, iceberg.PrimitiveTypes.Int32, "", false, iceberg.Int32Literal(1)).
+		Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deleteFilter := iceberg.NewOr(
+		iceberg.LessThanEqual(iceberg.Reference("id"), int64(5)),
+		iceberg.IsNull(iceberg.Reference("flag")),
+	)
+	tbl, err = tbl.Delete(ctx, deleteFilter, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{
+		6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+	}, readRowIDsByID(t, ctx, tbl))
+}
+
 func TestCoWRewriteNormalizesTheSurvivorComplement(t *testing.T) {
 	ctx := context.Background()
 	tbl := buildTwoRowGroupV3Table(t)
