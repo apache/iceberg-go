@@ -231,6 +231,19 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 			return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
+	// Validate the assembled field set rather than each field as it is added:
+	// the redundancy check needs every field in place, and routing the builder
+	// through the same validator as UnmarshalJSON keeps one definition of a
+	// redundant field, so a spec this constructor accepts is one this package's
+	// UnmarshalJSON can read back. NewPartitionSpec and NewPartitionSpecID do
+	// not validate, so that guarantee covers this constructor only.
+	//
+	// ErrInvalidPartitionSpec is attached exactly once per error, by whichever
+	// layer knows the sentinel: options return bare errors and the loop above
+	// wraps them, while validatePartitionFields wraps its own.
+	if err := validatePartitionFields(spec.fields); err != nil {
+		return PartitionSpec{}, err
+	}
 	spec.initialize()
 
 	return spec, nil
@@ -302,9 +315,6 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	} else {
 		fieldIDValue = *fieldID
 	}
-	if err := p.checkForRedundantPartitions(field.ID, transform); err != nil {
-		return err
-	}
 	unboundField := PartitionField{
 		SourceIDs: []int{field.ID},
 		FieldID:   fieldIDValue,
@@ -337,21 +347,6 @@ func validateTransform(transform Transform) error {
 	default:
 		return nil
 	}
-}
-
-func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
-	if fields, ok := p.sourceIdToFields[sourceID]; ok {
-		for _, f := range fields {
-			if f.Transform.Equals(transform) {
-				return fmt.Errorf("cannot add redundant partition with source id %d and transform %s. A partition with the same source id and transform already exists with name: %s",
-					sourceID,
-					transform,
-					f.Name)
-			}
-		}
-	}
-
-	return nil
 }
 
 func (p *PartitionSpec) Len() int {
@@ -400,6 +395,10 @@ func (ps *PartitionSpec) assignPartitionFieldIds(lastAssignedFieldIDPtr *int) er
 // NewPartitionSpec creates a new PartitionSpec with the given fields.
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
+//
+// The fields are not checked for redundancy either, so this accepts a spec that
+// UnmarshalJSON would reject, meaning the result may not survive a metadata
+// round trip. Use NewPartitionSpecOpts when the spec has to be readable back.
 func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 	return NewPartitionSpecID(InitialPartitionSpecID, fields...)
 }
@@ -407,6 +406,10 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 // NewPartitionSpecID creates a new PartitionSpec with the given fields and id.
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
+//
+// The fields are not checked for redundancy either, so this accepts a spec that
+// UnmarshalJSON would reject, meaning the result may not survive a metadata
+// round trip. Use NewPartitionSpecOpts when the spec has to be readable back.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
 	fieldCopies := make([]PartitionField, len(fields))
 	for i, field := range fields {
@@ -527,24 +530,51 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// validatePartitionFields rejects duplicate partition names and redundant
+// fields (the same transform applied to the same source columns). It is the
+// single definition of a well-formed field set, shared by NewPartitionSpecOpts
+// and UnmarshalJSON so the builder cannot produce a spec the parser rejects.
+//
+// Repeated void fields are exempt: void is the tombstone written for a dropped
+// partition field, so a spec that has dropped several fields legitimately
+// carries more than one.
+//
+// TODO: this does not implement Java's dedupName rule, which collapses year,
+// month, day and hour to a single name per source column and so rejects
+// year(ts) alongside month(ts). We accept that pairing, which means a spec
+// built here can be refused by Java's PartitionSpec.Builder. UpdateSpec.addField
+// already carries an added-vs-added guard for time transforms, so the rule
+// exists in the codebase but not in this validator.
 func validatePartitionFields(fields []PartitionField) error {
 	names := make(map[string]struct{}, len(fields))
-	definitions := make(map[string]struct{}, len(fields))
+	// Keyed by source IDs only; the transforms behind each key are compared with
+	// Transform.Equals rather than their rendered names, so a transform whose
+	// String() is not injective cannot make two distinct transforms collide.
+	bySource := make(map[string][]Transform, len(fields))
 	for _, field := range fields {
 		if _, ok := names[field.Name]; ok {
 			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
 		}
 		names[field.Name] = struct{}{}
+		// Reject a nil transform before the redundancy comparison below calls
+		// Equals on it. The option constructors accept any Transform and
+		// validateTransform's default branch passes nil through, so this is the
+		// first place a nil would be dereferenced.
+		if field.Transform == nil {
+			return fmt.Errorf("%w: partition field %s has no transform", ErrInvalidPartitionSpec, field.Name)
+		}
 		if _, isVoid := field.Transform.(VoidTransform); isVoid {
 			continue
 		}
 
-		definition := fmt.Sprintf("%v:%s", field.SourceIDs, field.Transform)
-		if _, ok := definitions[definition]; ok {
-			return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
-				ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+		key := fmt.Sprint(field.SourceIDs)
+		for _, existing := range bySource[key] {
+			if existing.Equals(field.Transform) {
+				return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
+					ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+			}
 		}
-		definitions[definition] = struct{}{}
+		bySource[key] = append(bySource[key], field.Transform)
 	}
 
 	return nil
