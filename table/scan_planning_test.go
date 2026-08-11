@@ -429,6 +429,7 @@ func (p *countingPlanIO) Load(context.Context) (icebergio.IO, error) {
 
 func (p *countingPlanIO) Close() error {
 	p.closeCalls++
+
 	return nil
 }
 
