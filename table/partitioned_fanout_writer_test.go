@@ -1380,6 +1380,99 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory(
 	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
 }
 
+func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchGenericApply() {
+	unknown, err := iceberg.ParseTransform("custom-transform")
+	s.Require().NoError(err)
+
+	tests := []struct {
+		name       string
+		transform  iceberg.Transform
+		sourceType iceberg.Type
+		value      iceberg.Literal
+		fallback   bool
+	}{
+		{
+			name: "identity", transform: iceberg.IdentityTransform{},
+			sourceType: iceberg.PrimitiveTypes.Int64, value: iceberg.Int64Literal(34),
+		},
+		{
+			name: "void", transform: iceberg.VoidTransform{},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+		{
+			name: "bucket", transform: iceberg.BucketTransform{NumBuckets: 16},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+		{
+			name: "truncate", transform: iceberg.TruncateTransform{Width: 3},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abcdef"),
+		},
+		{
+			name: "year", transform: iceberg.YearTransform{},
+			sourceType: iceberg.PrimitiveTypes.Date, value: iceberg.DateLiteral(19_358),
+		},
+		{
+			name: "month", transform: iceberg.MonthTransform{},
+			sourceType: iceberg.PrimitiveTypes.Timestamp, value: iceberg.TimestampLiteral(1_672_531_200_000_000),
+		},
+		{
+			name: "day nanoseconds", transform: iceberg.DayTransform{},
+			sourceType: iceberg.PrimitiveTypes.TimestampNs, value: iceberg.TimestampNsLiteral(1_672_531_200_000_000_000),
+		},
+		{
+			name: "hour", transform: iceberg.HourTransform{},
+			sourceType: iceberg.PrimitiveTypes.Timestamp, value: iceberg.TimestampLiteral(1_672_531_200_000_000),
+		},
+		{
+			name: "invalid truncate fallback", transform: iceberg.TruncateTransform{Width: 0},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"), fallback: true,
+		},
+		{
+			name: "unknown fallback", transform: unknown,
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			expected := test.transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: test.value})
+			var expectedValue any
+			if expected.Valid {
+				expectedValue = expected.Val.Any()
+			}
+
+			bound, ok := bindPartitionTransform(test.transform, test.sourceType)
+			if test.fallback {
+				s.False(ok)
+
+				return
+			}
+
+			s.Require().True(ok)
+			s.Equal(expectedValue, bound(test.value.Any()))
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForInvalidTransform() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.BinaryTypes.String}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{{"abc"}})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part",
+		Transform: iceberg.TruncateTransform{Width: 0},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Nil(partitions[0].partitionRec.Get(0))
+}
+
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
