@@ -1136,10 +1136,10 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
 
-	// u.identifierFieldNames is a map, so the iteration above yields the ids in a 
+	// u.identifierFieldNames is a map, so the iteration above yields the ids in a
 	// non-deterministic order. Thus, sorting them to produce a canonical ordering:
 	// Schema.Equals compares IdentifierFieldIDs positionally, so,
-	// an unsorted slice would make otherwise-identical schemas compare unequal at random. 
+	// an unsorted slice would make otherwise-identical schemas compare unequal at random.
 	slices.Sort(identifierFieldIDs)
 
 	meta, err := u.txn.txnMeta()
