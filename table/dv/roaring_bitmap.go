@@ -143,6 +143,11 @@ func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 // Positions returns an iterator over every set position in ascending
 // order. The positions yielded are the same 64-bit values passed to Set,
 // mirroring Java's RoaringPositionBitmap#forEach.
+//
+// The bitmap must not be modified while iterating: the key set is
+// captured up front while each bucket is consulted lazily, so a
+// concurrent or re-entrant Set/Or produces an inconsistent view (as
+// with the rest of the type, which is not safe for concurrent use).
 func (b *RoaringPositionBitmap) Positions() iter.Seq[uint64] {
 	return func(yield func(uint64) bool) {
 		for _, key := range slices.Sorted(maps.Keys(b.bitmaps)) {
