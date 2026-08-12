@@ -111,6 +111,14 @@ func TestMoRDeleteSupersedingDVFailsInsteadOfReplaying(t *testing.T) {
 	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
 		"a commit carrying DV removals must fail on the first CAS conflict, not refresh-and-replay")
 
+	// The clean conflict leaves the transaction retriable, not latched
+	// as committed: a naive same-transaction retry surfaces a fresh
+	// conflict (its requirement still targets the stale base) rather
+	// than "transaction has already been committed".
+	_, err = staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+
 	// The table is uncorrupted: exactly one live DV (the peer's merged
 	// one) references the data file, and only the peer's deletes apply.
 	committed, err := cat.LoadTable(ctx, table.Identifier{"db", "no_replay_removals"})

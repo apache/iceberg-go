@@ -723,9 +723,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		// against a refreshed base could silently miss a concurrently
 		// committed replacement and strand two live deletion vectors on
 		// one data file. The caller must rebuild the removal against the
-		// current snapshot and try again.
+		// current snapshot and try again. The annotation distinguishes
+		// this abort from an exhausted retry budget while preserving
+		// errors.Is(err, ErrCommitFailed).
 		if co.noReplay {
-			return nil, err
+			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
 		}
 	}
 
