@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
@@ -208,4 +209,53 @@ func benchmarkChunkBoundaries(length, numChunks int) []int {
 	}
 
 	return boundaries
+}
+
+func BenchmarkProcessPositionalDeletes(b *testing.B) {
+	const numRows = 64 * 1024
+
+	for _, tc := range []struct {
+		name    string
+		deletes set[int64]
+	}{
+		{name: "clean", deletes: set[int64]{numRows: {}}},
+		{name: "partial", deletes: set[int64]{numRows / 2: {}}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			batch := benchmarkPositionalDeleteBatch(memory.DefaultAllocator, numRows)
+			defer batch.Release()
+
+			ctx := context.Background()
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				process := processPositionalDeletes(ctx, tc.deletes, (&rowPositionSource{}).cursor())
+				batch.Retain()
+				out, err := process(batch)
+				if err != nil {
+					b.Fatal(err)
+				}
+				out.Release()
+			}
+		})
+	}
+}
+
+func benchmarkPositionalDeleteBatch(mem memory.Allocator, numRows int64) arrow.RecordBatch {
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	bldr.Reserve(int(numRows))
+	for i := range numRows {
+		bldr.Append(i)
+	}
+
+	values := bldr.NewArray()
+	defer values.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: false,
+	}}, nil)
+
+	return array.NewRecordBatch(schema, []arrow.Array{values}, numRows)
 }
