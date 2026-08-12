@@ -384,26 +384,108 @@ func TestCalculateBackoff(t *testing.T) {
 }
 
 func TestLockConfigurationParsing(t *testing.T) {
-	props := map[string]string{
-		LockCheckMinWaitTime: "200ms",
-		LockCheckMaxWaitTime: "30s",
-		LockCheckRetries:     "5",
-	}
+	t.Run("legacy go duration keys", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitTime: "200ms",
+			LockCheckMaxWaitTime: "30s",
+			LockCheckRetries:     "5",
+		}
 
-	opts := NewHiveOptions()
-	opts.ApplyProperties(props)
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
 
-	assert.Equal(t, 200*time.Millisecond, opts.LockMinWaitTime)
-	assert.Equal(t, 30*time.Second, opts.LockMaxWaitTime)
-	assert.Equal(t, 5, opts.LockRetries)
+		assert.Equal(t, 200*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 30*time.Second, opts.LockMaxWaitTime)
+		assert.Equal(t, 5, opts.LockRetries)
+	})
+
+	t.Run("java millisecond keys", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitMs: "75",
+			LockCheckMaxWaitMs: "2500",
+			LockCheckRetries:   "6",
+		}
+
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
+
+		assert.Equal(t, 75*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 2500*time.Millisecond, opts.LockMaxWaitTime)
+		assert.Equal(t, 6, opts.LockRetries)
+	})
+
+	t.Run("java keys win over legacy aliases", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitMs:   "80",
+			LockCheckMaxWaitMs:   "4000",
+			LockCheckMinWaitTime: "200ms",
+			LockCheckMaxWaitTime: "30s",
+		}
+
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
+
+		assert.Equal(t, 80*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 4*time.Second, opts.LockMaxWaitTime)
+	})
 }
 
 func TestLockConfigurationDefaults(t *testing.T) {
 	opts := NewHiveOptions()
 
+	assert.Equal(t, 50*time.Millisecond, DefaultLockCheckMinWaitTime)
+	assert.Equal(t, 5*time.Second, DefaultLockCheckMaxWaitTime)
 	assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
 	assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
 	assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+}
+
+func TestLockConfigurationValidation(t *testing.T) {
+	t.Run("negative and zero waits keep defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitMs: "0",
+			LockCheckMaxWaitMs: "-1",
+			LockCheckRetries:   "0",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+		assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+	})
+
+	t.Run("min greater than or equal to max keeps defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitMs: "5000",
+			LockCheckMaxWaitMs: "50",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+
+		opts = NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitTime: "5s",
+			LockCheckMaxWaitTime: "5s",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+	})
+
+	t.Run("invalid legacy duration keeps defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitTime: "not-a-duration",
+			LockCheckMaxWaitTime: "also-bad",
+			LockCheckRetries:     "nope",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+		assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+	})
 }
 
 func TestApplyJitterBelowCapNeverShorterThanInput(t *testing.T) {
@@ -469,7 +551,7 @@ func TestApplyJitterAtCapNeverPollsSoonerThanMinWait(t *testing.T) {
 // grows.
 //
 // Reaching the cap takes a lowered lock-check-max-wait-time or a raised retry
-// count; the defaults (100ms, 1 minute, 4 retries) top out at 337.5ms and never
+// count; the defaults (50ms, 5s, 4 retries) top out at 168.75ms and never
 // saturate. The values below are the smallest that put the boundary in range.
 func TestApplyJitterMinimumIsMonotonicAcrossTheCap(t *testing.T) {
 	minWait := 100 * time.Millisecond
@@ -543,11 +625,11 @@ func TestApplyJitterAtCapFloorsCorrectlyVersusFlatScaleFloor(t *testing.T) {
 	}
 }
 
-// A caller may configure minWait above maxWait; options.go accepts it, and
-// calculateBackoff resolves it by returning maxWait. The downward spread must not
-// then draw below the configured minimum. Flooring at half the interval would
-// permit a third of it, because the replay loop cannot run when minWait is already
-// past the cap.
+// A caller may pass minWait above maxWait directly; ApplyProperties ignores that
+// configuration, but calculateBackoff still resolves it by returning maxWait. The
+// downward spread must not then draw below the configured minimum. Flooring at
+// half the interval would permit a third of it, because the replay loop cannot
+// run when minWait is already past the cap.
 func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 	minWait := 90 * time.Second
 	maxWait := 60 * time.Second
