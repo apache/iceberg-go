@@ -18,11 +18,10 @@
 package rest
 
 import (
+	"encoding/json"
 	"math"
 	"strconv"
 	"testing"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"

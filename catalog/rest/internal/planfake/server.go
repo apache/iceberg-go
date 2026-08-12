@@ -19,6 +19,7 @@ package planfake
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,8 +29,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/goccy/go-json"
 )
 
 // Request is one request captured by the fake server. Path is the escaped wire

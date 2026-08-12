@@ -19,6 +19,7 @@ package rest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,8 +30,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/goccy/go-json"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
