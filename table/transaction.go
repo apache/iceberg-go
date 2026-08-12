@@ -92,6 +92,12 @@ type Transaction struct {
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
 
+	// noReplay marks the commit as non-replayable: on a CAS conflict
+	// doCommit fails instead of refreshing and replaying. Set by
+	// snapshot producers whose staged snapshot carries delete-file
+	// removals; see the flag site in commitManifests.
+	noReplay bool
+
 	mx        sync.Mutex
 	committed bool
 }
@@ -313,6 +319,19 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	return nil
 }
 
+// RemoveProperties removes the given property keys from the table. Keys that
+// are not currently set are ignored.
+func (t *Transaction) RemoveProperties(keys []string) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if len(keys) > 0 {
+		return t.apply([]Update{NewRemovePropertiesUpdate(keys)}, nil)
+	}
+
+	return nil
+}
+
 // UpgradeFormatVersion upgrades the table to the given format version. Downgrading
 // is not allowed. If the table is already at the given version, this is a no-op.
 func (t *Transaction) UpgradeFormatVersion(version int) error {
@@ -381,10 +400,9 @@ type expireSnapshotsCfg struct {
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 
 // WithRetainLast sets the minimum number of snapshots to keep per branch,
-// regardless of age. It overrides the MinSnapshotsToKeepKey
-// ("min-snapshots-to-keep") table property for this call. Snapshots beyond this
-// count become eligible for expiry only once they are also older than the
-// configured age (see WithOlderThan).
+// regardless of age. It overrides the MinSnapshotsToKeepKey table property for
+// this call. Snapshots beyond this count become eligible for expiry only once
+// they are also older than the configured age (see WithOlderThan).
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
@@ -395,10 +413,10 @@ func WithRetainLast(n int) ExpireSnapshotsOpt {
 }
 
 // WithOlderThan expires snapshots older than the given duration, measured from
-// the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
-// table property for this call. The most recent snapshots are still retained up
-// to the count set by WithRetainLast. This option does not expire branches or
-// tags based on their age; configure max-ref-age-ms on the ref or table for that.
+// the current time. It overrides the MaxSnapshotAgeMsKey table property for this
+// call. The most recent snapshots are still retained up to the count set by
+// WithRetainLast. This option does not expire branches or tags based on their
+// age; configure MaxRefAgeMsKey on the ref or table for that.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
@@ -417,6 +435,22 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.postCommit = postCommit
 	}
+}
+
+func getRetentionInt(props iceberg.Properties, standardKey, legacyKey string, defaultValue int) int {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt(standardKey, defaultValue)
+	}
+
+	return props.GetInt(legacyKey, defaultValue)
+}
+
+func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, defaultValue int64) int64 {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt64(standardKey, defaultValue)
+	}
+
+	return props.GetInt64(legacyKey, defaultValue)
 }
 
 // ExpireSnapshots removes expired snapshots from the table metadata, staging
@@ -466,24 +500,30 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	// Read table-level retention properties as the last-resort defaults,
-	// mirroring the Java implementation. When neither the ref nor the
-	// caller provides a value, fall back to the table property; when the
-	// table property is also absent use the constant default (math.MaxInt64,
-	// meaning "keep everything").
-	propMaxRefAgeMs := meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
-	propMinSnapshotsToKeep := meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
-	propMaxSnapshotAgeMs := meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
+	// mirroring the Java implementation. The unprefixed property names are
+	// retained as compatibility fallbacks for tables created by older Go
+	// versions.
+	propMaxRefAgeMs := getRetentionInt64(
+		meta.props, MaxRefAgeMsKey, legacyMaxRefAgeMsKey, MaxRefAgeMsDefault,
+	)
+	propMinSnapshotsToKeep := getRetentionInt(
+		meta.props, MinSnapshotsToKeepKey, legacyMinSnapshotsToKeepKey, MinSnapshotsToKeepDefault,
+	)
+	propMaxSnapshotAgeMs := getRetentionInt64(
+		meta.props, MaxSnapshotAgeMsKey, legacyMaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault,
+	)
+	defaultMaxSnapshotAgeMs := propMaxSnapshotAgeMs
+	if cfg.maxSnapshotAgeMs != nil {
+		defaultMaxSnapshotAgeMs = *cfg.maxSnapshotAgeMs
+	}
 
+	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
 		// Assert that this ref's snapshot ID hasn't changed concurrently.
 		// This ensures we don't accidentally expire snapshots that are now
 		// referenced by updated refs.
 		snapshotID := ref.SnapshotID
 		reqs = append(reqs, AssertRefSnapshotID(refName, &snapshotID))
-
-		if refName == MainBranch {
-			snapsToKeep[ref.SnapshotID] = struct{}{}
-		}
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
@@ -497,6 +537,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 
 			continue
+		}
+		retainedRefs[refName] = ref
+
+		if refName == MainBranch {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
 		}
 
 		var (
@@ -536,6 +581,41 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 			snapId = *snap.ParentSnapshotID
 			numSnapshots++
+		}
+	}
+
+	referencedSnapshots := make(map[int64]struct{})
+	for _, ref := range retainedRefs {
+		if ref.SnapshotRefType != BranchRef {
+			referencedSnapshots[ref.SnapshotID] = struct{}{}
+
+			continue
+		}
+
+		snapshotID := ref.SnapshotID
+		for {
+			snap, err := meta.SnapshotByID(snapshotID)
+			if err != nil {
+				break
+			}
+
+			referencedSnapshots[snap.SnapshotID] = struct{}{}
+			if snap.ParentSnapshotID == nil {
+				break
+			}
+
+			snapshotID = *snap.ParentSnapshotID
+		}
+	}
+
+	unreferencedSnapshotCutoff := nowMs - defaultMaxSnapshotAgeMs
+	for _, snap := range meta.snapshotList {
+		if _, referenced := referencedSnapshots[snap.SnapshotID]; referenced {
+			continue
+		}
+
+		if snap.TimestampMs >= unreferencedSnapshotCutoff {
+			snapsToKeep[snap.SnapshotID] = struct{}{}
 		}
 	}
 
@@ -2366,6 +2446,9 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.selectorErr != nil {
+		return nil, s.selectorErr
+	}
 
 	return s, nil
 }
@@ -2413,6 +2496,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
+			withCommitNoReplay(t.noReplay),
 		)
 		if err != nil {
 			// A clean conflict (ErrCommitFailed) committed nothing and stays
