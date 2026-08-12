@@ -717,8 +717,16 @@ type arrowScan struct {
 
 	useLargeTypes bool
 	concurrency   int
+}
 
-	nameMapping iceberg.NameMapping
+// arrowScanInvariants holds metadata-derived values that cannot change during
+// a scan. The snapshots returned by Metadata are owned by the scan and are
+// safe to share read-only across file workers.
+type arrowScanInvariants struct {
+	tableSchema     *iceberg.Schema
+	tableProperties iceberg.Properties
+	projectedIDs    set[int]
+	nameMapping     iceberg.NameMapping
 }
 
 // collectLeafIDs recursively collects leaf field IDs from a type
@@ -742,6 +750,23 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 	}
 }
 
+func addFilterFieldIDs(idset set[int], rowFilter iceberg.BooleanExpression) error {
+	if rowFilter == nil {
+		return nil
+	}
+
+	extracted, err := iceberg.ExtractFieldIDs(rowFilter)
+	if err != nil {
+		return err
+	}
+
+	for _, id := range extracted {
+		idset[id] = struct{}{}
+	}
+
+	return nil
+}
+
 func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equalityDeletes []*equalityDeleteSet) (set[int], error) {
 	idset := set[int]{}
 	// Collect leaf field IDs for column pruning.
@@ -751,15 +776,8 @@ func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equa
 		collectLeafIDs(field.Type, field.ID, idset)
 	}
 
-	if rowFilter != nil {
-		extracted, err := iceberg.ExtractFieldIDs(rowFilter)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, id := range extracted {
-			idset[id] = struct{}{}
-		}
+	if err := addFilterFieldIDs(idset, rowFilter); err != nil {
+		return nil, err
 	}
 	for _, deletes := range equalityDeletes {
 		for _, id := range deletes.fieldIDs {
@@ -770,18 +788,52 @@ func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equa
 	return idset, nil
 }
 
+func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowScanInvariants, error) {
+	projectedIDs, err := as.projectedFieldIDs(as.boundRowFilter, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return &arrowScanInvariants{
+		tableSchema:     as.metadata.CurrentSchema(),
+		tableProperties: tableProperties,
+		projectedIDs:    projectedIDs,
+		nameMapping:     as.metadata.NameMapping(),
+	}, nil
+}
+
+func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, tasks []FileScanTask) error {
+	for _, task := range tasks {
+		rowFilter, err := as.rowFilterForTask(task)
+		if err != nil {
+			return err
+		}
+
+		if err := addFilterFieldIDs(invariants.projectedIDs, rowFilter); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func addEqualityDeleteFieldIDs(invariants *arrowScanInvariants, eqDeleteSets map[int][]*equalityDeleteSet) {
+	for _, deleteSets := range eqDeleteSets {
+		for _, deleteSet := range deleteSets {
+			for _, id := range deleteSet.fieldIDs {
+				invariants.projectedIDs[id] = struct{}{}
+			}
+		}
+	}
+}
+
 type enumeratedRecord struct {
 	Record tblutils.Enumerated[arrow.RecordBatch]
 	Task   tblutils.Enumerated[FileScanTask]
 	Err    error
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, rowFilter iceberg.BooleanExpression, equalityDeletes []*equalityDeleteSet) (*iceberg.Schema, []int, tblutils.FileReader, error) {
-	ids, err := as.projectedFieldIDs(rowFilter, equalityDeletes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (*iceberg.Schema, []int, tblutils.FileReader, error) {
 	src, err := tblutils.GetFile(ctx, as.fs, file, false)
 	if err != nil {
 		return nil, nil, nil, err
@@ -792,7 +844,7 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, r
 		return nil, nil, nil, err
 	}
 
-	fileSchema, colIndices, err := rdr.PrunedSchema(ids, as.nameMapping)
+	fileSchema, colIndices, err := rdr.PrunedSchema(invariants.projectedIDs, invariants.nameMapping)
 	if err != nil {
 		rdr.Close()
 
@@ -800,9 +852,9 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, r
 	}
 
 	iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
-		NameMapping:     as.nameMapping,
-		TableSchema:     as.metadata.CurrentSchema(),
-		TableProperties: as.metadata.Properties(),
+		NameMapping:     invariants.nameMapping,
+		TableSchema:     invariants.tableSchema,
+		TableProperties: invariants.tableProperties,
 	})
 	if err != nil {
 		rdr.Close()
@@ -1328,7 +1380,7 @@ func pruningFilterHasMissingInitialDefault(
 	return false, nil
 }
 
-func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet) (err error) {
+func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], out chan<- enumeratedRecord, positionalDeletes positionDeletes, dvBitmap *dv.RoaringPositionBitmap, eqDeleteSets []*equalityDeleteSet, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -1349,7 +1401,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, rowFilter, eqDeleteSets)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants)
 	if err != nil {
 		return err
 	}
@@ -1453,7 +1505,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 
 		return ToRequestedSchema(ctx, as.projectedSchema, readSchema, r, SchemaOptions{
 			UseLargeTypes:   as.useLargeTypes,
-			TableProperties: as.metadata.Properties(),
+			TableProperties: invariants.tableProperties,
 		})
 	})
 
@@ -1462,7 +1514,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	return err
 }
 
-func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord) (err error) {
+func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutils.Enumerated[FileScanTask], positionalDeletes positionDeletes, out chan<- enumeratedRecord, invariants *arrowScanInvariants) (err error) {
 	defer func() {
 		if err != nil {
 			out <- enumeratedRecord{Task: task, Err: err}
@@ -1477,7 +1529,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		dropFile   bool
 	)
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, as.boundRowFilter, nil)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants)
 	if err != nil {
 		return err
 	}
@@ -1634,9 +1686,8 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, eqDeleteSets map[int][]*equalityDeleteSet) iter.Seq2[arrow.RecordBatch, error] {
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, eqDeleteSets map[int][]*equalityDeleteSet, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
 	extSet := substrait.NewExtensionSet()
-	as.nameMapping = as.metadata.NameMapping()
 
 	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
 	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
@@ -1663,7 +1714,8 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 					if err := as.recordsFromTask(ctx, task, records,
 						deletesPerFile[filePath],
 						dvBitmaps[filePath],
-						eqDeleteSets[task.Index]); err != nil {
+						eqDeleteSets[task.Index],
+						invariants); err != nil {
 						cancel(err)
 
 						return
@@ -1696,11 +1748,12 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		as.useLargeTypes = false
 	}
 
-	ctx = tblutils.WithTableProperties(ctx, as.metadata.Properties())
+	tableProperties := as.metadata.Properties()
+	ctx = tblutils.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
 		UseLargeTypes:   as.useLargeTypes,
-		TableProperties: as.metadata.Properties(),
+		TableProperties: tableProperties,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -1708,6 +1761,14 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	if as.rowLimit == 0 {
 		return resultSchema, func(yield func(arrow.RecordBatch, error) bool) {}, nil
+	}
+
+	invariants, err := as.scanInvariants(tableProperties)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := as.addTaskProjectedFieldIDs(invariants, tasks); err != nil {
+		return nil, nil, err
 	}
 
 	deletesPerFile, err := readAllDeleteFiles(ctx, as.fs, tasks, as.concurrency)
@@ -1732,13 +1793,14 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 	}
 
 	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
-		as.metadata.CurrentSchema(), as.metadata.NameMapping(), tasks, as.concurrency)
+		invariants.tableSchema, invariants.nameMapping, tasks, as.concurrency)
 	if err != nil {
 		// Positional deletes were fully loaded; release them before aborting.
 		releasePerFilePosDeletes(deletesPerFile)
 
 		return nil, nil, err
 	}
+	addEqualityDeleteFieldIDs(invariants, eqDeleteSets)
 
-	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile, dvBitmaps, eqDeleteSets), nil
+	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile, dvBitmaps, eqDeleteSets, invariants), nil
 }
