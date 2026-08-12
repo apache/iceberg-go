@@ -199,6 +199,9 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 		if err != nil {
 			return nil, err
 		}
+		if !p {
+			continue
+		}
 
 		m, err := metricsEval(entry.DataFile())
 		if err != nil {
