@@ -204,7 +204,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if len(manifestList) == 0 {
 		return finish(nil)
 	}
-	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}
