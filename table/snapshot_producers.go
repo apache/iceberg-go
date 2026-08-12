@@ -1431,6 +1431,13 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		addSnap.supersededSource = acc
 	}
 
+	// Build the assertion from the base table's branch head, not the
+	// staged metadata's current snapshot: a staged intermediate snapshot
+	// never exists on the catalog, so requiring it could never hold. A
+	// nil id requires that the branch not exist yet (this commit
+	// creates it).
+	baseHeadID := sp.txn.baseRefSnapshotID(branch)
+
 	return []Update{
 			addSnap,
 			// Carry over the branch's existing retention settings so advancing
@@ -1441,6 +1448,6 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			// determines the resulting ref rather than merging with the old one.
 			sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
 		}, []Requirement{
-			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
+			AssertRefSnapshotID(branch, baseHeadID),
 		}, nil
 }

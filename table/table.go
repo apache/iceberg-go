@@ -503,6 +503,12 @@ type commitOpts struct {
 	// Set for commits carrying delete-file removals; see the flag site
 	// in snapshotProducer.commitManifests for the rationale.
 	noReplay bool
+
+	// pinnedRefs names branches with an explicit requirement from
+	// Transaction.AssertRefSnapshotID, whose assertions must not be
+	// rewritten to the fresh branch head between retries (see
+	// Transaction.pinnedRefs).
+	pinnedRefs map[string]struct{}
 }
 
 type commitOption func(*commitOpts)
@@ -525,6 +531,10 @@ func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 
 func withCommitNoReplay(noReplay bool) commitOption {
 	return func(o *commitOpts) { o.noReplay = noReplay }
+}
+
+func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
+	return func(o *commitOpts) { o.pinnedRefs = refs }
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
@@ -633,7 +643,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				}
 			}
 			current = fresh.metadata
-			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
+
+			// A pinned assertion the fresh catalog state violates can
+			// never succeed — fail now instead of burning the remaining
+			// retries on it.
+			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
+				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			}
 			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 				return nil, err
 			}
@@ -783,7 +800,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // the branch is empty or the new head cannot be resolved (branch
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
-func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata) []Requirement {
+//
+// Assertions on branches in pinned were registered explicitly by the
+// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
+// semantics and are never rewritten: a branch that has changed must
+// fail the commit, not be replayed against the new head.
+func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
 	}
@@ -795,19 +817,46 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	out := make([]Requirement, len(reqs))
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
-			newID := head.SnapshotID
-			if a.requireBranch {
-				out[i] = assertBranchRefSnapshotID(branch, &newID)
-			} else {
-				out[i] = AssertRefSnapshotID(branch, &newID)
-			}
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				newID := head.SnapshotID
+				if a.requireBranch {
+					out[i] = assertBranchRefSnapshotID(branch, &newID)
+				} else {
+					out[i] = AssertRefSnapshotID(branch, &newID)
+				}
 
-			continue
+				continue
+			}
 		}
 		out[i] = r
 	}
 
 	return out
+}
+
+// validatePinnedRefRequirements validates every assert-ref-snapshot-id
+// requirement on a pinned branch against the freshly refreshed catalog
+// metadata. A failure means the branch has changed from the required
+// snapshot: the assertion is never rewritten, so it can never hold and
+// the commit must fail instead of retrying.
+func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	for _, r := range reqs {
+		a, ok := r.(*assertRefSnapshotID)
+		if !ok {
+			continue
+		}
+		if _, isPinned := pinned[a.Ref]; !isPinned {
+			continue
+		}
+		if err := a.Validate(fresh); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
