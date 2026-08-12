@@ -674,6 +674,78 @@ func TestUpdateColumn(t *testing.T) {
 		require.ErrorContains(t, err, "non-null default (7)")
 	})
 
+	t.Run("test valid write default is applied", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(int32(7))},
+		}).Apply()
+		require.NoError(t, err)
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		require.True(t, ok)
+		assert.Equal(t, int32(7), ageField.WriteDefault)
+	})
+
+	t.Run("test mistyped write default is rejected", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral("not-an-int")},
+		}).Apply()
+		require.ErrorContains(t, err, "invalid write-default for age")
+	})
+
+	t.Run("test write default validated against updated type", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		// Promote age to Int64 in the same update;
+		// the write-default must match the promoted type, so an int32 literal is rejected.
+		_, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			FieldType:    iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64},
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(int32(7))},
+		}).Apply()
+		require.ErrorContains(t, err, "invalid write-default for age")
+
+		// A default matching the promoted type is accepted.
+		txn = table.NewTransaction()
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			FieldType:    iceberg.Optional[iceberg.Type]{Valid: true, Val: iceberg.PrimitiveTypes.Int64},
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(int64(7))},
+		}).Apply()
+		require.NoError(t, err)
+		ageField, ok := newSchema.FindFieldByName("age")
+		require.True(t, ok)
+		assert.Equal(t, int64(7), ageField.WriteDefault)
+	})
+
+	t.Run("test write default on non-primitive column is rejected", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"address"}, ColumnUpdate{
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.NewLiteral(int32(7))},
+		}).Apply()
+		require.ErrorContains(t, err, "invalid write-default for address")
+	})
+
+	t.Run("test clearing write default on optional column is allowed", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).UpdateColumn([]string{"age"}, ColumnUpdate{
+			WriteDefault: iceberg.Optional[iceberg.Literal]{Valid: true, Val: nil},
+		}).Apply()
+		require.NoError(t, err)
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		require.True(t, ok)
+		assert.Nil(t, ageField.WriteDefault)
+	})
+
 	t.Run("test update non-existent column", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
 		txn := table.NewTransaction()
