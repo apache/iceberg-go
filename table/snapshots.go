@@ -354,7 +354,11 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 		}
 
 		for _, m := range manifests {
-			for entry, err := range m.Entries(fio, false) {
+			// Discard DELETED entries: they are tombstones recording a
+			// removal, not files reachable from this snapshot. Yielding
+			// them would make existence and duplicate checks treat a
+			// file deleted by this snapshot as still live.
+			for entry, err := range m.Entries(fio, true) {
 				if err != nil {
 					yield(nil, err)
 
