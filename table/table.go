@@ -494,8 +494,11 @@ type commitOpts struct {
 	// may leave this empty; Transaction.Commit always sets it.
 	branch string
 
-	// validators runs once before cat.CommitTable on the first attempt
-	// only. Refresh-and-replay across retries is deferred to PR 2.5.
+	// validators run before cat.CommitTable on every attempt of the
+	// retry loop. On attempt 0 the writer's metadata and the catalog
+	// state coincide, so the conflict context has no concurrent
+	// snapshots and validators short-circuit; on retries they run
+	// against the freshly refreshed catalog state (refresh-and-replay).
 	validators []conflictValidatorFunc
 
 	// noReplay makes a CAS conflict terminal: doCommit returns the
