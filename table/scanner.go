@@ -672,32 +672,28 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	if err != nil {
 		return nil, err
 	}
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// This path has no reporter behind it, so the manifest counts recorded into
 	// this accumulator are intentionally discarded. A future caller that needs
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, &scanMetricsAccumulator{})
 }
 
-// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
-// using the given schema. It records total/scanned/skipped manifest counts
-// (split by data vs delete content) into acc.
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
-	snap, err := scan.ResolveSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	if snap == nil {
-		return nil, nil
-	}
-
-	afs, err := scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
+// fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
+// with fs and filters them using the given schema. It records
+// total/scanned/skipped manifest counts (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(snap *Snapshot, fs io.IO, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(afs)
+	manifestList, err := snap.Manifests(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -751,12 +747,20 @@ func (scan *Scan) collectManifestEntries(
 	if err != nil {
 		return nil, err
 	}
+	var fs io.IO
+	if len(manifestList) > 0 {
+		fs, err = scan.ioF(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	return scan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
 }
 
 func (scan *Scan) collectManifestEntriesWithSchema(
 	ctx context.Context,
+	fs io.IO,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 ) (*manifestEntries, error) {
@@ -788,10 +792,6 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
-			fs, err := scan.ioF(ctx)
-			if err != nil {
-				return err
-			}
 			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -910,15 +910,26 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 // is no snapshot or every manifest is pruned.
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) ([]FileScanTask, error) {
 	scan.planIO = nil
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Share one FileIO for this planning operation between the manifest list
+	// and all manifest workers. Other concurrent table reads use the same
+	// ownership.
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}

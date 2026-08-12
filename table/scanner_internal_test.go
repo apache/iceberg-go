@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"strconv"
 	"sync"
@@ -51,6 +52,145 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
+}
+
+func scanWithManifestCount(tb testing.TB, manifestCount int) (*Scan, *iceio.MemFS) {
+	tb.Helper()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec()
+	metadata, err := NewMetadata(
+		schema,
+		&spec,
+		UnsortedSortOrder,
+		"mem://planning/table",
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(tb, err)
+
+	snapshotID := int64(1)
+	fs := iceio.NewMemFS()
+	manifests := make([]iceberg.ManifestFile, manifestCount)
+	for i := range manifestCount {
+		dataFile, err := iceberg.NewDataFileBuilder(
+			spec,
+			iceberg.EntryContentData,
+			fmt.Sprintf("mem://planning/table/data/file-%d.parquet", i),
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			1,
+			128,
+		)
+		require.NoError(tb, err)
+
+		entry := iceberg.NewManifestEntryBuilder(
+			iceberg.EntryStatusADDED,
+			&snapshotID,
+			dataFile.Build(),
+		).SequenceNum(1).Build()
+		manifestPath := fmt.Sprintf("mem://planning/table/metadata/manifest-%d.avro", i)
+		var manifestData bytes.Buffer
+		manifests[i], err = iceberg.WriteManifest(
+			manifestPath,
+			&manifestData,
+			2,
+			spec,
+			schema,
+			snapshotID,
+			[]iceberg.ManifestEntry{entry},
+		)
+		require.NoError(tb, err)
+		require.NoError(tb, fs.WriteFile(manifestPath, manifestData.Bytes()))
+	}
+
+	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
+	sequenceNumber := int64(1)
+	var manifestListData bytes.Buffer
+	require.NoError(tb, iceberg.WriteManifestList(
+		2,
+		&manifestListData,
+		snapshotID,
+		nil,
+		&sequenceNumber,
+		0,
+		manifests,
+	))
+	require.NoError(tb, fs.WriteFile(manifestListPath, manifestListData.Bytes()))
+
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(tb, err)
+	schemaID := schema.ID
+	require.NoError(tb, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: sequenceNumber,
+		TimestampMs:    metadata.LastUpdatedMillis() + 1,
+		ManifestList:   manifestListPath,
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}))
+	require.NoError(tb, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	metadata, err = builder.Build()
+	require.NoError(tb, err)
+
+	return &Scan{
+		metadata:       metadata,
+		ioF:            func(context.Context) (iceio.IO, error) { return fs, nil },
+		planningMode:   ScanPlanningLocal,
+		rowFilter:      iceberg.AlwaysTrue{},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		options:        iceberg.Properties{},
+		limit:          ScanNoLimit,
+		concurrency:    8,
+	}, fs
+}
+
+func TestPlanFilesReusesFileIO(t *testing.T) {
+	const manifestCount = 8
+
+	scan, fs := scanWithManifestCount(t, manifestCount)
+	var calls atomic.Int64
+	scan.ioF = func(context.Context) (iceio.IO, error) {
+		calls.Add(1)
+
+		return fs, nil
+	}
+
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, tasks, manifestCount)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+func BenchmarkPlanFilesFileIOReuse(b *testing.B) {
+	for _, manifestCount := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("manifests_%d", manifestCount), func(b *testing.B) {
+			scan, fs := scanWithManifestCount(b, manifestCount)
+			var calls atomic.Int64
+			scan.ioF = func(context.Context) (iceio.IO, error) {
+				calls.Add(1)
+
+				return fs, nil
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				tasks, err := scan.PlanFiles(b.Context())
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(tasks) != manifestCount {
+					b.Fatalf("unexpected task count: %d", len(tasks))
+				}
+			}
+			b.ReportMetric(float64(calls.Load())/float64(b.N), "fileio-loads/op")
+		})
+	}
 }
 
 func TestPartitionsMatchHandlesBinaryValues(t *testing.T) {
@@ -463,7 +603,9 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	require.NoError(t, err)
 
 	var acc scanMetricsAccumulator
-	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(context.Background(), schema, &acc)
+	snapshot, err := scan.ResolveSnapshot()
+	require.NoError(t, err)
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snapshot, memIO, schema, &acc)
 	require.NoError(t, err)
 
 	// Two data manifests, one delete manifest.
