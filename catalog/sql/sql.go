@@ -1589,6 +1589,10 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return errViewsUnsupportedOnV0
 	}
 
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return err
+	}
+
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.TableNameFromIdent(identifier)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
@@ -1796,6 +1800,10 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return false, nil
 	}
 
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return false, err
+	}
+
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
 	if err != nil {
 		return false, err
@@ -1820,6 +1828,10 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
 	if c.isV0() {
 		return nil, errViewsUnsupportedOnV0
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return nil, err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
