@@ -941,6 +941,187 @@ func TestRowDeltaRemoveDeletesRequiresReplacement(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no replacement deletion vector")
 	})
+
+	t.Run("removal-only delta", func(t *testing.T) {
+		tbl, _, _, dv1 := newTableWithLiveDV(t)
+		rd := tbl.NewTransaction().NewRowDelta(nil).RemoveDeletes(dv1)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no replacement deletion vector",
+			"a removal-only delta must fail with the replacement-required error, not the empty-delta error")
+	})
+}
+
+// Why: committing a replacement DV while the data file's current live
+// DV stays live would put two live DVs on one data file, which the v3
+// spec forbids and scan planning rejects; the same holds for two added
+// replacements targeting one data file in a single delta.
+// Condition: a supersession delta that (a) adds a replacement DV for a
+// data file whose live DV is not in RemoveDeletes, or (b) adds two
+// replacement DVs referencing the same data file.
+// Assertion: Commit fails identifying the surviving live DV (a) or the
+// duplicated reference (b).
+func TestRowDeltaRemoveDeletesRejectsSurvivingLiveDV(t *testing.T) {
+	t.Run("replacement added while live DV not removed", func(t *testing.T) {
+		tbl, location, pathA, pathB, dvA, _ := newTableWithSharedPuffinDVs(t)
+
+		// Supersede A's DV, but also add a replacement for B without
+		// removing B's live DV.
+		dvA2 := writeDV(t, location, "dv-a2.puffin", pathA, []int64{0, 1})
+		dvB2 := writeDV(t, location, "dv-b2.puffin", pathB, []int64{0, 1})
+		rd := tbl.NewTransaction().NewRowDelta(nil).
+			AddDeletes(dvA2, dvB2).
+			RemoveDeletes(dvA)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta")
+		assert.Contains(t, err.Error(), pathB)
+	})
+
+	t.Run("two replacements for one data file", func(t *testing.T) {
+		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+		rep1 := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+		rep2 := buildDVFile(t, location+"/data/dv-003.puffin", dataPath)
+		rd := tbl.NewTransaction().NewRowDelta(nil).
+			AddDeletes(rep1, rep2).
+			RemoveDeletes(dv1)
+
+		err := rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple added deletion vectors reference data file "+dataPath)
+	})
+}
+
+// Why: a table that already violates the one-live-DV-per-data-file
+// invariant must fail a supersession commit loudly — the producer keys
+// DV removals by referenced data file, so proceeding would either
+// tombstone several entries while counting one removal (same path) or
+// leave the sibling duplicate live next to the replacement (different
+// paths).
+// Condition: v3 tables corrupted through the unvalidated plain
+// AddDeletes path so one data file carries two live DV entries, first
+// as duplicate entries at one Puffin path, then at two distinct paths;
+// a RowDelta then supersedes one of them.
+// Assertion: Commit fails naming the duplicate entries rather than
+// committing.
+func TestRowDeltaRemoveDeletesCorruptDuplicateLiveDVs(t *testing.T) {
+	t.Run("duplicate entries at one path", func(t *testing.T) {
+		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+		// Corrupt the table: a second snapshot re-adds the same DV
+		// entry (same path, same referenced data file).
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).Commit(t.Context()))
+		tbl, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+		rd := tbl.NewTransaction().NewRowDelta(nil).
+			AddDeletes(replacement).
+			RemoveDeletes(dv1)
+
+		err = rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate live deletion vectors")
+	})
+
+	t.Run("duplicate entries at two paths", func(t *testing.T) {
+		tbl, location, dataPath, dv1 := newTableWithLiveDV(t)
+
+		// Corrupt the table: a second live DV for the same data file
+		// at a different Puffin path.
+		dv1b := writeDV(t, location, "dv-001b.puffin", dataPath, []int64{0})
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1b).Commit(t.Context()))
+		tbl, err := tx.Commit(t.Context())
+		require.NoError(t, err)
+
+		replacement := writeDV(t, location, "dv-002.puffin", dataPath, []int64{0, 1})
+		rd := tbl.NewTransaction().NewRowDelta(nil).
+			AddDeletes(replacement).
+			RemoveDeletes(dv1)
+
+		err = rd.Commit(t.Context())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is not removed by this row delta",
+			"the sibling duplicate at the other path must be flagged as surviving")
+		assert.Contains(t, err.Error(), dv1b.FilePath())
+	})
+}
+
+// Why: RemoveDeletes resolves removals against the snapshot the writer
+// built on, so a commit carrying them must fail on a CAS conflict
+// instead of refresh-and-replaying — a replay would inherit the peer's
+// replacement DV from the fresh base while the stale removal replays
+// as a no-op, stranding two live DVs on one data file.
+// Condition: two writers stage supersessions of the same live DV from
+// the same view via RowDelta.RemoveDeletes; the peer commits first;
+// the stale writer commits with retries enabled.
+// Assertion: the stale commit fails wrapping ErrCommitFailed after
+// exactly one CommitTable attempt, and the committed table carries
+// exactly one live DV — the peer's.
+func TestRowDeltaRemoveDeletesFailsInsteadOfReplaying(t *testing.T) {
+	ctx := t.Context()
+	tbl, cat := newNoReplayV3Table(t)
+	tbl = appendTenRows(t, tbl)
+	location := tbl.Location()
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	dataPath := tasks[0].File.FilePath()
+
+	// Baseline DV hides position 0.
+	dv1 := writeDV(t, location, "dv-001.puffin", dataPath, []int64{0})
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(dv1).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	// Stage the stale writer's supersession first, from the current view.
+	dvStale := writeDV(t, location, "dv-stale.puffin", dataPath, []int64{0, 2})
+	staleTxn := tbl.NewTransaction()
+	require.NoError(t, staleTxn.NewRowDelta(nil).AddDeletes(dvStale).RemoveDeletes(dv1).Commit(ctx))
+
+	// Peer supersedes dv1 from the same view and wins the race.
+	dvPeer := writeDV(t, location, "dv-peer.puffin", dataPath, []int64{0, 1})
+	peerTxn := tbl.NewTransaction()
+	require.NoError(t, peerTxn.NewRowDelta(nil).AddDeletes(dvPeer).RemoveDeletes(dv1).Commit(ctx))
+	_, err = peerTxn.Commit(ctx)
+	require.NoError(t, err)
+
+	attemptsBefore := cat.attempts.Load()
+	_, err = staleTxn.Commit(ctx)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed)
+	assert.Equal(t, attemptsBefore+1, cat.attempts.Load(),
+		"a RowDelta carrying DV removals must fail on the first CAS conflict, not refresh-and-replay")
+
+	// The table is uncorrupted: exactly one live DV — the peer's.
+	committed, err := cat.LoadTable(ctx, table.Identifier{"db", "no_replay_removals"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{dvPeer.FilePath() + " -> " + dataPath},
+		deleteEntriesReferencing(t, committed, map[string]struct{}{dataPath: {}}),
+		"the data file must carry exactly one live DV: the peer's")
+}
+
+// Why: deletion vectors exist only in format v3; a v2 table cannot
+// carry the entries RemoveDeletes targets, and the error should say so
+// instead of failing resolution with a confusing lookup error.
+// Condition: a v2 table commits a RowDelta with a removal.
+// Assertion: Commit fails with a format-version error.
+func TestRowDeltaRemoveDeletesRequiresV3(t *testing.T) {
+	tbl := newRowDeltaCommitTestTableVersion(t, 2)
+	rd := tbl.NewTransaction().NewRowDelta(nil).
+		AddDeletes(buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet")).
+		RemoveDeletes(buildDVFile(t, "s3://bucket/data/dv-001.puffin", "s3://bucket/data/data-001.parquet"))
+
+	err := rd.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "format version >= 3")
 }
 
 // Why: only DV supersession is safe to express through a RowDelta;
