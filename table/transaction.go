@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -167,13 +168,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return err
 	}
 
-	for _, r := range reqs {
-		if err := r.Validate(current); err != nil {
-			return err
-		}
-	}
-
-	existing := map[string]struct{}{}
+	// Deduplicate requirements by semantic key, rejecting pairs that
+	// share a key but cannot both hold (see checkRequirementConflict).
+	// Only requirements actually appended are validated against the
+	// staged metadata: a deduplicated twin re-asserts base state the
+	// staged metadata has intentionally moved past, and its kept twin
+	// was validated when first added.
+	existing := make(map[string]Requirement, len(t.reqs))
 	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
 	for _, r := range t.reqs {
 		key, err := requirementSemanticKey(r)
@@ -181,7 +182,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			return err
 		}
 
-		existing[key] = struct{}{}
+		existing[key] = r
 		stagedReqs = append(stagedReqs, r)
 	}
 
@@ -191,10 +192,18 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			return err
 		}
 
-		if _, ok := existing[key]; !ok {
-			stagedReqs = append(stagedReqs, r)
-			existing[key] = struct{}{}
+		if prev, ok := existing[key]; ok {
+			if err := checkRequirementConflict(prev, r); err != nil {
+				return err
+			}
+
+			continue
 		}
+		if err := r.Validate(current); err != nil {
+			return err
+		}
+		existing[key] = r
+		stagedReqs = append(stagedReqs, r)
 	}
 
 	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
@@ -226,13 +235,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 // from collapsing into one another.
 //
 // assert-ref-snapshot-id is special-cased to key by requirement type + ref name
-// only, deliberately ignoring the asserted snapshot id. Within a single
-// transaction the builder mutates its own ref state across operations (e.g. the
-// first append asserts main == nil, a later append asserts main == snapshot-1),
-// which would otherwise produce multiple, mutually contradictory base-state
-// assertions for the same ref against the pre-transaction metadata. Keying by
-// ref name keeps only the first assertion for each ref while still letting
-// assertions for different refs survive dedupe.
+// only, deliberately ignoring the asserted snapshot id. Producers build their
+// assertion from the BASE table's branch head, so repeated producer commits
+// (and explicit AssertRefSnapshotID calls) for the same ref produce identical
+// assertions that collapse to one, while assertions for different refs
+// survive dedupe. Two assertions for the same ref requiring different
+// snapshot ids share a key but cannot be collapsed —
+// checkRequirementConflict rejects them at apply time.
 func requirementSemanticKey(r Requirement) (string, error) {
 	if ref, ok := r.(*assertRefSnapshotID); ok {
 		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
@@ -244,6 +253,59 @@ func requirementSemanticKey(r Requirement) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+// checkRequirementConflict reports whether two requirements sharing a
+// semantic key can be collapsed into one. Identical ref assertions dedupe
+// to the first; two assert-ref-snapshot-id for the same ref requiring
+// different snapshot ids can never both hold, so keeping either one
+// would silently drop a check the caller registered — reject instead.
+func checkRequirementConflict(prev, next Requirement) error {
+	a, aok := prev.(*assertRefSnapshotID)
+	b, bok := next.(*assertRefSnapshotID)
+	if !aok || !bok {
+		return nil
+	}
+
+	if (a.SnapshotID == nil) != (b.SnapshotID == nil) ||
+		(a.SnapshotID != nil && *a.SnapshotID != *b.SnapshotID) {
+		return fmt.Errorf("conflicting snapshot-id assertions for ref %q: %s vs %s",
+			a.Ref, formatSnapshotID(a.SnapshotID), formatSnapshotID(b.SnapshotID))
+	}
+
+	return nil
+}
+
+// formatSnapshotID renders a required snapshot id for error messages; a
+// nil id asserts the ref's absence.
+func formatSnapshotID(id *int64) string {
+	if id == nil {
+		return "<ref absent>"
+	}
+
+	return strconv.FormatInt(*id, 10)
+}
+
+// baseRefSnapshotID returns the snapshot id the transaction's BASE
+// table metadata records for branch, or nil when the branch does not
+// exist on the base. Ref requirements must be built from this state —
+// the catalog state the writer actually read, as in Java's
+// UpdateRequirements — rather than the staged builder's refs, which
+// move past it as producer commits stage intermediate snapshots the
+// catalog has never seen.
+func (t *Transaction) baseRefSnapshotID(branch string) *int64 {
+	if t.tbl == nil || t.tbl.metadata == nil {
+		return nil
+	}
+	for name, ref := range t.tbl.metadata.Refs() {
+		if name == branch {
+			id := ref.SnapshotID
+
+			return &id
+		}
+	}
+
+	return nil
 }
 
 func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
@@ -364,9 +426,17 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	}
 
 	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
-	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
 
-	return t.apply([]Update{update}, []Requirement{req})
+	// Assert the base branch head so a concurrent head move fails the
+	// commit instead of the rollback clobbering it. When main was
+	// staged by this transaction (absent on the base), the update that
+	// created it already carries its own base-state requirement.
+	var reqs []Requirement
+	if id := t.baseRefSnapshotID(MainBranch); id != nil {
+		reqs = append(reqs, AssertRefSnapshotID(MainBranch, id))
+	}
+
+	return t.apply([]Update{update}, reqs)
 }
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
@@ -519,11 +589,14 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Assert that this ref's snapshot ID hasn't changed concurrently.
-		// This ensures we don't accidentally expire snapshots that are now
-		// referenced by updated refs.
-		snapshotID := ref.SnapshotID
-		reqs = append(reqs, AssertRefSnapshotID(refName, &snapshotID))
+		// Assert the ref's base snapshot id so we don't accidentally
+		// expire snapshots that are now referenced by concurrently
+		// updated refs. Refs the transaction itself staged (absent on
+		// the base) get no assertion here: the update that created
+		// them carries its own base-state requirement.
+		if id := t.baseRefSnapshotID(refName); id != nil {
+			reqs = append(reqs, AssertRefSnapshotID(refName, id))
+		}
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
 		if err != nil {
