@@ -78,7 +78,7 @@ func newEqualityDeletePartitionKey(
 		}
 	}
 
-	tuple, err := partitionConflictKey(specID, partition)
+	tuple, err := canonicalPartitionKey(specID, partition)
 	if err != nil {
 		return equalityDeletePartitionKey{}, err
 	}
@@ -126,7 +126,7 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 	case uuid.UUID:
 		return equalityDeleteBinaryPartitionValue(value[:]), nil
 	default:
-		encoded, err := appendPartitionConflictValue(nil, value)
+		encoded, err := appendCanonicalPartitionValue(nil, value)
 		if err != nil {
 			return nil, err
 		}
