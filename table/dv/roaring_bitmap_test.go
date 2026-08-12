@@ -618,3 +618,83 @@ func TestRoaringBitmapEmptyRoundTrip(t *testing.T) {
 	assert.True(t, got.IsEmpty())
 	assert.Equal(t, int64(0), got.Cardinality())
 }
+
+// Why: Positions is the supported way to enumerate a deletion vector's
+// contents; without it consumers must round-trip the serialized format.
+// Condition: iterate an empty bitmap.
+// Assertion: no positions are yielded.
+func TestRoaringBitmapPositionsEmpty(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+
+	for pos := range bm.Positions() {
+		t.Fatalf("empty bitmap yielded position %d", pos)
+	}
+}
+
+// Why: the single-position case pins down that Positions yields exactly what Set stored.
+// Condition: set one position above the 32-bit boundary and iterate.
+// Assertion: exactly that position is yielded.
+func TestRoaringBitmapPositionsSingle(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	want := (uint64(7) << 32) | 123
+	bm.Set(want)
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+	}
+
+	assert.Equal(t, []uint64{want}, got)
+}
+
+// Why: positions spanning multiple 32-bit keys must come back in ascending
+// 64-bit order, with the count agreeing with Cardinality.
+// Condition: set positions across keys 0, 1, and 5 (crossing the 32-bit
+// boundary) in shuffled insertion order, then iterate.
+// Assertion: yielded positions are the sorted originals and their count
+// equals Cardinality.
+func TestRoaringBitmapPositionsAscendingAcrossKeys(t *testing.T) {
+	positions := []uint64{
+		(uint64(5) << 32) | 1,
+		0,
+		(uint64(1) << 32) | 42,
+		65535,
+		uint64(5) << 32,
+		(uint64(1) << 32) | 9999,
+		1,
+	}
+
+	bm := NewRoaringPositionBitmap()
+	for _, pos := range positions {
+		bm.Set(pos)
+	}
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+	}
+
+	want := slices.Clone(positions)
+	slices.Sort(want)
+	assert.Equal(t, want, got)
+	assert.Equal(t, bm.Cardinality(), int64(len(got)))
+}
+
+// Why: iter.Seq consumers may stop early (e.g. range-over-func with break);
+// the iterator must honor that instead of continuing to yield.
+// Condition: set positions in two keys and break after the first yield.
+// Assertion: exactly one position (the smallest) is observed.
+func TestRoaringBitmapPositionsEarlyBreak(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	bm.Set(10)
+	bm.Set((uint64(2) << 32) | 3)
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+
+		break
+	}
+
+	assert.Equal(t, []uint64{10}, got)
+}
