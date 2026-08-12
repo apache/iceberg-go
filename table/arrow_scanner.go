@@ -354,6 +354,20 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64]) recProces
 // rowCount bounds the mask to the data file's row count. The closure-captured
 // nextIdx tracks absolute position across batches, mirroring
 // processPositionalDeletes.
+//
+// Overflow safety: binary-like columns emitted by the Parquet reader always
+// use int64 offsets (LargeBinary / LargeString) because GetReader calls
+// SetForceLarge for every leaf column. This prevents the production crash
+// where a batch exceeding 2^31-1 bytes of binary payload produced corrupt
+// int32 offsets that panicked inside Arrow's compute kernel.
+//
+// Pipeline ordering note: processPositionalDeletes runs before this step (see
+// recordsFromTask). If a manually-constructed task carries both a DV and
+// positional-delete rows for the same data file, processPositionalDeletes sheds
+// rows first, so nextIdx here tracks post-deletion row counts — no longer
+// aligned with DV's absolute file positions. PlanFiles guarantees mutual
+// exclusion in practice (a data file with a DV does not also get pos-delete
+// matching), but hand-built tasks can trigger the misalignment.
 func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitmap, rowCount int64) recProcessFn {
 	nextIdx := int64(0)
 	keepBits := bitmap.KeepMaskBytes(rowCount)
@@ -362,8 +376,28 @@ func filterByDeletionVector(ctx context.Context, bitmap *dv.RoaringPositionBitma
 	return func(r arrow.RecordBatch) (arrow.RecordBatch, error) {
 		defer r.Release()
 
+		// Zero-row batches are valid at the tail of a row group whose last
+		// rows fell in a prior batch. Pass through without advancing nextIdx
+		// so the absolute-position counter stays aligned with the keep-mask.
+		if r.NumRows() == 0 {
+			r.Retain() // balance defer r.Release() — caller takes ownership
+			return r, nil
+		}
+
 		currentIdx := nextIdx
 		nextIdx += r.NumRows()
+
+		// Guard: if the reader delivers more rows than the file metadata
+		// claims (rowCount = task.Value.File.Count()), nextIdx would exceed
+		// rowCount and array.NewSlice would panic with an out-of-bounds error.
+		// Return a descriptive error instead so the caller can log and skip.
+		if nextIdx > rowCount {
+			return nil, fmt.Errorf(
+				"filterByDeletionVector: reader delivered more rows than file "+
+					"metadata claims (batch rows=%d, cumulative=%d, file count=%d); "+
+					"possible metadata/data mismatch",
+				r.NumRows(), nextIdx, rowCount)
+		}
 
 		// Wrap (and slice) the shared keep-mask buffer for this batch.
 		// array.NewSlice on a Boolean array tracks the bit-level offset,

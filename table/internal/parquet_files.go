@@ -902,6 +902,41 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (FileReader, error)
 		arrProps.SetReadDict(0, true)
 	}
 
+	// Force int64 offsets (LargeBinary / LargeString) for every binary-like
+	// leaf column. Without this, pqarrow builds *array.Binary (int32 offsets)
+	// for Parquet BYTE_ARRAY columns. BinaryBuilder.appendNextOffset guards the
+	// int32 cast with debug.Assert, which is an empty function under the default
+	// !assert build tag — inert in every production binary. A single read batch
+	// whose aggregate BYTE_ARRAY payload exceeds 2^31-1 bytes (≈2 GiB) wraps
+	// int32 silently and writes negative offsets into the offset buffer.
+	//
+	// compute.FilterRecordBatch on a column with corrupt offsets dispatches to
+	// VarBinaryImpl[int32] (arrow/compute/internal/kernels/vector_selection.go),
+	// which does rawData[valOffset : valOffset+valSize] with no bounds check. A
+	// negative valOffset sign-extends and panics with "slice bounds out of range",
+	// crashing the process inside a goroutine the runtime cannot recover.
+	//
+	// int64 offsets make overflow structurally impossible (would need ~9 EiB per
+	// batch). Cost: 8-byte vs 4-byte offsets with no data copy. Downstream code
+	// is unaffected: ToRequestedSchema with useLargeTypes=false (the default)
+	// runs as the last pipeline step and casts LargeBinary/LargeString back to
+	// Binary/String before callers see the output.
+	//
+	// SetForceLarge is keyed by physical (leaf) column index, matching
+	// pqarrow's ColumnIndexByNode. We iterate NumColumns() rather than
+	// Root().NumFields() so nested schemas (structs, lists) have all their
+	// binary-like leaves covered, not just the top-level ones.
+	//
+	// Note: dict-encoded columns (SetReadDict=true) are not affected. pqarrow
+	// wraps the primitive type in DictionaryType before the IsBinaryLike check,
+	// so arrow.IsBinaryLike(DICTIONARY) is false and SetForceLarge is a no-op
+	// for those columns. Positional-delete file_path (col 0, SetReadDict=true)
+	// therefore remains *array.Dictionary{*array.String}.
+	numCols := rdr.MetaData().Schema.NumColumns()
+	for i := range numCols {
+		arrProps.SetForceLarge(i, true)
+	}
+
 	fr, err := pqarrow.NewFileReader(rdr, arrProps, pfs.mem)
 	if err != nil {
 		return nil, err
