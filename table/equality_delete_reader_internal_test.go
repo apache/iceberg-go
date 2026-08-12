@@ -21,13 +21,22 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -230,6 +239,158 @@ func TestReadAllEqualityDeleteFilesRejectsEmptyEqualityFieldIDs(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrEmptyEqualityFieldIDs)
 	require.ErrorContains(t, err, "empty-equality-fields.parquet")
+}
+
+func TestReadEqualityDeleteFileMatchesMaterializedRead(t *testing.T) {
+	t.Parallel()
+
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 3, Name: "ignored", Type: iceberg.PrimitiveTypes.String},
+	)
+	arrowSchema, err := SchemaToArrowSchema(tableSchema, nil, true, false)
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "equality-delete.parquet")
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"id": 7, "name": "alice", "ignored": "a very large value that is not part of the equality key"},
+		{"id": null, "name": "bob", "ignored": "another value that should not be read"},
+		{"id": 7, "name": null, "ignored": "yet another value that should not be read"}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	f, err := (iceio.LocalFS{}).Create(path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, f, 2,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		path, iceberg.ParquetFile, nil, nil, nil, 3, info.Size())
+	require.NoError(t, err)
+	builder.EqualityFieldIDs([]int{1, 2})
+	dataFile := builder.Build()
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	gotKeys, gotNames, err := readEqualityDeleteFile(
+		ctx, iceio.LocalFS{}, tableSchema, nil, dataFile, []int{1, 2})
+	require.NoError(t, err)
+
+	wantKeys, wantNames, err := readEqualityDeleteFileMaterialized(
+		ctx, iceio.LocalFS{}, tableSchema, nil, dataFile, []int{1, 2})
+	require.NoError(t, err)
+
+	assert.Equal(t, wantNames, gotNames)
+	assert.Equal(t, wantKeys, gotKeys)
+
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, _, err = readEqualityDeleteFile(
+		canceledCtx, iceio.LocalFS{}, tableSchema, nil, dataFile, []int{1, 2})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func readEqualityDeleteFileMaterialized(
+	ctx context.Context,
+	fs iceio.IO,
+	tableSchema *iceberg.Schema,
+	nameMapping iceberg.NameMapping,
+	dataFile iceberg.DataFile,
+	fieldIDs []int,
+) (set[string], []string, error) {
+	src, err := internal.GetFile(ctx, fs, dataFile, true)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	rdr, err := src.GetReader(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer iceinternal.CheckedClose(rdr, &err)
+
+	tbl, err := rdr.ReadTable(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tbl.Release()
+
+	if nameMapping == nil {
+		nameMapping = tableSchema.NameMapping()
+	}
+	hasFieldIDs, err := VisitArrowSchema(tbl.Schema(), hasIDs{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var fileSchema *iceberg.Schema
+	if !hasFieldIDs {
+		fileSchema, err = ArrowSchemaToIcebergWithOptions(tbl.Schema(), ArrowToIcebergOptions{
+			NameMapping: nameMapping,
+			TableSchema: tableSchema,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var fieldRefsByID arrowFieldRefsByID
+	if hasFieldIDs {
+		fieldRefsByID = indexArrowFieldsByMetadata(tbl.Schema())
+	} else {
+		fieldRefsByID = indexArrowFields(fileSchema)
+	}
+
+	colNames := make([]string, len(fieldIDs))
+	fieldRefs := make([]arrowFieldRef, len(fieldIDs))
+	for i, fieldID := range fieldIDs {
+		name, ok := tableSchema.FindColumnName(fieldID)
+		if !ok {
+			return nil, nil, fmt.Errorf("equality delete field ID %d not found in table schema for %s", fieldID, dataFile.FilePath())
+		}
+
+		ref, err := resolveArrowField(fieldRefsByID, fieldID, name, dataFile.FilePath())
+		if err != nil {
+			return nil, nil, err
+		}
+		colNames[i] = name
+		fieldRefs[i] = ref
+	}
+
+	keys := make(set[string])
+	var keyBuf bytes.Buffer
+	tr := array.NewTableReader(tbl, tbl.NumRows())
+	defer tr.Release()
+	for tr.Next() {
+		rec := tr.RecordBatch()
+		encoders := make([]colEncoder, len(fieldRefs))
+		for i, ref := range fieldRefs {
+			encoders[i], err = makeArrowFieldEncoder(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
+		for row := 0; row < int(rec.NumRows()); row++ {
+			keyBuf.Reset()
+			for _, enc := range encoders {
+				enc(&keyBuf, row)
+			}
+			keys[keyBuf.String()] = struct{}{}
+		}
+	}
+
+	return keys, colNames, nil
 }
 
 func TestProcessEqualityDeletesUsesStructuralFieldPaths(t *testing.T) {
