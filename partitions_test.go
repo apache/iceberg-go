@@ -926,6 +926,83 @@ func TestNewPartitionSpecOptsAllowsDistinctTransformsOnSameSource(t *testing.T) 
 	assert.Equal(t, 2, spec.NumFields())
 }
 
+func TestNewPartitionSpecOptsRejectsRedundantTimeTransforms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	tests := []struct {
+		name  string
+		first iceberg.Transform
+		last  iceberg.Transform
+	}{
+		{name: "year_month", first: iceberg.YearTransform{}, last: iceberg.MonthTransform{}},
+		{name: "year_day", first: iceberg.YearTransform{}, last: iceberg.DayTransform{}},
+		{name: "year_hour", first: iceberg.YearTransform{}, last: iceberg.HourTransform{}},
+		{name: "month_day", first: iceberg.MonthTransform{}, last: iceberg.DayTransform{}},
+		{name: "month_hour", first: iceberg.MonthTransform{}, last: iceberg.HourTransform{}},
+		{name: "day_hour", first: iceberg.DayTransform{}, last: iceberg.HourTransform{}},
+		// order must not matter
+		{name: "hour_day", first: iceberg.HourTransform{}, last: iceberg.DayTransform{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldByName("ts", "first", tt.first, schema, nil),
+				iceberg.AddPartitionFieldByName("ts", "second", tt.last, schema, nil),
+			)
+
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, "redundant partition field")
+		})
+	}
+}
+
+func TestNewPartitionSpecOptsAllowsTimeAndNonTimeOnSameSource(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	tests := []struct {
+		name  string
+		other iceberg.Transform
+	}{
+		{name: "identity", other: iceberg.IdentityTransform{}},
+		{name: "bucket", other: iceberg.BucketTransform{NumBuckets: 16}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldByName("ts", "ts_day", iceberg.DayTransform{}, schema, nil),
+				iceberg.AddPartitionFieldByName("ts", "ts_other", tt.other, schema, nil),
+			)
+
+			require.NoError(t, err)
+			assert.Equal(t, 2, spec.NumFields())
+		})
+	}
+}
+
+func TestNewPartitionSpecOptsAllowsTimeTransformsOnDistinctSources(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts1", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "ts2", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	spec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(1),
+		iceberg.AddPartitionFieldByName("ts1", "ts1_day", iceberg.DayTransform{}, schema, nil),
+		iceberg.AddPartitionFieldByName("ts2", "ts2_hour", iceberg.HourTransform{}, schema, nil),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, spec.NumFields())
+}
+
 // void is the tombstone for a dropped partition field, so a spec that dropped
 // several fields on one column carries several voids. BindToSchema replays such
 // a spec through the builder, which must not reject it.
@@ -1083,21 +1160,19 @@ func TestValidatePartitionFieldsMultiSourceRedundancy(t *testing.T) {
 	assert.Equal(t, 2, back.NumFields())
 }
 
-// Known divergence from Java: dedupName collapses the time transforms to one
-// name per source column, so Java rejects this pairing while we accept it. If
-// that rule ever lands here, this test should flip rather than silently break
-// callers building hierarchical time specs.
-func TestNewPartitionSpecOptsAllowsMultipleTimeTransforms(t *testing.T) {
+// dedupName collapses the time transforms to one name per source column, so
+// year(ts) alongside month(ts) is redundant and rejected.
+func TestNewPartitionSpecOptsRejectsMultipleTimeTransforms(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
 
-	spec, err := iceberg.NewPartitionSpecOpts(
+	_, err := iceberg.NewPartitionSpecOpts(
 		iceberg.WithSpecID(1),
 		iceberg.AddPartitionFieldByName("ts", "ts_year", iceberg.YearTransform{}, schema, nil),
 		iceberg.AddPartitionFieldByName("ts", "ts_month", iceberg.MonthTransform{}, schema, nil),
 	)
 
-	require.NoError(t, err)
-	assert.Equal(t, 2, spec.NumFields())
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "redundant partition field")
 }

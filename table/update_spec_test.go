@@ -122,6 +122,71 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
 }
 
+func TestUpdateSpecRejectsTimeTransformConflictWithExistingField(t *testing.T) {
+	baseSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{3},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "ts_hour",
+		Transform: iceberg.HourTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"hour_partitioned"}, meta, "", nil, nil)
+
+	updates, reqs, err := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("ts", iceberg.DayTransform{}, "ts_day").
+		BuildUpdates()
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "redundant partition field")
+	assert.Nil(t, updates)
+	assert.Nil(t, reqs)
+}
+
+func TestUpdateSpecAllowsReplacingTimeTransformOnSameSource(t *testing.T) {
+	newYearPartitionedTable := func() *table.Table {
+		baseSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{3},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "ts_year",
+			Transform: iceberg.YearTransform{},
+		})
+		meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+
+		return table.New([]string{"year_partitioned"}, meta, "", nil, nil)
+	}
+
+	assertReplaced := func(t *testing.T, specUpdate *table.UpdateSpec) {
+		t.Helper()
+		updates, reqs, err := specUpdate.BuildUpdates()
+		require.NoError(t, err)
+		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		require.Equal(t, 1, newSpec.NumFields())
+		assert.Equal(t, "ts_month", newSpec.Field(0).Name)
+		assert.Equal(t, iceberg.MonthTransform{}, newSpec.Field(0).Transform)
+		assert.Equal(t, 3, newSpec.Field(0).SourceID())
+	}
+
+	t.Run("remove then add", func(t *testing.T) {
+		tbl := newYearPartitionedTable()
+		assertReplaced(t, table.NewUpdateSpec(tbl.NewTransaction(), false).
+			RemoveField("ts_year").
+			AddField("ts", iceberg.MonthTransform{}, "ts_month"))
+	})
+
+	t.Run("add then remove", func(t *testing.T) {
+		tbl := newYearPartitionedTable()
+		assertReplaced(t, table.NewUpdateSpec(tbl.NewTransaction(), false).
+			AddField("ts", iceberg.MonthTransform{}, "ts_month").
+			RemoveField("ts_year"))
+	})
+}
+
 func TestUpdateSpecAddField(t *testing.T) {
 	var txn *table.Transaction
 

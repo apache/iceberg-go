@@ -551,26 +551,26 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 }
 
 // validatePartitionFields rejects duplicate partition names and redundant
-// fields (the same transform applied to the same source columns). It is the
-// single definition of a well-formed field set, shared by NewPartitionSpecOpts
-// and UnmarshalJSON so the builder cannot produce a spec the parser rejects.
+// fields (transforms that overlap when applied to the same source columns). It
+// is the single definition of a well-formed field set, shared by
+// NewPartitionSpecOpts and UnmarshalJSON so the builder cannot produce a spec
+// the parser rejects.
 //
 // Repeated void fields are exempt: void is the tombstone written for a dropped
 // partition field, so a spec that has dropped several fields legitimately
 // carries more than one.
 //
-// TODO: this does not implement Java's dedupName rule, which collapses year,
-// month, day and hour to a single name per source column and so rejects
-// year(ts) alongside month(ts). We accept that pairing, which means a spec
-// built here can be refused by Java's PartitionSpec.Builder. UpdateSpec.addField
-// already carries an added-vs-added guard for time transforms, so the rule
-// exists in the codebase but not in this validator.
+// Every time transform (year, month, day, hour) collapses to
+// a single "time" key per source column. Any two time transforms are additionally redundant
+// regardless of granularity: year, month, day and hour on one source column
+// produce overlapping partitions, so permit at most one.
 func validatePartitionFields(fields []PartitionField) error {
 	names := make(map[string]struct{}, len(fields))
 	// Keyed by source IDs only; the transforms behind each key are compared with
-	// Transform.Equals rather than their rendered names, so a transform whose
-	// String() is not injective cannot make two distinct transforms collide.
-	bySource := make(map[string][]Transform, len(fields))
+	// partitionFieldsRedundant rather than their rendered names, so a transform
+	// whose String() is not injective cannot make two distinct transforms
+	// collide.
+	bySource := make(map[string][]PartitionField, len(fields))
 	for _, field := range fields {
 		if _, ok := names[field.Name]; ok {
 			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
@@ -589,15 +589,25 @@ func validatePartitionFields(fields []PartitionField) error {
 
 		key := fmt.Sprint(field.SourceIDs)
 		for _, existing := range bySource[key] {
-			if existing.Equals(field.Transform) {
-				return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
-					ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+			if partitionFieldsRedundant(existing.Transform, field.Transform) {
+				return fmt.Errorf("%w: redundant partition field for source IDs %v: %s (%s) conflicts with %s (%s)",
+					ErrInvalidPartitionSpec, field.SourceIDs, field.Name, field.Transform, existing.Name, existing.Transform)
 			}
 		}
-		bySource[key] = append(bySource[key], field.Transform)
+		bySource[key] = append(bySource[key], field)
 	}
 
 	return nil
+}
+
+func partitionFieldsRedundant(a, b Transform) bool {
+	if a.Equals(b) {
+		return true
+	}
+	_, aTime := a.(TimeTransform)
+	_, bTime := b.(TimeTransform)
+
+	return aTime && bTime
 }
 
 func (ps *PartitionSpec) initialize() {
