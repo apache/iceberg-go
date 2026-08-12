@@ -92,6 +92,12 @@ type Transaction struct {
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
 
+	// noReplay marks the commit as non-replayable: on a CAS conflict
+	// doCommit fails instead of refreshing and replaying. Set by
+	// snapshot producers whose staged snapshot carries delete-file
+	// removals; see the flag site in commitManifests.
+	noReplay bool
+
 	mx        sync.Mutex
 	committed bool
 }
@@ -2490,6 +2496,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
+			withCommitNoReplay(t.noReplay),
 		)
 		if err != nil {
 			// A clean conflict (ErrCommitFailed) committed nothing and stays
