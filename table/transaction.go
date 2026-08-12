@@ -92,13 +92,10 @@ type Transaction struct {
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
 
-	// noReplay marks the commit as non-replayable — on a CAS conflict
-	// doCommit fails with ErrCommitFailed instead of refreshing and
-	// replaying. Set by snapshot producers whose staged snapshot
-	// carries delete-file removals: removal identity is
-	// snapshot-relative, so a replayed removal is semantically a
-	// different operation (it may silently no-op against a peer's
-	// concurrently committed replacement).
+	// noReplay marks the commit as non-replayable: on a CAS conflict
+	// doCommit fails instead of refreshing and replaying. Set by
+	// snapshot producers whose staged snapshot carries delete-file
+	// removals; see the flag site in commitManifests.
 	noReplay bool
 
 	mx        sync.Mutex
