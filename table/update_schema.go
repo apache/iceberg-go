@@ -493,6 +493,15 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 			if field.Required && !u.allowIncompatibleChanges {
 				return fmt.Errorf("cannot change default value of required column to nil: %s", fullName)
 			}
+		} else {
+			// Validate the new write-default against the column's (possibly promoted) type.
+			effectiveType := field.Type
+			if update.FieldType.Valid {
+				effectiveType = update.FieldType.Val
+			}
+			if err := validateDefaultValue(effectiveType, update.WriteDefault.Val.Any()); err != nil {
+				return fmt.Errorf("invalid write-default for %s: %w", fullName, err)
+			}
 		}
 	}
 
@@ -514,7 +523,13 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		updatedField.Required = update.Required.Val
 	}
 	if update.WriteDefault.Valid {
-		updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		// A nil literal clears the write-default;
+		// Calling Any() on it would dereference a nil interface and panic.
+		if update.WriteDefault.Val == nil {
+			updatedField.WriteDefault = nil
+		} else {
+			updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		}
 	}
 	if update.Doc.Valid {
 		updatedField.Doc = update.Doc.Val
