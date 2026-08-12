@@ -352,9 +352,19 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 }
 
 func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+	if existing, ok := w.writers.Load(partition); ok {
+		if writer, ok := existing.(*RollingDataWriter); ok {
+			return writer, nil
+		}
+
+		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Recheck after acquiring the lock in case another goroutine created the
+	// writer while this goroutine was waiting.
 	if existing, ok := w.writers.Load(partition); ok {
 		if writer, ok := existing.(*RollingDataWriter); ok {
 			return writer, nil

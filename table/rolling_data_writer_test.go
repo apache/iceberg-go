@@ -22,6 +22,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -64,6 +66,32 @@ func (s *RollingDataWriterTestSuite) SetupTest() {
 
 func TestRollingDataWriter(t *testing.T) {
 	suite.Run(t, new(RollingDataWriterTestSuite))
+}
+
+func BenchmarkWriterFactoryCacheHit(b *testing.B) {
+	for _, partitionCount := range []int{1, 8, 128} {
+		b.Run(strconv.Itoa(partitionCount)+"_partitions", func(b *testing.B) {
+			factory := &writerFactory{}
+			partitions := make([]string, partitionCount)
+			for i := range partitionCount {
+				partitions[i] = strconv.Itoa(i)
+				factory.writers.Store(partitions[i], &RollingDataWriter{})
+			}
+
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				var i int
+				for pb.Next() {
+					writer, err := factory.getOrCreateRollingDataWriter(
+						context.Background(), partitions[i%partitionCount], nil, nil)
+					if err != nil || writer == nil {
+						b.Fatalf("get existing writer: writer=%v, err=%v", writer, err)
+					}
+					i++
+				}
+			})
+		})
+	}
 }
 
 func (s *RollingDataWriterTestSuite) createWriterFactory(loc string, arrSchema *arrow.Schema, targetFileSize int64) (*writerFactory, *iceberg.Schema) {
@@ -269,6 +297,49 @@ func (s *RollingDataWriterTestSuite) TestCloseAllFinishesQueuedRecordsWithoutCan
 	}
 
 	s.Equal(expectedRows, actualRows, "all queued records should be flushed when closeAll is used")
+}
+
+func (s *RollingDataWriterTestSuite) TestConcurrentGetOrCreateCreatesOneWriter() {
+	const goroutineCount = 32
+
+	factory := &writerFactory{}
+	outputCh := make(chan iceberg.DataFile)
+	start := make(chan struct{})
+	results := make(chan struct {
+		writer *RollingDataWriter
+		err    error
+	}, goroutineCount)
+
+	var wg sync.WaitGroup
+	for range goroutineCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			writer, err := factory.getOrCreateRollingDataWriter(s.ctx, "partition", nil, outputCh)
+			results <- struct {
+				writer *RollingDataWriter
+				err    error
+			}{writer, err}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var expected *RollingDataWriter
+	for result := range results {
+		s.Require().NoError(result.err)
+		if expected == nil {
+			expected = result.writer
+		}
+		s.Same(expected, result.writer)
+	}
+
+	s.EqualValues(1, factory.partitionIDCounter.Load())
+	s.Require().NotNil(expected)
+	s.Require().NoError(expected.closeAndWait())
 }
 
 func (s *RollingDataWriterTestSuite) TestAbortAndWaitCancelsContext() {
