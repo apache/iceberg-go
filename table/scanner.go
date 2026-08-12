@@ -1015,11 +1015,8 @@ type FileScanTask struct {
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
 	// for this task. Remote planners may simplify the original filter using
-	// file metadata; nil means the caller did not provide a task residual.
-	// ReadTasks currently applies the Scan's original row filter and does not
-	// consume this per-task value. Remote integration must preserve that original
-	// filter until per-task residual evaluation is wired; otherwise tasks read
-	// outside their originating Scan could under-filter rows.
+	// file metadata; nil means the caller did not provide a task residual and
+	// ReadTasks falls back to the Scan's original row filter.
 	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
@@ -1047,8 +1044,8 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 }
 
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
-// scan's projection, row filters, and positional delete handling. This is useful when
-// the caller has already planned or selected specific tasks to read.
+// scan's projection, per-task residual filters, and positional delete handling. This
+// is useful when the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if scan.selectorErr != nil {
 		return nil, nil, scan.selectorErr
@@ -1076,6 +1073,22 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		return nil, nil, err
 	}
 
+	// Bind task residuals against the schema selected by this scan, which may
+	// be an older snapshot schema rather than the table's current schema. Keep
+	// the caller's task slice untouched because the same plan may be reused.
+	readTasks := slices.Clone(tasks)
+	for i := range readTasks {
+		if readTasks[i].Residual == nil {
+			continue
+		}
+
+		readTasks[i].Residual, err = bindTaskFilter(effectiveSchema,
+			readTasks[i].Residual, scan.caseSensitive)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bind residual for task %d: %w", i, err)
+		}
+	}
+
 	// A plan-scoped FileIO (from remote planning) takes precedence over the
 	// table's default FileIO and is closed once the returned iterator finishes.
 	var fs io.IO
@@ -1097,7 +1110,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		rowLimit:        scan.limit,
 		options:         scan.options,
 		concurrency:     scan.concurrency,
-	}).GetRecords(ctx, tasks)
+	}).GetRecords(ctx, readTasks)
 	if err != nil {
 		// No iterator to drive cleanup on a setup error, so close here.
 		if scan.planIO != nil {
