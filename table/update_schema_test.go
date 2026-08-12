@@ -969,6 +969,35 @@ func TestSetIdentifierField(t *testing.T) {
 	})
 }
 
+func TestSetIdentifierFieldDeterministicOrder(t *testing.T) {
+	t.Run("apply returns identifier field ids in sorted order", func(t *testing.T) {
+		const iterations = 50
+
+		var first *iceberg.Schema
+		for range iterations {
+			table := New([]string{"id"}, testMetadata, "", nil, nil)
+			txn := table.NewTransaction()
+
+			newSchema, err := NewUpdateSchema(txn, true, true).
+				SetIdentifierField([][]string{{"age"}, {"id"}, {"name"}}).
+				Apply()
+			require.NoError(t, err)
+			require.NotNil(t, newSchema)
+
+			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs)
+
+			// Every independently-produced schema must compare equal, which is
+			// exactly the invariant the ordering bug breaks.
+			if first == nil {
+				first = newSchema
+			} else {
+				assert.True(t, first.Equals(newSchema),
+					"schemas produced by separate Apply() calls must be equal")
+			}
+		}
+	})
+}
+
 func TestErrorHandling(t *testing.T) {
 	t.Run("test incompatible changes without allowIncompatibleChanges", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
