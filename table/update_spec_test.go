@@ -92,7 +92,7 @@ func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 
 func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
-		SourceIDs: []int{5}, FieldID: 1000, Name: "old_partition",
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
 		Transform: iceberg.VoidTransform{},
 	})
 	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
@@ -100,7 +100,7 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 
 	metadataJSON, err := json.Marshal(meta)
 	require.NoError(t, err)
-	source := []byte(`"source-id":5,`)
+	source := []byte(`"source-id":1,`)
 	metadataJSON = bytes.ReplaceAll(metadataJSON, source, nil)
 	require.NotContains(t, string(metadataJSON), string(source))
 	meta, err = table.ParseMetadataBytes(metadataJSON)
@@ -116,7 +116,7 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	require.Equal(t, 2, newSpec.NumFields())
 	assert.Equal(t, []int{0}, newSpec.Field(0).SourceIDs)
 	assert.Equal(t, 1000, newSpec.Field(0).FieldID)
-	assert.Equal(t, "old_partition", newSpec.Field(0).Name)
+	assert.Equal(t, "id", newSpec.Field(0).Name)
 	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
 	assert.Equal(t, 2, newSpec.Field(1).SourceID())
 	assert.Equal(t, "name_identity", newSpec.Field(1).Name)

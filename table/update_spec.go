@@ -427,9 +427,10 @@ func (us *UpdateSpec) isDuplicatePartition(transform iceberg.Transform, partitio
 	return !deleted && transform.Equals(partitionField.Transform)
 }
 
-func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name string, sourceId int, partitionNames map[string]bool) error {
+func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name string, sourceId int, transform iceberg.Transform, partitionNames map[string]bool) error {
 	field, found := schema.FindFieldByName(name)
-	if found && field.ID != sourceId {
+	_, isVoid := transform.(iceberg.VoidTransform)
+	if found && field.ID != sourceId && (sourceId != 0 || !isVoid) {
 		return fmt.Errorf("cannot create partition from name that exists in schema %s", name)
 	}
 	if _, exists := partitionNames[name]; exists {
@@ -441,7 +442,7 @@ func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name stri
 }
 
 func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId int, name string, transform iceberg.Transform, partitionNames map[string]bool) (iceberg.PartitionField, error) {
-	err := us.checkAndAddPartitionName(schema, name, sourceId, partitionNames)
+	err := us.checkAndAddPartitionName(schema, name, sourceId, transform, partitionNames)
 	if err != nil {
 		return iceberg.PartitionField{}, err
 	}
