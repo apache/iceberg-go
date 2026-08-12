@@ -1091,6 +1091,10 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
 	r.snapshotMode = SnapshotMode(cfg.Get(keySnapshotLoadingMode, ""))
+	if r.snapshotMode != "" && r.snapshotMode != SnapshotModeAll && r.snapshotMode != SnapshotModeRefs {
+		return nil, fmt.Errorf("%w: invalid %s %q (want %q or %q)",
+			ErrRESTError, keySnapshotLoadingMode, r.snapshotMode, SnapshotModeAll, SnapshotModeRefs)
+	}
 
 	// Negotiate capabilities from the endpoints the server advertises, falling
 	// back to a backward-compatible default set when none are provided.
