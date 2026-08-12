@@ -1378,8 +1378,72 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
+// parquetStatsColumn contains the immutable per-file resolution needed to
+// interpret a physical Parquet column's statistics. The row-group metadata
+// still carries the values that are accumulated, but the path-to-field lookup
+// is independent of the row group and is done once from the resolved schema.
+type parquetStatsColumn struct {
+	path         string
+	fieldID      int
+	statsCol     StatisticsCollector
+	variantChild bool
+	skipStats    bool
+	resolveErr   error
+}
+
+func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) []parquetStatsColumn {
+	columns := make([]parquetStatsColumn, meta.Schema.NumColumns())
+	for pos := range meta.Schema.NumColumns() {
+		column := meta.Schema.Column(pos)
+		columnPath := column.ColumnPath()
+		descriptor := parquetStatsColumn{path: column.Path()}
+
+		fieldID, ok := colMapping[descriptor.path]
+		if !ok {
+			// Variant sub-columns (metadata, value, typed_value children) have
+			// no Iceberg field ID (spec: "must not be assigned field IDs").
+			// Walk up the resolved path once to find a variant ancestor.
+			for depth := len(columnPath) - 1; depth >= 1; depth-- {
+				ancestorPath := strings.Join(columnPath[:depth], ".")
+				if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
+					_, descriptor.variantChild = variantFieldIDs[ancestorID]
+
+					break
+				}
+			}
+			if !descriptor.variantChild {
+				descriptor.resolveErr = fmt.Errorf("column chunk %q not found in column mapping", columnPath)
+			}
+
+			columns[pos] = descriptor
+
+			continue
+		}
+
+		descriptor.fieldID = fieldID
+		statsCol, ok := statsCols[fieldID]
+		if !ok {
+			// Only the reserved row-lineage metadata columns (_row_id,
+			// _last_updated_sequence_number) may legitimately appear in a file
+			// without a metrics-plan entry. Writers materialize them without
+			// adding them to the table schema, so skip them entirely.
+			if iceberg.IsMetadataColumn(fieldID) {
+				descriptor.skipStats = true
+			} else {
+				descriptor.resolveErr = fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, descriptor.path)
+			}
+		} else {
+			descriptor.statsCol = statsCol
+		}
+		columns[pos] = descriptor
+	}
+
+	return columns
+}
+
 func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}, arrowSchema *arrow.Schema) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
+	columns := resolveParquetStatsColumns(pqmeta, statsCols, colMapping, variantFieldIDs)
 	var (
 		colSizes        = make(map[int]int64)
 		valueCounts     = make(map[int]int64)
@@ -1411,44 +1475,15 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 				panic(err)
 			}
 
-			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
-			if !ok {
-				// Variant sub-columns (metadata, value, typed_value children) have no
-				// Iceberg field ID (spec: "must not be assigned field IDs"). Walk up
-				// the path hierarchy to find a variant ancestor.
-				path := colChunk.PathInSchema()
-				found := false
-				for depth := len(path) - 1; depth >= 1; depth-- {
-					ancestorPath := strings.Join(path[:depth], ".")
-					if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
-						if _, isVariant := variantFieldIDs[ancestorID]; isVariant {
-							found = true
-						}
-
-						break
-					}
-				}
-				if found {
-					continue
-				}
-
-				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))
+			column := columns[pos]
+			if column.resolveErr != nil {
+				panic(column.resolveErr)
 			}
-			statsCol, ok := statsCols[fieldID]
-			if !ok {
-				// Only the reserved row-lineage metadata columns (_row_id,
-				// _last_updated_sequence_number) may legitimately appear in
-				// a file without a metrics-plan entry: writers materialize
-				// them without adding them to the table schema. Any other
-				// field id missing from the plan means the plan and the
-				// file disagree — fail loudly rather than silently dropping
-				// that column's stats.
-				if iceberg.IsMetadataColumn(fieldID) {
-					continue
-				}
-
-				panic(fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, colChunk.PathInSchema()))
+			if column.variantChild || column.skipStats {
+				continue
 			}
+
+			fieldID, statsCol := column.fieldID, column.statsCol
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
 			}
@@ -1528,7 +1563,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		return ok
 	})
 
-	vlo, vup := p.collectVariantBounds(pqmeta, arrowSchema, colMapping, statsCols)
+	vlo, vup := p.collectVariantBoundsWithColumns(pqmeta, arrowSchema, colMapping, statsCols, columns)
 
 	return &DataFileStatistics{
 		RecordCount:        pqmeta.GetNumRows(),
@@ -1594,6 +1629,16 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		return nil, nil
 	}
 
+	columns := resolveParquetStatsColumns(meta, statsCols, colMapping, nil)
+
+	return p.collectVariantBoundsWithColumns(meta, arrowSchema, colMapping, statsCols, columns)
+}
+
+func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaData, arrowSchema *arrow.Schema, colMapping map[string]int, statsCols map[int]StatisticsCollector, columns []parquetStatsColumn) (lower, upper map[int][]byte) {
+	if arrowSchema == nil {
+		return nil, nil
+	}
+
 	type leafAgg struct {
 		leaf     variantLeaf
 		parentID int
@@ -1636,7 +1681,7 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 			if err != nil {
 				continue
 			}
-			path := cc.PathInSchema().String()
+			path := columns[pos].path
 
 			if _, isResidual := residualParent[path]; isResidual {
 				// Non-null residual entries invalidate the bound unless they are all variant-null.
