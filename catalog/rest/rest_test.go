@@ -1115,6 +1115,32 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 	r.ErrorContains(err, "examples in warehouse")
 }
 
+func (r *RestCatalogSuite) TestDropNamespace409() {
+	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Namespace examples is not empty. Contains 1 table(s).",
+				"type":    "NamespaceNotEmptyException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples"))
+	r.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	r.ErrorContains(err, "is not empty")
+}
+
 func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)

@@ -539,6 +539,79 @@ func TestDeleteColumn(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "field not found")
 	})
+
+	t.Run("test delete top level column with own update fails", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			UpdateColumn([]string{"age"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "the age"},
+			}).
+			DeleteColumn([]string{"age"}).
+			Apply()
+		require.ErrorContains(t, err, "field that has updates cannot be deleted: age")
+	})
+
+	t.Run("test delete nested column with own update fails", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		_, err := NewUpdateSchema(txn, true, true).
+			UpdateColumn([]string{"address", "city"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "the city"},
+			}).
+			DeleteColumn([]string{"address", "city"}).
+			Apply()
+		require.ErrorContains(t, err, "field that has updates cannot be deleted: address.city")
+	})
+
+	t.Run("test delete parent struct with updated child succeeds", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			UpdateColumn([]string{"address", "city"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "the city"},
+			}).
+			DeleteColumn([]string{"address"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		_, ok := newSchema.FindFieldByName("address")
+		assert.False(t, ok, "address struct should be deleted")
+
+		// The staged child update is discarded with its parent; every other
+		// top-level column must survive untouched.
+		for _, name := range []string{"id", "name", "age", "tags", "properties"} {
+			_, ok := newSchema.FindFieldByName(name)
+			assert.True(t, ok, "field %s should remain", name)
+		}
+	})
+
+	// deleting a column while an unrelated column has a pending update must still succeed,
+	// and that update must be applied to the surviving column.
+	t.Run("test delete column with unrelated pending update succeeds", func(t *testing.T) {
+		table := New([]string{"id"}, testMetadata, "", nil, nil)
+		txn := table.NewTransaction()
+
+		newSchema, err := NewUpdateSchema(txn, true, true).
+			UpdateColumn([]string{"age"}, ColumnUpdate{
+				Doc: iceberg.Optional[string]{Valid: true, Val: "the age"},
+			}).
+			DeleteColumn([]string{"name"}).
+			Apply()
+		require.NoError(t, err)
+		require.NotNil(t, newSchema)
+
+		_, ok := newSchema.FindFieldByName("name")
+		assert.False(t, ok, "name column should be deleted")
+
+		ageField, ok := newSchema.FindFieldByName("age")
+		require.True(t, ok, "age column should remain")
+		assert.Equal(t, "the age", ageField.Doc, "unrelated update should still apply")
+	})
 }
 
 func TestUpdateColumn(t *testing.T) {
@@ -1038,6 +1111,35 @@ func TestSetIdentifierField(t *testing.T) {
 			Apply()
 		require.Error(t, err)
 		require.ErrorContains(t, err, "identifier field not found: name")
+	})
+}
+
+func TestSetIdentifierFieldDeterministicOrder(t *testing.T) {
+	t.Run("apply returns identifier field ids in sorted order", func(t *testing.T) {
+		const iterations = 50
+
+		var first *iceberg.Schema
+		for range iterations {
+			table := New([]string{"id"}, testMetadata, "", nil, nil)
+			txn := table.NewTransaction()
+
+			newSchema, err := NewUpdateSchema(txn, true, true).
+				SetIdentifierField([][]string{{"age"}, {"id"}, {"name"}}).
+				Apply()
+			require.NoError(t, err)
+			require.NotNil(t, newSchema)
+
+			assert.Equal(t, []int{1, 2, 3}, newSchema.IdentifierFieldIDs)
+
+			// Every independently-produced schema must compare equal, which is
+			// exactly the invariant the ordering bug breaks.
+			if first == nil {
+				first = newSchema
+			} else {
+				assert.True(t, first.Equals(newSchema),
+					"schemas produced by separate Apply() calls must be equal")
+			}
+		}
 	})
 }
 

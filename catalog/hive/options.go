@@ -55,6 +55,10 @@ const (
 	DefaultLockCheckMinWaitTime = 100 * time.Millisecond // 100ms
 	DefaultLockCheckMaxWaitTime = 60 * time.Second       // 1 minute
 	DefaultLockCheckRetries     = 4
+
+	// lockCheckBackoffScale matches the Java MetastoreLock lock-check path, which
+	// passes 1.5 to Tasks.exponentialBackoff (not the Tasks default of 2.0).
+	lockCheckBackoffScale = 1.5
 )
 
 type HiveOptions struct {

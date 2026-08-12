@@ -380,8 +380,13 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		return fmt.Errorf("field that has additions cannot be deleted: %s", fullName)
 	}
 
-	if _, ok := u.updates[field.ID]; ok {
-		return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+	// u.updates is keyed by parent ID, then by the field's own ID, so a
+	// field's own pending update lives under its parent's map
+	parentID := u.findParentID(field.ID)
+	if upds, ok := u.updates[parentID]; ok {
+		if _, ok := upds[field.ID]; ok {
+			return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+		}
 	}
 
 	delete(u.identifierFieldNames, fullName)
@@ -1150,6 +1155,12 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		}
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
+
+	// u.identifierFieldNames is a map, so the iteration above yields the ids in a
+	// non-deterministic order. Thus, sorting them to produce a canonical ordering:
+	// Schema.Equals compares IdentifierFieldIDs positionally, so,
+	// an unsorted slice would make otherwise-identical schemas compare unequal at random.
+	slices.Sort(identifierFieldIDs)
 
 	meta, err := u.txn.txnMeta()
 	if err != nil {

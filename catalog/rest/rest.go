@@ -1879,7 +1879,10 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 	}
 
 	_, err = doDelete[struct{}](ctx, r.baseURI, path,
-		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchNamespace,
+			http.StatusConflict: catalog.ErrNamespaceNotEmpty,
+		})
 
 	return err
 }
