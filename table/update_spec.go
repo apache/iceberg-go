@@ -207,12 +207,8 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
-	opts := make([]iceberg.PartitionOption, len(partitionFields))
-	for i, field := range partitionFields {
-		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, us.txn.tbl.Schema(), &field.FieldID)
-	}
-
-	newSpec, err := iceberg.NewPartitionSpecOpts(opts...)
+	candidate := iceberg.NewPartitionSpec(partitionFields...)
+	newSpec, err := candidate.BindToSchema(us.txn.tbl.Schema(), nil, nil)
 	if err != nil {
 		return iceberg.PartitionSpec{}, err
 	}

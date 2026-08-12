@@ -80,6 +80,15 @@ func (p *PartitionField) EscapedName() string {
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if len(p.SourceIDs) == 1 && p.SourceIDs[0] == 0 {
+		if _, isVoid := p.Transform.(VoidTransform); isVoid {
+			return json.Marshal(struct {
+				FieldID   int       `json:"field-id"`
+				Name      string    `json:"name"`
+				Transform Transform `json:"transform"`
+			}{p.FieldID, p.Name, p.Transform})
+		}
+	}
 	if len(p.SourceIDs) > 1 {
 		return json.Marshal(struct {
 			SourceIDs []int     `json:"source-ids"`
@@ -208,6 +217,17 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	}
 
 	for _, field := range p.Fields() {
+		if len(field.SourceIDs) == 1 && field.SourceIDs[0] == 0 {
+			if _, isVoid := field.Transform.(VoidTransform); isVoid {
+				opts = append(opts, func(spec *PartitionSpec) error {
+					spec.fields = append(spec.fields, clonePartitionField(field))
+
+					return nil
+				})
+
+				continue
+			}
+		}
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 

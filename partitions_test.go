@@ -943,6 +943,34 @@ func TestBindToSchemaAllowsRepeatedVoidTransforms(t *testing.T) {
 	assert.Equal(t, 2, bound.NumFields())
 }
 
+func TestBindToSchemaPreservesSourceLessVoidTombstone(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	data := `{"spec-id":0,"fields":[{"field-id":1000,"name":"old_partition","transform":"void"}]}`
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+
+	newSpecID := 2
+	bound, err := spec.BindToSchema(schema, nil, &newSpecID)
+	require.NoError(t, err)
+	assert.Equal(t, newSpecID, bound.ID())
+	require.Equal(t, 1, bound.NumFields())
+	assert.Equal(t, []int{0}, bound.Field(0).SourceIDs)
+	assert.Equal(t, 1000, bound.Field(0).FieldID)
+	assert.Equal(t, "old_partition", bound.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, bound.Field(0).Transform)
+
+	roundTripped, err := json.Marshal(bound)
+	require.NoError(t, err)
+	assert.NotContains(t, string(roundTripped), `"source-id"`)
+
+	var decoded iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(roundTripped, &decoded))
+	assert.True(t, bound.Equals(decoded))
+}
+
 // Redundancy is keyed on Transform.Equals rather than the rendered transform
 // name, so a transform whose String() is not injective cannot collide with a
 // distinct one. nonComparableTransform embeds IdentityTransform, so every
