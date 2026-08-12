@@ -99,6 +99,13 @@ type Transaction struct {
 	// removals; see the flag site in commitManifests.
 	noReplay bool
 
+	// pinnedRefs names branches with an explicit AssertRefSnapshotID
+	// requirement. doCommit's refresh-and-replay must not rewrite their
+	// assertions to the fresh branch head between retries: the caller
+	// opted into compare-and-swap semantics, so a branch that has
+	// changed fails the commit.
+	pinnedRefs map[string]struct{}
+
 	mx        sync.Mutex
 	committed bool
 }
@@ -376,6 +383,63 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	}
 	if len(props) > 0 {
 		return t.apply([]Update{NewSetPropertiesUpdate(props)}, nil)
+	}
+
+	return nil
+}
+
+// AssertRefSnapshotID records a requirement that the given branch is
+// unchanged from the transaction's base table metadata — the catalog
+// state this transaction read: the branch must still reference the
+// same snapshot id, or still not exist when the base has none. An
+// empty branch means the transaction's target branch (main unless the
+// transaction was created with NewTransactionOnBranch).
+//
+// It provides optimistic concurrency for metadata-only commits, such
+// as SetProperties used for exactly-once bookkeeping. Commit normally
+// retries against the fresh branch head; with this requirement it
+// instead fails with ErrCommitFailed if any snapshot was committed to
+// the branch after the transaction's read. Snapshot producers
+// targeting the branch in the same transaction fail the same way
+// rather than retry.
+//
+// The requirement is submitted together with the transaction's
+// updates; a transaction with no updates never contacts the catalog,
+// so the requirement alone does not force a commit.
+func (t *Transaction) AssertRefSnapshotID(branch string) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if branch == "" {
+		branch = t.branch
+	}
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	id := t.baseRefSnapshotID(branch)
+
+	// Record the pin before the requirement can become visible to a
+	// concurrent Commit, which would otherwise rewrite the requirement
+	// to the fresh head on retry and silently void the
+	// compare-and-swap. The transient pin is harmless on its own and
+	// is rolled back if the requirement fails to apply.
+	t.mx.Lock()
+	if t.pinnedRefs == nil {
+		t.pinnedRefs = make(map[string]struct{})
+	}
+	_, alreadyPinned := t.pinnedRefs[branch]
+	t.pinnedRefs[branch] = struct{}{}
+	t.mx.Unlock()
+
+	if err := t.apply(nil, []Requirement{AssertRefSnapshotID(branch, id)}); err != nil {
+		if !alreadyPinned {
+			t.mx.Lock()
+			delete(t.pinnedRefs, branch)
+			t.mx.Unlock()
+		}
+
+		return err
 	}
 
 	return nil
@@ -2570,6 +2634,7 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
 			withCommitNoReplay(t.noReplay),
+			withCommitPinnedRefs(t.pinnedRefs),
 		)
 		if err != nil {
 			// A clean conflict (ErrCommitFailed) committed nothing and stays
