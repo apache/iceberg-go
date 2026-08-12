@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -591,46 +590,6 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	return out, nil
 }
 
-// matchEqualityDeletesToData returns the equality delete files that apply to
-// the given data entry. An equality delete applies when:
-//   - it has a strictly greater sequence number than the data file
-//   - it shares the same partition (for partitioned tables)
-//
-// The "strictly greater" rule ensures that data files committed in the same
-// snapshot as the equality deletes are not affected — this is how RowDelta
-// atomically adds new rows alongside deletes for old rows.
-func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
-	dataSeqNum := dataEntry.SequenceNum()
-	dataPartition := dataEntry.DataFile().Partition()
-
-	out := make([]iceberg.DataFile, 0)
-	for _, del := range eqDeleteEntries {
-		// Equality deletes only apply to data files with a strictly lower
-		// sequence number.
-		if del.SequenceNum() <= dataSeqNum {
-			continue
-		}
-
-		// For partitioned tables, equality deletes must share the same
-		// partition as the data file. Unpartitioned deletes (nil/empty
-		// partition) apply globally.
-		delPartition := del.DataFile().Partition()
-		if len(delPartition) > 0 && len(dataPartition) > 0 {
-			if !partitionsMatch(dataPartition, delPartition) {
-				continue
-			}
-		}
-
-		out = append(out, del.DataFile())
-	}
-
-	return out
-}
-
-func partitionsMatch(a, b map[int]any) bool {
-	return maps.EqualFunc(a, b, reflect.DeepEqual)
-}
-
 // buildDVIndex indexes deletion vectors by the data file path they reference.
 // The spec requires at most one DV per data file; a second entry for the same
 // path is rejected with an error.
@@ -945,6 +904,10 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil {
 		return nil, err
 	}
+	eqDeleteIndex, err := buildEqualityDeleteIndex(entries.equalityDeleteEntries, scan.metadata)
+	if err != nil {
+		return nil, err
+	}
 
 	results = make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
@@ -962,7 +925,10 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 				return nil, err
 			}
 		}
-		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
+		eqDeleteFiles, err := eqDeleteIndex.forDataFile(e)
+		if err != nil {
+			return nil, err
+		}
 
 		task := FileScanTask{
 			File:                e.DataFile(),

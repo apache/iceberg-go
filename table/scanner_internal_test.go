@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"runtime"
 	"strconv"
 	"sync"
@@ -36,6 +37,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,76 +56,217 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
-func TestPartitionsMatchHandlesBinaryValues(t *testing.T) {
+func newEqualityDeleteIndexTestEntry(
+	path string,
+	specID int32,
+	partition map[int]any,
+	sequenceNumber int64,
+) iceberg.ManifestEntry {
+	return iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED,
+		nil,
+		&sequenceNumber,
+		nil,
+		&mockDataFile{path: path, specid: specID, partition: partition},
+	)
+}
+
+type equalityDeleteIndexTestSpecLookup map[int]iceberg.PartitionSpec
+
+func (s equalityDeleteIndexTestSpecLookup) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	spec, ok := s[id]
+	if !ok {
+		return nil
+	}
+
+	return &spec
+}
+
+func equalityDeleteIndexTestSpecs() equalityDeleteIndexTestSpecLookup {
+	partitionedField := func() iceberg.PartitionField {
+		return iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition",
+			Transform: iceberg.IdentityTransform{},
+		}
+	}
+
+	return equalityDeleteIndexTestSpecLookup{
+		0: iceberg.NewPartitionSpecID(0),
+		1: iceberg.NewPartitionSpecID(1, partitionedField()),
+		2: iceberg.NewPartitionSpecID(2, partitionedField()),
+		3: iceberg.NewPartitionSpecID(3, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "void",
+			Transform: iceberg.VoidTransform{},
+		}),
+	}
+}
+
+func TestEqualityDeleteIndexMatchesPartitionAndSequence(t *testing.T) {
+	partition := map[int]any{1000: []byte{0xde, 0xad}}
+	deleteEntries := []iceberg.ManifestEntry{
+		newEqualityDeleteIndexTestEntry("same-sequence.parquet", 1, partition, 5),
+		newEqualityDeleteIndexTestEntry("matching-newer.parquet", 1,
+			map[int]any{1000: append([]byte(nil), 0xde, 0xad)}, 7),
+		newEqualityDeleteIndexTestEntry("matching-older.parquet", 1, partition, 3),
+		newEqualityDeleteIndexTestEntry("different-partition.parquet", 1,
+			map[int]any{1000: []byte{0xbe, 0xef}}, 8),
+		newEqualityDeleteIndexTestEntry("different-spec.parquet", 2, partition, 8),
+		newEqualityDeleteIndexTestEntry("global-newer.parquet", 0, nil, 6),
+		newEqualityDeleteIndexTestEntry("global-same-sequence.parquet", 0, nil, 5),
+	}
+
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 5)
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	require.Len(t, matched, 2)
+	assert.Equal(t, []string{"global-newer.parquet", "matching-newer.parquet"},
+		[]string{matched[0].FilePath(), matched[1].FilePath()})
+}
+
+func TestEqualityDeleteIndexKeepsPartitionedDeletesScoped(t *testing.T) {
+	partitionedDelete := newEqualityDeleteIndexTestEntry(
+		"partitioned-delete.parquet", 1, map[int]any{1000: "a"}, 3)
+	globalDelete := newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 3)
+
+	idx, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
+	matched, err := idx.forDataFile(unpartitionedData)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "global-delete.parquet", matched[0].FilePath())
+}
+
+func TestEqualityDeleteIndexTreatsVoidSpecAsGlobal(t *testing.T) {
+	voidDelete := newEqualityDeleteIndexTestEntry(
+		"void-delete.parquet", 3, map[int]any{1000: nil}, 3)
+
+	idx, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
+	matched, err := idx.forDataFile(unpartitionedData)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "void-delete.parquet", matched[0].FilePath())
+}
+
+func TestEqualityDeleteIndexRejectsUnknownPartitionSpec(t *testing.T) {
+	deleteEntry := newEqualityDeleteIndexTestEntry("delete.parquet", 99, nil, 2)
+
+	_, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "delete.parquet")
+}
+
+func TestEqualityDeleteIndexSkipsPartitionKeysWithoutPartitionedDeletes(t *testing.T) {
+	dataEntry := newEqualityDeleteIndexTestEntry(
+		"data.parquet", 1, map[int]any{1000: struct{}{}}, 1)
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		nil,
+		{newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 2)},
+	} {
+		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs())
+		require.NoError(t, err)
+
+		matched, err := idx.forDataFile(dataEntry)
+		require.NoError(t, err)
+		assert.Len(t, matched, len(entries))
+	}
+}
+
+func TestEqualityDeleteIndexSortsBySequence(t *testing.T) {
+	partition := map[int]any{1000: "a"}
+	deleteEntries := []iceberg.ManifestEntry{
+		newEqualityDeleteIndexTestEntry("sequence-4.parquet", 1, partition, 4),
+		newEqualityDeleteIndexTestEntry("sequence-2-a.parquet", 1, partition, 2),
+		newEqualityDeleteIndexTestEntry("sequence-3.parquet", 1, partition, 3),
+		newEqualityDeleteIndexTestEntry("sequence-2-b.parquet", 1, partition, 2),
+	}
+
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 1)
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	paths := make([]string, len(matched))
+	for i, file := range matched {
+		paths[i] = file.FilePath()
+	}
+	assert.Equal(t, []string{
+		"sequence-2-a.parquet",
+		"sequence-2-b.parquet",
+		"sequence-3.parquet",
+		"sequence-4.parquet",
+	}, paths)
+}
+
+func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
+	sampleUUID := uuid.MustParse("12345678-9abc-def0-1234-56789abcdef0")
 	tests := []struct {
 		name  string
-		left  map[int]any
-		right map[int]any
-		match bool
+		left  any
+		right any
 	}{
-		{
-			name:  "equal binary values",
-			left:  map[int]any{1000: []byte{0xde, 0xad}},
-			right: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
-			match: true,
-		},
-		{
-			name:  "different binary values",
-			left:  map[int]any{1000: []byte{0xde, 0xad}},
-			right: map[int]any{1000: []byte{0xbe, 0xef}},
-		},
-		{
-			name:  "binary and string values differ",
-			left:  map[int]any{1000: []byte("value")},
-			right: map[int]any{1000: "value"},
-		},
-		{
-			name:  "comparable values still match",
-			left:  map[int]any{1000: int32(7), 1001: "region"},
-			right: map[int]any{1000: int32(7), 1001: "region"},
-			match: true,
-		},
-		{
-			name:  "different field IDs",
-			left:  map[int]any{1000: []byte{1}},
-			right: map[int]any{1001: []byte{1}},
-		},
+		{name: "integer widths", left: int32(7), right: int64(7)},
+		{name: "date and integer", left: iceberg.Date(7), right: int32(7)},
+		{name: "float widths", left: float32(1.5), right: float64(1.5)},
+		{name: "NaN", left: math.Float32frombits(0x7fc00000), right: math.NaN()},
+		{name: "UUID and bytes", left: sampleUUID, right: sampleUUID[:]},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.NotPanics(t, func() {
-				assert.Equal(t, tt.match, partitionsMatch(tt.left, tt.right))
-			})
+			left, err := newEqualityDeletePartitionKey(1, map[int]any{1000: tt.left})
+			require.NoError(t, err)
+			right, err := newEqualityDeletePartitionKey(1, map[int]any{1000: tt.right})
+			require.NoError(t, err)
+			assert.Equal(t, left, right)
 		})
 	}
+
+	base, err := newEqualityDeletePartitionKey(1, map[int]any{1000: int32(7)})
+	require.NoError(t, err)
+	differentSpec, err := newEqualityDeletePartitionKey(2, map[int]any{1000: int32(7)})
+	require.NoError(t, err)
+	differentField, err := newEqualityDeletePartitionKey(1, map[int]any{1001: int32(7)})
+	require.NoError(t, err)
+	assert.NotEqual(t, base, differentSpec)
+	assert.NotEqual(t, base, differentField)
+	multiField, err := newEqualityDeletePartitionKey(1, map[int]any{
+		1000: int32(7),
+		1001: "region",
+	})
+	require.NoError(t, err)
+	multiFieldReordered, err := newEqualityDeletePartitionKey(1, map[int]any{
+		1001: "region",
+		1000: int64(7),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, multiField, multiFieldReordered)
+
+	_, err = newEqualityDeletePartitionKey(1, map[int]any{1000: struct{}{}})
+	assert.ErrorContains(t, err, "unsupported partition value type struct {}")
 }
 
-func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
-	dataSeqNum := int64(1)
-	deleteSeqNum := int64(2)
-	dataFile := &mockDataFile{
-		path:      "data.parquet",
-		partition: map[int]any{1000: []byte{0xde, 0xad}},
-	}
-	matchingDelete := &mockDataFile{
-		path:      "matching-delete.parquet",
-		partition: map[int]any{1000: append([]byte(nil), 0xde, 0xad)},
-	}
-	nonMatchingDelete := &mockDataFile{
-		path:      "non-matching-delete.parquet",
-		partition: map[int]any{1000: []byte{0xbe, 0xef}},
-	}
+func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {
+	negativeZero := math.Copysign(0, -1)
 
-	dataEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
-	deleteEntries := []iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
-	}
+	negative, err := newEqualityDeletePartitionKey(1, map[int]any{1000: negativeZero})
+	require.NoError(t, err)
+	positive, err := newEqualityDeletePartitionKey(1, map[int]any{1000: float64(0)})
+	require.NoError(t, err)
 
-	assert.Equal(t, []iceberg.DataFile{matchingDelete},
-		matchEqualityDeletesToData(dataEntry, deleteEntries))
+	assert.NotEqual(t, negative, positive)
 }
 
 func TestMinSequenceNum(t *testing.T) {
