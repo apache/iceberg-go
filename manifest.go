@@ -472,13 +472,8 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	partitionField := getField(entryField.Type, "partition")
 
 	for _, field := range partitionField.Type.Fields {
-		var fid int
-		switch v := field.Props["field-id"].(type) {
-		case int:
-			fid = v
-		case float64:
-			fid = int(v)
-		default:
+		fid, ok := schemaFieldID(field)
+		if !ok {
 			continue
 		}
 
@@ -1010,10 +1005,15 @@ const (
 )
 
 // schemaFieldID returns the Iceberg "field-id" property of an Avro schema
-// field, if present. Props hold decoded JSON, so numbers arrive as float64.
+// field, if present. Schemas parsed from JSON (e.g. an OCF header's embedded
+// writer schema) carry numbers as float64, while schemas built in memory
+// carry int.
 func schemaFieldID(f avro.SchemaField) (int, bool) {
-	if id, ok := f.Props["field-id"].(float64); ok {
-		return int(id), true
+	switch v := f.Props["field-id"].(type) {
+	case int:
+		return v, true
+	case float64:
+		return int(v), true
 	}
 
 	return 0, false
@@ -1050,8 +1050,10 @@ func inferManifestListVersion(sc *avro.Schema) int {
 // absent, the version is inferred from the embedded writer schema, so lists
 // from writers that omit the key (e.g. DuckDB's iceberg extension) decode
 // with their real content types and sequence numbers instead of falling back
-// to v1. When the key is present but claims v1 for a schema that carries v2+
-// fields, an error is returned rather than silently dropping those fields.
+// to v1. When the key is present but claims a lower version than the schema
+// carries fields for, an error is returned rather than silently dropping
+// those fields on decode (or on a later rewrite through the older writer
+// schema).
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	var version int
 
@@ -1071,11 +1073,11 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 			return nil, err
 		}
 
-		if version == 1 {
-			if inferred > 1 {
-				return nil, fmt.Errorf("manifest list's 'format-version' metadata says 1, but the embedded writer schema carries v%d fields; reading it as v1 would silently drop them", inferred)
-			}
+		if version < inferred {
+			return nil, fmt.Errorf("manifest list's 'format-version' metadata says %d, but the embedded writer schema carries v%d fields; reading it as v%d would silently drop them", version, inferred, version)
+		}
 
+		if version == 1 {
 			return manifestFileV1Reader, nil
 		}
 

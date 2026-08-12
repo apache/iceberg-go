@@ -224,24 +224,35 @@ func TestReadManifestListDuckDBFixture(t *testing.T) {
 }
 
 // TestReadManifestListKeyContradictsSchema: a "format-version" key claiming
-// v1 for a list whose writer schema carries v2+/v3 fields must be an error;
-// reading it through the v1 schema would silently drop those fields.
+// a lower version than the writer schema carries fields for must be an
+// error. Reading a v2+ schema through the v1 reader would silently drop the
+// v2 fields on decode; reading a v3 schema as v2 would stamp Version()==2 and
+// let a later rewrite through the v2 writer schema drop first_row_id.
 func TestReadManifestListKeyContradictsSchema(t *testing.T) {
-	for _, version := range []int{2, 3} {
-		mf := NewManifestFile(version, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
+	cases := []struct {
+		writeVersion int
+		claimedKey   string
+	}{
+		{writeVersion: 2, claimedKey: "1"},
+		{writeVersion: 3, claimedKey: "1"},
+		{writeVersion: 3, claimedKey: "2"},
+	}
+	for _, tc := range cases {
+		mf := NewManifestFile(tc.writeVersion, "s3://bucket/metadata/deletes-m0.avro", 100, 0, 42).
 			Content(ManifestContentDeletes).
 			SequenceNum(5, 3).
 			Build()
 
 		var buf bytes.Buffer
 		seq := int64(5)
-		require.NoError(t, WriteManifestList(version, &buf, 42, nil, &seq, 0, []ManifestFile{mf}))
+		require.NoError(t, WriteManifestList(tc.writeVersion, &buf, 42, nil, &seq, 0, []ManifestFile{mf}))
 
 		lied := rewriteManifestListMetadata(t, buf.Bytes(), func(meta map[string][]byte) {
-			meta["format-version"] = []byte("1")
+			meta["format-version"] = []byte(tc.claimedKey)
 		})
 
 		_, err := ReadManifestList(bytes.NewReader(lied))
-		assert.ErrorContains(t, err, "'format-version' metadata says 1", "v%d", version)
+		assert.ErrorContains(t, err, "'format-version' metadata says "+tc.claimedKey,
+			"v%d schema with key %s", tc.writeVersion, tc.claimedKey)
 	}
 }
