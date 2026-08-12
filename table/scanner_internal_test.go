@@ -344,6 +344,9 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 	}, nil)
 
 	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+	pio := &countingPlanIO{}
+	scan.planIO = mustPlanIOState(t, pio)
+	state := scan.planIO
 
 	_, err = scan.fetchPartitionSpecFilteredManifests(context.Background())
 	require.Error(t, err, "manifest eval errors must propagate instead of silently dropping manifests")
@@ -351,6 +354,8 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 
 	_, err = scan.PlanFiles(context.Background())
 	require.Error(t, err, "PlanFiles must fail when manifest filtering errors")
+	assert.Same(t, state, scan.planIO)
+	assert.Equal(t, 0, pio.closeCalls)
 }
 
 func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testing.T) {
