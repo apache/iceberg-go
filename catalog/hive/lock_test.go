@@ -625,11 +625,11 @@ func TestApplyJitterAtCapFloorsCorrectlyVersusFlatScaleFloor(t *testing.T) {
 	}
 }
 
-// A caller may configure minWait above maxWait; options.go accepts it, and
-// calculateBackoff resolves it by returning maxWait. The downward spread must not
-// then draw below the configured minimum. Flooring at half the interval would
-// permit a third of it, because the replay loop cannot run when minWait is already
-// past the cap.
+// A caller may pass minWait above maxWait directly; ApplyProperties ignores that
+// configuration, but calculateBackoff still resolves it by returning maxWait. The
+// downward spread must not then draw below the configured minimum. Flooring at
+// half the interval would permit a third of it, because the replay loop cannot
+// run when minWait is already past the cap.
 func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 	minWait := 90 * time.Second
 	maxWait := 60 * time.Second
