@@ -821,18 +821,22 @@ func (filterBindingVisitor) VisitFalse() filterBindingState { return filterBindi
 func (filterBindingVisitor) VisitNot(child filterBindingState) filterBindingState {
 	return child
 }
+
 func (filterBindingVisitor) VisitAnd(left, right filterBindingState) filterBindingState {
 	return filterBindingState{
 		hasBound:   left.hasBound || right.hasBound,
 		hasUnbound: left.hasUnbound || right.hasUnbound,
 	}
 }
+
 func (filterBindingVisitor) VisitOr(left, right filterBindingState) filterBindingState {
 	return filterBindingVisitor{}.VisitAnd(left, right)
 }
+
 func (filterBindingVisitor) VisitUnbound(iceberg.UnboundPredicate) filterBindingState {
 	return filterBindingState{hasUnbound: true}
 }
+
 func (filterBindingVisitor) VisitBound(iceberg.BoundPredicate) filterBindingState {
 	return filterBindingState{hasBound: true}
 }
@@ -1150,12 +1154,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	)
 
 	rowFilter := as.boundRowFilter
-	rowFilter, err = bindTaskFilter(as.metadata.CurrentSchema(), task.Value.Residual, as.caseSensitive)
-	if task.Value.Residual == nil {
-		rowFilter = as.boundRowFilter
-	}
-	if err != nil {
-		return err
+	if task.Value.Residual != nil {
+		rowFilter, err = bindTaskFilter(as.metadata.CurrentSchema(), task.Value.Residual, as.caseSensitive)
+		if err != nil {
+			return err
+		}
 	}
 
 	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, rowFilter)
