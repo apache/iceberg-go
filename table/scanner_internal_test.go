@@ -285,6 +285,99 @@ func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {
 	assert.NotEqual(t, negative, positive)
 }
 
+func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
+	spec := partitionedSpec()
+	schema := simpleSchema()
+	snapshotID := int64(1)
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"mem://default/table/data/file.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: int32(7)},
+		nil,
+		nil,
+		1,
+		100,
+	)
+	require.NoError(t, err)
+
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED,
+		&snapshotID,
+		nil,
+		nil,
+		builder.Build(),
+	)
+	manifestPath := "mem://default/table/metadata/manifest.avro"
+	var manifestBytes bytes.Buffer
+	manifest, err := iceberg.WriteManifest(
+		manifestPath,
+		&manifestBytes,
+		2,
+		spec,
+		schema,
+		snapshotID,
+		[]iceberg.ManifestEntry{entry},
+	)
+	require.NoError(t, err)
+
+	fs := iceio.NewMemFS()
+	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+	tests := []struct {
+		name             string
+		partitionMatches bool
+		metricsMatches   bool
+		wantEvaluations  []string
+		wantEntries      int
+	}{
+		{
+			name:             "partition rejection skips metrics",
+			partitionMatches: false,
+			metricsMatches:   true,
+			wantEvaluations:  []string{"partition"},
+		},
+		{
+			name:             "partition acceptance evaluates metrics",
+			partitionMatches: true,
+			metricsMatches:   true,
+			wantEvaluations:  []string{"partition", "metrics"},
+			wantEntries:      1,
+		},
+		{
+			name:             "metrics rejection still prunes accepted partition",
+			partitionMatches: true,
+			metricsMatches:   false,
+			wantEvaluations:  []string{"partition", "metrics"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evaluations := make([]string, 0, 2)
+			entries, err := openManifest(
+				fs,
+				manifest,
+				func(iceberg.DataFile) (bool, error) {
+					evaluations = append(evaluations, "partition")
+
+					return tt.partitionMatches, nil
+				},
+				func(iceberg.DataFile) (bool, error) {
+					evaluations = append(evaluations, "metrics")
+
+					return tt.metricsMatches, nil
+				},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEvaluations, evaluations)
+			assert.Len(t, entries, tt.wantEntries)
+		})
+	}
+}
+
 func TestMinSequenceNum(t *testing.T) {
 	tests := []struct {
 		name      string
