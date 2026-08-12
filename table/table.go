@@ -497,6 +497,12 @@ type commitOpts struct {
 	// validators runs once before cat.CommitTable on the first attempt
 	// only. Refresh-and-replay across retries is deferred to PR 2.5.
 	validators []conflictValidatorFunc
+
+	// noReplay makes a CAS conflict terminal: doCommit returns the
+	// ErrCommitFailed error instead of entering refresh-and-replay.
+	// Set for commits carrying delete-file removals; see the flag site
+	// in snapshotProducer.commitManifests for the rationale.
+	noReplay bool
 }
 
 type commitOption func(*commitOpts)
@@ -515,6 +521,10 @@ func withCommitBranch(branch string) commitOption {
 
 func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
+}
+
+func withCommitNoReplay(noReplay bool) commitOption {
+	return func(o *commitOpts) { o.noReplay = noReplay }
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
@@ -700,6 +710,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			cleanupOrphans = false
 
 			return nil, err
+		}
+
+		// Non-replayable commits fail on the first CAS conflict instead
+		// of replaying (see commitOpts.noReplay). The annotation
+		// distinguishes this abort from an exhausted retry budget while
+		// preserving errors.Is(err, ErrCommitFailed).
+		if co.noReplay {
+			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
 		}
 	}
 
