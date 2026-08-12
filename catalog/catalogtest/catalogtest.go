@@ -94,6 +94,13 @@ func RunCatalogTests(t *testing.T, cfg Config) {
 	t.Run("BasicCreateTableThatAlreadyExists", func(t *testing.T) { testBasicCreateTableThatAlreadyExists(t, cfg) })
 	t.Run("LoadMissingTable", func(t *testing.T) { testLoadMissingTable(t, cfg) })
 	t.Run("LoadTableWithNonExistingNamespace", func(t *testing.T) { testLoadTableWithNonExistingNamespace(t, cfg) })
+
+	t.Run("CreateNamespace", func(t *testing.T) { testCreateNamespace(t, cfg) })
+	t.Run("CreateNamespaceThatAlreadyExists", func(t *testing.T) { testCreateNamespaceThatAlreadyExists(t, cfg) })
+	t.Run("DropNamespace", func(t *testing.T) { testDropNamespace(t, cfg) })
+	t.Run("DropMissingNamespace", func(t *testing.T) { testDropMissingNamespace(t, cfg) })
+	t.Run("DropNamespaceNotEmpty", func(t *testing.T) { testDropNamespaceNotEmpty(t, cfg) })
+	t.Run("ListNamespaces", func(t *testing.T) { testListNamespaces(t, cfg) })
 }
 
 // testBasicCreateTable asserts that a newly created table is visible to the
