@@ -718,6 +718,63 @@ func (s *FanoutWriterTestSuite) TestPartitionedWriterReusesExtractionPlan() {
 	s.Same(firstPlan, writer.plan)
 }
 
+func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanMatchesSchema() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "part",
+	})
+
+	originalSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "part", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "value", Type: arrow.BinaryTypes.String},
+	}, nil)
+	plan, err := newPartitionExtractionPlan(spec, icebergSchema, originalSchema)
+	s.Require().NoError(err)
+
+	tests := []struct {
+		name   string
+		schema *arrow.Schema
+		match  bool
+	}{
+		{name: "same schema pointer", schema: originalSchema, match: true},
+		{name: "equivalent schema", schema: arrow.NewSchema(originalSchema.Fields(), nil), match: true},
+		{
+			name: "reordered fields",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "value", Type: arrow.BinaryTypes.String},
+				{Name: "part", Type: arrow.PrimitiveTypes.Int32},
+			}, nil),
+			match: false,
+		},
+		{
+			name: "added field",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "part", Type: arrow.PrimitiveTypes.Int32},
+				{Name: "value", Type: arrow.BinaryTypes.String},
+				{Name: "extra", Type: arrow.FixedWidthTypes.Boolean},
+			}, nil),
+			match: false,
+		},
+		{
+			name: "changed field type",
+			schema: arrow.NewSchema([]arrow.Field{
+				{Name: "part", Type: arrow.PrimitiveTypes.Int64},
+				{Name: "value", Type: arrow.BinaryTypes.String},
+			}, nil),
+			match: false,
+		},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			s.Equal(test.match, plan.matchesSchema(test.schema))
+		})
+	}
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecordSchema() {
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Int32},

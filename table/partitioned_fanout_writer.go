@@ -375,7 +375,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
 	// Preserve support for iterators whose batch schema changes. The usual path compares
 	// schema pointers; equivalent independently-built schemas also reuse the plan.
-	if record.Schema() != p.recordSchema && !record.Schema().Equal(p.recordSchema) {
+	if !p.matchesSchema(record.Schema()) {
 		plan, err := newPartitionExtractionPlan(p.spec, p.schema, record.Schema())
 		if err != nil {
 			return nil, err
@@ -427,6 +427,10 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 	}
 
 	return partitionMap.collectPartitions(), nil
+}
+
+func (p *partitionExtractionPlan) matchesSchema(recordSchema *arrow.Schema) bool {
+	return recordSchema == p.recordSchema || recordSchema.Equal(p.recordSchema)
 }
 
 // partitionMapNode represents a simple tree structure for storing partitionInfo.
