@@ -474,9 +474,34 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	if err != nil {
 		return err
 	}
-	cs := meta.currentSnapshot()
-	if cs == nil {
-		return errors.New("cannot rollback: table has no current snapshot")
+
+	branch := t.branch
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	// Resolve the head from the target branch's OWN ref. This deliberately does
+	// not reuse a resolver that falls back to main's head for an unknown ref:
+	// rolling back a branch that does not exist would then rewind
+	// main instead. An absent ref must fail here, never fall back.
+	ref, ok := meta.refs[branch]
+	if !ok {
+		return fmt.Errorf("cannot rollback: branch %q does not exist", branch)
+	}
+
+	if ref.SnapshotRefType != BranchRef {
+		return fmt.Errorf("%w: cannot rollback: ref %q is a %s, not a branch",
+			iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+	}
+
+	// Present but invalid is not the same as absent: metadata validation
+	// (checkRefsExist) rejects dangling refs on load, so reaching this means
+	// in-flight builder state is inconsistent. Fail closed and name the ref
+	// rather than reporting the branch as empty.
+	cs, err := meta.SnapshotByID(ref.SnapshotID)
+	if err != nil {
+		return fmt.Errorf("cannot rollback: branch %q references unknown snapshot %d: %w",
+			branch, ref.SnapshotID, err)
 	}
 
 	lookup := func(id int64) *Snapshot {
@@ -486,19 +511,19 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	}
 
 	if !IsAncestorOf(cs.SnapshotID, snapshotID, lookup) {
-		return fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d",
-			snapshotID, cs.SnapshotID)
+		return fmt.Errorf("snapshot %d is not an ancestor of branch %q head snapshot %d",
+			snapshotID, branch, cs.SnapshotID)
 	}
 
-	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
+	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
 
 	// Assert the base branch head so a concurrent head move fails the
-	// commit instead of the rollback clobbering it. When main was
+	// commit instead of the rollback clobbering it. When the branch was
 	// staged by this transaction (absent on the base), the update that
 	// created it already carries its own base-state requirement.
 	var reqs []Requirement
-	if id := t.baseRefSnapshotID(MainBranch); id != nil {
-		reqs = append(reqs, AssertRefSnapshotID(MainBranch, id))
+	if id := t.baseRefSnapshotID(branch); id != nil {
+		reqs = append(reqs, AssertRefSnapshotID(branch, id))
 	}
 
 	return t.apply([]Update{update}, reqs)
