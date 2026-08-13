@@ -219,7 +219,11 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	for _, field := range p.Fields() {
 		if len(field.SourceIDs) == 1 && field.SourceIDs[0] == 0 {
 			if _, isVoid := field.Transform.(VoidTransform); isVoid {
-				opts = append(opts, PreservePartitionField(field))
+				opts = append(opts, func(spec *PartitionSpec) error {
+					spec.fields = append(spec.fields, clonePartitionField(field))
+
+					return nil
+				})
 
 				continue
 			}
@@ -290,19 +294,6 @@ func AddPartitionFieldByName(sourceName string, targetName string, transform Tra
 		if err != nil {
 			return err
 		}
-
-		return nil
-	}
-}
-
-// PreservePartitionField appends field to the spec as-is, without resolving
-// it against a schema. Use this for historical source-less void tombstones
-// (SourceIDs == []int{0} with a VoidTransform), whose source column no
-// longer exists in the schema and so cannot go through
-// AddPartitionFieldBySourceID.
-func PreservePartitionField(field PartitionField) PartitionOption {
-	return func(p *PartitionSpec) error {
-		p.fields = append(p.fields, clonePartitionField(field))
 
 		return nil
 	}

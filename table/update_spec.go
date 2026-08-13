@@ -231,19 +231,8 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
-	opts := make([]iceberg.PartitionOption, len(partitionFields))
-	for i, field := range partitionFields {
-		if len(field.SourceIDs) == 1 && field.SourceIDs[0] == 0 {
-			if _, isVoid := field.Transform.(iceberg.VoidTransform); isVoid {
-				opts[i] = iceberg.PreservePartitionField(field)
-
-				continue
-			}
-		}
-		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, us.meta.CurrentSchema(), &field.FieldID)
-	}
-
-	newSpec, err := iceberg.NewPartitionSpecOpts(opts...)
+	candidate := iceberg.NewPartitionSpec(partitionFields...)
+	newSpec, err := candidate.BindToSchema(us.meta.CurrentSchema(), nil, nil)
 	if err != nil {
 		return iceberg.PartitionSpec{}, err
 	}
