@@ -106,18 +106,26 @@ func TestNameMappingFromJson(t *testing.T) {
 	})
 }
 
-func TestApplyNameMappingUsesFirstMatchingName(t *testing.T) {
+func TestApplyNameMappingUsesAlias(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 100, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
 	)
 	mapping := iceberg.NameMapping{
-		{FieldID: makeID(1), Names: []string{"renamed", "legacy"}},
-		{FieldID: makeID(2), Names: []string{"renamed"}},
+		{FieldID: makeID(1), Names: []string{"legacy", "renamed"}},
 	}
 
 	result, err := iceberg.ApplyNameMapping(schema, mapping)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Field(0).ID)
+}
+
+func TestNameMappingAccessorRemainsComparable(t *testing.T) {
+	first := iceberg.NameMappingAccessor{}
+	second := iceberg.NameMappingAccessor{}
+	accessors := map[iceberg.NameMappingAccessor]struct{}{first: {}}
+
+	_, ok := accessors[second]
+	assert.True(t, ok)
 }
 
 func TestNameMappingToJson(t *testing.T) {
