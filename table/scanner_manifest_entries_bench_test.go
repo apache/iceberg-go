@@ -27,6 +27,32 @@ import (
 )
 
 func BenchmarkManifestEntryCollection(b *testing.B) {
+	benchmarkCases := []struct {
+		manifestCount int
+		concurrency   int
+		entryCount    int
+	}{
+		{manifestCount: 8, concurrency: 1, entryCount: 1_000},
+		{manifestCount: 8, concurrency: 4, entryCount: 1_000},
+		{manifestCount: 8, concurrency: 16, entryCount: 1_000},
+		{manifestCount: 64, concurrency: 1, entryCount: 1_000},
+		{manifestCount: 64, concurrency: 4, entryCount: 1_000},
+		{manifestCount: 64, concurrency: 16, entryCount: 1_000},
+		{manifestCount: 8, concurrency: 1, entryCount: 10_000},
+		{manifestCount: 8, concurrency: 4, entryCount: 10_000},
+		{manifestCount: 8, concurrency: 16, entryCount: 10_000},
+		{manifestCount: 16, concurrency: 1, entryCount: 10_000},
+		{manifestCount: 16, concurrency: 4, entryCount: 10_000},
+		{manifestCount: 16, concurrency: 16, entryCount: 10_000},
+		{manifestCount: 64, concurrency: 1, entryCount: 10_000},
+		{manifestCount: 64, concurrency: 4, entryCount: 10_000},
+		{manifestCount: 64, concurrency: 16, entryCount: 10_000},
+		{manifestCount: 8, concurrency: 4, entryCount: 100_000},
+		{manifestCount: 8, concurrency: 16, entryCount: 100_000},
+		{manifestCount: 16, concurrency: 4, entryCount: 100_000},
+		{manifestCount: 16, concurrency: 16, entryCount: 100_000},
+	}
+
 	for _, workload := range []struct {
 		name    string
 		content iceberg.ManifestContent
@@ -34,29 +60,26 @@ func BenchmarkManifestEntryCollection(b *testing.B) {
 		{name: "data", content: iceberg.ManifestContentData},
 		{name: "deletes", content: iceberg.ManifestContentDeletes},
 	} {
-		for _, manifestCount := range []int{8, 64} {
-			for _, concurrency := range []int{1, 4, 16} {
-				const entryCount = 1_000
-				name := fmt.Sprintf("content=%s/manifests=%d/concurrency=%d/entries=%d",
-					workload.name, manifestCount, concurrency, entryCount)
-				b.Run(name, func(b *testing.B) {
-					entries := benchmarkManifestEntries(entryCount, workload.content)
-					b.ReportAllocs()
-					b.ResetTimer()
-					b.ReportMetric(float64(manifestCount*entryCount), "entries/op")
+		for _, benchmarkCase := range benchmarkCases {
+			name := fmt.Sprintf("content=%s/manifests=%d/concurrency=%d/entries=%d",
+				workload.name, benchmarkCase.manifestCount, benchmarkCase.concurrency, benchmarkCase.entryCount)
+			b.Run(name, func(b *testing.B) {
+				entries := benchmarkManifestEntries(benchmarkCase.entryCount, workload.content)
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.ReportMetric(float64(benchmarkCase.manifestCount*benchmarkCase.entryCount), "entries/op")
 
-					var result *manifestEntries
-					for range b.N {
-						result = collectManifestEntryBatches(entries, manifestCount, concurrency)
-					}
+				var result *manifestEntries
+				for range b.N {
+					result = collectManifestEntryBatches(entries, benchmarkCase.manifestCount, benchmarkCase.concurrency)
+				}
 
-					if got, want := len(result.dataEntries)+len(result.positionalDeleteEntries)+
-						len(result.equalityDeleteEntries)+len(result.dvEntries), manifestCount*entryCount; got != want {
-						b.Fatalf("collected %d entries, want %d", got, want)
-					}
-					runtime.KeepAlive(result)
-				})
-			}
+				if got, want := len(result.dataEntries)+len(result.positionalDeleteEntries)+
+					len(result.equalityDeleteEntries)+len(result.dvEntries), benchmarkCase.manifestCount*benchmarkCase.entryCount; got != want {
+					b.Fatalf("collected %d entries, want %d", got, want)
+				}
+				runtime.KeepAlive(result)
+			})
 		}
 	}
 }
