@@ -50,7 +50,7 @@ import (
 // [table.CollectSafePositionDeletes]'s caller contract requires whenever
 // multiple groups land in one rewrite snapshot; the result feeds
 // [table.RewriteDataFilesOptions].ExtraDeleteFilesToRemove. Like
-// [CollectDeadEqualityDeletes], the returned files are safe to remove in the
+// [CollectDeadEqualityDeletesWithSpecs], the returned files are safe to remove in the
 // same commit that stages the rewrite: a concurrent
 // commit cannot resurrect them, because any concurrent delete touching a
 // rewritten file is rejected by the rewrite validator and any concurrent data
