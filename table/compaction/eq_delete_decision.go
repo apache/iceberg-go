@@ -24,6 +24,7 @@ import (
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 // SurvivorSurvey describes the surviving data files in a snapshot after a
@@ -207,7 +208,9 @@ func DecideDeadEqualityDeletesWithSpecs(
 			isUnpartitioned = spec.IsUnpartitioned()
 			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
 		}
-		if survey.specAwareApplicableMinSeq(df.SpecID(), df.Partition(), isUnpartitioned) >= e.SequenceNum() {
+		if survey.specAwareApplicableMinSeq(
+			df.SpecID(), internal.BorrowedDataFilePartition(df), isUnpartitioned,
+		) >= e.SequenceNum() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}

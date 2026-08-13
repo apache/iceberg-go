@@ -27,6 +27,7 @@ import (
 	"strconv"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/puffin"
 )
@@ -176,15 +177,15 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 		return nil, fmt.Errorf("expected PUFFIN format for deletion vector, got %s", dvFile.FileFormat())
 	}
 
-	if dvFile.ContentOffset() == nil || dvFile.ContentSizeInBytes() == nil {
+	_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
+	if contentOffset == nil || contentSize == nil {
 		return nil, fmt.Errorf("DV file %s missing ContentOffset/ContentSizeInBytes", dvFile.FilePath())
 	}
-	manifestReferencedDataFile := dvFile.ReferencedDataFile()
 	if manifestReferencedDataFile == nil || *manifestReferencedDataFile == "" {
 		return nil, fmt.Errorf("%w: DV file %s missing or empty %s property", ErrInvalidDeletionVector, dvFile.FilePath(), dvReferencedDataFileProperty)
 	}
 
-	size := *dvFile.ContentSizeInBytes()
+	size := *contentSize
 	if size < 0 || size > int64(puffin.DefaultMaxBlobSize) {
 		return nil, fmt.Errorf("DV blob size %d out of valid range [0, %d]", size, puffin.DefaultMaxBlobSize)
 	}
@@ -200,7 +201,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 		return nil, fmt.Errorf("create puffin reader for %s: %w", dvFile.FilePath(), err)
 	}
 
-	offset := *dvFile.ContentOffset()
+	offset := *contentOffset
 	blob, err := findBlobMetadataByRange(reader.Blobs(), offset, size)
 	if err != nil {
 		return nil, fmt.Errorf("%w: DV file %s: %w", ErrInvalidDeletionVector, dvFile.FilePath(), err)
