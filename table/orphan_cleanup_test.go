@@ -79,11 +79,11 @@ func TestOrphanCleanupOptions(t *testing.T) {
 
 	schemes := map[string]string{"s3,s3a,s3n": "s3"}
 	WithEqualSchemes(schemes)(cfg)
-	assert.Equal(t, map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"}, cfg.equalSchemes)
+	assert.Equal(t, schemes, cfg.equalSchemes)
 
 	authorities := map[string]string{"host1,host2": "canonical"}
 	WithEqualAuthorities(authorities)(cfg)
-	assert.Equal(t, map[string]string{"host1": "canonical", "host2": "canonical"}, cfg.equalAuthorities)
+	assert.Equal(t, authorities, cfg.equalAuthorities)
 }
 
 func TestFlattenURIEquivalences(t *testing.T) {
@@ -94,12 +94,41 @@ func TestFlattenURIEquivalences(t *testing.T) {
 	}
 
 	assert.Equal(t, map[string]string{
-		"s3":     "s3",
-		"s3a":    "gs",
-		"s3n":    "s3",
-		"gs":     "gs",
-		"single": "canonical",
+		"s3":         "s3",
+		"s3a":        "gs",
+		"s3n":        "s3",
+		"gs":         "gs",
+		"single":     "canonical",
+		"s3,s3a,s3n": "s3",
+		"s3a,gs":     "gs",
 	}, flattenURIEquivalences(equivalences))
+}
+
+func TestFlattenURIEquivalencesPreservesExactMappingPrecedence(t *testing.T) {
+	equivalences := map[string]string{
+		"host1":       "canonical",
+		"host1,host2": "other",
+		"host2":       "canonical",
+	}
+
+	flattened := flattenURIEquivalences(equivalences)
+	assert.Equal(t, "canonical", flattened["host1"])
+	assert.Equal(t, "canonical", flattened["host2"])
+}
+
+func TestEqualAuthoritiesPreservesExactMappingAcrossOptions(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"host1": "canonical",
+		}),
+		WithEqualAuthorities(map[string]string{
+			"host1,host2": "other",
+			"host2":       "canonical",
+		}),
+	)
+
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host1", cfg.equalAuthorities))
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host2", cfg.equalAuthorities))
 }
 
 func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
@@ -487,6 +516,25 @@ func TestCheckPrefixMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckPrefixMismatchPreservesExactEquivalencePrecedence(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithPrefixMismatchMode(PrefixMismatchDelete),
+		WithEqualAuthorities(map[string]string{
+			"host1":       "canonical",
+			"host1,host2": "other",
+			"host2":       "canonical",
+		}),
+	)
+
+	decision, err := checkPrefixMismatch(
+		"s3://host1/path/file.txt",
+		"s3://host2/path/file.txt",
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, prefixMismatchKeep, decision)
 }
 
 func TestIsFileOrphan(t *testing.T) {

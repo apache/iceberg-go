@@ -150,7 +150,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for scheme, canonical := range flattenURIEquivalences(schemes) {
+		for scheme, canonical := range schemes {
 			cfg.equalSchemes[scheme] = canonical
 		}
 	}
@@ -165,7 +165,7 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for authority, canonical := range flattenURIEquivalences(authorities) {
+		for authority, canonical := range authorities {
 			cfg.equalAuthorities[authority] = canonical
 		}
 	}
@@ -173,7 +173,8 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 
 // flattenURIEquivalences expands comma-separated URI equivalence groups into
 // direct lookups. Groups are processed in sorted order so overlapping groups
-// have deterministic behavior; the lexicographically last group wins.
+// have deterministic behavior; the lexicographically last group wins. Original
+// keys are overlaid afterward so exact mappings retain precedence over groups.
 func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 	if len(equivalences) == 0 {
 		return nil
@@ -187,9 +188,17 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 
 	flattened := make(map[string]string, len(equivalences))
 	for _, group := range groups {
+		if !strings.Contains(group, ",") {
+			continue
+		}
+
 		for _, value := range strings.Split(group, ",") {
 			flattened[strings.TrimSpace(value)] = equivalences[group]
 		}
+	}
+
+	for _, group := range groups {
+		flattened[group] = equivalences[group]
 	}
 
 	return flattened
@@ -274,6 +283,9 @@ func newOrphanCleanupConfigWithMode(executingPlan bool, opts ...OrphanCleanupOpt
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	cfg.equalSchemes = flattenURIEquivalences(cfg.equalSchemes)
+	cfg.equalAuthorities = flattenURIEquivalences(cfg.equalAuthorities)
 
 	return cfg
 }
