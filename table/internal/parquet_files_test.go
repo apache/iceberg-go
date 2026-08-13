@@ -152,6 +152,7 @@ func newAbortTestWriter(t *testing.T, fs iceio.WriteFileIO, fileName string) int
 func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, table.Metadata) {
 	tableMeta, err := table.ParseMetadataString(`{
         "format-version": 2,
+        "last-sequence-number": 0,
         "location": "s3://bucket/test/location",
         "last-column-id": 7,
         "current-schema-id": 0,
@@ -639,6 +640,7 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 
 	tableMeta, err := table.ParseMetadataString(`{
 		"format-version": 3,
+		"last-sequence-number": 0,
 		"location": "s3://bucket/test/location",
 		"last-column-id": 2,
 		"current-schema-id": 0,
@@ -825,6 +827,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			// Create table metadata with decimal type
 			tableMeta, err := table.ParseMetadataString(fmt.Sprintf(`{
 				"format-version": 2,
+				"last-sequence-number": 0,
 				"location": "s3://bucket/test/location",
 				"last-column-id": 1,
 				"current-schema-id": 0,

@@ -69,12 +69,9 @@ type Config struct {
 
 	// PreserveDeadEqualityDeletes, when true, retains equality delete
 	// files that are provably dead after the rewrite. The cleanup
-	// predicate matches the v2 reader (see scanner.go
-	// matchEqualityDeletesToData and DecideDeadEqualityDeletes): an
-	// eq-delete is dead iff no surviving applicable data file has
-	// seq < eq-delete.seq, where "applicable" means same partition
-	// tuple OR either side has empty partition. SpecID is NOT part of
-	// the predicate.
+	// predicate follows scan planning's partition-spec applicability rule
+	// (see DecideDeadEqualityDeletesWithSpecs) and never removes one that could still
+	// affect a surviving data file.
 	//
 	// Zero value (false) is the recommended default: dead eq-deletes are
 	// expunged during the rewrite commit, which keeps manifest fanout
@@ -86,7 +83,7 @@ type Config struct {
 	// Honored only in atomic mode (RewriteDataFilesOptions.PartialProgress=false).
 	// The CLI / library caller is responsible for translating this flag
 	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
-	// — see CollectDeadEqualityDeletes.
+	// — see CollectDeadEqualityDeletesWithSpecs.
 	PreserveDeadEqualityDeletes bool
 }
 
