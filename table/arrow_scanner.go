@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"strconv"
 	"sync"
 
@@ -1508,6 +1509,30 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 		cancel, as.rowLimit)
 }
 
+// readPropertiesFor overlays a scan's options onto the table's properties to
+// produce the property set the file readers see.
+//
+// Read tuning is expressed in two places that used to disagree. A table can
+// carry read.parquet.batch-size in its metadata, and a caller can pass the same
+// key per scan via Scan.WithOptions. Only the table's properties ever reached
+// the reader, so the per-scan value was dropped without a word: a caller asking
+// for smaller batches to bound its memory still got ParquetBatchSizeDefault
+// (131072) rows per batch, and nothing reported the difference.
+//
+// Scan options win, being the more specific of the two. The result is a fresh
+// map, so neither input is mutated.
+func readPropertiesFor(tableProps, scanOpts iceberg.Properties) iceberg.Properties {
+	if len(scanOpts) == 0 {
+		return tableProps
+	}
+
+	merged := make(iceberg.Properties, len(tableProps)+len(scanOpts))
+	maps.Copy(merged, tableProps)
+	maps.Copy(merged, scanOpts)
+
+	return merged
+}
+
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))
@@ -1515,7 +1540,7 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		as.useLargeTypes = false
 	}
 
-	ctx = tblutils.WithTableProperties(ctx, as.metadata.Properties())
+	ctx = tblutils.WithTableProperties(ctx, readPropertiesFor(as.metadata.Properties(), as.options))
 
 	resultSchema, err := SchemaToArrowSchemaWithOptions(as.projectedSchema, ArrowSchemaOptions{
 		UseLargeTypes:   as.useLargeTypes,
