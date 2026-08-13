@@ -34,15 +34,18 @@ var expressionEvaluatorBenchmarkSink bool
 
 func BenchmarkExpressionEvaluatorTraversal(b *testing.B) {
 	for _, tc := range []struct {
-		name string
-		op   Operation
+		name         string
+		op           Operation
+		shortCircuit bool
 	}{
-		{name: "and-left-false", op: OpAnd},
-		{name: "or-left-true", op: OpOr},
+		{name: "and-left-false", op: OpAnd, shortCircuit: true},
+		{name: "or-left-true", op: OpOr, shortCircuit: true},
+		{name: "and-no-short-circuit", op: OpAnd},
+		{name: "or-no-short-circuit", op: OpOr},
 	} {
 		for _, fieldCount := range []int{8, 32, 128} {
 			b.Run(fmt.Sprintf("%s/fields=%d", tc.name, fieldCount), func(b *testing.B) {
-				bound, row := evaluatorBenchmarkInput(fieldCount, tc.op)
+				bound, row := evaluatorBenchmarkInput(fieldCount, tc.op, tc.shortCircuit)
 
 				b.Run("full-traversal", func(b *testing.B) {
 					benchmarkExpressionTraversal(b, bound, row, false)
@@ -55,7 +58,7 @@ func BenchmarkExpressionEvaluatorTraversal(b *testing.B) {
 	}
 }
 
-func evaluatorBenchmarkInput(fieldCount int, op Operation) (BooleanExpression, StructLike) {
+func evaluatorBenchmarkInput(fieldCount int, op Operation, shortCircuit bool) (BooleanExpression, StructLike) {
 	fields := make([]NestedField, fieldCount)
 	predicates := make([]BooleanExpression, fieldCount)
 	values := make(evaluatorBenchmarkRow, fieldCount)
@@ -68,15 +71,21 @@ func evaluatorBenchmarkInput(fieldCount int, op Operation) (BooleanExpression, S
 	}
 
 	if op == OpAnd {
-		values[0] = int32(0)
-		for i := 1; i < fieldCount; i++ {
-			values[i] = int32(1)
+		if shortCircuit {
+			values[0] = int32(0)
+			for i := 1; i < fieldCount; i++ {
+				values[i] = int32(1)
+			}
+		} else {
+			for i := range values {
+				values[i] = int32(1)
+			}
 		}
-	} else {
+	} else if shortCircuit {
 		values[0] = int32(1)
 	}
 
-	var rest BooleanExpression = predicates[fieldCount-1]
+	rest := predicates[fieldCount-1]
 	for i := fieldCount - 2; i >= 1; i-- {
 		if op == OpAnd {
 			rest = NewAnd(predicates[i], rest)

@@ -100,10 +100,11 @@ func VisitExpr[T any](expr BooleanExpression, visitor BooleanExprVisitor[T]) (re
 	return visitBoolExpr(expr, visitor), err
 }
 
-// VisitExprEvaluator traverses a boolean expression for a visitor that returns
-// boolean results. Unlike VisitExpr, it skips the right side of an AND when
-// the left side is false and the right side of an OR when the left side is
-// true.
+// VisitExprEvaluator traverses a boolean expression for a visitor whose
+// boolean results represent expression truth. Unlike VisitExpr, it only visits
+// the nodes required to determine the result: it skips the right side of an
+// AND when the left side is false and the right side of an OR when the left
+// side is true.
 func VisitExprEvaluator(expr BooleanExpression, visitor BooleanExprVisitor[bool]) (res bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {

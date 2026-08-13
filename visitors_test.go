@@ -235,9 +235,17 @@ func (e *evaluatorVisitor) VisitFalse() bool {
 
 func (e *evaluatorVisitor) VisitNot(child bool) bool { return !child }
 
-func (e *evaluatorVisitor) VisitAnd(left, right bool) bool { return left && right }
+func (e *evaluatorVisitor) VisitAnd(left, right bool) bool {
+	e.visited = append(e.visited, "and")
 
-func (e *evaluatorVisitor) VisitOr(left, right bool) bool { return left || right }
+	return left && right
+}
+
+func (e *evaluatorVisitor) VisitOr(left, right bool) bool {
+	e.visited = append(e.visited, "or")
+
+	return left || right
+}
 
 func (e *evaluatorVisitor) VisitUnbound(pred iceberg.UnboundPredicate) bool {
 	ref := pred.Term().(iceberg.Reference)
@@ -283,7 +291,7 @@ func TestVisitExprEvaluatorShortCircuits(t *testing.T) {
 				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
 			values:  map[string]bool{"left": true, "right": false},
 			result:  false,
-			visited: []string{"left", "right"},
+			visited: []string{"left", "right", "and"},
 		},
 		{
 			name: "or when left is false",
@@ -292,7 +300,7 @@ func TestVisitExprEvaluatorShortCircuits(t *testing.T) {
 				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
 			values:  map[string]bool{"left": false, "right": true},
 			result:  true,
-			visited: []string{"left", "right"},
+			visited: []string{"left", "right", "or"},
 		},
 	}
 
