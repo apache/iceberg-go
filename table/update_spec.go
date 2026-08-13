@@ -179,11 +179,12 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 		} else {
 			updates = append(updates, NewSetDefaultSpecUpdate(newSpec.ID()))
 		}
-		// Read the staged value so Transaction.apply (which validates against
-		// staged metadata) accepts each chained commit. requirementSemanticKey
-		// keeps this assertion a type-keyed singleton, retaining the first one
-		// (the base value), so one non-contradictory assertion reaches the catalog.
-		requiredLastAssignedPartitionID := us.meta.LastPartitionSpecID()
+		// This concurrency assertion must describe the base (pre-transaction)
+		// catalog state, not the staged/advancing one: every chained
+		// UpdateSpec.Commit() in the transaction then asserts the same value,
+		// so they collapse to one via the ordinary semantic-key dedupe instead
+		// of reaching the catalog as several contradictory values.
+		requiredLastAssignedPartitionID := us.txn.tbl.Metadata().LastPartitionSpecID()
 		if requiredLastAssignedPartitionID == nil {
 			// Mirror the constructor's guard: an unpartitioned table may not
 			// have a last-assigned partition id yet.
@@ -414,9 +415,18 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			iceberg.ErrInvalidArgument, key.Transform, err)
 	}
 
+	// Reuse applies to format v2+ (v1 has no permanent field-ID contract) and
+	// resurrects fields removed in an earlier committed update; same-update
+	// remove/re-add is handled ahead of this call by rewriteDeleteAndAddField.
 	if us.meta.Version() >= 2 {
 		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
+		// PartitionSpecs() is ordered by ascending spec ID, so when the same
+		// source + transform appears under different names across specs (e.g. a
+		// field renamed before it was removed), the lowest-spec-ID match wins.
+		// The match's own name is returned, which for the no-name case may be an
+		// older name than the current schema uses; this precedence is
+		// deterministic and preserves the original (permanent) field ID.
 		for _, spec := range us.meta.PartitionSpecs() {
 			for _, field := range spec.Fields() {
 				historicalFields = append(historicalFields, field)
