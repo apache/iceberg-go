@@ -109,11 +109,27 @@ func TestEmptySummary(t *testing.T) {
 	assert.Empty(t, summary.Properties)
 }
 
-func TestInvalidOperation(t *testing.T) {
+func TestUnknownOperationIsPreserved(t *testing.T) {
 	var summary table.Summary
-	err := json.Unmarshal([]byte(`{"operation": "foobar"}`), &summary)
+	require.NoError(t, json.Unmarshal([]byte(`{"operation":"merge","foo":"bar"}`), &summary))
+	assert.Equal(t, table.Operation("merge"), summary.Operation)
+	assert.Equal(t, iceberg.Properties{"foo": "bar"}, summary.Properties)
+
+	encoded, err := json.Marshal(&summary)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"operation":"merge","foo":"bar"}`, string(encoded))
+}
+
+func TestEmptyOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":""}`), &summary)
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
-	assert.ErrorContains(t, err, "found 'foobar'")
+}
+
+func TestNullOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":null}`), &summary)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 }
 
 func TestSummaryEqualsHandlesNil(t *testing.T) {

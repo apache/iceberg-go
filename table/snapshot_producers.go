@@ -1309,6 +1309,22 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		})
 	}
 
+	// Delete-file removals (path-keyed delete files and ref-keyed
+	// deletion vectors) are resolved against the snapshot this producer
+	// built on — removal identity is snapshot-relative. A
+	// refresh-and-replay would inherit a concurrently committed
+	// replacement from the fresh base while the stale removal replays
+	// as a no-op (checkRemovedFiles deliberately treats a superseded
+	// entry as absent), stranding two live deletion vectors on one data
+	// file. Such commits must fail on a CAS conflict instead of
+	// replaying; the caller re-resolves the removal against the current
+	// snapshot and retries. Data-file removals (deletedFiles) stay
+	// replayable: they are path-keyed and checkRemovedFiles fails the
+	// rebuild terminally when the path is gone from the fresh base.
+	if len(sp.deletedDeleteFiles) > 0 || len(sp.deletedDVsByRef) > 0 {
+		sp.txn.noReplay = true
+	}
+
 	// Build the manifest-list rebuild closure. It is called by doCommit
 	// on each OCC retry to regenerate the manifest list so it correctly
 	// inherits all data files committed by concurrent writers since the
@@ -1415,6 +1431,13 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 		addSnap.supersededSource = acc
 	}
 
+	// Build the assertion from the base table's branch head, not the
+	// staged metadata's current snapshot: a staged intermediate snapshot
+	// never exists on the catalog, so requiring it could never hold. A
+	// nil id requires that the branch not exist yet (this commit
+	// creates it).
+	baseHeadID := sp.txn.baseRefSnapshotID(branch)
+
 	return []Update{
 			addSnap,
 			// Carry over the branch's existing retention settings so advancing
@@ -1425,6 +1448,6 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			// determines the resulting ref rather than merging with the old one.
 			sp.txn.meta.NewRetainingSnapshotRefUpdate(branch, sp.snapshotID, BranchRef),
 		}, []Requirement{
-			AssertRefSnapshotID(branch, sp.txn.meta.currentSnapshotID),
+			AssertRefSnapshotID(branch, baseHeadID),
 		}, nil
 }

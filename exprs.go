@@ -956,7 +956,7 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		if err != nil {
 			return nil, err
 		}
-		typedSet.Add(casted)
+		typedSet.Add(cloneBoundLiteral(casted))
 	}
 
 	switch typedSet.Len() {
@@ -1057,7 +1057,7 @@ func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundP
 }
 
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
-	return bsp.lits
+	return cloneBoundLiteralSet(bsp.lits)
 }
 
 type BoundTransform struct {

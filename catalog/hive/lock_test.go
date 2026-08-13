@@ -360,14 +360,15 @@ func TestCalculateBackoff(t *testing.T) {
 		attempt  int
 		expected time.Duration
 	}{
-		{0, 100 * time.Millisecond}, // 100ms * 2^0 = 100ms
-		{1, 200 * time.Millisecond}, // 100ms * 2^1 = 200ms
-		{2, 400 * time.Millisecond}, // 100ms * 2^2 = 400ms
-		{3, 800 * time.Millisecond}, // 100ms * 2^3 = 800ms
-		{4, 1 * time.Second},        // 100ms * 2^4 = 1.6s, capped at 1s
-		{10, 1 * time.Second},       // Capped at maxWait
-		{63, 1 * time.Second},       // Capped without overflowing time.Duration
-		{1000, 1 * time.Second},     // Large retry counts remain capped
+		{0, 100 * time.Millisecond},    // 100ms * 1.5^0
+		{1, 150 * time.Millisecond},    // 100ms * 1.5^1
+		{2, 225 * time.Millisecond},    // 100ms * 1.5^2
+		{3, 337500 * time.Microsecond}, // 100ms * 1.5^3
+		{4, 506250 * time.Microsecond}, // 100ms * 1.5^4
+		{5, 759375 * time.Microsecond}, // 100ms * 1.5^5
+		{6, 1 * time.Second},           // 100ms * 1.5^6 ≈ 1.14s, capped at 1s
+		{10, 1 * time.Second},          // Capped at maxWait
+		{1000, 1 * time.Second},        // Large retry counts remain capped
 	}
 
 	for _, tt := range tests {
@@ -378,31 +379,113 @@ func TestCalculateBackoff(t *testing.T) {
 	}
 
 	maxDuration := time.Duration(1<<63 - 1)
-	assert.Equal(t, time.Duration(1)<<62, calculateBackoff(62, time.Nanosecond, maxDuration))
-	assert.Equal(t, maxDuration, calculateBackoff(63, time.Nanosecond, maxDuration))
+	assert.Equal(t, maxDuration, calculateBackoff(10000, time.Nanosecond, maxDuration),
+		"extreme attempt counts must cap without overflowing")
 }
 
 func TestLockConfigurationParsing(t *testing.T) {
-	props := map[string]string{
-		LockCheckMinWaitTime: "200ms",
-		LockCheckMaxWaitTime: "30s",
-		LockCheckRetries:     "5",
-	}
+	t.Run("legacy go duration keys", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitTime: "200ms",
+			LockCheckMaxWaitTime: "30s",
+			LockCheckRetries:     "5",
+		}
 
-	opts := NewHiveOptions()
-	opts.ApplyProperties(props)
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
 
-	assert.Equal(t, 200*time.Millisecond, opts.LockMinWaitTime)
-	assert.Equal(t, 30*time.Second, opts.LockMaxWaitTime)
-	assert.Equal(t, 5, opts.LockRetries)
+		assert.Equal(t, 200*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 30*time.Second, opts.LockMaxWaitTime)
+		assert.Equal(t, 5, opts.LockRetries)
+	})
+
+	t.Run("java millisecond keys", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitMs: "75",
+			LockCheckMaxWaitMs: "2500",
+			LockCheckRetries:   "6",
+		}
+
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
+
+		assert.Equal(t, 75*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 2500*time.Millisecond, opts.LockMaxWaitTime)
+		assert.Equal(t, 6, opts.LockRetries)
+	})
+
+	t.Run("java keys win over legacy aliases", func(t *testing.T) {
+		props := map[string]string{
+			LockCheckMinWaitMs:   "80",
+			LockCheckMaxWaitMs:   "4000",
+			LockCheckMinWaitTime: "200ms",
+			LockCheckMaxWaitTime: "30s",
+		}
+
+		opts := NewHiveOptions()
+		opts.ApplyProperties(props)
+
+		assert.Equal(t, 80*time.Millisecond, opts.LockMinWaitTime)
+		assert.Equal(t, 4*time.Second, opts.LockMaxWaitTime)
+	})
 }
 
 func TestLockConfigurationDefaults(t *testing.T) {
 	opts := NewHiveOptions()
 
+	assert.Equal(t, 50*time.Millisecond, DefaultLockCheckMinWaitTime)
+	assert.Equal(t, 5*time.Second, DefaultLockCheckMaxWaitTime)
 	assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
 	assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
 	assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+}
+
+func TestLockConfigurationValidation(t *testing.T) {
+	t.Run("negative and zero waits keep defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitMs: "0",
+			LockCheckMaxWaitMs: "-1",
+			LockCheckRetries:   "0",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+		assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+	})
+
+	t.Run("min greater than or equal to max keeps defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitMs: "5000",
+			LockCheckMaxWaitMs: "50",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+
+		opts = NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitTime: "5s",
+			LockCheckMaxWaitTime: "5s",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+	})
+
+	t.Run("invalid legacy duration keeps defaults", func(t *testing.T) {
+		opts := NewHiveOptions()
+		opts.ApplyProperties(map[string]string{
+			LockCheckMinWaitTime: "not-a-duration",
+			LockCheckMaxWaitTime: "also-bad",
+			LockCheckRetries:     "nope",
+		})
+
+		assert.Equal(t, DefaultLockCheckMinWaitTime, opts.LockMinWaitTime)
+		assert.Equal(t, DefaultLockCheckMaxWaitTime, opts.LockMaxWaitTime)
+		assert.Equal(t, DefaultLockCheckRetries, opts.LockRetries)
+	})
 }
 
 func TestApplyJitterBelowCapNeverShorterThanInput(t *testing.T) {
@@ -431,13 +514,14 @@ func TestApplyJitterAtCapStaysWithinBoundsAndVaries(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := time.Second
 
-	// 800ms is the last interval the sequence produced before saturating, which is
-	// the floor the code actually guarantees. Asserting maxWait/2 here would pass a
-	// regression that let the spread dip to 600ms.
+	// 759.375ms is the last interval the 1.5× sequence produced before saturating,
+	// which is the floor the code actually guarantees. Asserting maxWait/1.5 here
+	// would pass a regression that let the spread dip below that interval.
+	lastUncapped := 759375 * time.Microsecond
 	seen := make(map[time.Duration]struct{})
 	for i := 0; i < 500; i++ {
 		got := applyJitter(maxWait, minWait, maxWait)
-		assert.GreaterOrEqual(t, got, 800*time.Millisecond,
+		assert.GreaterOrEqual(t, got, lastUncapped,
 			"the spread at the cap must be at least the last uncapped interval")
 		assert.LessOrEqual(t, got, maxWait,
 			"the wait must never exceed the configured maximum")
@@ -461,26 +545,28 @@ func TestApplyJitterAtCapNeverPollsSoonerThanMinWait(t *testing.T) {
 }
 
 // The guaranteed minimum must not fall as the sequence saturates. The attempt
-// before the cap waits for its own full interval, so flooring the spread at half
-// the cap would let the first saturated attempt poll sooner than the one before
-// it, which inverts the property that the wait between checks only ever grows.
+// before the cap waits for its own full interval, so flooring the spread at
+// maxWait/1.5 would let the first saturated attempt poll sooner than the one
+// before it, which inverts the property that the wait between checks only ever
+// grows.
 //
 // Reaching the cap takes a lowered lock-check-max-wait-time or a raised retry
-// count; the defaults (100ms, 1 minute, 4 retries) top out at 800ms and never
+// count; the defaults (50ms, 5s, 4 retries) top out at 168.75ms and never
 // saturate. The values below are the smallest that put the boundary in range.
 func TestApplyJitterMinimumIsMonotonicAcrossTheCap(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := time.Second
 
-	// The sequence runs 100ms, 200ms, 400ms, 800ms, then saturates at 1s.
-	// Attempt 3 draws from [800ms, 1s]; attempt 4 is the first capped one.
+	// The sequence runs 100ms, 150ms, 225ms, 337.5ms, 506.25ms, 759.375ms, then
+	// saturates at 1s. Attempt 5 draws from [759.375ms, 1s]; attempt 6 is the
+	// first capped one.
 	//
 	// The bound compared against is exact, not sampled. Below the cap the jitter is
 	// added on top, so the interval itself is the floor and no estimate is needed.
 	// Sampling both sides instead would compare two noisy minima that sit a hair
 	// above the same true floor, and which of them lands lower is chance.
 	var floor time.Duration
-	for attempt := 0; attempt < 8; attempt++ {
+	for attempt := 0; attempt < 10; attempt++ {
 		d := calculateBackoff(attempt, minWait, maxWait)
 
 		for i := 0; i < 2000; i++ {
@@ -499,46 +585,51 @@ func TestApplyJitterMinimumIsMonotonicAcrossTheCap(t *testing.T) {
 func TestApplyJitterAtCapFloorsAtTheLastUncappedInterval(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := time.Second
+	lastUncapped := 759375 * time.Microsecond
 
-	assert.Equal(t, 800*time.Millisecond, calculateBackoff(3, minWait, maxWait),
+	assert.Equal(t, lastUncapped, calculateBackoff(5, minWait, maxWait),
 		"the last interval before the cap")
-	assert.Equal(t, maxWait, calculateBackoff(4, minWait, maxWait),
+	assert.Equal(t, maxWait, calculateBackoff(6, minWait, maxWait),
 		"the first interval at the cap")
 
 	for i := 0; i < 2000; i++ {
-		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), 800*time.Millisecond,
+		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), lastUncapped,
 			"the spread at the cap must not reach below the last uncapped interval")
 	}
 }
 
-// The case above uses a clean power-of-two ratio, where d/2 and the last uncapped
-// interval happen to be close. This one separates them: at 300ms/1s the sequence
-// runs 300ms, 600ms, then saturates, so the floor must be 600ms while d/2 is only
-// 500ms. It is the case that distinguishes the replay from a flat max(minWait, d/2)
-// floor, and the only place the arithmetic could quietly go wrong.
-func TestApplyJitterAtCapFloorsCorrectlyForNonPowerOfTwoRatios(t *testing.T) {
+// A flat max(minWait, d/1.5) floor is close but not exact. At 300ms/1s the
+// sequence runs 300ms, 450ms, 675ms, then saturates, so the floor must be 675ms
+// while d/1.5 is only ~666ms. It is the case that distinguishes the replay from a
+// flat scale-factor floor, and the place the arithmetic could quietly go wrong.
+func TestApplyJitterAtCapFloorsCorrectlyVersusFlatScaleFloor(t *testing.T) {
 	minWait := 300 * time.Millisecond
 	maxWait := time.Second
+	lastUncapped := 675 * time.Millisecond
 
-	require.Equal(t, 600*time.Millisecond, calculateBackoff(1, minWait, maxWait),
+	require.Equal(t, lastUncapped, calculateBackoff(2, minWait, maxWait),
 		"the last interval before the cap")
-	require.Equal(t, maxWait, calculateBackoff(2, minWait, maxWait),
+	require.Equal(t, maxWait, calculateBackoff(3, minWait, maxWait),
 		"the first interval at the cap")
+
+	flatScaleFloor := time.Duration(float64(maxWait) / lockCheckBackoffScale)
+	require.Less(t, flatScaleFloor, lastUncapped,
+		"precondition: the flat floor must sit below the last uncapped interval")
 
 	for i := 0; i < 2000; i++ {
 		got := applyJitter(maxWait, minWait, maxWait)
-		assert.GreaterOrEqual(t, got, 600*time.Millisecond,
-			"a flat d/2 floor would allow 500ms here, below what the previous attempt guaranteed")
+		assert.GreaterOrEqual(t, got, lastUncapped,
+			"a flat d/1.5 floor would allow ~666ms here, below what the previous attempt guaranteed")
 		assert.LessOrEqual(t, got, maxWait,
 			"the wait must never exceed the configured maximum")
 	}
 }
 
-// A caller may configure minWait above maxWait; options.go accepts it, and
-// calculateBackoff resolves it by returning maxWait. The downward spread must not
-// then draw below the configured minimum. Flooring at half the interval would
-// permit a third of it, because the replay loop cannot run when minWait is already
-// past the cap.
+// A caller may pass minWait above maxWait directly; ApplyProperties ignores that
+// configuration, but calculateBackoff still resolves it by returning maxWait. The
+// downward spread must not then draw below the configured minimum. Flooring at
+// half the interval would permit a third of it, because the replay loop cannot
+// run when minWait is already past the cap.
 func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 	minWait := 90 * time.Second
 	maxWait := 60 * time.Second
@@ -553,12 +644,10 @@ func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 	}
 }
 
-// Exercises the wiring at the acquireLocks call site rather than the helper alone,
-// and pins the aggregate delay. The schedule is 10ms, 20ms, 40ms, 80ms, and each
-// draw adds up to one further interval, so the total falls in [150ms, 300ms]. Only
-// the lower bound is asserted tightly; the ceiling is loose because a busy CI box
-// can add arbitrary scheduling delay on top, and a flaky timing test is worse than
-// no timing test.
+// Exercises the wiring at the acquireLocks call site rather than the helper alone.
+// With minWait=10ms and 4 retries the 1.5× schedule is 10ms, 15ms, 22.5ms, 33.75ms
+// before jitter. Call counts are asserted rather than wall-clock delay, because a
+// busy CI box can add arbitrary scheduling latency on top.
 func TestAcquireLocksRunsTheFullRetrySchedule(t *testing.T) {
 	mockClient := new(mockHiveClient)
 	ctx := context.Background()
