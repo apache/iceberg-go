@@ -1304,6 +1304,10 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 		return nil
 	}
 
+	if _, ok := valArr.DataType().(arrow.NestedType); ok {
+		defer valArr.Release()
+	}
+
 	valArr = a.castIfNeeded(listType.ElementField(), valArr)
 	defer valArr.Release()
 
@@ -1354,8 +1358,15 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 		return nil
 	}
 
+	if _, ok := keyResult.DataType().(arrow.NestedType); ok {
+		defer keyResult.Release()
+	}
 	keys := a.castIfNeeded(m.KeyField(), keyResult)
 	defer keys.Release()
+
+	if _, ok := valResult.DataType().(arrow.NestedType); ok {
+		defer valResult.Release()
+	}
 	vals := a.castIfNeeded(m.ValueField(), valResult)
 	defer vals.Release()
 
