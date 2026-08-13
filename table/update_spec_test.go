@@ -18,6 +18,8 @@
 package table_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -86,6 +88,38 @@ func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	err := table.NewUpdateSpec(nil, false).Commit()
 	require.ErrorIs(t, err, table.ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
+		Transform: iceberg.VoidTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	metadataJSON, err := json.Marshal(meta)
+	require.NoError(t, err)
+	source := []byte(`"source-id":1,`)
+	metadataJSON = bytes.ReplaceAll(metadataJSON, source, nil)
+	require.NotContains(t, string(metadataJSON), string(source))
+	meta, err = table.ParseMetadataBytes(metadataJSON)
+	require.NoError(t, err)
+	tbl := table.New([]string{"source_less_void"}, meta, "", nil, nil)
+
+	update := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+	newSpec, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, []int{0}, newSpec.Field(0).SourceIDs)
+	assert.Equal(t, 1000, newSpec.Field(0).FieldID)
+	assert.Equal(t, "id", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, 2, newSpec.Field(1).SourceID())
+	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
 }
 
 func TestUpdateSpecAddField(t *testing.T) {

@@ -570,6 +570,7 @@ func (t *TableWritingTestSuite) TestAddFilesUnpartitioned() {
 				"added-data-files":       "5",
 				"added-files-size":       "3070",
 				"added-records":          "5",
+				"iceberg-version":        "Apache Iceberg Go " + iceberg.Version(),
 				"total-data-files":       "5",
 				"total-delete-files":     "0",
 				"total-equality-deletes": "0",
@@ -792,6 +793,7 @@ func (t *TableWritingTestSuite) TestAddFilesPartitionedTable() {
 				"added-files-size":        "3070",
 				"added-records":           "5",
 				"changed-partition-count": "1",
+				"iceberg-version":         "Apache Iceberg Go " + iceberg.Version(),
 				"total-data-files":        "5",
 				"total-delete-files":      "0",
 				"total-equality-deletes":  "0",
@@ -1184,6 +1186,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFiles() {
 			"added-records":          "4",
 			"deleted-data-files":     "2",
 			"deleted-records":        "4",
+			"iceberg-version":        "Apache Iceberg Go " + iceberg.Version(),
 			"removed-files-size":     "1816",
 			"total-data-files":       "4",
 			"total-delete-files":     "0",
@@ -1952,8 +1955,8 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsNoOpWhenNothingToExpire() {
 }
 
 // TestExpireSnapshotsUsesTableProperties verifies that ExpireSnapshots reads
-// min-snapshots-to-keep and max-snapshot-age-ms from table properties when
-// no explicit options are provided by the caller (mirrors Java behaviour).
+// the standard history.expire.* properties when no explicit options are
+// provided by the caller (mirrors Java behaviour).
 func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
 	fs := iceio.LocalFS{}
 
@@ -1973,7 +1976,7 @@ func (t *TableWritingTestSuite) TestExpireSnapshotsUsesTableProperties() {
 			table.MinSnapshotsToKeepKey: "2",
 			table.MaxSnapshotAgeMsKey:   "0", // expire everything older than "now"
 			// max-ref-age-ms is intentionally absent to prove that a missing
-			// property correctly falls back to the math.MaxInt default.
+			// property correctly falls back to the standard forever default.
 		})
 	t.Require().NoError(err)
 
@@ -3216,6 +3219,35 @@ func (t *TableTestSuite) TestRefresh() {
 	t.Equal(originalLocation, tbl.Location())
 	t.True(originalSchema.Equals(tbl.Schema()))
 	t.Equal(originalSpec, tbl.Spec())
+}
+
+func (t *TableTestSuite) TestTransactionRemoveProperties() {
+	cat, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    "file://" + t.T().TempDir(),
+	})
+	t.Require().NoError(err)
+
+	ident := table.Identifier{"test", "remove_properties_table"}
+	t.Require().NoError(cat.CreateNamespace(context.Background(), catalog.NamespaceFromIdent(ident), nil))
+
+	tbl, err := cat.CreateTable(context.Background(), ident, t.tbl.Schema(),
+		catalog.WithProperties(iceberg.Properties{"keep": "true", "drop": "true"}))
+	t.Require().NoError(err)
+	t.Require().NotNil(tbl)
+
+	txn := tbl.NewTransaction()
+	t.Require().NoError(txn.RemoveProperties([]string{"drop", "absent"}))
+
+	updated, err := txn.Commit(context.Background())
+	t.Require().NoError(err)
+
+	t.Equal("true", updated.Properties()["keep"])
+	_, ok := updated.Properties()["drop"]
+	t.False(ok)
 }
 
 func (t *TableTestSuite) TestMetadataCompressionRoundTrip() {
