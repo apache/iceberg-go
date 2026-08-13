@@ -102,6 +102,33 @@ func TestBuildScanReport(t *testing.T) {
 	assert.Nil(t, m.IndexedDeleteFiles)
 }
 
+func TestBuildScanReportIncludesEnvironmentContext(t *testing.T) {
+	meta := metricsTestMetadata(t)
+	key := iceberg.EnvironmentEngineNameKey
+	preserveEnvironmentProperties(t, key)
+
+	iceberg.SetEnvironmentProperty(key, "iceberg-go-test")
+	scan := &Scan{
+		metadata:       meta,
+		identifier:     Identifier{"db", "tbl"},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		options: iceberg.Properties{
+			key:           "scan-option-value",
+			"scan-option": "present",
+		},
+	}
+
+	sr := scan.buildScanReport(&scanMetricsAccumulator{}, meta.CurrentSchema(), meta.CurrentSchema(), time.Millisecond)
+
+	assert.Equal(t, "iceberg-go-test", sr.Metadata[key], "environment context overrides scan options")
+	assert.Equal(t, "present", sr.Metadata["scan-option"])
+	assert.Equal(t, "Apache Iceberg Go "+iceberg.Version(), sr.Metadata["iceberg-version"])
+
+	sr.Metadata[key] = "changed"
+	assert.Equal(t, "iceberg-go-test", iceberg.EnvironmentContext()[key])
+}
+
 func TestProjectedFieldsSelectedSubset(t *testing.T) {
 	meta := metricsTestMetadata(t)
 	scan := &Scan{metadata: meta, selectedFields: []string{"data"}, caseSensitive: true}
