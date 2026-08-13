@@ -757,6 +757,23 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.ErrorContains(t, err, "partition field cannot contain both source-id and source-ids")
 	})
 
+	t.Run("unmarshal rejects empty source-ids", func(t *testing.T) {
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(`{
+			"source-ids": [],
+			"field-id": 1002,
+			"transform": "identity",
+			"name": "identity"
+		}`), &field)
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "source-ids cannot be empty")
+	})
+
+	t.Run("unmarshal rejects non-object JSON", func(t *testing.T) {
+		var field iceberg.PartitionField
+		require.Error(t, json.Unmarshal([]byte(`[1, 2]`), &field))
+	})
+
 	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
 		jsonData := `
 		{
@@ -767,6 +784,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
 		assert.Equal(t, 0, field.SourceID())
+		assert.Equal(t, []int{0}, field.SourceIDs)
 	})
 
 	t.Run("unmarshal void with source id", func(t *testing.T) {
@@ -776,6 +794,66 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`), &field))
 		assert.Equal(t, 1, field.SourceID())
 	})
+}
+
+func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{
+			name: "invalid transform",
+			data: `{"source-id":1,"field-id":1000,"transform":"bucket[0]","name":"new"}`,
+		},
+		{
+			name: "non-positive source ID",
+			data: `{"source-id":0,"field-id":1000,"transform":"identity","name":"new"}`,
+		},
+		{
+			name: "missing source ID",
+			data: `{"field-id":1000,"transform":"identity","name":"new"}`,
+		},
+		{
+			name: "empty name",
+			data: `{"source-id":1,"field-id":1000,"transform":"identity","name":""}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			initial := iceberg.PartitionField{
+				SourceIDs: []int{7},
+				FieldID:   1007,
+				Name:      "old",
+				Transform: iceberg.IdentityTransform{},
+			}
+			field := initial
+			field.SourceIDs = slices.Clone(initial.SourceIDs)
+			require.Error(t, json.Unmarshal([]byte(test.data), &field))
+			assert.Equal(t, initial, field)
+		})
+	}
+}
+
+func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "old field",
+		Transform: iceberg.IdentityTransform{},
+	})
+	field := spec.Field(0)
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"source-id": 2,
+		"field-id": 1001,
+		"transform": "identity",
+		"name": "new field"
+	}`), &field))
+
+	assert.Equal(t, []int{2}, field.SourceIDs)
+	assert.Equal(t, 1001, field.FieldID)
+	assert.Equal(t, "new field", field.Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, field.Transform)
+	assert.Equal(t, "new+field", field.EscapedName())
 }
 
 func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
@@ -941,6 +1019,34 @@ func TestBindToSchemaAllowsRepeatedVoidTransforms(t *testing.T) {
 	bound, err := spec.BindToSchema(schema, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, bound.NumFields())
+}
+
+func TestBindToSchemaPreservesSourceLessVoidTombstone(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	data := `{"spec-id":0,"fields":[{"field-id":1000,"name":"old_partition","transform":"void"}]}`
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+
+	newSpecID := 2
+	bound, err := spec.BindToSchema(schema, nil, &newSpecID)
+	require.NoError(t, err)
+	assert.Equal(t, newSpecID, bound.ID())
+	require.Equal(t, 1, bound.NumFields())
+	assert.Equal(t, []int{0}, bound.Field(0).SourceIDs)
+	assert.Equal(t, 1000, bound.Field(0).FieldID)
+	assert.Equal(t, "old_partition", bound.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, bound.Field(0).Transform)
+
+	roundTripped, err := json.Marshal(bound)
+	require.NoError(t, err)
+	assert.NotContains(t, string(roundTripped), `"source-id"`)
+
+	var decoded iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal(roundTripped, &decoded))
+	assert.True(t, bound.Equals(decoded))
 }
 
 // Redundancy is keyed on Transform.Equals rather than the rendered transform

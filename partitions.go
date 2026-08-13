@@ -80,6 +80,15 @@ func (p *PartitionField) EscapedName() string {
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if len(p.SourceIDs) == 1 && p.SourceIDs[0] == 0 {
+		if _, isVoid := p.Transform.(VoidTransform); isVoid {
+			return json.Marshal(struct {
+				FieldID   int       `json:"field-id"`
+				Name      string    `json:"name"`
+				Transform Transform `json:"transform"`
+			}{p.FieldID, p.Name, p.Transform})
+		}
+	}
 	if len(p.SourceIDs) > 1 {
 		return json.Marshal(struct {
 			SourceIDs []int     `json:"source-ids"`
@@ -142,14 +151,16 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	p.FieldID = aux.FieldID
-	p.Name = aux.Name
+	next := PartitionField{
+		FieldID: aux.FieldID,
+		Name:    aux.Name,
+	}
 
 	var err error
-	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = ParseTransform(aux.TransformString); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
-	if err := validateTransform(p.Transform); err != nil {
+	if err := validateTransform(next.Transform); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
@@ -157,25 +168,27 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
 	}
 	if !hasSourceID && !hasSourceIDs {
-		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+		if _, isVoid := next.Transform.(VoidTransform); !isVoid {
 			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 		}
 		// Preserve compatibility with historical source-less void tombstones.
-		p.SourceIDs = []int{0}
+		next.SourceIDs = []int{0}
 	} else if len(aux.SourceIDs) > 0 {
-		p.SourceIDs = aux.SourceIDs
+		next.SourceIDs = aux.SourceIDs
 	} else {
-		p.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{aux.SourceID}
 	}
-	for _, sourceID := range p.SourceIDs {
-		_, isVoid := p.Transform.(VoidTransform)
+	for _, sourceID := range next.SourceIDs {
+		_, isVoid := next.Transform.(VoidTransform)
 		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
 			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
 		}
 	}
-	if p.Name == "" {
+	if next.Name == "" {
 		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
+
+	*p = next
 
 	return nil
 }
@@ -208,6 +221,17 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	}
 
 	for _, field := range p.Fields() {
+		if len(field.SourceIDs) == 1 && field.SourceIDs[0] == 0 {
+			if _, isVoid := field.Transform.(VoidTransform); isVoid {
+				opts = append(opts, func(spec *PartitionSpec) error {
+					spec.fields = append(spec.fields, clonePartitionField(field))
+
+					return nil
+				})
+
+				continue
+			}
+		}
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 

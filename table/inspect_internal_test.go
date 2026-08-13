@@ -20,6 +20,8 @@ package table
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 
@@ -99,6 +101,56 @@ func collectRecord(t *testing.T, rr array.RecordReader) arrow.RecordBatch {
 	require.False(t, rr.Next(), "expected exactly one record batch")
 
 	return rec
+}
+
+func inspectTableWithManifestList(t *testing.T, spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile) *Table {
+	return inspectTableWithManifestListAndSchemas(t, simpleSchema(), nil, spec, version, manifests)
+}
+
+func inspectTableWithManifestListAndSchemas(t *testing.T, initialSchema, currentSchema *iceberg.Schema,
+	spec iceberg.PartitionSpec, version int, manifests []iceberg.ManifestFile,
+) *Table {
+	t.Helper()
+
+	const snapshotID = int64(1)
+	ctx := context.Background()
+	fs, err := iceio.LoadFS(ctx, nil, "mem://default/table-location")
+	require.NoError(t, err)
+	memIO := fs.(iceio.WriteFileIO)
+	meta, err := NewMetadata(initialSchema, &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	txn := tbl.NewTransaction()
+	if currentSchema != nil {
+		require.NoError(t, txn.meta.AddSchema(currentSchema))
+		require.NoError(t, txn.meta.SetCurrentSchemaID(currentSchema.ID))
+	}
+
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	sequenceNumber := int64(1)
+	var listSequenceNumber *int64
+	if version > 1 {
+		listSequenceNumber = &sequenceNumber
+	}
+
+	var listBuf bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(version, &listBuf, snapshotID, nil,
+		listSequenceNumber, 0, manifests))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
 }
 
 func TestInspectHistorySchema(t *testing.T) {
@@ -841,32 +893,6 @@ func TestInspectDeleteFilesEmpty(t *testing.T) {
 	require.EqualValues(t, 20, record.NumCols())
 }
 
-func TestDataFilesSchema(t *testing.T) {
-	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-	}})
-
-	require.Equal(t, []string{
-		"content", "file_path", "file_format", "spec_id", "partition",
-		"record_count", "file_size_in_bytes", "column_sizes", "value_counts", "null_value_counts",
-		"nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
-		"equality_ids", "sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
-		"content_size_in_bytes",
-	}, testFieldNames(sc))
-	require.NotContains(t, testFieldNames(sc), "distinct_value_counts")
-
-	fields := sc.Fields()
-	require.Equal(t, 134, fields[0].ID)
-	require.Equal(t, 100, fields[1].ID)
-	require.Equal(t, 141, fields[3].ID)
-	require.Equal(t, 102, fields[4].ID)
-	require.Equal(t, 137, fields[10].ID)
-	require.Equal(t, 145, fields[len(fields)-1].ID)
-
-	unpartitioned := DataFilesSchema(&iceberg.StructType{})
-	require.NotContains(t, testFieldNames(unpartitioned), "partition")
-}
-
 type inspectManifestSpec struct {
 	content iceberg.ManifestContent
 	entries []iceberg.ManifestEntry
@@ -922,6 +948,520 @@ func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, ma
 
 	return New(Identifier{"db", "inspect-files"}, built, "metadata.json",
 		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+}
+
+func TestInspectManifestsSchema(t *testing.T) {
+	sc := ManifestsSchema()
+
+	require.Equal(t,
+		[]string{
+			"content", "path", "length", "partition_spec_id", "added_snapshot_id",
+			"added_data_files_count", "existing_data_files_count", "deleted_data_files_count",
+			"added_delete_files_count", "existing_delete_files_count", "deleted_delete_files_count",
+			"partition_summaries",
+		},
+		testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, 14, fields[0].ID)
+	require.Equal(t, 1, fields[1].ID)
+	require.Equal(t, 17, fields[10].ID)
+	require.Equal(t, 8, fields[11].ID)
+	require.True(t, fields[4].Required)
+	for _, idx := range []int{5, 6, 7, 8, 9, 10} {
+		require.False(t, fields[idx].Required)
+	}
+	require.True(t, fields[11].Required)
+	require.True(t, fields[11].Type.(*iceberg.ListType).ElementRequired)
+	require.Equal(t, 9, fields[11].Type.(*iceberg.ListType).ElementID)
+
+	arrowSchema, err := SchemaToArrowSchema(sc, nil, true, false)
+	require.NoError(t, err)
+	require.False(t, arrowSchema.Field(4).Nullable)
+	for _, idx := range []int{5, 6, 7, 8, 9, 10} {
+		require.True(t, arrowSchema.Field(idx).Nullable)
+	}
+	require.False(t, arrowSchema.Field(11).Nullable)
+
+	partitionSummary := fields[11].Type.(*iceberg.ListType).Element.(*iceberg.StructType)
+	require.Equal(t,
+		[]string{"contains_null", "contains_nan", "lower_bound", "upper_bound"},
+		testFieldNames(iceberg.NewSchema(0, partitionSummary.FieldList...)))
+	require.Equal(t, 10, partitionSummary.FieldList[0].ID)
+	require.Equal(t, 11, partitionSummary.FieldList[1].ID)
+	require.Equal(t, 12, partitionSummary.FieldList[2].ID)
+	require.Equal(t, 13, partitionSummary.FieldList[3].ID)
+}
+
+func TestInspectManifests(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	file := newTestDataFileWithCount(t, spec,
+		"mem://default/table-location/data/data.parquet", map[int]any{1000: int32(7)}, 3)
+	sequenceNumber := int64(1)
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+
+	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID,
+		[]iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, 1, record.Column(5).(*array.Int32).Value(0))
+	require.EqualValues(t, 0, record.Column(8).(*array.Int32).Value(0))
+	require.Equal(t, manifestPath, record.Column(1).(*array.String).Value(0))
+
+	summaries := record.Column(11).(*array.List)
+	require.False(t, summaries.IsNull(0))
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 1, end-start)
+	summary := summaries.ListValues().(*array.Struct)
+	require.False(t, summary.Field(0).(*array.Boolean).Value(0))
+	require.False(t, summary.Field(1).(*array.Boolean).IsNull(0))
+	require.False(t, summary.Field(1).(*array.Boolean).Value(0))
+	require.Equal(t, "7", summary.Field(2).(*array.String).Value(0))
+	require.Equal(t, "7", summary.Field(3).(*array.String).Value(0))
+}
+
+func TestInspectManifestsContainsNaN(t *testing.T) {
+	spec := partitionedSpec()
+	containsNaN := true
+	bound, err := iceberg.Int32Literal(7).MarshalBinary()
+	require.NoError(t, err)
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/contains-nan.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{
+			ContainsNaN: &containsNaN,
+			LowerBound:  &bound,
+			UpperBound:  &bound,
+		}}).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	summaries := record.Column(11).(*array.List)
+	summary := summaries.ListValues().(*array.Struct)
+	containsNaNValues := summary.Field(1).(*array.Boolean)
+	require.False(t, containsNaNValues.IsNull(0))
+	require.True(t, containsNaNValues.Value(0))
+}
+
+func TestInspectManifestsPromotedPartitionSummaryBounds(t *testing.T) {
+	tests := []struct {
+		name        string
+		initialType iceberg.Type
+		currentType iceberg.Type
+		literal     iceberg.Literal
+		expected    string
+	}{
+		{
+			name:        "int to long",
+			initialType: iceberg.PrimitiveTypes.Int32,
+			currentType: iceberg.PrimitiveTypes.Int64,
+			literal:     iceberg.Int32Literal(7),
+			expected:    "7",
+		},
+		{
+			name:        "float to double",
+			initialType: iceberg.PrimitiveTypes.Float32,
+			currentType: iceberg.PrimitiveTypes.Float64,
+			literal:     iceberg.Float32Literal(1.5),
+			expected:    "1.5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := partitionedSpec()
+			initialSchema := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "id", Type: tt.initialType, Required: true,
+			})
+			currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
+				ID: 1, Name: "id", Type: tt.currentType, Required: true,
+			})
+			bound, err := tt.literal.MarshalBinary()
+			require.NoError(t, err)
+			manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/promoted.avro",
+				100, int32(spec.ID()), 1).
+				SequenceNum(1, 1).
+				Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
+				Build()
+			tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
+				spec, 2, []iceberg.ManifestFile{manifest})
+
+			rr, err := tbl.Inspect().Manifests(context.Background())
+			require.NoError(t, err)
+			defer rr.Release()
+			record := collectRecord(t, rr)
+			defer record.Release()
+
+			summaries := record.Column(11).(*array.List)
+			start, end := summaries.ValueOffsets(0)
+			require.EqualValues(t, 1, end-start)
+			summary := summaries.ListValues().(*array.Struct)
+			require.Equal(t, tt.expected, summary.Field(2).(*array.String).Value(0))
+			require.Equal(t, tt.expected, summary.Field(3).(*array.String).Value(0))
+		})
+	}
+}
+
+func TestInspectManifestsDroppedPartitionSource(t *testing.T) {
+	spec := partitionedSpec()
+	initialSchema := simpleSchema()
+	currentSchema := iceberg.NewSchema(1)
+	bound, err := iceberg.Int32Literal(7).MarshalBinary()
+	require.NoError(t, err)
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/dropped-source.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{LowerBound: &bound, UpperBound: &bound}}).
+		Build()
+	tbl := inspectTableWithManifestListAndSchemas(t, initialSchema, currentSchema,
+		spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	summaries := record.Column(11).(*array.List)
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 1, end-start)
+	summary := summaries.ListValues().(*array.Struct)
+	require.True(t, summary.Field(2).(*array.String).IsNull(0))
+	require.True(t, summary.Field(3).(*array.String).IsNull(0))
+}
+
+func TestInspectManifestsDeleteCounts(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-manifest.avro",
+		100, int32(spec.ID()), 1).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		AddedFiles(2).
+		ExistingFiles(3).
+		DeletedFiles(4).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, iceberg.ManifestContentDeletes, record.Column(0).(*array.Int32).Value(0))
+	for _, col := range []int{5, 6, 7} {
+		require.EqualValues(t, 0, record.Column(col).(*array.Int32).Value(0))
+	}
+	require.EqualValues(t, 2, record.Column(8).(*array.Int32).Value(0))
+	require.EqualValues(t, 3, record.Column(9).(*array.Int32).Value(0))
+	require.EqualValues(t, 4, record.Column(10).(*array.Int32).Value(0))
+}
+
+func TestInspectManifestsV1UnknownCounts(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
+		100, int32(spec.ID()), 1).
+		AddedFiles(-1).
+		ExistingFiles(-1).
+		DeletedFiles(-1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	for _, col := range []int{5, 6, 7} {
+		require.True(t, record.Column(col).(*array.Int32).IsNull(0))
+	}
+	for _, col := range []int{8, 9, 10} {
+		values := record.Column(col).(*array.Int32)
+		require.False(t, values.IsNull(0))
+		require.EqualValues(t, 0, values.Value(0))
+	}
+	summaries := record.Column(11).(*array.List)
+	require.False(t, summaries.IsNull(0))
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 0, end-start)
+}
+
+func TestAppendManifestCountValidatesNegativeSentinels(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  int
+		count    int32
+		wantNull bool
+		wantErr  bool
+	}{
+		{name: "v1 absent count", version: 1, count: -1, wantNull: true},
+		{name: "v1 invalid negative count", version: 1, count: -2, wantErr: true},
+		{name: "v2 negative count", version: 2, count: -1, wantErr: true},
+		{name: "v3 negative count", version: 3, count: -1, wantErr: true},
+		{name: "non-negative count", version: 2, count: 3},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := array.NewInt32Builder(memory.DefaultAllocator)
+			defer builder.Release()
+
+			err := appendManifestCount(builder, tt.version, "added_data_files", tt.count)
+			if tt.wantErr {
+				require.ErrorContains(t, err, fmt.Sprintf("negative added_data_files count %d", tt.count))
+				require.ErrorContains(t, err, fmt.Sprintf("manifest list version %d", tt.version))
+				require.Zero(t, builder.Len())
+
+				return
+			}
+
+			require.NoError(t, err)
+			values := builder.NewInt32Array()
+			defer values.Release()
+			require.Equal(t, tt.wantNull, values.IsNull(0))
+			if !tt.wantNull {
+				require.Equal(t, tt.count, values.Value(0))
+			}
+		})
+	}
+}
+
+func TestInspectManifestsRejectsNegativeAddedSnapshotID(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(1, "mem://default/table-location/metadata/v1-manifest.avro",
+		100, int32(spec.ID()), -1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 1, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.ErrorContains(t, err, "negative added_snapshot_id -1")
+}
+
+func TestInspectManifestsRejectsNegativeCountsForV2AndV3(t *testing.T) {
+	tests := []struct {
+		name                     string
+		version                  int
+		content                  iceberg.ManifestContent
+		added, existing, deleted int32
+		invalidCountName         string
+	}{
+		{name: "v2 added data files", version: 2, added: -123, existing: 1, deleted: 1, invalidCountName: "added_data_files"},
+		{name: "v2 existing data files", version: 2, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_data_files"},
+		{name: "v2 deleted data files", version: 2, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_data_files"},
+		{name: "v3 added data files", version: 3, added: -123, existing: 1, deleted: 1, invalidCountName: "added_data_files"},
+		{name: "v3 existing data files", version: 3, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_data_files"},
+		{name: "v3 deleted data files", version: 3, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_data_files"},
+		{name: "v2 added delete files", version: 2, content: iceberg.ManifestContentDeletes, added: -123, existing: 1, deleted: 1, invalidCountName: "added_delete_files"},
+		{name: "v2 existing delete files", version: 2, content: iceberg.ManifestContentDeletes, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_delete_files"},
+		{name: "v2 deleted delete files", version: 2, content: iceberg.ManifestContentDeletes, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_delete_files"},
+		{name: "v3 added delete files", version: 3, content: iceberg.ManifestContentDeletes, added: -123, existing: 1, deleted: 1, invalidCountName: "added_delete_files"},
+		{name: "v3 existing delete files", version: 3, content: iceberg.ManifestContentDeletes, added: 1, existing: -123, deleted: 1, invalidCountName: "existing_delete_files"},
+		{name: "v3 deleted delete files", version: 3, content: iceberg.ManifestContentDeletes, added: 1, existing: 1, deleted: -123, invalidCountName: "deleted_delete_files"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := partitionedSpec()
+			manifest := iceberg.NewManifestFile(tt.version, "mem://default/table-location/metadata/negative-count.avro",
+				100, int32(spec.ID()), 1).
+				Content(tt.content).
+				SequenceNum(1, 1).
+				AddedFiles(tt.added).
+				ExistingFiles(tt.existing).
+				DeletedFiles(tt.deleted).
+				Build()
+			tbl := inspectTableWithManifestList(t, spec, tt.version, []iceberg.ManifestFile{manifest})
+
+			_, err := tbl.Inspect().Manifests(context.Background())
+			require.ErrorContains(t, err, fmt.Sprintf("negative %s count -123", tt.invalidCountName))
+			require.ErrorContains(t, err, fmt.Sprintf("manifest list version %d", tt.version))
+		})
+	}
+}
+
+func TestInspectManifestsRejectsMissingPartitionSpec(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
+		100, 999, 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{}}).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "references missing partition spec 999")
+}
+
+func TestInspectManifestsAllowsMissingPartitionSpecWithoutSummaries(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/missing-spec.avro",
+		100, 999, 1).
+		SequenceNum(1, 1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	summaries := record.Column(11).(*array.List)
+	require.False(t, summaries.IsNull(0))
+	start, end := summaries.ValueOffsets(0)
+	require.EqualValues(t, 0, end-start)
+}
+
+func TestInspectManifestsReportsPartitionFieldNameInBoundErrors(t *testing.T) {
+	spec := partitionedSpec()
+	invalidBound := []byte{0x01}
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/invalid-bound.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{LowerBound: &invalidBound}}).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.ErrorContains(t, err, "partition field \"id\" lower bound")
+}
+
+func TestInspectManifestsWrapsFileIOFactoryError(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/manifest.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+	factoryErr := errors.New("factory failed")
+	tbl.fsF = func(context.Context) (iceio.IO, error) { return nil, factoryErr }
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.ErrorIs(t, err, factoryErr)
+	require.ErrorContains(t, err, "inspect manifests: get file IO")
+}
+
+func TestInspectManifestsNoCurrentSnapshot(t *testing.T) {
+	spec := partitionedSpec()
+	meta, err := NewMetadata(simpleSchema(), &spec, UnsortedSortOrder, "mem://default/table-location", nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil)
+
+	rr, err := tbl.Inspect().Manifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 0, record.NumRows())
+	require.EqualValues(t, 12, record.NumCols())
+}
+
+func TestInspectManifestsRejectsExtraPartitionSummaries(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/extra-summary.avro",
+		100, int32(spec.ID()), 1).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{}, {}}).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has 2 partition summaries")
+}
+
+func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
+	spec := partitionedSpec()
+	manifest := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/unknown-content.avro",
+		100, int32(spec.ID()), 1).
+		Content(iceberg.ManifestContent(2)).
+		SequenceNum(1, 1).
+		Build()
+	tbl := inspectTableWithManifestList(t, spec, 2, []iceberg.ManifestFile{manifest})
+
+	_, err := tbl.Inspect().Manifests(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "has unknown content 2")
+}
+
+func TestDataFilesSchema(t *testing.T) {
+	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	}})
+
+	require.Equal(t, []string{
+		"content", "file_path", "file_format", "spec_id", "partition",
+		"record_count", "file_size_in_bytes", "column_sizes", "value_counts", "null_value_counts",
+		"nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
+		"equality_ids", "sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
+		"content_size_in_bytes",
+	}, testFieldNames(sc))
+	require.NotContains(t, testFieldNames(sc), "distinct_value_counts")
+
+	fields := sc.Fields()
+	require.Equal(t, 134, fields[0].ID)
+	require.Equal(t, 100, fields[1].ID)
+	require.Equal(t, 141, fields[3].ID)
+	require.Equal(t, 102, fields[4].ID)
+	require.Equal(t, 137, fields[10].ID)
+	require.Equal(t, 145, fields[len(fields)-1].ID)
+
+	unpartitioned := DataFilesSchema(&iceberg.StructType{})
+	require.NotContains(t, testFieldNames(unpartitioned), "partition")
+}
+
+func TestDeleteFilesSchema(t *testing.T) {
+	sc := DeleteFilesSchema(&iceberg.StructType{})
+	names := testFieldNames(sc)
+	require.Equal(t, testFieldNames(DataFilesSchema(&iceberg.StructType{})), names)
+	require.Equal(t, "content", names[0])
+	require.Equal(t, "file_path", names[1])
+	require.Equal(t, "equality_ids", names[14])
+	require.Equal(t, "referenced_data_file", names[17])
+	require.Equal(t, 134, sc.Fields()[0].ID)
+	require.Equal(t, 145, sc.Fields()[len(sc.Fields())-1].ID)
+	require.NotContains(t, names, "partition")
 }
 
 func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) *Table {
@@ -1248,19 +1788,6 @@ func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
 	require.NoError(t, err)
 	_, err = inspectPartitionType(metadataFor([]iceberg.PartitionSpec{field(0, 1, unknown)}))
 	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-}
-
-func TestDeleteFilesSchema(t *testing.T) {
-	sc := DeleteFilesSchema(&iceberg.StructType{})
-	names := testFieldNames(sc)
-	require.Equal(t, testFieldNames(DataFilesSchema(&iceberg.StructType{})), names)
-	require.Equal(t, "content", names[0])
-	require.Equal(t, "file_path", names[1])
-	require.Equal(t, "equality_ids", names[14])
-	require.Equal(t, "referenced_data_file", names[17])
-	require.Equal(t, 134, sc.Fields()[0].ID)
-	require.Equal(t, 145, sc.Fields()[len(sc.Fields())-1].ID)
-	require.NotContains(t, names, "partition")
 }
 
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
