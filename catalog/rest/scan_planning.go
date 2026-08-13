@@ -313,6 +313,7 @@ func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, 
 // references are indexes into the envelope-local delete-files array.
 func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]table.FileScanTask, error) {
 	var result []table.FileScanTask
+	plans := newPartitionDecodePlanCache()
 	for i, envelope := range envelopes {
 		// Keep empty completed plans cheap and allow the low-level planner method
 		// to return no tasks even when a caller did not provide metadata.
@@ -320,7 +321,7 @@ func remoteScanTasks(envelopes []ScanTasks, req table.ScanPlanningRequest) ([]ta
 			continue
 		}
 
-		tasks, err := DecodeScanTasks(envelope, req.Metadata, req.Schema, req.RowFilter)
+		tasks, err := decodeScanTasks(envelope, req.Metadata, req.Schema, req.RowFilter, plans)
 		if err != nil {
 			return nil, fmt.Errorf("decoding remote scan task envelope %d: %w", i, err)
 		}
