@@ -1278,12 +1278,15 @@ func (t *TableWritingTestSuite) TestAddDataFilesMultipleSpecs() {
 
 	filesBySpec := map[int32]iceberg.DataFile{}
 	for _, m := range manifests {
-		entries, err := m.FetchEntries(fs, false)
-		t.Require().NoError(err)
-		t.Require().Len(entries, 1)
-		df := entries[0].DataFile()
-		t.Equal(m.PartitionSpecID(), df.SpecID())
-		filesBySpec[m.PartitionSpecID()] = df
+		numEntries := 0
+		for entry, err := range m.Entries(fs, false) {
+			t.Require().NoError(err)
+			numEntries++
+			df := entry.DataFile()
+			t.Equal(m.PartitionSpecID(), df.SpecID())
+			filesBySpec[m.PartitionSpecID()] = df
+		}
+		t.Equal(1, numEntries)
 	}
 	t.Require().Contains(filesBySpec, int32(0))
 	t.Require().Contains(filesBySpec, int32(1))
