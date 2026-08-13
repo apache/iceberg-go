@@ -984,7 +984,7 @@ func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
 	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", transactionTestPtr(int64(30)))
 }
 
-// TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20: 
+// TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20:
 // it is main's head but absent from "diverged"'s lineage, so validating against main accepts it.
 func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
@@ -1021,7 +1021,7 @@ func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
 	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
 }
 
-// TestRollbackToSnapshotRejectsDanglingBranchRef separates "absent" from "present but invalid": 
+// TestRollbackToSnapshotRejectsDanglingBranchRef separates "absent" from "present but invalid":
 // a ref pointing at an unknown snapshot must fail loudly, not read as empty.
 func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
@@ -1037,7 +1037,7 @@ func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
 }
 
-// TestRollbackToSnapshotRejectsTagRef guards the ref type at the operation: 
+// TestRollbackToSnapshotRejectsTagRef guards the ref type at the operation:
 // a tag must not be rewritten as a branch, dropping its retention.
 func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
@@ -1057,7 +1057,7 @@ func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
 	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
 }
 
-// TestRollbackToSnapshotOnMainIsUnchanged is the steady-state case: 
+// TestRollbackToSnapshotOnMainIsUnchanged is the steady-state case:
 // a default transaction still rolls main back, and still refuses when only a branch has a head.
 func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 	t.Run("rolls main back", func(t *testing.T) {
@@ -1092,7 +1092,7 @@ func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
 	})
 }
 
-// TestRollbackToSnapshotSharesOneBaseAssertionWithProducer covers an interaction branch scoping enables: 
+// TestRollbackToSnapshotSharesOneBaseAssertionWithProducer covers an interaction branch scoping enables:
 // both now assert one ref, so either order must keep the base head pinned.
 func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 	producerAssertion := func(txn *Transaction) error {
@@ -1137,7 +1137,7 @@ func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
 	})
 }
 
-// TestRollbackToSnapshotCommitRejectsBranchTurnedTag covers the type-changing race: 
+// TestRollbackToSnapshotCommitRejectsBranchTurnedTag covers the type-changing race:
 // a branch replaced by a same-id tag before commit must fail, since the id assertion alone still holds.
 func TestRollbackToSnapshotCommitRejectsBranchTurnedTag(t *testing.T) {
 	tbl := newRollbackBranchTable(t)
