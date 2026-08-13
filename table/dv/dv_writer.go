@@ -202,8 +202,8 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 			SequenceNumber: -1,
 			Fields:         []int32{},
 			Properties: map[string]string{
-				dvCardinalityProperty:  strconv.FormatInt(cardinality, 10),
-				"referenced-data-file": dataFilePath,
+				dvCardinalityProperty:        strconv.FormatInt(cardinality, 10),
+				dvReferencedDataFileProperty: dataFilePath,
 			},
 		}, dvBytes)
 		if err != nil {

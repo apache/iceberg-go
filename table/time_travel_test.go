@@ -125,6 +125,152 @@ func TestSnapshotAsOf(t *testing.T) {
 	})
 }
 
+func TestSnapshotAsOfWithOutOfOrderSnapshotLog(t *testing.T) {
+	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
+	snapshots := []Snapshot{
+		{SnapshotID: 1000, TimestampMs: baseTime + 2000, SequenceNumber: 1},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000, SequenceNumber: 2},
+		{SnapshotID: 3000, TimestampMs: baseTime + 3000, SequenceNumber: 3},
+	}
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime + 2000},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000},
+		{SnapshotID: 3000, TimestampMs: baseTime + 3000},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	tbl := Table{
+		identifier: []string{"db", "table"},
+		metadata:   meta,
+	}
+
+	queryTime := baseTime + 2500
+	snapshot := tbl.SnapshotAsOf(queryTime, true)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+	scan := tbl.Scan(WithSnapshotAsOf(queryTime))
+	snapshot, err = scan.ResolveSnapshot()
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+	snapshot = tbl.SnapshotAsOf(baseTime+2000, false)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(2000), snapshot.SnapshotID)
+}
+
+func TestSnapshotAsOfWithEqualTimestampsUsesFirstLogEntry(t *testing.T) {
+	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
+	snapshots := []Snapshot{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000, SequenceNumber: 1},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000, SequenceNumber: 2},
+	}
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000},
+		{SnapshotID: 2000, TimestampMs: baseTime + 1000},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	tbl := Table{metadata: meta}
+	snapshot := tbl.SnapshotAsOf(baseTime+1000, true)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+
+	scan := tbl.Scan(WithSnapshotAsOf(baseTime + 1000))
+	snapshot, err = scan.ResolveSnapshot()
+	require.NoError(t, err)
+	require.NotNil(t, snapshot)
+	assert.Equal(t, int64(1000), snapshot.SnapshotID)
+}
+
+func TestResolveSnapshotRejectsUnknownSnapshotLogEntry(t *testing.T) {
+	baseTime := time.Now().Add(5 * time.Second).UnixMilli()
+	snapshots := []Snapshot{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000, SequenceNumber: 1},
+	}
+	snapshotLog := []SnapshotLogEntry{
+		{SnapshotID: 1000, TimestampMs: baseTime + 1000},
+		{SnapshotID: 2000, TimestampMs: baseTime + 2000},
+	}
+
+	meta, err := createTestMetadata(snapshots, snapshotLog)
+	require.NoError(t, err)
+
+	scan := (Table{metadata: meta}).Scan(WithSnapshotAsOf(baseTime + 2500))
+	_, err = scan.ResolveSnapshot()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+}
+
+func TestScanUseRefKeepsSnapshotSelectorsExclusive(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	require.NoError(t, txn.meta.SetSnapshotRef("release", 20, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+	tbl := Table{metadata: meta}
+
+	asOfTimestamp := time.Now().UnixMilli()
+	asOfScan := tbl.Scan(WithSnapshotAsOf(asOfTimestamp))
+	_, err = asOfScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "as-of timestamp")
+	require.Nil(t, asOfScan.snapshotID)
+	require.Equal(t, &asOfTimestamp, asOfScan.asOfTimestamp)
+
+	mainScan, err := asOfScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.NotSame(t, asOfScan, mainScan)
+	require.Nil(t, mainScan.snapshotID)
+	require.Equal(t, &asOfTimestamp, mainScan.asOfTimestamp)
+
+	snapshotID := int64(10)
+	snapshotScan := tbl.Scan(WithSnapshotID(snapshotID))
+	_, err = snapshotScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "snapshot id")
+	require.Equal(t, &snapshotID, snapshotScan.snapshotID)
+	require.Nil(t, snapshotScan.asOfTimestamp)
+
+	mainScan, err = snapshotScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.Equal(t, &snapshotID, mainScan.snapshotID)
+	require.Nil(t, mainScan.asOfTimestamp)
+
+	conflictingScan := tbl.Scan(WithSnapshotAsOf(asOfTimestamp), WithSnapshotID(snapshotID))
+	_, err = conflictingScan.UseRef("feature")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	mainScan, err = conflictingScan.UseRef(MainBranch)
+	require.NoError(t, err, "UseRef(main) should remain a no-op clone for a conflicting scan")
+	require.NotSame(t, conflictingScan, mainScan)
+	require.ErrorIs(t, mainScan.selectorErr, iceberg.ErrInvalidArgument)
+
+	liveScan := tbl.Scan()
+	mainScan, err = liveScan.UseRef(MainBranch)
+	require.NoError(t, err)
+	require.Nil(t, mainScan.snapshotID)
+	require.Nil(t, mainScan.asOfTimestamp)
+
+	branchScan, err := liveScan.UseRef("feature")
+	require.NoError(t, err)
+	require.Equal(t, int64(20), *branchScan.snapshotID)
+	_, err = branchScan.UseRef("release")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "snapshot id")
+
+	tagScan, err := liveScan.UseRef("release")
+	require.NoError(t, err)
+	require.Equal(t, int64(20), *tagScan.snapshotID)
+
+	_, err = liveScan.UseRef("unknown")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "unknown ref=unknown")
+}
+
 func TestTable_WithSnapshotAsOf(t *testing.T) {
 	baseTime := time.Now()
 
@@ -206,15 +352,29 @@ func TestTable_WithSnapshotAsOf(t *testing.T) {
 		assert.Contains(t, recordsErr.Error(), "no snapshot found for timestamp")
 	})
 
-	t.Run("WithSnapshotID clears conflicting WithSnapshotAsOf option", func(t *testing.T) {
+	t.Run("WithSnapshotID records conflicting WithSnapshotAsOf option", func(t *testing.T) {
 		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
-		// WithSnapshotID should clear any previous asOfTimestamp
 		scan := table.Scan(WithSnapshotAsOf(timestamp), WithSnapshotID(9999))
 		require.NotNil(t, scan)
 
-		// Should use snapshot ID, not timestamp
-		assert.Equal(t, &[]int64{9999}[0], scan.snapshotID)
+		assert.ErrorIs(t, scan.selectorErr, iceberg.ErrInvalidArgument)
+		assert.Nil(t, scan.snapshotID)
+		assert.Equal(t, &timestamp, scan.asOfTimestamp)
+		_, err := scan.ResolveSnapshot()
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
+
+	t.Run("WithSnapshotAsOf records conflicting WithSnapshotID option", func(t *testing.T) {
+		snapshotID := int64(9999)
+		timestamp := baseTime.Add(30 * time.Minute).UnixMilli()
+		scan := table.Scan(WithSnapshotID(snapshotID), WithSnapshotAsOf(timestamp))
+		require.NotNil(t, scan)
+
+		assert.ErrorIs(t, scan.selectorErr, iceberg.ErrInvalidArgument)
+		assert.Equal(t, &snapshotID, scan.snapshotID)
 		assert.Nil(t, scan.asOfTimestamp)
+		_, err := scan.Projection()
+		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 }
 

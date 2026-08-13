@@ -50,6 +50,8 @@ type CatalogConfig struct {
 	Credential  string       `yaml:"credential"`
 	Warehouse   string       `yaml:"warehouse"`
 	AwsProfile  string       `yaml:"aws-profile"`
+	SQLDriver   string       `yaml:"sql-driver"`
+	SQLDialect  string       `yaml:"sql-dialect"`
 	RestOptions *RestOptions `yaml:"rest,omitempty"`
 }
 

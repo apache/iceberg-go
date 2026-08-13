@@ -642,6 +642,11 @@ func TestDoCommit_OrphanCleanedOnCommitDiverged(t *testing.T) {
 		CommitMaxRetryWaitMsKey:      "2",
 		CommitTotalRetryTimeoutMsKey: "60000",
 	})
+	freshBuilder, err := MetadataBuilderFromBase(freshMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, freshBuilder.SetUUID(meta.TableUUID()))
+	freshMeta, err = freshBuilder.Build()
+	require.NoError(t, err)
 
 	tbl := newOCCTable(t, meta, wfs, nil)
 	txn := tbl.NewTransaction()

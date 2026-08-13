@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -636,9 +637,10 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 
 	newOrderID := b.reuseOrCreateNewSortOrderID(sortOrder)
 	if _, err := b.GetSortOrderByID(newOrderID); err == nil {
-		if b.lastAddedSortOrderID != &newOrderID {
+		sortOrder.orderID = newOrderID
+
+		if b.lastAddedSortOrderID == nil || *b.lastAddedSortOrderID != newOrderID {
 			b.lastAddedSortOrderID = &newOrderID
-			sortOrder.orderID = newOrderID
 			b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
 		}
 
@@ -1511,11 +1513,11 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	var ret Metadata
 	switch ver.FormatVersion {
 	case 1:
-		ret = initMetadataV1Deser()
+		ret = &metadataV1{}
 	case 2:
-		ret = initMetadataV2Deser()
+		ret = &metadataV2{}
 	case 3:
-		ret = initMetadataV3Deser()
+		ret = &metadataV3{}
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -1524,12 +1526,44 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requirePartitionSpecIDs(normalized); err != nil {
+		return nil, err
+	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	return ret, nil
+}
+
+func requirePartitionSpecIDs(b []byte) error {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	rawSpecs, ok := metadata["partition-specs"]
+	if !ok {
+		return nil
+	}
+
+	var specs []json.RawMessage
+	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
+	}
+	for i, rawSpec := range specs {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(rawSpec, &spec); err != nil {
+			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
+		}
+		rawID, ok := spec["spec-id"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
+		}
+	}
+
+	return nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
@@ -1659,6 +1693,8 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
+		// These fields use negative sentinels so validation can distinguish omitted
+		// values from explicit zero values.
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -1884,6 +1920,10 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
 	return maps.Clone(c.Props)
 }
 
@@ -2465,10 +2505,8 @@ func (m *metadataV1) preValidate() {
 
 func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	type Alias metadataV1
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV1Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
@@ -2493,9 +2531,15 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		}
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV1) ToV2() metadataV2 {
@@ -2540,10 +2584,8 @@ func (m *metadataV2) Equals(other Metadata) bool {
 
 func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	type Alias metadataV2
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV2Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
@@ -2557,9 +2599,15 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV2) validate() error {
@@ -2616,18 +2664,26 @@ func (m *metadataV3) Equals(other Metadata) bool {
 
 func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	type Alias metadataV3
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV3Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
 
-	m.preValidate()
+	if err := rejectFieldsBeyondVersion(aux.FormatVersion); err != nil {
+		return err
+	}
 
-	return m.validate()
+	next.preValidate()
+
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 // MarshalJSON serializes v3 metadata with the spec-mandated emission of
@@ -2707,10 +2763,15 @@ type SequenceNumberValidator interface {
 
 // checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
 func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
+	lastSequenceNumber := validator.LastSequenceNumber()
+	if lastSequenceNumber == -1 {
+		return fmt.Errorf("%w: last-sequence-number is required for format versions greater than 1", ErrInvalidMetadata)
+	}
+
 	for _, snap := range snapshotList {
-		if snap.SequenceNumber > validator.LastSequenceNumber() {
+		if snap.SequenceNumber > lastSequenceNumber {
 			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, validator.LastSequenceNumber())
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, lastSequenceNumber)
 		}
 	}
 

@@ -42,6 +42,7 @@ import (
 func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaData, Metadata) {
 	tableMeta, err := ParseMetadataString(`{
 		"format-version": 2,
+		"last-sequence-number": 0,
         "location": "s3://bucket/test/location",
         "last-column-id": 7,
         "current-schema-id": 0,
@@ -679,5 +680,82 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 				assert.ErrorContains(t, err, tc.wantErr)
 			})
 		}
+	})
+}
+
+// Delete writes target files written under whatever spec was current at the
+// time, so the guard has to look past the current spec.
+func TestCheckNoUnknownTransformInSpecs(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	tableSchema := schema()
+	cleanSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "y", Transform: iceberg.IdentityTransform{},
+	})
+	unknownSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "y_custom", Transform: unknown,
+	})
+
+	// Specs are added in order; the last one added becomes the default, so the
+	// caller controls which spec is current and which is historic.
+	build := func(t *testing.T, specs ...iceberg.PartitionSpec) Metadata {
+		builder, err := NewMetadataBuilder(2)
+		require.NoError(t, err)
+		require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+		require.NoError(t, builder.AddSchema(&tableSchema))
+		require.NoError(t, builder.SetCurrentSchemaID(-1))
+		sortOrder := sortOrder()
+		require.NoError(t, builder.AddSortOrder(&sortOrder))
+		require.NoError(t, builder.SetDefaultSortOrderID(-1))
+		for i := range specs {
+			require.NoError(t, builder.AddPartitionSpec(&specs[i], i == 0))
+		}
+		require.NoError(t, builder.SetDefaultSpecID(-1))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		return meta
+	}
+
+	specIDWithUnknown := func(t *testing.T, meta Metadata) int32 {
+		for _, spec := range meta.PartitionSpecs() {
+			specID := int32(spec.ID())
+			for _, f := range spec.Fields() {
+				if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+					return specID
+				}
+			}
+		}
+		t.Fatal("no spec with an unknown transform")
+
+		return 0
+	}
+
+	t.Run("unknown in current spec", func(t *testing.T) {
+		meta := build(t, cleanSpec, unknownSpec)
+		err := checkNoUnknownTransformInSpecs(meta, nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+		assert.ErrorContains(t, err, "custom_transform[42]")
+	})
+
+	t.Run("unknown only in historic spec", func(t *testing.T) {
+		meta := build(t, unknownSpec, cleanSpec)
+		files := map[string]partitionContext{
+			"s3://bucket/data/a.parquet": {specID: specIDWithUnknown(t, meta)},
+		}
+		require.ErrorIs(t, checkNoUnknownTransformInSpecs(meta, files), iceberg.ErrInvalidTransform)
+
+		// No file was written under the unknown spec, so there is nothing to reject.
+		require.NoError(t, checkNoUnknownTransformInSpecs(meta, nil))
+	})
+
+	t.Run("all specs clean", func(t *testing.T) {
+		meta := build(t, cleanSpec)
+		currentSpec := meta.PartitionSpec()
+		files := map[string]partitionContext{
+			"s3://bucket/data/a.parquet": {specID: int32(currentSpec.ID())},
+		}
+		require.NoError(t, checkNoUnknownTransformInSpecs(meta, files))
 	})
 }

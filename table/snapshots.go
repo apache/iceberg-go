@@ -233,9 +233,10 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 		return nil
 	}
 
-	if s.Operation, err = ValidOperation(op); err != nil {
-		return err
+	if op == "" {
+		return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
 	}
+	s.Operation = Operation(op)
 
 	delete(alias, operationKey)
 	s.Properties = alias
@@ -353,7 +354,11 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 		}
 
 		for _, m := range manifests {
-			for entry, err := range m.Entries(fio, false) {
+			// Discard DELETED entries: they are tombstones recording a
+			// removal, not files reachable from this snapshot. Yielding
+			// them would make existence and duplicate checks treat a
+			// file deleted by this snapshot as still live.
+			for entry, err := range m.Entries(fio, true) {
 				if err != nil {
 					yield(nil, err)
 
@@ -418,6 +423,31 @@ type MetadataLogEntry struct {
 type SnapshotLogEntry struct {
 	SnapshotID  int64 `json:"snapshot-id"`
 	TimestampMs int64 `json:"timestamp-ms"`
+}
+
+// snapshotLogEntryAsOf returns the log entry with the greatest eligible
+// timestamp. Snapshot-log entries can be out of chronological order when
+// commits have small clock skews, so the result must not depend on iteration
+// order.
+func snapshotLogEntryAsOf(entries iter.Seq[SnapshotLogEntry], timestampMs int64, inclusive bool) (SnapshotLogEntry, bool) {
+	var (
+		best  SnapshotLogEntry
+		found bool
+	)
+
+	for entry := range entries {
+		eligible := entry.TimestampMs < timestampMs
+		if inclusive {
+			eligible = entry.TimestampMs <= timestampMs
+		}
+
+		if eligible && (!found || entry.TimestampMs > best.TimestampMs) {
+			best = entry
+			found = true
+		}
+	}
+
+	return best, found
 }
 
 type SnapshotSummaryCollector struct {
