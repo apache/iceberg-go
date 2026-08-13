@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/metrics"
 )
 
@@ -88,7 +89,8 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 		}
 		for _, df := range t.DeletionVectorFiles {
 			acc.dvs++
-			if csb := df.ContentSizeInBytes(); csb != nil {
+			_, _, _, _, csb := iceberginternal.BorrowedDataFilePointers(df)
+			if csb != nil {
 				acc.totalDeleteFileSize += *csb
 			}
 		}

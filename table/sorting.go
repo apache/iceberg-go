@@ -162,35 +162,39 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	s.Direction = aux.Direction
-	s.NullOrder = aux.NullOrder
-
-	if hasSourceIDs {
-		s.SourceIDs = aux.SourceIDs
-	} else {
-		s.SourceIDs = []int{aux.SourceID}
+	next := SortField{
+		Direction: aux.Direction,
+		NullOrder: aux.NullOrder,
 	}
 
-	if err := validateSortSourceIDs(s.SourceIDs); err != nil {
+	if hasSourceIDs {
+		next.SourceIDs = aux.SourceIDs
+	} else {
+		next.SourceIDs = []int{aux.SourceID}
+	}
+
+	if err := validateSortSourceIDs(next.SourceIDs); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
 	}
 
 	var err error
-	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
 		return err
 	}
 
-	switch s.Direction {
+	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
 		return ErrInvalidSortDirection
 	}
 
-	switch s.NullOrder {
+	switch next.NullOrder {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
 	}
+
+	*s = next
 
 	return nil
 }

@@ -649,7 +649,7 @@ func (sp *snapshotProducer) removeDeleteFile(df iceberg.DataFile) *snapshotProdu
 }
 
 func (sp *snapshotProducer) removeDeletionVector(df iceberg.DataFile) *snapshotProducer {
-	ref := df.ReferencedDataFile()
+	ref := internal.BorrowedDataFileReferencedDataFile(df)
 	if ref == nil {
 		return sp
 	}
@@ -668,7 +668,7 @@ func (sp *snapshotProducer) deleteFileRemoved(df iceberg.DataFile) bool {
 	if _, ok := sp.deletedDeleteFiles[df.FilePath()]; ok {
 		return true
 	}
-	if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
+	if ref := internal.BorrowedDataFileReferencedDataFile(df); IsDeletionVector(df) && ref != nil {
 		want, ok := sp.deletedDVsByRef[*ref]
 
 		return ok && want.FilePath() == df.FilePath()
@@ -1073,7 +1073,7 @@ type removedFilePresence struct {
 
 func (p *removedFilePresence) counts(df iceberg.DataFile) bool {
 	if IsDeletionVector(df) {
-		ref := df.ReferencedDataFile()
+		ref := internal.BorrowedDataFileReferencedDataFile(df)
 		if ref == nil {
 			return false
 		}
@@ -1137,7 +1137,7 @@ func (sp *snapshotProducer) checkRemovedFiles(parent *Snapshot) (*removedFilePre
 				// The path must match too: a peer may have superseded our DV with
 				// a replacement for the same data file (same ref, new path), and
 				// that replacement must not read as "our DV is still present".
-				if ref := df.ReferencedDataFile(); ref != nil {
+				if ref := internal.BorrowedDataFileReferencedDataFile(df); ref != nil {
 					if want, ok := sp.deletedDVsByRef[*ref]; ok && want.FilePath() == df.FilePath() {
 						present.dvRefs[*ref] = struct{}{}
 					}

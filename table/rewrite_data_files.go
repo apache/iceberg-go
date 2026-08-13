@@ -25,6 +25,7 @@ import (
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // RewriteResult summarizes a completed compaction.
@@ -577,7 +578,7 @@ func CollectSafeDeletionVectors(tasks []FileScanTask) []iceberg.DataFile {
 
 	for _, task := range tasks {
 		for _, dv := range task.DeletionVectorFiles {
-			ref := dv.ReferencedDataFile()
+			ref := iceberginternal.BorrowedDataFileReferencedDataFile(dv)
 			if ref == nil {
 				continue
 			}
