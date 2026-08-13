@@ -601,6 +601,73 @@ func TestManifestWriterUpdatesPartitionSummariesIncrementally(t *testing.T) {
 	assertSummary(2, false, false, NewLiteral([]byte{1}), NewLiteral([]byte{3}))
 }
 
+func TestManifestWriterCopiesBinaryPartitionSummaryBounds(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+	low := []byte{1}
+	high := []byte{2}
+
+	newEntry := func(path string, partition []byte) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			map[int]any{1000: partition},
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("low.parquet", low)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("high.parquet", high)); err != nil {
+		t.Fatal(err)
+	}
+
+	low[0] = 3
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 1 {
+		t.Fatalf("expected one partition summary, got %d", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, []byte{1}) {
+		t.Fatalf("lower bound = %v, want [1]", summary.LowerBound)
+	}
+	if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, []byte{2}) {
+		t.Fatalf("upper bound = %v, want [2]", summary.UpperBound)
+	}
+}
+
 type ManifestTestSuite struct {
 	suite.Suite
 
