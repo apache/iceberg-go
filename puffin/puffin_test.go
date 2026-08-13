@@ -50,11 +50,16 @@ type partialFailWriter struct {
 
 type countingReaderAtSeeker struct {
 	*bytes.Reader
-	readLengths []int
+	reads []readCall
+}
+
+type readCall struct {
+	offset int64
+	length int
 }
 
 func (r *countingReaderAtSeeker) ReadAt(p []byte, offset int64) (int, error) {
-	r.readLengths = append(r.readLengths, len(p))
+	r.reads = append(r.reads, readCall{offset: offset, length: len(p)})
 
 	return r.Reader.ReadAt(p, offset)
 }
@@ -352,7 +357,7 @@ func TestReaderReusesPrefetchedFooterPayload(t *testing.T) {
 	_, err := puffin.NewReader(reader)
 	require.NoError(t, err)
 
-	require.Len(t, reader.readLengths, 2)
+	require.Len(t, reader.reads, 2)
 }
 
 func TestReaderReadsLargeFooterPayloadFromUnderlyingReader(t *testing.T) {
@@ -372,7 +377,12 @@ func TestReaderReadsLargeFooterPayloadFromUnderlyingReader(t *testing.T) {
 	_, err := puffin.NewReader(reader)
 	require.NoError(t, err)
 
-	require.Greater(t, len(reader.readLengths), 2)
+	require.GreaterOrEqual(t, len(reader.reads), 4)
+
+	footerMagicRead := reader.reads[2]
+	payloadRead := reader.reads[3]
+	require.Equal(t, puffin.MagicSize, footerMagicRead.length)
+	require.Equal(t, footerMagicRead.offset+int64(puffin.MagicSize), payloadRead.offset)
 }
 
 // TestWriterValidation verifies that Writer rejects invalid input.
