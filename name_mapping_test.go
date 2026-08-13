@@ -106,6 +106,20 @@ func TestNameMappingFromJson(t *testing.T) {
 	})
 }
 
+func TestApplyNameMappingUsesFirstMatchingName(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 100, Name: "renamed", Type: iceberg.PrimitiveTypes.String},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: makeID(1), Names: []string{"renamed", "legacy"}},
+		{FieldID: makeID(2), Names: []string{"renamed"}},
+	}
+
+	result, err := iceberg.ApplyNameMapping(schema, mapping)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Field(0).ID)
+}
+
 func TestNameMappingToJson(t *testing.T) {
 	result, err := json.Marshal(tableNameMappingNested)
 	require.NoError(t, err)

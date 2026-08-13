@@ -262,46 +262,74 @@ func (u *updateNameMappingVisitor) addNewFields(mappedFields []MappedField, pare
 	return append(fields, newFields...)
 }
 
-type NameMappingAccessor struct{}
+type NameMappingAccessor struct {
+	fieldsByName map[*MappedField]map[string]*MappedField
+}
+
+func newNameMappingAccessor(root *MappedField) NameMappingAccessor {
+	accessor := NameMappingAccessor{
+		fieldsByName: make(map[*MappedField]map[string]*MappedField),
+	}
+	accessor.indexFields(root)
+
+	return accessor
+}
+
+func (n NameMappingAccessor) indexFields(field *MappedField) {
+	if field == nil || len(field.Fields) == 0 {
+		return
+	}
+
+	fieldsByName := make(map[string]*MappedField, len(field.Fields))
+	n.fieldsByName[field] = fieldsByName
+
+	for i := range field.Fields {
+		mappedField := &field.Fields[i]
+		for _, name := range mappedField.Names {
+			if _, exists := fieldsByName[name]; !exists {
+				fieldsByName[name] = mappedField
+			}
+		}
+
+		n.indexFields(mappedField)
+	}
+}
+
+func (n NameMappingAccessor) getField(partnerStruct *MappedField, fieldName string) *MappedField {
+	if partnerStruct == nil {
+		return nil
+	}
+
+	if fieldsByName, ok := n.fieldsByName[partnerStruct]; ok {
+		return fieldsByName[fieldName]
+	}
+
+	return partnerStruct.GetField(fieldName)
+}
 
 func (NameMappingAccessor) SchemaPartner(partner *MappedField) *MappedField {
 	return partner
 }
 
 func (n NameMappingAccessor) FieldPartner(partnerStruct *MappedField, _ int, fieldName string) *MappedField {
-	if partnerStruct == nil {
-		return nil
-	}
-
-	return partnerStruct.GetField(fieldName)
+	return n.getField(partnerStruct, fieldName)
 }
 
 func (n NameMappingAccessor) ListElementPartner(partnerList *MappedField) *MappedField {
-	if partnerList == nil {
-		return nil
-	}
-
-	return partnerList.GetField("element")
+	return n.getField(partnerList, "element")
 }
 
 func (n NameMappingAccessor) MapKeyPartner(partnerMap *MappedField) *MappedField {
-	if partnerMap == nil {
-		return nil
-	}
-
-	return partnerMap.GetField("key")
+	return n.getField(partnerMap, "key")
 }
 
 func (n NameMappingAccessor) MapValuePartner(partnerMap *MappedField) *MappedField {
-	if partnerMap == nil {
-		return nil
-	}
-
-	return partnerMap.GetField("value")
+	return n.getField(partnerMap, "value")
 }
 
 type nameMapProjectVisitor struct {
 	currentPath []string
+	accessor    NameMappingAccessor
 }
 
 func (n *nameMapProjectVisitor) popPath() {
@@ -367,15 +395,10 @@ func (n *nameMapProjectVisitor) Field(field NestedField, fieldPartner *MappedFie
 	}
 }
 
-func (nameMapProjectVisitor) mappedFieldID(mapped *MappedField, name string) int {
-	for _, f := range mapped.Fields {
-		if slices.Contains(f.Names, name) {
-			if f.FieldID != nil {
-				return *f.FieldID
-			}
-
-			return -1
-		}
+func (n nameMapProjectVisitor) mappedFieldID(mapped *MappedField, name string) int {
+	field := n.accessor.getField(mapped, name)
+	if field != nil && field.FieldID != nil {
+		return *field.FieldID
 	}
 
 	return -1
@@ -437,10 +460,15 @@ func (n *nameMapProjectVisitor) Variant(v VariantType, variantPartner *MappedFie
 }
 
 func ApplyNameMapping(schemaWithoutIDs *Schema, nameMapping NameMapping) (*Schema, error) {
+	partner := &MappedField{Fields: nameMapping}
+	accessor := newNameMappingAccessor(partner)
 	top, err := VisitSchemaWithPartner(schemaWithoutIDs,
-		&MappedField{Fields: nameMapping},
-		&nameMapProjectVisitor{currentPath: make([]string, 0, 1)},
-		NameMappingAccessor{})
+		partner,
+		&nameMapProjectVisitor{
+			currentPath: make([]string, 0, 1),
+			accessor:    accessor,
+		},
+		accessor)
 	if err != nil {
 		return nil, err
 	}
