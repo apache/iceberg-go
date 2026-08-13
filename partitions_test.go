@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -956,6 +957,10 @@ func TestNewPartitionSpecOptsRejectsRedundantTimeTransforms(t *testing.T) {
 
 			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 			assert.ErrorContains(t, err, "redundant partition field")
+			// Both offending fields must be named, or a wide spec leaves the
+			// caller nothing to act on.
+			assert.ErrorContains(t, err,
+				fmt.Sprintf("second (%s) conflicts with first (%s)", tt.last, tt.first))
 		})
 	}
 }
@@ -1079,10 +1084,10 @@ func TestNewPartitionSpecOptsRedundancyUsesTransformEquals(t *testing.T) {
 	assert.Equal(t, 2, spec.NumFields())
 }
 
-// BindToSchema replays an existing spec through the builder, so it inherits the
-// same redundancy check. The specs are built with NewPartitionSpecID because
-// that constructor does not validate, which is the only way to get a redundant
-// spec into BindToSchema in the first place.
+// BindToSchema uses the replay rule, which still rejects two fields applying the
+// same transform to one column. The spec is built with NewPartitionSpecID
+// because that constructor does not validate, the only way to get a redundant
+// spec into BindToSchema at all.
 func TestBindToSchemaRejectsRedundantField(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -1160,19 +1165,67 @@ func TestValidatePartitionFieldsMultiSourceRedundancy(t *testing.T) {
 	assert.Equal(t, 2, back.NumFields())
 }
 
-// dedupName collapses the time transforms to one name per source column, so
-// year(ts) alongside month(ts) is redundant and rejected.
-func TestNewPartitionSpecOptsRejectsMultipleTimeTransforms(t *testing.T) {
+func TestUnmarshalPartitionSpecAllowsTimeGranularityOverlap(t *testing.T) {
+	data := `{"spec-id":0,"fields":[` +
+		`{"source-id":1,"field-id":1000,"name":"ts_day","transform":"day"},` +
+		`{"source-id":1,"field-id":1001,"name":"ts_hour","transform":"hour"}]}`
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+	require.Equal(t, 2, spec.NumFields())
+	assert.Equal(t, iceberg.DayTransform{}, spec.Field(0).Transform)
+	assert.Equal(t, iceberg.HourTransform{}, spec.Field(1).Transform)
+
+	duplicate := `{"spec-id":0,"fields":[` +
+		`{"source-id":1,"field-id":1000,"name":"first","transform":"day"},` +
+		`{"source-id":1,"field-id":1001,"name":"second","transform":"day"}]}`
+	err := json.Unmarshal([]byte(duplicate), &spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "redundant partition field")
+}
+
+func TestBindToSchemaAllowsTimeGranularityOverlap(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
 
-	_, err := iceberg.NewPartitionSpecOpts(
-		iceberg.WithSpecID(1),
-		iceberg.AddPartitionFieldByName("ts", "ts_year", iceberg.YearTransform{}, schema, nil),
-		iceberg.AddPartitionFieldByName("ts", "ts_month", iceberg.MonthTransform{}, schema, nil),
+	overlapping := iceberg.NewPartitionSpecID(1,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "ts_day",
+			Transform: iceberg.DayTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001, Name: "ts_hour",
+			Transform: iceberg.HourTransform{},
+		},
 	)
 
-	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
-	assert.ErrorContains(t, err, "redundant partition field")
+	bound, err := overlapping.BindToSchema(schema, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 2, bound.NumFields())
+}
+
+func TestTimeTransformMembership(t *testing.T) {
+	tests := []struct {
+		name     string
+		trans    iceberg.Transform
+		wantTime bool
+	}{
+		{name: "year", trans: iceberg.YearTransform{}, wantTime: true},
+		{name: "month", trans: iceberg.MonthTransform{}, wantTime: true},
+		{name: "day", trans: iceberg.DayTransform{}, wantTime: true},
+		{name: "hour", trans: iceberg.HourTransform{}, wantTime: true},
+		{name: "identity", trans: iceberg.IdentityTransform{}, wantTime: false},
+		{name: "void", trans: iceberg.VoidTransform{}, wantTime: false},
+		{name: "bucket", trans: iceberg.BucketTransform{NumBuckets: 16}, wantTime: false},
+		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantTime: false},
+		{name: "unknown", trans: iceberg.UnknownTransform{}, wantTime: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, isTime := tt.trans.(iceberg.TimeTransform)
+			assert.Equal(t, tt.wantTime, isTime)
+		})
+	}
 }
