@@ -596,15 +596,24 @@ func (b *MetadataBuilder) NextRowID() int64 {
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) error {
-	if b.currentSnapshotID != nil && slices.Contains(snapshotIds, *b.currentSnapshotID) {
-		return errors.New("current snapshot cannot be removed")
+	removedIDs := make(map[int64]struct{}, len(snapshotIds))
+	for _, snapshotID := range snapshotIds {
+		removedIDs[snapshotID] = struct{}{}
+	}
+
+	if b.currentSnapshotID != nil {
+		if _, ok := removedIDs[*b.currentSnapshotID]; ok {
+			return errors.New("current snapshot cannot be removed")
+		}
 	}
 
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+		return ok
 	})
 	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+		return ok
 	})
 
 	newRefs := make(map[string]SnapshotRef)
@@ -618,10 +627,12 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	// Prune statistics entries whose snapshot was removed so that table
 	// metadata does not retain stale statistics references.
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(e StatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+		return ok
 	})
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(e PartitionStatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+		return ok
 	})
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
