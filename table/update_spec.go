@@ -414,7 +414,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			iceberg.ErrInvalidArgument, key.Transform, err)
 	}
 
-	if us.meta.Version() == 2 {
+	if us.meta.Version() >= 2 {
 		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
 		for _, spec := range us.meta.PartitionSpecs() {
