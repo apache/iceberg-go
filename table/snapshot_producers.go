@@ -1018,9 +1018,8 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 		}
 	}
 
-	specs := sp.txn.meta.specs
 	for _, df := range sp.deletedFiles {
-		if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return nil, err
 		}
 	}
@@ -1028,7 +1027,7 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 		if countDeleteRemoval != nil && !countDeleteRemoval(df) {
 			continue
 		}
-		if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return nil, err
 		}
 	}
@@ -1036,7 +1035,7 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 		if countDeleteRemoval != nil && !countDeleteRemoval(df) {
 			continue
 		}
-		if err = ssc.removeFile(df, currentSchema, specs[df.SpecID()]); err != nil {
+		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
 			return nil, err
 		}
 	}
