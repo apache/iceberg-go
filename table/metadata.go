@@ -609,16 +609,18 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
 		_, ok := removedIDs[e.SnapshotID]
-		return ok
-	})
-	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
-		_, ok := removedIDs[e.SnapshotID]
+
 		return ok
 	})
 
-	newRefs := make(map[string]SnapshotRef)
+	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+	for _, snapshot := range b.snapshotList {
+		validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+	}
+
+	newRefs := make(map[string]SnapshotRef, len(b.refs))
 	for name, ref := range b.refs {
-		if _, err := b.SnapshotByID(ref.SnapshotID); err == nil {
+		if _, ok := validSnapshotIDs[ref.SnapshotID]; ok {
 			newRefs[name] = ref
 		}
 	}
@@ -628,10 +630,12 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	// metadata does not retain stale statistics references.
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(e StatisticsFile) bool {
 		_, ok := removedIDs[e.SnapshotID]
+
 		return ok
 	})
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(e PartitionStatisticsFile) bool {
 		_, ok := removedIDs[e.SnapshotID]
+
 		return ok
 	})
 
@@ -1093,14 +1097,19 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		}
 	}
 	if len(intermediateIDs) != 0 || hasRemoved {
+		validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+		for _, snapshot := range b.snapshotList {
+			validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+		}
+
 		newSnapsLog := make([]SnapshotLogEntry, 0, len(b.snapshotLog))
 		for _, s := range b.snapshotLog {
-			if snap, _ := b.SnapshotByID(s.SnapshotID); snap != nil {
+			if _, ok := validSnapshotIDs[s.SnapshotID]; ok {
 				if _, ok := intermediateIDs[s.SnapshotID]; !ok {
 					newSnapsLog = append(newSnapsLog, s)
 				}
 			} else if hasRemoved {
-				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
+				newSnapsLog = newSnapsLog[:0]
 			}
 		}
 		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {

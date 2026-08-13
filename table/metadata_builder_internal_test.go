@@ -755,6 +755,50 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
 }
 
+func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	baseTimestamp := builder.base.LastUpdatedMillis()
+	const (
+		snapshot1ID int64 = 1
+		snapshot2ID int64 = 2
+		snapshot3ID int64 = 3
+	)
+
+	builder.snapshotList = []Snapshot{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}
+	builder.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}
+	builder.currentSnapshotID = ptr(snapshot3ID)
+	builder.refs = map[string]SnapshotRef{
+		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
+	}
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	newBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot2ID}, false))
+	require.Equal(t, []SnapshotLogEntry{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}, newBuilder.snapshotLog)
+
+	rebuilt, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.Equal(t, []SnapshotLogEntry{{
+		SnapshotID:  snapshot3ID,
+		TimestampMs: baseTimestamp + 3,
+	}}, slices.Collect(rebuilt.SnapshotLogs()))
+}
+
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
