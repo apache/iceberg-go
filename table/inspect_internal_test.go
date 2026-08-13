@@ -22,11 +22,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
@@ -1185,6 +1188,358 @@ func TestInspectManifestsRejectsUnknownContent(t *testing.T) {
 	require.ErrorContains(t, err, "has unknown content 2")
 }
 
+func TestDataFilesSchema(t *testing.T) {
+	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	}})
+
+	require.Equal(t, []string{
+		"content", "file_path", "file_format", "spec_id", "partition",
+		"record_count", "file_size_in_bytes", "column_sizes", "value_counts", "null_value_counts",
+		"nan_value_counts", "lower_bounds", "upper_bounds", "key_metadata", "split_offsets",
+		"equality_ids", "sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
+		"content_size_in_bytes",
+	}, testFieldNames(sc))
+	require.NotContains(t, testFieldNames(sc), "distinct_value_counts")
+
+	fields := sc.Fields()
+	require.Equal(t, 134, fields[0].ID)
+	require.Equal(t, 100, fields[1].ID)
+	require.Equal(t, 141, fields[3].ID)
+	require.Equal(t, 102, fields[4].ID)
+	require.Equal(t, 137, fields[10].ID)
+	require.Equal(t, 145, fields[len(fields)-1].ID)
+
+	unpartitioned := DataFilesSchema(&iceberg.StructType{})
+	require.NotContains(t, testFieldNames(unpartitioned), "partition")
+}
+
+func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) *Table {
+	t.Helper()
+	const snapshotID = int64(1)
+
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+}
+
+func inspectDataFileEntries(t *testing.T, spec iceberg.PartitionSpec, count int) []iceberg.ManifestEntry {
+	t.Helper()
+	const snapshotID = int64(1)
+
+	entries := make([]iceberg.ManifestEntry, 0, count)
+	for index := 0; index < count; index++ {
+		path := "mem://default/table-location/data/live-" + strconv.Itoa(index) + ".parquet"
+		file := newTestDataFile(t, spec, path, nil)
+		sequenceNumber := int64(1)
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file))
+	}
+
+	return entries
+}
+
+func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := *iceberg.UnpartitionedSpec
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+
+	entries := make([]iceberg.ManifestEntry, 0, inspectRecordBatchSize+2)
+	for index := 0; index < inspectRecordBatchSize+1; index++ {
+		file := newTestDataFile(t, spec,
+			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
+		sequenceNumber := int64(1)
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file))
+	}
+	deletedPath := "mem://default/table-location/data/deleted.parquet"
+	deleted := newTestDataFile(t, spec, deletedPath, nil)
+	deletedSequenceNumber := int64(1)
+	entries = append(entries, iceberg.NewManifestEntry(
+		iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &deletedSequenceNumber, &deletedSequenceNumber, deleted))
+
+	manifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	var batchRows []int
+	var paths []string
+	for rr.Next() {
+		record := rr.RecordBatch()
+		batchRows = append(batchRows, int(record.NumRows()))
+		filePaths := record.Column(1).(*array.String)
+		for row := 0; row < filePaths.Len(); row++ {
+			paths = append(paths, filePaths.Value(row))
+		}
+	}
+	require.NoError(t, rr.Err())
+	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
+	require.Len(t, paths, inspectRecordBatchSize+1)
+	require.NotContains(t, paths, deletedPath)
+}
+
+func TestInspectDataFilesReturnsPartitionValues(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := partitionedSpec()
+	file := newTestDataFile(t, spec,
+		"mem://default/table-location/data/partitioned.parquet", map[int]any{1000: int32(7)})
+	sequenceNumber := int64(1)
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
+
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 1, record.NumRows())
+	partition := record.Column(4).(*array.Struct)
+	values := partition.Field(0).(*array.Int32)
+	require.EqualValues(t, 7, values.Value(0))
+}
+
+func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := *iceberg.UnpartitionedSpec
+	file := newTestDataFile(t, spec,
+		"mem://default/table-location/data/deleted.parquet", nil)
+	sequenceNumber := int64(1)
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusDELETED, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+	tbl := inspectDataFilesTable(t, spec, []iceberg.ManifestEntry{entry})
+
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 0, record.NumRows())
+}
+
+func TestInspectDataFilesAllocator(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		abandon bool
+	}{
+		{name: "drains reader"},
+		{name: "abandons reader after first batch", abandon: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			t.Cleanup(func() { checked.AssertSize(t, 0) })
+
+			spec := *iceberg.UnpartitionedSpec
+			tbl := inspectDataFilesTable(t, spec, inspectDataFileEntries(t, spec, inspectRecordBatchSize+1))
+			rr, err := tbl.Inspect(WithInspectAllocator(checked)).DataFiles(context.Background())
+			require.NoError(t, err)
+
+			if tt.abandon {
+				require.True(t, rr.Next())
+				rr.Release()
+
+				return
+			}
+
+			for rr.Next() {
+				// The reader owns the current batch until the next call to Next or
+				// Release, so no extra retain is needed here.
+			}
+			require.NoError(t, rr.Err())
+			rr.Release()
+		})
+	}
+}
+
+func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
+	fields := inspectContentFileFields(&iceberg.StructType{})
+	reordered := make([]iceberg.NestedField, 0, len(fields))
+	reordered = append(reordered, fields[1:]...)
+	reordered = append(reordered, fields[0])
+	schema := iceberg.NewSchema(0, reordered...)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer bldr.Release()
+	file := newTestDataFile(t, *iceberg.UnpartitionedSpec,
+		"mem://default/table-location/data/reordered.parquet", nil)
+	require.NoError(t, appendContentFileRecord(bldr, &iceberg.StructType{}, file))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	pathIndex := record.Schema().FieldIndices("file_path")[0]
+	countIndex := record.Schema().FieldIndices("record_count")[0]
+	require.Equal(t, file.FilePath(), record.Column(pathIndex).(*array.String).Value(0))
+	require.EqualValues(t, file.Count(), record.Column(countIndex).(*array.Int64).Value(0))
+}
+
+func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	oldSpec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: iceberg.IdentityTransform{},
+	})
+	newSpec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "category", Transform: iceberg.IdentityTransform{},
+	})
+	lastPartitionID := 1001
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		LastColumnId:    2,
+		SchemaList:      []*iceberg.Schema{schema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{oldSpec, newSpec},
+		DefaultSpecID:   1,
+		LastPartitionID: &lastPartitionID,
+		SnapshotRefs:    map[string]SnapshotRef{},
+	}}
+
+	partitionType, err := inspectPartitionType(meta)
+	require.NoError(t, err)
+	require.Equal(t, []int{1000, 1001}, []int{
+		partitionType.FieldList[0].ID,
+		partitionType.FieldList[1].ID,
+	})
+	require.Equal(t, []string{"region", "category"}, []string{
+		partitionType.FieldList[0].Name,
+		partitionType.FieldList[1].Name,
+	})
+}
+
+func TestInspectPartitionTypeRejectsIncompatibleFieldReuse(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	metadataFor := func(specs []iceberg.PartitionSpec) Metadata {
+		lastPartitionID := 1000
+
+		return &metadataV2{commonMetadata: commonMetadata{
+			FormatVersion:   2,
+			UUID:            uuid.New(),
+			LastColumnId:    2,
+			SchemaList:      []*iceberg.Schema{schema},
+			CurrentSchemaID: 0,
+			Specs:           specs,
+			DefaultSpecID:   specs[len(specs)-1].ID(),
+			LastPartitionID: &lastPartitionID,
+		}}
+	}
+	field := func(specID, sourceID int, transform iceberg.Transform) iceberg.PartitionSpec {
+		return iceberg.NewPartitionSpecID(specID, iceberg.PartitionField{
+			SourceIDs: []int{sourceID}, FieldID: 1000, Name: "part", Transform: transform,
+		})
+	}
+
+	tests := []struct {
+		name  string
+		specs []iceberg.PartitionSpec
+		valid bool
+	}{
+		{
+			name:  "void transition is compatible",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.VoidTransform{})},
+			valid: true,
+		},
+		{
+			name:  "pointer void transition is compatible",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, &iceberg.VoidTransform{})},
+			valid: true,
+		},
+		{
+			name:  "different source ids",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 2, iceberg.IdentityTransform{})},
+		},
+		{
+			name:  "different transforms",
+			specs: []iceberg.PartitionSpec{field(0, 1, iceberg.IdentityTransform{}), field(1, 1, iceberg.BucketTransform{NumBuckets: 16})},
+		},
+		{
+			name: "void cannot hide incompatible history",
+			specs: []iceberg.PartitionSpec{
+				field(0, 1, iceberg.BucketTransform{NumBuckets: 16}),
+				field(1, 1, iceberg.IdentityTransform{}),
+				field(2, 1, iceberg.VoidTransform{}),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := inspectPartitionType(metadataFor(tt.specs))
+			if tt.valid {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		})
+	}
+
+	unknown, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+	_, err = inspectPartitionType(metadataFor([]iceberg.PartitionSpec{field(0, 1, unknown)}))
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
@@ -1250,4 +1605,46 @@ func testFieldNames(sc *iceberg.Schema) []string {
 	}
 
 	return names
+}
+
+func TestInspectValueScalarDecimal(t *testing.T) {
+	typ := iceberg.DecimalTypeOf(10, 2)
+	arrowType := &arrow.Decimal128Type{Precision: 10, Scale: 2}
+	value := iceberg.DecimalLiteral{Val: decimal128.FromI64(123), Scale: 2}
+
+	got, err := inspectValueScalar(value, typ, arrowType)
+	require.NoError(t, err)
+	require.Equal(t, value.Val, got.(*scalar.Decimal128).Value)
+}
+
+func TestInspectValueScalarRejectsMismatchedPartitionValues(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     any
+		typ       iceberg.Type
+		arrowType arrow.DataType
+		want      string
+	}{
+		{name: "date", value: int64(1), typ: iceberg.PrimitiveTypes.Date, arrowType: arrow.FixedWidthTypes.Date32, want: "unsupported date"},
+		{name: "time", value: int64(1), typ: iceberg.PrimitiveTypes.Time, arrowType: arrow.FixedWidthTypes.Time64us, want: "unsupported time"},
+		{name: "timestamp", value: int64(1), typ: iceberg.PrimitiveTypes.Timestamp, arrowType: arrow.FixedWidthTypes.Timestamp_us, want: "unsupported timestamp"},
+		{name: "timestamp nanos", value: int64(1), typ: iceberg.PrimitiveTypes.TimestampNs, arrowType: arrow.FixedWidthTypes.Timestamp_ns, want: "unsupported nanosecond timestamp"},
+		{name: "UUID", value: []byte("not-a-UUID"), typ: iceberg.PrimitiveTypes.UUID, arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 16}, want: "unsupported UUID"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := inspectValueScalar(tt.value, tt.typ, tt.arrowType)
+			require.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestInspectInt32ValueRejectsOverflow(t *testing.T) {
+	if strconv.IntSize == 32 {
+		t.Skip("int32 is the native int width")
+	}
+
+	_, err := inspectInt32Value(int(^uint32(0)>>1)+1, "field ID")
+	require.ErrorContains(t, err, "does not fit in int32")
 }
