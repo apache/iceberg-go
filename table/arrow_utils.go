@@ -20,7 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1000,9 +999,13 @@ func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
 
 			return s
 		case string:
-			b, err := base64.StdEncoding.DecodeString(val)
+			fixedLen := -1
+			if fixed, ok := t.(iceberg.FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			b, err := internal.DecodeDefaultBytes(val, fixedLen)
 			if err != nil {
-				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot base64-decode string %q: %w", t, val, err))
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot decode string %q: %w", t, val, err))
 			}
 			s, err := scalar.MakeScalarParam(b, dt)
 			if err != nil {

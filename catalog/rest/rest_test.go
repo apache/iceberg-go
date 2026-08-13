@@ -1115,6 +1115,32 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 	r.ErrorContains(err, "examples in warehouse")
 }
 
+func (r *RestCatalogSuite) TestDropNamespace409() {
+	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Namespace examples is not empty. Contains 1 table(s).",
+				"type":    "NamespaceNotEmptyException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples"))
+	r.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	r.ErrorContains(err, "is not empty")
+}
+
 func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
@@ -1455,6 +1481,7 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 func (r *RestCatalogSuite) TestLoadTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
+		r.Empty(req.URL.Query().Get("snapshots"), "LoadTable must not send ?snapshots by default")
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1569,6 +1596,129 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			},
 		},
 	}))
+}
+
+func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
+	// Server returns only the snapshot referenced by the main branch (refs behaviour).
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("refs", req.URL.Query().Get("snapshots"))
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]},
+				"current-schema-id": 0,
+				"schemas": [{"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]}],
+				"partition-spec": [], "default-spec-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"last-partition-id": 999, "default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"properties": {},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": {"main": {"snapshot-id": 3497810964824022504, "type": "branch"}},
+				"snapshots": [
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504.avro",
+						"schema-id": 0
+					}
+				],
+				"snapshot-log": [], "metadata-log": []
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{"snapshot-loading-mode": "refs"}))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.Require().NoError(err)
+
+	// Only the snapshot referenced by main is returned.
+	r.Len(tbl.Metadata().Snapshots(), 1)
+	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[0].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
+}
+
+func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
+	// Server returns all snapshots including unreferenced historical ones (all behaviour).
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("all", req.URL.Query().Get("snapshots"))
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]},
+				"current-schema-id": 0,
+				"schemas": [{"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]}],
+				"partition-spec": [], "default-spec-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"last-partition-id": 999, "default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"properties": {},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": {"main": {"snapshot-id": 3497810964824022504, "type": "branch"}},
+				"snapshots": [
+					{
+						"snapshot-id": 1000000000000000001,
+						"timestamp-ms": 1646700000000,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-1000000000000000001.avro",
+						"schema-id": 0
+					},
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"parent-snapshot-id": 1000000000000000001,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504.avro",
+						"schema-id": 0
+					}
+				],
+				"snapshot-log": [], "metadata-log": []
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{"snapshot-loading-mode": "all"}))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.Require().NoError(err)
+
+	// Both the current and the unreferenced historical snapshot are returned.
+	r.Len(tbl.Metadata().Snapshots(), 2)
+	r.EqualValues(1000000000000000001, tbl.Metadata().Snapshots()[0].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[1].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
 }
 
 func (r *RestCatalogSuite) TestRenameTable204() {

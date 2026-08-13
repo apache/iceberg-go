@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/DataDog/iceberg-go"
 )
 
 func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {
@@ -49,7 +50,11 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				defer rec.Release()
 
 				delSet := buildDel(nDel)
-				filterFn, err := processEqualityDeletes(ctx, []*equalityDeleteSet{delSet})
+				fileSchema := iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int64},
+					iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int64},
+				)
+				filterFn, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{delSet}, fileSchema, "data.parquet")
 				if err != nil {
 					b.Fatal(err)
 				}

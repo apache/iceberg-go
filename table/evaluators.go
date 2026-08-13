@@ -26,6 +26,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/DataDog/iceberg-go"
+	iceberginternal "github.com/DataDog/iceberg-go/internal"
 	"github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
@@ -574,7 +575,7 @@ func (m *manifestEvalVisitor) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *manifestEvalVisitor) VisitNot(child bool) bool       { return !child }
@@ -837,7 +838,7 @@ func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
@@ -1340,7 +1341,7 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *strictMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
@@ -1762,7 +1763,7 @@ func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []int
 }
 
 func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
-	return iceberg.VisitBoundPredicate(pred, c)
+	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
 }
 
 func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {

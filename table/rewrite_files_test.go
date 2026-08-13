@@ -343,6 +343,47 @@ func TestRewriteFiles_DeleteFile_RoutesByContentType(t *testing.T) {
 	assert.NotContains(t, err.Error(), dataSliceMiss)
 }
 
+// TestAddFiles_ReAddsPathDeletedByRewrite pins the duplicate check's
+// tombstone handling: a rewrite that removes a data file leaves a
+// DELETED manifest entry for its path on the branch head. That entry
+// records a removal — the path is no longer referenced by the table —
+// so a subsequent AddFiles for the same path must not report a false
+// "already referenced" conflict.
+func TestAddFiles_ReAddsPathDeletedByRewrite(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/seed.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "seed"}]`)
+	seedTx := tbl.NewTransaction()
+	require.NoError(t, seedTx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = seedTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	// A rewrite removes the file, leaving a DELETED tombstone on the head.
+	// The physical parquet file stays on disk (Iceberg deletes are
+	// metadata-only), so it can be legitimately re-added.
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	rewriteTx := tbl.NewTransaction()
+	require.NoError(t, rewriteTx.NewRewrite(nil).DeleteFile(tasks[0].File).Commit(t.Context()))
+	tbl, err = rewriteTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	readdTx := tbl.NewTransaction()
+	require.NoError(t, readdTx.AddFiles(t.Context(), []string{dataPath}, nil, false),
+		"a path whose only head entry is a DELETED tombstone is not referenced by the table")
+	tbl, err = readdTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err = tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, dataPath, tasks[0].File.FilePath())
+}
+
 // TestRewriteFiles_RejectsAddsWithoutDataDeletes proves that staging
 // new data files with no data files to delete is rejected up front —
 // otherwise the chain would slip through ReplaceFiles →
