@@ -233,9 +233,10 @@ func (s *Summary) UnmarshalJSON(b []byte) (err error) {
 		return nil
 	}
 
-	if s.Operation, err = ValidOperation(op); err != nil {
-		return err
+	if op == "" {
+		return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
 	}
+	s.Operation = Operation(op)
 
 	delete(alias, operationKey)
 	s.Properties = alias
@@ -353,7 +354,11 @@ func (s Snapshot) dataFiles(fio iceio.IO, fileFilter set[iceberg.ManifestEntryCo
 		}
 
 		for _, m := range manifests {
-			for entry, err := range m.Entries(fio, false) {
+			// Discard DELETED entries: they are tombstones recording a
+			// removal, not files reachable from this snapshot. Yielding
+			// them would make existence and duplicate checks treat a
+			// file deleted by this snapshot as still live.
+			for entry, err := range m.Entries(fio, true) {
 				if err != nil {
 					yield(nil, err)
 
@@ -480,9 +485,10 @@ func (s *SnapshotSummaryCollector) addFile(df iceberg.DataFile, sc *iceberg.Sche
 		return err
 	}
 
-	if len(df.Partition()) > 0 {
+	partition := dataFilePartition(df)
+	if len(partition) > 0 {
 		partitionPath := spec.PartitionToPath(
-			GetPartitionRecord(df, spec.PartitionType(sc)), sc)
+			newPartitionRecord(partition, spec.PartitionType(sc)), sc)
 
 		return s.updatePartitionMetrics(partitionPath, df, true)
 	}
@@ -495,9 +501,10 @@ func (s *SnapshotSummaryCollector) removeFile(df iceberg.DataFile, sc *iceberg.S
 		return err
 	}
 
-	if len(df.Partition()) > 0 {
+	partition := dataFilePartition(df)
+	if len(partition) > 0 {
 		partitionPath := spec.PartitionToPath(
-			GetPartitionRecord(df, spec.PartitionType(sc)), sc)
+			newPartitionRecord(partition, spec.PartitionType(sc)), sc)
 
 		return s.updatePartitionMetrics(partitionPath, df, false)
 	}

@@ -446,6 +446,20 @@ func TestSetSortOrder(t *testing.T) {
 	require.True(t, builder.updates[0].(*addSortOrderUpdate).SortOrder.Equals(expected), "expected sort order to match added sort order")
 }
 
+func TestAddSortOrderDoesNotAddDuplicateUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	first := sortOrder()
+	first.orderID = 10
+	second := sortOrder()
+	second.orderID = 20
+
+	require.NoError(t, builder.AddSortOrder(&first))
+	require.NoError(t, builder.AddSortOrder(&second))
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, 1, first.OrderID())
+	require.Equal(t, 1, second.OrderID())
+}
+
 func TestSetRef(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0

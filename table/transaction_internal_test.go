@@ -66,20 +66,6 @@ func TestCurrentSnapshotForRefResolvesBranchHead(t *testing.T) {
 	require.Equal(t, int64(10), missing.SnapshotID, "a not-yet-created branch falls back to main's head")
 }
 
-func TestCurrentSnapshotIDForRefResolvesBranchHead(t *testing.T) {
-	txn := newTransactionWithSnapshotRefs(t)
-
-	require.NotNil(t, txn.meta.currentSnapshotIDForRef(MainBranch))
-	require.Equal(t, int64(10), *txn.meta.currentSnapshotIDForRef(MainBranch))
-
-	require.NotNil(t, txn.meta.currentSnapshotIDForRef("feature"))
-	require.Equal(t, int64(20), *txn.meta.currentSnapshotIDForRef("feature"),
-		"feature branch assertion id must be the branch head (20), not main (10)")
-
-	require.Nil(t, txn.meta.currentSnapshotIDForRef("does-not-exist"),
-		"a not-yet-created branch must assert non-existence (nil), not main's head")
-}
-
 func TestCreateSnapshotProducerParentsOnBranchHead(t *testing.T) {
 	t.Run("feature branch parents on feature head", func(t *testing.T) {
 		txn := newTransactionWithSnapshotRefs(t)
@@ -361,7 +347,7 @@ func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
 // tag race. "feature" does not exist when the transaction is constructed, so
 // the ref-type guard in NewTransactionOnBranchWithError has nothing to reject
 // and the commit carries an "assert this ref is absent" requirement
-// (currentSnapshotIDForRef returns nil for an unknown branch). If a peer
+// (baseRefSnapshotID returns nil for a branch absent from the base). If a peer
 // creates that name as a TAG before the retry, the replay must fail: without
 // the check, commitManifests emits a BranchRef update that would advance the
 // tag onto a new snapshot and strip its immutability.
@@ -604,6 +590,179 @@ func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
 	_, tagExists := txn.meta.refs["old-tag"]
 	require.True(t, branchExists, "WithOlderThan must not expire a branch without max-ref-age-ms")
 	require.True(t, tagExists, "WithOlderThan must not expire a tag without max-ref-age-ms")
+}
+
+func TestExpireSnapshotsUsesStandardRetentionPropertyNames(t *testing.T) {
+	tests := []struct {
+		name            string
+		props           iceberg.Properties
+		oldSnapshotKept bool
+	}{
+		{
+			name: "standard properties",
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey: "1",
+				MaxSnapshotAgeMsKey:   "0",
+			},
+		},
+		{
+			name: "legacy properties",
+			props: iceberg.Properties{
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
+		{
+			name: "standard max age takes precedence",
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "1",
+				MaxSnapshotAgeMsKey:         "0",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "1000000000000000000",
+			},
+		},
+		{
+			name:            "standard minimum takes precedence",
+			oldSnapshotKept: true,
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "2",
+				MaxSnapshotAgeMsKey:         "0",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
+		{
+			name:            "malformed standard max age does not use legacy value",
+			oldSnapshotKept: true,
+			props: iceberg.Properties{
+				MinSnapshotsToKeepKey:       "1",
+				MaxSnapshotAgeMsKey:         "not-a-number",
+				legacyMinSnapshotsToKeepKey: "1",
+				legacyMaxSnapshotAgeMsKey:   "0",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.meta.props = tt.props
+			txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-time.Hour).UnixMilli()
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, err := txn.meta.SnapshotByID(10)
+			if tt.oldSnapshotKept {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestExpireSnapshotsUsesStandardRetentionDefaults(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-6 * 24 * time.Hour).UnixMilli()
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+
+	require.NoError(t, txn.ExpireSnapshots())
+	_, err := txn.meta.SnapshotByID(10)
+	require.Error(t, err)
+}
+
+func TestExpireSnapshotsUsesStandardMaxRefAgeProperty(t *testing.T) {
+	tests := []struct {
+		name    string
+		props   iceberg.Properties
+		refKept bool
+	}{
+		{
+			name: "standard property",
+			props: iceberg.Properties{
+				MaxRefAgeMsKey: "60000",
+			},
+		},
+		{
+			name: "legacy property",
+			props: iceberg.Properties{
+				legacyMaxRefAgeMsKey: "60000",
+			},
+		},
+		{
+			name:    "standard property takes precedence",
+			refKept: true,
+			props: iceberg.Properties{
+				MaxRefAgeMsKey:       "1000000000000000000",
+				legacyMaxRefAgeMsKey: "60000",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.meta.props = tt.props
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+			require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 10, BranchRef))
+			txn.meta.snapshotList[0].TimestampMs = time.Now().Add(-time.Hour).UnixMilli()
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, refKept := txn.meta.refs["old-branch"]
+			if tt.refKept {
+				require.True(t, refKept)
+			} else {
+				require.False(t, refKept)
+			}
+		})
+	}
+}
+
+func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
+	tests := []struct {
+		name         string
+		age          time.Duration
+		snapshotKept bool
+	}{
+		{name: "younger than default age", age: time.Hour, snapshotKept: true},
+		{name: "older than default age", age: 6 * 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			now := time.Now().UnixMilli()
+			require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+				SnapshotID:       30,
+				ParentSnapshotID: transactionTestPtr(int64(10)),
+				SequenceNumber:   3,
+				ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+				Summary:          &Summary{Operation: OpAppend},
+				TimestampMs:      now,
+			}))
+			txn.meta.props = iceberg.Properties{MaxRefAgeMsKey: "60000"}
+			require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+			require.NoError(t, txn.meta.SetSnapshotRef("old-branch", 30, BranchRef))
+			require.NoError(t, txn.meta.RemoveSnapshotRef("feature"))
+			for i := range txn.meta.snapshotList {
+				if txn.meta.snapshotList[i].SnapshotID == 30 {
+					txn.meta.snapshotList[i].TimestampMs = time.Now().Add(-tt.age).UnixMilli()
+
+					break
+				}
+			}
+
+			require.NoError(t, txn.ExpireSnapshots())
+			_, refKept := txn.meta.refs["old-branch"]
+			require.False(t, refKept)
+			_, snapshotErr := txn.meta.SnapshotByID(30)
+			if tt.snapshotKept {
+				require.NoError(t, snapshotErr)
+			} else {
+				require.Error(t, snapshotErr)
+			}
+		})
+	}
 }
 
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
@@ -968,12 +1127,14 @@ func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T)
 	require.Equal(t, AssertTableUUID(baseMeta.TableUUID()), txn.reqs[0])
 }
 
-// TestTransactionApplyDedupesSameRefAssertionsNewTable covers two appends in a
-// single new-table transaction: the first asserts main must not exist, and the
-// second (after the builder has created main) asserts main == the new snapshot.
-// Only the first main == nil assertion, which reflects the pre-transaction base
-// state, must be retained.
-func TestTransactionApplyDedupesSameRefAssertionsNewTable(t *testing.T) {
+// TestTransactionApplyDedupesIdenticalSameRefAssertions covers repeated
+// producer commits in one transaction: producers build their assertion from
+// the BASE table's branch head, so a second commit re-asserts exactly the
+// base state the first one required. The identical twin must collapse to a
+// single requirement — and it
+// must dedupe WITHOUT being re-validated against the staged metadata, which
+// has intentionally moved past the base state it re-asserts.
+func TestTransactionApplyDedupesIdenticalSameRefAssertions(t *testing.T) {
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 
 	// First append: main does not exist yet in the pre-transaction metadata.
@@ -992,20 +1153,21 @@ func TestTransactionApplyDedupesSameRefAssertionsNewTable(t *testing.T) {
 	}))
 	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 10, BranchRef))
 
-	// Second append asserts main == 10; it must dedupe against the first
-	// assertion for main rather than adding a contradictory base-state check.
-	newHead := int64(10)
-	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &newHead)})
+	// Second append re-asserts the same base state (main absent). The staged
+	// metadata now has main -> 10, so validating this twin would fail —
+	// dedup must skip it instead of re-validating.
+	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, nil)})
 	require.NoError(t, err)
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, nil)
 }
 
-// TestTransactionApplyDedupesSameRefAssertionsExistingTable covers two appends
-// on an existing table: the first asserts the original base head, and the second
-// (after the builder has advanced main) asserts the new head. Only the original
-// base-head assertion must be retained.
-func TestTransactionApplyDedupesSameRefAssertionsExistingTable(t *testing.T) {
+// TestTransactionApplyRejectsConflictingSameRefAssertions covers two
+// assertions for the same ref requiring different snapshot ids (or an id vs
+// absence): both can never hold against the catalog, so collapsing them
+// would silently drop a check the caller registered. apply must fail with
+// a named error and leave the accumulated requirements unchanged.
+func TestTransactionApplyRejectsConflictingSameRefAssertions(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t) // main -> 10, feature -> 20
 
 	base := int64(10)
@@ -1014,24 +1176,83 @@ func TestTransactionApplyDedupesSameRefAssertionsExistingTable(t *testing.T) {
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
 
-	// Simulate the first append advancing main -> 30.
-	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
-		SnapshotID:       30,
-		ParentSnapshotID: transactionTestPtr(base),
-		SequenceNumber:   3,
-		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
-		Summary:          &Summary{Operation: OpAppend},
-		TimestampMs:      time.Now().UnixMilli(),
-	}))
-	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 30, BranchRef))
+	other := int64(30)
+	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &other)})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "conflicting snapshot-id assertions")
 
-	// Second append asserts main == 30; it must dedupe against the original
-	// base-head assertion, which is the only one kept.
-	newHead := int64(30)
-	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, &newHead)})
-	require.NoError(t, err)
+	err = txn.apply(nil, []Requirement{AssertRefSnapshotID(MainBranch, nil)})
+	require.Error(t, err, "required id vs required absence must also conflict")
+	require.Contains(t, err.Error(), "conflicting snapshot-id assertions")
+
 	require.Len(t, txn.reqs, 1)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &base)
+}
+
+// refAssertions returns the assert-ref-snapshot-id requirements the
+// transaction has accumulated, in registration order.
+func refAssertions(txn *Transaction) []*assertRefSnapshotID {
+	var out []*assertRefSnapshotID
+	for _, r := range txn.reqs {
+		if a, ok := r.(*assertRefSnapshotID); ok {
+			out = append(out, a)
+		}
+	}
+
+	return out
+}
+
+// requireSingleBaseMainAssertion asserts the transaction holds exactly
+// one ref assertion: main required to be absent, the base state of the
+// fresh test table (not a staged intermediate snapshot, which the
+// catalog has never seen).
+func requireSingleBaseMainAssertion(t *testing.T, txn *Transaction, msg string) {
+	t.Helper()
+
+	asserts := refAssertions(txn)
+	require.Len(t, asserts, 1, msg)
+	require.Equal(t, MainBranch, asserts[0].Ref)
+	require.Nil(t, asserts[0].SnapshotID, msg)
+}
+
+func addOneTestDataFile(t *testing.T, txn *Transaction, path string) {
+	t.Helper()
+
+	require.NoError(t, txn.AddDataFiles(t.Context(), []iceberg.DataFile{
+		newTestDataFile(t, *iceberg.UnpartitionedSpec, path, nil),
+	}, nil))
+}
+
+// TestTransactionSecondProducerCommitAssertsBaseHead runs two real producer
+// commits (AddDataFiles) in one transaction on a new table. Each producer
+// must assert the base table's branch head — absent here — rather than the
+// staged metadata's current snapshot: the staged intermediate snapshot
+// never exists on the catalog, and the conflict check would reject it as
+// contradicting the first producer's base assertion.
+func TestTransactionSecondProducerCommitAssertsBaseHead(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	addOneTestDataFile(t, txn, "mem://default/table-location/data/f1.parquet")
+	addOneTestDataFile(t, txn, "mem://default/table-location/data/f2.parquet")
+
+	requireSingleBaseMainAssertion(t, txn,
+		"producer assertions must be built from the base branch head and collapse to one")
+}
+
+// TestTransactionExpireAfterProducerDoesNotConflict pins the interaction
+// between a producer commit and ExpireSnapshots inside one transaction:
+// expire's per-ref assertions are built from the base table's state, so a
+// ref the producer just created must not produce a staged-head assertion
+// that conflicts with the producer's own.
+func TestTransactionExpireAfterProducerDoesNotConflict(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	addOneTestDataFile(t, txn, "mem://default/table-location/data/f1.parquet")
+	require.NoError(t, txn.ExpireSnapshots(WithOlderThan(7*24*time.Hour)),
+		"expire after a producer in the same transaction must not register a conflicting staged-head assertion")
+
+	requireSingleBaseMainAssertion(t, txn,
+		"only the producer's base-state assertion must remain for the branch it created")
 }
 
 // TestTransactionApplyKeepsRefAssertionsForDistinctRefs confirms that dedupe by

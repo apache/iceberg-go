@@ -69,12 +69,9 @@ type Config struct {
 
 	// PreserveDeadEqualityDeletes, when true, retains equality delete
 	// files that are provably dead after the rewrite. The cleanup
-	// predicate matches the v2 reader (see scanner.go
-	// matchEqualityDeletesToData and DecideDeadEqualityDeletes): an
-	// eq-delete is dead iff no surviving applicable data file has
-	// seq < eq-delete.seq, where "applicable" means same partition
-	// tuple OR either side has empty partition. SpecID is NOT part of
-	// the predicate.
+	// predicate follows scan planning's partition-spec applicability rule
+	// (see DecideDeadEqualityDeletesWithSpecs) and never removes one that could still
+	// affect a surviving data file.
 	//
 	// Zero value (false) is the recommended default: dead eq-deletes are
 	// expunged during the rewrite commit, which keeps manifest fanout
@@ -86,7 +83,7 @@ type Config struct {
 	// Honored only in atomic mode (RewriteDataFilesOptions.PartialProgress=false).
 	// The CLI / library caller is responsible for translating this flag
 	// into the snapshot walk + RewriteDataFilesOptions.ExtraDeleteFilesToRemove
-	// — see CollectDeadEqualityDeletes.
+	// — see CollectDeadEqualityDeletesWithSpecs.
 	PreserveDeadEqualityDeletes bool
 }
 
@@ -213,7 +210,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	var partitionOrder []string
 
 	for _, t := range tasks {
-		key := partitionBucketKey(t.File.SpecID(), t.File.Partition())
+		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
 		bucket, ok := partitions[key]
 		if !ok {
 			bucket = partitionBucket{key: key}
@@ -363,12 +360,13 @@ func isFileScoped(d iceberg.DataFile) bool {
 // referenced_data_file is optional in V2 and our own scan planning never sets
 // it (see matchDeletesToData).
 func referencedDataFilePath(d iceberg.DataFile) string {
-	if ref := d.ReferencedDataFile(); ref != nil && *ref != "" {
+	if ref := internal.BorrowedDataFileReferencedDataFile(d); ref != nil && *ref != "" {
 		return *ref
 	}
 
-	lower := d.LowerBoundValues()[filePathFieldID]
-	upper := d.UpperBoundValues()[filePathFieldID]
+	lowerBounds, upperBounds := internal.BorrowedDataFileBounds(d)
+	lower := lowerBounds[filePathFieldID]
+	upper := upperBounds[filePathFieldID]
 	if len(lower) == 0 || !bytes.Equal(lower, upper) {
 		return ""
 	}

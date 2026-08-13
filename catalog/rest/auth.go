@@ -18,6 +18,7 @@
 package rest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -30,6 +31,19 @@ type AuthManager interface {
 	AuthHeader() (string, string, error)
 }
 
+// ContextAuthManager is an optional interface an AuthManager may implement to
+// honor a caller-supplied context (deadline and cancellation) while producing
+// the authorization header. sessionTransport prefers AuthHeaderWithContext when
+// the manager implements it, so a request's deadline also bounds the auth step
+// rather than only the request/response cycle. A manager implementing only
+// AuthManager still works, but its auth step cannot be interrupted mid-call —
+// bounding that case is the implementer's responsibility.
+type ContextAuthManager interface {
+	AuthManager
+	// AuthHeaderWithContext returns the authorization header, honoring ctx.
+	AuthHeaderWithContext(ctx context.Context) (string, string, error)
+}
+
 // Oauth2AuthManager is an implementation of the AuthManager interface which
 // uses an oauth2.TokenSource to provide bearer tokens. The token source
 // handles caching, thread-safe refresh, and expiry management.
@@ -37,8 +51,29 @@ type Oauth2AuthManager struct {
 	tokenSource oauth2.TokenSource
 }
 
+var _ ContextAuthManager = (*Oauth2AuthManager)(nil)
+
 // AuthHeader returns the authorization header with the bearer token.
 func (o *Oauth2AuthManager) AuthHeader() (string, string, error) {
+	return o.authHeader()
+}
+
+// AuthHeaderWithContext returns the authorization header, honoring ctx. A
+// cached, unexpired token is returned without any network call, so a bounded
+// caller (such as the metrics dispatcher) pays no auth latency in the common
+// case. When a refresh is required it goes through the token-refresh HTTP
+// client, whose Timeout bounds how long a stalled token endpoint can block; the
+// ctx check here additionally short-circuits work for a caller whose deadline
+// has already elapsed.
+func (o *Oauth2AuthManager) AuthHeaderWithContext(ctx context.Context) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+
+	return o.authHeader()
+}
+
+func (o *Oauth2AuthManager) authHeader() (string, string, error) {
 	tok, err := o.tokenSource.Token()
 	if err != nil {
 		var re *oauth2.RetrieveError
