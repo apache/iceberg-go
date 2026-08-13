@@ -293,7 +293,7 @@ func compactionTestSpecs() compactionTestSpecLookup {
 // reads only path, partition, content type, and seq, so a minimal
 // builder configuration is enough.
 func makeEqDeleteEntry(
-	t *testing.T,
+	t testing.TB,
 	spec iceberg.PartitionSpec,
 	part map[int]any,
 	seq int64,
