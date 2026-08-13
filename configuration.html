@@ -255,12 +255,14 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-name</code></td><td>SigV4 service name.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-region</code></td><td>SigV4 region.</td></tr>

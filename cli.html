@@ -250,8 +250,8 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>Catalog connection flags are global and apply to every subcommand:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code></td></tr>
-<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive)</td></tr>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>. <code>dynamodb</code> is recognized but not implemented yet.</td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive) or SQL DSN</td></tr>
 <tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
 <tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
 <tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
@@ -259,6 +259,8 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
 <tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
+<tr><td><code>--sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
+<tr><td><code>--sql-dialect</code></td><td>SQL dialect for the SQL catalog. The SQL catalog library supports <code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, and <code>oracle</code>, but the default CLI binary only ships the <code>sqlite</code> dialect via <code>sqliteshim</code>. Other dialects need a custom build that blank-imports their <code>database/sql</code> drivers.</td></tr>
 </tbody></table>
 </div>
 <p>To avoid passing flags every time, define a config file at <code>~/.iceberg-go.yaml</code>:</p>
@@ -268,6 +270,15 @@ catalog:
     type: rest
     uri: http://localhost:8181
     warehouse: s3://my-warehouse
+</code></pre>
+<p>SQL catalog example:</p>
+<pre><code class="language-yaml">catalog:
+  local:
+    type: sql
+    uri: file:iceberg-catalog.db
+    warehouse: file:///tmp/warehouse
+    sql-driver: sqliteshim
+    sql-dialect: sqlite
 </code></pre>
 <p>Flags on the command line override values from the config file.</p>
 <h2 id="output-format"><a class="header" href="#output-format">Output format</a></h2>

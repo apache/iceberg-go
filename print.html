@@ -542,12 +542,14 @@ catalog:
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Purpose</th></tr></thead><tbody>
 <tr><td><code>default-catalog</code></td><td>Name used when <code>--catalog-name</code> is not passed on the CLI.</td></tr>
 <tr><td><code>max-workers</code></td><td>Worker pool size for concurrent operations. Default <code>5</code>.</td></tr>
-<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.type</code></td><td>One of <code>rest</code>, <code>hive</code>, <code>glue</code>, <code>sql</code>, <code>hadoop</code>. <code>dynamodb</code> is recognized by the CLI but not implemented yet.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.uri</code></td><td>Catalog endpoint or DSN.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.warehouse</code></td><td>Warehouse identifier (REST/Glue) or location (Hive/SQL).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.credential</code></td><td>Credential string passed through to the catalog's auth handler.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.output</code></td><td>CLI output format (e.g. <code>text</code>, <code>json</code>).</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.aws-profile</code></td><td>AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. Maps to the <code>sql.driver</code> property. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
+<tr><td><code>catalog.&lt;name&gt;.sql-dialect</code></td><td>SQL dialect for the SQL catalog (<code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, <code>oracle</code>). Maps to the <code>sql.dialect</code> property. The default CLI binary only ships <code>sqlite</code> via <code>sqliteshim</code>; other dialects need a custom build with their drivers.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.sigv4-enabled</code></td><td>Enable AWS SigV4 signing for REST.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-name</code></td><td>SigV4 service name.</td></tr>
 <tr><td><code>catalog.&lt;name&gt;.rest.signing-region</code></td><td>SigV4 region.</td></tr>
@@ -851,8 +853,8 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 </code></pre>
 <p>Catalog connection flags are global and apply to every subcommand:</p>
 <div class="table-wrapper"><table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody>
-<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code></td></tr>
-<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive)</td></tr>
+<tr><td><code>--catalog</code></td><td>Catalog type: <code>rest</code> (default), <code>glue</code>, <code>hive</code>, <code>hadoop</code>, <code>sql</code>. <code>dynamodb</code> is recognized but not implemented yet.</td></tr>
+<tr><td><code>--uri</code></td><td>Catalog URI (REST/Hive) or SQL DSN</td></tr>
 <tr><td><code>--warehouse</code></td><td>Warehouse location</td></tr>
 <tr><td><code>--credential</code></td><td>Credentials for the catalog</td></tr>
 <tr><td><code>--token</code></td><td>OAuth token (skips OAuth flow)</td></tr>
@@ -860,6 +862,8 @@ docker run -p 8181:8181 apache/iceberg-rest-fixture:latest
 <tr><td><code>--catalog-name</code></td><td>Catalog name to load from config file (default <code>default</code>)</td></tr>
 <tr><td><code>--config</code></td><td>Path to a config file</td></tr>
 <tr><td><code>--aws-profile</code></td><td>AWS named profile to use (Glue catalog); overrides <code>aws-profile</code> in the config file</td></tr>
+<tr><td><code>--sql-driver</code></td><td><code>database/sql</code> driver name for the SQL catalog. The default CLI binary only compiles in <code>sqliteshim</code>; other drivers require a custom build.</td></tr>
+<tr><td><code>--sql-dialect</code></td><td>SQL dialect for the SQL catalog. The SQL catalog library supports <code>postgres</code>, <code>mysql</code>, <code>sqlite</code>, <code>mssql</code>, and <code>oracle</code>, but the default CLI binary only ships the <code>sqlite</code> dialect via <code>sqliteshim</code>. Other dialects need a custom build that blank-imports their <code>database/sql</code> drivers.</td></tr>
 </tbody></table>
 </div>
 <p>To avoid passing flags every time, define a config file at <code>~/.iceberg-go.yaml</code>:</p>
@@ -869,6 +873,15 @@ catalog:
     type: rest
     uri: http://localhost:8181
     warehouse: s3://my-warehouse
+</code></pre>
+<p>SQL catalog example:</p>
+<pre><code class="language-yaml">catalog:
+  local:
+    type: sql
+    uri: file:iceberg-catalog.db
+    warehouse: file:///tmp/warehouse
+    sql-driver: sqliteshim
+    sql-dialect: sqlite
 </code></pre>
 <p>Flags on the command line override values from the config file.</p>
 <h2 id="output-format"><a class="header" href="#output-format">Output format</a></h2>
