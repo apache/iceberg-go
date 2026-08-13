@@ -1301,6 +1301,79 @@ func TestAddSnapshotRejectsInvalidTimestamp(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestAddSnapshotOnFreshBuilderDoesNotPanic(t *testing.T) {
+	tableSchema := schema()
+	spec := partitionSpec()
+	order := sortOrder()
+
+	builder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+	require.NoError(t, builder.AddSchema(&tableSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.AddSortOrder(&order))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	require.NoError(t, builder.AddPartitionSpec(&spec, true))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      time.Now().UnixMilli(),
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend, Properties: map[string]string{}},
+		SchemaID:         &schemaID,
+	}
+
+	require.NotPanics(t, func() {
+		err = builder.AddSnapshot(&snapshot)
+	})
+	require.NoError(t, err)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+}
+
+func TestAddSnapshotUpdateOnFreshBuilderDoesNotPanic(t *testing.T) {
+	tableSchema := schema()
+	spec := partitionSpec()
+	order := sortOrder()
+
+	builder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+	require.NoError(t, builder.AddSchema(&tableSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.AddSortOrder(&order))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	require.NoError(t, builder.AddPartitionSpec(&spec, true))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+
+	schemaID := 0
+	snapshot := &Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      time.Now().UnixMilli(),
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend, Properties: map[string]string{}},
+		SchemaID:         &schemaID,
+	}
+	update := NewAddSnapshotUpdate(snapshot)
+
+	require.NotPanics(t, func() {
+		err = builder.AddSnapshotUpdate(update)
+	})
+	require.NoError(t, err)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+}
+
 func TestConstructDefaultMainBranch(t *testing.T) {
 	// TODO: Not sure what this test is supposed to do Rust: `test_construct_default_main_branch`
 	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")

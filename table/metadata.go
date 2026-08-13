@@ -519,7 +519,11 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 				snapshot.TimestampMs, last.TimestampMs)
 		}
 	}
-	maxTS := max(b.lastUpdatedMS, b.base.LastUpdatedMillis())
+	var baseLastUpdated int64
+	if b.base != nil {
+		baseLastUpdated = b.base.LastUpdatedMillis()
+	}
+	maxTS := max(b.lastUpdatedMS, baseLastUpdated)
 	if snapshot.TimestampMs-maxTS < -oneMinuteInMs {
 		return fmt.Errorf("invalid snapshot timestamp %d: before last updated timestamp %d",
 			snapshot.TimestampMs, maxTS)
