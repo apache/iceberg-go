@@ -114,7 +114,12 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 //   - Magic  (4 bytes, little-endian): DVMagicNumber
 //   - Bitmap (variable): roaring bitmap in Iceberg portable format
 //   - CRC-32 (4 bytes, big-endian): checksum over magic + bitmap
+//
+// The bitmap is run-length encoded in place before it is written, matching
+// Java's BitmapPositionDeleteIndex.serialize.
 func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
+	bitmap.RunLengthEncode()
+
 	var bitmapBuf bytes.Buffer
 	if err := bitmap.Serialize(&bitmapBuf); err != nil {
 		return nil, fmt.Errorf("serialize roaring bitmap: %w", err)

@@ -94,8 +94,8 @@ func runRewriteWithCleanup(t *testing.T, tbl *table.Table, groups []table.Compac
 					rewrittenSet[task.File.FilePath()] = struct{}{}
 				}
 			}
-			deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(
-				t.Context(), iceio.LocalFS{}, snap, rewrittenSet)
+			deadEqDeletes, err := compaction.CollectDeadEqualityDeletesWithSpecs(
+				t.Context(), iceio.LocalFS{}, tbl.Metadata(), snap, rewrittenSet)
 			require.NoError(t, err)
 			rewriteOpts.ExtraDeleteFilesToRemove = deadEqDeletes
 		}

@@ -534,3 +534,47 @@ func TestSchemasToGlueColumnsClearsPreviousIcebergComment(t *testing.T) {
 	require.NotNil(t, columns[0].Comment)
 	assert.Empty(t, aws.ToString(columns[0].Comment))
 }
+
+func TestSchemasToGlueColumnsPreservesLogicalOrder(t *testing.T) {
+	original := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.StringType{}, Required: true},
+		iceberg.NestedField{ID: 3, Name: "address", Type: iceberg.StringType{}, Required: false},
+	)
+
+	// "address" is dropped, "email" is added and the remaining columns are reordered
+	current := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 4, Name: "email", Type: iceberg.StringType{}, Required: false},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.StringType{}, Required: true},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+
+	metadata, err := table.NewMetadata(original, nil, table.SortOrder{}, "s3://example/path", nil)
+	assert.NoError(t, err)
+
+	mb, err := table.MetadataBuilderFromBase(metadata, "")
+	assert.NoError(t, err)
+
+	err = mb.AddSchema(current)
+	assert.NoError(t, err)
+
+	err = mb.SetCurrentSchemaID(1)
+	assert.NoError(t, err)
+
+	metadata, err = mb.Build()
+	assert.NoError(t, err)
+
+	columns := schemasToGlueColumns(metadata, nil)
+
+	names := make([]string, len(columns))
+	for i, c := range columns {
+		names[i] = aws.ToString(c.Name)
+	}
+
+	assert.Equal(t, []string{"email", "name", "id", "address"}, names, "Glue column order must follow the current logical schema")
+	assert.Equal(t, "false", columns[3].Parameters[icebergFieldCurrentKey])
+
+	for i := range 3 {
+		assert.Equal(t, "true", columns[i].Parameters[icebergFieldCurrentKey])
+	}
+}

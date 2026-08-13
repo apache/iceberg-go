@@ -474,7 +474,7 @@ err := txn.ExpireSnapshots(/* options */)
 err = txn.RollbackToSnapshot(targetSnapshotID)
 ```
 
-Tune retention with the `min-snapshots-to-keep`, `max-snapshot-age-ms`, and `max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
+Tune retention with the `history.expire.min-snapshots-to-keep`, `history.expire.max-snapshot-age-ms`, and `history.expire.max-ref-age-ms` table properties (see [Configuration](./configuration.md)).
 
 ## Maintenance
 

@@ -47,7 +47,7 @@ type RewriteResult struct {
 	// RemovedEqualityDeleteFiles is the count of equality delete files
 	// removed via [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
 	// The caller computes which eq-deletes are dead — typically via
-	// [compaction.CollectDeadEqualityDeletes] — and passes the list in.
+	// [compaction.CollectDeadEqualityDeletesWithSpecs] — and passes the list in.
 	RemovedEqualityDeleteFiles int
 
 	// RemovedDeletionVectorFiles is the count of deletion vectors removed
@@ -151,7 +151,7 @@ type RewriteDataFilesOptions struct {
 	// the rewrite and that the caller wants expunged in the same
 	// snapshot. Honored only when PartialProgress is false.
 	//
-	// Use [compaction.CollectDeadEqualityDeletes] and
+	// Use [compaction.CollectDeadEqualityDeletesWithSpecs] and
 	// [compaction.CollectDeadPositionDeletes] to compute this list
 	// from the current snapshot. Position deletes attached to
 	// rewritten tasks are already removed by the per-group staging;
@@ -207,7 +207,7 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 //
 // Cleanup beyond that per-group staging is the caller's
 // responsibility: compute the dead sets with
-// [compaction.CollectDeadEqualityDeletes] and
+// [compaction.CollectDeadEqualityDeletesWithSpecs] and
 // [compaction.CollectDeadPositionDeletes] (against the same snapshot
 // the rewrite is staged on) and pass them via
 // [RewriteDataFilesOptions.ExtraDeleteFilesToRemove]. The executor
@@ -520,7 +520,7 @@ func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
 // reading, the new output files will not contain the deleted rows.
 //
 // Only position deletes (EntryContentPosDeletes) are considered.
-// Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
+// Equality deletes are decided by [compaction.DecideDeadEqualityDeletesWithSpecs]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
 //

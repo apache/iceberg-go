@@ -100,6 +100,32 @@ var requiredUpdateFields = map[string][]string{
 	UpdateRemoveEncryptionKey:       {"key-id"},
 }
 
+func normalizeLegacyPropertyFields(action string, raw json.RawMessage) (json.RawMessage, error) {
+	var modern, legacy string
+	switch action {
+	case UpdateSetProperties:
+		modern, legacy = "updates", "updated"
+	case UpdateRemoveProperties:
+		modern, legacy = "removals", "removed"
+	default:
+		return raw, nil
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+
+	if _, ok := object[modern]; !ok {
+		if value, ok := object[legacy]; ok {
+			object[modern] = value
+		}
+	}
+	delete(object, legacy)
+
+	return json.Marshal(object)
+}
+
 func validateRequiredUpdateFields(action string, raw json.RawMessage) error {
 	fields := requiredUpdateFields[action]
 	if len(fields) == 0 {
@@ -195,6 +221,11 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		default:
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
+		normalized, err := normalizeLegacyPropertyFields(base.ActionName, raw)
+		if err != nil {
+			return err
+		}
+		raw = normalized
 		if err := validateRequiredUpdateFields(base.ActionName, raw); err != nil {
 			return err
 		}

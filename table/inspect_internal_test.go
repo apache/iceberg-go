@@ -404,6 +404,258 @@ func TestInspectSnapshotsEmpty(t *testing.T) {
 	require.EqualValues(t, 6, rec.NumCols())
 }
 
+func TestInspectMetadataLogEntriesSchema(t *testing.T) {
+	sc := MetadataLogEntriesSchema()
+
+	require.Equal(t,
+		[]string{"timestamp", "file", "latest_snapshot_id", "latest_schema_id", "latest_sequence_number"},
+		testFieldNames(sc))
+
+	fields := sc.Fields()
+	for i := range fields {
+		require.Equal(t, i+1, fields[i].ID)
+	}
+
+	require.True(t, fields[0].Required, "timestamp is required")
+	require.True(t, fields[1].Required, "file is required")
+	require.False(t, fields[2].Required, "latest_snapshot_id is optional")
+	require.False(t, fields[3].Required, "latest_schema_id is optional")
+	require.False(t, fields[4].Required, "latest_sequence_number is optional")
+
+	require.Equal(t, iceberg.PrimitiveTypes.TimestampTz, fields[0].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[1].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[2].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int32, fields[3].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[4].Type)
+}
+
+func TestInspectMetadataLogEntries(t *testing.T) {
+	const (
+		s1      = int64(101)
+		s2      = int64(102)
+		expired = int64(999)
+	)
+	schema1 := 1
+	schema2 := 2
+	current := s2
+	lastPartitionID := 999
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion: 2,
+		UUID:          uuid.New(),
+		Loc:           "s3://test/metadata-log-entries",
+		LastUpdatedMS: 4000,
+		LastColumnId:  1,
+		SchemaList: []*iceberg.Schema{
+			iceberg.NewSchema(0),
+			iceberg.NewSchema(schema1),
+			iceberg.NewSchema(schema2),
+		},
+		CurrentSchemaID: schema2,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+		LastPartitionID: &lastPartitionID,
+		Props:           iceberg.Properties{},
+		MetadataLog: []MetadataLogEntry{
+			{MetadataFile: "/metadata/v1.json", TimestampMs: 1000},
+			{MetadataFile: "/metadata/v2.json", TimestampMs: 2000},
+		},
+		SnapshotList: []Snapshot{
+			{SnapshotID: s1, SequenceNumber: 7, TimestampMs: 1500, SchemaID: &schema1},
+			{SnapshotID: s2, SequenceNumber: 8, TimestampMs: 3000, SchemaID: &schema2},
+		},
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: s1, TimestampMs: 1500},
+			{SnapshotID: s2, TimestampMs: 3000},
+			{SnapshotID: expired, TimestampMs: 3500},
+		},
+		CurrentSnapshotID:  &current,
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: s2, SnapshotRefType: BranchRef}},
+	}}
+	tbl := New(Identifier{"metadata-log-entries"}, meta, "/metadata/v3.json", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 3, rec.NumRows())
+	require.EqualValues(t, 5, rec.NumCols())
+
+	tsType, ok := rec.Schema().Field(0).Type.(*arrow.TimestampType)
+	require.True(t, ok, "timestamp must be an Arrow timestamp")
+	require.Equal(t, arrow.Microsecond, tsType.Unit)
+	require.Equal(t, "UTC", tsType.TimeZone)
+
+	timestamp := rec.Column(0).(*array.Timestamp)
+	file := rec.Column(1).(*array.String)
+	latestSnapshotID := rec.Column(2).(*array.Int64)
+	latestSchemaID := rec.Column(3).(*array.Int32)
+	latestSequenceNumber := rec.Column(4).(*array.Int64)
+
+	require.EqualValues(t, 1000*1000, timestamp.Value(0))
+	require.EqualValues(t, 2000*1000, timestamp.Value(1))
+	require.EqualValues(t, 4000*1000, timestamp.Value(2))
+	require.Equal(t, "/metadata/v1.json", file.Value(0))
+	require.Equal(t, "/metadata/v2.json", file.Value(1))
+	require.Equal(t, "/metadata/v3.json", file.Value(2))
+
+	// No snapshot had been committed at the first metadata-file timestamp.
+	require.True(t, latestSnapshotID.IsNull(0))
+	require.True(t, latestSchemaID.IsNull(0))
+	require.True(t, latestSequenceNumber.IsNull(0))
+
+	require.EqualValues(t, s1, latestSnapshotID.Value(1))
+	require.EqualValues(t, schema1, latestSchemaID.Value(1))
+	require.EqualValues(t, 7, latestSequenceNumber.Value(1))
+	// The snapshot log can retain an entry after the snapshot itself expires.
+	// Keep its ID while leaving details that require the missing snapshot null.
+	require.EqualValues(t, expired, latestSnapshotID.Value(2))
+	require.True(t, latestSchemaID.IsNull(2))
+	require.True(t, latestSequenceNumber.IsNull(2))
+}
+
+func TestLatestSnapshotAtKeepsExpiredSnapshotID(t *testing.T) {
+	const expiredSnapshot = int64(101)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotLog: []SnapshotLogEntry{{SnapshotID: expiredSnapshot, TimestampMs: 2000}},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, 2500)
+	require.True(t, found)
+	require.Equal(t, expiredSnapshot, snapshotID)
+	require.Nil(t, snapshot)
+}
+
+func TestLatestSnapshotAtScansAllSnapshotLogEntries(t *testing.T) {
+	const (
+		firstSnapshot  = int64(101)
+		secondSnapshot = int64(102)
+		lateSnapshot   = int64(103)
+	)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotList: []Snapshot{
+			{SnapshotID: firstSnapshot},
+			{SnapshotID: secondSnapshot},
+			{SnapshotID: lateSnapshot},
+		},
+		// The 500ms inversion is intentional and models clock skew within the
+		// metadata validator's one-minute tolerance.
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: firstSnapshot, TimestampMs: 2000},
+			{SnapshotID: secondSnapshot, TimestampMs: 3000},
+			{SnapshotID: lateSnapshot, TimestampMs: 2500},
+		},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, 2600)
+	require.True(t, found)
+	require.NotNil(t, snapshot)
+	require.Equal(t, lateSnapshot, snapshotID)
+	require.Equal(t, lateSnapshot, snapshot.SnapshotID)
+}
+
+func TestLatestSnapshotAtUsesFirstEntryForEqualTimestamps(t *testing.T) {
+	const (
+		firstSnapshot  = int64(101)
+		secondSnapshot = int64(102)
+		timestamp      = int64(2000)
+	)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SnapshotList: []Snapshot{
+			{SnapshotID: firstSnapshot},
+			{SnapshotID: secondSnapshot},
+		},
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: firstSnapshot, TimestampMs: timestamp},
+			{SnapshotID: secondSnapshot, TimestampMs: timestamp},
+		},
+	}}
+
+	snapshotID, snapshot, found := latestSnapshotAt(meta, timestamp)
+	require.True(t, found)
+	require.NotNil(t, snapshot)
+	require.Equal(t, firstSnapshot, snapshotID)
+	require.Equal(t, firstSnapshot, snapshot.SnapshotID)
+}
+
+func TestInspectMetadataLogEntriesAllowsLiveSnapshotWithoutSchemaID(t *testing.T) {
+	const snapshotID = int64(101)
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		LastUpdatedMS: 2000,
+		SnapshotList:  []Snapshot{{SnapshotID: snapshotID, SequenceNumber: 7}},
+		SnapshotLog:   []SnapshotLogEntry{{SnapshotID: snapshotID, TimestampMs: 1500}},
+		SnapshotRefs:  map[string]SnapshotRef{},
+	}}
+	tbl := New(Identifier{"metadata-log-entries-nil-schema"}, meta, "/metadata/v2.json", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	latestSnapshotID := rec.Column(2).(*array.Int64)
+	latestSchemaID := rec.Column(3).(*array.Int32)
+	latestSequenceNumber := rec.Column(4).(*array.Int64)
+	require.EqualValues(t, snapshotID, latestSnapshotID.Value(0))
+	require.True(t, latestSchemaID.IsNull(0))
+	require.EqualValues(t, 7, latestSequenceNumber.Value(0))
+}
+
+func TestInspectMetadataLogEntriesEmpty(t *testing.T) {
+	lastPartitionID := 999
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:      2,
+		UUID:               uuid.New(),
+		Loc:                "s3://test/empty-metadata-log",
+		LastUpdatedMS:      1000,
+		LastColumnId:       1,
+		SchemaList:         []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID:    0,
+		Specs:              []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:      0,
+		LastPartitionID:    &lastPartitionID,
+		Props:              iceberg.Properties{},
+		SnapshotRefs:       map[string]SnapshotRef{},
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+	}}
+	tbl := New(Identifier{"empty-metadata-log"}, meta, "/metadata/v1.json", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 1, rec.NumRows())
+	require.Equal(t, "/metadata/v1.json", rec.Column(1).(*array.String).Value(0))
+	for column := 2; column < int(rec.NumCols()); column++ {
+		require.True(t, rec.Column(column).IsNull(0), "column %d should be null", column)
+	}
+}
+
+func TestInspectMetadataLogEntriesSkipsEmptyCurrentMetadataLocation(t *testing.T) {
+	meta := &metadataV2{commonMetadata: commonMetadata{LastUpdatedMS: 1000}}
+	tbl := New(Identifier{"empty-metadata-location"}, meta, "", nil, nil)
+
+	rr, err := tbl.Inspect().MetadataLogEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 0, rec.NumRows())
+	require.EqualValues(t, 5, rec.NumCols())
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
@@ -414,6 +666,29 @@ func TestInspectAllocatorOption(t *testing.T) {
 	tbl := snapshotsTestTable()
 
 	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Snapshots(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+}
+
+func TestInspectMetadataLogEntriesAllocator(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		LastUpdatedMS: 2000,
+		MetadataLog: []MetadataLogEntry{
+			{MetadataFile: "/metadata/v1.json", TimestampMs: 1000},
+		},
+		SnapshotList: []Snapshot{{SnapshotID: 101, SequenceNumber: 7}},
+		SnapshotLog:  []SnapshotLogEntry{{SnapshotID: 101, TimestampMs: 1500}},
+	}}
+	tbl := New(Identifier{"metadata-log-entries-allocator"}, meta, "/metadata/v2.json", nil, nil)
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).MetadataLogEntries(context.Background())
 	require.NoError(t, err)
 	defer rr.Release()
 

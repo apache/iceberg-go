@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/DataDog/iceberg-go/internal"
 	"github.com/DataDog/iceberg-go/table"
 	"github.com/google/uuid"
 )
@@ -42,19 +43,6 @@ type Requirement interface {
 
 type Requirements []Requirement
 
-// requirementForType returns an instance of a requirement corresponding to a given type.
-func requirementForType(reqType string) (Requirement, error) {
-	var req Requirement
-	switch reqType {
-	case reqAssertViewUUID:
-		req = &assertViewUuid{}
-	default:
-		return nil, fmt.Errorf("unknown requirement type: %s", reqType)
-	}
-
-	return req, nil
-}
-
 func (r *Requirements) UnmarshalJSON(data []byte) error {
 	var rawRequirements []json.RawMessage
 	if err := json.Unmarshal(data, &rawRequirements); err != nil {
@@ -66,17 +54,10 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 		requirements = make(Requirements, 0, len(rawRequirements))
 	}
 	for _, raw := range rawRequirements {
-		var base baseRequirement
-		if err := json.Unmarshal(raw, &base); err != nil {
-			return err
-		}
-
-		req, err := requirementForType(base.Type)
+		req, err := parseRequirementBytes(raw, func(reqType string) error {
+			return fmt.Errorf("unknown requirement type: %s", reqType)
+		})
 		if err != nil {
-			return err
-		}
-
-		if err := json.Unmarshal(raw, req); err != nil {
 			return err
 		}
 		requirements = append(requirements, req)
@@ -91,6 +72,39 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 // identify the type of the requirement.
 type baseRequirement struct {
 	Type string `json:"type"`
+}
+
+type assertViewUUIDWire struct {
+	UUID *uuid.UUID `json:"uuid"`
+}
+
+func requiredRequirementField(name string) error {
+	return internal.MissingRequiredField(table.ErrInvalidRequirement, name)
+}
+
+func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, error) {
+	var base internal.RequirementWire
+	if err := json.Unmarshal(b, &base); err != nil {
+		return nil, err
+	}
+	if base.Type == nil {
+		return nil, requiredRequirementField("type")
+	}
+
+	switch *base.Type {
+	case reqAssertViewUUID:
+		var req assertViewUUIDWire
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.UUID == nil {
+			return nil, requiredRequirementField("uuid")
+		}
+
+		return AssertViewUUID(*req.UUID), nil
+	default:
+		return nil, unknown(*base.Type)
+	}
 }
 
 func (b baseRequirement) GetType() string {
@@ -139,20 +153,5 @@ func ParseRequirementString(s string) (Requirement, error) {
 
 // ParseRequirementBytes parses json bytes into a Requirement
 func ParseRequirementBytes(b []byte) (Requirement, error) {
-	var base baseRequirement
-	if err := json.Unmarshal(b, &base); err != nil {
-		return nil, err
-	}
-
-	switch base.Type {
-	case reqAssertViewUUID:
-		var req assertViewUuid
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertViewUUID(req.UUID), nil
-	}
-
-	return nil, table.ErrInvalidRequirement
+	return parseRequirementBytes(b, func(string) error { return table.ErrInvalidRequirement })
 }

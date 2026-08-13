@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"testing"
 
@@ -148,6 +149,23 @@ func TestBuildRefEntries(t *testing.T) {
 	assert.Equal(t, "v1.0", tags[0].Name)
 	require.NotNil(t, tags[0].MaxRefAgeMs)
 	assert.Equal(t, int64(86400000), *tags[0].MaxRefAgeMs)
+}
+
+func TestRunRefsRejectsInvalidTypeBeforeLoad(t *testing.T) {
+	cat := &loadTrackingCatalog{}
+	var out errCapture
+
+	exitCode := captureExit(func() {
+		runRefs(context.Background(), &out, cat, &RefsCmd{
+			TableID: "db.evnets",
+			Type:    "foo",
+		})
+	})
+
+	assert.Equal(t, 1, exitCode)
+	require.Error(t, out.lastErr)
+	assert.Contains(t, out.lastErr.Error(), "invalid --type")
+	assert.Zero(t, cat.loadCount)
 }
 
 func TestTextOutputSnapshots(t *testing.T) {

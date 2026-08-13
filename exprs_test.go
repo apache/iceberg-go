@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -28,6 +29,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type containsBoundSetVisitor struct {
+	FooBoundExprVisitor
+	needle iceberg.Literal
+	found  bool
+}
+
+func (v *containsBoundSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
+	v.found = literals.Contains(v.needle)
+	literals.Add(iceberg.NewLiteral("visitor-injected"))
+
+	return nil
+}
 
 type ExprA struct{}
 
@@ -470,6 +484,101 @@ func TestInNotInSimplifications(t *testing.T) {
 		assert.Equal(t, 2, bsp.Literals().Len())
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("hello")))
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("world")))
+	})
+
+	t.Run("bound literals are isolated", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+
+		bsp := bound.(iceberg.BoundSetPredicate)
+		literals := bsp.Literals()
+		literals.Add(iceberg.NewLiteral("injected"))
+
+		assert.Equal(t, 2, bsp.Literals().Len())
+		assert.False(t, bsp.Literals().Contains(iceberg.NewLiteral("injected")))
+	})
+
+	t.Run("bound literal values are isolated", func(t *testing.T) {
+		geometry, err := iceberg.GeometryTypeOf("srid:4326")
+		require.NoError(t, err)
+		geography, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+		require.NoError(t, err)
+
+		tests := []struct {
+			name string
+			typ  iceberg.Type
+			lits func([]byte, []byte) []iceberg.Literal
+		}{
+			{
+				name: "binary",
+				typ:  iceberg.PrimitiveTypes.Binary,
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "fixed",
+				typ:  iceberg.FixedTypeOf(16),
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "geometry",
+				typ:  geometry,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geometry, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geometry, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+			{
+				name: "geography",
+				typ:  geography,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geography, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geography, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				first := []byte("0123456789abcdef")
+				second := []byte("fedcba9876543210")
+				expected := slices.Clone(first)
+				isin := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), tt.lits(first, second))
+				schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+
+				bound, err := isin.(iceberg.UnboundPredicate).Bind(schema, true)
+				require.NoError(t, err)
+				first[0] = 0xff
+
+				expectedLiteral, err := iceberg.LiteralFromBytes(tt.typ, expected)
+				require.NoError(t, err)
+				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expectedLiteral))
+			})
+		}
+	})
+
+	t.Run("bound predicate visitors receive detached literals", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+		predicate := bound.(iceberg.BoundPredicate)
+		visitor := &containsBoundSetVisitor{needle: iceberg.NewLiteral("hello")}
+
+		iceberg.VisitBoundPredicate(predicate, visitor)
+		assert.True(t, visitor.found)
+		assert.Equal(t, 2, predicate.(iceberg.BoundSetPredicate).Literals().Len())
 	})
 
 	t.Run("bind dedup to eq", func(t *testing.T) {

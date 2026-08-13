@@ -19,8 +19,10 @@ package view_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/DataDog/iceberg-go/view"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -94,4 +96,39 @@ func TestParseRequirementListReplacesExistingSlice(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal([]byte(`[]`), &requirements))
 	assert.Empty(t, requirements)
+}
+
+func TestParseRequirementRejectsMissingUUID(t *testing.T) {
+	for _, data := range []string{
+		`{"type":"assert-view-uuid"}`,
+		`{"type":"assert-view-uuid","uuid":null}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			_, err := view.ParseRequirementBytes([]byte(data))
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
+
+			var requirements view.Requirements
+			err = json.Unmarshal([]byte("["+data+"]"), &requirements)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, fmt.Sprintf("missing required field %q", "uuid"))
+		})
+	}
+}
+
+func TestParseRequirementRejectsMissingOrNullType(t *testing.T) {
+	for _, data := range []string{`{}`, `{"type":null}`} {
+		t.Run(data, func(t *testing.T) {
+			expectedError := fmt.Sprintf("missing required field %q", "type")
+
+			_, err := view.ParseRequirementBytes([]byte(data))
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, expectedError)
+
+			var requirements view.Requirements
+			err = json.Unmarshal([]byte("["+data+"]"), &requirements)
+			require.ErrorIs(t, err, table.ErrInvalidRequirement)
+			require.ErrorContains(t, err, expectedError)
+		})
+	}
 }

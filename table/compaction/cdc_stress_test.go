@@ -44,7 +44,7 @@ import (
 // Without dead-eq-delete cleanup, every preserved eq-delete sits in
 // every future snapshot's manifests forever, and scan latency degrades
 // linearly with the number of accumulated commits. With cleanup
-// (compaction.CollectDeadEqualityDeletes threaded through
+// (compaction.CollectDeadEqualityDeletesWithSpecs threaded through
 // table.RewriteDataFilesOptions.ExtraDeleteFilesToRemove), a single
 // compaction collapses both data files and eq-deletes back to
 // near-baseline.
@@ -176,8 +176,8 @@ func TestCDCStress(t *testing.T) {
 		}
 	}
 	fs := iceio.LocalFS{}
-	deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(
-		t.Context(), fs, tbl.CurrentSnapshot(), rewrittenSet)
+	deadEqDeletes, err := compaction.CollectDeadEqualityDeletesWithSpecs(
+		t.Context(), fs, tbl.Metadata(), tbl.CurrentSnapshot(), rewrittenSet)
 	require.NoError(t, err)
 
 	tx = tbl.NewTransaction()
