@@ -1232,6 +1232,16 @@ func (a *arrowProjectionVisitor) Schema(_ *iceberg.Schema, _ arrow.Array, result
 	return result
 }
 
+func ownsChildResult(arr arrow.Array) bool {
+	if arr == nil {
+		return false
+	}
+
+	_, nested := arr.DataType().(arrow.NestedType)
+
+	return nested
+}
+
 func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.Array, fieldResults []arrow.Array) arrow.Array {
 	if structArr == nil {
 		return nil
@@ -1242,7 +1252,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 	for i, field := range st.FieldList {
 		arr := fieldResults[i]
 		if arr != nil {
-			if _, ok := arr.DataType().(arrow.NestedType); ok {
+			if ownsChildResult(arr) {
 				defer arr.Release()
 			}
 
@@ -1299,13 +1309,13 @@ func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fie
 }
 
 func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.Array, valArr arrow.Array) arrow.Array {
+	if ownsChildResult(valArr) {
+		defer valArr.Release()
+	}
+
 	arr, ok := listArr.(array.ListLike)
 	if !ok || valArr == nil {
 		return nil
-	}
-
-	if _, ok := valArr.DataType().(arrow.NestedType); ok {
-		defer valArr.Release()
 	}
 
 	valArr = a.castIfNeeded(listType.ElementField(), valArr)
@@ -1349,6 +1359,14 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
+	if ownsChildResult(keyResult) {
+		defer keyResult.Release()
+	}
+
+	if ownsChildResult(valResult) {
+		defer valResult.Release()
+	}
+
 	if keyResult == nil || valResult == nil {
 		return nil
 	}
@@ -1358,15 +1376,8 @@ func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, val
 		return nil
 	}
 
-	if _, ok := keyResult.DataType().(arrow.NestedType); ok {
-		defer keyResult.Release()
-	}
 	keys := a.castIfNeeded(m.KeyField(), keyResult)
 	defer keys.Release()
-
-	if _, ok := valResult.DataType().(arrow.NestedType); ok {
-		defer valResult.Release()
-	}
 	vals := a.castIfNeeded(m.ValueField(), valResult)
 	defer vals.Release()
 
@@ -1400,7 +1411,8 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 	}
 	// UnshredVariant returns a caller-owned array whose ref is balanced by
 	// castIfNeeded's Retain/Release. This holds only because VariantType is not
-	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// an arrow.NestedType; if it were, ownsChildResult would report true and the
+	// parent Struct/List/Map would Release and double-free.
 	// The checked-allocator leak tests guard this invariant.
 	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
 	if err != nil {

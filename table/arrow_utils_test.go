@@ -1498,6 +1498,56 @@ func TestToRequestedSchemaMapStructValueNoLeak(t *testing.T) {
 	assert.Equal(t, int32(7), vals.Field(0).(*array.Int32).Value(0))
 }
 
+func TestToRequestedSchemaMapStructKeyNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	keyStruct := arrow.StructOf(
+		arrow.Field{Name: "k", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldIDMeta("3")},
+	)
+	mapType := arrow.MapOfWithMetadata(keyStruct, fieldIDMeta("2"), arrow.PrimitiveTypes.Int32, fieldIDMeta("4"))
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "m", Type: mapType, Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	mb := bldr.Field(0).(*array.MapBuilder)
+	kb := mb.KeyBuilder().(*array.StructBuilder)
+	vb := mb.ItemBuilder().(*array.Int32Builder)
+	mb.Append(true)
+	kb.Append(true)
+	kb.FieldBuilder(0).(*array.StringBuilder).Append("k")
+	vb.Append(7)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "k", Type: iceberg.PrimitiveTypes.String, Required: true},
+				},
+			},
+			ValueID: 4, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	m := converted.Column(0).(*array.Map)
+	keys := m.Keys().(*array.Struct)
+	require.Equal(t, 1, keys.Len())
+	assert.Equal(t, "k", keys.Field(0).(*array.String).Value(0))
+	vals := m.Items().(*array.Int32)
+	require.Equal(t, 1, vals.Len())
+	assert.Equal(t, int32(7), vals.Value(0))
+}
+
 func TestToRequestedSchemaListOfListNoLeak(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
