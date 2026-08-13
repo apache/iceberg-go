@@ -167,31 +167,38 @@ type CompactCmd struct {
 	Run     *CompactRunCmd     `arg:"subcommand:run" help:"run bin-pack compaction"`
 }
 
+type RewriteManifestsCmd struct {
+	TableID            string `arg:"positional,required" help:"full path to a table"`
+	TargetManifestSize int64  `arg:"--target-manifest-size" default:"0" help:"target manifest size in bytes (default: table property)"`
+	SpecID             int    `arg:"--spec-id" default:"-1" help:"only rewrite manifests of this partition spec id"`
+}
+
 // Top-level args
 
 type Args struct {
-	List         *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
-	Describe     *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
-	Schema       *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
-	Spec         *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
-	Uuid         *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
-	Location     *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
-	Create       *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
-	Drop         *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
-	Files        *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
-	Rename       *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
-	Properties   *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
-	Compact      *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
-	Info         *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
-	Snapshots    *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
-	Refs         *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
-	PartStats    *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
-	Branch       *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
-	Tag          *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
-	ExpireSnaps  *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
-	CleanOrphans *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
-	Upgrade      *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
-	Rollback     *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
+	List             *ListCmd             `arg:"subcommand:list" help:"list tables or namespaces"`
+	Describe         *DescribeCmd         `arg:"subcommand:describe" help:"describe a namespace or table"`
+	Schema           *SchemaCmd           `arg:"subcommand:schema" help:"get the schema of a table"`
+	Spec             *SpecCmd             `arg:"subcommand:spec" help:"return the partition spec of a table"`
+	Uuid             *UuidCmd             `arg:"subcommand:uuid" help:"return the UUID of a table"`
+	Location         *LocationCmd         `arg:"subcommand:location" help:"return the location of a table"`
+	Create           *CreateCmd           `arg:"subcommand:create" help:"create a namespace or table"`
+	Drop             *DropCmd             `arg:"subcommand:drop" help:"drop a namespace or table"`
+	Files            *FilesCmd            `arg:"subcommand:files" help:"list all files of a table"`
+	Rename           *RenameCmd           `arg:"subcommand:rename" help:"rename a table"`
+	Properties       *PropertiesCmd       `arg:"subcommand:properties" help:"manage properties on tables/namespaces"`
+	Compact          *CompactCmd          `arg:"subcommand:compact" help:"analyze or run bin-pack compaction"`
+	RewriteManifests *RewriteManifestsCmd `arg:"subcommand:rewrite-manifests" help:"rewrite (compact) table manifests"`
+	Info             *InfoCmd             `arg:"subcommand:info" help:"show single-screen table summary"`
+	Snapshots        *SnapshotsCmd        `arg:"subcommand:snapshots" help:"list table snapshots"`
+	Refs             *RefsCmd             `arg:"subcommand:refs" help:"list snapshot refs"`
+	PartStats        *PartitionStatsCmd   `arg:"subcommand:partition-stats" help:"list partition statistics files"`
+	Branch           *BranchCmd           `arg:"subcommand:branch" help:"manage table branches"`
+	Tag              *TagCmd              `arg:"subcommand:tag" help:"manage table tags"`
+	ExpireSnaps      *ExpireSnapshotsCmd  `arg:"subcommand:expire-snapshots" help:"expire old snapshots"`
+	CleanOrphans     *CleanOrphanFilesCmd `arg:"subcommand:clean-orphan-files" help:"remove orphan files"`
+	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
+	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
 	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
@@ -202,6 +209,7 @@ type Args struct {
 	Warehouse   string `arg:"--warehouse" help:"warehouse to use"`
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
+	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -236,9 +244,9 @@ func main() {
 		}
 	}
 
-	fileCfg := config.ParseConfig(config.LoadConfig(args.Config), args.CatalogName)
-	if fileCfg != nil {
-		mergeConf(fileCfg, &args, explicitFlags)
+	if err := applyConfigFile(&args, explicitFlags); err != nil {
+		log.Printf("configuration error: %v", err)
+		os.Exit(1)
 	}
 
 	// Validate nested subcommands before catalog init.
@@ -318,6 +326,8 @@ func main() {
 		runProperties(ctx, output, cat, args.Properties)
 	case args.Compact != nil:
 		runCompact(ctx, output, cat, args.Compact)
+	case args.RewriteManifests != nil:
+		runRewriteManifests(ctx, output, cat, args.RewriteManifests)
 	case args.Info != nil:
 		tbl := loadTable(ctx, output, cat, args.Info.TableID)
 		output.Info(tbl)
@@ -348,7 +358,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		err error
 	)
 
-	switch catalog.Type(args.Catalog) {
+	switch catalog.Type(strings.ToLower(args.Catalog)) {
 	case catalog.REST:
 		opts := []rest.Option{}
 		if len(args.Token) > 0 {
@@ -379,7 +389,12 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 			log.Fatal(err)
 		}
 	case catalog.Glue:
-		awscfg, err := awsconfig.LoadDefaultConfig(ctx)
+		var awsLoadOpts []func(*awsconfig.LoadOptions) error
+		if args.AwsProfile != "" {
+			awsLoadOpts = append(awsLoadOpts, awsconfig.WithSharedConfigProfile(args.AwsProfile))
+		}
+
+		awscfg, err := awsconfig.LoadDefaultConfig(ctx, awsLoadOpts...)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -387,7 +402,9 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		opts := []glue.Option{
 			glue.WithAwsConfig(awscfg),
 		}
-		cat = glue.NewCatalog(opts...)
+		if cat, err = glue.NewCatalog(opts...); err != nil {
+			log.Fatal(err)
+		}
 	case catalog.Hive:
 		props := iceberg.Properties{
 			hive.URI: args.URI,
@@ -445,11 +462,11 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		ns := cmd.Namespace
 		props := iceberg.Properties{}
 		if ns.Description != "" {
-			props["Description"] = ns.Description
+			props["comment"] = ns.Description
 		}
 
 		if ns.LocationURI != "" {
-			props["Location"] = ns.LocationURI
+			props["location"] = ns.LocationURI
 		}
 
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
@@ -509,7 +526,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.PartitionSpec != "" {
-			spec, err := parsePartitionSpec(tbl.PartitionSpec)
+			spec, err := parsePartitionSpec(tbl.PartitionSpec, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse partition spec: %w", err))
 				os.Exit(1)
@@ -519,7 +536,7 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		}
 
 		if tbl.SortOrder != "" {
-			sortOrder, err := parseSortOrder(tbl.SortOrder)
+			sortOrder, err := parseSortOrder(tbl.SortOrder, schema)
 			if err != nil {
 				output.Error(fmt.Errorf("failed to parse sort order: %w", err))
 				os.Exit(1)
@@ -546,24 +563,43 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		if err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Namespace " + cmd.Namespace.Identifier + " dropped successfully")
 	case cmd.Table != nil:
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)
-		var err error
+
 		if cmd.Table.Purge {
-			if purger, ok := cat.(catalog.PurgeableTable); ok {
-				err = purger.PurgeTable(ctx, ident)
-			} else {
+			purger, ok := cat.(catalog.PurgeableTable)
+			if !ok {
 				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
 				osExit(1)
+
+				return
 			}
-		} else {
-			err = cat.DropTable(ctx, ident)
+
+			if err := purger.PurgeTable(ctx, ident); err != nil {
+				output.Error(err)
+				osExit(1)
+
+				return
+			}
+
+			output.Text("Table " + cmd.Table.Identifier + " purged successfully")
+
+			return
 		}
-		if err != nil {
+
+		if err := cat.DropTable(ctx, ident); err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Table " + cmd.Table.Identifier + " dropped successfully")
 	}
 }
 
@@ -616,8 +652,8 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 		if val, ok := props[get.PropName]; ok {
 			output.Text(val)
 		} else {
-			output.Error(errors.New("could not find property " + get.PropName + " on namespace " + get.Identifier))
-			os.Exit(1)
+			output.Error(fmt.Errorf("could not find property %s on %s %s", get.PropName, get.Type, get.Identifier))
+			osExit(1)
 		}
 	case cmd.Set != nil:
 		set := cmd.Set
@@ -785,6 +821,60 @@ func loadTable(ctx context.Context, output Output, cat catalog.Catalog, id strin
 	return tbl
 }
 
+// resolveCatalogName returns the catalog name to pass to ParseConfig.
+// When --catalog-name was given explicitly it wins; otherwise "" is returned
+// so ParseConfig can fall back through default-catalog -> "default".
+func resolveCatalogName(explicitFlags map[string]bool, flagValue string) string {
+	if explicitFlags["catalog-name"] {
+		return flagValue
+	}
+
+	return ""
+}
+
+func applyConfigFile(args *Args, explicitFlags map[string]bool) error {
+	configData, err := config.LoadConfigFile(args.Config)
+	if err != nil {
+		return err
+	}
+
+	catalogName := resolveCatalogName(explicitFlags, args.CatalogName)
+	fileCfg, err := config.ParseConfig(configData, catalogName)
+	if err != nil {
+		return fmt.Errorf("parse config file %s: %w", resolvedConfigPath(args.Config), err)
+	}
+	if fileCfg != nil {
+		mergeConf(fileCfg, args, explicitFlags)
+
+		return nil
+	}
+	if len(configData) == 0 {
+		return nil
+	}
+	if args.Config != "" || explicitFlags["catalog-name"] {
+		if catalogName == "" {
+			catalogName = "default"
+		}
+
+		return fmt.Errorf("catalog %q not found in config file %s", catalogName, resolvedConfigPath(args.Config))
+	}
+
+	log.Printf("warning: catalog %q not found in config file", args.CatalogName)
+
+	return nil
+}
+
+func resolvedConfigPath(configPath string) string {
+	if configPath == "" {
+		homeDir, _ := os.UserHomeDir()
+		configPath = filepath.Join(homeDir, ".iceberg-go.yaml")
+	}
+
+	path, _ := filepath.Abs(configPath)
+
+	return path
+}
+
 // mergeConf applies values from the file config into args for any option
 // that was not explicitly provided on the command line. explicitFlags is a set
 // of flag names (without the "--" prefix) that appeared in os.Args so that
@@ -808,6 +898,10 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 
 	if !explicitFlags["warehouse"] && len(fileConf.Warehouse) > 0 {
 		args.Warehouse = fileConf.Warehouse
+	}
+
+	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
+		args.AwsProfile = fileConf.AwsProfile
 	}
 
 	if fileConf.RestOptions != nil {

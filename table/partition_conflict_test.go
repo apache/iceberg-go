@@ -175,50 +175,6 @@ func buildPartitionedContext(
 }
 
 // ---------------------------------------------------------------------------
-// anyToLiteral
-// ---------------------------------------------------------------------------
-
-func TestAnyToLiteral_SupportedTypes(t *testing.T) {
-	cases := []struct {
-		name string
-		v    any
-	}{
-		{"bool", true},
-		{"int32", int32(42)},
-		{"int64", int64(42)},
-		{"float32", float32(1.5)},
-		{"float64", float64(1.5)},
-		{"string", "hello"},
-		{"bytes", []byte{0x01}},
-		{"Date", iceberg.Date(100)},
-		{"Time", iceberg.Time(1000)},
-		{"Timestamp", iceberg.Timestamp(9999)},
-		// TimestampNano: arm in anyToLiteral was unreachable from the manifest read path
-		// because convertAvroValueToIcebergType had no timestamp-nanos case; now fixed.
-		{"TimestampNano", iceberg.TimestampNano(9999)},
-		{"UUID", uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")},
-		// DecimalLiteral is the named type returned by convertAvroValueToIcebergType
-		// (type DecimalLiteral Decimal). It must be accepted without falling through
-		// to the default error branch.
-		{"DecimalLiteral", iceberg.DecimalLiteral{Scale: 2}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			lit, err := anyToLiteral(tc.v)
-			require.NoError(t, err)
-			assert.NotNil(t, lit)
-		})
-	}
-}
-
-func TestAnyToLiteral_UnsupportedType(t *testing.T) {
-	_, err := anyToLiteral(struct{}{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported partition value type")
-}
-
-// ---------------------------------------------------------------------------
 // validateNoConflictingDataFilesInPartitions short-circuit paths
 // ---------------------------------------------------------------------------
 
@@ -334,6 +290,42 @@ func TestRowDeltaValidate_SamePartitionRejected(t *testing.T) {
 		spec, iceberg.EntryContentEqDeletes,
 		dir+"/us-eq-del.parquet", iceberg.ParquetFile,
 		usPartition, nil, nil, 1, 1024,
+	)
+	require.NoError(t, err)
+
+	err = validateNoConflictingDataFilesInPartitions(ctx, []iceberg.DataFile{eqDf.Build()}, IsolationSerializable)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConflictingDataFiles)
+}
+
+func TestRowDeltaValidate_NullIdentityPartitionRejected(t *testing.T) {
+	dir := filepath.ToSlash(t.TempDir())
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "dt", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	writerBaseID := int64(249)
+	baseMeta := partitionedConflictMeta(t, schema, 2, &writerBaseID)
+	concSnapshotID := int64(250)
+
+	spec := baseMeta.PartitionSpec()
+
+	nullPartition := map[int]any{}
+	for _, pf := range spec.Fields() {
+		nullPartition[pf.FieldID] = nil
+	}
+	mf := writeTestManifest(t, dir, spec, schema, concSnapshotID, nullPartition, dir+"/null-dt-data.parquet")
+	listPath := writeTestManifestList(t, dir, concSnapshotID, []iceberg.ManifestFile{mf})
+
+	ctx := buildPartitionedContext(t, baseMeta, listPath, writerBaseID, concSnapshotID)
+	require.Len(t, ctx.concurrent, 1)
+
+	eqDf, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentEqDeletes,
+		dir+"/null-dt-eq-del.parquet", iceberg.ParquetFile,
+		nullPartition, nil, nil, 1, 1024,
 	)
 	require.NoError(t, err)
 

@@ -32,9 +32,12 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
 	"github.com/apache/iceberg-go/catalog/rest"
+	"github.com/apache/iceberg-go/metrics"
 	"github.com/apache/iceberg-go/table"
 	"github.com/apache/iceberg-go/view"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -74,6 +77,7 @@ func (r *RestCatalogSuite) SetupTest() {
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
@@ -580,6 +584,66 @@ func (r *RestCatalogSuite) TestListTablesPagination() {
 	r.Require().NoError(lastErr)
 }
 
+func (r *RestCatalogSuite) TestListTablesPaginationCycle() {
+	const namespace = "accounting"
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+		if requestCount > 3 {
+			r.Fail("pagination continued after a repeated token")
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+
+			return
+		}
+
+		var name, nextPageToken string
+		switch req.URL.Query().Get("pageToken") {
+		case "":
+			name, nextPageToken = "first", "token-a"
+		case "token-a":
+			name, nextPageToken = "second", "token-b"
+		case "token-b":
+			name, nextPageToken = "third", "token-a"
+		default:
+			r.Fail("unexpected page token")
+			http.Error(w, "unexpected page token", http.StatusBadRequest)
+
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"identifiers": []any{map[string]any{
+				"namespace": []string{namespace},
+				"name":      name,
+			}},
+			"next-page-token": nextPageToken,
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	var identifiers []table.Identifier
+	var paginationErr error
+	for identifier, err := range cat.ListTables(context.Background(), catalog.ToIdentifier(namespace)) {
+		if err != nil {
+			paginationErr = err
+
+			break
+		}
+		identifiers = append(identifiers, identifier)
+	}
+
+	r.ErrorIs(paginationErr, rest.ErrRESTError)
+	r.ErrorContains(paginationErr, "pagination cycle: repeated page token")
+	r.Equal(3, requestCount)
+	r.Equal([]table.Identifier{
+		{"accounting", "first"},
+		{"accounting", "second"},
+		{"accounting", "third"},
+	}, identifiers)
+}
+
 func (r *RestCatalogSuite) TestListTablesPaginationErrorOnSubsequentPage() {
 	namespace := "accounting"
 	r.mux.HandleFunc("/v1/namespaces/"+namespace+"/tables", func(w http.ResponseWriter, req *http.Request) {
@@ -741,6 +805,47 @@ func (r *RestCatalogSuite) TestListNamespaceWithParent200() {
 	r.Require().NoError(err)
 
 	r.Equal([]table.Identifier{{"accounting", "tax"}}, results)
+}
+
+func (r *RestCatalogSuite) TestNamespaceOperationsRejectInvalidComponents() {
+	requestCount := 0
+	r.mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+	})
+	r.mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
+		requestCount++
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	for _, namespace := range []table.Identifier{
+		{"bad\x00name"},
+		{"a\x1fb"},
+	} {
+		r.ErrorIs(cat.CreateNamespace(context.Background(), namespace, nil), catalog.ErrNoSuchNamespace)
+		r.ErrorIs(cat.DropNamespace(context.Background(), namespace), catalog.ErrNoSuchNamespace)
+		_, err = cat.LoadNamespaceProperties(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.UpdateNamespaceProperties(context.Background(), namespace, nil, nil)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.CheckNamespaceExists(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		_, err = cat.ListNamespaces(context.Background(), namespace)
+		r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		for _, err := range cat.ListTables(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+		for _, err := range cat.ListViews(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+		for _, err := range cat.ListFunctions(context.Background(), namespace) {
+			r.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+	}
+
+	r.Zero(requestCount)
 }
 
 func (r *RestCatalogSuite) TestListNamespaces400() {
@@ -1010,6 +1115,32 @@ func (r *RestCatalogSuite) TestDropNamespace404() {
 	r.ErrorContains(err, "examples in warehouse")
 }
 
+func (r *RestCatalogSuite) TestDropNamespace409() {
+	r.mux.HandleFunc("/v1/namespaces/examples", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodDelete, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": "Namespace examples is not empty. Contains 1 table(s).",
+				"type":    "NamespaceNotEmptyException",
+				"code":    409,
+			},
+		})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	err = cat.DropNamespace(context.Background(), catalog.ToIdentifier("examples"))
+	r.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	r.ErrorContains(err, "is not empty")
+}
+
 func (r *RestCatalogSuite) TestLoadNamespaceProps200() {
 	r.mux.HandleFunc("/v1/namespaces/leden", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
@@ -1251,6 +1382,59 @@ func (r *RestCatalogSuite) TestCreateTable409() {
 	r.ErrorIs(err, catalog.ErrTableAlreadyExists)
 }
 
+// TestCreateTableInvalidReporterDoesNotHitServer pins that an invalid
+// metrics-reporter-impl fails CreateTable before the create POST is sent, so a
+// bad reporter can't turn a table the server already created into a reported
+// failure. The reporter is resolved at the top of CreateTable, so the server
+// endpoint is never hit.
+func (r *RestCatalogSuite) TestCreateTableInvalidReporterDoesNotHitServer() {
+	var serverHit bool
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		serverHit = true
+		w.Write([]byte(createTableRestExample))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{metrics.ReporterImplKey: "does-not-exist"}),
+	)
+	r.Require().NoError(err)
+
+	_, err = cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	r.Require().Error(err)
+	r.False(serverHit, "create POST must not be sent when the reporter is invalid")
+}
+
+// TestServerVendedReporterImplIgnored pins that a metrics-reporter-impl vended by
+// the server via /v1/config cannot select — or, with an unregistered name, break
+// — the client's reporter. The client configured none, so the op must succeed and
+// fall back to the nop reporter; selection is resolved from client props only.
+func TestServerVendedReporterImplIgnored(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults": map[string]any{},
+			// A server-vended reporter impl the Go client does not recognize.
+			"overrides": map[string]any{metrics.ReporterImplKey: "does-not-exist"},
+			"endpoints": rest.AllEndpointStrings,
+		})
+	})
+	mux.HandleFunc("/v1/namespaces/fokko/tables", func(w http.ResponseWriter, req *http.Request) {
+		w.Write([]byte(createTableRestExample))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Client does NOT configure a reporter.
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	tbl, err := cat.CreateTable(context.Background(), catalog.ToIdentifier("fokko", "fokko2"), tableSchemaSimple)
+	require.NoError(t, err, "an unregistered server-vended reporter must not fail the create")
+	assert.IsType(t, metrics.NopReporter{}, tbl.MetricsReporter())
+}
+
 func (r *RestCatalogSuite) TestCheckTableExists204() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/fokko2", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodHead, req.Method)
@@ -1297,6 +1481,7 @@ func (r *RestCatalogSuite) TestCheckTableExists404() {
 func (r *RestCatalogSuite) TestLoadTable200() {
 	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
+		r.Empty(req.URL.Query().Get("snapshots"), "LoadTable must not send ?snapshots by default")
 
 		for k, v := range TestHeaders {
 			r.Equal(v, req.Header.Values(k))
@@ -1411,6 +1596,129 @@ func (r *RestCatalogSuite) TestLoadTable200() {
 			},
 		},
 	}))
+}
+
+func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeRefs() {
+	// Server returns only the snapshot referenced by the main branch (refs behaviour).
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("refs", req.URL.Query().Get("snapshots"))
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]},
+				"current-schema-id": 0,
+				"schemas": [{"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]}],
+				"partition-spec": [], "default-spec-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"last-partition-id": 999, "default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"properties": {},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": {"main": {"snapshot-id": 3497810964824022504, "type": "branch"}},
+				"snapshots": [
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504.avro",
+						"schema-id": 0
+					}
+				],
+				"snapshot-log": [], "metadata-log": []
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{"snapshot-loading-mode": "refs"}))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.Require().NoError(err)
+
+	// Only the snapshot referenced by main is returned.
+	r.Len(tbl.Metadata().Snapshots(), 1)
+	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[0].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
+}
+
+func (r *RestCatalogSuite) TestLoadTableWithSnapshotModeAll() {
+	// Server returns all snapshots including unreferenced historical ones (all behaviour).
+	r.mux.HandleFunc("/v1/namespaces/fokko/tables/table", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+		r.Equal("all", req.URL.Query().Get("snapshots"))
+		w.Write([]byte(`{
+			"metadata-location": "s3://warehouse/database/table/metadata/00002.gz.metadata.json",
+			"metadata": {
+				"format-version": 1,
+				"table-uuid": "b55d9dda-6561-423a-8bfc-787980ce421f",
+				"location": "s3://warehouse/database/table",
+				"last-updated-ms": 1646787054459,
+				"last-column-id": 2,
+				"schema": {"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]},
+				"current-schema-id": 0,
+				"schemas": [{"type": "struct", "schema-id": 0, "fields": [
+					{"id": 1, "name": "id", "required": false, "type": "int"},
+					{"id": 2, "name": "data", "required": false, "type": "string"}
+				]}],
+				"partition-spec": [], "default-spec-id": 0,
+				"partition-specs": [{"spec-id": 0, "fields": []}],
+				"last-partition-id": 999, "default-sort-order-id": 0,
+				"sort-orders": [{"order-id": 0, "fields": []}],
+				"properties": {},
+				"current-snapshot-id": 3497810964824022504,
+				"refs": {"main": {"snapshot-id": 3497810964824022504, "type": "branch"}},
+				"snapshots": [
+					{
+						"snapshot-id": 1000000000000000001,
+						"timestamp-ms": 1646700000000,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-1000000000000000001.avro",
+						"schema-id": 0
+					},
+					{
+						"snapshot-id": 3497810964824022504,
+						"timestamp-ms": 1646787054459,
+						"parent-snapshot-id": 1000000000000000001,
+						"summary": {"operation": "append"},
+						"manifest-list": "s3://warehouse/database/table/metadata/snap-3497810964824022504.avro",
+						"schema-id": 0
+					}
+				],
+				"snapshot-log": [], "metadata-log": []
+			}
+		}`))
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithOAuthToken(TestToken),
+		rest.WithAdditionalProps(iceberg.Properties{"snapshot-loading-mode": "all"}))
+	r.Require().NoError(err)
+
+	tbl, err := cat.LoadTable(context.Background(), catalog.ToIdentifier("fokko", "table"))
+	r.Require().NoError(err)
+
+	// Both the current and the unreferenced historical snapshot are returned.
+	r.Len(tbl.Metadata().Snapshots(), 2)
+	r.EqualValues(1000000000000000001, tbl.Metadata().Snapshots()[0].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.Metadata().Snapshots()[1].SnapshotID)
+	r.EqualValues(3497810964824022504, tbl.CurrentSnapshot().SnapshotID)
 }
 
 func (r *RestCatalogSuite) TestRenameTable204() {
@@ -2258,7 +2566,8 @@ type RestTLSCatalogSuite struct {
 	srv *httptest.Server
 	mux *http.ServeMux
 
-	configVals url.Values
+	configVals       url.Values
+	configAuthHeader string
 }
 
 func (r *RestTLSCatalogSuite) SetupTest() {
@@ -2267,10 +2576,12 @@ func (r *RestTLSCatalogSuite) SetupTest() {
 	r.mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
 		r.Require().Equal(http.MethodGet, req.Method)
 		r.configVals = req.URL.Query()
+		r.configAuthHeader = req.Header.Get("Authorization")
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"defaults":  map[string]any{},
 			"overrides": map[string]any{},
+			"endpoints": rest.AllEndpointStrings,
 		})
 	})
 
@@ -2282,6 +2593,7 @@ func (r *RestTLSCatalogSuite) TearDownTest() {
 	r.srv = nil
 	r.mux = nil
 	r.configVals = nil
+	r.configAuthHeader = ""
 }
 
 func (r *RestTLSCatalogSuite) TestSSLFail() {
@@ -2303,6 +2615,7 @@ func (r *RestTLSCatalogSuite) TestSSLLoadRegisteredCatalog() {
 
 	r.NotNil(cat)
 	r.Equal(r.configVals.Get("warehouse"), "s3://some-bucket")
+	r.Equal("Bearer "+TestToken, r.configAuthHeader)
 }
 
 func (r *RestTLSCatalogSuite) TestSSLConfig() {
@@ -2476,6 +2789,19 @@ func (r *RestCatalogSuite) TestCreateView200() {
 	r.NoError(err)
 	r.Equal("metadata-location", createdView.MetadataLocation())
 	r.True(expectedViewMD.Equals(createdView.Metadata()))
+}
+
+func (r *RestCatalogSuite) TestCreateViewRejectsNilVersion() {
+	ctlg, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL)
+	r.Require().NoError(err)
+
+	_, err = ctlg.CreateView(
+		context.Background(),
+		table.Identifier{"ns", "view"},
+		nil,
+		iceberg.NewSchema(0),
+	)
+	r.ErrorIs(err, iceberg.ErrInvalidArgument)
 }
 
 func (r *RestCatalogSuite) TestCreateView409() {
@@ -2652,6 +2978,115 @@ func (r *RestCatalogSuite) TestRegisterView409() {
 	r.ErrorContains(err, "The given view already exists")
 }
 
+func (r *RestCatalogSuite) TestRenameView204() {
+	const metadataLoc = "s3://bucket/warehouse/example.db/destination/metadata/00001.metadata.json"
+
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		var payload struct {
+			Source struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"source"`
+			Destination struct {
+				Namespace []string `json:"namespace"`
+				Name      string   `json:"name"`
+			} `json:"destination"`
+		}
+		r.NoError(json.NewDecoder(req.Body).Decode(&payload))
+		r.Equal([]string{"example"}, payload.Source.Namespace)
+		r.Equal("source", payload.Source.Name)
+		r.Equal([]string{"example"}, payload.Destination.Namespace)
+		r.Equal("destination", payload.Destination.Name)
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Mock the load view endpoint for loading the renamed view.
+	r.mux.HandleFunc("/v1/namespaces/example/views/destination", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodGet, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"metadata-location": %q, "metadata": %s, "config": {}}`,
+			metadataLoc, exampleViewMetadataJSON)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	fromIdent := catalog.ToIdentifier("example", "source")
+	toIdent := catalog.ToIdentifier("example", "destination")
+
+	renamed, err := cat.RenameView(context.Background(), fromIdent, toIdent)
+	r.Require().NoError(err)
+
+	r.Equal(toIdent, renamed.Identifier())
+	r.Equal(metadataLoc, renamed.MetadataLocation())
+	r.Equal(uuid.MustParse("a1b2c3d4-e5f6-7890-1234-567890abcdef"), renamed.Metadata().ViewUUID())
+	r.Equal(exampleViewSQL, renamed.Metadata().CurrentVersion().Representations[0].Sql)
+}
+
+func (r *RestCatalogSuite) TestRenameView404() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view does not exist",
+			Type:    "NoSuchViewException",
+			Code:    404,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.ErrorContains(err, "The given view does not exist")
+}
+
+func (r *RestCatalogSuite) TestRenameView409() {
+	r.mux.HandleFunc("/v1/views/rename", func(w http.ResponseWriter, req *http.Request) {
+		r.Require().Equal(http.MethodPost, req.Method)
+
+		for k, v := range TestHeaders {
+			r.Equal(v, req.Header.Values(k))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{"error": errorResponse{
+			Message: "The given view already exists",
+			Type:    "AlreadyExistsException",
+			Code:    409,
+		}})
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithOAuthToken(TestToken))
+	r.Require().NoError(err)
+
+	_, err = cat.RenameView(context.Background(),
+		catalog.ToIdentifier("example", "source"), catalog.ToIdentifier("example", "destination"))
+	r.ErrorIs(err, catalog.ErrViewAlreadyExists)
+	r.ErrorContains(err, "The given view already exists")
+}
+
 type mockTransport struct {
 	calls []struct {
 		method, path string
@@ -2680,13 +3115,77 @@ func (r *RestCatalogSuite) TestCatalogWithCustomTransport() {
 	r.Equal("/v1/config", transport.calls[0].path)
 
 	// Not expected to succeed
-	tbl, err := cat.LoadTable(context.Background(), table.Identifier{"unknown"})
+	tbl, err := cat.LoadTable(context.Background(), table.Identifier{"namespace", "unknown"})
 	r.Error(err)
 	r.Nil(tbl)
 
 	r.Len(transport.calls, 2)
 	r.Equal("GET", transport.calls[1].method)
-	r.Equal("/v1/namespaces/tables/unknown", transport.calls[1].path)
+	r.Equal("/v1/namespaces/namespace/tables/unknown", transport.calls[1].path)
+}
+
+func (r *RestCatalogSuite) TestTableAndViewIdentifiersRequireNamespace() {
+	var transport mockTransport
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL, rest.WithCustomTransport(&transport))
+	r.Require().NoError(err)
+	r.Require().Len(transport.calls, 1)
+
+	_, err = cat.LoadTable(context.Background(), table.Identifier{"table"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.LoadView(context.Background(), table.Identifier{"view"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+	r.NotErrorIs(err, catalog.ErrNoSuchTable)
+
+	for _, ident := range []table.Identifier{
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "table/name"},
+		{"namespace", "table\nname"},
+	} {
+		_, err = cat.LoadTable(context.Background(), ident)
+		r.ErrorIs(err, catalog.ErrNoSuchTable)
+	}
+
+	for _, ident := range []table.Identifier{
+		{"namespace", ""},
+		{"namespace", "."},
+		{"namespace", ".."},
+		{"namespace", "view/name"},
+		{"namespace", "view\nname"},
+	} {
+		_, err = cat.LoadView(context.Background(), ident)
+		r.ErrorIs(err, catalog.ErrNoSuchView)
+		r.NotErrorIs(err, catalog.ErrNoSuchTable)
+	}
+
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameTable(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"source"}, table.Identifier{"namespace", "destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+
+	_, err = cat.RenameView(context.Background(), table.Identifier{"namespace", "source"}, table.Identifier{"destination"})
+	r.ErrorIs(err, catalog.ErrNoSuchView)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"table"}},
+	})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrMissingIdentifier)
+
+	err = cat.CommitTransaction(context.Background(), []table.TableCommit{
+		{Identifier: table.Identifier{"namespace", "table/name"}},
+	})
+	r.ErrorIs(err, catalog.ErrNoSuchTable)
+	r.NotErrorIs(err, catalog.ErrMissingIdentifier)
+
+	r.Len(transport.calls, 1)
 }
 
 func (r *RestTLSCatalogSuite) TestCatalogWithCustomTransportAndTlsConfig() {
@@ -3211,4 +3710,52 @@ func (r *RestCatalogSuite) TestCommitTransactionErrCommitStateUnknown() {
 				"%d should return ErrCommitStateUnknown, got: %v", code, err)
 		})
 	}
+}
+
+// TestEndpointNegotiation drives a catalog against a server that advertises only
+// a subset of endpoints, exercising the negotiation path end to end.
+func TestEndpointNegotiation(t *testing.T) {
+	var listNamespacesHit, tablesHit bool
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+			// Advertise list-namespaces only: create-table and list-tables are
+			// deliberately absent.
+			"endpoints": []string{"GET /v1/{prefix}/namespaces"},
+		})
+	})
+	mux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		listNamespacesHit = true
+		json.NewEncoder(w).Encode(map[string]any{"namespaces": []any{}})
+	})
+	mux.HandleFunc("/v1/namespaces/", func(w http.ResponseWriter, req *http.Request) {
+		tablesHit = true
+		http.Error(w, "unexpected request to unsupported endpoint", http.StatusInternalServerError)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", srv.URL, rest.WithOAuthToken(TestToken))
+	require.NoError(t, err)
+
+	// An unsupported op fails with the capability sentinel, not a transport error.
+	_, err = cat.CreateTable(context.Background(), table.Identifier{"ns", "tbl"}, tableSchemaSimple)
+	assert.ErrorIs(t, err, rest.ErrEndpointNotSupported)
+	assert.NotErrorIs(t, err, rest.ErrRESTError)
+
+	// An advertised op works.
+	nss, err := cat.ListNamespaces(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, nss)
+	assert.True(t, listNamespacesHit)
+
+	// An unsupported list op yields empty without erroring or calling the server.
+	for _, err := range cat.ListTables(context.Background(), table.Identifier{"ns"}) {
+		require.NoError(t, err)
+	}
+	assert.False(t, tablesHit)
 }

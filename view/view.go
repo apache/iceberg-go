@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 
 	"github.com/apache/iceberg-go"
@@ -43,7 +44,7 @@ func (t View) Equals(other View) bool {
 		t.metadata.Equals(other.metadata)
 }
 
-func (t View) Identifier() table.Identifier     { return t.identifier }
+func (t View) Identifier() table.Identifier     { return slices.Clone(t.identifier) }
 func (t View) Metadata() Metadata               { return t.metadata }
 func (t View) MetadataLocation() string         { return t.metadataLocation }
 func (t View) CurrentVersion() *Version         { return t.metadata.CurrentVersion() }
@@ -55,7 +56,7 @@ func (t View) Schemas() map[int]*iceberg.Schema { return t.metadata.SchemasByID(
 
 func New(ident table.Identifier, meta Metadata, metadataLocation string) *View {
 	return &View{
-		identifier:       ident,
+		identifier:       slices.Clone(ident),
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 	}
@@ -113,6 +114,36 @@ func CreateView(
 	loc string,
 	props iceberg.Properties,
 ) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, props, props)
+}
+
+// CreateViewWithIOProperties creates a view using ioProps to configure the
+// filesystem and metadataProps as the properties persisted in view metadata.
+func CreateViewWithIOProperties(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	viewSQL string,
+	defaultNS table.Identifier,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+) (*View, error) {
+	return createView(ctx, catalogName, viewIdent, schema, viewSQL, defaultNS, loc, ioProps, metadataProps)
+}
+
+func createView(
+	ctx context.Context,
+	catalogName string,
+	viewIdent table.Identifier,
+	schema *iceberg.Schema,
+	viewSQL string,
+	defaultNS table.Identifier,
+	loc string,
+	ioProps iceberg.Properties,
+	metadataProps iceberg.Properties,
+) (*View, error) {
 	versionId := int64(1)
 
 	builder, err := NewMetadataBuilder()
@@ -136,20 +167,23 @@ func CreateView(
 			viewVersion,
 			schema,
 		).
-		SetProperties(props).
+		SetProperties(metadataProps).
 		Build()
 	if err != nil {
 		return nil, err
 	}
 
-	metadataLocation := loc + "/metadata/view-" + uuid.New().String() + ".metadata.json"
+	metadataLocation, err := url.JoinPath(loc, "metadata", "view-"+uuid.New().String()+".metadata.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to build view metadata location: %w", err)
+	}
 
 	viewMetadataBytes, err := json.Marshal(viewMD)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal view metadata: %w", err)
 	}
 
-	fs, err := io.LoadFS(ctx, props, metadataLocation)
+	fs, err := io.LoadFS(ctx, ioProps, metadataLocation)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load filesystem for view metadata: %w", err)
 	}
@@ -159,15 +193,23 @@ func CreateView(
 		return nil, errors.New("filesystem IO does not support writing")
 	}
 
-	out, err := wfs.Create(metadataLocation)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create view metadata file: %w", err)
-	}
-	defer internal.CheckedClose(out, &err)
-
-	if _, err := out.Write(viewMetadataBytes); err != nil {
-		return nil, fmt.Errorf("failed to write view metadata: %w", err)
+	if err := writeViewMetadata(wfs, metadataLocation, viewMetadataBytes); err != nil {
+		return nil, err
 	}
 
 	return New(viewIdent, viewMD, metadataLocation), nil
+}
+
+func writeViewMetadata(wfs io.WriteFileIO, metadataLocation string, data []byte) (err error) {
+	out, err := wfs.Create(metadataLocation)
+	if err != nil {
+		return fmt.Errorf("failed to create view metadata file: %w", err)
+	}
+	defer internal.CheckedClose(out, &err)
+
+	if _, err := out.Write(data); err != nil {
+		return fmt.Errorf("failed to write view metadata: %w", err)
+	}
+
+	return nil
 }

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 )
@@ -38,14 +39,20 @@ type RewriteResult struct {
 	RemovedDataFiles int
 
 	// RemovedPositionDeleteFiles is the count of position delete files
-	// removed because their referenced data file was rewritten.
+	// removed because their referenced data file was rewritten or
+	// because they were passed via
+	// [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
 	RemovedPositionDeleteFiles int
 
 	// RemovedEqualityDeleteFiles is the count of equality delete files
 	// removed via [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
 	// The caller computes which eq-deletes are dead — typically via
-	// [compaction.CollectDeadEqualityDeletes] — and passes the list in.
+	// [compaction.CollectDeadEqualityDeletesWithSpecs] — and passes the list in.
 	RemovedEqualityDeleteFiles int
+
+	// RemovedDeletionVectorFiles is the count of deletion vectors removed
+	// because their referenced data file was rewritten.
+	RemovedDeletionVectorFiles int
 
 	// BytesBefore is the total size of input data files (from the compaction plan).
 	BytesBefore int64
@@ -78,7 +85,7 @@ type CompactionTaskGroup struct {
 // the position delete files safe to expunge in the rewrite snapshot.
 //
 // A distributed coordinator aggregates results from N workers and
-// applies them to a [RewriteFiles] builder via [RewriteFiles.Apply]
+// applies them to a [RewriteFiles] builder via [RewriteFiles.ApplyResult]
 // to commit a single atomic snapshot. Each field is plain data
 // ([]iceberg.DataFile values plus scalars) — callers serialize the
 // contained DataFiles across process boundaries themselves; the
@@ -101,6 +108,11 @@ type CompactionGroupResult struct {
 	// via [CollectSafePositionDeletes]. They are safe to expunge in
 	// the rewrite snapshot.
 	SafePosDeletes []iceberg.DataFile
+
+	// SafeDeletionVectors are deletion vectors attached to tasks in this
+	// group, computed via [CollectSafeDeletionVectors]. Each is bound to
+	// a data file being rewritten, so all are safe to expunge.
+	SafeDeletionVectors []iceberg.DataFile
 
 	// BytesBefore is [CompactionTaskGroup.TotalSizeBytes] passed
 	// through, recorded so the coordinator can roll up metrics
@@ -135,15 +147,16 @@ type RewriteDataFilesOptions struct {
 	// per-group snapshot rather than being summed or split.
 	SnapshotProps iceberg.Properties
 
-	// ExtraDeleteFilesToRemove are delete files (typically equality
-	// deletes that are dead after the rewrite) that the caller wants
-	// expunged in the same snapshot as the rewrite. Honored only when
-	// PartialProgress is false.
+	// ExtraDeleteFilesToRemove are delete files that are dead after
+	// the rewrite and that the caller wants expunged in the same
+	// snapshot. Honored only when PartialProgress is false.
 	//
-	// Use [compaction.CollectDeadEqualityDeletes] to compute this list
-	// from the current snapshot. Position delete files that are fully
-	// applied are removed automatically and do NOT need to be passed
-	// in here.
+	// Use [compaction.CollectDeadEqualityDeletesWithSpecs] and
+	// [compaction.CollectDeadPositionDeletes] to compute this list
+	// from the current snapshot. Position deletes attached to
+	// rewritten tasks are already removed by the per-group staging;
+	// listing them again here is harmless (each file is removed and
+	// counted once).
 	ExtraDeleteFilesToRemove []iceberg.DataFile
 
 	// GroupOptions are forwarded to every [ExecuteCompactionGroup]
@@ -179,10 +192,7 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 
 // WithCompactionScanConcurrency sets the scan concurrency used when
 // reading the group's tasks. Forwarded to [Table.Scan] as
-// [WitMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
-//
-// TODO: the [WitMaxConcurrency] link enshrines a pre-existing typo
-// (missing `h`). Update this reference when that symbol is renamed.
+// [WithMaxConcurrency]. Zero (the default) means runtime.GOMAXPROCS.
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
@@ -195,9 +205,11 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // applied (every referenced data file is in the rewrite set) are
 // removed automatically.
 //
-// Equality-delete cleanup is the caller's responsibility: compute the
-// dead set with [compaction.CollectDeadEqualityDeletes] (against the
-// same snapshot the rewrite is staged on) and pass it via
+// Cleanup beyond that per-group staging is the caller's
+// responsibility: compute the dead sets with
+// [compaction.CollectDeadEqualityDeletesWithSpecs] and
+// [compaction.CollectDeadPositionDeletes] (against the same snapshot
+// the rewrite is staged on) and pass them via
 // [RewriteDataFilesOptions.ExtraDeleteFilesToRemove]. The executor
 // only orchestrates the commit; it does not impose a cleanup policy.
 // This split keeps the pure spec predicate in table/compaction and
@@ -207,8 +219,11 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 // convert [compaction.Group] → [CompactionTaskGroup] and pass them
 // here. Distributed coordinators stage worker results via
 // [ExecuteCompactionGroup] and commit them via [Transaction.NewRewrite]
-// + [RewriteFiles.Apply] + [RewriteFiles.Commit] instead.
+// + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] instead.
 func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
+	if _, err := t.txnMeta(); err != nil {
+		return nil, err
+	}
 	if len(groups) == 0 {
 		return &RewriteResult{}, nil
 	}
@@ -219,6 +234,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 
 	result := &RewriteResult{}
 	rewrite := t.NewRewrite(opts.SnapshotProps)
+	stagedDeleteFiles := make(map[string]struct{})
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -238,17 +254,38 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 			continue
 		}
 
-		rewrite.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+		rewrite.ApplyResult(gr)
 		accumulateGroupMetrics(result, gr)
+		for _, df := range gr.SafePosDeletes {
+			stagedDeleteFiles[df.FilePath()] = struct{}{}
+		}
+		for _, df := range gr.SafeDeletionVectors {
+			stagedDeleteFiles[df.FilePath()] = struct{}{}
+		}
 	}
 
 	if result.RewrittenGroups == 0 {
 		return result, nil
 	}
 
+	// Extra delete files may overlap what the groups already staged
+	// (e.g. [compaction.CollectDeadPositionDeletes] output includes
+	// deletes attached to rewritten tasks); ReplaceFiles rejects
+	// duplicate removals, so stage each file once.
 	for _, df := range opts.ExtraDeleteFilesToRemove {
+		if _, ok := stagedDeleteFiles[df.FilePath()]; ok {
+			continue
+		}
+		stagedDeleteFiles[df.FilePath()] = struct{}{}
 		rewrite.DeleteFile(df)
-		result.RemovedEqualityDeleteFiles++
+		switch {
+		case df.ContentType() == iceberg.EntryContentEqDeletes:
+			result.RemovedEqualityDeleteFiles++
+		case IsDeletionVector(df):
+			result.RemovedDeletionVectorFiles++
+		default:
+			result.RemovedPositionDeleteFiles++
+		}
 	}
 
 	if err := rewrite.Commit(ctx); err != nil {
@@ -263,7 +300,7 @@ func (t *Transaction) RewriteDataFiles(ctx context.Context, groups []CompactionT
 // [WriteRecords], and computes the position-delete files safe to
 // expunge in the rewrite snapshot. It does not commit — the caller
 // hands the result to a coordinator that uses [Transaction.NewRewrite]
-// + [RewriteFiles.Apply] + [RewriteFiles.Commit] to stage the
+// + [RewriteFiles.ApplyResult] + [RewriteFiles.Commit] to stage the
 // atomic commit.
 //
 // Empty groups return a zero [CompactionGroupResult] without doing
@@ -287,7 +324,7 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 
 	var scanOpts []ScanOption
 	if cfg.scanConcurrency > 0 {
-		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
+		scanOpts = append(scanOpts, WithMaxConcurrency(cfg.scanConcurrency))
 	}
 
 	// Preserve row lineage only when every source file in the group carries
@@ -295,19 +332,17 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	// legacy files on a v3 table) would otherwise produce one output where
 	// post-lineage rows have explicit _row_id values and pre-lineage rows
 	// have nulls, which violates the per-file uniqueness/coverage
-	// invariant the v3 spec requires. Splitting mixed groups into separate
-	// outputs is a larger refactor and is left as a follow-up; for now we
-	// degrade gracefully (the rewrite still succeeds, but lineage is not
-	// preserved for the surviving rows).
+	// invariant the v3 spec requires. Row IDs are assigned lazily during
+	// the first v3 manifest-list write after a v1/v2->v3 upgrade, so mixed
+	// groups are expected during migration; for now we degrade gracefully
+	// and do not preserve lineage for the surviving rows.
 	preserveLineage := tbl.metadata.Version() >= 3 && allTasksHaveRowLineage(group.Tasks)
 	if preserveLineage {
 		scanOpts = append(scanOpts, WithRowLineage())
 	} else if tbl.metadata.Version() >= 3 {
-		// Mixed group on a v3 table — at least one source file lacks
-		// FirstRowID so we drop lineage on the surviving rows. This is the
-		// common case during a v1/v2→v3 migration; surface it so operators
-		// can detect silent lineage loss instead of having to diff
-		// metadata before/after.
+		// Drop lineage for the whole mixed group. Warn only when at least one
+		// source file already carried lineage; all-legacy groups fall through
+		// silently because there is no lineage to lose.
 		var lineageFiles, legacyFiles int
 		for _, t := range group.Tasks {
 			if t.FirstRowID != nil {
@@ -343,7 +378,10 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 		// table's name mapping — which doesn't (and cannot) contain the
 		// reserved metadata column names, so the fallback path panics.
 		projectedSchema := iceberg.SchemaWithRowLineage(tbl.Schema())
-		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		arrowSchema, err = SchemaToArrowSchemaWithOptions(projectedSchema, ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: tbl.Metadata().Properties(),
+		})
 		if err != nil {
 			return CompactionGroupResult{}, fmt.Errorf("build arrow schema for lineage write in group %q: %w", group.PartitionKey, err)
 		}
@@ -368,20 +406,19 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 
 	return CompactionGroupResult{
-		PartitionKey:   group.PartitionKey,
-		OldDataFiles:   oldFiles,
-		NewDataFiles:   newFiles,
-		SafePosDeletes: CollectSafePositionDeletes(group.Tasks),
-		BytesBefore:    group.TotalSizeBytes,
-		BytesAfter:     bytesAfter,
+		PartitionKey:        group.PartitionKey,
+		OldDataFiles:        oldFiles,
+		NewDataFiles:        newFiles,
+		SafePosDeletes:      CollectSafePositionDeletes(group.Tasks),
+		SafeDeletionVectors: CollectSafeDeletionVectors(group.Tasks),
+		BytesBefore:         group.TotalSizeBytes,
+		BytesAfter:          bytesAfter,
 	}, nil
 }
 
 // allTasksHaveRowLineage returns true iff every task in the group has a
 // non-nil FirstRowID — i.e. every source file already carries v3 row lineage.
-// Used to gate the preservation path on compaction: mixed groups (some
-// lineage, some legacy) would otherwise produce per-file invariant
-// violations, so the gate is conservative.
+// It returns false for an empty task slice.
 func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 	if len(tasks) == 0 {
 		return false
@@ -410,7 +447,7 @@ func allTasksHaveRowLineage(tasks []FileScanTask) bool {
 func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []CompactionTaskGroup, opts RewriteDataFilesOptions) (*RewriteResult, error) {
 	result := &RewriteResult{}
 	props := maps.Clone(opts.SnapshotProps)
-	var allRewritten []string
+	var allRewritten []iceberg.DataFile
 
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
@@ -430,14 +467,13 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes,
+		deletesToRemove := append(slices.Clone(gr.SafePosDeletes), gr.SafeDeletionVectors...)
+		if err := t.ReplaceFiles(ctx, gr.OldDataFiles, gr.NewDataFiles, deletesToRemove,
 			props, withRewriteSemantics()); err != nil {
 			return result, fmt.Errorf("commit compaction group %q: %w", group.PartitionKey, err)
 		}
 
-		for _, f := range gr.OldDataFiles {
-			allRewritten = append(allRewritten, f.FilePath())
-		}
+		allRewritten = append(allRewritten, gr.OldDataFiles...)
 		accumulateGroupMetrics(result, gr)
 	}
 
@@ -453,22 +489,25 @@ func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 	r.AddedDataFiles += len(gr.NewDataFiles)
 	r.RemovedDataFiles += len(gr.OldDataFiles)
 	r.RemovedPositionDeleteFiles += len(gr.SafePosDeletes)
+	r.RemovedDeletionVectorFiles += len(gr.SafeDeletionVectors)
 	r.BytesBefore += gr.BytesBefore
 	r.BytesAfter += gr.BytesAfter
 }
 
 // rewriteValidator builds a conflictValidatorFunc that rejects the
-// commit if a concurrent snapshot added delete files pointing at any
-// of the rewritten data-file paths (or eq-deletes during the rewrite,
-// conservatively). Always runs — no isolation gating, because rewrite
-// is a structural operation, not a user-facing isolation choice.
-func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
+// commit if a concurrent snapshot added delete files targeting any of
+// the rewritten data files — by referenced-data-file path, by
+// file_path bounds, by partition overlap for partition-scoped
+// pos-deletes, or (conservatively) any eq-delete during the rewrite.
+// Always runs — no isolation gating, because rewrite is a structural
+// operation, not a user-facing isolation choice.
+func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
 	return func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
 		}
 
-		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenPaths)
+		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
 	}
 }
 
@@ -481,7 +520,7 @@ func rewriteValidator(rewrittenPaths []string) conflictValidatorFunc {
 // reading, the new output files will not contain the deleted rows.
 //
 // Only position deletes (EntryContentPosDeletes) are considered.
-// Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
+// Equality deletes are decided by [compaction.DecideDeadEqualityDeletesWithSpecs]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
 //
@@ -519,6 +558,34 @@ func CollectSafePositionDeletes(tasks []FileScanTask) []iceberg.DataFile {
 			}
 			seen[path] = true
 			safe = append(safe, df)
+		}
+	}
+
+	return safe
+}
+
+// CollectSafeDeletionVectors returns the tasks' deletion vectors, deduplicated
+// by referenced data file.
+//
+// Scan planning attaches to a task only the DV referencing its own data file,
+// so every returned DV references a file in the rewrite set. A hand-built
+// [FileScanTask] carrying a DV for some other live data file would have that DV
+// expunged here — populate DeletionVectorFiles only from scan planning.
+func CollectSafeDeletionVectors(tasks []FileScanTask) []iceberg.DataFile {
+	seen := make(map[string]struct{})
+	var safe []iceberg.DataFile
+
+	for _, task := range tasks {
+		for _, dv := range task.DeletionVectorFiles {
+			ref := dv.ReferencedDataFile()
+			if ref == nil {
+				continue
+			}
+			if _, ok := seen[*ref]; ok {
+				continue
+			}
+			seen[*ref] = struct{}{}
+			safe = append(safe, dv)
 		}
 	}
 

@@ -21,6 +21,7 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +29,13 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/catalog"
@@ -71,6 +75,15 @@ func (s *SparkIntegrationTestSuite) SetupTest() {
 	cat, err := rest.NewCatalog(s.ctx, "rest", "http://localhost:8181", rest.WithAdditionalProps(s.props))
 	s.Require().NoError(err)
 	s.cat = cat
+}
+
+func (s *SparkIntegrationTestSuite) requireSpark4() {
+	s.T().Helper()
+	major, err := recipe.SparkMajorVersion()
+	s.Require().NoError(err, "spark version extraction failed")
+	if major < 4 {
+		s.T().Skipf("requires Spark 4+ (running Spark %d)", major)
+	}
 }
 
 func (s *SparkIntegrationTestSuite) TestSetProperties() {
@@ -340,6 +353,8 @@ func (s *SparkIntegrationTestSuite) TestUpdateSpec() {
 }
 
 func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
+	s.requireSpark4()
+
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "event", Type: iceberg.PrimitiveTypes.String},
@@ -449,6 +464,464 @@ func (s *SparkIntegrationTestSuite) TestVariantWriteAndScan() {
 	arrVal, ok := v4.Value().(variant.ArrayValue)
 	s.Require().True(ok)
 	s.EqualValues(3, arrVal.Len())
+
+	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT ts, event, to_json(payload) AS pj FROM default.go_variant_events ORDER BY ts")
+	s.Require().NoError(err)
+	s.Require().Contains(out, `"target":"button-submit"`)
+	s.Require().Contains(out, `98.6`)
+	s.Require().Contains(out, `true`)
+	s.Require().Contains(out, `["prod","us-west-2",7]`)
+}
+
+func (s *SparkIntegrationTestSuite) TestShreddedVariantSparkWriteGoRead() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	_, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_shredded_variant"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{
+			table.PropertyFormatVersion:    "3",
+			"write.parquet.shred-variants": "true",
+		}),
+	)
+	s.Require().NoError(err)
+
+	// Bulk rows share one object shape {a, b, c:{x, y}} so Spark shreds it; the
+	// 1000+/2000+ rows exercise residual merge, scalars, arrays and nulls.
+	const bulk = 200
+	insert := "INSERT INTO default.go_shredded_variant VALUES\n"
+	rows := make([]string, 0, bulk+8)
+	for id := 0; id < bulk; id++ {
+		rows = append(rows, fmt.Sprintf(
+			"(%d, parse_json(format_string('{\"a\": %d, \"b\": \"row\", \"c\": {\"x\": %d, \"y\": \"y%d\"}}', %d, %d, %d)))",
+			id, id, id, id, id, id, id))
+	}
+	// 1000/1001: an extra "rare" field falls to residual; a/b/c stay shredded.
+	rows = append(rows,
+		`(1000, parse_json('{"a": 1000, "b": "row", "c": {"x": 1000, "y": "y1000"}, "rare": "R1000"}'))`,
+		`(1001, parse_json('{"a": 1001, "b": "row", "c": {"x": 1001, "y": "y1001"}, "rare": "R1001"}'))`)
+	// 2000: top-level scalar. 2001: array. 2002: JSON null. 2003: SQL null.
+	rows = append(rows,
+		`(2000, parse_json('42'))`,
+		`(2001, parse_json('[1, 2, 3]'))`,
+		`(2002, parse_json('null'))`,
+		`(2003, CAST(NULL AS VARIANT))`)
+	_, err = recipe.ExecuteSpark(s.T(), "./validation.py", "--sql", insert+strings.Join(rows, ",\n"))
+	s.Require().NoError(err)
+
+	tbl, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier("default", "go_shredded_variant"))
+	s.Require().NoError(err)
+
+	// Confirm Spark actually shredded (else this test is a false green).
+	tasks, err := tbl.Scan().PlanFiles(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(tasks)
+	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
+
+	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
+	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
+
+	scanMem := memory.DefaultAllocator
+	ctx := compute.WithAllocator(s.ctx, scanMem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+
+	s.EqualValues(bulk+6, results.NumRows())
+	s.EqualValues(2, results.NumCols())
+
+	// Index payload by id so assertions are order-independent.
+	byID := map[int64]variant.Value{}
+	nullIDs := map[int64]bool{}
+	idChunks := results.Column(0).Data().Chunks()
+	pChunks := results.Column(1).Data().Chunks()
+	for ck := range idChunks {
+		idArr := idChunks[ck].(*array.Int64)
+		pArr := pChunks[ck].(*extensions.VariantArray)
+		for i := 0; i < idArr.Len(); i++ {
+			id := idArr.Value(i)
+			// Storage().IsNull, not IsNull: a present variant-null must reach byID.
+			if pArr.Storage().IsNull(i) {
+				nullIDs[id] = true
+
+				continue
+			}
+			v, err := pArr.Value(i)
+			s.Require().NoError(err, "id %d", id)
+			byID[id] = v
+		}
+	}
+
+	s.Run("nested object reassembles", func() {
+		for _, id := range []int64{0, 99, 199} {
+			v, ok := byID[id]
+			s.Require().True(ok, "missing id %d", id)
+			obj, ok := v.Value().(variant.ObjectValue)
+			s.Require().True(ok, "id %d not an object", id)
+			s.EqualValues(id, s.variantField(obj, "a"))
+			s.Equal("row", s.variantField(obj, "b"))
+			c, ok := s.variantField(obj, "c").(variant.ObjectValue)
+			s.Require().True(ok, "id %d field c not an object", id)
+			s.EqualValues(id, s.variantField(c, "x"))
+			s.Equal(fmt.Sprintf("y%d", id), s.variantField(c, "y"))
+		}
+	})
+
+	s.Run("partial shred merges residual", func() {
+		for _, id := range []int64{1000, 1001} {
+			v, ok := byID[id]
+			s.Require().True(ok, "missing id %d", id)
+			obj, ok := v.Value().(variant.ObjectValue)
+			s.Require().True(ok, "id %d not an object", id)
+			s.EqualValues(id, s.variantField(obj, "a"))
+			s.Equal(fmt.Sprintf("R%d", id), s.variantField(obj, "rare"), "residual field must merge")
+		}
+	})
+
+	s.Run("top-level scalar", func() {
+		v, ok := byID[2000]
+		s.Require().True(ok, "missing id 2000")
+		s.EqualValues(42, v.Value())
+	})
+
+	s.Run("top-level array", func() {
+		v, ok := byID[2001]
+		s.Require().True(ok, "missing id 2001")
+		arr, ok := v.Value().(variant.ArrayValue)
+		s.Require().True(ok, "id 2001 should be an array")
+		s.EqualValues(3, arr.Len())
+	})
+
+	s.Run("json null is present", func() {
+		v, ok := byID[2002]
+		s.Require().True(ok, "id 2002 (parse_json('null')) must be present, not a physical null")
+		s.Equal(variant.Null, v.Type())
+	})
+
+	s.Run("sql null is physical null", func() {
+		s.True(nullIDs[2003], "id 2003 should be a physical SQL null")
+	})
+
+	s.Run("spark reads merged variant back", func() {
+		out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+			"SELECT to_json(payload) AS pj FROM default.go_shredded_variant WHERE id = 1000")
+		s.Require().NoError(err)
+		s.Require().Contains(out, "1000")
+		s.Require().Contains(out, "R1000")
+	})
+}
+
+// variantField returns the Go value of an object field, failing if absent.
+func (s *SparkIntegrationTestSuite) variantField(obj variant.ObjectValue, key string) any {
+	f, err := obj.ValueByKey(key)
+	s.Require().NoError(err, "missing field %q", key)
+
+	return f.Value.Value()
+}
+
+// assertVariantFileShredded fails unless the payload column was written shredded.
+func (s *SparkIntegrationTestSuite) assertVariantFileShredded(tbl *table.Table, path string) {
+	fs, err := tbl.FS(s.ctx)
+	s.Require().NoError(err)
+	f, err := fs.Open(path)
+	s.Require().NoError(err)
+	defer f.Close()
+
+	pf, err := file.NewParquetReader(f)
+	s.Require().NoError(err)
+	defer pf.Close()
+
+	root := pf.MetaData().Schema.Root()
+	var payload *schema.GroupNode
+	for i := 0; i < root.NumFields(); i++ {
+		if g, ok := root.Field(i).(*schema.GroupNode); ok && g.Name() == "payload" {
+			payload = g
+
+			break
+		}
+	}
+	s.Require().NotNil(payload, "payload must be a group node")
+
+	names := map[string]bool{}
+	var typedValue *schema.GroupNode
+	for i := 0; i < payload.NumFields(); i++ {
+		fld := payload.Field(i)
+		names[fld.Name()] = true
+		if g, ok := fld.(*schema.GroupNode); ok && fld.Name() == "typed_value" {
+			typedValue = g
+		}
+	}
+	s.Require().True(names["typed_value"], "Spark must have written a shredded variant (typed_value child); got children %v", names)
+
+	// c is a nested object, so it must itself be shredded (its own typed_value).
+	s.Require().NotNil(typedValue, "typed_value must be a group")
+	var cField *schema.GroupNode
+	for i := 0; i < typedValue.NumFields(); i++ {
+		if g, ok := typedValue.Field(i).(*schema.GroupNode); ok && g.Name() == "c" {
+			cField = g
+		}
+	}
+	s.Require().NotNil(cField, "typed_value must contain shredded field c")
+	cNames := map[string]bool{}
+	for i := 0; i < cField.NumFields(); i++ {
+		cNames[cField.Field(i).Name()] = true
+	}
+	s.True(cNames["typed_value"], "nested object c must itself be shredded; got %v", cNames)
+}
+
+func (s *SparkIntegrationTestSuite) TestShreddedVariantGoWriteSparkRead() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_shred_write"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{
+			table.PropertyFormatVersion:    "3",
+			"write.parquet.shred-variants": "true",
+		}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	idBldr := array.NewInt64Builder(mem)
+	defer idBldr.Release()
+	payloadBldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer payloadBldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		s.Require().NoError(b.Append(v))
+		val, err := b.Build()
+		s.Require().NoError(err)
+
+		return val
+	}
+
+	// 12 uniform rows {a, b, c:{x,y}, d:decimal} so the analyzer shreds a, b, the
+	// nested object c, and the decimal d; assertVariantFileShredded requires c too.
+	// d (123.45, precision 5) exercises the spec decimal4->INT32 typed_value path.
+	const nRows = 12
+	for i := 0; i < nRows; i++ {
+		idBldr.Append(int64(i))
+		payloadBldr.Append(mkVariant(map[string]any{
+			"a": int64(5_000_000_000 + i),
+			"b": "row",
+			"c": map[string]any{"x": int64(i * 2), "y": int64(i * 3)},
+			"d": variant.DecimalValue[decimal.Decimal32]{Scale: 2, Value: decimal.Decimal32(12345)},
+		}))
+	}
+
+	idArr := idBldr.NewInt64Array()
+	defer idArr.Release()
+	payloadArr := payloadBldr.NewArray()
+	defer payloadArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, payloadArr}, nRows)
+	defer rec.Release()
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Prove the GO writer actually shredded the file (and nested c too).
+	tasks, err := tbl.Scan().PlanFiles(s.ctx)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(tasks)
+	s.assertVariantFileShredded(tbl, tasks[0].File.FilePath())
+
+	// Shredded child bounds are stored under the parent variant field id.
+	s.Require().NotEmpty(tasks[0].File.LowerBoundValues()[2], "variant child lower bounds must be written")
+	s.Require().NotEmpty(tasks[0].File.UpperBoundValues()[2], "variant child upper bounds must be written")
+
+	// Spark reads the Go-written shredded file back and reassembles values.
+	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT id, to_json(payload) AS pj FROM default.go_shred_write ORDER BY id")
+	s.Require().NoError(err)
+	s.Require().Contains(out, `"a":5000000000`)
+	s.Require().Contains(out, `"c":{"x":0,"y":0}`)
+	s.Require().Contains(out, `"c":{"x":22,"y":33}`)
+	// Decimal round-trips: Spark renders variant decimals as bare numerics (see
+	// TestDifferentDataTypes), so the spec decimal4->INT32 typed_value reassembles.
+	s.Require().Contains(out, `"d":123.45`)
+}
+
+// TestShreddedVariantPartitionedGoWriteSparkRead is the cross-engine check for the
+// partitioned write path: a table partitioned by p, shredding a decimal, so AppendTable
+// fans out concurrent partition writers (the path that raced on the shared write-props
+// slice). Every partition file must be shredded and Spark must reassemble the values.
+func (s *SparkIntegrationTestSuite) TestShreddedVariantPartitionedGoWriteSparkRead() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "p", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	partitionSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "p"},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_shred_partitioned"),
+		icebergSchema,
+		catalog.WithPartitionSpec(&partitionSpec),
+		catalog.WithProperties(iceberg.Properties{
+			table.PropertyFormatVersion:    "3",
+			"write.parquet.shred-variants": "true",
+		}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	idBldr := array.NewInt64Builder(mem)
+	defer idBldr.Release()
+	pBldr := array.NewInt64Builder(mem)
+	defer pBldr.Release()
+	payloadBldr := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer payloadBldr.Release()
+
+	mkVariant := func(v any) variant.Value {
+		var b variant.Builder
+		s.Require().NoError(b.Append(v))
+		val, err := b.Build()
+		s.Require().NoError(err)
+
+		return val
+	}
+
+	// 12 rows across 3 partitions (p = i%3); each payload shreds a, b, nested c, and the
+	// decimal d, so every partition file carries a shredded decimal typed_value.
+	const nRows, nPart = 12, 3
+	for i := 0; i < nRows; i++ {
+		idBldr.Append(int64(i))
+		pBldr.Append(int64(i % nPart))
+		payloadBldr.Append(mkVariant(map[string]any{
+			"a": int64(5_000_000_000 + i),
+			"b": "row",
+			"c": map[string]any{"x": int64(i * 2), "y": int64(i * 3)},
+			"d": variant.DecimalValue[decimal.Decimal32]{Scale: 2, Value: decimal.Decimal32(12345)},
+		}))
+	}
+
+	idArr := idBldr.NewInt64Array()
+	defer idArr.Release()
+	pArr := pBldr.NewInt64Array()
+	defer pArr.Release()
+	payloadArr := payloadBldr.NewArray()
+	defer payloadArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, pArr, payloadArr}, nRows)
+	defer rec.Release()
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	// Every partition produced its own file, and each was shredded (incl. nested c).
+	tasks, err := tbl.Scan().PlanFiles(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(tasks, nPart, "one file per partition")
+	for _, tsk := range tasks {
+		s.assertVariantFileShredded(tbl, tsk.File.FilePath())
+		s.Require().NotEmpty(tsk.File.LowerBoundValues()[3], "variant child lower bounds must be written")
+		s.Require().NotEmpty(tsk.File.UpperBoundValues()[3], "variant child upper bounds must be written")
+	}
+
+	// Spark reads the Go-written partitioned shredded files back and reassembles values.
+	out, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"SELECT id, p, to_json(payload) AS pj FROM default.go_shred_partitioned ORDER BY id")
+	s.Require().NoError(err)
+	s.Require().Contains(out, `"a":5000000000`)
+	s.Require().Contains(out, `"c":{"x":0,"y":0}`)
+	s.Require().Contains(out, `"c":{"x":22,"y":33}`)
+	s.Require().Contains(out, `"d":123.45`)
+}
+
+func (s *SparkIntegrationTestSuite) TestUnknownTypeWriteAndScan() {
+	s.requireSpark4()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "note", Type: iceberg.UnknownType{}, Required: false},
+	)
+
+	tbl, err := s.cat.CreateTable(
+		s.ctx,
+		catalog.ToIdentifier("default", "go_unknown_table"),
+		icebergSchema,
+		catalog.WithProperties(iceberg.Properties{table.PropertyFormatVersion: "3"}),
+	)
+	s.Require().NoError(err)
+
+	arrowSchema, err := table.SchemaToArrowSchema(icebergSchema, nil, true, false)
+	s.Require().NoError(err)
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	idBldr := array.NewInt64Builder(mem)
+	defer idBldr.Release()
+	idBldr.AppendValues([]int64{1, 2, 3}, nil)
+	idArr := idBldr.NewInt64Array()
+	defer idArr.Release()
+
+	nullArr := array.NewNull(3)
+	defer nullArr.Release()
+
+	rec := array.NewRecord(arrowSchema, []arrow.Array{idArr, nullArr}, 3)
+	defer rec.Release()
+
+	arrTable := array.NewTableFromRecords(arrowSchema, []arrow.Record{rec})
+	defer arrTable.Release()
+
+	tx := tbl.NewTransaction()
+	s.Require().NoError(tx.AppendTable(s.ctx, arrTable, 2048, nil))
+	tbl, err = tx.Commit(s.ctx)
+	s.Require().NoError(err)
+
+	scanMem := memory.DefaultAllocator
+	ctx := compute.WithAllocator(s.ctx, scanMem)
+	results, err := tbl.Scan().ToArrowTable(ctx)
+	s.Require().NoError(err)
+	defer results.Release()
+	s.EqualValues(3, results.NumRows())
+	s.EqualValues(2, results.NumCols())
+
+	desc, err := recipe.ExecuteSpark(s.T(), "./validation.py", "--sql",
+		"DESCRIBE default.go_unknown_table")
+	s.Require().NoError(err)
+	s.Require().Contains(desc, "note")
+	s.Require().Contains(desc, "void")
 }
 
 func (s *SparkIntegrationTestSuite) TestOverwriteBasic() {

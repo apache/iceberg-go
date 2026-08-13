@@ -20,10 +20,13 @@ package view
 import (
 	"bytes"
 	"context"
+	"net/url"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -85,6 +88,72 @@ func (t *ViewTestSuite) TestNewViewFromReadFile() {
 	t.True(t.view.Equals(*vw2))
 }
 
+func (t *ViewTestSuite) TestCreateViewJoinsTrailingSlashMetadataLocation() {
+	createdView, err := CreateView(
+		t.T().Context(),
+		"test-catalog",
+		[]string{"ns", "test_view"},
+		newTestSchema(0),
+		"select 1",
+		[]string{"ns"},
+		"mem://view-create-location/test-view/",
+		nil,
+	)
+	t.Require().NoError(err)
+	t.Require().NotNil(createdView)
+
+	metadataLocation := createdView.MetadataLocation()
+	parsedLocation, err := url.Parse(metadataLocation)
+	t.Require().NoError(err)
+	t.NotContains(parsedLocation.Path, "//metadata/")
+	t.Contains(parsedLocation.Path, "/test-view/metadata/view-")
+
+	fs, err := iceio.LoadFS(t.T().Context(), nil, metadataLocation)
+	t.Require().NoError(err)
+	metadataFile, err := fs.Open(metadataLocation)
+	t.Require().NoError(err)
+	t.Require().NoError(metadataFile.Close())
+}
+
 func (t *ViewTestSuite) TestLocation() {
 	t.Equal("s3://bucket/test/location", t.view.Location())
+}
+
+func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
+	var mockfs internal.MockFS
+	mockfs.Test(t)
+	mockfs.On("Create", mock.Anything).
+		Return(&internal.MockFile{Contents: bytes.NewReader(nil), ErrOnClose: true}, nil)
+	defer mockfs.AssertExpectations(t)
+
+	const scheme = "view-close-error"
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		return &mockfs, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	createdView, err := CreateView(
+		t.Context(),
+		"test-catalog",
+		[]string{"ns", "test_view"},
+		newTestSchema(0),
+		"select 1",
+		[]string{"ns"},
+		scheme+"://bucket/test-view",
+		nil,
+	)
+	require.EqualError(t, err, "error on close")
+	require.Nil(t, createdView)
+}
+
+func (t *ViewTestSuite) TestIdentifierReturnsDefensiveCopy() {
+	identifier := []string{"namespace", "view"}
+	vw := New(identifier, nil, "metadata.json")
+
+	identifier[0] = "changed-input"
+	t.Equal([]string{"namespace", "view"}, vw.Identifier())
+
+	returned := vw.Identifier()
+	returned[1] = "changed-output"
+	t.Equal([]string{"namespace", "view"}, vw.Identifier())
 }

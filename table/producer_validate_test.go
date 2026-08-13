@@ -165,16 +165,51 @@ func TestOverwriteFiles_IsolationKeySplitByOp(t *testing.T) {
 		WriteUpdateIsolationLevelKey: string(IsolationSerializable),
 	}
 
+	deleteLevel, err := readIsolationLevel(props, WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault)
+	require.NoError(t, err)
 	// OpDelete must resolve to the delete key (snapshot).
 	assert.Equal(t, IsolationSnapshot,
-		readIsolationLevel(props, WriteDeleteIsolationLevelKey, WriteDeleteIsolationLevelDefault),
+		deleteLevel,
 		"OpDelete path must consult write.delete.isolation-level")
 
 	// Every other op (OpOverwrite, OpReplace) must resolve to the
 	// update key (serializable).
+	updateLevel, err := readIsolationLevel(props, WriteUpdateIsolationLevelKey, WriteUpdateIsolationLevelDefault)
+	require.NoError(t, err)
 	assert.Equal(t, IsolationSerializable,
-		readIsolationLevel(props, WriteUpdateIsolationLevelKey, WriteUpdateIsolationLevelDefault),
+		updateLevel,
 		"non-delete ops must consult write.update.isolation-level")
+}
+
+// TestOverwriteFiles_ValidateInvalidIsolationLevel verifies that malformed
+// isolation settings fail the validator before conflict scanning runs.
+func TestOverwriteFiles_ValidateInvalidIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteUpdateIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn}}
+
+	assert.ErrorIs(t, of.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestOverwriteFiles_ValidateInvalidDeleteIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn, op: OpDelete}}
+
+	assert.ErrorIs(t, of.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestOverwriteFiles_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteUpdateIsolationLevelKey: "not-a-level",
+	})
+	of := &overwriteFiles{base: &snapshotProducer{txn: txn}}
+
+	assert.ErrorIs(t, of.validate(nil), ErrInvalidIsolationLevel)
 }
 
 // TestOverwriteFiles_ValidateNilContext hardens validate against a
@@ -223,13 +258,47 @@ func TestRowDelta_ValidateEqDeleteIsolationGates(t *testing.T) {
 	}
 }
 
+// TestRowDelta_ValidateInvalidIsolationLevel verifies malformed isolation
+// settings fail before manifest or schema checks.
+func TestRowDelta_ValidateInvalidIsolationLevel(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	eqDelete := newTestEqDeleteFile(t, "eq-1.parquet", []int{1})
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{eqDelete}}
+
+	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestRowDelta_ValidateInvalidIsolationLevelWithPosDeletesOnly(t *testing.T) {
+	cc := newEmptyConflictContext(t)
+	posDelete := newTestPosDeleteFile(t, "pos-1.parquet", nil)
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn, delFiles: []iceberg.DataFile{posDelete}}
+
+	assert.ErrorIs(t, rd.validate(cc), ErrInvalidIsolationLevel)
+}
+
+func TestRowDelta_ValidateInvalidIsolationLevelWithNilContext(t *testing.T) {
+	txn := newValidateTestTxn(t, iceberg.Properties{
+		WriteDeleteIsolationLevelKey: "not-a-level",
+	})
+	rd := &RowDelta{txn: txn}
+
+	assert.ErrorIs(t, rd.validate(nil), ErrInvalidIsolationLevel)
+}
+
 func TestRewriteValidator_Smokes(t *testing.T) {
 	cc := newEmptyConflictContext(t)
 
-	// Empty rewrittenPaths short-circuits regardless of cc.
+	// Empty rewrittenFiles short-circuits regardless of cc.
 	require.NoError(t, rewriteValidator(nil)(cc))
 	require.NoError(t, rewriteValidator(nil)(nil))
 
-	// Non-empty paths but zero concurrent snapshots is also nil.
-	require.NoError(t, rewriteValidator([]string{"a.parquet"})(cc))
+	// Non-empty files but zero concurrent snapshots is also nil.
+	rewritten := newTestDataFile(t, *iceberg.UnpartitionedSpec, "a.parquet", nil)
+	require.NoError(t, rewriteValidator([]iceberg.DataFile{rewritten})(cc))
 }

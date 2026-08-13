@@ -1,0 +1,25 @@
+{
+  "report-type": "commit-report",
+  "table-name": "nyc.taxis",
+  "snapshot-id": 3450729581828559851,
+  "sequence-number": 2,
+  "operation": "append",
+  "metrics": {
+    "total-duration": {
+      "count": 1,
+      "time-unit": "nanoseconds",
+      "total-duration": 1234567890
+    },
+    "attempts": {"unit": "count", "value": 1},
+    "added-data-files": {"unit": "count", "value": 4},
+    "total-data-files": {"unit": "count", "value": 4},
+    "added-records": {"unit": "count", "value": 12345},
+    "total-records": {"unit": "count", "value": 12345},
+    "added-files-size-bytes": {"unit": "bytes", "value": 4096000},
+    "total-files-size-bytes": {"unit": "bytes", "value": 4096000},
+    "manifests-created": {"unit": "count", "value": 1},
+    "manifests-kept": {"unit": "count", "value": 0},
+    "manifest-entries-processed": {"unit": "count", "value": 4}
+  },
+  "metadata": {"engine": "go"}
+}

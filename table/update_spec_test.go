@@ -18,11 +18,14 @@
 package table_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var testSchema = iceberg.NewSchema(1,
@@ -59,6 +62,65 @@ var testMetadataPartitioned, _ = table.NewMetadata(testSchema, &partitionSpec, t
 var testNonPartitionedTable = table.New([]string{"non_partitioned"}, testMetadataNonPartitioned, "", nil, nil)
 
 var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartitioned, "", nil, nil)
+
+func TestNewUpdateSpecRejectsUnknownTransformInBaseSpec(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "id_custom",
+		Transform: unknown,
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"unknown_spec"}, meta, "", nil, nil)
+
+	_, _, err = table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+	require.ErrorContains(t, err, "custom_transform[42]")
+}
+
+func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
+	err := table.NewUpdateSpec(nil, false).Commit()
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
+		Transform: iceberg.VoidTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	metadataJSON, err := json.Marshal(meta)
+	require.NoError(t, err)
+	source := []byte(`"source-id":1,`)
+	metadataJSON = bytes.ReplaceAll(metadataJSON, source, nil)
+	require.NotContains(t, string(metadataJSON), string(source))
+	meta, err = table.ParseMetadataBytes(metadataJSON)
+	require.NoError(t, err)
+	tbl := table.New([]string{"source_less_void"}, meta, "", nil, nil)
+
+	update := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+	newSpec, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, []int{0}, newSpec.Field(0).SourceIDs)
+	assert.Equal(t, 1000, newSpec.Field(0).FieldID)
+	assert.Equal(t, "id", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, 2, newSpec.Field(1).SourceID())
+	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
+}
 
 func TestUpdateSpecAddField(t *testing.T) {
 	var txn *table.Transaction
@@ -115,6 +177,40 @@ func TestUpdateSpecAddField(t *testing.T) {
 			BuildUpdates()
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "year cannot transform string values from name")
+		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
+	})
+
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"bucket", iceberg.BucketTransform{NumBuckets: 0}},
+		{"truncate", iceberg.TruncateTransform{Width: 0}},
+	} {
+		t.Run("reject invalid "+tt.name+" transform parameters", func(t *testing.T) {
+			specUpdate := table.NewUpdateSpec(testNonPartitionedTable.NewTransaction(), true)
+			updates, reqs, err := specUpdate.
+				AddField("id", tt.transform, "invalid_transform").
+				BuildUpdates()
+
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "invalid partition transform")
+			assert.Nil(t, updates)
+			assert.Nil(t, reqs)
+		})
+	}
+
+	t.Run("add unknown transform field", func(t *testing.T) {
+		unknown, err := iceberg.ParseTransform("custom_transform[42]")
+		require.NoError(t, err)
+
+		txn = testPartitionedTable.NewTransaction()
+		updates, reqs, err := table.NewUpdateSpec(txn, true).
+			AddField("id", unknown, "id_custom").
+			BuildUpdates()
+		require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+		assert.ErrorContains(t, err, "custom_transform[42]")
 		assert.Nil(t, updates)
 		assert.Nil(t, reqs)
 	})

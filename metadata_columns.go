@@ -17,7 +17,23 @@
 
 package iceberg
 
-import "slices"
+import (
+	"math"
+	"slices"
+)
+
+// MaxStructFieldID is the largest field ID a user-supplied schema may assign.
+// Field IDs greater than this are reserved by the spec for metadata columns
+// (_row_id, _last_updated_sequence_number, _file, _pos, _deleted, _spec_id,
+// _partition, ...). Java: TypeUtil.MAX_STRUCT_FIELD_ID (Integer.MAX_VALUE - 200).
+const MaxStructFieldID = math.MaxInt32 - 200
+
+// IsReservedFieldID reports whether fieldID falls in the range the spec reserves
+// for metadata columns. User schemas must not assign IDs in this range; table
+// schema field IDs must not exceed MaxStructFieldID.
+func IsReservedFieldID(fieldID int) bool {
+	return fieldID > MaxStructFieldID
+}
 
 // Row lineage metadata column field IDs (v3+). Reserved IDs are Integer.MAX_VALUE - 107
 // and Integer.MAX_VALUE - 108 per the Iceberg spec (Metadata Columns / Row Lineage).
@@ -63,21 +79,21 @@ func IsMetadataColumn(fieldID int) bool {
 	return fieldID == RowIDFieldID || fieldID == LastUpdatedSequenceNumberFieldID
 }
 
-// SchemaWithRowLineage returns a new schema with the row-lineage metadata columns
-// (_row_id, _last_updated_sequence_number) appended to the given schema's fields.
-// Used when reading source files during a CoW rewrite or compaction so that row
-// identity and per-row update sequence are preserved in the output.
-//
-// Idempotent: if a row-lineage column is already present (by reserved field ID),
-// it is not appended again. The returned schema always allocates a fresh field
-// slice so it cannot alias the input schema's backing array.
+// SchemaWithRowLineage appends both row-lineage metadata columns (_row_id,
+// _last_updated_sequence_number) so a CoW rewrite or compaction preserves them.
 func SchemaWithRowLineage(s *Schema) *Schema {
+	return SchemaWithRowLineageColumns(s, true, true)
+}
+
+// SchemaWithRowLineageColumns appends the requested row-lineage columns: _row_id
+// when rowID, _last_updated_sequence_number when lastUpdatedSeq. Request exactly
+// the columns you will materialize so the read schema matches the produced batch.
+//
+// Idempotent by reserved field ID; always clones the field slice (no aliasing).
+func SchemaWithRowLineageColumns(s *Schema, rowID, lastUpdatedSeq bool) *Schema {
 	if s == nil {
 		return nil
 	}
-	// Clone the field slice up front so we never share a backing array with the
-	// caller's schema — append-with-spare-capacity could otherwise mutate the
-	// source schema's fields when the caller next mutates either side.
 	fields := slices.Clone(s.Fields())
 
 	hasRowID := false
@@ -91,10 +107,10 @@ func SchemaWithRowLineage(s *Schema) *Schema {
 		}
 	}
 
-	if !hasRowID {
+	if rowID && !hasRowID {
 		fields = append(fields, RowID())
 	}
-	if !hasSeqNum {
+	if lastUpdatedSeq && !hasSeqNum {
 		fields = append(fields, LastUpdatedSequenceNumber())
 	}
 
@@ -110,18 +126,5 @@ func SchemaWithRowLineage(s *Schema) *Schema {
 //
 // Idempotent on RowIDFieldID; allocates a fresh field slice.
 func SchemaWithRowID(s *Schema) *Schema {
-	if s == nil {
-		return nil
-	}
-	fields := slices.Clone(s.Fields())
-
-	for _, f := range fields {
-		if f.ID == RowIDFieldID {
-			return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
-		}
-	}
-
-	fields = append(fields, RowID())
-
-	return NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
+	return SchemaWithRowLineageColumns(s, true, false)
 }

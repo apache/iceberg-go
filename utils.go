@@ -102,6 +102,9 @@ func (l literalSet) addliteral(v Literal) {
 		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
 	case BinaryLiteral:
 		l[maphash.Bytes(lzseed, []byte(v))] = struct{ orig Literal }{v}
+	case GeoLiteral:
+		// GeoLiteral holds a []byte, so it cannot be used as a map key directly.
+		l[maphash.Bytes(lzseed, v.Value())] = struct{ orig Literal }{v}
 	default:
 		l[v] = struct{ orig Literal }{}
 	}
@@ -124,6 +127,13 @@ func (l literalSet) Contains(lit Literal) bool {
 		return lit.Equals(v.orig)
 	case FixedLiteral:
 		v, ok := l[maphash.Bytes(lzseed, []byte(lit))]
+		if !ok {
+			return false
+		}
+
+		return lit.Equals(v.orig)
+	case GeoLiteral:
+		v, ok := l[maphash.Bytes(lzseed, lit.Value())]
 		if !ok {
 			return false
 		}

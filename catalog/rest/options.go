@@ -28,6 +28,11 @@ import (
 
 type Option func(*options)
 
+// TransportFactory creates a transport owned by the REST catalog and returns
+// the cleanup function to run when the catalog is closed. The TLS config is
+// the one configured with WithTLSConfig.
+type TransportFactory func(*tls.Config) (http.RoundTripper, func())
+
 func WithCredential(cred string) Option {
 	return func(o *options) {
 		o.credential = cred
@@ -103,6 +108,10 @@ func WithSigV4RegionSvc(region, service string) Option {
 	}
 }
 
+// WithAuthURI sets the OAuth2 token endpoint (oauth2-server-uri). When not set,
+// the client falls back to {catalog}/v1/oauth/tokens. This is the programmatic
+// equivalent of the oauth2-server-uri property (or its rest.authorization-url
+// alias).
 func WithAuthURI(uri *url.URL) Option {
 	return func(o *options) {
 		o.authUri = uri
@@ -158,6 +167,15 @@ func WithCustomTransport(transport http.RoundTripper) Option {
 	}
 }
 
+// WithTransportFactory configures a catalog-owned transport factory. The
+// returned cleanup function is called when the catalog is closed. Use
+// WithCustomTransport when the caller owns the transport instead.
+func WithTransportFactory(factory TransportFactory) Option {
+	return func(o *options) {
+		o.transportFactory = factory
+	}
+}
+
 type options struct {
 	awsConfig         aws.Config
 	awsConfigSet      bool
@@ -176,6 +194,7 @@ type options struct {
 	audience          string
 	resource          string
 	transport         http.RoundTripper
+	transportFactory  TransportFactory
 	headers           map[string]string
 
 	oauthTLSConfig *tls.Config

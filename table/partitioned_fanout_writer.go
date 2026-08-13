@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -54,8 +55,53 @@ type partitionInfo struct {
 
 type partitionFieldInfo struct {
 	sourceField iceberg.PartitionField
+	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
+}
+
+type binaryPartitionKey string
+
+type nanPartitionKey struct {
+	bits int
+}
+
+func comparablePartitionKey(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return binaryPartitionKey(value)
+	case float32:
+		if math.IsNaN(float64(value)) {
+			return nanPartitionKey{bits: 32}
+		}
+	case float64:
+		if math.IsNaN(value) {
+			return nanPartitionKey{bits: 64}
+		}
+	}
+
+	return value
+}
+
+func partitionRecordsEqual(left, right partitionRecord) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if comparablePartitionKey(left[i]) != comparablePartitionKey(right[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func clonePartitionValue(value any) any {
+	if bytes, ok := value.([]byte); ok {
+		return slices.Clone(bytes)
+	}
+
+	return value
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -80,16 +126,22 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, ctx := errgroup.WithContext(ctx)
-	startRecordFeeder(ctx, p.itr, fanoutWorkers, inputRecordsCh)
+	fanoutBaseCtx, fanoutCancel := context.WithCancel(ctx)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(fanoutBaseCtx)
+	writerCtx, writerCancel := context.WithCancel(ctx)
+	cancel := func() {
+		fanoutCancel()
+		writerCancel()
+	}
+	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
 		fanoutWorkers.Go(func() error {
-			return p.fanout(ctx, inputRecordsCh, outputDataFilesCh)
+			return p.fanout(fanoutCtx, writerCtx, inputRecordsCh, outputDataFilesCh)
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh)
+	return p.yieldDataFiles(fanoutWorkers, inputRecordsCh, outputDataFilesCh, cancel)
 }
 
 func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, error], fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
@@ -115,7 +167,7 @@ func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, err
 	})
 }
 
-func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) fanout(ctx context.Context, writerCtx context.Context, inputRecordsCh <-chan arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -126,7 +178,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 				return nil
 			}
 
-			if err := p.processRecord(ctx, record, dataFilesChannel); err != nil {
+			if err := p.processRecord(ctx, writerCtx, record, dataFilesChannel); err != nil {
 				return err
 			}
 		}
@@ -136,7 +188,7 @@ func (p *partitionedFanoutWriter) fanout(ctx context.Context, inputRecordsCh <-c
 // processRecord partitions a single record batch and writes sub-batches to
 // the appropriate rolling data writers. The record is released when this
 // function returns, bounding Arrow memory to one batch per fanout worker.
-func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
+func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx context.Context, record arrow.RecordBatch, dataFilesChannel chan<- iceberg.DataFile) error {
 	defer record.Release()
 
 	partitions, err := p.getPartitions(record)
@@ -157,7 +209,7 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 		}
 
 		partitionPath := p.partitionPath(val.partitionRec)
-		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(ctx, partitionPath, val.partitionValues, dataFilesChannel)
+		rollingDataWriter, err := p.writerFactory.getOrCreateRollingDataWriter(writerCtx, partitionPath, val.partitionValues, dataFilesChannel)
 		if err != nil {
 			partitionRecord.Release()
 
@@ -174,27 +226,59 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, record arro
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
-	return yieldDataFiles(p.writerFactory, fanoutWorkers, outputDataFilesCh)
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh <-chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, cancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+	return yieldDataFiles(
+		p.writerFactory,
+		fanoutWorkers,
+		inputRecordsCh,
+		outputDataFilesCh,
+		p.writerFactory.closeAll,
+		p.writerFactory.abortAll,
+		cancel,
+	)
 }
 
-func yieldDataFiles(writerFactory *writerFactory, fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile) iter.Seq2[iceberg.DataFile, error] {
+func yieldDataFiles(
+	writerFactory *writerFactory,
+	fanoutWorkers *errgroup.Group,
+	inputRecordsCh <-chan arrow.RecordBatch,
+	outputDataFilesCh chan iceberg.DataFile,
+	closeAll func() error,
+	abortAll func(),
+	cancel context.CancelFunc,
+) iter.Seq2[iceberg.DataFile, error] {
 	// Use a channel to safely communicate the error from the goroutine
 	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
+		defer cancel()
 		err := fanoutWorkers.Wait()
-		err = errors.Join(err, writerFactory.closeAll())
+		// Wait includes the feeder, which closes inputRecordsCh, so draining cannot
+		// block. Any remaining batches were retained by the feeder but never dequeued;
+		// workers release dequeued batches themselves.
+		for record := range inputRecordsCh {
+			record.Release()
+		}
+		if err != nil {
+			abortAll()
+		} else {
+			err = errors.Join(err, closeAll())
+		}
 		errCh <- err
 		close(errCh)
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
+		// LIFO defer order matters: cancel signals the producer first
+		// (synchronous, instant), then the drain pulls outputDataFilesCh so
+		// any in-flight stream send can complete and the producer's
+		// closeAll / fanoutWorkers.Wait paths unblock.
 		defer func() {
 			for range outputDataFilesCh {
 			}
 		}()
+		defer cancel()
 
 		// Yield data files as they arrive - no error yet since goroutine is still running
 		for f := range outputDataFilesCh {
@@ -221,12 +305,20 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 
 	partitionColumns := make([]arrow.Array, len(partitionFields))
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
+	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
+	for _, field := range spec.Fields() {
+		specFieldsByID[field.FieldID] = field
+	}
 
-	for i := range partitionFields {
-		sourceField := spec.Field(i)
+	for i, partitionField := range partitionFields {
+		sourceField, ok := specFieldsByID[partitionField.ID]
+		if !ok {
+			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
+		}
+		partitionFieldsInfo[i].fieldID = partitionField.ID
 		colName, ok := schema.FindColumnName(sourceField.SourceID())
 		if !ok {
-			return nil, fmt.Errorf("failed to find source field ID %d in schema", sourceField.SourceID())
+			continue
 		}
 		colIndices := record.Schema().FieldIndices(colName)
 		if len(colIndices) == 0 {
@@ -239,6 +331,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		partitionColumns[i] = record.Column(colIndices[0])
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
+			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
 		}
@@ -247,12 +340,19 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 	for row := range record.NumRows() {
 		for i := range partitionFields {
 			col := partitionColumns[i]
-			if !col.IsNull(int(row)) {
+			if col != nil && !col.IsNull(int(row)) {
 				fieldInfo := partitionFieldsInfo[i]
 				sourceField := fieldInfo.sourceField
 				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
 				if err != nil {
-					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
+					return nil, fmt.Errorf(
+						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
+						fieldInfo.sourceName,
+						sourceField.SourceID(),
+						col.DataType(),
+						fieldInfo.sourceType,
+						err,
+					)
 				}
 
 				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
@@ -297,10 +397,11 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	// Navigate through all but the last partition field
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
-		val, ok := node.children[part]
+		key := comparablePartitionKey(part)
+		val, ok := node.children[key]
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[part] = newNode
+			node.children[key] = newNode
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
@@ -308,7 +409,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	}
 
 	// Last level stores the actual partitionInfo
-	lastKey := partitionRec[len(partitionRec)-1]
+	lastKey := comparablePartitionKey(partitionRec[len(partitionRec)-1])
 	partVal, ok := node.children[lastKey].(*partitionInfo)
 	if ok {
 		return partVal
@@ -320,8 +421,9 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	// Copy partitionRec values so they don't get overwritten
 	partRecCopy := make(partitionRecord, len(partitionRec))
 	for i := range partitionRec {
-		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
-		partRecCopy[i] = partitionRec[i]
+		value := clonePartitionValue(partitionRec[i])
+		partitionValues[fieldInfo[i].fieldID] = value
+		partRecCopy[i] = value
 	}
 
 	partVal = &partitionInfo{
@@ -472,6 +574,14 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	case *array.LargeBinary:
 
 		return iceberg.NewLiteral(arr.Value(row)), nil
+	case *array.FixedSizeBinary:
+		switch sourceType.(type) {
+		case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		default:
+			return nil, fmt.Errorf("%w: cannot convert Arrow %s to Iceberg type %v", iceberg.ErrInvalidSchema, arr.DataType(), sourceType)
+		}
+
+		return iceberg.NewLiteral(arr.Value(row)).To(sourceType)
 
 	default:
 		val := column.GetOneForMarshal(row)

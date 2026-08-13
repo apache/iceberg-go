@@ -27,6 +27,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"time"
 	"unsafe"
@@ -80,37 +81,43 @@ type NumericLiteral interface {
 	Decrement() Literal
 }
 
-// NewLiteral provides a literal based on the type of T
+// NewLiteral provides a literal based on the type of T.
+//
+// The type switch is performed on &val (a pointer) rather than val itself.
+// Boxing a small scalar such as bool into an interface makes the compiler
+// reference runtime.staticuint64s, which emits a relocation the linker rejects
+// as misaligned on big-endian platforms such as s390x. Switching on a pointer
+// boxes only the pointer, never the scalar, avoiding that reference.
 func NewLiteral[T LiteralType](val T) Literal {
-	switch v := any(val).(type) {
-	case bool:
-		return BoolLiteral(v)
-	case int32:
-		return Int32Literal(v)
-	case int64:
-		return Int64Literal(v)
-	case float32:
-		return Float32Literal(v)
-	case float64:
-		return Float64Literal(v)
-	case Date:
-		return DateLiteral(v)
-	case Time:
-		return TimeLiteral(v)
-	case Timestamp:
-		return TimestampLiteral(v)
-	case TimestampNano:
-		return TimestampNsLiteral(v)
-	case string:
-		return StringLiteral(v)
-	case []byte:
-		return BinaryLiteral(v)
-	case uuid.UUID:
-		return UUIDLiteral(v)
-	case Decimal:
-		return DecimalLiteral(v)
-	case variant.Value:
-		return VariantLiteral(v)
+	switch v := any(&val).(type) {
+	case *bool:
+		return BoolLiteral(*v)
+	case *int32:
+		return Int32Literal(*v)
+	case *int64:
+		return Int64Literal(*v)
+	case *float32:
+		return Float32Literal(*v)
+	case *float64:
+		return Float64Literal(*v)
+	case *Date:
+		return DateLiteral(*v)
+	case *Time:
+		return TimeLiteral(*v)
+	case *Timestamp:
+		return TimestampLiteral(*v)
+	case *TimestampNano:
+		return TimestampNsLiteral(*v)
+	case *string:
+		return StringLiteral(*v)
+	case *[]byte:
+		return BinaryLiteral(*v)
+	case *uuid.UUID:
+		return UUIDLiteral(*v)
+	case *Decimal:
+		return DecimalLiteral(*v)
+	case *variant.Value:
+		return VariantLiteral(*v)
 	}
 	panic("can't happen due to literal type constraint")
 }
@@ -169,14 +176,33 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 		err := v.UnmarshalBinary(data)
 
 		return v, err
+	case GeometryType, GeographyType:
+		// Geometry/Geography single-value bounds use the Iceberg geospatial
+		// serialization (spec Appendix D): little-endian float64 coordinates in
+		// X, Y[, Z][, M] order, i.e. 16, 24, or 32 bytes — not WKB. The
+		// coordinates have no total order, so they are returned as a GeoLiteral
+		// (not a plain BinaryLiteral): it reports the real geo type and is not
+		// comparable, so any attempt to order it errors instead of silently
+		// running bytes.Compare over the coordinate bytes.
+		switch len(data) {
+		case 16, 24, 32: // valid coordinate lengths (XY / XYZ|XYM / XYZM)
+		default:
+			return nil, fmt.Errorf("%w: geometry/geography bound must be 16, 24, or 32 bytes, got %d",
+				ErrInvalidBinSerialization, len(data))
+		}
+
+		return GeoLiteral{val: data, typ: typ}, nil
 	case FixedType:
-		if len(data) != t.Len() {
+		if len(data) < t.Len() {
 			// looks like some writers will write a prefix of the fixed length
 			// for lower/upper bounds instead of the full length. so let's pad
 			// it out to the full length if unpacking a fixed length literal
 			padded := make([]byte, t.Len())
 			copy(padded, data)
 			data = padded
+		} else if len(data) > t.Len() {
+			return nil, fmt.Errorf("%w: %w: fixed[%d] value has %d bytes",
+				ErrInvalidBinSerialization, ErrInvalidFixedLength, t.Len(), len(data))
 		}
 		var v FixedLiteral
 		err := v.UnmarshalBinary(data)
@@ -295,7 +321,7 @@ type belowMinLiteral[T int32 | int64 | float32 | float64] struct {
 }
 
 func (bm belowMinLiteral[T]) MarshalBinary() (data []byte, err error) {
-	return nil, fmt.Errorf("%w: cannot marshal above max literal",
+	return nil, fmt.Errorf("%w: cannot marshal below min literal",
 		ErrInvalidBinSerialization)
 }
 
@@ -370,11 +396,10 @@ type BoolLiteral bool
 
 func (BoolLiteral) Comparator() Comparator[bool] {
 	return func(v1, v2 bool) int {
+		if v1 == v2 {
+			return 0
+		}
 		if v1 {
-			if v2 {
-				return 0
-			}
-
 			return 1
 		}
 
@@ -399,15 +424,13 @@ func (b BoolLiteral) Equals(l Literal) bool {
 	return literalEq(b, l)
 }
 
-var falseBin, trueBin = [1]byte{0x0}, [1]byte{0x1}
-
 func (b BoolLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as 0x00 for false, and anything non-zero for True
 	if b {
-		return trueBin[:], nil
+		return []byte{0x1}, nil
 	}
 
-	return falseBin[:], nil
+	return []byte{0x0}, nil
 }
 
 func (b *BoolLiteral) UnmarshalBinary(data []byte) error {
@@ -802,9 +825,11 @@ func (t TimestampLiteral) To(typ Type) (Literal, error) {
 		return t, nil
 	case TimestampTzType:
 		return t, nil
-	case TimestampNsType:
-		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
-	case TimestampTzNsType:
+	case TimestampNsType, TimestampTzNsType:
+		if t > math.MaxInt64/1000 || t < math.MinInt64/1000 {
+			return nil, fmt.Errorf("%w: timestamp %d is outside the nanosecond range", ErrBadCast, t)
+		}
+
 		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
 	case DateType:
 		return DateLiteral(Timestamp(t).ToDate()), nil
@@ -960,8 +985,8 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimeLiteral(val), nil
 	case TimestampType:
-		// requires RFC3339 with no time zone
-		tm, err := time.Parse("2006-01-02T15:04:05", string(s))
+		// ISO date-time, no zone; fractional seconds optional.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid Timestamp format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
@@ -969,14 +994,32 @@ func (s StringLiteral) To(typ Type) (Literal, error) {
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
 	case TimestampTzType:
-		// requires RFC3339 format WITH time zone
-		tm, err := time.Parse(time.RFC3339, string(s))
+		// ISO date-time WITH zone; up to microsecond fractional seconds.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999Z07:00", string(s))
 		if err != nil {
 			return nil, fmt.Errorf("%w: invalid TimestampTz format for casting from string '%s': %s",
 				ErrBadCast, s, err.Error())
 		}
 
 		return TimestampLiteral(Timestamp(tm.UTC().UnixMicro())), nil
+	case TimestampNsType:
+		// Same as timestamp but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
+	case TimestampTzNsType:
+		// Same as timestamptz but nanosecond precision.
+		tm, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", string(s))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid TimestampTzNs format for casting from string '%s': %s",
+				ErrBadCast, s, err.Error())
+		}
+
+		return TimestampNsLiteral(TimestampNano(tm.UTC().UnixNano())), nil
 	case UUIDType:
 		val, err := uuid.Parse(string(s))
 		if err != nil {
@@ -1092,10 +1135,55 @@ func (b *BinaryLiteral) UnmarshalBinary(data []byte) error {
 	return nil
 }
 
+// GeoLiteral is a non-null geometry or geography single-value bound. Iceberg
+// serializes geospatial bounds as the concatenation of little-endian float64
+// coordinates in X, Y[, Z][, M] order (spec Appendix D), not as WKB. Those
+// coordinates have no total order, so - unlike every other literal - GeoLiteral
+// is deliberately not a TypedLiteral: it exposes no Comparator and refuses to be
+// cast to an orderable type. That keeps ordering-based pruning from silently
+// running bytes.Compare over coordinate bytes (which would yield wrong answers)
+// and makes it error instead. Type() reports the concrete GeometryType or
+// GeographyType, so callers that key off the literal's own type - pruning, To,
+// logging - see the truth rather than plain binary.
+type GeoLiteral struct {
+	val []byte
+	typ Type
+}
+
+func (g GeoLiteral) Type() Type    { return g.typ }
+func (g GeoLiteral) Value() []byte { return g.val }
+func (g GeoLiteral) Any() any      { return g.val }
+func (g GeoLiteral) String() string {
+	return fmt.Sprintf("%s(%x)", g.typ, g.val)
+}
+
+func (g GeoLiteral) To(typ Type) (Literal, error) {
+	// Only an identity cast is meaningful. Casting to any orderable type is
+	// rejected so a geo bound can never be smuggled into a comparison.
+	if g.typ.Equals(typ) {
+		return g, nil
+	}
+
+	return nil, fmt.Errorf("%w: GeoLiteral to %s", ErrBadCast, typ)
+}
+
+func (g GeoLiteral) Equals(other Literal) bool {
+	rhs, ok := other.(GeoLiteral)
+	if !ok {
+		return false
+	}
+
+	return g.typ.Equals(rhs.typ) && bytes.Equal(g.val, rhs.val)
+}
+
+func (g GeoLiteral) MarshalBinary() ([]byte, error) {
+	return g.val, nil
+}
+
 type FixedLiteral []byte
 
 func (FixedLiteral) Comparator() Comparator[[]byte] { return bytes.Compare }
-func (f FixedLiteral) Type() Type                   { return FixedTypeOf(len(f)) }
+func (f FixedLiteral) Type() Type                   { return FixedType{len: len(f)} }
 func (f FixedLiteral) Value() []byte                { return []byte(f) }
 func (f FixedLiteral) Any() any                     { return f.Value() }
 func (f FixedLiteral) String() string               { return string(f) }
@@ -1117,7 +1205,7 @@ func (f FixedLiteral) To(typ Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: cannot convert FixedLiteral to %s, different length - %d <> %d",
 			ErrBadCast, typ, len(f), t.len)
 	case BinaryType:
-		return f, nil
+		return BinaryLiteral(slices.Clone(f)), nil
 	}
 
 	return nil, fmt.Errorf("%w: FixedLiteral[%d] to %s",
@@ -1227,7 +1315,9 @@ func (DecimalLiteral) Comparator() Comparator[Decimal] {
 // precision; DecimalLiteral does not carry precision. Callers that need the
 // real column precision must consult the bound field's type rather than
 // lit.Type(). See https://github.com/apache/iceberg-go/issues/1028.
-func (d DecimalLiteral) Type() Type     { return DecimalTypeOf(9, d.Scale) }
+func (d DecimalLiteral) Type() Type {
+	return DecimalType{precision: 9, scale: d.Scale}
+}
 func (d DecimalLiteral) Value() Decimal { return Decimal(d) }
 func (d DecimalLiteral) Any() any       { return d.Value() }
 func (d DecimalLiteral) String() string {
@@ -1244,14 +1334,22 @@ func (d DecimalLiteral) To(t Type) (Literal, error) {
 		return nil, fmt.Errorf("%w: could not convert %v to %s",
 			ErrBadCast, d, t)
 	case Int32Type:
-		v := d.Val.BigInt().Int64()
-		if v > math.MaxInt32 {
+		v := d.Val.BigInt()
+		if !v.IsInt64() {
+			if v.Sign() > 0 {
+				return Int32AboveMaxLiteral(), nil
+			} else if v.Sign() < 0 {
+				return Int32BelowMinLiteral(), nil
+			}
+		}
+		i := v.Int64()
+		if i > math.MaxInt32 {
 			return Int32AboveMaxLiteral(), nil
-		} else if v < math.MinInt32 {
+		} else if i < math.MinInt32 {
 			return Int32BelowMinLiteral(), nil
 		}
 
-		return Int32Literal(int32(v)), nil
+		return Int32Literal(int32(i)), nil
 	case Int64Type:
 		v := d.Val.BigInt()
 		if !v.IsInt64() {

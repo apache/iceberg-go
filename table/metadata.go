@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 	"io"
 	"iter"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -44,22 +46,18 @@ const (
 )
 
 func generateSnapshotID() int64 {
-	var (
-		rndUUID = uuid.New()
-		out     [8]byte
-	)
+	return snapshotIDFromUUID(uuid.New())
+}
+
+func snapshotIDFromUUID(id uuid.UUID) int64 {
+	var out [8]byte
 
 	for i := range 8 {
-		lhs, rhs := rndUUID[i], rndUUID[i+8]
+		lhs, rhs := id[i], id[i+8]
 		out[i] = lhs ^ rhs
 	}
 
-	snapshotID := int64(binary.LittleEndian.Uint64(out[:]))
-	if snapshotID < 0 {
-		snapshotID = -snapshotID
-	}
-
-	return snapshotID
+	return int64(binary.LittleEndian.Uint64(out[:]) & math.MaxInt64)
 }
 
 // Metadata for an iceberg table as specified in the Iceberg spec
@@ -242,7 +240,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.lastUpdatedMS = 0
 	b.lastColumnId = metadata.LastColumnID()
 	b.schemaList = slices.Clone(metadata.Schemas())
-	b.currentSchemaID = metadata.CurrentSchema().ID
+	currentSchema := metadata.CurrentSchema()
+	if currentSchema == nil {
+		return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+	}
+	b.currentSchemaID = currentSchema.ID
 	b.specs = slices.Clone(metadata.PartitionSpecs())
 	defaultSpecID := metadata.DefaultPartitionSpec()
 	b.defaultSpecID = defaultSpecID
@@ -280,6 +282,60 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	}
 
 	return b, nil
+}
+
+// clonePtr returns a pointer to a shallow copy of *value, or nil if value is nil.
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
+}
+
+// clone returns a metadata-builder copy suitable for staging updates.
+// The copy shares only immutable data with the original builder and keeps
+// value types separated so partial update attempts remain atomic.
+func (b *MetadataBuilder) clone() *MetadataBuilder {
+	if b == nil {
+		return nil
+	}
+
+	cloned := &MetadataBuilder{
+		base:                 b.base,
+		updates:              append([]Update(nil), b.updates...),
+		formatVersion:        b.formatVersion,
+		uuid:                 b.uuid,
+		loc:                  b.loc,
+		lastUpdatedMS:        b.lastUpdatedMS,
+		lastColumnId:         b.lastColumnId,
+		schemaList:           slices.Clone(b.schemaList),
+		currentSchemaID:      b.currentSchemaID,
+		specs:                slices.Clone(b.specs),
+		defaultSpecID:        b.defaultSpecID,
+		lastPartitionID:      clonePtr(b.lastPartitionID),
+		props:                maps.Clone(b.props),
+		snapshotList:         slices.Clone(b.snapshotList),
+		currentSnapshotID:    clonePtr(b.currentSnapshotID),
+		snapshotLog:          slices.Clone(b.snapshotLog),
+		metadataLog:          slices.Clone(b.metadataLog),
+		sortOrderList:        slices.Clone(b.sortOrderList),
+		defaultSortOrderID:   b.defaultSortOrderID,
+		refs:                 maps.Clone(b.refs),
+		statisticsList:       slices.Clone(b.statisticsList),
+		partitionStatsList:   slices.Clone(b.partitionStatsList),
+		encryptionKeyList:    slices.Clone(b.encryptionKeyList),
+		previousFileEntry:    clonePtr(b.previousFileEntry),
+		lastSequenceNumber:   clonePtr(b.lastSequenceNumber),
+		nextRowID:            clonePtr(b.nextRowID),
+		lastAddedSchemaID:    clonePtr(b.lastAddedSchemaID),
+		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
+		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
+	}
+
+	return cloned
 }
 
 func (b *MetadataBuilder) HasChanges() bool { return len(b.updates) > 0 }
@@ -449,7 +505,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return errors.New("can't add snapshot with no added partition specs")
 	} else if s, _ := b.SnapshotByID(snapshot.SnapshotID); s != nil {
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
-	} else if b.formatVersion == 2 &&
+	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
 		snapshot.SequenceNumber <= *b.lastSequenceNumber {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
@@ -502,6 +558,19 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 	if *snapshot.FirstRowID < nextRowID {
 		return fmt.Errorf("%w: first-row-id %d is behind table next-row-id %d",
 			ErrInvalidRowLineage, *snapshot.FirstRowID, nextRowID)
+	}
+
+	// next-row-id is non-decreasing across snapshots, not strictly increasing:
+	// zero-added-rows snapshots (delete-only or metadata-only commits) are
+	// spec-legal and leave the cursor unchanged, so this accepts a sum equal to
+	// the current cursor rather than requiring it to advance. At this point
+	// AddedRows is non-nil and non-negative (guaranteed by the FirstRowID != nil
+	// check above plus Snapshot.ValidateRowLineage), and nextRowID is
+	// non-negative per spec, so the only thing left to guard is int64 overflow
+	// of the running cursor.
+	if *snapshot.AddedRows > math.MaxInt64-nextRowID {
+		return fmt.Errorf("%w: adding %d rows to next-row-id %d overflows int64",
+			ErrInvalidRowLineage, *snapshot.AddedRows, nextRowID)
 	}
 
 	newNextRowID := nextRowID + *snapshot.AddedRows
@@ -568,9 +637,10 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 
 	newOrderID := b.reuseOrCreateNewSortOrderID(sortOrder)
 	if _, err := b.GetSortOrderByID(newOrderID); err == nil {
-		if b.lastAddedSortOrderID != &newOrderID {
+		sortOrder.orderID = newOrderID
+
+		if b.lastAddedSortOrderID == nil || *b.lastAddedSortOrderID != newOrderID {
 			b.lastAddedSortOrderID = &newOrderID
-			sortOrder.orderID = newOrderID
 			b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
 		}
 
@@ -775,11 +845,12 @@ func (b *MetadataBuilder) SetProperties(props iceberg.Properties) error {
 		}
 	}
 
-	b.updates = append(b.updates, NewSetPropertiesUpdate(props))
+	updates := maps.Clone(props)
+	b.updates = append(b.updates, NewSetPropertiesUpdate(updates))
 	if b.props == nil {
-		b.props = props
+		b.props = maps.Clone(updates)
 	} else {
-		maps.Copy(b.props, props)
+		maps.Copy(b.props, updates)
 	}
 
 	return nil
@@ -835,6 +906,9 @@ func (b *MetadataBuilder) SetSnapshotRef(
 			return fmt.Errorf("%w: invalid snapshot ref option: %w", iceberg.ErrInvalidArgument, err)
 		}
 	}
+	if err := ref.validate(); err != nil {
+		return fmt.Errorf("%w: invalid snapshot ref: %w", iceberg.ErrInvalidArgument, err)
+	}
 
 	var maxRefAgeMs, maxSnapshotAgeMs int64
 	var minSnapshotsToKeep int
@@ -887,6 +961,24 @@ func (b *MetadataBuilder) SetSnapshotRef(
 	return nil
 }
 
+func (b *MetadataBuilder) NewRetainingSnapshotRefUpdate(name string, snapshotID int64, refType RefType) *setSnapshotRefUpdate {
+	var maxRefAgeMs, maxSnapshotAgeMs int64
+	var minSnapshotsToKeep int
+	if existing, ok := b.refs[name]; ok && existing.SnapshotRefType == refType {
+		if existing.MaxRefAgeMs != nil {
+			maxRefAgeMs = *existing.MaxRefAgeMs
+		}
+		if existing.MaxSnapshotAgeMs != nil {
+			maxSnapshotAgeMs = *existing.MaxSnapshotAgeMs
+		}
+		if existing.MinSnapshotsToKeep != nil {
+			minSnapshotsToKeep = *existing.MinSnapshotsToKeep
+		}
+	}
+
+	return NewSetSnapshotRefUpdate(name, snapshotID, refType, maxRefAgeMs, maxSnapshotAgeMs, minSnapshotsToKeep)
+}
+
 func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	if _, found := b.refs[name]; !found {
 		return fmt.Errorf("%w: snapshot ref not found: %s", iceberg.ErrInvalidArgument, name)
@@ -902,13 +994,17 @@ func (b *MetadataBuilder) RemoveSnapshotRef(name string) error {
 	return nil
 }
 
-func (b *MetadataBuilder) SetUUID(uuid uuid.UUID) error {
-	if b.uuid == uuid {
+func (b *MetadataBuilder) SetUUID(newUUID uuid.UUID) error {
+	if newUUID == uuid.Nil {
+		return fmt.Errorf("%w: cannot set uuid to nil", iceberg.ErrInvalidArgument)
+	}
+
+	if b.uuid == newUUID {
 		return nil
 	}
 
-	b.updates = append(b.updates, NewAssignUUIDUpdate(uuid))
-	b.uuid = uuid
+	b.updates = append(b.updates, NewAssignUUIDUpdate(newUUID))
+	b.uuid = newUUID
 
 	return nil
 }
@@ -996,7 +1092,7 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
 			}
 		}
-		if b.currentSnapshotID != nil {
+		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {
 			last := newSnapsLog[len(newSnapsLog)-1]
 			if last.SnapshotID != *b.currentSnapshotID {
 				return fmt.Errorf("%w: cannot set invalid snapshot log: latest entry is not the current snapshot", iceberg.ErrInvalidArgument)
@@ -1190,12 +1286,16 @@ func (b *MetadataBuilder) reuseOrCreateNewSchemaID(newSchema *iceberg.Schema) in
 }
 
 func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
+	if len(ints) == 0 {
+		return nil
+	}
+
 	if slices.Contains(ints, b.defaultSpecID) {
 		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}
 
-	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs)-len(ints))
-	removed := make([]int, len(ints))
+	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs))
+	removed := make([]int, 0, len(ints))
 	for _, spec := range b.specs {
 		if slices.Contains(ints, spec.ID()) {
 			removed = append(removed, spec.ID())
@@ -1208,7 +1308,7 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 	b.specs = newSpecs
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSpecUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSpecUpdate(removed))
 	}
 
 	return nil
@@ -1223,7 +1323,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 		return fmt.Errorf("%w: can't remove current schema with id %d", iceberg.ErrInvalidArgument, b.currentSchemaID)
 	}
 
-	removed := make([]int, len(ints))
+	removed := make([]int, 0, len(ints))
 	b.schemaList = slices.DeleteFunc(b.schemaList, func(s *iceberg.Schema) bool {
 		if slices.Contains(ints, s.ID) {
 			removed = append(removed, s.ID)
@@ -1235,7 +1335,7 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 	})
 
 	if len(removed) != 0 {
-		b.updates = append(b.updates, NewRemoveSchemasUpdate(ints))
+		b.updates = append(b.updates, NewRemoveSchemasUpdate(removed))
 	}
 
 	return nil
@@ -1314,6 +1414,9 @@ func (b *MetadataBuilder) AddEncryptionKey(key EncryptionKey) error {
 	if b.formatVersion < 3 {
 		return fmt.Errorf("%w: encryption keys are only supported for format version 3 or higher, current version: %d",
 			iceberg.ErrInvalidArgument, b.formatVersion)
+	}
+	if err := key.validate(); err != nil {
+		return fmt.Errorf("%w: %v", iceberg.ErrInvalidArgument, err)
 	}
 
 	replaced := false
@@ -1404,7 +1507,7 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		FormatVersion int `json:"format-version"`
 	}{}
 	if err := json.Unmarshal(b, &ver); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	var ret Metadata
@@ -1419,7 +1522,144 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, ErrInvalidMetadataFormatVersion
 	}
 
-	return ret, json.Unmarshal(b, ret)
+	normalized, err := assignMissingPartitionFieldIDs(b)
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePartitionSpecIDs(normalized); err != nil {
+		return nil, err
+	}
+
+	if err := json.Unmarshal(normalized, ret); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	return ret, nil
+}
+
+func requirePartitionSpecIDs(b []byte) error {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	rawSpecs, ok := metadata["partition-specs"]
+	if !ok {
+		return nil
+	}
+
+	var specs []json.RawMessage
+	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
+	}
+	for i, rawSpec := range specs {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(rawSpec, &spec); err != nil {
+			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
+		}
+		rawID, ok := spec["spec-id"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
+		}
+	}
+
+	return nil
+}
+
+func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+	if err := requireLastUpdatedMS(metadata); err != nil {
+		return nil, err
+	}
+
+	type rawPartitionSpec struct {
+		ID     int                          `json:"spec-id"`
+		Fields []map[string]json.RawMessage `json:"fields"`
+	}
+
+	var specs []rawPartitionSpec
+	usesSpecList := false
+	if rawSpecs, ok := metadata["partition-specs"]; ok {
+		if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+			return nil, err
+		}
+		usesSpecList = true
+	} else if rawFields, ok := metadata["partition-spec"]; ok {
+		var fields []map[string]json.RawMessage
+		if err := json.Unmarshal(rawFields, &fields); err != nil {
+			return nil, err
+		}
+		specs = []rawPartitionSpec{{Fields: fields}}
+	} else {
+		return b, nil
+	}
+
+	lastAssignedID := iceberg.PartitionDataIDStart - 1
+	lastPartitionIDSet := false
+	if rawLastPartitionID, ok := metadata["last-partition-id"]; ok {
+		var lastPartitionID *int
+		if err := json.Unmarshal(rawLastPartitionID, &lastPartitionID); err == nil && lastPartitionID != nil {
+			lastAssignedID = max(lastAssignedID, *lastPartitionID)
+			lastPartitionIDSet = true
+		}
+	}
+
+	missingFields := make([]map[string]json.RawMessage, 0)
+	for _, spec := range specs {
+		for _, field := range spec.Fields {
+			rawFieldID, ok := field["field-id"]
+			if !ok {
+				missingFields = append(missingFields, field)
+
+				continue
+			}
+
+			var fieldID *int
+			if err := json.Unmarshal(rawFieldID, &fieldID); err == nil && fieldID != nil {
+				lastAssignedID = max(lastAssignedID, *fieldID)
+			}
+		}
+	}
+
+	if len(missingFields) == 0 {
+		return b, nil
+	}
+
+	for _, field := range missingFields {
+		lastAssignedID++
+		rawFieldID, err := json.Marshal(lastAssignedID)
+		if err != nil {
+			return nil, err
+		}
+		field["field-id"] = rawFieldID
+	}
+
+	if usesSpecList {
+		rawSpecs, err := json.Marshal(specs)
+		if err != nil {
+			return nil, err
+		}
+		metadata["partition-specs"] = rawSpecs
+	} else {
+		rawFields, err := json.Marshal(specs[0].Fields)
+		if err != nil {
+			return nil, err
+		}
+		metadata["partition-spec"] = rawFields
+	}
+
+	if lastPartitionIDSet {
+		rawLastPartitionID, err := json.Marshal(lastAssignedID)
+		if err != nil {
+			return nil, err
+		}
+		metadata["last-partition-id"] = rawLastPartitionID
+	}
+
+	return json.Marshal(metadata)
 }
 
 // https://iceberg.apache.org/spec/#iceberg-table-spec
@@ -1453,7 +1693,6 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
-		LastUpdatedMS:      -1,
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -1463,14 +1702,69 @@ func initCommonMetadataForDeserialization() commonMetadata {
 	}
 }
 
-func (c *commonMetadata) Ref() SnapshotRef                     { return c.SnapshotRefs[MainBranch] }
-func (c *commonMetadata) Refs() iter.Seq2[string, SnapshotRef] { return maps.All(c.SnapshotRefs) }
+func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
+	value, ok := fields["last-updated-ms"]
+	if !ok || string(value) == "null" {
+		return fmt.Errorf("%w: last-updated-ms is absent or null", ErrInvalidMetadata)
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) Ref() SnapshotRef {
+	return cloneSnapshotRef(c.SnapshotRefs[MainBranch])
+}
+
+func (c *commonMetadata) Refs() iter.Seq2[string, SnapshotRef] {
+	return func(yield func(string, SnapshotRef) bool) {
+		for name, ref := range c.SnapshotRefs {
+			if !yield(name, cloneSnapshotRef(ref)) {
+				return
+			}
+		}
+	}
+}
+
 func (c *commonMetadata) SnapshotLogs() iter.Seq[SnapshotLogEntry] {
 	return slices.Values(c.SnapshotLog)
 }
 
 func (c *commonMetadata) PreviousFiles() iter.Seq[MetadataLogEntry] {
 	return slices.Values(c.MetadataLog)
+}
+
+func stringPointerEqual(left, right *string) bool {
+	if left == right {
+		return true
+	}
+	if left == nil || right == nil {
+		return false
+	}
+
+	return *left == *right
+}
+
+func blobMetadataEqual(left, right BlobMetadata) bool {
+	return left.Type == right.Type &&
+		left.SnapshotID == right.SnapshotID &&
+		left.SequenceNumber == right.SequenceNumber &&
+		slices.Equal(left.Fields, right.Fields) &&
+		maps.Equal(left.Properties, right.Properties)
+}
+
+func statisticsFileEqual(left, right StatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes &&
+		left.FileFooterSizeInBytes == right.FileFooterSizeInBytes &&
+		stringPointerEqual(left.KeyMetadata, right.KeyMetadata) &&
+		slices.EqualFunc(left.BlobMetadata, right.BlobMetadata, blobMetadataEqual)
+}
+
+func partitionStatisticsFileEqual(left, right PartitionStatisticsFile) bool {
+	return left.SnapshotID == right.SnapshotID &&
+		left.StatisticsPath == right.StatisticsPath &&
+		left.FileSizeInBytes == right.FileSizeInBytes
 }
 
 func (c *commonMetadata) Equals(other *commonMetadata) bool {
@@ -1500,6 +1794,10 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 		fallthrough
 	case !iceinternal.SliceEqualHelper(c.Specs, other.Specs):
 		fallthrough
+	case !slices.EqualFunc(c.StatisticsList, other.StatisticsList, statisticsFileEqual):
+		fallthrough
+	case !slices.EqualFunc(c.PartitionStatsList, other.PartitionStatsList, partitionStatisticsFileEqual):
+		fallthrough
 	case !maps.Equal(c.Props, other.Props):
 		fallthrough
 	case !maps.EqualFunc(c.SnapshotRefs, other.SnapshotRefs, func(sr1, sr2 SnapshotRef) bool { return sr1.Equals(sr2) }):
@@ -1521,18 +1819,18 @@ func (c *commonMetadata) TableUUID() uuid.UUID       { return c.UUID }
 func (c *commonMetadata) Location() string           { return c.Loc }
 func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
 func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
-func (c *commonMetadata) Schemas() []*iceberg.Schema { return c.SchemaList }
+func (c *commonMetadata) Schemas() []*iceberg.Schema { return cloneSchemas(c.SchemaList) }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
 	for _, s := range c.SchemaList {
 		if s.ID == c.CurrentSchemaID {
-			return s
+			return cloneSchema(s)
 		}
 	}
 	panic("should never get here")
 }
 
 func (c *commonMetadata) PartitionSpecs() []iceberg.PartitionSpec {
-	return c.Specs
+	return clonePartitionSpecs(c.Specs)
 }
 
 func (c *commonMetadata) DefaultPartitionSpec() int {
@@ -1542,29 +1840,43 @@ func (c *commonMetadata) DefaultPartitionSpec() int {
 func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
 	for _, s := range c.Specs {
 		if s.ID() == c.DefaultSpecID {
-			return s
+			return clonePartitionSpec(s)
 		}
 	}
 
-	return *iceberg.UnpartitionedSpec
+	return clonePartitionSpec(*iceberg.UnpartitionedSpec)
 }
 
 func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
 	for _, s := range c.Specs {
 		if s.ID() == id {
-			return &s
+			clone := clonePartitionSpec(s)
+
+			return &clone
 		}
 	}
 
 	return nil
 }
 
-func (c *commonMetadata) LastPartitionSpecID() *int { return c.LastPartitionID }
-func (c *commonMetadata) Snapshots() []Snapshot     { return c.SnapshotList }
+func (c *commonMetadata) LastPartitionSpecID() *int {
+	if c.LastPartitionID == nil {
+		return nil
+	}
+
+	id := *c.LastPartitionID
+
+	return &id
+}
+
+func (c *commonMetadata) Snapshots() []Snapshot {
+	return cloneSnapshots(c.SnapshotList)
+}
+
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	for i := range c.SnapshotList {
 		if c.SnapshotList[i].SnapshotID == id {
-			return &c.SnapshotList[i]
+			return cloneSnapshotPtr(&c.SnapshotList[i])
 		}
 	}
 
@@ -1587,15 +1899,18 @@ func (c *commonMetadata) CurrentSnapshot() *Snapshot {
 	return c.SnapshotByID(*c.CurrentSnapshotID)
 }
 
-func (c *commonMetadata) SortOrders() []SortOrder { return c.SortOrderList }
+func (c *commonMetadata) SortOrders() []SortOrder {
+	return cloneSortOrders(c.SortOrderList)
+}
+
 func (c *commonMetadata) SortOrder() SortOrder {
 	for _, s := range c.SortOrderList {
 		if s.OrderID() == c.DefaultSortOrderID {
-			return s
+			return cloneSortOrder(s)
 		}
 	}
 
-	return UnsortedSortOrder
+	return cloneSortOrder(UnsortedSortOrder)
 }
 
 func (c *commonMetadata) DefaultSortOrder() int {
@@ -1603,19 +1918,267 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
-	return c.Props
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
+	return maps.Clone(c.Props)
 }
 
 func (c *commonMetadata) Statistics() iter.Seq[StatisticsFile] {
-	return slices.Values(c.StatisticsList)
+	return slices.Values(cloneStatisticsFiles(c.StatisticsList))
 }
 
 func (c *commonMetadata) PartitionStatistics() iter.Seq[PartitionStatisticsFile] {
-	return slices.Values(c.PartitionStatsList)
+	return slices.Values(slices.Clone(c.PartitionStatsList))
 }
 
 func (c *commonMetadata) EncryptionKeys() iter.Seq[EncryptionKey] {
-	return slices.Values(c.EncryptionKeyList)
+	return slices.Values(cloneEncryptionKeys(c.EncryptionKeyList))
+}
+
+func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
+	if schema == nil {
+		return nil
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(
+		schema.ID,
+		slices.Clone(schema.IdentifierFieldIDs),
+		cloneNestedFields(schema.Fields())...,
+	)
+}
+
+func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
+	if schemas == nil {
+		return nil
+	}
+
+	clones := make([]*iceberg.Schema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = cloneSchema(schema)
+	}
+
+	return clones
+}
+
+func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
+	clones := slices.Clone(fields)
+	for i := range clones {
+		clones[i].Type = cloneSchemaType(clones[i].Type)
+		clones[i].InitialDefault = cloneDefault(clones[i].InitialDefault)
+		clones[i].WriteDefault = cloneDefault(clones[i].WriteDefault)
+	}
+
+	return clones
+}
+
+func cloneDefault(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return slices.Clone(value)
+	case iceberg.BinaryLiteral:
+		return iceberg.BinaryLiteral(slices.Clone([]byte(value)))
+	case iceberg.FixedLiteral:
+		return iceberg.FixedLiteral(slices.Clone([]byte(value)))
+	case []any:
+		clones := make([]any, len(value))
+		for i, item := range value {
+			clones[i] = cloneDefault(item)
+		}
+
+		return clones
+	case map[string]any:
+		clones := make(map[string]any, len(value))
+		for key, item := range value {
+			clones[key] = cloneDefault(item)
+		}
+
+		return clones
+	default:
+		return value
+	}
+}
+
+func cloneSchemaType(typ iceberg.Type) iceberg.Type {
+	switch typ := typ.(type) {
+	case *iceberg.StructType:
+		return &iceberg.StructType{FieldList: cloneNestedFields(typ.FieldList)}
+	case *iceberg.ListType:
+		return &iceberg.ListType{
+			ElementID:       typ.ElementID,
+			Element:         cloneSchemaType(typ.Element),
+			ElementRequired: typ.ElementRequired,
+		}
+	case *iceberg.MapType:
+		return &iceberg.MapType{
+			KeyID:         typ.KeyID,
+			KeyType:       cloneSchemaType(typ.KeyType),
+			ValueID:       typ.ValueID,
+			ValueType:     cloneSchemaType(typ.ValueType),
+			ValueRequired: typ.ValueRequired,
+		}
+	default:
+		return typ
+	}
+}
+
+func clonePartitionSpec(spec iceberg.PartitionSpec) iceberg.PartitionSpec {
+	fields := make([]iceberg.PartitionField, spec.NumFields())
+	for i := range fields {
+		fields[i] = spec.Field(i)
+	}
+
+	return iceberg.NewPartitionSpecID(spec.ID(), fields...)
+}
+
+func clonePartitionSpecs(specs []iceberg.PartitionSpec) []iceberg.PartitionSpec {
+	if specs == nil {
+		return nil
+	}
+
+	clones := make([]iceberg.PartitionSpec, len(specs))
+	for i, spec := range specs {
+		clones[i] = clonePartitionSpec(spec)
+	}
+
+	return clones
+}
+
+func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
+	clone := ref
+	if ref.MinSnapshotsToKeep != nil {
+		value := *ref.MinSnapshotsToKeep
+		clone.MinSnapshotsToKeep = &value
+	}
+	if ref.MaxSnapshotAgeMs != nil {
+		value := *ref.MaxSnapshotAgeMs
+		clone.MaxSnapshotAgeMs = &value
+	}
+	if ref.MaxRefAgeMs != nil {
+		value := *ref.MaxRefAgeMs
+		clone.MaxRefAgeMs = &value
+	}
+
+	return clone
+}
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	clone := snapshot
+	if snapshot.ParentSnapshotID != nil {
+		value := *snapshot.ParentSnapshotID
+		clone.ParentSnapshotID = &value
+	}
+	if snapshot.SchemaID != nil {
+		value := *snapshot.SchemaID
+		clone.SchemaID = &value
+	}
+	if snapshot.FirstRowID != nil {
+		value := *snapshot.FirstRowID
+		clone.FirstRowID = &value
+	}
+	if snapshot.AddedRows != nil {
+		value := *snapshot.AddedRows
+		clone.AddedRows = &value
+	}
+	if snapshot.Summary != nil {
+		clone.Summary = &Summary{
+			Operation:  snapshot.Summary.Operation,
+			Properties: maps.Clone(snapshot.Summary.Properties),
+		}
+	}
+
+	return clone
+}
+
+func cloneSnapshotPtr(snapshot *Snapshot) *Snapshot {
+	if snapshot == nil {
+		return nil
+	}
+
+	clone := cloneSnapshot(*snapshot)
+
+	return &clone
+}
+
+func cloneSnapshots(snapshots []Snapshot) []Snapshot {
+	if snapshots == nil {
+		return nil
+	}
+
+	clones := make([]Snapshot, len(snapshots))
+	for i, snapshot := range snapshots {
+		clones[i] = cloneSnapshot(snapshot)
+	}
+
+	return clones
+}
+
+func cloneSortOrder(order SortOrder) SortOrder {
+	clone := order
+	clone.fields = make([]SortField, len(order.fields))
+	for i, field := range order.fields {
+		clone.fields[i] = field
+		clone.fields[i].SourceIDs = slices.Clone(field.SourceIDs)
+	}
+
+	return clone
+}
+
+func cloneSortOrders(orders []SortOrder) []SortOrder {
+	if orders == nil {
+		return nil
+	}
+
+	clones := make([]SortOrder, len(orders))
+	for i, order := range orders {
+		clones[i] = cloneSortOrder(order)
+	}
+
+	return clones
+}
+
+func cloneStatisticsFiles(stats []StatisticsFile) []StatisticsFile {
+	if stats == nil {
+		return nil
+	}
+
+	clones := make([]StatisticsFile, len(stats))
+	for i, stat := range stats {
+		clones[i] = stat
+		if stat.KeyMetadata != nil {
+			value := *stat.KeyMetadata
+			clones[i].KeyMetadata = &value
+		}
+		if stat.BlobMetadata != nil {
+			clones[i].BlobMetadata = make([]BlobMetadata, len(stat.BlobMetadata))
+			for j, blob := range stat.BlobMetadata {
+				clones[i].BlobMetadata[j] = blob
+				clones[i].BlobMetadata[j].Fields = slices.Clone(blob.Fields)
+				clones[i].BlobMetadata[j].Properties = maps.Clone(blob.Properties)
+			}
+		}
+	}
+
+	return clones
+}
+
+func cloneEncryptionKeys(keys []EncryptionKey) []EncryptionKey {
+	if keys == nil {
+		return nil
+	}
+
+	clones := make([]EncryptionKey, len(keys))
+	for i, key := range keys {
+		clones[i] = key
+		if key.EncryptedByID != nil {
+			value := *key.EncryptedByID
+			clones[i].EncryptedByID = &value
+		}
+		clones[i].Properties = maps.Clone(key.Properties)
+	}
+
+	return clones
 }
 
 // preValidate updates values in the metadata struct with defaults based on
@@ -1656,11 +2219,23 @@ func (c *commonMetadata) preValidate() {
 }
 
 func (c *commonMetadata) checkSchemas() error {
-	// check that current-schema-id is present in schemas
-	for _, s := range c.SchemaList {
-		if s.ID == c.CurrentSchemaID {
-			return nil
+	seen := make(map[int]struct{}, len(c.SchemaList))
+	currentFound := false
+	for i, s := range c.SchemaList {
+		if s == nil {
+			return fmt.Errorf("%w: schema at index %d is null", ErrInvalidMetadata, i)
 		}
+		if _, ok := seen[s.ID]; ok {
+			return fmt.Errorf("%w: duplicate schema ID %d", ErrInvalidMetadata, s.ID)
+		}
+		seen[s.ID] = struct{}{}
+
+		if s.ID == c.CurrentSchemaID {
+			currentFound = true
+		}
+	}
+	if currentFound {
+		return nil
 	}
 
 	return fmt.Errorf("%w: current-schema-id %d can't be found in any schema",
@@ -1714,9 +2289,6 @@ func (c *commonMetadata) constructRefs() {
 
 func (c *commonMetadata) validate() error {
 	switch {
-	case c.LastUpdatedMS == 0:
-		// last-updated-ms is required
-		return fmt.Errorf("%w: missing last-updated-ms", ErrInvalidMetadata)
 	case c.LastColumnId < 0:
 		// last-column-id is required
 		return fmt.Errorf("%w: missing last-column-id", ErrInvalidMetadata)
@@ -1756,6 +2328,10 @@ func (c *commonMetadata) validate() error {
 		return err
 	}
 
+	if err := c.checkSnapshots(); err != nil {
+		return err
+	}
+
 	c.constructRefs()
 
 	if err := c.checkMainRefMatchesCurrentSnapshot(); err != nil {
@@ -1764,6 +2340,18 @@ func (c *commonMetadata) validate() error {
 
 	if err := c.checkRefsExist(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (c *commonMetadata) checkSnapshots() error {
+	seen := make(map[int64]struct{}, len(c.SnapshotList))
+	for _, snapshot := range c.SnapshotList {
+		if _, ok := seen[snapshot.SnapshotID]; ok {
+			return fmt.Errorf("%w: duplicate snapshot ID %d", ErrInvalidMetadata, snapshot.SnapshotID)
+		}
+		seen[snapshot.SnapshotID] = struct{}{}
 	}
 
 	return nil
@@ -2182,16 +2770,28 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 	if tableUuid == uuid.Nil {
 		tableUuid = uuid.New()
 	}
+	var inputProps iceberg.Properties
 	var err error
 	formatVersion := DefaultFormatVersion
 	if props != nil {
-		verStr, ok := props[PropertyFormatVersion]
+		inputProps = maps.Clone(props)
+		verStr, ok := inputProps[PropertyFormatVersion]
 		if ok {
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
-				formatVersion = DefaultFormatVersion
+				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(props, PropertyFormatVersion)
+			delete(inputProps, PropertyFormatVersion)
 		}
+	}
+
+	// Reject reserved metadata column IDs on the user-supplied schema before
+	// reassignIDs runs: reassignment overwrites every field ID with a fresh,
+	// non-reserved value, so a reserved ID (e.g. _row_id) would otherwise be
+	// silently remapped and later resolve to the wrong physical column against
+	// Java-written files (see #1107). This is stricter than Java, which relies
+	// on assignFreshIds to remap them; rejecting is the safer contract here.
+	if err := validateNoReservedFieldIDs(sc); err != nil {
+		return nil, err
 	}
 
 	reassignedIds, err := reassignIDs(sc, partitions, sortOrder)
@@ -2236,7 +2836,7 @@ func NewMetadataWithUUID(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, 
 		return nil, err
 	}
 
-	if err = builder.SetProperties(props); err != nil {
+	if err = builder.SetProperties(inputProps); err != nil {
 		return nil, err
 	}
 

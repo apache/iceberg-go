@@ -23,14 +23,17 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -41,6 +44,18 @@ type keyDefaultMap[K comparable, V any] struct {
 	data           map[K]V
 
 	mx sync.RWMutex
+}
+
+type keyDefaultMapErr[K comparable, V any] struct {
+	defaultFactory func(K) (V, error)
+	data           map[K]keyDefaultValueErr[V]
+
+	mx sync.RWMutex
+}
+
+type keyDefaultValueErr[V any] struct {
+	value V
+	err   error
 }
 
 func (k *keyDefaultMap[K, V]) Get(key K) V {
@@ -66,6 +81,29 @@ func (k *keyDefaultMap[K, V]) Get(key K) V {
 	return v
 }
 
+func (k *keyDefaultMapErr[K, V]) Get(key K) (V, error) {
+	k.mx.RLock()
+	if v, ok := k.data[key]; ok {
+		k.mx.RUnlock()
+
+		return v.value, v.err
+	}
+
+	k.mx.RUnlock()
+	k.mx.Lock()
+	defer k.mx.Unlock()
+
+	// race check between RLock and Lock
+	if v, ok := k.data[key]; ok {
+		return v.value, v.err
+	}
+
+	value, err := k.defaultFactory(key)
+	k.data[key] = keyDefaultValueErr[V]{value: value, err: err}
+
+	return value, err
+}
+
 func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, V] {
 	return &keyDefaultMap[K, V]{
 		data:           make(map[K]V),
@@ -73,17 +111,12 @@ func newKeyDefaultMap[K comparable, V any](factory func(K) V) *keyDefaultMap[K, 
 	}
 }
 
-func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMap[K, V] {
-	return &keyDefaultMap[K, V]{
-		data: make(map[K]V),
-		defaultFactory: func(k K) V {
-			v, err := factory(k)
-			if err != nil {
-				panic(err)
-			}
-
-			return v
-		},
+// newKeyDefaultMapWrapErr memoizes both successful values and deterministic
+// factory errors, so the same failing key is not retried on subsequent reads.
+func newKeyDefaultMapWrapErr[K comparable, V any](factory func(K) (V, error)) *keyDefaultMapErr[K, V] {
+	return &keyDefaultMapErr[K, V]{
+		data:           make(map[K]keyDefaultValueErr[V]),
+		defaultFactory: factory,
 	}
 }
 
@@ -179,88 +212,155 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	return out, nil
 }
 
-func isDeletionVector(df iceberg.DataFile) bool {
-	return df.ReferencedDataFile() != nil
+// IsDeletionVector reports whether df is a deletion vector: a Puffin file with
+// position-delete content. The content-type guard matters because df is an
+// arbitrary DataFile, so a non-pos-delete Puffin from an external writer must
+// not be misclassified. Keying on format rather than referenced_data_file
+// avoids misclassifying a Parquet pos-delete that legally sets it.
+func IsDeletionVector(df iceberg.DataFile) bool {
+	return df.FileFormat() == iceberg.PuffinFile &&
+		df.ContentType() == iceberg.EntryContentPosDeletes
 }
 
 type Scan struct {
-	metadata       Metadata
-	ioF            FSysF
+	identifier       Identifier
+	metadata         Metadata
+	metadataLocation string
+	ioF              FSysF
+	planner          ScanPlanner
+	planningMode     ScanPlanningMode
+	// planIO, when non-nil, owns the plan-scoped FileIO loader set by remote
+	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
+	// the plan retires it after all active readers finish. See PlanIO.
+	planIO         *planIOState
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
 	snapshotID     *int64
 	asOfTimestamp  *int64
+	selectorErr    error
 	options        iceberg.Properties
 	limit          int64
 
 	includeRowLineage bool
 
-	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
-	concurrency      int
+	concurrency int
+
+	reporter metrics.Reporter
 }
 
-func (scan *Scan) UseRowLimit(n int64) *Scan {
+// clone copies the scan configuration and gives the copy its own ownership
+// reference to any remote plan.
+func (scan *Scan) clone() *Scan {
 	out := *scan
-	out.limit = n
+	if out.planIO != nil {
+		out.planIO.retain()
+	}
 
 	return &out
 }
 
+func (scan *Scan) UseRowLimit(n int64) *Scan {
+	out := scan.clone()
+	out.limit = n
+
+	return out
+}
+
+// Reporter returns the metrics reporter for this scan, never nil. The
+// scan-planning instrumentation emits its ScanReport through it.
+func (scan *Scan) Reporter() metrics.Reporter {
+	if scan.reporter == nil {
+		return metrics.NopReporter{}
+	}
+
+	return scan.reporter
+}
+
+// UseRef selects a named snapshot reference. UseRef(MainBranch) is the one
+// intentional exception to selector exclusivity: it returns a clone without
+// changing an existing snapshot or as-of selector. Any conflicting selectors
+// recorded by scan options are still surfaced by scan execution.
 func (scan *Scan) UseRef(name string) (*Scan, error) {
+	if name == MainBranch {
+		return scan.clone(), nil
+	}
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
 	if scan.snapshotID != nil {
 		return nil, fmt.Errorf("%w: cannot override ref, already set snapshot id %d",
 			iceberg.ErrInvalidArgument, *scan.snapshotID)
 	}
+	if scan.asOfTimestamp != nil {
+		return nil, fmt.Errorf("%w: cannot override ref, already set as-of timestamp %d",
+			iceberg.ErrInvalidArgument, *scan.asOfTimestamp)
+	}
 
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
-		out := *scan
+		out := scan.clone()
 		out.snapshotID = &snap.SnapshotID
-		out.partitionFilters = newKeyDefaultMapWrapErr(out.buildPartitionProjection)
 
-		return &out, nil
+		return out, nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot scan unknown ref=%s", iceberg.ErrInvalidArgument, name)
 }
 
-func (scan *Scan) Snapshot() *Snapshot {
-	if scan.snapshotID != nil {
-		return scan.metadata.SnapshotByID(*scan.snapshotID)
+// ResolveSnapshot resolves the snapshot selected by this scan. Live scans use
+// the table's current snapshot; explicit snapshot IDs and as-of timestamps
+// must resolve to an existing snapshot.
+func (scan *Scan) ResolveSnapshot() (*Snapshot, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
 	}
 
-	if scan.asOfTimestamp != nil {
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				return scan.metadata.SnapshotByID(entry.SnapshotID)
-			}
-		}
-	}
-
-	return scan.metadata.CurrentSnapshot()
-}
-
-func (scan *Scan) Projection() (*iceberg.Schema, error) {
-	curSchema := scan.metadata.CurrentSchema()
-	curVersion := scan.metadata.Version()
 	if scan.snapshotID != nil {
 		snap := scan.metadata.SnapshotByID(*scan.snapshotID)
 		if snap == nil {
 			return nil, fmt.Errorf("%w: snapshot not found: %d", ErrInvalidOperation, *scan.snapshotID)
 		}
 
-		if snap.SchemaID != nil {
-			for _, schema := range scan.metadata.Schemas() {
-				if schema.ID == *snap.SchemaID {
-					curSchema = schema
-
-					break
-				}
-			}
-		}
+		return snap, nil
 	}
+
+	if scan.asOfTimestamp != nil {
+		entry, ok := snapshotLogEntryAsOf(scan.metadata.SnapshotLogs(), *scan.asOfTimestamp, true)
+		if !ok {
+			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+		}
+
+		snap := scan.metadata.SnapshotByID(entry.SnapshotID)
+		if snap == nil {
+			return nil, fmt.Errorf("%w: snapshot log references unknown snapshot %d", ErrInvalidMetadata, entry.SnapshotID)
+		}
+
+		return snap, nil
+	}
+
+	return scan.metadata.CurrentSnapshot(), nil
+}
+
+// Snapshot returns the snapshot selected by this scan. It returns nil when an
+// explicit snapshot cannot be resolved; use ResolveSnapshot when the reason
+// for that result must be distinguished from a table with no current snapshot.
+func (scan *Scan) Snapshot() *Snapshot {
+	snap, _ := scan.ResolveSnapshot()
+
+	return snap
+}
+
+func (scan *Scan) Projection() (*iceberg.Schema, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
+	curSchema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+	curVersion := scan.metadata.Version()
 
 	if scan.includeRowLineage && curVersion < minFormatVersionRowLineage {
 		return nil, fmt.Errorf("%w: row lineage requires format version %d, table is v%d",
@@ -307,6 +407,38 @@ func (scan *Scan) Projection() (*iceberg.Schema, error) {
 	}
 
 	return schema, nil
+}
+
+func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
+
+	curSchema := scan.metadata.CurrentSchema()
+	if scan.snapshotID == nil && scan.asOfTimestamp == nil {
+		// Live scans intentionally use the table's current schema. A schema-only
+		// metadata update can advance CurrentSchema without creating a snapshot,
+		// while explicit snapshot/as-of scans use the snapshot schema below.
+		return curSchema, nil
+	}
+
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
+	}
+
+	if snap.SchemaID == nil {
+		return curSchema, nil
+	}
+
+	for _, schema := range scan.metadata.Schemas() {
+		if schema.ID == *snap.SchemaID {
+			return schema, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: snapshot %d references unknown schema id %d",
+		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
 }
 
 // splitLineageMetadataFields partitions selectedFields into user fields and
@@ -358,47 +490,45 @@ func appendMissingLineageFields(s *iceberg.Schema, lineageFields []iceberg.Neste
 	return iceberg.NewSchemaWithIdentifiers(s.ID, s.IdentifierFieldIDs, fields...)
 }
 
-func (scan *Scan) buildPartitionProjection(specID int) (iceberg.BooleanExpression, error) {
-	return buildPartitionProjection(specID, scan.metadata, scan.rowFilter, scan.caseSensitive)
-}
-
-func buildPartitionProjection(specID int, meta Metadata, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
+func buildPartitionProjection(specID int, meta Metadata, schema *iceberg.Schema, rowFilter iceberg.BooleanExpression, caseSensitive bool) (iceberg.BooleanExpression, error) {
 	spec := meta.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	project := newInclusiveProjection(meta.CurrentSchema(), *spec, caseSensitive)
+	project := newInclusiveProjection(schema, *spec, caseSensitive)
 
 	return project(rowFilter)
 }
 
-func (scan *Scan) buildManifestEvaluator(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
-	return buildManifestEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
-}
-
-func buildManifestEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
+func buildManifestEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
 
-	return newManifestEvaluator(*spec, metadata.CurrentSchema(),
-		partitionFilters.Get(specID), caseSensitive)
+	partitionFilter, err := partitionFilters.Get(specID)
+	if err != nil {
+		return nil, err
+	}
+
+	return newManifestEvaluator(*spec, schema,
+		partitionFilter, caseSensitive)
 }
 
-func (scan *Scan) buildPartitionEvaluator(specID int) (func(iceberg.DataFile) (bool, error), error) {
-	return buildPartitionEvaluator(specID, scan.metadata, scan.partitionFilters, scan.caseSensitive)
-}
-
-func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
+func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Schema, partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression], caseSensitive bool) (func(iceberg.DataFile) (bool, error), error) {
 	spec := metadata.PartitionSpecByID(specID)
 	if spec == nil {
 		return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, specID)
 	}
-	partType := spec.PartitionType(metadata.CurrentSchema())
+	partType := spec.PartitionType(schema)
 	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 
-	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilters.Get(specID), caseSensitive)
+	partitionFilter, err := partitionFilters.Get(specID)
+	if err != nil {
+		return nil, err
+	}
+
+	fn, err := iceberg.ExpressionEvaluator(partSchema, partitionFilter, caseSensitive)
 	if err != nil {
 		return nil, err
 	}
@@ -406,6 +536,12 @@ func buildPartitionEvaluator(specID int, metadata Metadata, partitionFilters *ke
 	return func(d iceberg.DataFile) (bool, error) {
 		return fn(GetPartitionRecord(d, partType))
 	}, nil
+}
+
+func (scan *Scan) partitionFiltersForSchema(schema *iceberg.Schema) *keyDefaultMapErr[int, iceberg.BooleanExpression] {
+	return newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+		return buildPartitionProjection(specID, scan.metadata, schema, scan.rowFilter, scan.caseSensitive)
+	})
 }
 
 func (scan *Scan) checkSequenceNumber(minSeqNum int64, manifest iceberg.ManifestFile) bool {
@@ -454,56 +590,6 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 	return out, nil
 }
 
-// matchEqualityDeletesToData returns the equality delete files that apply to
-// the given data entry. An equality delete applies when:
-//   - it has a strictly greater sequence number than the data file
-//   - it shares the same partition (for partitioned tables)
-//
-// The "strictly greater" rule ensures that data files committed in the same
-// snapshot as the equality deletes are not affected — this is how RowDelta
-// atomically adds new rows alongside deletes for old rows.
-func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
-	dataSeqNum := dataEntry.SequenceNum()
-	dataPartition := dataEntry.DataFile().Partition()
-
-	out := make([]iceberg.DataFile, 0)
-	for _, del := range eqDeleteEntries {
-		// Equality deletes only apply to data files with a strictly lower
-		// sequence number.
-		if del.SequenceNum() <= dataSeqNum {
-			continue
-		}
-
-		// For partitioned tables, equality deletes must share the same
-		// partition as the data file. Unpartitioned deletes (nil/empty
-		// partition) apply globally.
-		delPartition := del.DataFile().Partition()
-		if len(delPartition) > 0 && len(dataPartition) > 0 {
-			if !partitionsMatch(dataPartition, delPartition) {
-				continue
-			}
-		}
-
-		out = append(out, del.DataFile())
-	}
-
-	return out
-}
-
-func partitionsMatch(a, b map[int]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-
-	return true
-}
-
 // buildDVIndex indexes deletion vectors by the data file path they reference.
 // The spec requires at most one DV per data file; a second entry for the same
 // path is rejected with an error.
@@ -522,14 +608,25 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 }
 
 // matchDVToData returns the deletion vector that applies to the given data
-// entry, if any. A DV applies only when the data file's sequence number is
-// less than or equal to the DV's sequence number.
+// entry, if any. A DV applies when the data file's sequence number is less
+// than or equal to the DV's sequence number.
+//
+// SequenceNum reports the -1 sentinel when an entry's sequence number is
+// unset (see manifest.go). Entries arrive here already inherited, so a
+// committed ADDED entry always carries a real (>= 0) sequence number; an
+// unset value comes from an EXISTING/DELETED entry missing its required
+// explicit sequence number, or a not-yet-committed manifest. Such an
+// indeterminate sequence number — on either side — is treated as "applies":
+// comparing a real data sequence number against an unset DV sequence (-1)
+// would never satisfy dataSeq <= -1 and would silently drop the DV,
+// resurfacing deleted rows; an unset data sequence likewise satisfies
+// -1 <= dvSeq for any known DV sequence.
 func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
 	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
 	if !ok {
 		return nil
 	}
-	if dataEntry.SequenceNum() <= dvEntry.SequenceNum() {
+	if dvSeq := dvEntry.SequenceNum(); dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
 		return []iceberg.DataFile{dvEntry.DataFile()}
 	}
 
@@ -539,7 +636,26 @@ func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.M
 // fetchPartitionSpecFilteredManifests retrieves the table's current snapshot,
 // fetches its manifest files, and applies partition-spec filters to remove irrelevant manifests.
 func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
-	snap := scan.Snapshot()
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	// This path has no reporter behind it, so the manifest counts recorded into
+	// this accumulator are intentionally discarded. A future caller that needs
+	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
+	// pass in an accumulator it actually reads.
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
+}
+
+// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
+// using the given schema. It records total/scanned/skipped manifest counts
+// (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	if snap == nil {
 		return nil, nil
 	}
@@ -555,16 +671,38 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	}
 
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
-	manifestEvaluators := newKeyDefaultMapWrapErr(scan.buildManifestEvaluator)
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+		return buildManifestEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+	})
 	filtered := make([]iceberg.ManifestFile, 0, len(manifestList))
 	for _, mf := range manifestList {
-		eval := manifestEvaluators.Get(int(mf.PartitionSpecID()))
+		isDelete := mf.ManifestContent() == iceberg.ManifestContentDeletes
+		if isDelete {
+			acc.totalDeleteManifests++
+		} else {
+			acc.totalDataManifests++
+		}
+
+		eval, err := manifestEvaluators.Get(int(mf.PartitionSpecID()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build manifest evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+		}
 		use, err := eval(mf)
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
 		if use {
+			if isDelete {
+				acc.scannedDeleteManifests++
+			} else {
+				acc.scannedDataManifests++
+			}
 			filtered = append(filtered, mf)
+		} else if isDelete {
+			acc.skippedDeleteManifests++
+		} else {
+			acc.skippedDataManifests++
 		}
 	}
 
@@ -577,8 +715,21 @@ func (scan *Scan) collectManifestEntries(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 ) (*manifestEntries, error) {
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+}
+
+func (scan *Scan) collectManifestEntriesWithSchema(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
-		scan.metadata.CurrentSchema(),
+		schema,
 		scan.rowFilter,
 		scan.caseSensitive,
 		scan.options["include_empty_files"] == "true",
@@ -594,7 +745,10 @@ func (scan *Scan) collectManifestEntries(
 	g, _ := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionEvaluators := newKeyDefaultMapWrapErr(scan.buildPartitionEvaluator)
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
+		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+	})
 
 	for _, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
@@ -606,7 +760,10 @@ func (scan *Scan) collectManifestEntries(
 			if err != nil {
 				return err
 			}
-			partEval := partitionEvaluators.Get(int(mf.PartitionSpecID()))
+			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
+			if err != nil {
+				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
+			}
 			manifestEntries, err := openManifest(fs, mf, partEval, metricsEval)
 			if err != nil {
 				return err
@@ -618,7 +775,7 @@ func (scan *Scan) collectManifestEntries(
 				case iceberg.EntryContentData:
 					entries.addDataEntry(e)
 				case iceberg.EntryContentPosDeletes:
-					if isDeletionVector(e.DataFile()) {
+					if IsDeletionVector(e.DataFile()) {
 						entries.addDVEntry(e)
 					} else {
 						entries.addPositionalDeleteEntry(e)
@@ -642,34 +799,98 @@ func (scan *Scan) collectManifestEntries(
 	return entries, nil
 }
 
-// PlanFiles orchestrates the fetching and filtering of manifests, and then
-// building a list of FileScanTasks that match the current Scan criteria.
+// PlanFiles orchestrates the fetching and filtering of manifests, building a
+// list of FileScanTasks that match the current Scan criteria. When planning
+// happens locally it times the whole operation and emits a ScanReport to the
+// scan's reporter on success; remote (server-side) planning reports its own
+// metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
-	if scan.asOfTimestamp != nil {
-		var snapshot *Snapshot
-		entries := slices.Collect(scan.metadata.SnapshotLogs())
-		for i := len(entries) - 1; i >= 0; i-- {
-			entry := entries[i]
-			if entry.TimestampMs <= *scan.asOfTimestamp {
-				snapshot = scan.metadata.SnapshotByID(entry.SnapshotID)
+	if scan.selectorErr != nil {
+		return nil, scan.selectorErr
+	}
 
-				break
-			}
-		}
-		if snapshot == nil {
-			return nil, fmt.Errorf("no snapshot found for timestamp %d", *scan.asOfTimestamp)
+	if scan.asOfTimestamp != nil {
+		snapshot, err := scan.ResolveSnapshot()
+		if err != nil {
+			return nil, err
 		}
 		scan.snapshotID = &snapshot.SnapshotID
 		scan.asOfTimestamp = nil
 	}
+
+	switch scan.planningMode {
+	case ScanPlanningRemote:
+		return scan.planFilesRemote(ctx)
+	case ScanPlanningAuto:
+		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() {
+			return scan.planFilesRemote(ctx)
+		}
+	case ScanPlanningLocal:
+	default:
+		return nil, fmt.Errorf("%w: unknown scan planning mode %q", iceberg.ErrInvalidArgument, scan.planningMode)
+	}
+
+	start := time.Now()
+	var acc scanMetricsAccumulator
+
+	// Resolve the planning schema once and thread it through both planning and
+	// the report, so the report describes exactly the schema that was used.
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	results, err := scan.planFilesLocal(ctx, &acc, schema)
+	if err != nil {
+		return nil, err
+	}
+	// Snap the elapsed time right after planning so total-planning-duration
+	// reflects planning alone, not the report assembly below.
+	planningDuration := time.Since(start)
+
+	// Only emit a report when planning ran against a real snapshot. A table with
+	// no snapshot plans zero files and has no real snapshot id to report; Java
+	// skips the scan report entirely in that case, so we do too.
+	//
+	// Building the report is also skipped for a no-op reporter — the opt-in
+	// default set by Table.Scan, the nil-reporter case for scans constructed
+	// directly in tests (see Reporter, which maps nil to NopReporter), and a
+	// Combine of only nop reporters. A nop discards the report, so assembling
+	// one would be pure overhead.
+	if scan.Snapshot() != nil {
+		if rep := scan.Reporter(); !metrics.IsNop(rep) {
+			// Resolve the projected schema best-effort for the report's projected
+			// fields. Report assembly must never fail a scan, so a projection error
+			// just yields a report that omits projected fields.
+			projected, _ := scan.Projection()
+			safeReport(ctx, rep, scan.buildScanReport(&acc, schema, projected, planningDuration))
+		}
+	}
+
+	return results, nil
+}
+
+// planFilesLocal performs local scan planning: it reads and filters the
+// snapshot's manifests using schema, builds the matching FileScanTasks, and
+// records planning metrics into acc for the caller to report. A successful
+// local plan retires any previous remote plan; a failed local plan leaves it
+// usable. It returns a nil slice (not an empty one) when there is no snapshot
+// or every manifest is pruned.
+func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
+	defer func() {
+		if err == nil {
+			scan.closePlanIO()
+		}
+	}()
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifests(ctx)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntries(ctx, manifestList)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -683,8 +904,12 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	if err != nil {
 		return nil, err
 	}
+	eqDeleteIndex, err := buildEqualityDeleteIndex(entries.equalityDeleteEntries, scan.metadata)
+	if err != nil {
+		return nil, err
+	}
 
-	results := make([]FileScanTask, 0, len(entries.dataEntries))
+	results = make([]FileScanTask, 0, len(entries.dataEntries))
 	for _, e := range entries.dataEntries {
 		// Spec §Scan Planning: when a deletion vector applies to a data
 		// file, positional-delete files must NOT be applied. The DV is
@@ -700,7 +925,10 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 				return nil, err
 			}
 		}
-		eqDeleteFiles := matchEqualityDeletesToData(e, entries.equalityDeleteEntries)
+		eqDeleteFiles, err := eqDeleteIndex.forDataFile(e)
+		if err != nil {
+			return nil, err
+		}
 
 		task := FileScanTask{
 			File:                e.DataFile(),
@@ -722,9 +950,137 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 			task.DataSequenceNumber = &s
 		}
 		results = append(results, task)
+		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
 
+	acc.resultDataFiles = int64(len(results))
+	// Delete-file metrics are derived from the planned tasks so they are
+	// result-scoped, consistent with result-data-files and total-file-size (a
+	// DV-suppressed positional delete never lands on a task, so it is excluded).
+	acc.applyResultDeleteMetrics(results)
+
 	return results, nil
+}
+
+func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
+	if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
+		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
+	}
+
+	caseSensitive := scan.caseSensitive
+	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
+		Identifier:       slices.Clone(scan.identifier),
+		Metadata:         scan.metadata,
+		MetadataLocation: scan.metadataLocation,
+		SnapshotID:       scan.snapshotID,
+		SelectedFields:   scan.selectedFields,
+		RowFilter:        scan.rowFilter,
+		CaseSensitive:    &caseSensitive,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	planIO, err := newPlanIOState(result.IO)
+	if err != nil {
+		return nil, err
+	}
+
+	// Replace the current plan only after the new plan is available. A planner
+	// failure or invalid PlanIO must not destroy a previously usable plan.
+	if scan.planIO != nil && scan.planIO.matches(result.IO) {
+		return result.Tasks, nil
+	}
+
+	oldPlanIO := scan.planIO
+	scan.planIO = planIO
+	if oldPlanIO != nil {
+		oldPlanIO.releaseOwner()
+	}
+
+	return result.Tasks, nil
+}
+
+type planIOState struct {
+	io PlanIO
+
+	mu        sync.Mutex
+	owners    int
+	readers   int
+	closeOnce sync.Once
+}
+
+func newPlanIOState(planIO PlanIO) (*planIOState, error) {
+	if planIO == nil {
+		return nil, nil
+	}
+
+	value := reflect.ValueOf(planIO)
+	if !value.Comparable() {
+		return nil, fmt.Errorf("%w: PlanIO type %T must be comparable", iceberg.ErrInvalidArgument, planIO)
+	}
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return nil, fmt.Errorf("%w: PlanIO must not be nil", iceberg.ErrInvalidArgument)
+		}
+	}
+
+	return &planIOState{io: planIO, owners: 1}, nil
+}
+
+func (p *planIOState) matches(planIO PlanIO) bool {
+	return planIO != nil && p.io == planIO
+}
+
+func (p *planIOState) retain() {
+	p.mu.Lock()
+	p.owners++
+	p.mu.Unlock()
+}
+
+func (p *planIOState) acquire(ctx context.Context) (io.IO, func(), error) {
+	p.mu.Lock()
+	if p.owners == 0 {
+		p.mu.Unlock()
+
+		return nil, nil, fmt.Errorf("%w: remote scan plan is no longer current", ErrInvalidOperation)
+	}
+	p.readers++
+	p.mu.Unlock()
+
+	fs, err := p.io.Load(ctx)
+	if err != nil {
+		p.release()
+
+		return nil, nil, err
+	}
+
+	var releaseOnce sync.Once
+
+	return fs, func() { releaseOnce.Do(p.release) }, nil
+}
+
+func (p *planIOState) release() {
+	p.mu.Lock()
+	p.readers--
+	closeNow := p.owners == 0 && p.readers == 0
+	p.mu.Unlock()
+
+	if closeNow {
+		p.closeOnce.Do(func() { _ = p.io.Close() })
+	}
+}
+
+func (p *planIOState) releaseOwner() {
+	p.mu.Lock()
+	p.owners--
+	closeNow := p.owners == 0 && p.readers == 0
+	p.mu.Unlock()
+
+	if closeNow {
+		p.closeOnce.Do(func() { _ = p.io.Close() })
+	}
 }
 
 type FileScanTask struct {
@@ -733,6 +1089,11 @@ type FileScanTask struct {
 	EqualityDeleteFiles []iceberg.DataFile // equality delete files
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
+	// Residual is the portion of the scan filter that must still be evaluated
+	// for this task. Remote planners may simplify the original filter using
+	// file metadata; nil means the caller did not provide a task residual and
+	// ReadTasks falls back to the Scan's original row filter.
+	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
 	// FirstRowID is the effective first_row_id for this file (from manifest entry, after inheritance).
@@ -759,16 +1120,25 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 }
 
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
-// scan's projection, row filters, and positional delete handling. This is useful when
-// the caller has already planned or selected specific tasks to read.
+// scan's projection, per-task residual filters, and positional delete handling. This
+// is useful when the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if scan.selectorErr != nil {
+		return nil, nil, scan.selectorErr
+	}
+
 	var (
 		boundFilter iceberg.BooleanExpression
 		err         error
 	)
 
+	effectiveSchema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if scan.rowFilter != nil {
-		boundFilter, err = iceberg.BindExpr(scan.metadata.CurrentSchema(), scan.rowFilter, scan.caseSensitive)
+		boundFilter, err = iceberg.BindExpr(effectiveSchema, scan.rowFilter, scan.caseSensitive)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -779,12 +1149,41 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		return nil, nil, err
 	}
 
-	fs, err := scan.ioF(ctx)
+	// Bind task residuals against the schema selected by this scan, which may
+	// be an older snapshot schema rather than the table's current schema. Keep
+	// the caller's task slice untouched because the same plan may be reused.
+	readTasks := slices.Clone(tasks)
+	for i := range readTasks {
+		if readTasks[i].Residual == nil {
+			continue
+		}
+
+		readTasks[i].Residual, err = bindTaskFilter(effectiveSchema,
+			readTasks[i].Residual, scan.caseSensitive)
+		if err != nil {
+			return nil, nil, fmt.Errorf("bind residual for task %d: %w", i, err)
+		}
+	}
+
+	// A plan-scoped FileIO (from remote planning) takes precedence over the
+	// table's default FileIO. The iterator keeps a reader lease so replanning
+	// cannot close the old plan's resources while records are still being read.
+	planIO := scan.planIO
+	var fs io.IO
+	var releasePlanIO func()
+	if planIO != nil {
+		fs, releasePlanIO, err = planIO.acquire(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		fs, err = scan.ioF(ctx)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return (&arrowScan{
+	outSchema, records, err := (&arrowScan{
 		metadata:        scan.metadata,
 		fs:              fs,
 		projectedSchema: schema,
@@ -793,7 +1192,48 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		rowLimit:        scan.limit,
 		options:         scan.options,
 		concurrency:     scan.concurrency,
-	}).GetRecords(ctx, tasks)
+	}).GetRecords(ctx, readTasks)
+	if err != nil {
+		// No iterator to drive cleanup on a setup error, so release here.
+		if releasePlanIO != nil {
+			releasePlanIO()
+		}
+
+		return nil, nil, err
+	}
+
+	if releasePlanIO != nil {
+		records = releasePlanIOAfter(records, releasePlanIO)
+	}
+
+	return outSchema, records, nil
+}
+
+// closePlanIO releases the scoped resources associated with the current
+// remote plan. It is safe to call when no remote plan has been installed.
+func (scan *Scan) closePlanIO() {
+	if scan.planIO == nil {
+		return
+	}
+
+	planIO := scan.planIO
+	scan.planIO = nil
+	planIO.releaseOwner()
+}
+
+// releasePlanIOAfter wraps an arrow record iterator so its plan-scoped IO lease
+// is released once iteration ends, whether the consumer exhausts the iterator
+// or stops early. A caller that never ranges over the iterator does not release
+// the lease; that is an accepted edge for an unread result.
+func releasePlanIOAfter(seq iter.Seq2[arrow.RecordBatch, error], release func()) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		defer release()
+		for rec, err := range seq {
+			if !yield(rec, err) {
+				return
+			}
+		}
+	}
 }
 
 // ToArrowTable calls ToArrowRecords and then gathers all of the records together

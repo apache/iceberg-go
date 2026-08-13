@@ -19,8 +19,6 @@ package glue
 
 import (
 	"fmt"
-	"maps"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -30,11 +28,24 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/glue/types"
 )
 
-func schemasToGlueColumns(metadata table.Metadata) []types.Column {
-	results := make(map[string]types.Column)
+func schemasToGlueColumns(metadata table.Metadata, existingColumns []types.Column) []types.Column {
+	// preserve the current schema's logical column order and then,
+	// append columns from historical schemas that are not already present
+	var columns []types.Column
+	addedNames := make(map[string]struct{})
+
+	addColumnWithDedupe := func(field types.Column) {
+		name := aws.ToString(field.Name)
+		if _, ok := addedNames[name]; ok {
+			return
+		}
+
+		columns = append(columns, field)
+		addedNames[name] = struct{}{}
+	}
 
 	for _, field := range schemaToGlueColumns(metadata.CurrentSchema(), true) {
-		results[aws.ToString(field.Name)] = field
+		addColumnWithDedupe(field)
 	}
 
 	for _, schema := range metadata.Schemas() {
@@ -43,20 +54,57 @@ func schemasToGlueColumns(metadata table.Metadata) []types.Column {
 		}
 
 		for _, field := range schemaToGlueColumns(schema, false) {
-			if _, ok := results[aws.ToString(field.Name)]; !ok {
-				results[aws.ToString(field.Name)] = field
+			addColumnWithDedupe(field)
+		}
+	}
+
+	existingComments := make(map[string]string)
+	for _, column := range existingColumns {
+		fieldID := column.Parameters[icebergFieldIDKey]
+		if fieldID == "" || column.Comment == nil {
+			continue
+		}
+		if _, ok := existingComments[fieldID]; !ok {
+			existingComments[fieldID] = aws.ToString(column.Comment)
+		}
+	}
+
+	// Preserve nil for fields that have never had an Iceberg doc, but keep an
+	// explicit empty string when a documented field was cleared in a later schema.
+	clearedComments := make(map[string]struct{})
+	currentSchema := metadata.CurrentSchema()
+	for _, field := range currentSchema.Fields() {
+		if field.Doc != "" {
+			continue
+		}
+
+		for _, schema := range metadata.Schemas() {
+			if schema.ID == currentSchema.ID {
+				continue
+			}
+			if previous, ok := schema.FindFieldByID(field.ID); ok && previous.Doc != "" {
+				clearedComments[strconv.Itoa(field.ID)] = struct{}{}
+
+				break
 			}
 		}
 	}
 
-	// Convert map values to slice and sort by icebergFieldIDKey
-	columns := slices.Collect(maps.Values(results))
-	slices.SortFunc(columns, func(a, b types.Column) int {
-		aID, _ := strconv.Atoi(a.Parameters[icebergFieldIDKey])
-		bID, _ := strconv.Atoi(b.Parameters[icebergFieldIDKey])
+	for i := range columns {
+		if columns[i].Comment != nil {
+			continue
+		}
 
-		return aID - bID
-	})
+		fieldID := columns[i].Parameters[icebergFieldIDKey]
+		if _, ok := clearedComments[fieldID]; ok {
+			columns[i].Comment = aws.String("")
+
+			continue
+		}
+		if comment, ok := existingComments[fieldID]; ok {
+			columns[i].Comment = aws.String(comment)
+		}
+	}
 
 	return columns
 }
@@ -74,14 +122,16 @@ func schemaToGlueColumns(schema *iceberg.Schema, isCurrent bool) []types.Column 
 // fieldToGlueColumn converts an Iceberg nested field to a Glue column.
 func fieldToGlueColumn(field iceberg.NestedField, isCurrent bool) types.Column {
 	column := types.Column{
-		Name:    aws.String(field.Name),
-		Comment: aws.String(field.Doc),
-		Type:    aws.String(icebergTypeToGlueType(field.Type)),
+		Name: aws.String(field.Name),
+		Type: aws.String(icebergTypeToGlueType(field.Type)),
 		Parameters: map[string]string{
 			icebergFieldIDKey:       strconv.Itoa(field.ID),
 			icebergFieldOptionalKey: strconv.FormatBool(!field.Required),
 			icebergFieldCurrentKey:  strconv.FormatBool(isCurrent),
 		},
+	}
+	if field.Doc != "" {
+		column.Comment = aws.String(field.Doc)
 	}
 
 	return column
@@ -120,7 +170,7 @@ func icebergTypeToGlueType(typ iceberg.Type) string {
 	case iceberg.DecimalType:
 		return fmt.Sprintf("decimal(%d,%d)", t.Precision(), t.Scale())
 	case iceberg.FixedType:
-		return fmt.Sprintf("binary(%d)", t.Len())
+		return "binary"
 	case *iceberg.StructType:
 		// For struct types, create a struct<field1:type1,field2:type2,...> representation
 		var fieldStrings []string

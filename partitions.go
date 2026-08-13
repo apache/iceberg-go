@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,15 +70,25 @@ func (p PartitionField) SourceID() int {
 }
 
 // EscapedName returns the URL-escaped version of the partition field name.
+// initialize() pre-populates escapedName for specs built through a constructor.
 func (p *PartitionField) EscapedName() string {
-	if p.escapedName == "" {
-		p.escapedName = url.QueryEscape(p.Name)
+	if p.escapedName != "" {
+		return p.escapedName
 	}
 
-	return p.escapedName
+	return url.QueryEscape(p.Name)
 }
 
 func (p PartitionField) MarshalJSON() ([]byte, error) {
+	if len(p.SourceIDs) == 1 && p.SourceIDs[0] == 0 {
+		if _, isVoid := p.Transform.(VoidTransform); isVoid {
+			return json.Marshal(struct {
+				FieldID   int       `json:"field-id"`
+				Name      string    `json:"name"`
+				Transform Transform `json:"transform"`
+			}{p.FieldID, p.Name, p.Transform})
+		}
+	}
 	if len(p.SourceIDs) > 1 {
 		return json.Marshal(struct {
 			SourceIDs []int     `json:"source-ids"`
@@ -118,8 +129,14 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 
 	if _, ok := raw["source-id"]; ok {
 		if _, ok := raw["source-ids"]; ok {
-			return errors.New("partition field cannot contain both source-id and source-ids")
+			return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
 		}
+	}
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
+
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
 	}
 
 	aux := struct {
@@ -137,15 +154,36 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	p.FieldID = aux.FieldID
 	p.Name = aux.Name
 
-	if len(aux.SourceIDs) > 0 {
+	var err error
+	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+	if err := validateTransform(p.Transform); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	if hasSourceIDs && len(aux.SourceIDs) == 0 {
+		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
+	}
+	if !hasSourceID && !hasSourceIDs {
+		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
+		}
+		// Preserve compatibility with historical source-less void tombstones.
+		p.SourceIDs = []int{0}
+	} else if len(aux.SourceIDs) > 0 {
 		p.SourceIDs = aux.SourceIDs
 	} else {
 		p.SourceIDs = []int{aux.SourceID}
 	}
-
-	var err error
-	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
-		return err
+	for _, sourceID := range p.SourceIDs {
+		_, isVoid := p.Transform.(VoidTransform)
+		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
+			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
+		}
+	}
+	if p.Name == "" {
+		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
 
 	return nil
@@ -179,6 +217,17 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	}
 
 	for _, field := range p.Fields() {
+		if len(field.SourceIDs) == 1 && field.SourceIDs[0] == 0 {
+			if _, isVoid := field.Transform.(VoidTransform); isVoid {
+				opts = append(opts, func(spec *PartitionSpec) error {
+					spec.fields = append(spec.fields, clonePartitionField(field))
+
+					return nil
+				})
+
+				continue
+			}
+		}
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 
@@ -202,6 +251,19 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 			return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
+	// Validate the assembled field set rather than each field as it is added:
+	// the redundancy check needs every field in place, and routing the builder
+	// through the same validator as UnmarshalJSON keeps one definition of a
+	// redundant field, so a spec this constructor accepts is one this package's
+	// UnmarshalJSON can read back. NewPartitionSpec and NewPartitionSpecID do
+	// not validate, so that guarantee covers this constructor only.
+	//
+	// ErrInvalidPartitionSpec is attached exactly once per error, by whichever
+	// layer knows the sentinel: options return bare errors and the loop above
+	// wraps them, while validatePartitionFields wraps its own.
+	if err := validatePartitionFields(spec.fields); err != nil {
+		return PartitionSpec{}, err
+	}
 	spec.initialize()
 
 	return spec, nil
@@ -209,6 +271,9 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 
 func WithSpecID(id int) PartitionOption {
 	return func(p *PartitionSpec) error {
+		if id < 0 {
+			return fmt.Errorf("spec id must be non-negative: %d", id)
+		}
 		p.id = id
 
 		return nil
@@ -256,6 +321,9 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
 	}
+	if err := validateTransform(transform); err != nil {
+		return err
+	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
@@ -266,9 +334,6 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 		fieldIDValue = unassignedFieldID
 	} else {
 		fieldIDValue = *fieldID
-	}
-	if err := p.checkForRedundantPartitions(field.ID, transform); err != nil {
-		return err
 	}
 	unboundField := PartitionField{
 		SourceIDs: []int{field.ID},
@@ -281,19 +346,27 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	return nil
 }
 
-func (p *PartitionSpec) checkForRedundantPartitions(sourceID int, transform Transform) error {
-	if fields, ok := p.sourceIdToFields[sourceID]; ok {
-		for _, f := range fields {
-			if f.Transform.Equals(transform) {
-				return fmt.Errorf("cannot add redundant partition with source id %d and transform %s. A partition with the same source id and transform already exists with name: %s",
-					sourceID,
-					transform,
-					f.Name)
-			}
+func validateTransform(transform Transform) error {
+	switch t := transform.(type) {
+	case BucketTransform:
+		return t.validateNumBuckets()
+	case *BucketTransform:
+		return t.validateNumBuckets()
+	case TruncateTransform:
+		return t.validateWidth()
+	case *TruncateTransform:
+		return t.validateWidth()
+	case UnknownTransform:
+		// The zero value is constructible from outside the package and would
+		// serialize as "transform": "".
+		if t.String() == "" {
+			return fmt.Errorf("%w: unknown transform has no name", ErrInvalidTransform)
 		}
-	}
 
-	return nil
+		return nil
+	default:
+		return nil
+	}
 }
 
 func (p *PartitionSpec) Len() int {
@@ -342,6 +415,10 @@ func (ps *PartitionSpec) assignPartitionFieldIds(lastAssignedFieldIDPtr *int) er
 // NewPartitionSpec creates a new PartitionSpec with the given fields.
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
+//
+// The fields are not checked for redundancy either, so this accepts a spec that
+// UnmarshalJSON would reject, meaning the result may not survive a metadata
+// round trip. Use NewPartitionSpecOpts when the spec has to be readable back.
 func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 	return NewPartitionSpecID(InitialPartitionSpecID, fields...)
 }
@@ -349,8 +426,16 @@ func NewPartitionSpec(fields ...PartitionField) PartitionSpec {
 // NewPartitionSpecID creates a new PartitionSpec with the given fields and id.
 //
 // The fields are not verified against a schema, use NewPartitionSpecOpts if you have to ensure compatibility.
+//
+// The fields are not checked for redundancy either, so this accepts a spec that
+// UnmarshalJSON would reject, meaning the result may not survive a metadata
+// round trip. Use NewPartitionSpecOpts when the spec has to be readable back.
 func NewPartitionSpecID(id int, fields ...PartitionField) PartitionSpec {
-	ret := PartitionSpec{id: id, fields: fields}
+	fieldCopies := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = clonePartitionField(field)
+	}
+	ret := PartitionSpec{id: id, fields: fieldCopies}
 	ret.initialize()
 
 	return ret
@@ -370,7 +455,7 @@ func (ps *PartitionSpec) CompatibleWith(other *PartitionSpec) bool {
 
 	return slices.EqualFunc(ps.fields, other.fields, func(left, right PartitionField) bool {
 		return slices.Equal(left.SourceIDs, right.SourceIDs) && left.Name == right.Name &&
-			left.Transform == right.Transform
+			left.Transform.Equals(right.Transform)
 	})
 }
 
@@ -384,7 +469,13 @@ func (ps PartitionSpec) Equals(other PartitionSpec) bool {
 
 // Fields returns an iterator over the partition fields in this spec.
 func (ps *PartitionSpec) Fields() iter.Seq2[int, PartitionField] {
-	return slices.All(ps.fields)
+	return func(yield func(int, PartitionField) bool) {
+		for i, field := range ps.fields {
+			if !yield(i, clonePartitionField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
@@ -399,17 +490,112 @@ func (ps PartitionSpec) MarshalJSON() ([]byte, error) {
 }
 
 func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
-	aux := struct {
-		ID     int              `json:"spec-id"`
-		Fields []PartitionField `json:"fields"`
-	}{ID: ps.id, Fields: ps.fields}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return fmt.Errorf("%w: invalid partition spec JSON: %w", ErrInvalidPartitionSpec, err)
+	}
 
-	if err := json.Unmarshal(b, &aux); err != nil {
+	id := InitialPartitionSpecID
+	if rawID, ok := raw["spec-id"]; ok {
+		if bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec spec-id cannot be null", ErrInvalidPartitionSpec)
+		}
+		if err := json.Unmarshal(rawID, &id); err != nil {
+			return fmt.Errorf("%w: invalid partition spec ID: %w", ErrInvalidPartitionSpec, err)
+		}
+	}
+	if id < 0 {
+		return fmt.Errorf("%w: spec ID must be non-negative: %d", ErrInvalidPartitionSpec, id)
+	}
+
+	rawFields, ok := raw["fields"]
+	if !ok || bytes.Equal(bytes.TrimSpace(rawFields), []byte("null")) {
+		return fmt.Errorf("%w: partition spec is missing required fields", ErrInvalidPartitionSpec)
+	}
+	var rawFieldList []json.RawMessage
+	if err := json.Unmarshal(rawFields, &rawFieldList); err != nil {
+		return fmt.Errorf("%w: invalid partition spec fields: %w", ErrInvalidPartitionSpec, err)
+	}
+
+	fields := make([]PartitionField, len(rawFieldList))
+	for i, rawField := range rawFieldList {
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(rawField, &keys); err != nil {
+			return fmt.Errorf("%w: invalid partition field JSON: %w", ErrInvalidPartitionSpec, err)
+		}
+		if rawFieldID, ok := keys["field-id"]; ok {
+			var fieldID *int
+			if err := json.Unmarshal(rawFieldID, &fieldID); err != nil {
+				return fmt.Errorf("%w: invalid partition field ID: %w", ErrInvalidPartitionSpec, err)
+			}
+			if fieldID == nil {
+				return fmt.Errorf("%w: partition field ID cannot be null", ErrInvalidPartitionSpec)
+			}
+		}
+		if err := json.Unmarshal(rawField, &fields[i]); err != nil {
+			return fmt.Errorf("%w: invalid partition field: %w", ErrInvalidPartitionSpec, err)
+		}
+	}
+	if err := validatePartitionFields(fields); err != nil {
 		return err
 	}
 
-	ps.id, ps.fields = aux.ID, aux.Fields
-	ps.initialize()
+	decoded := PartitionSpec{id: id, fields: fields}
+	if err := decoded.assignPartitionFieldIds(nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
+	}
+	decoded.initialize()
+	*ps = decoded
+
+	return nil
+}
+
+// validatePartitionFields rejects duplicate partition names and redundant
+// fields (the same transform applied to the same source columns). It is the
+// single definition of a well-formed field set, shared by NewPartitionSpecOpts
+// and UnmarshalJSON so the builder cannot produce a spec the parser rejects.
+//
+// Repeated void fields are exempt: void is the tombstone written for a dropped
+// partition field, so a spec that has dropped several fields legitimately
+// carries more than one.
+//
+// TODO: this does not implement Java's dedupName rule, which collapses year,
+// month, day and hour to a single name per source column and so rejects
+// year(ts) alongside month(ts). We accept that pairing, which means a spec
+// built here can be refused by Java's PartitionSpec.Builder. UpdateSpec.addField
+// already carries an added-vs-added guard for time transforms, so the rule
+// exists in the codebase but not in this validator.
+func validatePartitionFields(fields []PartitionField) error {
+	names := make(map[string]struct{}, len(fields))
+	// Keyed by source IDs only; the transforms behind each key are compared with
+	// Transform.Equals rather than their rendered names, so a transform whose
+	// String() is not injective cannot make two distinct transforms collide.
+	bySource := make(map[string][]Transform, len(fields))
+	for _, field := range fields {
+		if _, ok := names[field.Name]; ok {
+			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
+		}
+		names[field.Name] = struct{}{}
+		// Reject a nil transform before the redundancy comparison below calls
+		// Equals on it. The option constructors accept any Transform and
+		// validateTransform's default branch passes nil through, so this is the
+		// first place a nil would be dereferenced.
+		if field.Transform == nil {
+			return fmt.Errorf("%w: partition field %s has no transform", ErrInvalidPartitionSpec, field.Name)
+		}
+		if _, isVoid := field.Transform.(VoidTransform); isVoid {
+			continue
+		}
+
+		key := fmt.Sprint(field.SourceIDs)
+		for _, existing := range bySource[key] {
+			if existing.Equals(field.Transform) {
+				return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
+					ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+			}
+		}
+		bySource[key] = append(bySource[key], field.Transform)
+	}
 
 	return nil
 }
@@ -418,13 +604,16 @@ func (ps *PartitionSpec) initialize() {
 	ps.sourceIdToFields = make(map[int][]PartitionField)
 
 	for i := range ps.fields {
+		ps.fields[i].escapedName = url.QueryEscape(ps.fields[i].Name)
 		ps.sourceIdToFields[ps.fields[i].SourceID()] = append(ps.sourceIdToFields[ps.fields[i].SourceID()], ps.fields[i])
 	}
 }
 
-func (ps *PartitionSpec) ID() int                    { return ps.id }
-func (ps *PartitionSpec) NumFields() int             { return len(ps.fields) }
-func (ps *PartitionSpec) Field(i int) PartitionField { return ps.fields[i] }
+func (ps *PartitionSpec) ID() int        { return ps.id }
+func (ps *PartitionSpec) NumFields() int { return len(ps.fields) }
+func (ps *PartitionSpec) Field(i int) PartitionField {
+	return clonePartitionField(ps.fields[i])
+}
 
 func (ps PartitionSpec) IsUnpartitioned() bool {
 	if len(ps.fields) == 0 {
@@ -441,7 +630,35 @@ func (ps PartitionSpec) IsUnpartitioned() bool {
 }
 
 func (ps *PartitionSpec) FieldsBySourceID(fieldID int) []PartitionField {
-	return slices.Clone(ps.sourceIdToFields[fieldID])
+	fields := ps.sourceIdToFields[fieldID]
+	if fields == nil {
+		return nil
+	}
+
+	clones := make([]PartitionField, len(fields))
+	for i, field := range fields {
+		clones[i] = clonePartitionField(field)
+	}
+
+	return clones
+}
+
+func clonePartitionField(field PartitionField) PartitionField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
+
+	return field
 }
 
 func (ps PartitionSpec) String() string {
@@ -480,6 +697,28 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 	return id
 }
 
+type resolvedPartitionField struct {
+	field      PartitionField
+	resultType Type
+}
+
+func (ps *PartitionSpec) resolvedPartitionFields(schema *Schema) []resolvedPartitionField {
+	fields := make([]resolvedPartitionField, 0, len(ps.fields))
+	for _, field := range ps.fields {
+		sourceType := Type(UnknownType{})
+		if typ, ok := schema.FindTypeByID(field.SourceID()); ok {
+			sourceType = typ
+		}
+
+		fields = append(fields, resolvedPartitionField{
+			field:      field,
+			resultType: field.Transform.ResultType(sourceType),
+		})
+	}
+
+	return fields
+}
+
 // PartitionType produces a struct of the partition spec.
 //
 // The partition fields should be optional:
@@ -489,20 +728,20 @@ func (ps *PartitionSpec) LastAssignedFieldID() int {
 //     have the result field and it may be null.
 //
 // There is a case where we can guarantee that a partition field in the first
-// and only parittion spec that uses a required source column will never be
+// and only partition spec that uses a required source column will never be
 // null, but it doesn't seem worth tracking this case.
+//
+// If a source column is missing, UnknownType is passed to the transform. This
+// retains the field's position and lets transforms with fixed result types,
+// such as bucket, continue to resolve their result type.
 func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
-	nestedFields := []NestedField{}
-	for _, field := range ps.fields {
-		sourceType, ok := schema.FindTypeByID(field.SourceID())
-		if !ok {
-			continue
-		}
-		resultType := field.Transform.ResultType(sourceType)
+	resolvedFields := ps.resolvedPartitionFields(schema)
+	nestedFields := make([]NestedField, 0, len(resolvedFields))
+	for _, field := range resolvedFields {
 		nestedFields = append(nestedFields, NestedField{
-			ID:       field.FieldID,
-			Name:     field.Name,
-			Type:     resultType,
+			ID:       field.field.FieldID,
+			Name:     field.field.Name,
+			Type:     field.resultType,
 			Required: false,
 		})
 	}
@@ -518,9 +757,9 @@ func (ps *PartitionSpec) PartitionType(schema *Schema) *StructType {
 // This does not apply the transforms to the data, it is assumed the provided data
 // has already been transformed appropriately.
 func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
-	partType := ps.PartitionType(sc)
+	resolvedFields := ps.resolvedPartitionFields(sc)
 
-	if len(partType.FieldList) == 0 {
+	if len(resolvedFields) == 0 {
 		return ""
 	}
 
@@ -528,22 +767,22 @@ func (ps *PartitionSpec) PartitionToPath(data StructLike, sc *Schema) string {
 	// Estimate capacity: escaped_name + "=" + escaped_value + "/" per field
 	var sb strings.Builder
 	estimatedSize := 0
-	for i := range partType.Fields() {
-		estimatedSize += len(ps.fields[i].EscapedName()) + 20 // name + "=" + avg value + "/"
+	for i := range resolvedFields {
+		estimatedSize += len(resolvedFields[i].field.EscapedName()) + 20 // name + "=" + avg value + "/"
 	}
 	sb.Grow(estimatedSize)
 
-	for i := range partType.Fields() {
+	for i := range resolvedFields {
 		if i > 0 {
 			sb.WriteByte('/')
 		}
 
 		// Use pre-escaped field name (now guaranteed to be initialized)
-		sb.WriteString(ps.fields[i].EscapedName())
+		sb.WriteString(resolvedFields[i].field.EscapedName())
 		sb.WriteByte('=')
 
 		// Only escape the value (which changes per row)
-		valueStr := ps.fields[i].Transform.ToHumanStr(data.Get(i))
+		valueStr := resolvedFields[i].field.Transform.ToHumanStrType(resolvedFields[i].resultType, data.Get(i))
 		sb.WriteString(url.QueryEscape(valueStr))
 	}
 
@@ -566,6 +805,11 @@ func GeneratePartitionFieldName(schema *Schema, field PartitionField) (string, e
 
 	transform := field.Transform
 	switch t := transform.(type) {
+	case UnknownTransform:
+		// A generated name would embed the transform's brackets, e.g.
+		// "id_custom_transform[42]". Make the caller supply one.
+		return "", fmt.Errorf("%w: partition field using unknown transform %s must be given an explicit name",
+			ErrInvalidTransform, t)
 	case IdentityTransform:
 		return sourceName, nil
 	case VoidTransform:

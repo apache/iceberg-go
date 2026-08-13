@@ -53,6 +53,13 @@ type headTrackingCatalog struct {
 	attempts atomic.Int32
 }
 
+type identifierCapturingCatalog struct {
+	metadata         Metadata
+	loadIdentifier   Identifier
+	commitIdentifier Identifier
+	failNextCommit   bool
+}
+
 func (c *headTrackingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
 	return New(ident, c.metadata, "",
 		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
@@ -72,6 +79,30 @@ func (c *headTrackingCatalog) CommitTable(_ context.Context, _ Identifier, reqs 
 	c.metadata = meta
 
 	return meta, "", nil
+}
+
+func (c *identifierCapturingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	c.loadIdentifier = ident
+
+	return New(ident, c.metadata, c.metadata.Location(),
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+}
+
+func (c *identifierCapturingCatalog) CommitTable(_ context.Context, ident Identifier, _ []Requirement, updates []Update) (Metadata, string, error) {
+	c.commitIdentifier = ident
+	if c.failNextCommit {
+		c.failNextCommit = false
+
+		return nil, "", ErrCommitFailed
+	}
+
+	updated, err := UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = updated
+
+	return updated, updated.Location(), nil
 }
 
 // graftSnapshotOnto builds a metadata that adds a child snapshot on
@@ -184,6 +215,68 @@ func TestDoCommit_ValidatorRejectsOnRefresh(t *testing.T) {
 		"validator rejection on retry must abort before re-issuing CommitTable")
 }
 
+func TestRefreshPassesIdentifierCopy(t *testing.T) {
+	branchHead := int64(1)
+	meta := newConflictTestMetadataWithProps(t, &branchHead, nil)
+	cat := &identifierCapturingCatalog{metadata: meta}
+	identifier := Identifier{"db", "refresh_copy_test"}
+
+	tbl := New(identifier, meta, "file:///tmp/test-refresh-copy/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	err := tbl.Refresh(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, identifier, tbl.Identifier())
+
+	cat.loadIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
+}
+
+func TestDoCommitPassesIdentifierCopy(t *testing.T) {
+	branchHead := int64(1)
+	meta := newConflictTestMetadataWithProps(t, &branchHead, nil)
+	cat := &identifierCapturingCatalog{metadata: meta}
+	identifier := Identifier{"db", "do_commit_copy_test"}
+
+	tbl := New(identifier, meta, "file:///tmp/test-do-commit-copy/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+	tx := tbl.NewTransaction()
+
+	require.NoError(t, tx.SetProperties(map[string]string{"k": "v"}))
+	updated, err := tx.Commit(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, identifier, tbl.Identifier())
+	assert.Equal(t, identifier, updated.Identifier())
+
+	cat.commitIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
+	assert.Equal(t, identifier, updated.Identifier())
+}
+
+func TestDoCommitRetryPassesIdentifierCopy(t *testing.T) {
+	branchHead := int64(1)
+	meta := newConflictTestMetadataWithProps(t, &branchHead, iceberg.Properties{
+		CommitNumRetriesKey:     "1",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	})
+	cat := &identifierCapturingCatalog{metadata: meta, failNextCommit: true}
+	identifier := Identifier{"db", "do-commit-retry-copy-test"}
+
+	tbl := New(identifier, meta, "file:///tmp/test-do-commit-retry-copy/metadata/v1.metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	_, err := tbl.doCommit(context.Background(), nil, nil, withCommitBranch(MainBranch))
+	require.NoError(t, err)
+	require.NotNil(t, cat.loadIdentifier)
+
+	cat.loadIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
+	cat.commitIdentifier[0] = "corrupt"
+	assert.Equal(t, identifier, tbl.Identifier())
+}
+
 // TestRewriteRefSnapshotRequirements covers the helper directly:
 // only the matching ref's assertion is rewritten; other requirements
 // pass through untouched; an empty-branch / nil-fresh / missing-
@@ -201,7 +294,7 @@ func TestRewriteRefSnapshotRequirements(t *testing.T) {
 	newHead := int64(99)
 	fresh := newConflictTestMetadata(t, &newHead)
 
-	out := rewriteRefSnapshotRequirements(reqs, MainBranch, fresh)
+	out := rewriteRefSnapshotRequirements(reqs, MainBranch, fresh, nil)
 	require.Len(t, out, 3)
 
 	a, ok := out[0].(*assertRefSnapshotID)
@@ -214,14 +307,21 @@ func TestRewriteRefSnapshotRequirements(t *testing.T) {
 	assert.Same(t, otherAssert, out[1])
 	assert.Same(t, uuidAssert, out[2])
 
+	// A pinned branch carries an explicit compare-and-swap requirement:
+	// its assertion must survive the rewrite untouched.
+	pinnedOut := rewriteRefSnapshotRequirements(reqs, MainBranch, fresh,
+		map[string]struct{}{MainBranch: {}})
+	assert.Same(t, mainAssert, pinnedOut[0],
+		"a pinned assertion must not be rewritten to the fresh head")
+
 	// Edge cases: empty branch / nil fresh / branch missing on fresh
 	// return the slice unchanged.
-	noBranchOut := rewriteRefSnapshotRequirements(reqs, "", fresh)
+	noBranchOut := rewriteRefSnapshotRequirements(reqs, "", fresh, nil)
 	assert.Equal(t, reqs, noBranchOut)
 
-	nilFreshOut := rewriteRefSnapshotRequirements(reqs, MainBranch, nil)
+	nilFreshOut := rewriteRefSnapshotRequirements(reqs, MainBranch, nil, nil)
 	assert.Equal(t, reqs, nilFreshOut)
 
-	missingBranchOut := rewriteRefSnapshotRequirements(reqs, "non-existent", fresh)
+	missingBranchOut := rewriteRefSnapshotRequirements(reqs, "non-existent", fresh, nil)
 	assert.Equal(t, reqs, missingBranchOut)
 }

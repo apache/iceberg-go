@@ -19,12 +19,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"strings"
 	"testing"
 
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_textOutput_DescribeTable(t *testing.T) {
@@ -147,6 +151,7 @@ read.split.target.size | 134217728
         {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
         {
             "type": "struct",
+			"schema-id": 1,
             "fields": [
                 {"id": 1, "name": "x", "required": true, "type": "long"}
             ]
@@ -198,7 +203,8 @@ read.split.target.size | 134217728
 			pterm.SetDefaultOutput(&buf)
 			pterm.DisableColor()
 
-			meta, _ := table.ParseMetadataBytes([]byte(tt.args.meta))
+			meta, err := table.ParseMetadataBytes([]byte(tt.args.meta))
+			require.NoError(t, err)
 			tbl := table.New([]string{"t"}, meta, "", nil, nil)
 			buf.Reset()
 
@@ -358,6 +364,7 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
         {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]},
         {
             "type": "struct",
+			"schema-id": 1,
             "fields": [
                 {"id": 1, "name": "x", "required": true, "type": "long"}
             ]
@@ -381,7 +388,7 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
     "refs": { }
 }`,
 			},
-			expected: `{"metadata":{"last-sequence-number":0,"format-version":2,"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1","location":"s3://bucket/test/location","last-updated-ms":1602638573590,"last-column-id":3,"schemas":[{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]},{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}],"current-schema-id":0,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":1000,"properties":{"read.split.target.size":"134217728"},"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0},"sort-order":{"order-id":0,"fields":[]},"spec":{"spec-id":0,"fields":[]},"schema":{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}}`,
+			expected: `{"metadata":{"last-sequence-number":0,"format-version":2,"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1","location":"s3://bucket/test/location","last-updated-ms":1602638573590,"last-column-id":3,"schemas":[{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]},{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":1,"identifier-field-ids":[]}],"current-schema-id":0,"partition-specs":[{"spec-id":0,"fields":[]}],"default-spec-id":0,"last-partition-id":1000,"properties":{"read.split.target.size":"134217728"},"sort-orders":[{"order-id":0,"fields":[]}],"default-sort-order-id":0},"sort-order":{"order-id":0,"fields":[]},"spec":{"spec-id":0,"fields":[]},"schema":{"type":"struct","fields":[{"type":"long","id":1,"name":"x","required":true}],"schema-id":0,"identifier-field-ids":[]}}`,
 		},
 	}
 	for _, tt := range tests {
@@ -394,7 +401,8 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
 				os.Stdout = oldStdout
 			}()
 
-			meta, _ := table.ParseMetadataBytes([]byte(tt.args.meta))
+			meta, err := table.ParseMetadataBytes([]byte(tt.args.meta))
+			require.NoError(t, err)
 			tbl := table.New([]string{"t"}, meta, "", nil, nil)
 
 			jsonOutput{}.DescribeTable(tbl)
@@ -406,4 +414,100 @@ func Test_jsonOutput_DescribeTable(t *testing.T) {
 			assert.JSONEq(t, tt.expected, buf.String())
 		})
 	}
+}
+
+func Test_textOutput_DescribeTableSnapshotWithoutSchemaID(t *testing.T) {
+	meta := `{
+    "format-version": 2,
+    "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+    "location": "mem://default/table",
+    "last-sequence-number": 1,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 1,
+    "current-schema-id": 0,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "required": true, "type": "int"}]}
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": []}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+        {"order-id": 0, "fields": []}
+    ],
+    "properties": {},
+    "current-snapshot-id": 100,
+    "snapshots": [
+        {
+            "snapshot-id": 100,
+            "timestamp-ms": 1602638573590,
+            "sequence-number": 1,
+            "summary": {"operation": "append"}
+        }
+    ],
+    "snapshot-log": [],
+    "refs": {}
+}`
+
+	var buf bytes.Buffer
+	pterm.SetDefaultOutput(&buf)
+	pterm.DisableColor()
+
+	parsed, err := table.ParseMetadataBytes([]byte(meta))
+	assert.NoError(t, err)
+	tbl := table.New([]string{"t"}, parsed, "", nil, nil)
+
+	textOutput{}.DescribeTable(tbl)
+
+	assert.True(t, strings.Contains(buf.String(), "Snapshot 100, schema unknown"))
+}
+
+func Test_textOutput_FilesSnapshotWithoutSchemaID(t *testing.T) {
+	meta := `{
+    "format-version": 2,
+    "table-uuid": "c8e7f6d4-03fe-4693-9a96-a0705ddf69c2",
+    "location": "mem://default/table",
+    "last-sequence-number": 1,
+    "last-updated-ms": 1602638573590,
+    "last-column-id": 1,
+    "current-schema-id": 0,
+    "schemas": [
+        {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "id", "required": true, "type": "int"}]}
+    ],
+    "default-spec-id": 0,
+    "partition-specs": [{"spec-id": 0, "fields": []}],
+    "last-partition-id": 1000,
+    "default-sort-order-id": 0,
+    "sort-orders": [
+        {"order-id": 0, "fields": []}
+    ],
+    "properties": {},
+    "current-snapshot-id": 100,
+    "snapshots": [
+        {
+            "snapshot-id": 100,
+            "timestamp-ms": 1602638573590,
+            "sequence-number": 1,
+            "summary": {"operation": "append"}
+        }
+    ],
+    "snapshot-log": [],
+    "refs": {}
+}`
+
+	var buf bytes.Buffer
+	pterm.SetDefaultOutput(&buf)
+	pterm.DisableColor()
+
+	memFS, err := iceio.LoadFS(context.Background(), nil, "mem://default/table")
+	assert.NoError(t, err)
+	parsed, err := table.ParseMetadataBytes([]byte(meta))
+	assert.NoError(t, err)
+	tbl := table.New([]string{"db", "events"}, parsed, "", func(_ context.Context) (iceio.IO, error) {
+		return memFS, nil
+	}, nil)
+
+	textOutput{}.Files(tbl, false)
+
+	assert.True(t, strings.Contains(buf.String(), "Snapshot 100, schema unknown"))
 }

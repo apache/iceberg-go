@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -181,9 +180,13 @@ func (b *MetadataBuilder) addVersion(newVersion *Version) (int64, error) {
 	}
 	dialects := make(map[string]struct{})
 	for _, repr := range version.Representations {
-		normalizedDialect := strings.ToLower(repr.Dialect)
+		normalizedDialect, err := validateRepresentation(repr)
+		if err != nil {
+			return 0, fmt.Errorf("%w: %s", ErrInvalidViewMetadata, err)
+		}
+
 		if _, ok := dialects[normalizedDialect]; ok {
-			return 0, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, normalizedDialect)
+			return 0, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, repr.Dialect)
 		}
 		dialects[normalizedDialect] = struct{}{}
 	}

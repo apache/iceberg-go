@@ -107,3 +107,80 @@ func TestUpdatesUnmarshalJSONInvalidJSON(t *testing.T) {
 	err := json.Unmarshal([]byte(jsonData), &updates)
 	require.Error(t, err)
 }
+
+func TestUpdatesUnmarshalJSONReplacesExistingSlice(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/old-location"}
+	]`), &updates))
+
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action": "set-properties", "updates": {"key": "value"}}
+	]`), &updates))
+	require.Len(t, updates, 1)
+	assert.Equal(t, UpdateSetProperties, updates[0].Action())
+
+	previous := append(Updates(nil), updates...)
+	err := json.Unmarshal([]byte(`[
+		{"action": "set-location", "location": "s3://bucket/new-location"},
+		{"action": "unknown-action"}
+	]`), &updates)
+	require.Error(t, err)
+	assert.Equal(t, previous, updates)
+
+	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
+	assert.Empty(t, updates)
+}
+
+func TestPropertyUpdateConstructorsCopyInputs(t *testing.T) {
+	props := iceberg.Properties{"owner": "alice"}
+	set := NewSetPropertiesUpdate(props)
+	props["owner"] = "bob"
+	props["team"] = "iceberg"
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, set.Updates)
+
+	removals := []string{"old-property"}
+	remove := NewRemovePropertiesUpdate(removals)
+	removals[0] = "new-property"
+	assert.Equal(t, []string{"old-property"}, remove.Removals)
+}
+
+func TestPropertyUpdateConstructorsPreserveNilness(t *testing.T) {
+	var nilProps iceberg.Properties
+	emptyProps := iceberg.Properties{}
+	assert.Nil(t, NewSetPropertiesUpdate(nilProps).Updates)
+	assert.NotNil(t, NewSetPropertiesUpdate(emptyProps).Updates)
+
+	var nilRemovals []string
+	emptyRemovals := []string{}
+	assert.Nil(t, NewRemovePropertiesUpdate(nilRemovals).Removals)
+	assert.NotNil(t, NewRemovePropertiesUpdate(emptyRemovals).Removals)
+}
+
+func TestMetadataBuilderPropertyChangesCopyInputs(t *testing.T) {
+	props := iceberg.Properties{"owner": "alice"}
+	removals := []string{"old-property"}
+
+	base, err := newTestBuilder().
+		SetLoc("location").
+		SetProperties(iceberg.Properties{"old-property": "value"}).
+		AddSchema(newTestSchema(0)).
+		AddVersion(newTestVersion(1, 0)).
+		SetCurrentVersionID(1).
+		Build()
+	require.NoError(t, err)
+
+	builder, err := MetadataBuilderFromBase(base)
+	require.NoError(t, err)
+	builder.SetProperties(props).RemoveProperties(removals)
+
+	props["owner"] = "bob"
+	removals[0] = "new-property"
+
+	result, err := builder.Build()
+	require.NoError(t, err)
+
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, result.Properties())
+	assert.Equal(t, iceberg.Properties{"owner": "alice"}, result.Changes[0].(*setPropertiesUpdate).Updates)
+	assert.Equal(t, []string{"old-property"}, result.Changes[1].(*removePropertiesUpdate).Removals)
+}

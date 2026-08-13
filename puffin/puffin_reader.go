@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 )
 
@@ -123,12 +125,32 @@ func NewReader(r ReaderAtSeeker, opts ...ReaderOption) (*Reader, error) {
 
 // Blobs returns the blob metadata entries from the footer.
 func (r *Reader) Blobs() []BlobMetadata {
-	return r.footer.Blobs
+	return cloneBlobMetadataList(r.footer.Blobs)
 }
 
 // Properties returns the file-level properties from the footer.
 func (r *Reader) Properties() map[string]string {
-	return r.footer.Properties
+	return maps.Clone(r.footer.Properties)
+}
+
+func cloneBlobMetadataList(blobs []BlobMetadata) []BlobMetadata {
+	cloned := make([]BlobMetadata, len(blobs))
+	for i, blob := range blobs {
+		cloned[i] = cloneBlobMetadata(blob)
+	}
+
+	return cloned
+}
+
+func cloneBlobMetadata(blob BlobMetadata) BlobMetadata {
+	blob.Fields = slices.Clone(blob.Fields)
+	blob.Properties = maps.Clone(blob.Properties)
+	if blob.CompressionCodec != nil {
+		codec := *blob.CompressionCodec
+		blob.CompressionCodec = &codec
+	}
+
+	return blob
 }
 
 // defaultFooterReadSize is the initial read size when reading the footer.
@@ -202,9 +224,20 @@ func (r *Reader) readFooter() error {
 	}
 
 	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
+	decoder := json.NewDecoder(payloadReader)
 	var footer Footer
-	if err := json.NewDecoder(payloadReader).Decode(&footer); err != nil {
+	if err := decoder.Decode(&footer); err != nil {
 		return fmt.Errorf("puffin: decode footer JSON: %w", err)
+	}
+
+	// FooterPayloadSize defines a single JSON footer object. Reject trailing
+	// content deliberately, even though some other Iceberg implementations
+	// accept padding or additional values inside the footer payload.
+	if decoder.More() {
+		return errors.New("puffin: unexpected content after footer JSON")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("puffin: unexpected content after footer JSON")
 	}
 
 	// Validate blob metadata
@@ -233,7 +266,7 @@ func (r *Reader) ReadBlob(index int) (*BlobData, error) {
 		return nil, err
 	}
 
-	return &BlobData{Metadata: meta, Data: data}, nil
+	return &BlobData{Metadata: cloneBlobMetadata(meta), Data: data}, nil
 }
 
 // ReadBlobByMetadata reads a blob using its metadata directly.
@@ -298,7 +331,7 @@ func (r *Reader) ReadAllBlobs() ([]*BlobData, error) {
 		if err != nil {
 			return nil, fmt.Errorf("puffin: read blob %d: %w", ib.index, err)
 		}
-		results[ib.index] = &BlobData{Metadata: ib.meta, Data: data}
+		results[ib.index] = &BlobData{Metadata: cloneBlobMetadata(ib.meta), Data: data}
 	}
 
 	return results, nil

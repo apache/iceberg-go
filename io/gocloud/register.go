@@ -30,6 +30,11 @@ func init() {
 	registerAzureSchemes()
 }
 
+var (
+	s3Schemes  = []string{"s3", "s3a", "s3n", "oss"}
+	gcsSchemes = []string{"gs"}
+)
+
 // registerS3Schemes registers S3-compatible storage schemes (s3, s3a, s3n).
 func registerS3Schemes() {
 	s3Factory := func(ctx context.Context, parsed *url.URL, props map[string]string) (icebergio.IO, error) {
@@ -38,7 +43,9 @@ func registerS3Schemes() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
+		extractor := defaultObjectLocationExtractor(parsed.Host, s3Schemes...)
+
+		return createBlobFS(ctx, bucket, extractor), nil
 	}
 	icebergio.Register("s3", s3Factory)
 	icebergio.Register("s3a", s3Factory)
@@ -54,7 +61,9 @@ func registerGCSScheme() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, defaultKeyExtractor(parsed.Host)), nil
+		extractor := defaultObjectLocationExtractor(parsed.Host, gcsSchemes...)
+
+		return createBlobFS(ctx, bucket, extractor), nil
 	})
 }
 
@@ -66,7 +75,9 @@ func registerAzureSchemes() {
 			return nil, err
 		}
 
-		return createBlobFS(ctx, bucket, adlsKeyExtractor()), nil
+		extractor := adlsObjectLocationExtractor(parsed)
+
+		return createBlobFS(ctx, bucket, extractor), nil
 	}
 	icebergio.Register("abfs", azureFactory)
 	icebergio.Register("abfss", azureFactory)

@@ -18,7 +18,9 @@
 package io
 
 import (
+	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,16 +30,91 @@ import (
 // the local file system.
 type LocalFS struct{}
 
+func localPath(name string) (string, error) {
+	if filepath.VolumeName(name) != "" {
+		return name, nil
+	}
+
+	schemeEnd := strings.IndexByte(name, ':')
+	firstSeparator := strings.IndexAny(name, `/\`)
+	if schemeEnd < 0 || (firstSeparator >= 0 && firstSeparator < schemeEnd) {
+		return name, nil
+	}
+	scheme := name[:schemeEnd]
+	// A colon is valid in a native POSIX filename. Treat non-file names as
+	// URIs only when they have an authority delimiter, preserving paths such as
+	// "partition:2026/data.parquet" while still rejecting s3:// and similar
+	// locations passed directly to LocalFS.
+	if !strings.EqualFold(scheme, "file") && !strings.HasPrefix(name[schemeEnd+1:], "//") {
+		return name, nil
+	}
+	if !strings.EqualFold(scheme, "file") {
+		return "", fmt.Errorf("unsupported local filesystem scheme %q", scheme)
+	}
+
+	parsed, err := url.Parse(name)
+	if err != nil {
+		return "", fmt.Errorf("invalid local file path %q: %w", name, err)
+	}
+	if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+		if filepath.Separator != '\\' || !isWindowsDriveHost(parsed.Host) {
+			return "", fmt.Errorf("unsupported file URI authority %q", parsed.Host)
+		}
+	}
+
+	path := parsed.Path
+	if parsed.Opaque != "" {
+		var err error
+		path, err = url.PathUnescape(parsed.Opaque)
+		if err != nil {
+			return "", fmt.Errorf("invalid local file path %q: %w", name, err)
+		}
+	}
+
+	if filepath.Separator == '\\' && isWindowsDriveHost(parsed.Host) {
+		path = parsed.Host + path
+	} else if filepath.Separator == '\\' && isWindowsDrivePath(path) {
+		path = path[1:]
+	}
+
+	return filepath.FromSlash(path), nil
+}
+
+func isWindowsDrivePath(path string) bool {
+	return len(path) >= 3 && path[0] == '/' &&
+		((path[1] >= 'a' && path[1] <= 'z') || (path[1] >= 'A' && path[1] <= 'Z')) &&
+		path[2] == ':'
+}
+
+func isWindowsDriveHost(host string) bool {
+	return len(host) == 2 &&
+		((host[0] >= 'a' && host[0] <= 'z') || (host[0] >= 'A' && host[0] <= 'Z')) &&
+		host[1] == ':'
+}
+
 func (LocalFS) Open(name string) (File, error) {
-	return os.Open(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.Open(path)
 }
 
 func (LocalFS) ReadFile(name string) ([]byte, error) {
-	return os.ReadFile(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.ReadFile(path)
 }
 
 func (LocalFS) Create(name string) (FileWriter, error) {
-	filename := strings.TrimPrefix(name, "file://")
+	filename, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return nil, err
 	}
@@ -46,37 +123,110 @@ func (LocalFS) Create(name string) (FileWriter, error) {
 }
 
 func (LocalFS) WriteFile(name string, content []byte) error {
-	return os.WriteFile(strings.TrimPrefix(name, "file://"), content, 0o644)
+	filename, err := localPath(name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		return err
+	}
+
+	return os.WriteFile(filename, content, 0o644)
 }
 
 func (LocalFS) Remove(name string) error {
-	return os.Remove(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.Remove(path)
 }
 
 func (LocalFS) RemoveAll(name string) error {
-	return os.RemoveAll(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.RemoveAll(path)
 }
 
 func (LocalFS) WalkDir(root string, fn fs.WalkDirFunc) error {
-	return filepath.WalkDir(strings.TrimPrefix(root, "file://"), fn)
+	path, err := localPath(root)
+	if err != nil {
+		return err
+	}
+
+	return filepath.WalkDir(path, fn)
 }
 
 func (LocalFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	return os.ReadDir(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.ReadDir(path)
 }
 
-func (LocalFS) MkdirAll(path string) error {
-	return os.MkdirAll(strings.TrimPrefix(path, "file://"), 0o755)
+func (LocalFS) MkdirAll(name string) error {
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.MkdirAll(path, 0o755)
 }
 
-func (LocalFS) Mkdir(path string) error {
-	return os.Mkdir(strings.TrimPrefix(path, "file://"), 0o755)
+func (LocalFS) Mkdir(name string) error {
+	path, err := localPath(name)
+	if err != nil {
+		return err
+	}
+
+	return os.Mkdir(path, 0o755)
 }
 
 func (LocalFS) Stat(name string) (fs.FileInfo, error) {
-	return os.Stat(strings.TrimPrefix(name, "file://"))
+	path, err := localPath(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return os.Stat(path)
 }
 
 func (LocalFS) Rename(oldpath, newpath string) error {
-	return os.Rename(strings.TrimPrefix(oldpath, "file://"), strings.TrimPrefix(newpath, "file://"))
+	src, err := localPath(oldpath)
+	if err != nil {
+		return err
+	}
+	dst, err := localPath(newpath)
+	if err != nil {
+		return err
+	}
+
+	return os.Rename(src, dst)
+}
+
+func (LocalFS) RenameNoReplace(oldpath, newpath string) error {
+	src, err := localPath(oldpath)
+	if err != nil {
+		return err
+	}
+	dst, err := localPath(newpath)
+	if err != nil {
+		return err
+	}
+
+	if err = os.Link(src, dst); err != nil {
+		return err
+	}
+
+	// Publishing already succeeded once the hard link exists. Removing the
+	// source temp file is best-effort cleanup.
+	_ = os.Remove(src)
+
+	return nil
 }

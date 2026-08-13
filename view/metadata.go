@@ -173,6 +173,18 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 		return nil, errors.New("invalid view version: must have at least one representation")
 	}
 
+	seenDialects := make(map[string]struct{})
+	for _, repr := range representations {
+		normalizedDialect, err := validateRepresentation(repr)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidViewMetadata, err)
+		}
+		if _, ok := seenDialects[normalizedDialect]; ok {
+			return nil, fmt.Errorf("%w: Invalid view version: Cannot add multiple queries for dialect %s", ErrInvalidViewMetadata, repr.Dialect)
+		}
+		seenDialects[normalizedDialect] = struct{}{}
+	}
+
 	version := &Version{
 		VersionID:        id,
 		SchemaID:         schemaID,
@@ -187,6 +199,25 @@ func NewVersion(id int64, schemaID int, representations []Representation, defaul
 	}
 
 	return version, nil
+}
+
+// validateRepresentation validates a SQL representation and returns its
+// normalized dialect for duplicate detection.
+func validateRepresentation(repr Representation) (string, error) {
+	if repr.Type != "sql" {
+		return "", errors.New("invalid view representation: type should be \"sql\"")
+	}
+
+	if strings.TrimSpace(repr.Sql) == "" {
+		return "", errors.New("invalid view representation: sql is required")
+	}
+
+	dialect := strings.TrimSpace(repr.Dialect)
+	if dialect == "" {
+		return "", errors.New("invalid view representation: dialect is required")
+	}
+
+	return strings.ToLower(dialect), nil
 }
 
 // NewVersionFromSQL creates a new Version with a single representation
@@ -219,12 +250,16 @@ func (v *Version) Clone() *Version {
 }
 
 // sqlDialects returns a set of strings representing the SQL dialects supported in this version.
-// Dialects are deduplicated by lowercase comparison
+// Dialects are deduplicated by trimmed, lowercase comparison.
 func (v *Version) sqlDialects() internal.Set[string] {
-	return internal.ToSet(internal.MapSlice(
-		v.Representations,
-		func(r Representation) string { return strings.ToLower(r.Dialect) },
-	))
+	dialects := make([]string, 0, len(v.Representations))
+	for _, repr := range v.Representations {
+		if repr.Type == "sql" {
+			dialects = append(dialects, strings.ToLower(strings.TrimSpace(repr.Dialect)))
+		}
+	}
+
+	return internal.ToSet(dialects)
 }
 
 type VersionLogEntry struct {
@@ -330,10 +365,15 @@ func (m *metadata) Equals(other Metadata) bool {
 func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
 func (m *metadata) ViewUUID() uuid.UUID        { return *m.UUID }
 func (m *metadata) Location() string           { return m.Loc }
-func (m *metadata) Versions() []*Version       { return m.VersionList }
-func (m *metadata) Schemas() []*iceberg.Schema { return m.SchemaList }
+func (m *metadata) Versions() []*Version       { return cloneSlice(m.VersionList) }
+func (m *metadata) Schemas() []*iceberg.Schema { return cloneSchemas(m.SchemaList) }
 func (m *metadata) SchemasByID() map[int]*iceberg.Schema {
-	return maps.Clone(m.lazySchemasByID())
+	clones := make(map[int]*iceberg.Schema, len(m.SchemaList))
+	for id, schema := range m.lazySchemasByID() {
+		clones[id] = cloneSchema(schema)
+	}
+
+	return clones
 }
 
 func (m *metadata) CurrentVersionID() int64 {
@@ -341,6 +381,10 @@ func (m *metadata) CurrentVersionID() int64 {
 }
 
 func (m *metadata) CurrentVersion() *Version {
+	return m.currentVersion().Clone()
+}
+
+func (m *metadata) currentVersion() *Version {
 	version, ok := m.lazyVersionsByID()[m.CurrentVersionIDValue]
 	if !ok {
 		panic("current version not found")
@@ -350,7 +394,7 @@ func (m *metadata) CurrentVersion() *Version {
 }
 
 func (m *metadata) CurrentSchemaID() int {
-	return m.CurrentVersion().SchemaID
+	return m.currentVersion().SchemaID
 }
 
 func (m *metadata) CurrentSchema() *iceberg.Schema {
@@ -359,15 +403,101 @@ func (m *metadata) CurrentSchema() *iceberg.Schema {
 		panic("current schema not found")
 	}
 
-	return schema
+	return cloneSchema(schema)
 }
 
 func (m *metadata) VersionLog() []VersionLogEntry {
-	return m.VersionLogList
+	return slices.Clone(m.VersionLogList)
 }
 
 func (m *metadata) Properties() iceberg.Properties {
-	return m.Props
+	return maps.Clone(m.Props)
+}
+
+func cloneSchema(schema *iceberg.Schema) *iceberg.Schema {
+	if schema == nil {
+		return nil
+	}
+
+	return iceberg.NewSchemaWithIdentifiers(
+		schema.ID,
+		slices.Clone(schema.IdentifierFieldIDs),
+		cloneNestedFields(schema.Fields())...,
+	)
+}
+
+func cloneSchemas(schemas []*iceberg.Schema) []*iceberg.Schema {
+	if schemas == nil {
+		return nil
+	}
+
+	clones := make([]*iceberg.Schema, len(schemas))
+	for i, schema := range schemas {
+		clones[i] = cloneSchema(schema)
+	}
+
+	return clones
+}
+
+func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
+	clones := slices.Clone(fields)
+	for i := range clones {
+		clones[i].Type = cloneSchemaType(clones[i].Type)
+		clones[i].InitialDefault = cloneDefault(clones[i].InitialDefault)
+		clones[i].WriteDefault = cloneDefault(clones[i].WriteDefault)
+	}
+
+	return clones
+}
+
+func cloneSchemaType(typ iceberg.Type) iceberg.Type {
+	switch typ := typ.(type) {
+	case *iceberg.StructType:
+		return &iceberg.StructType{FieldList: cloneNestedFields(typ.FieldList)}
+	case *iceberg.ListType:
+		return &iceberg.ListType{
+			ElementID:       typ.ElementID,
+			Element:         cloneSchemaType(typ.Element),
+			ElementRequired: typ.ElementRequired,
+		}
+	case *iceberg.MapType:
+		return &iceberg.MapType{
+			KeyID:         typ.KeyID,
+			KeyType:       cloneSchemaType(typ.KeyType),
+			ValueID:       typ.ValueID,
+			ValueType:     cloneSchemaType(typ.ValueType),
+			ValueRequired: typ.ValueRequired,
+		}
+	default:
+		return typ
+	}
+}
+
+func cloneDefault(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return slices.Clone(value)
+	case iceberg.BinaryLiteral:
+		return iceberg.BinaryLiteral(slices.Clone([]byte(value)))
+	case iceberg.FixedLiteral:
+		return iceberg.FixedLiteral(slices.Clone([]byte(value)))
+	case []any:
+		clones := make([]any, len(value))
+		for i, item := range value {
+			clones[i] = cloneDefault(item)
+		}
+
+		return clones
+	case map[string]any:
+		clones := make(map[string]any, len(value))
+		for key, item := range value {
+			clones[key] = cloneDefault(item)
+		}
+
+		return clones
+	default:
+		return value
+	}
 }
 
 func (m *metadata) validate() error {
@@ -400,6 +530,10 @@ func (m *metadata) validate() error {
 		return fmt.Errorf("%w: at least one schema is required", ErrInvalidViewMetadata)
 	}
 
+	if err := m.checkSchemaAndVersionEntries(); err != nil {
+		return err
+	}
+
 	if err := m.checkCurrentVersionExists(); err != nil {
 		return err
 	}
@@ -410,6 +544,32 @@ func (m *metadata) validate() error {
 
 	if err := m.checkDialectsUnique(); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func (m *metadata) checkSchemaAndVersionEntries() error {
+	schemaIDs := make(map[int]struct{}, len(m.SchemaList))
+	for i, schema := range m.SchemaList {
+		if schema == nil {
+			return fmt.Errorf("%w: schema at index %d is null", ErrInvalidViewMetadata, i)
+		}
+		if _, ok := schemaIDs[schema.ID]; ok {
+			return fmt.Errorf("%w: duplicate schema-id %d", ErrInvalidViewMetadata, schema.ID)
+		}
+		schemaIDs[schema.ID] = struct{}{}
+	}
+
+	versionIDs := make(map[int64]struct{}, len(m.VersionList))
+	for i, version := range m.VersionList {
+		if version == nil {
+			return fmt.Errorf("%w: version at index %d is null", ErrInvalidViewMetadata, i)
+		}
+		if _, ok := versionIDs[version.VersionID]; ok {
+			return fmt.Errorf("%w: duplicate version-id %d", ErrInvalidViewMetadata, version.VersionID)
+		}
+		versionIDs[version.VersionID] = struct{}{}
 	}
 
 	return nil
@@ -427,13 +587,10 @@ func (m *metadata) checkCurrentVersionExists() error {
 }
 
 func (m *metadata) checkVersionSchemasExist() error {
-	schemaIDs := make(map[int]bool)
-	for _, schema := range m.SchemaList {
-		schemaIDs[schema.ID] = true
-	}
+	schemasByID := m.lazySchemasByID()
 
 	for _, version := range m.VersionList {
-		if !schemaIDs[version.SchemaID] {
+		if _, ok := schemasByID[version.SchemaID]; !ok {
 			return fmt.Errorf("%w: version %d references unknown schema-id %d",
 				ErrInvalidViewMetadata, version.VersionID, version.SchemaID)
 		}
@@ -446,7 +603,15 @@ func (m *metadata) checkDialectsUnique() error {
 	for _, version := range m.VersionList {
 		seenDialects := make(map[string]bool)
 		for _, repr := range version.Representations {
-			dialect := strings.ToLower(repr.Dialect)
+			if repr.Type != "sql" {
+				continue
+			}
+
+			dialect, err := validateRepresentation(repr)
+			if err != nil {
+				return fmt.Errorf("%w: version %d: %s", ErrInvalidViewMetadata, version.VersionID, err)
+			}
+
 			if seenDialects[dialect] {
 				return fmt.Errorf("%w: version %d has duplicate dialect %s",
 					ErrInvalidViewMetadata, version.VersionID, repr.Dialect)
@@ -489,18 +654,27 @@ func (m *metadata) init() {
 
 func (m *metadata) UnmarshalJSON(b []byte) error {
 	type Alias metadata
-	aux := (*Alias)(m)
-
-	aux.FormatVersionValue = -1
-	aux.CurrentVersionIDValue = -1
+	next := metadata{
+		FormatVersionValue:    -1,
+		CurrentVersionIDValue: -1,
+	}
+	aux := (*Alias)(&next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
 
+	next.init()
+
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = next
+	// init() rebinds the lazy-index closures to m after the value copy.
 	m.init()
 
-	return m.validate()
+	return nil
 }
 
 // NewMetadata creates a new view metadata object using the provided version, schema, location, and props,
@@ -518,16 +692,22 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 		viewUUID = uuid.New()
 	}
 
+	var inputProps iceberg.Properties
 	formatVersion := DefaultViewFormatVersion
 	if props != nil {
-		verStr, ok := props["format-version"]
+		inputProps = maps.Clone(props)
+		verStr, ok := inputProps[table.PropertyFormatVersion]
 		if ok {
 			var err error
 			if formatVersion, err = strconv.Atoi(verStr); err != nil {
-				formatVersion = DefaultViewFormatVersion
+				return nil, fmt.Errorf("%w: %s", iceberg.ErrInvalidFormatVersion, verStr)
 			}
-			delete(props, "format-version")
+			delete(inputProps, table.PropertyFormatVersion)
 		}
+	}
+
+	if formatVersion > SupportedViewFormatVersion {
+		return nil, fmt.Errorf("%w: %d", iceberg.ErrInvalidFormatVersion, formatVersion)
 	}
 
 	// We assume that this constructor is used for building metadata for a new view.
@@ -547,7 +727,7 @@ func NewMetadataWithUUID(version *Version, sc *iceberg.Schema, location string, 
 		SetFormatVersion(formatVersion).
 		SetUUID(viewUUID).
 		SetLoc(location).
-		SetProperties(props).
+		SetProperties(inputProps).
 		SetCurrentVersion(version, sc).
 		Build()
 }

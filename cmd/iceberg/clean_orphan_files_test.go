@@ -19,14 +19,85 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io/fs"
 	"os"
 	"testing"
 
+	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/pterm/pterm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cleanOrphanCatalog struct {
+	catalog.Catalog
+	table *table.Table
+}
+
+func (c cleanOrphanCatalog) LoadTable(context.Context, table.Identifier) (*table.Table, error) {
+	return c.table, nil
+}
+
+type cleanOrphanOutput struct {
+	Output
+	results []CleanOrphanFilesResult
+	errors  []error
+}
+
+func (o *cleanOrphanOutput) CleanOrphanFilesResult(result CleanOrphanFilesResult) {
+	o.results = append(o.results, result)
+}
+
+func (o *cleanOrphanOutput) Error(err error) {
+	o.errors = append(o.errors, err)
+}
+
+func TestRunCleanOrphanFilesPreviewsPlanBeforeDeletion(t *testing.T) {
+	ctx := context.Background()
+	memFS := icebergio.NewMemFS()
+	location := "mem://preview/table"
+	metadataLocation := location + "/metadata/v1.metadata.json"
+	orphanPath := location + "/data/orphan.parquet"
+
+	meta, err := table.NewMetadata(iceberg.NewSchema(0), nil, table.UnsortedSortOrder, location, nil)
+	require.NoError(t, err)
+	require.NoError(t, memFS.WriteFile(metadataLocation, nil))
+	require.NoError(t, memFS.WriteFile(orphanPath, []byte("orphan")))
+
+	tbl := table.New(
+		table.Identifier{"db", "preview"},
+		meta,
+		metadataLocation,
+		func(context.Context) (icebergio.IO, error) { return memFS, nil },
+		nil,
+	)
+	output := &cleanOrphanOutput{}
+
+	runCleanOrphanFiles(ctx, output, cleanOrphanCatalog{table: tbl}, &CleanOrphanFilesCmd{
+		TableID:   "db.preview",
+		OlderThan: "1h",
+		Yes:       true,
+	})
+
+	require.Empty(t, output.errors)
+	require.Len(t, output.results, 2)
+	preview := output.results[0]
+	assert.True(t, preview.DryRun)
+	assert.Equal(t, 1, preview.OrphanFileCount)
+	require.Len(t, preview.OrphanFiles, 1)
+	assert.Equal(t, orphanPath, preview.OrphanFiles[0].Path)
+
+	deleted := output.results[1]
+	assert.False(t, deleted.DryRun)
+	assert.Equal(t, 1, deleted.OrphanFileCount)
+	assert.Equal(t, orphanPath, deleted.OrphanFiles[0].Path)
+	_, err = memFS.Open(orphanPath)
+	assert.ErrorIs(t, err, fs.ErrNotExist)
+}
 
 func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 	const metadata = `{
@@ -58,7 +129,11 @@ func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 
 	orphanResult := table.OrphanCleanupResult{
 		OrphanFileLocations: []string{"s3://bucket/data/file1.parquet", "s3://bucket/data/file2.parquet"},
-		TotalSizeBytes:      4096,
+		OrphanFiles: []table.OrphanFile{
+			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 1024},
+			{Path: "s3://bucket/data/file2.parquet", SizeBytes: 2048},
+		},
+		TotalSizeBytes: 4096,
 	}
 
 	result := buildCleanOrphanFilesResult(tbl, orphanResult, true)
@@ -69,6 +144,7 @@ func TestBuildCleanOrphanFilesResultDryRun(t *testing.T) {
 	assert.Equal(t, int64(4096), result.TotalSizeBytes)
 	require.Len(t, result.OrphanFiles, 2)
 	assert.Equal(t, "s3://bucket/data/file1.parquet", result.OrphanFiles[0].Path)
+	assert.Equal(t, int64(1024), result.OrphanFiles[0].SizeBytes)
 }
 
 func TestBuildCleanOrphanFilesResultDeleted(t *testing.T) {
@@ -101,8 +177,11 @@ func TestBuildCleanOrphanFilesResultDeleted(t *testing.T) {
 
 	orphanResult := table.OrphanCleanupResult{
 		OrphanFileLocations: []string{"s3://bucket/data/file1.parquet"},
-		DeletedFiles:        []string{"s3://bucket/data/file1.parquet"},
-		TotalSizeBytes:      2048,
+		OrphanFiles: []table.OrphanFile{
+			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 2048},
+		},
+		DeletedFiles:   []string{"s3://bucket/data/file1.parquet"},
+		TotalSizeBytes: 2048,
 	}
 
 	result := buildCleanOrphanFilesResult(tbl, orphanResult, false)
@@ -110,6 +189,62 @@ func TestBuildCleanOrphanFilesResultDeleted(t *testing.T) {
 	assert.False(t, result.DryRun)
 	assert.Equal(t, 1, result.OrphanFileCount)
 	assert.Equal(t, "s3://bucket/data/file1.parquet", result.OrphanFiles[0].Path)
+	assert.Equal(t, int64(2048), result.OrphanFiles[0].SizeBytes)
+}
+
+func TestBuildCleanOrphanFilesResultDeletedFiltersToDeletedFiles(t *testing.T) {
+	const metadata = `{
+        "format-version": 2,
+        "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+        "location": "s3://bucket/test/location",
+        "last-sequence-number": 0,
+        "last-updated-ms": 1602638573590,
+        "last-column-id": 1,
+        "current-schema-id": 0,
+        "schemas": [{"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "required": true, "type": "long"}]}],
+        "default-spec-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "last-partition-id": 0,
+        "default-sort-order-id": 0,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+        "refs": {}
+    }`
+
+	meta, err := table.ParseMetadataBytes([]byte(metadata))
+	require.NoError(t, err)
+
+	tbl := table.New([]string{"db", "orphans"}, meta, "", nil, nil)
+
+	orphanResult := table.OrphanCleanupResult{
+		OrphanFileLocations: []string{
+			"s3://bucket/data/file1.parquet",
+			"s3://bucket/data/file2.parquet",
+		},
+		OrphanFiles: []table.OrphanFile{
+			{Path: "s3://bucket/data/file1.parquet", SizeBytes: 1024},
+			{Path: "s3://bucket/data/file2.parquet", SizeBytes: 2048},
+		},
+		DeletedFiles:   []string{"s3://bucket/data/file2.parquet"},
+		TotalSizeBytes: 3072,
+	}
+
+	result := buildCleanOrphanFilesResult(tbl, orphanResult, false)
+
+	assert.False(t, result.DryRun)
+	assert.Equal(t, 1, result.OrphanFileCount)
+	require.Len(t, result.OrphanFiles, 1)
+	assert.Equal(t, "s3://bucket/data/file2.parquet", result.OrphanFiles[0].Path)
+	assert.Equal(t, int64(2048), result.OrphanFiles[0].SizeBytes)
+}
+
+func TestShouldPrintCleanOrphanPreview(t *testing.T) {
+	assert.False(t, shouldPrintCleanOrphanPreview(jsonOutput{}))
+	assert.True(t, shouldPrintCleanOrphanPreview(textOutput{}))
 }
 
 func TestTextOutputCleanOrphanFilesResultEmpty(t *testing.T) {
@@ -142,8 +277,8 @@ func TestTextOutputCleanOrphanFilesResultDryRun(t *testing.T) {
 		OrphanFileCount: 2,
 		TotalSizeBytes:  1048576,
 		OrphanFiles: []OrphanFileEntry{
-			{Path: "s3://bucket/data/a.parquet"},
-			{Path: "s3://bucket/data/b.parquet"},
+			{Path: "s3://bucket/data/a.parquet", SizeBytes: 1024},
+			{Path: "s3://bucket/data/b.parquet", SizeBytes: 4096},
 		},
 	}
 
@@ -155,6 +290,8 @@ func TestTextOutputCleanOrphanFilesResultDryRun(t *testing.T) {
 	assert.Contains(t, output, "2 orphan files found")
 	assert.Contains(t, output, "1.0 MB")
 	assert.Contains(t, output, "s3://bucket/data/a.parquet")
+	assert.Contains(t, output, "1.0 KB")
+	assert.Contains(t, output, "4.0 KB")
 }
 
 func TestJSONOutputCleanOrphanFilesResult(t *testing.T) {
@@ -169,7 +306,7 @@ func TestJSONOutputCleanOrphanFilesResult(t *testing.T) {
 		OrphanFileCount: 1,
 		TotalSizeBytes:  512,
 		OrphanFiles: []OrphanFileEntry{
-			{Path: "s3://bucket/data/orphan.parquet"},
+			{Path: "s3://bucket/data/orphan.parquet", SizeBytes: 512},
 		},
 	}
 
@@ -185,4 +322,5 @@ func TestJSONOutputCleanOrphanFilesResult(t *testing.T) {
 	assert.Contains(t, output, `"orphan_file_count":1`)
 	assert.Contains(t, output, `"total_size_bytes":512`)
 	assert.Contains(t, output, `"path":"s3://bucket/data/orphan.parquet"`)
+	assert.Contains(t, output, `"size_bytes":512`)
 }

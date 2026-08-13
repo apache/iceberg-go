@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
@@ -45,12 +47,16 @@ import (
 //	    return err
 //	}
 //	return w.Finish()
+//
+// Writer cannot be reused after a physical write fails. Once poisoned, all
+// subsequent operations return the original write error without changing state.
 type Writer struct {
 	w         io.Writer
 	offset    int64
 	blobs     []BlobMetadata
 	props     map[string]string
 	done      bool
+	failed    error
 	createdBy string
 }
 
@@ -90,6 +96,9 @@ func (w *Writer) AddProperties(props map[string]string) error {
 	if w.done {
 		return errors.New("puffin: cannot set properties: writer already finalized")
 	}
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot set properties: writer previously failed: %w", w.failed)
+	}
 	for k, v := range props {
 		w.props[k] = v
 	}
@@ -97,9 +106,17 @@ func (w *Writer) AddProperties(props map[string]string) error {
 	return nil
 }
 
-// clear properties
-func (w *Writer) ClearProperties() {
+// ClearProperties removes all file-level properties.
+func (w *Writer) ClearProperties() error {
+	if w.done {
+		return errors.New("puffin: cannot clear properties: writer already finalized")
+	}
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot clear properties: writer previously failed: %w", w.failed)
+	}
 	w.props = make(map[string]string)
+
+	return nil
 }
 
 // SetCreatedBy overrides the default "created-by" property written to the footer.
@@ -107,6 +124,9 @@ func (w *Writer) ClearProperties() {
 func (w *Writer) SetCreatedBy(createdBy string) error {
 	if w.done {
 		return errors.New("puffin: cannot set created-by: writer already finalized")
+	}
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot set created-by: writer previously failed: %w", w.failed)
 	}
 	if createdBy == "" {
 		return errors.New("puffin: cannot set created-by: value cannot be empty")
@@ -123,12 +143,17 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 	if w.done {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: writer already finalized")
 	}
+	if w.failed != nil {
+		return BlobMetadata{}, fmt.Errorf("puffin: cannot add blob: writer previously failed: %w", w.failed)
+	}
 	if input.Type == "" {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: type is required")
 	}
 	if input.Fields == nil {
 		return BlobMetadata{}, errors.New("puffin: cannot add blob: fields is required")
 	}
+	fields := slices.Clone(input.Fields)
+	properties := maps.Clone(input.Properties)
 
 	// Deletion vectors have special requirements per spec. Format matches
 	// the reader-side validateBlobs check so both sides surface the same
@@ -146,19 +171,21 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		// for deletion-vector-v1; the reader in table/dv does not enforce
 		// them today, so we hold the line here to keep Go-emitted files
 		// always conformant.
-		if input.Properties["cardinality"] == "" {
+		if properties["cardinality"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a cardinality property")
 		}
-		// Reject non-numeric or negative values at write time too — otherwise
-		// a writer could emit "cardinality": "abc" or "-1" that the reader
-		// hard-rejects later. ParseUint covers both: "-1" fails as invalid
-		// syntax (the minus is rejected before any value is parsed), so
-		// non-numeric and negative collapse into one error path.
-		if _, err := strconv.ParseUint(input.Properties["cardinality"], 10, 64); err != nil {
+		// Parse the same signed range used by deletion-vector readers and
+		// manifest record counts so every emitted value is readable.
+		cardinality, err := strconv.ParseInt(properties["cardinality"], 10, 64)
+		if err != nil {
 			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer: %w",
-				input.Properties["cardinality"], err)
+				properties["cardinality"], err)
 		}
-		if input.Properties["referenced-data-file"] == "" {
+		if cardinality < 0 {
+			return BlobMetadata{}, fmt.Errorf("puffin: deletion-vector-v1 cardinality property %q is not a valid non-negative integer",
+				properties["cardinality"])
+		}
+		if properties["referenced-data-file"] == "" {
 			return BlobMetadata{}, errors.New("puffin: deletion-vector-v1 requires a referenced-data-file property")
 		}
 	}
@@ -167,18 +194,21 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 		Type:           input.Type,
 		SnapshotID:     input.SnapshotID,
 		SequenceNumber: input.SequenceNumber,
-		Fields:         input.Fields,
+		Fields:         fields,
 		Offset:         w.offset,
 		Length:         int64(len(data)),
-		Properties:     input.Properties,
+		Properties:     properties,
 	}
 
-	if err := writeAll(w.w, data); err != nil {
+	if err := w.write(data); err != nil {
 		return BlobMetadata{}, fmt.Errorf("puffin: write blob: %w", err)
 	}
 
 	w.offset += meta.Length
 	w.blobs = append(w.blobs, meta)
+
+	meta.Fields = slices.Clone(meta.Fields)
+	meta.Properties = maps.Clone(meta.Properties)
 
 	return meta, nil
 }
@@ -189,6 +219,9 @@ func (w *Writer) AddBlob(input BlobMetadataInput, data []byte) (BlobMetadata, er
 func (w *Writer) Finish() error {
 	if w.done {
 		return errors.New("puffin: cannot finish: writer already finalized")
+	}
+	if w.failed != nil {
+		return fmt.Errorf("puffin: cannot finish: writer previously failed: %w", w.failed)
 	}
 
 	// Build footer
@@ -223,12 +256,12 @@ func (w *Writer) Finish() error {
 	}
 
 	// Write footer start magic
-	if err := writeAll(w.w, magic[:]); err != nil {
+	if err := w.write(magic[:]); err != nil {
 		return fmt.Errorf("puffin: write footer magic: %w", err)
 	}
 
 	// Write footer payload
-	if err := writeAll(w.w, payload); err != nil {
+	if err := w.write(payload); err != nil {
 		return fmt.Errorf("puffin: write footer payload: %w", err)
 	}
 
@@ -238,11 +271,21 @@ func (w *Writer) Finish() error {
 	binary.LittleEndian.PutUint32(trailer[4:8], 0) // flags = 0 (uncompressed)
 	copy(trailer[8:12], magic[:])
 
-	if err := writeAll(w.w, trailer[:]); err != nil {
+	if err := w.write(trailer[:]); err != nil {
 		return fmt.Errorf("puffin: write footer trailer: %w", err)
 	}
 
 	w.done = true
+
+	return nil
+}
+
+func (w *Writer) write(data []byte) error {
+	if err := writeAll(w.w, data); err != nil {
+		w.failed = err
+
+		return err
+	}
 
 	return nil
 }

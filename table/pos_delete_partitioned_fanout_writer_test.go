@@ -25,10 +25,14 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
@@ -74,7 +78,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "success",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 86, 2147483546: 172}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 86, 2147483546: 172}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 1, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},
 		// This test case illustrates how the positionDeletePartitionedFanoutWriter does not validate that all records
 		// in a batch have the same file path. Doing so would be prohibitive in the current implementation and
@@ -84,7 +88,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			name:                   "batch with records having different file paths",
 			pathToPartitionContext: map[string]partitionContext{"file://namespace/age_bucket=1/test.parquet": {partitionData: map[int]any{iceberg.PartitionDataIDStart: 1}, specID: 0}},
 			input:                  mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://namespace/age_bucket=1/test.parquet", "pos": 100}, {"file_path": "file://namespace/age_bucket=0/test.parquet", "pos": 10}]`),
-			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 94, 2147483546: 185}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes, sortOrderID: ptr(1)},
+			expectedDataFile:       &mockDataFile{columnSizes: map[int]int64{2147483545: 94, 2147483546: 185}, format: iceberg.ParquetFile, partition: map[int]any{iceberg.PartitionDataIDStart: 1}, count: 2, specid: 0, contentType: iceberg.EntryContentPosDeletes},
 		},
 	}
 
@@ -140,7 +144,7 @@ func TestPositionDeletePartitionedFanoutWriterProcessBatch(t *testing.T) {
 			writer := newPositionDeletePartitionedFanoutWriter(latestMeta, tc.pathToPartitionContext, nil, factory)
 
 			dataFileCh := make(chan iceberg.DataFile, 10)
-			err = writer.processBatch(ctx, tc.input, dataFileCh)
+			err = writer.processBatch(ctx, ctx, tc.input, dataFileCh)
 			if tc.expectedErr != nil {
 				require.ErrorContains(t, err, tc.expectedErr.Error())
 
@@ -187,7 +191,7 @@ func TestPositionDeletePartitionedFanoutWriterPartitionPathIsDeterministic(t *te
 
 	metadataBuilder, err := NewMetadataBuilder(2)
 	require.NoError(t, err)
-	err = metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema)
+	err = metadataBuilder.AddSchema(clonePositionalDeleteSchema())
 	require.NoError(t, err)
 	err = metadataBuilder.SetCurrentSchemaID(0)
 	require.NoError(t, err)
@@ -379,8 +383,8 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	batchB := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema,
 		fmt.Sprintf(`[{"file_path": %q, "pos": 5}]`, pathB))
 
-	require.NoError(t, writer.processBatch(t.Context(), batchA, dataFileCh))
-	require.NoError(t, writer.processBatch(t.Context(), batchB, dataFileCh))
+	require.NoError(t, writer.processBatch(t.Context(), t.Context(), batchA, dataFileCh))
+	require.NoError(t, writer.processBatch(t.Context(), t.Context(), batchB, dataFileCh))
 	require.NoError(t, factory.closeAll())
 	close(dataFileCh)
 
@@ -400,6 +404,76 @@ func TestPositionDeletePartitionedFanoutWriterRoutesPartitionsIndependently(t *t
 	require.Contains(t, byPart, int32(2))
 	assert.Equal(t, int64(2), byPart[1].Count(), "id=1 delete file must contain only the two rows targeting pathA")
 	assert.Equal(t, int64(1), byPart[2].Count(), "id=2 delete file must contain only the one row targeting pathB")
+}
+
+func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t *testing.T) {
+	t.Parallel()
+
+	const path = "file://t/id=1/a.parquet"
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	tableSchema := iceberg.NewSchema(
+		0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	partitionSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		FieldID: 1000, SourceIDs: []int{1}, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	metadataBuilder, err := NewMetadataBuilder(2)
+	require.NoError(t, err)
+	require.NoError(t, metadataBuilder.AddSchema(tableSchema))
+	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
+	require.NoError(t, metadataBuilder.AddPartitionSpec(&partitionSpec, true))
+	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
+	require.NoError(t, metadataBuilder.AddSortOrder(&UnsortedSortOrder))
+	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(0))
+	latestMeta, err := metadataBuilder.Build()
+	require.NoError(t, err)
+
+	var produced atomic.Int32
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		for range 1000 {
+			produced.Add(1)
+			batch, _, err := array.RecordFromJSON(
+				mem,
+				PositionalDeleteArrowSchema,
+				strings.NewReader(fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, path)),
+			)
+			require.NoError(t, err)
+			accepted := yield(batch, nil)
+			batch.Release()
+			if !accepted {
+				return
+			}
+		}
+	}
+
+	writeUUID := uuid.New()
+	factory, err := newWriterFactory(t.TempDir(), recordWritingArgs{
+		fs: &io.LocalFS{}, sc: PositionalDeleteArrowSchema, writeUUID: &writeUUID, counter: internal.Counter(0),
+	}, metadataBuilder, iceberg.PositionalDeleteSchema, 1,
+		withContentType(iceberg.EntryContentPosDeletes),
+		withFactoryFileSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, err)
+	writer := newPositionDeletePartitionedFanoutWriter(
+		latestMeta,
+		map[string]partitionContext{path: {partitionData: map[int]any{1000: int32(1)}, specID: 0}},
+		records,
+		factory,
+	)
+
+	for dataFile, writeErr := range writer.Write(ctx, 1) {
+		require.NoError(t, writeErr)
+		require.NotNil(t, dataFile)
+
+		break
+	}
+
+	assert.Positive(t, produced.Load())
+	assert.Less(t, produced.Load(), int32(100))
+	require.Zero(t, mem.CurrentAlloc())
 }
 
 func TestPositionDeletePartitionedNoGoroutineLeak(t *testing.T) {
@@ -665,15 +739,14 @@ var defaultPositionDeleteMatching = []dataFileMatcherOption{withContentTypeMatch
 // ptr-helpers previously sprinkled across the internal package tests.
 func ptr[T any](v T) *T { return &v }
 
-// TestPositionDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of positionDeleteRecordsToDataFiles: the resulting DataFiles must carry
-// the table's default sort order id exactly like the partitioned branch does.
+// Position deletes are ordered by (file_path, pos), never by a table sort
+// order, so their sort order id stays null.
 func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
 	metadataBuilder, err := NewMetadataBuilder(2)
 	require.NoError(t, err)
-	require.NoError(t, metadataBuilder.AddSchema(iceberg.PositionalDeleteSchema))
+	require.NoError(t, metadataBuilder.AddSchema(clonePositionalDeleteSchema()))
 	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
 	unpartitioned := *iceberg.UnpartitionedSpec
 	require.NoError(t, metadataBuilder.AddPartitionSpec(&unpartitioned, true))
@@ -690,8 +763,7 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 
 	built, err := metadataBuilder.Build()
 	require.NoError(t, err)
-	expectedID := built.DefaultSortOrder()
-	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+	require.NotZero(t, built.DefaultSortOrder(), "sanity: sort order id should be non-zero")
 
 	writeUUID := uuid.New()
 	rb := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, `[{"file_path": "file://unpartitioned/test.parquet", "pos": 0}]`)
@@ -714,14 +786,12 @@ func TestPositionDeleteUnpartitionedSortOrderID(t *testing.T) {
 	}
 	require.NotEmpty(t, files, "expected at least one data file")
 	for _, df := range files {
-		require.NotNil(t, df.SortOrderID(), "unpartitioned pos-delete DataFile must carry sort order id")
-		assert.Equal(t, expectedID, *df.SortOrderID())
+		assert.Nil(t, df.SortOrderID(), "pos-delete DataFile must have a null sort order id per spec")
 	}
 }
 
-// TestEqualityDeleteUnpartitionedSortOrderID covers the unpartitioned branch
-// of equalityDeleteRecordsToDataFiles: the resulting DataFiles must carry
-// the table's default sort order id.
+// The eq-delete writer does not order rows by the table sort order, so the
+// DataFiles must not claim it.
 func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	t.Parallel()
 
@@ -749,8 +819,7 @@ func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 
 	built, err := metadataBuilder.Build()
 	require.NoError(t, err)
-	expectedID := built.DefaultSortOrder()
-	require.NotZero(t, expectedID, "sanity: sort order id should be non-zero")
+	require.NotZero(t, built.DefaultSortOrder(), "sanity: sort order id should be non-zero")
 
 	delArrowSc, err := SchemaToArrowSchema(delSchema, nil, true, false)
 	require.NoError(t, err)
@@ -777,8 +846,7 @@ func TestEqualityDeleteUnpartitionedSortOrderID(t *testing.T) {
 	}
 	require.NotEmpty(t, files, "expected at least one data file")
 	for _, df := range files {
-		require.NotNil(t, df.SortOrderID(), "unpartitioned eq-delete DataFile must carry sort order id")
-		assert.Equal(t, expectedID, *df.SortOrderID())
+		assert.Nil(t, df.SortOrderID(), "eq-delete DataFile must not claim a sort order it was not written in")
 	}
 }
 

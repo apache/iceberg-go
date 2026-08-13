@@ -46,12 +46,13 @@ func newTestRefresher(fetchCreds func(ctx context.Context, ident []string) (iceb
 func TestVendedCredsCachedIOReturnedWhenNotExpired(t *testing.T) {
 	t.Parallel()
 
+	refreshErr := errors.New("refresh unavailable")
 	var callCount atomic.Int32
 
 	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
 		callCount.Add(1)
 
-		return iceberg.Properties{}, nil
+		return nil, refreshErr
 	})
 
 	// Seed cached IO and set expiry in the future.
@@ -153,13 +154,16 @@ func TestVendedCredsConcurrentAccess(t *testing.T) {
 	assert.NotNil(t, r.cachedIO, "cachedIO should be set after initial load")
 }
 
-func TestVendedCredsGracefulDegradation(t *testing.T) {
+func TestVendedCredsReturnsRefreshFailureForExpiredCredentials(t *testing.T) {
 	t.Parallel()
 
 	fetchErr := errors.New("network error")
 	now := time.Now()
 
+	var callCount atomic.Int32
 	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
 		return nil, fetchErr
 	})
 	r.nowFunc = func() time.Time { return now }
@@ -170,8 +174,29 @@ func TestVendedCredsGracefulDegradation(t *testing.T) {
 	r.expiresAt = now.Add(-time.Second)
 
 	got, err := r.loadFS(context.Background())
-	require.NoError(t, err, "should not return error when cached IO exists and refresh fails")
-	assert.Equal(t, existingIO, got, "should return cached IO on refresh failure")
+	require.ErrorIs(t, err, fetchErr)
+	require.ErrorContains(t, err, "refresh vended credentials for file:///tmp/test")
+	assert.Nil(t, got)
+
+	assert.Equal(t, int32(1), callCount.Load(), "a refresh should have been attempted")
+}
+
+func TestVendedCredsReturnsLoadFailureForExpiredCredentials(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		return iceberg.Properties{}, nil
+	})
+	r.nowFunc = func() time.Time { return now }
+	r.location = "notascheme://bucket/path"
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(-time.Second)
+
+	got, err := r.loadFS(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "load filesystem with refreshed credentials for notascheme://bucket/path")
+	assert.Nil(t, got)
 }
 
 func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
@@ -185,6 +210,7 @@ func TestVendedCredsErrorWhenInitialLoadFails(t *testing.T) {
 
 	got, err := r.loadFS(context.Background())
 	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "refreshed credentials")
 	assert.Nil(t, got)
 }
 
@@ -283,14 +309,28 @@ func TestVendedCredsExpiresAtFromConfig(t *testing.T) {
 		assert.Equal(t, serverExpiry.UnixMilli(), got.UnixMilli())
 	})
 
-	t.Run("falls back to default 60m when no expiry key", func(t *testing.T) {
+	t.Run("refreshable creds fall back to default 60m when no expiry key", func(t *testing.T) {
 		t.Parallel()
+		r := &vendedCredentialRefresher{
+			mu:      semaphore.NewWeighted(1),
+			nowFunc: func() time.Time { return now },
+			fetchCreds: func(context.Context, []string) (iceberg.Properties, error) {
+				return nil, nil
+			},
+		}
+		got := r.expiresAtFromConfig(iceberg.Properties{})
+		assert.Equal(t, now.Add(60*time.Minute).UnixMilli(), got.UnixMilli())
+	})
+
+	t.Run("non-refreshable creds without expiry never expire", func(t *testing.T) {
+		t.Parallel()
+		// fetchCreds nil: no re-fetch to trigger, so no fallback TTL — zero time.
 		r := &vendedCredentialRefresher{
 			mu:      semaphore.NewWeighted(1),
 			nowFunc: func() time.Time { return now },
 		}
 		got := r.expiresAtFromConfig(iceberg.Properties{})
-		assert.Equal(t, now.Add(60*time.Minute).UnixMilli(), got.UnixMilli())
+		assert.True(t, got.IsZero())
 	})
 }
 
@@ -322,6 +362,220 @@ func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
 	assert.Equal(t, serverExpiry.UnixMilli(), r.expiresAt.UnixMilli())
 }
 
+func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		expiresIn     time.Duration
+		wantRefreshed bool
+	}{
+		{
+			name:          "within buffer refreshes",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer - time.Minute,
+			wantRefreshed: true,
+		},
+		{
+			name:          "at buffer boundary : reuse the cache",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer,
+			wantRefreshed: false,
+		},
+		{
+			name:          "past buffer reuses cache",
+			expiresIn:     defaultVendedCredentialsExpiryBuffer + time.Minute,
+			wantRefreshed: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var callCount atomic.Int32
+			now := time.Now()
+
+			r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+				callCount.Add(1)
+
+				return iceberg.Properties{}, nil
+			})
+			r.nowFunc = func() time.Time { return now }
+
+			r.cachedIO = iceio.LocalFS{}
+			r.expiresAt = now.Add(tc.expiresIn)
+
+			_, err := r.loadFS(context.Background())
+			require.NoError(t, err)
+
+			if tc.wantRefreshed {
+				assert.Equal(t, int32(1), callCount.Load(), "credentials within the expiry buffer must be proactively refreshed")
+			} else {
+				assert.Equal(t, int32(0), callCount.Load(), "credentials outside the expiry buffer must reuse the cache")
+			}
+		})
+	}
+}
+
+func TestVendedCredsPlanScopedNotRefusedWithinBuffer(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	// Plan-scoped refresher: no fetchCreds, so creds can't be renewed.
+	// A cred still valid but inside the prefetch buffer must be served, not refused.
+	r := &vendedCredentialRefresher{
+		mu:       semaphore.NewWeighted(1),
+		location: "file:///tmp/test",
+		props:    iceberg.Properties{},
+		nowFunc:  func() time.Time { return now },
+	}
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(defaultVendedCredentialsExpiryBuffer - time.Minute)
+
+	got, err := r.loadFS(context.Background())
+	require.NoError(t, err,
+		"plan-scoped creds still within their hard expiry must not be refused early")
+	assert.Equal(t, r.cachedIO, got)
+
+	// Past the hard expiry, with no way to renew, the load fails.
+	r.nowFunc = func() time.Time { return now.Add(time.Hour) }
+	_, err = r.loadFS(context.Background())
+	require.ErrorIs(t, err, ErrVendedCredentialsExpired)
+}
+
+func TestVendedCredsRefreshBufferClampedToLifetime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	// Short-lived (2m) renewable token.
+	// Buffer : lifetime/2 (1m), so a just-issued token is served from cache instead of re-fetched at once.
+	shortTTL := 2 * time.Minute
+
+	var callCount atomic.Int32
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
+		return iceberg.Properties{
+			keyS3TokenExpiresAtMs: strconv.FormatInt(now.Add(shortTTL).UnixMilli(), 10),
+		}, nil
+	})
+	r.nowFunc = func() time.Time { return now }
+
+	// Seed an already-issued short-lived credential.
+	r.cachedIO = iceio.LocalFS{}
+	r.issuedAt = now
+	r.expiresAt = now.Add(shortTTL)
+
+	// buffer = min(5m, 2m/2) = 1m, so at issue time the cache is still served.
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), callCount.Load(),
+		"a freshly issued short-lived token must be served from cache, not re-fetched")
+
+	// Once inside the clamped 1m window, it refreshes proactively.
+	r.nowFunc = func() time.Time { return now.Add(90 * time.Second) }
+	_, err = r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(),
+		"token within the clamped buffer window must be refreshed")
+}
+
+func TestVendedCredsShouldRefreshNeverExpires(t *testing.T) {
+	t.Parallel()
+
+	r := &vendedCredentialRefresher{
+		mu:        semaphore.NewWeighted(1),
+		nowFunc:   func() time.Time { return time.Now() },
+		expiresAt: time.Time{},
+	}
+	assert.False(t, r.shouldRefresh(),
+		"credentials with no expiry must never be proactively refreshed")
+}
+
+func TestVendedCredsRefreshBuffer(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+
+	cases := []struct {
+		name      string
+		issuedAt  time.Time
+		expiresAt time.Time
+		want      time.Duration
+	}{
+		{
+			name:      "no issuedAt uses default buffer",
+			expiresAt: now.Add(time.Hour),
+			want:      defaultVendedCredentialsExpiryBuffer,
+		},
+		{
+			name:      "long lifetime uses default buffer",
+			issuedAt:  now,
+			expiresAt: now.Add(time.Hour),
+			want:      defaultVendedCredentialsExpiryBuffer,
+		},
+		{
+			name:      "short lifetime clamps to half",
+			issuedAt:  now,
+			expiresAt: now.Add(2 * time.Minute),
+			want:      time.Minute,
+		},
+		{
+			name:      "negative lifetime clamps to zero",
+			issuedAt:  now,
+			expiresAt: now.Add(-time.Minute),
+			want:      0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := &vendedCredentialRefresher{
+				mu:        semaphore.NewWeighted(1),
+				issuedAt:  tc.issuedAt,
+				expiresAt: tc.expiresAt,
+			}
+			assert.Equal(t, tc.want, r.refreshBuffer())
+		})
+	}
+}
+
+func TestVendedCredsIssuedAtUpdatedOnRefreshPreventsSelfRetrigger(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	clock := func() time.Time { return now }
+
+	var callCount atomic.Int32
+	r := newTestRefresher(func(ctx context.Context, ident []string) (iceberg.Properties, error) {
+		callCount.Add(1)
+
+		// Server vends a fresh 60m token relative to the current clock.
+		return iceberg.Properties{
+			keyS3TokenExpiresAtMs: strconv.FormatInt(clock().Add(time.Hour).UnixMilli(), 10),
+		}, nil
+	})
+	r.nowFunc = clock
+
+	// Seed a hard-expired cred to force a refresh.
+	r.cachedIO = iceio.LocalFS{}
+	r.expiresAt = now.Add(-time.Second)
+
+	_, err := r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(), "expired cred must be refreshed")
+	assert.Equal(t, now, r.issuedAt, "issuedAt must be updated to the refresh time")
+
+	// Immediately after refresh, the fresh token must be served from cache
+	// rather than re-fetched (no self-retrigger).
+	_, err = r.loadFS(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), callCount.Load(),
+		"a freshly refreshed token must not immediately retrigger another fetch")
+}
+
 func TestResolveStorageCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -330,7 +584,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		creds    []storageCredential
+		creds    []StorageCredential
 		location string
 		want     iceberg.Properties
 	}{
@@ -342,7 +596,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "matching prefix",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/", Config: s3Creds},
 			},
 			location: "s3://bucket/path/to/file",
@@ -350,7 +604,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "no matching prefix",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://other-bucket/", Config: s3Creds},
 			},
 			location: "s3://bucket/path",
@@ -358,7 +612,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "longest prefix wins",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/", Config: s3Creds},
 				{Prefix: "s3://bucket/specific/", Config: specificCreds},
 			},
@@ -367,7 +621,7 @@ func TestResolveStorageCredentials(t *testing.T) {
 		},
 		{
 			name: "longest prefix wins regardless of order",
-			creds: []storageCredential{
+			creds: []StorageCredential{
 				{Prefix: "s3://bucket/specific/", Config: specificCreds},
 				{Prefix: "s3://bucket/", Config: s3Creds},
 			},

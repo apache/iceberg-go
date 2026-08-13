@@ -52,6 +52,7 @@ Catalog connection flags are global and apply to every subcommand:
 | `--scope` | OAuth scope (default `catalog`) |
 | `--catalog-name` | Catalog name to load from config file (default `default`) |
 | `--config` | Path to a config file |
+| `--aws-profile` | AWS named profile to use (Glue catalog); overrides `aws-profile` in the config file |
 
 To avoid passing flags every time, define a config file at `~/.iceberg-go.yaml`:
 ```yaml

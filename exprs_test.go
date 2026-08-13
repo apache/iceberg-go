@@ -19,14 +19,29 @@ package iceberg_test
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type containsBoundSetVisitor struct {
+	FooBoundExprVisitor
+	needle iceberg.Literal
+	found  bool
+}
+
+func (v *containsBoundSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
+	v.found = literals.Contains(v.needle)
+	literals.Add(iceberg.NewLiteral("visitor-injected"))
+
+	return nil
+}
 
 type ExprA struct{}
 
@@ -216,7 +231,17 @@ func TestRefTypes(t *testing.T) {
 		iceberg.NestedField{ID: 11, Name: "k", Type: iceberg.PrimitiveTypes.Binary},
 		iceberg.NestedField{ID: 12, Name: "l", Type: iceberg.PrimitiveTypes.UUID},
 		iceberg.NestedField{ID: 13, Name: "m", Type: iceberg.FixedTypeOf(5)},
-		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}})
+		iceberg.NestedField{ID: 14, Name: "n", Type: iceberg.VariantType{}},
+		iceberg.NestedField{ID: 15, Name: "o", Type: iceberg.PrimitiveTypes.TimestampNs},
+		iceberg.NestedField{ID: 16, Name: "p", Type: iceberg.PrimitiveTypes.TimestampTzNs})
+
+	timestampNanoFields := []struct {
+		name string
+		typ  iceberg.Type
+	}{
+		{name: "o", typ: iceberg.PrimitiveTypes.TimestampNs},
+		{name: "p", typ: iceberg.PrimitiveTypes.TimestampTzNs},
+	}
 
 	t.Run("bind term", func(t *testing.T) {
 		for i := 0; i < sc.NumFields(); i++ {
@@ -294,6 +319,20 @@ func TestRefTypes(t *testing.T) {
 			assert.Equal(t, iceberg.OpEQ, uid.Op())
 			assert.True(t, uid.(iceberg.BoundLiteralPredicate).Literal().Type().Equals(iceberg.PrimitiveTypes.UUID))
 		})
+
+		t.Run("timestamp-nanos", func(t *testing.T) {
+			for _, tt := range timestampNanoFields {
+				t.Run(tt.typ.String(), func(t *testing.T) {
+					value := iceberg.TimestampNano(123456789)
+					b, err := iceberg.EqualTo(iceberg.Reference(tt.name), value).Bind(sc, true)
+					require.NoError(t, err)
+
+					assert.Equal(t, iceberg.OpEQ, b.Op())
+					assert.True(t, b.(iceberg.BoundLiteralPredicate).Ref().Type().Equals(tt.typ))
+					assert.Equal(t, value, b.(iceberg.BoundLiteralPredicate).Literal().Any())
+				})
+			}
+		})
 	})
 
 	t.Run("bind set", func(t *testing.T) {
@@ -365,6 +404,28 @@ func TestRefTypes(t *testing.T) {
 				assert.True(t, v.Type().Equals(iceberg.PrimitiveTypes.UUID))
 			}
 		})
+
+		t.Run("timestamp-nanos", func(t *testing.T) {
+			for _, tt := range timestampNanoFields {
+				t.Run(tt.typ.String(), func(t *testing.T) {
+					b, err := iceberg.IsIn(
+						iceberg.Reference(tt.name),
+						iceberg.TimestampNano(123456789),
+						iceberg.TimestampNano(987654321),
+					).(iceberg.UnboundPredicate).Bind(sc, true)
+					require.NoError(t, err)
+
+					assert.Equal(t, iceberg.OpIn, b.Op())
+					assert.True(t, b.(iceberg.BoundSetPredicate).Ref().Type().Equals(tt.typ))
+					assert.Equal(t, 2, b.(iceberg.BoundSetPredicate).Literals().Len())
+					assert.True(t, b.(iceberg.BoundSetPredicate).Literals().All(func(lit iceberg.Literal) bool {
+						_, ok := lit.(iceberg.TimestampNsLiteral)
+
+						return ok
+					}))
+				})
+			}
+		})
 	})
 }
 
@@ -423,6 +484,101 @@ func TestInNotInSimplifications(t *testing.T) {
 		assert.Equal(t, 2, bsp.Literals().Len())
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("hello")))
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("world")))
+	})
+
+	t.Run("bound literals are isolated", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+
+		bsp := bound.(iceberg.BoundSetPredicate)
+		literals := bsp.Literals()
+		literals.Add(iceberg.NewLiteral("injected"))
+
+		assert.Equal(t, 2, bsp.Literals().Len())
+		assert.False(t, bsp.Literals().Contains(iceberg.NewLiteral("injected")))
+	})
+
+	t.Run("bound literal values are isolated", func(t *testing.T) {
+		geometry, err := iceberg.GeometryTypeOf("srid:4326")
+		require.NoError(t, err)
+		geography, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+		require.NoError(t, err)
+
+		tests := []struct {
+			name string
+			typ  iceberg.Type
+			lits func([]byte, []byte) []iceberg.Literal
+		}{
+			{
+				name: "binary",
+				typ:  iceberg.PrimitiveTypes.Binary,
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "fixed",
+				typ:  iceberg.FixedTypeOf(16),
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "geometry",
+				typ:  geometry,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geometry, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geometry, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+			{
+				name: "geography",
+				typ:  geography,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geography, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geography, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				first := []byte("0123456789abcdef")
+				second := []byte("fedcba9876543210")
+				expected := slices.Clone(first)
+				isin := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), tt.lits(first, second))
+				schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+
+				bound, err := isin.(iceberg.UnboundPredicate).Bind(schema, true)
+				require.NoError(t, err)
+				first[0] = 0xff
+
+				expectedLiteral, err := iceberg.LiteralFromBytes(tt.typ, expected)
+				require.NoError(t, err)
+				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expectedLiteral))
+			})
+		}
+	})
+
+	t.Run("bound predicate visitors receive detached literals", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+		predicate := bound.(iceberg.BoundPredicate)
+		visitor := &containsBoundSetVisitor{needle: iceberg.NewLiteral("hello")}
+
+		iceberg.VisitBoundPredicate(predicate, visitor)
+		assert.True(t, visitor.found)
+		assert.Equal(t, 2, predicate.(iceberg.BoundSetPredicate).Literals().Len())
 	})
 
 	t.Run("bind dedup to eq", func(t *testing.T) {
@@ -841,4 +997,21 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 			assert.Equal(t, tt.exp, b)
 		})
 	}
+}
+
+func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
+	sc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},
+	)
+
+	var b variant.Builder
+	require.NoError(t, b.Append(int64(1)))
+	val, err := b.Build()
+	require.NoError(t, err)
+
+	pred := iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference("payload"), iceberg.VariantLiteral(val))
+	_, err = iceberg.BindExpr(sc, pred, true)
+	require.Error(t, err)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
 }

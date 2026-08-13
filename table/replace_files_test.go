@@ -236,4 +236,52 @@ func TestReplaceFiles_ValidationErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot remove delete files")
 	})
+
+	newDV := func(path, ref string) iceberg.DataFile {
+		b, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+			path, iceberg.PuffinFile, nil, nil, nil, 1, 128)
+		require.NoError(t, err)
+		if ref != "" {
+			b.ReferencedDataFile(ref)
+		}
+
+		return b.Build()
+	}
+
+	t.Run("deletion vector missing referenced_data_file", func(t *testing.T) {
+		tx := tbl.NewTransaction()
+		err := tx.ReplaceFiles(t.Context(),
+			nil, nil,
+			[]iceberg.DataFile{newDV("s3://bucket/dv-0001.puffin", "")},
+			nil,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing referenced_data_file")
+	})
+
+	t.Run("deletion vectors referencing the same data file", func(t *testing.T) {
+		tx := tbl.NewTransaction()
+		err := tx.ReplaceFiles(t.Context(),
+			nil, nil,
+			[]iceberg.DataFile{
+				newDV("s3://bucket/dv-a.puffin", "s3://bucket/data-001.parquet"),
+				newDV("s3://bucket/dv-b.puffin", "s3://bucket/data-001.parquet"),
+			},
+			nil,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "distinct data files")
+	})
+
+	t.Run("deletion vector not in table", func(t *testing.T) {
+		tx := tbl.NewTransaction()
+		err := tx.ReplaceFiles(t.Context(),
+			nil, nil,
+			[]iceberg.DataFile{newDV("s3://bucket/dv-0001.puffin", "s3://bucket/nonexistent-data.parquet")},
+			nil,
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot remove deletion vectors that do not belong to the table")
+	})
 }

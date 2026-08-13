@@ -20,8 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -34,6 +32,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/puffin"
 	"github.com/apache/iceberg-go/table/dv"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,10 +46,7 @@ import (
 // magic 0xD1D33964][bitmap][4B BE CRC32] envelope so dv.DeserializeDV
 // accepts it. A Go-built payload suffices here; the cross-impl byte pin
 // against a Java-produced fixture is the job of #1041, not this test.
-//
-// TODO(#1041): replace the hand-built envelope with a dv.SerializeDV helper
-// once that PR exports one. Today the dv package only exports the read side.
-func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length int64) {
+func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile string) (path string, offset, length, cardinality int64) {
 	t.Helper()
 
 	bitmap := dv.NewRoaringPositionBitmap()
@@ -58,18 +54,8 @@ func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile s
 		bitmap.Set(p)
 	}
 
-	var bitmapBuf bytes.Buffer
-	require.NoError(t, bitmap.Serialize(&bitmapBuf))
-
-	// Length covers magic + bitmap, excludes CRC.
-	magicAndBitmap := make([]byte, 4+bitmapBuf.Len())
-	binary.LittleEndian.PutUint32(magicAndBitmap[:4], dv.DVMagicNumber)
-	copy(magicAndBitmap[4:], bitmapBuf.Bytes())
-
-	payload := make([]byte, 4+len(magicAndBitmap)+4)
-	binary.BigEndian.PutUint32(payload[:4], uint32(len(magicAndBitmap)))
-	copy(payload[4:4+len(magicAndBitmap)], magicAndBitmap)
-	binary.BigEndian.PutUint32(payload[4+len(magicAndBitmap):], crc32.ChecksumIEEE(magicAndBitmap))
+	payload, err := dv.SerializeDV(bitmap)
+	require.NoError(t, err)
 
 	var puffinBuf bytes.Buffer
 	w, err := puffin.NewWriter(&puffinBuf)
@@ -90,20 +76,24 @@ func writeDVPuffinFixture(t *testing.T, positions []uint64, referencedDataFile s
 	path = filepath.Join(t.TempDir(), "dv.puffin")
 	require.NoError(t, os.WriteFile(path, puffinBuf.Bytes(), 0o644))
 
-	return path, blobMeta.Offset, blobMeta.Length
+	return path, blobMeta.Offset, blobMeta.Length, bitmap.Cardinality()
 }
 
 // newDVMockDataFile builds a manifest-entry-shaped mock for a DV puffin blob.
-// FileSizeBytes is intentionally left at zero (mockDataFile's default): the
-// scanner read path consults ContentOffset / ContentSizeInBytes only, and
-// setting filesize to the blob length (rather than the puffin file size)
-// invites a misleading test fixture.
-func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSize int64) *dvMockDataFile {
+// recordCount is the manifest entry's record_count (field 103): for a DV it
+// equals the blob cardinality, and ReadDV cross-checks the two, so callers
+// pass the cardinality returned by writeDVPuffinFixture. FileSizeBytes is
+// intentionally left at zero (mockDataFile's default): the scanner read path
+// consults ContentOffset / ContentSizeInBytes only, and setting filesize to
+// the blob length (rather than the puffin file size) invites a misleading
+// test fixture.
+func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSize, recordCount int64) *dvMockDataFile {
 	return &dvMockDataFile{
 		mockDataFile: mockDataFile{
 			path:        puffinPath,
 			contentType: iceberg.EntryContentPosDeletes,
 			format:      iceberg.PuffinFile,
+			count:       recordCount,
 		},
 		referencedDataFile: strPtr(referencedDataFile),
 		contentOffset:      int64Ptr(offset),
@@ -136,10 +126,10 @@ func TestReadAllDeletionVectors(t *testing.T) {
 
 	t.Run("decodes positions and keys by referenced data file", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-001.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataFilePath)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1, 3, 5, 7, 9}, dataFilePath)
 
 		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
-			newDVMockDataFile(puffinPath, dataFilePath, offset, length),
+			newDVMockDataFile(puffinPath, dataFilePath, offset, length, card),
 		}}}
 
 		got, err := readAllDeletionVectors(ctx, fs, tasks, 1)
@@ -161,8 +151,8 @@ func TestReadAllDeletionVectors(t *testing.T) {
 
 	t.Run("dedups identical DV referenced by two tasks", func(t *testing.T) {
 		const dataFilePath = "file:///table/data/data-002.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{2, 4}, dataFilePath)
-		dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{2, 4}, dataFilePath)
+		dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
 
 		tasks := []FileScanTask{
 			{DeletionVectorFiles: []iceberg.DataFile{dvFile}},
@@ -185,7 +175,7 @@ func TestReadAllDeletionVectors(t *testing.T) {
 	})
 
 	t.Run("DV missing referenced_data_file is rejected", func(t *testing.T) {
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
+		puffinPath, offset, length, _ := writeDVPuffinFixture(t, []uint64{0}, "file:///placeholder.parquet")
 
 		dvFile := &dvMockDataFile{
 			mockDataFile: mockDataFile{
@@ -201,6 +191,15 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "missing referenced_data_file")
+	})
+
+	t.Run("DV identity mismatch propagates from ReadDV", func(t *testing.T) {
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0}, "file:///table/data/data-001.parquet")
+		dvFile := newDVMockDataFile(puffinPath, "file:///table/data/data-002.parquet", offset, length, card)
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
+		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
+		assert.Contains(t, err.Error(), "manifest referenced_data_file")
 	})
 
 	t.Run("DV missing content_offset is rejected", func(t *testing.T) {
@@ -231,12 +230,12 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		// right place to catch the case where two blobs share a puffin file
 		// but live at different content offsets — sameDVBlob compares both.
 		const dataFilePath = "file:///table/data/data-003.parquet"
-		puffinA, offsetA, lengthA := writeDVPuffinFixture(t, []uint64{1, 2}, dataFilePath)
-		puffinB, offsetB, lengthB := writeDVPuffinFixture(t, []uint64{3, 4}, dataFilePath)
+		puffinA, offsetA, lengthA, cardA := writeDVPuffinFixture(t, []uint64{1, 2}, dataFilePath)
+		puffinB, offsetB, lengthB, cardB := writeDVPuffinFixture(t, []uint64{3, 4}, dataFilePath)
 
 		tasks := []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
-			newDVMockDataFile(puffinA, dataFilePath, offsetA, lengthA),
-			newDVMockDataFile(puffinB, dataFilePath, offsetB, lengthB),
+			newDVMockDataFile(puffinA, dataFilePath, offsetA, lengthA, cardA),
+			newDVMockDataFile(puffinB, dataFilePath, offsetB, lengthB, cardB),
 		}}}
 
 		_, err := readAllDeletionVectors(ctx, fs, tasks, 1)
@@ -255,8 +254,8 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		// nil-ref entry in the input, the call returns a clean error and
 		// does not panic, regardless of how concurrency is configured.
 		const dataFilePath = "file:///table/data/data-004.parquet"
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{42}, dataFilePath)
-		valid := newDVMockDataFile(puffinPath, dataFilePath, offset, length)
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{42}, dataFilePath)
+		valid := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
 		broken := &dvMockDataFile{
 			mockDataFile: mockDataFile{
 				path:        "/nonexistent.puffin",
@@ -296,7 +295,7 @@ func TestFilterByDeletionVector(t *testing.T) {
 	for _, p := range []uint64{1, 3, 7, 9} {
 		bitmap.Set(p)
 	}
-	filter := filterByDeletionVector(ctx, bitmap, 10)
+	filter := filterByDeletionVector(ctx, bitmap, 10, (&rowPositionSource{}).cursor())
 
 	mkBatch := func(start, end int64) arrow.RecordBatch {
 		bldr := array.NewInt64Builder(mem)
@@ -326,4 +325,93 @@ func TestFilterByDeletionVector(t *testing.T) {
 		assert.Equal(t, []int64{5, 6, 8},
 			out2.Column(0).(*array.Int64).Int64Values())
 	})
+}
+
+// TestFilterByDeletionVectorOutOfBoundsPosition guards the slow-path bound: when
+// a surviving span's cursor positions exceed rowCount (row-group metadata and the
+// manifest's File.Count() disagree — a writer bug, hand-built file, or corruption)
+// the keep-mask index must not run off keepBits. The guard keeps such rows rather
+// than panicking, so the batch survives intact.
+func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewGoAllocator()
+
+	const rowCount = 4
+	bitmap := dv.NewRoaringPositionBitmap()
+	src := &rowPositionSource{spans: []internal.RowGroupSpan{{FirstRowPos: 100, NumRows: 3}}}
+	filter := filterByDeletionVector(ctx, bitmap, rowCount, src.cursor())
+
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	for i := int64(0); i < 3; i++ {
+		bldr.Append(i)
+	}
+	col := bldr.NewArray()
+	defer col.Release()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{col}, 3)
+
+	out, err := filter(batch)
+	require.NoError(t, err)
+	defer out.Release()
+	assert.Equal(t, []int64{0, 1, 2}, out.Column(0).(*array.Int64).Int64Values())
+}
+
+func TestFilterByDeletionVectorStaleRowCount(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewGoAllocator()
+
+	mkBatch := func(values ...int64) arrow.RecordBatch {
+		bldr := array.NewInt64Builder(mem)
+		defer bldr.Release()
+		bldr.AppendValues(values, nil)
+		col := bldr.NewArray()
+		defer col.Release()
+		schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+
+		return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
+	}
+
+	bitmap := dv.NewRoaringPositionBitmap()
+	bitmap.Set(1)
+	bitmap.Set(3)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+
+	withinCount, err := filter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer withinCount.Release()
+	assert.Equal(t, []int64{0}, withinCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryCount, err := filter(mkBatch(2, 3))
+	require.NoError(t, err)
+	defer boundaryCount.Release()
+	assert.Equal(t, []int64{2}, boundaryCount.Column(0).(*array.Int64).Int64Values())
+
+	straddlingFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	straddlingPrefix, err := straddlingFilter(mkBatch(0, 1))
+	require.NoError(t, err)
+	defer straddlingPrefix.Release()
+	assert.Equal(t, []int64{0}, straddlingPrefix.Column(0).(*array.Int64).Int64Values())
+
+	straddlingCount, err := straddlingFilter(mkBatch(2, 3, 4, 5))
+	require.NoError(t, err)
+	defer straddlingCount.Release()
+	assert.Equal(t, []int64{2, 4, 5}, straddlingCount.Column(0).(*array.Int64).Int64Values())
+
+	boundaryFilter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
+	boundaryBatch, err := boundaryFilter(mkBatch(0, 1, 2, 3))
+	require.NoError(t, err)
+	defer boundaryBatch.Release()
+	assert.Equal(t, []int64{0, 2}, boundaryBatch.Column(0).(*array.Int64).Int64Values())
+
+	afterBoundary, err := boundaryFilter(mkBatch(4, 5))
+	require.NoError(t, err)
+	defer afterBoundary.Release()
+	assert.Equal(t, []int64{4, 5}, afterBoundary.Column(0).(*array.Int64).Int64Values())
+
+	zeroRowCountFilter := filterByDeletionVector(ctx, bitmap, 0, (&rowPositionSource{}).cursor())
+	zeroRowCount, err := zeroRowCountFilter(mkBatch(6, 7))
+	require.NoError(t, err)
+	defer zeroRowCount.Release()
+	assert.Equal(t, []int64{6, 7}, zeroRowCount.Column(0).(*array.Int64).Int64Values())
 }

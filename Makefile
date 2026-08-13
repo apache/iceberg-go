@@ -24,7 +24,7 @@ test:
 
 # Race detector is opt-in per package/test.
 test-race:
-	go test -race -v ./codec/...
+	go test -race -v ./codec/... ./metrics/...
 
 docs-gen:
 	go run ./website/gen
@@ -67,7 +67,7 @@ integration-io:
 	go test -tags=integration -v ./io/...
 
 integration-rest:
-	go test -tags=integration -v -run="^TestRestIntegration$$" ./catalog/rest
+	go test -tags=integration -v -run="^(TestRestIntegration|TestRestCatalogConformance)$$" ./catalog/rest
 
 integration-spark:
 	go test -tags=integration -v -run="^TestSparkIntegration" ./table

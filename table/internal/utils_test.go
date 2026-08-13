@@ -18,12 +18,15 @@
 package internal_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"slices"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
@@ -64,14 +67,65 @@ func TestMetricsModePairs(t *testing.T) {
 }
 
 func TestTruncateUpperBoundString(t *testing.T) {
-	assert.Equal(t, "ab", internal.TruncateUpperBoundText("aaaa", 2))
-	// \u10FFFF\u10FFFF\x00
-	assert.Equal(t, "", internal.TruncateUpperBoundText("\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", 2))
+	tests := []struct {
+		name     string
+		value    string
+		truncate int
+		expected string
+	}{
+		{name: "increment", value: "aaaa", truncate: 2, expected: "ab"},
+		{name: "surrogate gap", value: "\uD7FFx", truncate: 1, expected: "\uE000"},
+		{name: "preceding scalar", value: "\uD7FEx", truncate: 1, expected: "\uD7FF"},
+		{name: "carry past maximal suffix", value: string([]rune{'a', utf8.MaxRune, utf8.MaxRune, 'x'}), truncate: 3, expected: "b"},
+		{name: "carry to maximal scalar", value: string([]rune{utf8.MaxRune - 1, utf8.MaxRune, 'x'}), truncate: 2, expected: string([]rune{utf8.MaxRune})},
+		// U+10FFFF U+10FFFF NUL has no greater valid Unicode prefix.
+		{name: "all maximal", value: "\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", truncate: 2, expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := internal.TruncateUpperBoundText(tt.value, tt.truncate)
+			assert.Equal(t, tt.expected, got)
+
+			if got != "" {
+				require.True(t, utf8.ValidString(got))
+				if tt.truncate < utf8.RuneCountInString(tt.value) {
+					require.Greater(t, bytes.Compare([]byte(got), []byte(tt.value)), 0)
+				}
+			}
+		})
+	}
 }
 
 func TestTruncateUpperBoundBinary(t *testing.T) {
-	assert.Equal(t, []byte{0x01, 0x03}, internal.TruncateUpperBoundBinary([]byte{0x01, 0x02, 0x03}, 2))
-	assert.Nil(t, internal.TruncateUpperBoundBinary([]byte{0xff, 0xff, 0x00}, 2))
+	tests := []struct {
+		name     string
+		value    []byte
+		truncate int
+		expected []byte
+	}{
+		{"increment", []byte{0x01, 0x02, 0x03}, 2, []byte{0x01, 0x03}},
+		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
+		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
+		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := slices.Clone(tt.value)
+			first := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+			second := internal.TruncateUpperBoundBinary(tt.value, tt.truncate)
+
+			assert.Equal(t, tt.expected, first)
+			assert.Equal(t, first, second)
+			assert.Equal(t, original, tt.value)
+
+			if len(first) > 0 {
+				first[0] ^= 0xff
+				assert.Equal(t, original, tt.value)
+			}
+		})
+	}
 }
 
 func TestMapExecAllWorkersError(t *testing.T) {
@@ -208,4 +262,173 @@ func TestPartitionValue_MismatchPanics(t *testing.T) {
 	}
 
 	assert.Panics(t, func() { stats.PartitionValue(partitionField, schema) })
+}
+
+func TestToDataFile_PartitionedCallerValueWins(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+
+	// The column spans more than one value (1..9), so inference would panic.
+	// A caller-supplied value must be recorded verbatim and short-circuit inference entirely.
+	stats := &internal.DataFileStatistics{
+		RecordCount: 2,
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(int32(1)),
+				max: iceberg.NewLiteral(int32(9)),
+			},
+		},
+	}
+
+	df := stats.ToDataFile(internal.DataFileOpts{
+		Schema:          schema,
+		Spec:            spec,
+		Path:            "s3://bucket/data/id=42/file.parquet",
+		Format:          iceberg.ParquetFile,
+		Content:         iceberg.EntryContentData,
+		FileSize:        1024,
+		PartitionValues: map[int]any{1000: int32(42)},
+	})
+
+	require.Contains(t, df.Partition(), 1000)
+	assert.EqualValues(t, 42, df.Partition()[1000],
+		"a non-nil caller-supplied partition value must be recorded and must not be overwritten by inference")
+}
+
+func TestToDataFile_NonOrderPreservingNilStaysAbsent(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_bucket",
+		Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+
+	// A multi-valued column with a non-order-preserving transform must not
+	// trigger inference (which would panic); the nil caller value stays nil.
+	stats := &internal.DataFileStatistics{
+		RecordCount: 2,
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{
+				min: iceberg.NewLiteral(int32(1)),
+				max: iceberg.NewLiteral(int32(9)),
+			},
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:          schema,
+			Spec:            spec,
+			Path:            "s3://bucket/data/file.parquet",
+			Format:          iceberg.ParquetFile,
+			Content:         iceberg.EntryContentData,
+			FileSize:        1024,
+			PartitionValues: map[int]any{1000: nil},
+		})
+		require.Contains(t, df.Partition(), 1000)
+		assert.Nil(t, df.Partition()[1000])
+	})
+}
+
+func TestToDataFile_ReferencedDataFile(t *testing.T) {
+	const ref = "s3://bucket/data/data-001.parquet"
+	stats := &internal.DataFileStatistics{RecordCount: 2}
+	refPtr := ref
+
+	t.Run("position delete records referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/pos-del.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentPosDeletes,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		require.NotNil(t, df.ReferencedDataFile())
+		assert.Equal(t, ref, *df.ReferencedDataFile())
+	})
+
+	t.Run("data content ignores referenced data file", func(t *testing.T) {
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:             iceberg.PositionalDeleteSchema,
+			Spec:               *iceberg.UnpartitionedSpec,
+			Path:               "s3://bucket/data/data.parquet",
+			Format:             iceberg.ParquetFile,
+			Content:            iceberg.EntryContentData,
+			FileSize:           1024,
+			ReferencedDataFile: &refPtr,
+		})
+		assert.Nil(t, df.ReferencedDataFile(),
+			"ToDataFile must ignore ReferencedDataFile for non-position-delete content")
+	})
+}
+
+func TestDataFileStatisticsDecimalPartitionManifestRoundTrip(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "price",
+		Type: iceberg.DecimalTypeOf(10, 2),
+	})
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "price",
+		Transform: iceberg.IdentityTransform{},
+	})
+	decimal := iceberg.Decimal{Val: decimal128.FromI64(-123), Scale: 2}
+	lit := iceberg.NewLiteral(decimal)
+	stats := internal.DataFileStatistics{
+		RecordCount: 1,
+		ColAggs: map[int]internal.StatsAgg{
+			1: &mockStatsAgg{min: lit, max: lit},
+		},
+	}
+	dataFile := stats.ToDataFile(internal.DataFileOpts{
+		Schema:          schema,
+		Spec:            spec,
+		Path:            "s3://bucket/table/data/file.parquet",
+		Format:          iceberg.ParquetFile,
+		Content:         iceberg.EntryContentData,
+		FileSize:        1024,
+		PartitionValues: map[int]any{1000: decimal},
+	})
+
+	snapshotID := int64(10)
+	sequenceNumber := int64(1)
+	entry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED,
+		&snapshotID,
+		&sequenceNumber,
+		&sequenceNumber,
+		dataFile,
+	)
+	var buf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(
+		"s3://bucket/table/metadata/manifest.avro",
+		&buf,
+		2,
+		spec,
+		schema,
+		snapshotID,
+		[]iceberg.ManifestEntry{entry},
+	)
+	require.NoError(t, err)
+
+	entries, err := iceberg.ReadManifest(manifest, bytes.NewReader(buf.Bytes()), false)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	got, ok := entries[0].DataFile().Partition()[1000].(iceberg.DecimalLiteral)
+	require.True(t, ok)
+	assert.True(t, got.Equals(iceberg.DecimalLiteral(decimal)))
 }

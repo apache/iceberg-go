@@ -20,6 +20,8 @@ package view
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -84,6 +86,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	var updates Updates
+	if len(rawUpdates) > 0 {
+		updates = make(Updates, 0, len(rawUpdates))
+	}
 	for _, raw := range rawUpdates {
 		var base baseUpdate
 		if err := json.Unmarshal(raw, &base); err != nil {
@@ -98,8 +104,10 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(raw, update); err != nil {
 			return err
 		}
-		*u = append(*u, update)
+		updates = append(updates, update)
 	}
+
+	*u = updates
 
 	return nil
 }
@@ -201,7 +209,7 @@ type setPropertiesUpdate struct {
 func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 	return &setPropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateSetProperties},
-		Updates:    updates,
+		Updates:    maps.Clone(updates),
 	}
 }
 
@@ -222,7 +230,7 @@ type removePropertiesUpdate struct {
 func NewRemovePropertiesUpdate(removals []string) *removePropertiesUpdate {
 	return &removePropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveProperties},
-		Removals:   removals,
+		Removals:   slices.Clone(removals),
 	}
 }
 

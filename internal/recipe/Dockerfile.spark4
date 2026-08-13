@@ -17,7 +17,7 @@ FROM apache/spark:4.0.2-python3
 
 USER root
 
-ARG ICEBERG_VERSION=1.10.0
+ARG ICEBERG_VERSION=1.11.0
 ARG SCALA_VERSION=2.13
 
 RUN curl --progress-bar -L --retry 3 \

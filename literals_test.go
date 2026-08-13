@@ -18,6 +18,7 @@
 package iceberg_test
 
 import (
+	"encoding/binary"
 	"math"
 	"strconv"
 	"testing"
@@ -200,8 +201,8 @@ func TestTimestampNanoLiteralConversions(t *testing.T) {
 		{
 			name:              "negative timestamp",
 			nanoLit:           iceberg.TimestampNsLiteral(-1234567890123456789),
-			expectedMicro:     iceberg.Timestamp(-1234567890123456),
-			expectedRoundTrip: iceberg.TimestampNano(-1234567890123456000),
+			expectedMicro:     iceberg.Timestamp(-1234567890123457),
+			expectedRoundTrip: iceberg.TimestampNano(-1234567890123457000),
 		},
 		{
 			name:              "maximum precision truncation",
@@ -230,6 +231,65 @@ func TestTimestampNanoLiteralConversions(t *testing.T) {
 			nanoValue, ok := backToNano.(iceberg.TimestampNsLiteral)
 			require.True(t, ok)
 			assert.Equal(t, tt.expectedRoundTrip, iceberg.TimestampNano(nanoValue))
+		})
+	}
+}
+
+func TestTimestampNanoToMicrosFloorsNegativeValues(t *testing.T) {
+	tests := []struct {
+		nanos  iceberg.TimestampNano
+		micros iceberg.Timestamp
+	}{
+		{nanos: -1001, micros: -2},
+		{nanos: -1000, micros: -1},
+		{nanos: -999, micros: -1},
+		{nanos: -1, micros: -1},
+		{nanos: 0, micros: 0},
+		{nanos: 1, micros: 0},
+		{nanos: 999, micros: 0},
+		{nanos: 1000, micros: 1},
+		{nanos: 1001, micros: 1},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.micros, tt.nanos.ToMicros())
+
+		for _, target := range []iceberg.Type{
+			iceberg.PrimitiveTypes.Timestamp,
+			iceberg.PrimitiveTypes.TimestampTz,
+		} {
+			converted, err := iceberg.TimestampNsLiteral(tt.nanos).To(target)
+			require.NoError(t, err)
+			assert.Equal(t, iceberg.TimestampLiteral(tt.micros), converted)
+		}
+	}
+}
+
+func TestTimestampLiteralToNanosRejectsOverflow(t *testing.T) {
+	targets := []iceberg.Type{
+		iceberg.PrimitiveTypes.TimestampNs,
+		iceberg.PrimitiveTypes.TimestampTzNs,
+	}
+
+	for _, target := range targets {
+		t.Run(target.String(), func(t *testing.T) {
+			for _, value := range []iceberg.TimestampLiteral{
+				iceberg.TimestampLiteral(math.MaxInt64/1000 + 1),
+				iceberg.TimestampLiteral(math.MinInt64/1000 - 1),
+			} {
+				actual, err := value.To(target)
+				assert.Nil(t, actual)
+				assert.ErrorIs(t, err, iceberg.ErrBadCast)
+			}
+
+			for _, value := range []iceberg.TimestampLiteral{
+				iceberg.TimestampLiteral(math.MaxInt64 / 1000),
+				iceberg.TimestampLiteral(math.MinInt64 / 1000),
+			} {
+				actual, err := value.To(target)
+				require.NoError(t, err)
+				assert.Equal(t, iceberg.TimestampNsLiteral(value*1000), actual)
+			}
 		})
 	}
 }
@@ -285,6 +345,12 @@ func TestInt64ToInt32OutsideBound(t *testing.T) {
 	assert.Implements(t, (*iceberg.BelowMinLiteral)(nil), belowMin)
 	assert.Equal(t, iceberg.Int32BelowMinLiteral(), belowMin)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, belowMin.Type())
+}
+
+func TestBelowMinLiteralMarshalBinary(t *testing.T) {
+	_, err := iceberg.Int32BelowMinLiteral().MarshalBinary()
+	require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+	assert.EqualError(t, err, "invalid binary serialization: cannot marshal below min literal")
 }
 
 func TestFloatConversions(t *testing.T) {
@@ -389,6 +455,14 @@ func TestDecimalToDecimalConversion(t *testing.T) {
 	assert.ErrorContains(t, err, "could not convert 34.11 to decimal(9, 3)")
 }
 
+func TestDecimalLiteralTypeDoesNotPanicForLargeScale(t *testing.T) {
+	lit := iceberg.DecimalLiteral{Scale: 10, Val: decimal128.FromI64(1234)}
+
+	assert.NotPanics(t, func() {
+		assert.NotNil(t, lit.Type())
+	})
+}
+
 func TestDecimalLiteralConversions(t *testing.T) {
 	n1 := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
 	n2 := iceberg.Decimal{Val: decimal128.FromI64(math.MaxInt32 + 1), Scale: 0}
@@ -436,6 +510,23 @@ func TestDecimalLiteralConversions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, iceberg.Int64BelowMinLiteral(), below)
 	assert.Equal(t, iceberg.PrimitiveTypes.Int64, below.Type())
+
+	above, err = iceberg.DecimalLiteral(n4).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32AboveMaxLiteral(), above)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, above.Type())
+
+	below, err = iceberg.DecimalLiteral(n5).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
+
+	n6 := iceberg.Decimal{Val: decimal128.FromU64(uint64(math.MaxInt64) + 2).Negate(), Scale: 0}
+
+	below, err = iceberg.DecimalLiteral(n6).To(iceberg.PrimitiveTypes.Int32)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.Int32BelowMinLiteral(), below)
+	assert.Equal(t, iceberg.PrimitiveTypes.Int32, below.Type())
 
 	v, err := decimal128.FromFloat64(math.MaxFloat32+1e37, 38, -1)
 	require.NoError(t, err)
@@ -587,6 +678,92 @@ func TestVariantLiteralFromBytes(t *testing.T) {
 	assert.ErrorContains(t, err, "variant")
 }
 
+// geoCoords encodes coordinate values as little-endian float64s, matching the
+// Iceberg geospatial single-value bound serialization (spec Appendix D).
+func geoCoords(vals ...float64) []byte {
+	b := make([]byte, 0, len(vals)*8)
+	for _, v := range vals {
+		var buf [8]byte
+		binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
+		b = append(b, buf[:]...)
+	}
+
+	return b
+}
+
+func TestGeoLiteralFromBytes(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	xy := geoCoords(1.5, 2.5)
+	lit, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+
+	// Type() must report the real geo type, not plain binary, so callers that
+	// key off the literal's own type don't misroute it.
+	assert.True(t, geom.Equals(lit.Type()), "got %s", lit.Type())
+	assert.False(t, iceberg.PrimitiveTypes.Binary.Equals(lit.Type()))
+
+	g, ok := lit.(iceberg.GeoLiteral)
+	require.True(t, ok, "expected GeoLiteral, got %T", lit)
+	assert.Equal(t, xy, g.Value())
+
+	// A geo literal is deliberately not orderable: it must not satisfy the
+	// []byte TypedLiteral that the pruning comparators dispatch on.
+	_, isComparable := lit.(iceberg.TypedLiteral[[]byte])
+	assert.False(t, isComparable, "GeoLiteral must not expose a []byte Comparator")
+}
+
+func TestGeoLiteralToRejectsOrdering(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	lit, err := iceberg.LiteralFromBytes(geom, geoCoords(1, 2))
+	require.NoError(t, err)
+
+	// Identity cast is allowed; casting to anything orderable must fail so a
+	// geo bound can never be smuggled into a comparison.
+	same, err := lit.To(geom)
+	require.NoError(t, err)
+	assert.True(t, lit.Equals(same))
+
+	_, err = lit.To(iceberg.PrimitiveTypes.Binary)
+	assert.ErrorIs(t, err, iceberg.ErrBadCast)
+}
+
+func TestGeoLiteralFromBytesInvalidLength(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	// 8 bytes is a single coordinate; a valid bound needs at least X and Y.
+	_, err = iceberg.LiteralFromBytes(geom, geoCoords(1))
+	assert.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+}
+
+func TestGeoLiteralEquals(t *testing.T) {
+	geom, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geog, err := iceberg.GeographyTypeOf("srid:4326", "karney")
+	require.NoError(t, err)
+
+	xy := geoCoords(1, 2)
+	a, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+	b, err := iceberg.LiteralFromBytes(geom, xy)
+	require.NoError(t, err)
+	assert.True(t, a.Equals(b))
+
+	// Same coordinate bytes but a different geo type are not equal.
+	c, err := iceberg.LiteralFromBytes(geog, xy)
+	require.NoError(t, err)
+	assert.False(t, a.Equals(c))
+
+	// Different coordinates are not equal.
+	d, err := iceberg.LiteralFromBytes(geom, geoCoords(3, 4))
+	require.NoError(t, err)
+	assert.False(t, a.Equals(d))
+}
+
 func TestVariantLiteralLargeArray(t *testing.T) {
 	const n = 300
 	elems := make([]any, n)
@@ -639,6 +816,11 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 }
 
 func TestFixedLiteral(t *testing.T) {
+	emptyFixed := iceberg.FixedLiteral(nil)
+	assert.NotPanics(t, func() {
+		assert.Equal(t, "fixed[0]", emptyFixed.Type().String())
+	})
+
 	fixedLit012 := iceberg.FixedLiteral{0x00, 0x01, 0x02}
 	fixedLit013 := iceberg.FixedLiteral{0x00, 0x01, 0x03}
 	assert.True(t, fixedLit012.Equals(fixedLit012))
@@ -667,7 +849,13 @@ func TestFixedLiteral(t *testing.T) {
 
 	binlit, err := fixedLit012.To(iceberg.PrimitiveTypes.Binary)
 	require.NoError(t, err)
-	assert.EqualValues(t, fixedLit012, binlit)
+	binaryLit, ok := binlit.(iceberg.BinaryLiteral)
+	require.True(t, ok)
+	assert.EqualValues(t, fixedLit012, binaryLit)
+	assert.True(t, binaryLit.Type().Equals(iceberg.PrimitiveTypes.Binary))
+
+	binaryLit[0] = 0xFF
+	assert.Equal(t, byte(0x00), fixedLit012[0])
 }
 
 func TestBinaryLiteral(t *testing.T) {
@@ -734,6 +922,52 @@ func TestInvalidBoolLiteralConversions(t *testing.T) {
 		iceberg.PrimitiveTypes.Binary,
 		iceberg.FixedTypeOf(2),
 	})
+}
+
+func TestBoolLiteralComparator(t *testing.T) {
+	cmp := iceberg.BoolLiteral(false).Comparator()
+
+	tests := []struct {
+		name     string
+		v1, v2   bool
+		expected int
+	}{
+		{"false_equals_false", false, false, 0},
+		{"true_equals_true", true, true, 0},
+		{"false_less_than_true", false, true, -1},
+		{"true_greater_than_false", true, false, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, cmp(tt.v1, tt.v2))
+		})
+	}
+}
+
+func TestBoolLiteralMarshalBinaryReturnsIndependentBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		value iceberg.BoolLiteral
+		want  byte
+	}{
+		{name: "false", value: iceberg.BoolLiteral(false), want: 0x0},
+		{name: "true", value: iceberg.BoolLiteral(true), want: 0x1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, data)
+
+			data[0] ^= 0x1
+
+			again, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, again)
+		})
+	}
 }
 
 func TestInvalidNumericConversions(t *testing.T) {
@@ -1024,6 +1258,43 @@ func TestUnmarshalBinary(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Truef(t, tt.result.Equals(lit), "expected: %s, got: %s", tt.result, lit)
+		})
+	}
+}
+
+func TestLiteralFromBytesFixedWidth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		data        []byte
+		want        iceberg.FixedLiteral
+		errContains string
+		oversized   bool
+	}{
+		{name: "exact", data: []byte{1, 2, 3, 4}, want: iceberg.FixedLiteral{1, 2, 3, 4}},
+		{name: "short", data: []byte{1, 2, 3}, want: iceberg.FixedLiteral{1, 2, 3, 0}},
+		{name: "zero length", data: []byte{}, want: iceberg.FixedLiteral{0, 0, 0, 0}},
+		{name: "nil", data: nil, errContains: "invalid binary serialization"},
+		{name: "one byte oversized", data: []byte{1, 2, 3, 4, 5}, errContains: "fixed[4] value has 5 bytes", oversized: true},
+		{name: "large oversized", data: make([]byte, 100), errContains: "fixed[4] value has 100 bytes", oversized: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			literal, err := iceberg.LiteralFromBytes(iceberg.FixedTypeOf(4), test.data)
+			if test.errContains != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+				if test.oversized {
+					require.ErrorIs(t, err, iceberg.ErrInvalidFixedLength)
+				}
+				require.ErrorContains(t, err, test.errContains)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.want, literal)
 		})
 	}
 }

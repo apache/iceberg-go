@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -56,39 +57,21 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	for _, raw := range rawRequirements {
-		var base baseRequirement
-		if err := json.Unmarshal(raw, &base); err != nil {
-			return err
-		}
-
-		var req Requirement
-		switch base.Type {
-		case reqAssertCreate:
-			req = &assertCreate{}
-		case reqAssertTableUUID:
-			req = &assertTableUuid{}
-		case reqAssertRefSnapshotID:
-			req = &assertRefSnapshotID{}
-		case reqAssertDefaultSpecID:
-			req = &assertDefaultSpecId{}
-		case reqAssertCurrentSchemaID:
-			req = &assertCurrentSchemaId{}
-		case reqAssertDefaultSortOrderID:
-			req = &assertDefaultSortOrderId{}
-		case reqAssertLastAssignedFieldID:
-			req = &assertLastAssignedFieldId{}
-		case reqAssertLastAssignedPartitionID:
-			req = &assertLastAssignedPartitionId{}
-		default:
-			return fmt.Errorf("unknown requirement type: %s", base.Type)
-		}
-
-		if err := json.Unmarshal(raw, req); err != nil {
-			return err
-		}
-		*r = append(*r, req)
+	var requirements Requirements
+	if len(rawRequirements) > 0 {
+		requirements = make(Requirements, 0, len(rawRequirements))
 	}
+	for _, raw := range rawRequirements {
+		req, err := parseRequirementBytes(raw, func(reqType string) error {
+			return fmt.Errorf("unknown requirement type: %s", reqType)
+		})
+		if err != nil {
+			return err
+		}
+		requirements = append(requirements, req)
+	}
+
+	*r = requirements
 
 	return nil
 }
@@ -97,6 +80,147 @@ func (r *Requirements) UnmarshalJSON(data []byte) error {
 // identify the type of the requirement.
 type baseRequirement struct {
 	Type string `json:"type"`
+}
+
+type assertTableUUIDWire struct {
+	UUID *uuid.UUID `json:"uuid"`
+}
+
+type nullableInt64 struct {
+	set   bool
+	value *int64
+}
+
+func (n *nullableInt64) UnmarshalJSON(data []byte) error {
+	n.set = true
+	n.value = nil
+	if string(data) == "null" {
+		return nil
+	}
+
+	var value int64
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	n.value = &value
+
+	return nil
+}
+
+type assertRefSnapshotIDWire struct {
+	Ref        *string       `json:"ref"`
+	SnapshotID nullableInt64 `json:"snapshot-id"`
+}
+
+func requiredRequirementField(name string) error {
+	return internal.MissingRequiredField(ErrInvalidRequirement, name)
+}
+
+func parseRequirementBytes(b []byte, unknown func(string) error) (Requirement, error) {
+	var base internal.RequirementWire
+	if err := json.Unmarshal(b, &base); err != nil {
+		return nil, err
+	}
+	if base.Type == nil {
+		return nil, requiredRequirementField("type")
+	}
+
+	switch *base.Type {
+	case reqAssertCreate:
+		return AssertCreate(), nil
+
+	case reqAssertTableUUID:
+		var req assertTableUUIDWire
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.UUID == nil {
+			return nil, requiredRequirementField("uuid")
+		}
+
+		return AssertTableUUID(*req.UUID), nil
+
+	case reqAssertRefSnapshotID:
+		var req assertRefSnapshotIDWire
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.Ref == nil {
+			return nil, requiredRequirementField("ref")
+		}
+		if !req.SnapshotID.set {
+			return nil, requiredRequirementField("snapshot-id")
+		}
+
+		return AssertRefSnapshotID(*req.Ref, req.SnapshotID.value), nil
+
+	case reqAssertDefaultSpecID:
+		var req struct {
+			DefaultSpecID *int `json:"default-spec-id"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.DefaultSpecID == nil {
+			return nil, requiredRequirementField("default-spec-id")
+		}
+
+		return AssertDefaultSpecID(*req.DefaultSpecID), nil
+
+	case reqAssertCurrentSchemaID:
+		var req struct {
+			CurrentSchemaID *int `json:"current-schema-id"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.CurrentSchemaID == nil {
+			return nil, requiredRequirementField("current-schema-id")
+		}
+
+		return AssertCurrentSchemaID(*req.CurrentSchemaID), nil
+
+	case reqAssertDefaultSortOrderID:
+		var req struct {
+			DefaultSortOrderID *int `json:"default-sort-order-id"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.DefaultSortOrderID == nil {
+			return nil, requiredRequirementField("default-sort-order-id")
+		}
+
+		return AssertDefaultSortOrderID(*req.DefaultSortOrderID), nil
+
+	case reqAssertLastAssignedFieldID:
+		var req struct {
+			LastAssignedFieldID *int `json:"last-assigned-field-id"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.LastAssignedFieldID == nil {
+			return nil, requiredRequirementField("last-assigned-field-id")
+		}
+
+		return AssertLastAssignedFieldID(*req.LastAssignedFieldID), nil
+
+	case reqAssertLastAssignedPartitionID:
+		var req struct {
+			LastAssignedPartitionID *int `json:"last-assigned-partition-id"`
+		}
+		if err := json.Unmarshal(b, &req); err != nil {
+			return nil, err
+		}
+		if req.LastAssignedPartitionID == nil {
+			return nil, requiredRequirementField("last-assigned-partition-id")
+		}
+
+		return AssertLastAssignedPartitionID(*req.LastAssignedPartitionID), nil
+	}
+
+	return nil, unknown(*base.Type)
 }
 
 func (b baseRequirement) GetType() string {
@@ -149,8 +273,9 @@ func (a *assertTableUuid) Validate(meta Metadata) error {
 
 type assertRefSnapshotID struct {
 	baseRequirement
-	Ref        string `json:"ref"`
-	SnapshotID *int64 `json:"snapshot-id"`
+	Ref           string `json:"ref"`
+	SnapshotID    *int64 `json:"snapshot-id"`
+	requireBranch bool
 }
 
 // AssertRefSnapshotID creates a requirement which ensures that the table branch
@@ -161,6 +286,15 @@ func AssertRefSnapshotID(ref string, id *int64) Requirement {
 		baseRequirement: baseRequirement{Type: reqAssertRefSnapshotID},
 		Ref:             ref,
 		SnapshotID:      id,
+	}
+}
+
+func assertBranchRefSnapshotID(ref string, id *int64) Requirement {
+	return &assertRefSnapshotID{
+		baseRequirement: baseRequirement{Type: reqAssertRefSnapshotID},
+		Ref:             ref,
+		SnapshotID:      id,
+		requireBranch:   true,
 	}
 }
 
@@ -179,6 +313,10 @@ func (a *assertRefSnapshotID) Validate(meta Metadata) error {
 	}
 
 	if r != nil {
+		if a.requireBranch && r.SnapshotRefType != BranchRef {
+			return fmt.Errorf("requirement failed: ref %q is a %s; tags cannot be transaction targets", a.Ref, r.SnapshotRefType)
+		}
+
 		if a.SnapshotID == nil {
 			return fmt.Errorf("requirement failed: %s %q was created concurrently", r.SnapshotRefType, a.Ref)
 		}
@@ -264,8 +402,13 @@ func (a *assertLastAssignedPartitionId) Validate(meta Metadata) error {
 		return errors.New("Requirement failed: current table metadata does not exist")
 	}
 
-	if *meta.LastPartitionSpecID() != a.LastAssignedPartitionID {
-		return fmt.Errorf("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *meta.LastPartitionSpecID())
+	lastPartitionSpecID := meta.LastPartitionSpecID()
+	if lastPartitionSpecID == nil {
+		return errors.New("requirement failed: last assigned partition id is missing")
+	}
+
+	if *lastPartitionSpecID != a.LastAssignedPartitionID {
+		return fmt.Errorf("requirement failed: last assigned partition id has changed: expected %d, found %d", a.LastAssignedPartitionID, *lastPartitionSpecID)
 	}
 
 	return nil
@@ -340,71 +483,5 @@ func ParseRequirementString(s string) (Requirement, error) {
 
 // ParseRequirementBytes parses json bytes into a Requirement
 func ParseRequirementBytes(b []byte) (Requirement, error) {
-	var base baseRequirement
-	if err := json.Unmarshal(b, &base); err != nil {
-		return nil, err
-	}
-
-	switch base.Type {
-	case reqAssertCreate:
-		return AssertCreate(), nil
-
-	case reqAssertTableUUID:
-		var req assertTableUuid
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertTableUUID(req.UUID), nil
-
-	case reqAssertRefSnapshotID:
-		var req assertRefSnapshotID
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertRefSnapshotID(req.Ref, req.SnapshotID), nil
-
-	case reqAssertDefaultSpecID:
-		var req assertDefaultSpecId
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertDefaultSpecID(req.DefaultSpecID), nil
-
-	case reqAssertCurrentSchemaID:
-		var req assertCurrentSchemaId
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertCurrentSchemaID(req.CurrentSchemaID), nil
-
-	case reqAssertDefaultSortOrderID:
-		var req assertDefaultSortOrderId
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertDefaultSortOrderID(req.DefaultSortOrderID), nil
-
-	case reqAssertLastAssignedFieldID:
-		var req assertLastAssignedFieldId
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertLastAssignedFieldID(req.LastAssignedFieldID), nil
-
-	case reqAssertLastAssignedPartitionID:
-		var req assertLastAssignedPartitionId
-		if err := json.Unmarshal(b, &req); err != nil {
-			return nil, err
-		}
-
-		return AssertLastAssignedPartitionID(req.LastAssignedPartitionID), nil
-	}
-
-	return nil, ErrInvalidRequirement
+	return parseRequirementBytes(b, func(string) error { return ErrInvalidRequirement })
 }

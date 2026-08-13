@@ -138,8 +138,8 @@ func (s *WriteRecordsSortTestSuite) TestPartitionedTableSortedPerFile() {
 	}
 
 	for _, df := range dataFiles {
-		s.NotNil(df.SortOrderID(), "data file must carry the sort order id")
-		s.Equal(meta.DefaultSortOrder(), *df.SortOrderID())
+		// Per-batch sorting only, so no per-file sort order claim.
+		s.Nil(df.SortOrderID(), "data file must not claim a sort order id")
 
 		ids, cats := readIDsAndCategories(s.T(), df.FilePath())
 		s.Require().NotEmpty(cats, "file should have at least one row")
@@ -195,8 +195,9 @@ func (s *WriteRecordsSortTestSuite) TestUnpartitionedTableMultipleBatchesEachSor
 		return rec
 	}
 
-	batch1 := makeBatch([]int32{3, 1, 2})
-	batch2 := makeBatch([]int32{6, 4, 5})
+	// Interleaved ranges, so per-batch and global sort give different results.
+	batch1 := makeBatch([]int32{5, 3, 1})
+	batch2 := makeBatch([]int32{4, 2, 0})
 	records := func(yield func(arrow.RecordBatch, error) bool) {
 		if !yield(batch1, nil) {
 			return
@@ -212,10 +213,9 @@ func (s *WriteRecordsSortTestSuite) TestUnpartitionedTableMultipleBatchesEachSor
 	s.Require().Len(dataFiles, 1)
 
 	ids, _ := readIDsAndCategories(s.T(), dataFiles[0].FilePath())
-	// Two locally-sorted runs concatenated: [1,2,3] then [4,5,6]. The
-	// boundary between them isn't a global sort, but each run is sorted.
-	s.Equal([]int32{1, 2, 3, 4, 5, 6}, ids,
-		"each batch is sorted independently and emitted in arrival order")
+	// Runs concatenated in arrival order; a global sort would give [0..5].
+	s.Equal([]int32{1, 3, 5, 0, 2, 4}, ids,
+		"batches are sorted independently and emitted in arrival order, not merged")
 }
 
 func readIDsAndCategories(t *testing.T, path string) ([]int32, []string) {

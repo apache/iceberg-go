@@ -20,6 +20,7 @@ package table
 import (
 	"cmp"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,7 +48,12 @@ func (e ErrIncompatibleSchema) Error() string {
 					fmt.Fprintf(&problems, "\n- invalid write default for %s: %s columns must default to null", f.ColName, f.Field.Type)
 				}
 			} else {
-				fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, f.Field.InitialDefault, f.InvalidDefault.MinFormatVersion)
+				if f.Field.InitialDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid initial default for %s: non-null default (%v) is not supported until v%d", f.ColName, formatDefaultValue(f.Field.InitialDefault), f.InvalidDefault.MinFormatVersion)
+				}
+				if f.Field.WriteDefault != nil {
+					fmt.Fprintf(&problems, "\n- invalid write default for %s: non-null default (%v) is not supported until v%d", f.ColName, formatDefaultValue(f.Field.WriteDefault), f.InvalidDefault.MinFormatVersion)
+				}
 			}
 		}
 	}
@@ -72,14 +78,32 @@ type UnsupportedType struct {
 
 type InvalidDefault struct {
 	MinFormatVersion  int
-	WriteDefault      any
 	MustBeNullForType bool
+}
+
+func formatDefaultValue(value any) any {
+	v := reflect.ValueOf(value)
+	for v.IsValid() && v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return nil
+	}
+
+	return v.Interface()
 }
 
 // checkSchemaCompatibility checks that the schema is compatible with the table's format version.
 // This validates that the schema does not contain types or features that were released
 // in later format versions.
 // Java: Schema::checkCompatibility
+// This check runs when a schema is added to a MetadataBuilder during table
+// construction or schema evolution. ParseMetadataBytes unmarshals existing
+// metadata directly and does not call this check. We intentionally validate
+// both default fields here, including write-default for pre-v3 schemas.
 func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 	const defaultValuesMinFormatVersion = 3
 	problems := make([]IncompatibleField, 0)
@@ -109,6 +133,13 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 			panic("invalid schema: field with id " + strconv.Itoa(field.ID) + " not found, this is a bug, please report.")
 		}
 
+		// Reject row-lineage metadata columns (_row_id,
+		// _last_updated_sequence_number) if a caller adds them to a stored
+		// schema during evolution. Other spec-reserved IDs (e.g. position-delete
+		// file_path/pos) are intentionally permitted: internal writers build
+		// throwaway metadata from those schemas via AddSchema. User schemas are
+		// validated against the full reserved range separately, before
+		// reassignIDs, in NewMetadataWithUUID.
 		if iceberg.IsMetadataColumn(field.ID) {
 			return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
 				iceberg.ErrInvalidSchema, colName, field.ID)
@@ -133,11 +164,11 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 				})
 			}
 		default:
-			if field.InitialDefault != nil && formatVersion < defaultValuesMinFormatVersion {
+			if (field.InitialDefault != nil || field.WriteDefault != nil) && formatVersion < defaultValuesMinFormatVersion {
 				problems = append(problems, IncompatibleField{
 					Field:          field,
 					ColName:        colName,
-					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion, WriteDefault: field.InitialDefault},
+					InvalidDefault: &InvalidDefault{MinFormatVersion: defaultValuesMinFormatVersion},
 				})
 			}
 		}
@@ -145,6 +176,47 @@ func checkSchemaCompatibility(sc *iceberg.Schema, formatVersion int) error {
 
 	if len(problems) != 0 {
 		return ErrIncompatibleSchema{fields: problems, formatVersion: formatVersion}
+	}
+
+	return nil
+}
+
+// validateNoReservedFieldIDs rejects user-supplied schemas that assign field IDs
+// in the range the spec reserves for metadata columns (_row_id,
+// _last_updated_sequence_number, _file, _pos, _deleted, ...). Field IDs must not
+// exceed iceberg.MaxStructFieldID. The walk is recursive: FlatFields yields every
+// leaf and nested field, so a reserved ID buried in a struct, list element, or
+// map key/value is caught too.
+//
+// This guards the table-creation path only. NewMetadataWithUUID calls it on the
+// user schema before reassignIDs, because reassignment overwrites every ID with
+// a fresh, non-reserved value and would otherwise mask a reserved ID the caller
+// supplied (see #1107). It intentionally covers the full reserved range, unlike
+// checkSchemaCompatibility, which permits internal writers to add position-delete
+// schemas (file_path/pos) via AddSchema.
+func validateNoReservedFieldIDs(sc *iceberg.Schema) error {
+	fieldsIt, err := sc.FlatFields()
+	if err != nil {
+		return fmt.Errorf("failed to enumerate schema fields: %w", err)
+	}
+
+	// Sort by ID so the reported field is deterministic when several are reserved.
+	for _, field := range slices.SortedFunc(fieldsIt, func(a, b iceberg.NestedField) int {
+		return cmp.Compare(a.ID, b.ID)
+	}) {
+		if !iceberg.IsReservedFieldID(field.ID) {
+			continue
+		}
+
+		// Report the schema's own name/path for the field, not the canonical
+		// metadata column name, so the caller can locate the offending field.
+		name, ok := sc.FindColumnName(field.ID)
+		if !ok {
+			name = field.Name
+		}
+
+		return fmt.Errorf("%w: field '%s' uses reserved metadata column ID %d",
+			iceberg.ErrInvalidSchema, name, field.ID)
 	}
 
 	return nil

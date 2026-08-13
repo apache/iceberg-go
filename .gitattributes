@@ -21,3 +21,7 @@
 # shell scripts with many flags. Unfortunately, directories themselves
 # won't recursively ignore, so we need the top level directories
 # as well as their files.
+
+# Force LF for Go sources so gofmt passes when checked out on Windows
+# (Windows runners would otherwise convert LF to CRLF and fail the gofmt linter).
+*.go text eol=lf

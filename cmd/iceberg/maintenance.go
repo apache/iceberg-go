@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -172,7 +173,7 @@ type CleanOrphanFilesResult struct {
 
 type OrphanFileEntry struct {
 	Path      string `json:"path"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 type UpgradeResult struct {
@@ -220,13 +221,27 @@ func parseDuration(s string) (time.Duration, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid day duration %q: %w", s, err)
 		}
+		if math.IsNaN(days) || math.IsInf(days, 0) {
+			return 0, fmt.Errorf("invalid day duration %q: must be finite", s)
+		}
+		if days < 0 {
+			return 0, fmt.Errorf("invalid day duration %q: must be non-negative", s)
+		}
 
-		return time.Duration(days * float64(24*time.Hour)), nil
+		nanos := days * float64(24*time.Hour)
+		if nanos >= float64(uint64(1)<<63) {
+			return 0, fmt.Errorf("invalid day duration %q: overflows time.Duration", s)
+		}
+
+		return time.Duration(nanos), nil
 	}
 
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid duration %q: must be non-negative", s)
 	}
 
 	return d, nil

@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -215,6 +216,13 @@ func TestPositionDeltaWriter_RequiresV3(t *testing.T) {
 	require.NotNil(t, w)
 }
 
+func TestPositionDeltaWriter_NilTable(t *testing.T) {
+	w, err := table.NewPositionDeltaWriter(nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, iceberg.ErrInvalidArgument))
+	require.Nil(t, w)
+}
+
 func TestPositionDeltaWriter_ReinsertRejectsNullRowID(t *testing.T) {
 	mem := memory.DefaultAllocator
 	tbl := newV3RowLineageTestTable(t)
@@ -271,4 +279,50 @@ func TestPositionDeltaWriter_ReinsertRejectsMissingColumn(t *testing.T) {
 	err = w.Reinsert(batch)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must contain _row_id")
+}
+
+func TestPositionDeltaWriter_RejectsDuplicateRowIDColumns(t *testing.T) {
+	for _, layout := range []struct {
+		name       string
+		appendRows func(first, second *array.Int64Builder)
+	}{
+		{"both null", func(first, second *array.Int64Builder) {
+			first.AppendNull()
+			second.AppendNull()
+		}},
+		{"both non-null", func(first, second *array.Int64Builder) {
+			first.Append(10)
+			second.Append(11)
+		}},
+	} {
+		t.Run(layout.name, func(t *testing.T) {
+			schema := arrow.NewSchema([]arrow.Field{
+				{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+				{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+				{Name: iceberg.RowIDColumnName, Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			}, nil)
+			builder := array.NewRecordBuilder(memory.DefaultAllocator, schema)
+			defer builder.Release()
+			builder.Field(0).(*array.Int64Builder).Append(1)
+			layout.appendRows(builder.Field(1).(*array.Int64Builder), builder.Field(2).(*array.Int64Builder))
+			batch := builder.NewRecordBatch()
+			defer batch.Release()
+
+			for _, operation := range []struct {
+				name string
+				call func(*table.PositionDeltaWriter) error
+			}{
+				{"Reinsert", func(w *table.PositionDeltaWriter) error { return w.Reinsert(batch) }},
+				{"Insert", func(w *table.PositionDeltaWriter) error { return w.Insert(batch) }},
+			} {
+				t.Run(operation.name, func(t *testing.T) {
+					writer, err := table.NewPositionDeltaWriter(newV3RowLineageTestTable(t))
+					require.NoError(t, err)
+					err = operation.call(writer)
+					require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+					require.ErrorContains(t, err, "multiple _row_id columns")
+				})
+			}
+		})
+	}
 }

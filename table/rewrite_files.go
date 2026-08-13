@@ -38,16 +38,16 @@ import (
 //     is the defining behavior of a rewrite).
 //   - A rewrite-specific conflict validator is registered so concurrent
 //     pos/eq-delete files targeting any rewritten data file are
-//     rejected pre-flight at [Transaction.Commit] time. The pos-delete
-//     branch only fires when the concurrent writer populated the
-//     manifest's referenced_data_file column (field id 143). That
-//     column is V2-optional and V3-required for deletion-vector
-//     deletes; V2 pos-delete writers commonly leave it empty, in
-//     which case only the conservative eq-delete-during-rewrite rule
-//     fires.
+//     rejected pre-flight at [Transaction.Commit] time. A pos-delete
+//     is matched to a rewritten file via its referenced_data_file
+//     column, via equal file_path lower/upper bounds when that column
+//     is unset, or — when neither resolves a single path — via
+//     partition overlap with a rewritten file. Eq-deletes are matched
+//     conservatively: any concurrent eq-delete during the rewrite
+//     conflicts.
 //
 // Distributed compaction coordinators construct one [RewriteFiles] on
-// the leader transaction, feed worker outputs in via [RewriteFiles.Apply],
+// the leader transaction, feed worker outputs in via [RewriteFiles.ApplyResult],
 // and commit one snapshot. In-process callers can use
 // [Transaction.RewriteDataFiles] which drives this builder internally.
 //
@@ -152,9 +152,10 @@ func (r *RewriteFiles) AddDataFile(df iceberg.DataFile) *RewriteFiles {
 // [RewriteFiles.DeleteFile] (which routes data vs. delete files by
 // content type), and every entry in adds via [RewriteFiles.AddDataFile].
 //
-// Distributed coordinators should prefer [RewriteFiles.ApplyResult],
-// which takes a [CompactionGroupResult] directly: the three positional
-// same-typed slices here transpose silently under refactor.
+// Deprecated: use [RewriteFiles.ApplyResult], which also carries
+// SafeDeletionVectors. Apply has no slot for them, so a coordinator wiring
+// worker output through Apply leaves deletion vectors for the rewritten files
+// orphaned.
 func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *RewriteFiles {
 	if r.err != nil {
 		return r
@@ -173,13 +174,10 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 	return r
 }
 
-// ApplyResult is the typed coordinator entry point: it queues a worker's
-// [CompactionGroupResult] onto this builder by routing OldDataFiles
-// (via DeleteFile), NewDataFiles (via AddDataFile), and SafePosDeletes
-// (via DeleteFile) in one call. Prefer this over [RewriteFiles.Apply]
-// when feeding worker outputs — the field names line up with the
-// builder semantics, so a refactor of CompactionGroupResult cannot
-// silently transpose roles.
+// ApplyResult queues a worker's [CompactionGroupResult] onto this builder,
+// routing OldDataFiles (DeleteFile), NewDataFiles (AddDataFile), SafePosDeletes
+// and SafeDeletionVectors (DeleteFile). Prefer it over [RewriteFiles.Apply],
+// which cannot carry SafeDeletionVectors.
 //
 // Typical distributed-coordinator pattern:
 //
@@ -189,7 +187,22 @@ func (r *RewriteFiles) Apply(deletes, adds, safeDeletes []iceberg.DataFile) *Rew
 //	}
 //	if err := rewrite.Commit(ctx); err != nil { ... }
 func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
-	return r.Apply(gr.OldDataFiles, gr.NewDataFiles, gr.SafePosDeletes)
+	for _, df := range gr.OldDataFiles {
+		r.DeleteFile(df)
+	}
+	for _, df := range gr.NewDataFiles {
+		r.AddDataFile(df)
+	}
+	// DVs route through DeleteFile like any pos-delete; ReplaceFiles then
+	// re-identifies them by referenced data file.
+	for _, df := range gr.SafePosDeletes {
+		r.DeleteFile(df)
+	}
+	for _, df := range gr.SafeDeletionVectors {
+		r.DeleteFile(df)
+	}
+
+	return r
 }
 
 // Commit stages the rewrite snapshot on the underlying transaction.
@@ -229,11 +242,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 	}
 
 	if len(r.dataFilesToDelete) > 0 {
-		rewritten := make([]string, 0, len(r.dataFilesToDelete))
-		for _, df := range r.dataFilesToDelete {
-			rewritten = append(rewritten, df.FilePath())
-		}
-		r.txn.addValidator(rewriteValidator(rewritten))
+		r.txn.addValidator(rewriteValidator(r.dataFilesToDelete))
 	}
 
 	return nil

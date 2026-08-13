@@ -32,14 +32,13 @@ import (
 // Returns nil keys for an unsorted SortOrder. Returns an error when a sort
 // field's source id is not a top-level column of fileSchema.
 //
-// Limitations (these match PyIceberg's current behavior):
+// Limitations:
 //
-//   - Per-batch, not per-file: the resolved keys are applied to each record
-//     batch independently as it is flushed; rows are not merged into a single
-//     globally sorted run across batches within a file.
+//   - Per-batch, not per-file: keys are applied to each batch independently,
+//     not merged into a globally sorted run across batches. Files therefore
+//     record no sort_order_id, which asserts the whole file is sorted.
 //   - Bucket transform falls back to source-column order, since the hash
-//     bucket is not order-preserving. The manifest entry still records the
-//     table's sort_order_id verbatim.
+//     bucket is not order-preserving.
 //   - Multi-argument transform sort fields use only the first source column.
 //   - Nested-field sort sources are not supported: a source id that is not a
 //     top-level column of fileSchema is rejected with an error.

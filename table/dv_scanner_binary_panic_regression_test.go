@@ -149,7 +149,7 @@ func runCorruptBinaryFilterForSubprocess() {
 	// corrupt end-offset, triggering the slice-bounds panic.
 	bitmap := dv.NewRoaringPositionBitmap()
 	bitmap.Set(2)
-	filter := filterByDeletionVector(ctx, bitmap, 3)
+	filter := filterByDeletionVector(ctx, bitmap, 3, (&rowPositionSource{}).cursor())
 
 	// filter takes ownership of batch (calls defer r.Release() internally).
 	batch := array.NewRecordBatch(schema, []arrow.Array{corruptBinary}, 3)
@@ -193,11 +193,10 @@ func TestFilterByDeletionVectorZeroRowBatch(t *testing.T) {
 	bitmap := dv.NewRoaringPositionBitmap()
 	bitmap.Set(1)
 	bitmap.Set(3)
-	filter := filterByDeletionVector(ctx, bitmap, 4)
+	filter := filterByDeletionVector(ctx, bitmap, 4, (&rowPositionSource{}).cursor())
 
 	// First: empty batch. Must pass through without panicking or advancing nextIdx.
-	empty := array.NewRecordBatch(schema, nil, 0)
-	outEmpty, err := filter(empty)
+	outEmpty, err := filter(mkBatch())
 	require.NoError(t, err)
 	require.NotNil(t, outEmpty)
 	assert.Equal(t, int64(0), outEmpty.NumRows(), "empty batch must stay empty")
@@ -223,11 +222,14 @@ func TestFilterByDeletionVectorZeroRowBatch(t *testing.T) {
 }
 
 // TestFilterByDeletionVectorRowCountGuard verifies that filterByDeletionVector
-// returns a descriptive error (not a panic) when the Parquet reader delivers
-// more rows than the file metadata claims.
+// does not panic when the Parquet reader delivers more rows than the file
+// metadata claims, and preserves the rows that fall past the end of the
+// keep-mask.
 //
-// Without this guard, array.NewSlice would panic with an out-of-bounds error
-// that is unrecoverable from outside the goroutine.
+// A stale manifest record_count is the realistic trigger. Without the guard,
+// array.NewSlice would be handed an end offset past the mask length and panic
+// with an out-of-bounds error that is unrecoverable from outside the goroutine
+// Arrow's compute executor owns.
 func TestFilterByDeletionVectorRowCountGuard(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
@@ -236,10 +238,10 @@ func TestFilterByDeletionVectorRowCountGuard(t *testing.T) {
 
 	schema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
 
-	// rowCount=2 but the batch delivers 5 rows — simulates a corrupted or
-	// mismatched file where the data has more rows than the metadata claims.
+	// rowCount=2 but the batch delivers 5 rows — simulates a stale manifest
+	// count where the data file has more rows than the metadata claims.
 	bitmap := dv.NewRoaringPositionBitmap()
-	filter := filterByDeletionVector(ctx, bitmap, 2 /* rowCount */)
+	filter := filterByDeletionVector(ctx, bitmap, 2 /* rowCount */, (&rowPositionSource{}).cursor())
 
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
@@ -251,12 +253,18 @@ func TestFilterByDeletionVectorRowCountGuard(t *testing.T) {
 	// double-release since filter calls defer r.Release() internally.
 
 	out, err := filter(bigBatch)
-	require.Error(t, err, "exceeding rowCount must return an error, not panic")
-	assert.Nil(t, out)
-	assert.Contains(t, err.Error(), "file count=2",
-		"error must quote the file row count for diagnosability")
-	assert.Contains(t, err.Error(), "batch rows=5",
-		"error must quote the batch row count for diagnosability")
+	require.NoError(t, err, "exceeding rowCount must not panic or error")
+	require.NotNil(t, out)
+	defer out.Release()
+
+	// The DV is empty, so nothing is deleted: the two masked rows and the three
+	// rows past the mask all survive.
+	require.Equal(t, int64(5), out.NumRows(),
+		"rows past the keep-mask must be preserved, not dropped")
+	vals := out.Column(0).(*array.Int64)
+	for i := range 5 {
+		assert.Equal(t, int64(i), vals.Value(i))
+	}
 }
 
 // writeBinaryParquetWithFieldID writes a single-column Binary (BYTE_ARRAY)
@@ -422,8 +430,8 @@ func TestDVScanWithBinaryColumn(t *testing.T) {
 	t.Run("DV deletes interior binary rows {1,3}", func(t *testing.T) {
 		dataPath := filepath.Join(tmp, "binary-2.parquet")
 		df := writeBinaryParquetWithFieldID(t, fs, dataPath, payloads)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{1, 3}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, cardinality := writeDVPuffinFixture(t, []uint64{1, 3}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, cardinality)
 
 		got := collectDVBinaryScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -440,8 +448,8 @@ func TestDVScanWithBinaryColumn(t *testing.T) {
 	t.Run("DV deletes all binary rows", func(t *testing.T) {
 		dataPath := filepath.Join(tmp, "binary-3.parquet")
 		df := writeBinaryParquetWithFieldID(t, fs, dataPath, payloads)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0, 1, 2, 3, 4}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, cardinality := writeDVPuffinFixture(t, []uint64{0, 1, 2, 3, 4}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, cardinality)
 
 		got := collectDVBinaryScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,
@@ -453,8 +461,8 @@ func TestDVScanWithBinaryColumn(t *testing.T) {
 	t.Run("DV deletes boundary binary rows {0,4}", func(t *testing.T) {
 		dataPath := filepath.Join(tmp, "binary-4.parquet")
 		df := writeBinaryParquetWithFieldID(t, fs, dataPath, payloads)
-		puffinPath, offset, length := writeDVPuffinFixture(t, []uint64{0, 4}, dataPath)
-		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length)
+		puffinPath, offset, length, cardinality := writeDVPuffinFixture(t, []uint64{0, 4}, dataPath)
+		dvFile := newDVMockDataFile(puffinPath, dataPath, offset, length, cardinality)
 
 		got := collectDVBinaryScanRows(t, tbl.Scan(), []FileScanTask{{
 			File:                df,

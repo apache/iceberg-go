@@ -1,0 +1,24 @@
+{
+  "report-type": "scan-report",
+  "table-name": "nyc.taxis",
+  "snapshot-id": 3450729581828559851,
+  "schema-id": 0,
+  "projected-field-ids": [1, 2, 3],
+  "projected-field-names": ["vendor_id", "trip_distance", "fare_amount"],
+  "filter": true,
+  "metrics": {
+    "total-planning-duration": {
+      "count": 1,
+      "time-unit": "nanoseconds",
+      "total-duration": 2644235116
+    },
+    "result-data-files": {"unit": "count", "value": 1},
+    "result-delete-files": {"unit": "count", "value": 0},
+    "total-data-manifests": {"unit": "count", "value": 1},
+    "scanned-data-manifests": {"unit": "count", "value": 1},
+    "skipped-data-manifests": {"unit": "count", "value": 0},
+    "total-file-size-in-bytes": {"unit": "bytes", "value": 10},
+    "total-delete-file-size-in-bytes": {"unit": "bytes", "value": 0}
+  },
+  "metadata": {"engine": "go"}
+}

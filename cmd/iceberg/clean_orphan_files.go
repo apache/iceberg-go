@@ -40,19 +40,24 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 
 	opts := []table.OrphanCleanupOption{
 		table.WithFilesOlderThan(olderThan),
-		table.WithDryRun(true),
 	}
 
 	if cmd.Location != "" {
 		opts = append(opts, table.WithLocation(cmd.Location))
 	}
 
-	result, err := tbl.DeleteOrphanFiles(ctx, opts...)
+	plan, err := tbl.PlanOrphanFiles(ctx, opts...)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file scan failed: %w", err))
 		os.Exit(1)
 	}
 
+	planFiles := plan.Files()
+	result := table.OrphanCleanupResult{
+		OrphanFileLocations: planFiles,
+		OrphanFiles:         plan.OrphanFiles(),
+		TotalSizeBytes:      plan.TotalSizeBytes(),
+	}
 	cliResult := buildCleanOrphanFilesResult(tbl, result, cmd.DryRun)
 
 	if cmd.DryRun {
@@ -61,29 +66,27 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 		return
 	}
 
-	if len(result.OrphanFileLocations) == 0 {
+	if len(planFiles) == 0 {
 		output.CleanOrphanFilesResult(cliResult)
 
 		return
 	}
 
+	// Text output shows the exact plan before confirmation. JSON output emits
+	// only the final result so one invocation produces one JSON document.
+	if shouldPrintCleanOrphanPreview(output) {
+		previewResult := buildCleanOrphanFilesResult(tbl, result, true)
+		output.CleanOrphanFilesResult(previewResult)
+	}
+
 	prompt := fmt.Sprintf("Delete %d orphan file(s) (%s) from %s?",
-		len(result.OrphanFileLocations), formatBytes(result.TotalSizeBytes), tableIDString(tbl))
+		len(planFiles), formatBytes(plan.TotalSizeBytes()), tableIDString(tbl))
 	if err := confirmAction(prompt, cmd.Yes); err != nil {
 		output.Error(err)
 		os.Exit(1)
 	}
 
-	deleteOpts := []table.OrphanCleanupOption{
-		table.WithFilesOlderThan(olderThan),
-		table.WithDryRun(false),
-	}
-
-	if cmd.Location != "" {
-		deleteOpts = append(deleteOpts, table.WithLocation(cmd.Location))
-	}
-
-	deleteResult, err := tbl.DeleteOrphanFiles(ctx, deleteOpts...)
+	deleteResult, err := tbl.ExecuteOrphanCleanup(ctx, plan)
 	if err != nil {
 		output.Error(fmt.Errorf("orphan file deletion failed: %w", err))
 		os.Exit(1)
@@ -93,15 +96,42 @@ func runCleanOrphanFiles(ctx context.Context, output Output, cat catalog.Catalog
 	output.CleanOrphanFilesResult(cliResult)
 }
 
-func buildCleanOrphanFilesResult(tbl *table.Table, result table.OrphanCleanupResult, dryRun bool) CleanOrphanFilesResult {
-	files := result.OrphanFileLocations
-	if !dryRun {
-		files = result.DeletedFiles
+func shouldPrintCleanOrphanPreview(output Output) bool {
+	switch output.(type) {
+	case jsonOutput:
+		return false
+	default:
+		return true
 	}
+}
 
-	entries := make([]OrphanFileEntry, 0, len(files))
-	for _, f := range files {
-		entries = append(entries, OrphanFileEntry{Path: f})
+func buildCleanOrphanFilesResult(tbl *table.Table, result table.OrphanCleanupResult, dryRun bool) CleanOrphanFilesResult {
+	var entries []OrphanFileEntry
+	if dryRun {
+		entries = make([]OrphanFileEntry, 0, len(result.OrphanFiles))
+		for _, f := range result.OrphanFiles {
+			entries = append(entries, OrphanFileEntry{
+				Path:      f.Path,
+				SizeBytes: f.SizeBytes,
+			})
+		}
+	} else {
+		deletedSet := make(map[string]struct{}, len(result.DeletedFiles))
+		for _, f := range result.DeletedFiles {
+			deletedSet[f] = struct{}{}
+		}
+
+		entries = make([]OrphanFileEntry, 0, len(result.DeletedFiles))
+		for _, f := range result.OrphanFiles {
+			if _, ok := deletedSet[f.Path]; !ok {
+				continue
+			}
+
+			entries = append(entries, OrphanFileEntry{
+				Path:      f.Path,
+				SizeBytes: f.SizeBytes,
+			})
+		}
 	}
 
 	return CleanOrphanFilesResult{
@@ -128,12 +158,13 @@ func (t textOutput) CleanOrphanFilesResult(result CleanOrphanFilesResult) {
 		pterm.Printfln("Deleted %d orphan files (%s) from %s.", result.OrphanFileCount, sizeStr, result.Table)
 	}
 
-	data := pterm.TableData{{"#", "PATH"}}
+	data := pterm.TableData{{"#", "PATH", "SIZE_BYTES"}}
 
 	for i, f := range result.OrphanFiles {
 		data = append(data, []string{
 			strconv.Itoa(i + 1),
 			f.Path,
+			formatBytes(f.SizeBytes),
 		})
 	}
 

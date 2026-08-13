@@ -18,9 +18,16 @@
 package main
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/alexflint/go-arg"
+	"github.com/apache/iceberg-go/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -218,6 +225,25 @@ func TestArgsParsing(t *testing.T) {
 			},
 		},
 		{
+			name: "rewrite-manifests with flags",
+			args: []string{"rewrite-manifests", "prod.db.events", "--target-manifest-size", "8388608", "--spec-id", "2"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.RewriteManifests)
+				assert.Equal(t, "prod.db.events", a.RewriteManifests.TableID)
+				assert.Equal(t, int64(8388608), a.RewriteManifests.TargetManifestSize)
+				assert.Equal(t, 2, a.RewriteManifests.SpecID)
+			},
+		},
+		{
+			name: "rewrite-manifests defaults",
+			args: []string{"rewrite-manifests", "prod.db.events"},
+			check: func(t *testing.T, a Args) {
+				require.NotNil(t, a.RewriteManifests)
+				assert.Equal(t, int64(0), a.RewriteManifests.TargetManifestSize)
+				assert.Equal(t, -1, a.RewriteManifests.SpecID)
+			},
+		},
+		{
 			name: "global flags",
 			args: []string{"--catalog", "glue", "--output", "json", "--warehouse", "s3://wh", "list"},
 			check: func(t *testing.T, a Args) {
@@ -225,6 +251,13 @@ func TestArgsParsing(t *testing.T) {
 				assert.Equal(t, "json", a.Output)
 				assert.Equal(t, "s3://wh", a.Warehouse)
 				require.NotNil(t, a.List)
+			},
+		},
+		{
+			name: "aws-profile flag",
+			args: []string{"--catalog", "glue", "--aws-profile", "my-profile", "list"},
+			check: func(t *testing.T, a Args) {
+				assert.Equal(t, "my-profile", a.AwsProfile)
 			},
 		},
 		{
@@ -278,4 +311,235 @@ func TestArgsParsing(t *testing.T) {
 			tt.check(t, a)
 		})
 	}
+}
+
+func TestResolveCatalogName(t *testing.T) {
+	tests := []struct {
+		name          string
+		explicitFlags map[string]bool
+		flagValue     string
+		want          string
+	}{
+		// explicit --catalog-name wins and is passed through
+		{"explicit flag wins", map[string]bool{"catalog-name": true}, "prod", "prod"},
+		// no flag: return "" so ParseConfig falls back to default-catalog / "default"
+		{"no flag returns empty string", map[string]bool{}, "default", ""},
+		// other flags set but not catalog-name: still falls back
+		{"other flags set only", map[string]bool{"uri": true}, "default", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, resolveCatalogName(tt.explicitFlags, tt.flagValue))
+		})
+	}
+}
+
+func TestApplyConfigFileFailsClosed(t *testing.T) {
+	t.Run("explicit missing file", func(t *testing.T) {
+		args := Args{Config: filepath.Join(t.TempDir(), "missing.yaml")}
+		err := applyConfigFile(&args, map[string]bool{"config": true})
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
+
+	t.Run("malformed file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte(":\t[broken yaml"), 0o600))
+		args := Args{Config: path}
+		err := applyConfigFile(&args, map[string]bool{"config": true})
+		require.ErrorContains(t, err, "parse config file")
+		require.ErrorContains(t, err, path)
+	})
+
+	t.Run("missing selected catalog", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("catalog:\n  available:\n    type: rest\n"), 0o600))
+		args := Args{Config: path, CatalogName: "missing"}
+		err := applyConfigFile(&args, map[string]bool{"config": true, "catalog-name": true})
+		require.EqualError(t, err, `catalog "missing" not found in config file `+path)
+	})
+
+	t.Run("valid selected catalog", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("catalog:\n  selected:\n    type: rest\n    uri: http://catalog.example\n"), 0o600))
+		args := Args{Config: path, CatalogName: "selected"}
+		err := applyConfigFile(&args, map[string]bool{"config": true, "catalog-name": true})
+		require.NoError(t, err)
+		require.Equal(t, "http://catalog.example", args.URI)
+	})
+}
+
+func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+	cmd := exec.Command(os.Args[0], "list", "--config", path)
+	cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+	out, err := cmd.CombinedOutput()
+
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, err, &exitErr, "expected non-zero exit; output: %s", out)
+	assert.Equal(t, 1, exitErr.ExitCode())
+	assert.Contains(t, string(out), "configuration error")
+	assert.Contains(t, string(out), path)
+}
+
+func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	restMux := http.NewServeMux()
+	restMux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":["GET /v1/{prefix}/namespaces"]}`))
+	})
+	restMux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespaces":[]}`))
+	})
+	restSrv := httptest.NewServer(restMux)
+	defer restSrv.Close()
+
+	glueMux := http.NewServeMux()
+	glueMux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"DatabaseList":[]}`))
+	})
+	glueSrv := httptest.NewServer(glueMux)
+	defer glueSrv.Close()
+
+	hadoopWarehouse := t.TempDir()
+
+	// A raw TCP listener stands in for a Hive metastore: the CLI only needs to
+	// get far enough to open a connection to prove "HIVE"/"Hive" were recognized
+	// as the Hive catalog type. It has no Thrift handshake, so the command still
+	// fails, but with an EOF/protocol error rather than "unrecognized catalog type".
+	hiveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer hiveLn.Close()
+	go func() {
+		for {
+			conn, err := hiveLn.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	hiveURI := "thrift://" + hiveLn.Addr().String()
+
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+		// wantErr is set for cases where the catalog type is recognized but the
+		// backend call itself is expected to fail (e.g. no real Hive metastore
+		// behind the raw TCP listener).
+		wantErr bool
+		// wantUnrecognized is set only for catalog type values that must still be
+		// rejected outright, to keep that failure mode distinguishable from
+		// wantErr above.
+		wantUnrecognized bool
+	}{
+		{
+			name: "rest lowercase",
+			args: []string{"list", "--catalog", "rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest uppercase",
+			args: []string{"list", "--catalog", "REST", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest mixed case",
+			args: []string{"list", "--catalog", "Rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "glue uppercase",
+			args: []string{"list", "--catalog", "GLUE"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "glue mixed case",
+			args: []string{"list", "--catalog", "Glue"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "hadoop uppercase",
+			args: []string{"list", "--catalog", "HADOOP", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name: "hadoop mixed case",
+			args: []string{"list", "--catalog", "Hadoop", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name:    "hive uppercase",
+			args:    []string{"list", "--catalog", "HIVE", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name:    "hive mixed case",
+			args:    []string{"list", "--catalog", "Hive", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name:             "unknown catalog type is still rejected",
+			args:             []string{"list", "--catalog", "RESTX", "--uri", restSrv.URL},
+			wantUnrecognized: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tt.args...)
+			cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+			cmd.Env = append(cmd.Env, tt.env...)
+			out, err := cmd.CombinedOutput()
+
+			if tt.wantUnrecognized {
+				require.Error(t, err, "output: %s", out)
+				require.Contains(t, string(out), "unrecognized catalog type")
+
+				return
+			}
+
+			if tt.wantErr {
+				require.Error(t, err, "output: %s", out)
+				require.NotContains(t, string(out), "unrecognized catalog type")
+
+				return
+			}
+
+			require.NoError(t, err, "output: %s", out)
+		})
+	}
+}
+
+func TestMergeConfAwsProfile(t *testing.T) {
+	fileCfg := &config.CatalogConfig{AwsProfile: "file-profile"}
+
+	t.Run("file value applied when flag absent", func(t *testing.T) {
+		var a Args
+		mergeConf(fileCfg, &a, map[string]bool{})
+		assert.Equal(t, "file-profile", a.AwsProfile)
+	})
+
+	t.Run("cli value preserved when flag explicit", func(t *testing.T) {
+		a := Args{AwsProfile: "cli-profile"}
+		mergeConf(fileCfg, &a, map[string]bool{"aws-profile": true})
+		assert.Equal(t, "cli-profile", a.AwsProfile)
+	})
 }
