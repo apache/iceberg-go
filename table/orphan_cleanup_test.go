@@ -79,11 +79,27 @@ func TestOrphanCleanupOptions(t *testing.T) {
 
 	schemes := map[string]string{"s3,s3a,s3n": "s3"}
 	WithEqualSchemes(schemes)(cfg)
-	assert.Equal(t, schemes, cfg.equalSchemes)
+	assert.Equal(t, map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"}, cfg.equalSchemes)
 
 	authorities := map[string]string{"host1,host2": "canonical"}
 	WithEqualAuthorities(authorities)(cfg)
-	assert.Equal(t, authorities, cfg.equalAuthorities)
+	assert.Equal(t, map[string]string{"host1": "canonical", "host2": "canonical"}, cfg.equalAuthorities)
+}
+
+func TestFlattenURIEquivalences(t *testing.T) {
+	equivalences := map[string]string{
+		"s3,s3a,s3n": "s3",
+		"s3a,gs":     "gs",
+		"single":     "canonical",
+	}
+
+	assert.Equal(t, map[string]string{
+		"s3":     "s3",
+		"s3a":    "gs",
+		"s3n":    "s3",
+		"gs":     "gs",
+		"single": "canonical",
+	}, flattenURIEquivalences(equivalences))
 }
 
 func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
@@ -184,8 +200,8 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 
 func TestNormalizeFilePath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
-		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities: map[string]string{"endpoint1,endpoint2": "canonical"},
+		equalSchemes:     map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities: map[string]string{"endpoint1": "canonical", "endpoint2": "canonical"},
 	}
 
 	tests := []struct {
@@ -301,8 +317,10 @@ func TestVersionHintLocation(t *testing.T) {
 
 func TestApplySchemeEquivalence(t *testing.T) {
 	equalSchemes := map[string]string{
-		"s3,s3a,s3n": "s3",
-		"gs":         "gs",
+		"s3":  "s3",
+		"s3a": "s3",
+		"s3n": "s3",
+		"gs":  "gs",
 	}
 
 	tests := []struct {
@@ -347,8 +365,9 @@ func TestApplySchemeEquivalence(t *testing.T) {
 
 func TestApplyAuthorityEquivalence(t *testing.T) {
 	equalAuthorities := map[string]string{
-		"host1,host2": "canonical",
-		"single":      "single",
+		"host1":  "canonical",
+		"host2":  "canonical",
+		"single": "single",
 	}
 
 	tests := []struct {
@@ -389,8 +408,8 @@ func TestApplyAuthorityEquivalence(t *testing.T) {
 func TestCheckPrefixMismatch(t *testing.T) {
 	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchError,
-		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities:   map[string]string{"host1,host2": "canonical"},
+		equalSchemes:       map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities:   map[string]string{"host1": "canonical", "host2": "canonical"},
 	}
 
 	tests := []struct {
@@ -477,8 +496,8 @@ func TestIsFileOrphan(t *testing.T) {
 	// instead of the existence check (_, ok).
 	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchError,
-		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities:   map[string]string{"host-a,host-b": "host-a"},
+		equalSchemes:       map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities:   map[string]string{"host-a": "host-a", "host-b": "host-a"},
 	}
 
 	referencedFiles := map[string]bool{
@@ -552,8 +571,8 @@ func TestIsFileOrphan(t *testing.T) {
 
 func TestNormalizeURLPath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
-		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities: map[string]string{"host1,host2": "canonical"},
+		equalSchemes:     map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities: map[string]string{"host1": "canonical", "host2": "canonical"},
 	}
 
 	tests := []struct {
