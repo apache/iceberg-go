@@ -21,8 +21,6 @@ import (
 	"fmt"
 	"net/url"
 	"path"
-	"strconv"
-	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -31,8 +29,10 @@ import (
 
 const (
 	hashBinaryStringBits = 20
-	entropyDirLength     = 4
 	entropyDirDepth      = 3
+	hashPathLength       = hashBinaryStringBits + entropyDirDepth
+	// Binary representation of all 4-bit values, indexed by nibble.
+	binaryHashNibbles = "0000000100100011010001010110011110001001101010111100110111101111"
 )
 
 type LocationProvider interface {
@@ -120,30 +120,22 @@ type objectStoreLocationProvider struct {
 }
 
 func computeHash(dataFileName string) string {
-	// Bitwise AND to combat sign-extension; bitwise OR to preserve leading zeroes
-	topMask := 1 << hashBinaryStringBits
-	hashCode := int(murmur3.Sum32([]byte(dataFileName)))&(topMask-1) | topMask
+	hashCode := murmur3.Sum32([]byte(dataFileName)) & ((1 << hashBinaryStringBits) - 1)
 
-	// Convert to binary string and take the last hashBinaryStringBits
-	binaryStr := strconv.FormatInt(int64(hashCode), 2)
+	// Format the hash directly into the final directory layout. The fixed
+	// buffer contains 20 bits and one separator for each of the three
+	// four-bit entropy directories.
+	var hashPath [hashPathLength]byte
+	copy(hashPath[0:4], binaryHashNibbles[((hashCode>>16)&0xf)*4:])
+	hashPath[4] = '/'
+	copy(hashPath[5:9], binaryHashNibbles[((hashCode>>12)&0xf)*4:])
+	hashPath[9] = '/'
+	copy(hashPath[10:14], binaryHashNibbles[((hashCode>>8)&0xf)*4:])
+	hashPath[14] = '/'
+	copy(hashPath[15:19], binaryHashNibbles[((hashCode>>4)&0xf)*4:])
+	copy(hashPath[19:23], binaryHashNibbles[(hashCode&0xf)*4:])
 
-	return dirsFromHash(binaryStr[len(binaryStr)-hashBinaryStringBits:])
-}
-
-func dirsFromHash(fileHash string) string {
-	// Divides hash into directories for optimized orphan removal operation
-	totalEntropyLength := entropyDirDepth * entropyDirLength
-
-	hashWithDirs := make([]string, 0)
-	for i := 0; i < totalEntropyLength; i += entropyDirLength {
-		hashWithDirs = append(hashWithDirs, fileHash[i:i+entropyDirLength])
-	}
-
-	if len(fileHash) > totalEntropyLength {
-		hashWithDirs = append(hashWithDirs, fileHash[totalEntropyLength:])
-	}
-
-	return strings.Join(hashWithDirs, "/")
+	return string(hashPath[:])
 }
 
 func (p *objectStoreLocationProvider) NewDataLocation(dataFileName string) string {
