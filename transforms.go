@@ -375,6 +375,28 @@ func hashTimestampNano(v any) uint32 {
 	return hashHelperInt[int64](micros)
 }
 
+func hashDecimal(v Decimal) uint32 {
+	// Decimal bucket transforms hash the minimum two's-complement
+	// big-endian representation of the unscaled value. Keep the full
+	// decimal128 value on the stack and trim only redundant sign bytes.
+	var buf [16]byte
+	binary.BigEndian.PutUint64(buf[:8], uint64(v.Val.HighBits()))
+	binary.BigEndian.PutUint64(buf[8:], v.Val.LowBits())
+
+	start := 0
+	if v.Val.Sign() >= 0 {
+		for start < len(buf)-1 && buf[start] == 0 && buf[start+1]&0x80 == 0 {
+			start++
+		}
+	} else {
+		for start < len(buf)-1 && buf[start] == 0xff && buf[start+1]&0x80 != 0 {
+			start++
+		}
+	}
+
+	return murmur3.Sum32(buf[start:])
+}
+
 func (t BucketTransform) Equals(other Transform) bool {
 	rhs, ok := other.(BucketTransform)
 	if !ok {
@@ -401,8 +423,7 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	case UUIDLiteral:
 		hash = murmur3.Sum32(v[:])
 	case DecimalLiteral:
-		b, _ := v.MarshalBinary()
-		hash = murmur3.Sum32(b)
+		hash = hashDecimal(Decimal(v))
 	case Int32Literal:
 		hash = hashHelperInt[int64](int64(v))
 	case Int64Literal:
@@ -451,9 +472,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 		h = hashTimestampNano
 	case DecimalType:
 		h = func(v any) uint32 {
-			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
-
-			return murmur3.Sum32(b)
+			return hashDecimal(v.(Decimal))
 		}
 	case StringType, FixedType, BinaryType:
 		h = func(v any) uint32 {
