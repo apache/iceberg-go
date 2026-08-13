@@ -291,6 +291,13 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 			Transform: transform.String(),
 		}
 		existingPartitionField, exists := us.transformToField[key]
+
+		if exists && transform.Equals(existingPartitionField.Transform) {
+			if _, deleted := us.deletes[existingPartitionField.FieldID]; deleted {
+				return us.rewriteDeleteAndAddField(existingPartitionField, partitionFieldName)
+			}
+		}
+
 		if exists && us.isDuplicatePartition(transform, existingPartitionField) {
 			return fmt.Errorf("duplicate partition field for %s=%v, %v already exists", ref.String(), ref, existingPartitionField)
 		}
@@ -361,6 +368,18 @@ func (us *UpdateSpec) removeField(name string) updateSpecOp {
 	}
 }
 
+// rewriteDeleteAndAddField restores a field removed earlier in this same
+// update, keeping its permanent ID and renaming it if a different name is
+// requested.
+func (us *UpdateSpec) rewriteDeleteAndAddField(existing iceberg.PartitionField, name string) error {
+	delete(us.deletes, existing.FieldID)
+	if name == "" || existing.Name == name {
+		return nil
+	}
+
+	return us.renameField(existing.Name, name)()
+}
+
 func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 	return func() error {
 		existingField, exists := us.nameToField[newName]
@@ -404,12 +423,21 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			}
 		}
 		for _, field := range historicalFields {
+			// Transform.String() is canonical: field.Transform is a parsed
+			// Transform whose String() re-normalizes any non-canonical on-disk
+			// text (e.g. "bucket[016]" -> "bucket[16]"), and transformName comes
+			// from a Transform.String() as well. The textual compare therefore
+			// distinguishes parameterized transforms (bucket[16] vs bucket[8])
+			// correctly without a structural comparison.
 			if field.SourceID() == sourceId && field.Transform.String() == transformName {
-				if len(name) > 0 && field.Name == name {
+				// Reuse the historical field's ID when no explicit name is
+				// requested (match on source + transform alone) or when the
+				// requested name matches.
+				if len(name) == 0 || field.Name == name {
 					return iceberg.PartitionField{
 						SourceIDs: []int{sourceId},
 						FieldID:   field.FieldID,
-						Name:      name,
+						Name:      field.Name,
 						Transform: field.Transform,
 					}, nil
 				}

@@ -142,6 +142,25 @@ catalog:
 			AwsProfile:  "my-aws-profile",
 		},
 	},
+	// sql catalog with driver/dialect
+	{
+		[]byte(`
+catalog:
+  default:
+    type: sql
+    uri: file:iceberg-catalog.db
+    warehouse: file:///tmp/warehouse
+    sql-driver: sqliteshim
+    sql-dialect: sqlite
+`), "default",
+		&CatalogConfig{
+			CatalogType: "sql",
+			URI:         "file:iceberg-catalog.db",
+			Warehouse:   "file:///tmp/warehouse",
+			SQLDriver:   "sqliteshim",
+			SQLDialect:  "sqlite",
+		},
+	},
 	// empty name resolves via the file's default-catalog field
 	{
 		[]byte(`
