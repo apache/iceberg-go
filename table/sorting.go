@@ -132,13 +132,19 @@ func (s SortField) MarshalJSON() ([]byte, error) {
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
+	var aux struct {
+		SourceID  json.RawMessage `json:"source-id"`
+		SourceIDs json.RawMessage `json:"source-ids"`
+		Transform json.RawMessage `json:"transform"`
+		Direction SortDirection   `json:"direction"`
+		NullOrder NullOrder       `json:"null-order"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
 		return fmt.Errorf("%w: failed to unmarshal sort field", err)
 	}
 
-	_, hasSourceID := raw["source-id"]
-	_, hasSourceIDs := raw["source-ids"]
+	hasSourceID := aux.SourceID != nil
+	hasSourceIDs := aux.SourceIDs != nil
 	if hasSourceID && hasSourceIDs {
 		return errors.New("sort field cannot contain both source-id and source-ids")
 	}
@@ -146,19 +152,24 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
-	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+	if aux.Transform == nil || string(aux.Transform) == "null" {
 		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
 	}
 
-	aux := struct {
-		SourceID        int           `json:"source-id"`
-		SourceIDs       []int         `json:"source-ids,omitempty"`
-		TransformString string        `json:"transform"`
-		Direction       SortDirection `json:"direction"`
-		NullOrder       NullOrder     `json:"null-order"`
-	}{}
-
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var sourceID int
+	if hasSourceID {
+		if err := json.Unmarshal(aux.SourceID, &sourceID); err != nil {
+			return err
+		}
+	}
+	var sourceIDs []int
+	if hasSourceIDs {
+		if err := json.Unmarshal(aux.SourceIDs, &sourceIDs); err != nil {
+			return err
+		}
+	}
+	var transformString string
+	if err := json.Unmarshal(aux.Transform, &transformString); err != nil {
 		return err
 	}
 
@@ -168,9 +179,9 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	}
 
 	if hasSourceIDs {
-		next.SourceIDs = aux.SourceIDs
+		next.SourceIDs = sourceIDs
 	} else {
-		next.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{sourceID}
 	}
 
 	if err := validateSortSourceIDs(next.SourceIDs); err != nil {
@@ -178,7 +189,7 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 	}
 
 	var err error
-	if next.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
 

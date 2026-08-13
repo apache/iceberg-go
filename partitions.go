@@ -122,32 +122,41 @@ func (p *PartitionField) String() string {
 }
 
 func (p *PartitionField) UnmarshalJSON(b []byte) error {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
+	var aux struct {
+		SourceID  json.RawMessage `json:"source-id"`
+		SourceIDs json.RawMessage `json:"source-ids"`
+		FieldID   int             `json:"field-id"`
+		Name      string          `json:"name"`
+		Transform json.RawMessage `json:"transform"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
 		return fmt.Errorf("%w: failed to unmarshal partition field", err)
 	}
 
-	if _, ok := raw["source-id"]; ok {
-		if _, ok := raw["source-ids"]; ok {
-			return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
-		}
+	hasSourceID := aux.SourceID != nil
+	hasSourceIDs := aux.SourceIDs != nil
+	if hasSourceID && hasSourceIDs {
+		return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
 	}
-	_, hasSourceID := raw["source-id"]
-	_, hasSourceIDs := raw["source-ids"]
 
-	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+	if aux.Transform == nil || string(aux.Transform) == "null" {
 		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
 	}
 
-	aux := struct {
-		SourceID        int    `json:"source-id"`
-		SourceIDs       []int  `json:"source-ids,omitempty"`
-		FieldID         int    `json:"field-id"`
-		Name            string `json:"name"`
-		TransformString string `json:"transform"`
-	}{}
-
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var sourceID int
+	if hasSourceID {
+		if err := json.Unmarshal(aux.SourceID, &sourceID); err != nil {
+			return err
+		}
+	}
+	var sourceIDs []int
+	if hasSourceIDs {
+		if err := json.Unmarshal(aux.SourceIDs, &sourceIDs); err != nil {
+			return err
+		}
+	}
+	var transformString string
+	if err := json.Unmarshal(aux.Transform, &transformString); err != nil {
 		return err
 	}
 
@@ -157,14 +166,14 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 	}
 
 	var err error
-	if next.Transform, err = ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = ParseTransform(transformString); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 	if err := validateTransform(next.Transform); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
-	if hasSourceIDs && len(aux.SourceIDs) == 0 {
+	if hasSourceIDs && len(sourceIDs) == 0 {
 		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
 	}
 	if !hasSourceID && !hasSourceIDs {
@@ -173,10 +182,10 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		}
 		// Preserve compatibility with historical source-less void tombstones.
 		next.SourceIDs = []int{0}
-	} else if len(aux.SourceIDs) > 0 {
-		next.SourceIDs = aux.SourceIDs
+	} else if len(sourceIDs) > 0 {
+		next.SourceIDs = sourceIDs
 	} else {
-		next.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{sourceID}
 	}
 	for _, sourceID := range next.SourceIDs {
 		_, isVoid := next.Transform.(VoidTransform)
