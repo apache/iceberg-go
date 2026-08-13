@@ -167,6 +167,11 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 		}
 		requiredLastAssignedPartitionId := us.txn.tbl.Metadata().LastPartitionSpecID()
 		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionId))
+		// Java UpdateRequirements.forUpdateTable registers
+		// AssertDefaultSpecID on SetDefaultPartitionSpec so two racing
+		// remove-only spec evolutions (which assign no new field ids)
+		// cannot both pass last-assigned-partition-id.
+		requirements = append(requirements, AssertDefaultSpecID(us.txn.tbl.Metadata().DefaultPartitionSpec()))
 	}
 
 	return updates, requirements, nil
