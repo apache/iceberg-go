@@ -904,8 +904,8 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 			groups[specID] = append(groups[specID], df)
 		}
 
-		for specID, files := range groups {
-			mf, err := sp.writeAddedManifest(content, specID, files)
+		for _, specID := range slices.Sorted(maps.Keys(groups)) {
+			mf, err := sp.writeAddedManifest(content, specID, groups[specID])
 			if err != nil {
 				return err
 			}
@@ -917,7 +917,15 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 }
 
 func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, specID int, files []iceberg.DataFile) (_ iceberg.ManifestFile, retErr error) {
-	wr, path, counter, out, err := sp.newManifestWriter(sp.spec(specID), iceberg.WithManifestWriterContent(content))
+	// Resolve the spec strictly: the sp.spec helper silently substitutes an
+	// empty spec on lookup failure, which here would write a manifest whose
+	// declared spec disagrees with its entries' partition tuples.
+	spec, err := sp.txn.meta.GetSpecByID(specID)
+	if err != nil || spec == nil {
+		return nil, fmt.Errorf("cannot write manifest for unregistered partition spec id %d: %w", specID, err)
+	}
+
+	wr, path, counter, out, err := sp.newManifestWriter(*spec, iceberg.WithManifestWriterContent(content))
 	if err != nil {
 		return nil, err
 	}

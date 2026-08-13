@@ -934,7 +934,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 }
 
 // validateDataFilePartitionData verifies that DataFile partition values match
-// the current partition spec fields by ID without reading file contents.
+// the given partition spec's fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
 	partitionData := dataFilePartition(df)
 
@@ -984,7 +984,12 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 
-	expectedSpecID := int32(currentSpec.ID())
+	// A data file may target any partition spec registered in the table
+	// metadata, not just the default: its manifest is written with that
+	// spec (see snapshotProducer.manifestProducer). Cache lookups since
+	// files typically share a handful of specs.
+	specsByID := make(map[int32]*iceberg.PartitionSpec)
+
 	setToAdd := make(map[string]struct{}, len(dataFiles))
 
 	for i, df := range dataFiles {
@@ -1012,12 +1017,20 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
 		}
 
-		if df.SpecID() != expectedSpecID {
-			return nil, fmt.Errorf("data file %s has invalid partition spec id %d for %s: expected %d",
-				path, df.SpecID(), operation, expectedSpecID)
+		spec, ok := specsByID[df.SpecID()]
+		if !ok {
+			spec, err = meta.GetSpecByID(int(df.SpecID()))
+			if err != nil || spec == nil {
+				return nil, fmt.Errorf("data file %s has unregistered partition spec id %d for %s",
+					path, df.SpecID(), operation)
+			}
+			if err := checkNoUnknownTransform(spec); err != nil {
+				return nil, fmt.Errorf("data file %s for %s: %w", path, operation, err)
+			}
+			specsByID[df.SpecID()] = spec
 		}
 
-		if err := validateDataFilePartitionData(df, currentSpec); err != nil {
+		if err := validateDataFilePartitionData(df, spec); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1108,6 +1121,12 @@ func (t *Transaction) ensureNameMapping() error {
 //
 // Unlike AddFiles, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
+//
+// Each DataFile may target any partition spec registered in the table metadata,
+// identified by its SpecID; files are grouped into one manifest per spec. This
+// permits writers to continue producing data under a previous spec after a
+// partition evolution, and rewrites that migrate files between specs.
+// Unregistered spec ids are rejected.
 //
 // By default this method automatically sets the schema name mapping in table
 // properties if one does not already exist. Pass [WithoutAutoNameMapping] to
