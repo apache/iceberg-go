@@ -446,6 +446,117 @@ func TestSetSortOrder(t *testing.T) {
 	require.True(t, builder.updates[0].(*addSortOrderUpdate).SortOrder.Equals(expected), "expected sort order to match added sort order")
 }
 
+// TestAddSortOrderReuseDoesNotDuplicateUpdate: re-adding a sort order
+// that already exists in the base metadata must not emit an
+// add-sort-order update for the existing ID (REST catalogs reject
+// those); the following set-default-sort-order must carry the concrete
+// reused ID so the update payload stays self-contained.
+func TestAddSortOrderReuseDoesNotDuplicateUpdate(t *testing.T) {
+	tableSchema := schema()
+	spec := iceberg.NewPartitionSpecID(0)
+
+	buildBase := func(t *testing.T) Metadata {
+		builder, err := NewMetadataBuilder(2)
+		require.NoError(t, err)
+		require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+		require.NoError(t, builder.AddSchema(&tableSchema))
+		require.NoError(t, builder.SetCurrentSchemaID(-1))
+		unsorted := UnsortedSortOrder
+		require.NoError(t, builder.AddSortOrder(&unsorted))
+		require.NoError(t, builder.SetDefaultSortOrderID(-1))
+		require.NoError(t, builder.AddPartitionSpec(&spec, true))
+		require.NoError(t, builder.SetDefaultSpecID(-1))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		return meta
+	}
+
+	// replace applies AddSortOrder+SetDefaultSortOrderID(-1) — the
+	// ReplaceSortOrder update sequence — on a builder from base and
+	// returns the new metadata plus the emitted updates.
+	replace := func(t *testing.T, base Metadata, order SortOrder) (Metadata, []Update) {
+		builder, err := MetadataBuilderFromBase(base, "")
+		require.NoError(t, err)
+		require.NoError(t, builder.AddSortOrder(&order))
+		require.NoError(t, builder.SetDefaultSortOrderID(-1))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		return meta, builder.updates
+	}
+
+	countAddSortOrder := func(updates []Update, orderID int) int {
+		n := 0
+		for _, u := range updates {
+			if a, ok := u.(*addSortOrderUpdate); ok && a.SortOrder.OrderID() == orderID {
+				n++
+			}
+		}
+
+		return n
+	}
+
+	// replay proves the emitted updates are self-contained: applying
+	// them to a fresh builder from the same base must reproduce the
+	// same default sort order.
+	replay := func(t *testing.T, base Metadata, updates []Update, wantDefault int) {
+		builder, err := MetadataBuilderFromBase(base, "")
+		require.NoError(t, err)
+		for _, u := range updates {
+			require.NoError(t, u.Apply(builder))
+		}
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Equal(t, wantDefault, meta.DefaultSortOrder())
+	}
+
+	orderA := sortOrder()
+	orderB, err := NewSortOrder(1, []SortField{
+		{SourceIDs: []int{1}, Direction: SortASC, NullOrder: NullsLast, Transform: iceberg.IdentityTransform{}},
+	})
+	require.NoError(t, err)
+
+	t.Run("unsorted to A to unsorted", func(t *testing.T) {
+		base := buildBase(t)
+
+		withA, updates := replace(t, base, orderA)
+		require.Equal(t, 1, countAddSortOrder(updates, withA.DefaultSortOrder()))
+		require.NotEqual(t, UnsortedSortOrderID, withA.DefaultSortOrder())
+		replay(t, base, updates, withA.DefaultSortOrder())
+
+		backToUnsorted, updates := replace(t, withA, UnsortedSortOrder)
+		require.Equal(t, UnsortedSortOrderID, backToUnsorted.DefaultSortOrder())
+		require.Zero(t, countAddSortOrder(updates, UnsortedSortOrderID),
+			"re-adding the existing unsorted order must not emit add-sort-order")
+		require.Len(t, updates, 1)
+		require.Equal(t, UnsortedSortOrderID, updates[0].(*setDefaultSortOrderUpdate).SortOrderID,
+			"set-default-sort-order must carry the concrete reused ID, not -1")
+		replay(t, withA, updates, UnsortedSortOrderID)
+	})
+
+	t.Run("A to B to A", func(t *testing.T) {
+		base := buildBase(t)
+		withA, _ := replace(t, base, orderA)
+		aID := withA.DefaultSortOrder()
+
+		withB, updates := replace(t, withA, orderB)
+		bID := withB.DefaultSortOrder()
+		require.NotEqual(t, aID, bID)
+		require.Equal(t, 1, countAddSortOrder(updates, bID))
+		replay(t, withA, updates, bID)
+
+		backToA, updates := replace(t, withB, orderA)
+		require.Equal(t, aID, backToA.DefaultSortOrder())
+		require.Zero(t, countAddSortOrder(updates, aID),
+			"re-adding existing order A must not emit add-sort-order")
+		require.Len(t, updates, 1)
+		require.Equal(t, aID, updates[0].(*setDefaultSortOrderUpdate).SortOrderID,
+			"set-default-sort-order must carry the concrete reused ID, not -1")
+		replay(t, withB, updates, aID)
+	})
+}
+
 func TestAddSortOrderDoesNotAddDuplicateUpdate(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	first := sortOrder()
@@ -453,11 +564,25 @@ func TestAddSortOrderDoesNotAddDuplicateUpdate(t *testing.T) {
 	second := sortOrder()
 	second.orderID = 20
 
+	// sortOrder() is already in the base metadata of builderWithoutChanges.
+	// Reuse must not emit add-sort-order (REST catalogs reject a second
+	// add under an existing ID).
 	require.NoError(t, builder.AddSortOrder(&first))
 	require.NoError(t, builder.AddSortOrder(&second))
-	require.Len(t, builder.updates, 1)
+	require.Empty(t, builder.updates)
 	require.Equal(t, 1, first.OrderID())
 	require.Equal(t, 1, second.OrderID())
+
+	// A new order added twice in this builder emits exactly one add.
+	fresh, err := NewSortOrder(1, []SortField{
+		{SourceIDs: []int{1}, Direction: SortASC, NullOrder: NullsLast, Transform: iceberg.IdentityTransform{}},
+	})
+	require.NoError(t, err)
+	again := fresh
+	require.NoError(t, builder.AddSortOrder(&fresh))
+	require.NoError(t, builder.AddSortOrder(&again))
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, fresh.OrderID(), again.OrderID())
 }
 
 func TestSetRef(t *testing.T) {
