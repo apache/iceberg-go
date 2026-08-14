@@ -122,6 +122,186 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
 }
 
+func TestUpdateSpecRejectsTimeTransformConflictWithExistingField(t *testing.T) {
+	baseSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{3},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "ts_hour",
+		Transform: iceberg.HourTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"hour_partitioned"}, meta, "", nil, nil)
+
+	updates, reqs, err := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("ts", iceberg.DayTransform{}, "ts_day").
+		BuildUpdates()
+
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "redundant partition field")
+	assert.Nil(t, updates)
+	assert.Nil(t, reqs)
+}
+
+func TestUpdateSpecAllowsReplacingTimeTransformOnSameSource(t *testing.T) {
+	newYearPartitionedTable := func() *table.Table {
+		baseSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{3},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "ts_year",
+			Transform: iceberg.YearTransform{},
+		})
+		meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+
+		return table.New([]string{"year_partitioned"}, meta, "", nil, nil)
+	}
+
+	assertReplaced := func(t *testing.T, specUpdate *table.UpdateSpec) {
+		t.Helper()
+		updates, reqs, err := specUpdate.BuildUpdates()
+		require.NoError(t, err)
+		assert.NotNil(t, updates)
+		assert.NotNil(t, reqs)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		require.Equal(t, 1, newSpec.NumFields())
+		assert.Equal(t, "ts_month", newSpec.Field(0).Name)
+		assert.Equal(t, iceberg.MonthTransform{}, newSpec.Field(0).Transform)
+		assert.Equal(t, 3, newSpec.Field(0).SourceID())
+	}
+
+	t.Run("remove then add", func(t *testing.T) {
+		tbl := newYearPartitionedTable()
+		assertReplaced(t, table.NewUpdateSpec(tbl.NewTransaction(), false).
+			RemoveField("ts_year").
+			AddField("ts", iceberg.MonthTransform{}, "ts_month"))
+	})
+
+	t.Run("add then remove", func(t *testing.T) {
+		tbl := newYearPartitionedTable()
+		assertReplaced(t, table.NewUpdateSpec(tbl.NewTransaction(), false).
+			AddField("ts", iceberg.MonthTransform{}, "ts_month").
+			RemoveField("ts_year"))
+	})
+}
+
+func TestUpdateSpecReplacesTimeTransformOverV1VoidTombstone(t *testing.T) {
+	baseSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{3},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "ts_year",
+		Transform: iceberg.YearTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &baseSpec, table.UnsortedSortOrder, "",
+		iceberg.Properties{"format-version": "1"})
+	require.NoError(t, err)
+	require.Equal(t, 1, meta.Version())
+	tbl := table.New([]string{"v1_year_partitioned"}, meta, "", nil, nil)
+
+	specUpdate := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		RemoveField("ts_year").
+		AddField("ts", iceberg.MonthTransform{}, "ts_month")
+	_, _, err = specUpdate.BuildUpdates()
+	require.NoError(t, err)
+
+	newSpec, err := specUpdate.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, "ts_year", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, 3, newSpec.Field(0).SourceID())
+	assert.Equal(t, "ts_month", newSpec.Field(1).Name)
+	assert.Equal(t, iceberg.MonthTransform{}, newSpec.Field(1).Transform)
+	assert.Equal(t, 3, newSpec.Field(1).SourceID())
+}
+
+// Iceberg-Java writes this metadata today, so loading it has to keep working: the
+// redundancy rule is a write-side rule.
+// Metadata carrying day(ts) and hour(ts) on one column, the shape both Iceberg-Java and
+// iceberg-go before at some point could write.
+const timeOverlapMetadataJSON = `{
+	"format-version": 2,
+	"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+	"location": "s3://bucket/table",
+	"last-sequence-number": 0,
+	"last-updated-ms": 1602638573874,
+	"last-column-id": 3,
+	"current-schema-id": 0,
+	"schemas": [{"type":"struct","schema-id":0,"fields":[
+		{"id":1,"name":"id","required":true,"type":"long"},
+		{"id":3,"name":"ts","required":false,"type":"timestamp"}]}],
+	"default-spec-id": 0,
+	"partition-specs": [{"spec-id":0,"fields":[
+		{"source-id":3,"field-id":1000,"name":"ts_day","transform":"day"},
+		{"source-id":3,"field-id":1001,"name":"ts_hour","transform":"hour"}]}],
+	"last-partition-id": 1001,
+	"default-sort-order-id": 0,
+	"sort-orders": [{"order-id":0,"fields":[]}],
+	"properties": {},
+	"current-snapshot-id": -1,
+	"snapshots": [],
+	"snapshot-log": [],
+	"metadata-log": []
+}`
+
+func newTimeOverlapTable(t *testing.T) *table.Table {
+	t.Helper()
+	meta, err := table.ParseMetadataString(timeOverlapMetadataJSON)
+	require.NoError(t, err)
+
+	return table.New([]string{"time_overlap"}, meta, "", nil, nil)
+}
+
+func TestParseMetadataAllowsTimeGranularityOverlapInSpec(t *testing.T) {
+	tbl := newTimeOverlapTable(t)
+
+	spec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 2, spec.NumFields())
+	assert.Equal(t, iceberg.DayTransform{}, spec.Field(0).Transform)
+	assert.Equal(t, iceberg.HourTransform{}, spec.Field(1).Transform)
+}
+
+// Inherited redundancy is checked on the spec the update produces, not on what
+// the update touches, so it blocks unrelated evolution until it is cleaned up.
+// Deliberate: rewriting the spec unchanged would carry the redundancy forward.
+func TestUpdateSpecOnInheritedTimeOverlap(t *testing.T) {
+	t.Run("unrelated add is blocked", func(t *testing.T) {
+		tbl := newTimeOverlapTable(t)
+		_, _, err := table.NewUpdateSpec(tbl.NewTransaction(), false).
+			AddField("id", iceberg.BucketTransform{NumBuckets: 8}, "id_bucket").
+			BuildUpdates()
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "ts_hour (hour) conflicts with ts_day (day)")
+	})
+
+	t.Run("unrelated rename is blocked", func(t *testing.T) {
+		tbl := newTimeOverlapTable(t)
+		_, _, err := table.NewUpdateSpec(tbl.NewTransaction(), false).
+			RenameField("ts_day", "ts_daily").
+			BuildUpdates()
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	})
+
+	// The escape hatch: dropping the redundant field is always allowed, and may
+	// be staged alongside the change that was blocked.
+	t.Run("removing the redundant field unblocks the rest", func(t *testing.T) {
+		tbl := newTimeOverlapTable(t)
+		specUpdate := table.NewUpdateSpec(tbl.NewTransaction(), false).
+			RemoveField("ts_day").
+			AddField("id", iceberg.BucketTransform{NumBuckets: 8}, "id_bucket")
+		_, _, err := specUpdate.BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		require.Equal(t, 2, newSpec.NumFields())
+		assert.Equal(t, "ts_hour", newSpec.Field(0).Name)
+		assert.Equal(t, "id_bucket", newSpec.Field(1).Name)
+	})
+}
+
 func TestUpdateSpecAddField(t *testing.T) {
 	var txn *table.Transaction
 
@@ -265,8 +445,11 @@ func TestUpdateSpecAddField(t *testing.T) {
 			AddField("ts", iceberg.MonthTransform{}, "ts_month").
 			BuildUpdates()
 
-		assert.Error(t, err)
-		assert.ErrorContains(t, err, "cannot add time partition field")
+		// Added-vs-added, and it reports the same sentinel and wording as the
+		// existing-vs-added case
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "redundant partition field")
+		assert.ErrorContains(t, err, "ts_month (month) conflicts with ts_year (year)")
 		assert.Nil(t, updates)
 		assert.Nil(t, reqs)
 	})

@@ -46,7 +46,6 @@ type UpdateSpec struct {
 	transformToField      map[transformKey]iceberg.PartitionField
 	transformToAddedField map[transformKey]iceberg.PartitionField
 	renames               map[string]string
-	addedTimeFields       map[int]iceberg.PartitionField
 	caseSensitive         bool
 	adds                  []iceberg.PartitionField
 	deletes               map[int]bool
@@ -74,7 +73,6 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		transformToField:      make(map[transformKey]iceberg.PartitionField),
 		transformToAddedField: make(map[transformKey]iceberg.PartitionField),
 		renames:               make(map[string]string),
-		addedTimeFields:       make(map[int]iceberg.PartitionField),
 		caseSensitive:         caseSensitive,
 		adds:                  make([]iceberg.PartitionField, 0),
 		deletes:               make(map[int]bool),
@@ -232,6 +230,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
+	if err := validateNoRedundantTimeFields(partitionFields); err != nil {
+		return iceberg.PartitionSpec{}, err
+	}
 	candidate := iceberg.NewPartitionSpec(partitionFields...)
 	newSpec, err := candidate.BindToSchema(us.meta.CurrentSchema(), nil, nil)
 	if err != nil {
@@ -249,6 +250,29 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	return iceberg.NewPartitionSpecID(newSpecId, partitionFields...), nil
+}
+
+// validateNoRedundantTimeFields rejects hour(ts) alongside day(ts).
+// Taking the assembled set is load bearing: only it knows which fields survive
+// the deletes, so AddField(month) -> RemoveField(year) works in either order.
+func validateNoRedundantTimeFields(fields []iceberg.PartitionField) error {
+	timeFields := make(map[int]iceberg.PartitionField, len(fields))
+	for _, field := range fields {
+		// Void is not a TimeTransform, so a v1 tombstone left by a removed
+		// year(ts) does not block adding month(ts) on the same column.
+		if _, isTime := field.Transform.(iceberg.TimeTransform); !isTime {
+			continue
+		}
+		source := field.SourceID()
+		if existing, exists := timeFields[source]; exists {
+			return fmt.Errorf("%w: redundant partition field for source ID %d: %s (%s) conflicts with %s (%s)",
+				iceberg.ErrInvalidPartitionSpec, source,
+				field.Name, field.Transform, existing.Name, existing.Transform)
+		}
+		timeFields[source] = field
+	}
+
+	return nil
 }
 
 func (us *UpdateSpec) Commit() error {
@@ -319,13 +343,9 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 			return fmt.Errorf("already added partition field with name: %s", newField.Name)
 		}
 
-		// Handle special case for time transforms
-		if _, isTimeTransform := newField.Transform.(iceberg.TimeTransform); isTimeTransform {
-			if existingTimeField, exists := us.addedTimeFields[newField.SourceID()]; exists {
-				return fmt.Errorf("cannot add time partition field: %s conflicts with %s", newField.Name, existingTimeField.Name)
-			}
-			us.addedTimeFields[newField.SourceID()] = newField
-		}
+		// Time conflicts are not checked here: they depend on which existing
+		// fields survive this update's deletes, so validateNoRedundantTimeFields
+		// checks the set Apply assembles once every operation has run.
 		us.transformToAddedField[key] = newField
 
 		// If name matches an existing field, rename it if it's VOID transform
