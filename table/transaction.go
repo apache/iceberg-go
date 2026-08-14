@@ -62,7 +62,7 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 // checks.
 func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.BooleanExpression) *snapshotProducer {
 	op := s.operation
-	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
+	if s.operation == OpOverwrite && s.txn.meta.currentSnapshotForRef(s.txn.branch) == nil {
 		op = OpAppend
 	}
 	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
@@ -827,9 +827,27 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
+// requireMainBranch fails loudly for operations whose read-side planning (which
+// existing files to delete, replace, or dedupe against) still resolves against
+// main's head and is not yet branch-aware. On a non-main branch it returns
+// ErrInvalidOperation rather than silently planning against the wrong snapshot;
+// branch-aware planning is tracked as a follow-up (#1638). Appends need no such
+// planning and remain supported on a branch.
+func (t *Transaction) requireMainBranch(op string) error {
+	if t.branch != "" && t.branch != MainBranch {
+		return fmt.Errorf("%w: %s is not yet supported on a branch transaction (branch %q)",
+			ErrInvalidOperation, op, t.branch)
+	}
+
+	return nil
+}
+
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceDataFiles"); err != nil {
 		return err
 	}
 	if len(filesToDelete) == 0 {
@@ -1120,6 +1138,9 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 	if _, err := t.txnMeta(); err != nil {
 		return err
 	}
+	if err := t.requireMainBranch("AddDataFiles"); err != nil {
+		return err
+	}
 	if len(dataFiles) == 0 {
 		return nil
 	}
@@ -1214,6 +1235,9 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceDataFilesWithDataFiles"); err != nil {
 		return err
 	}
 	if len(filesToDelete) == 0 {
@@ -1325,6 +1349,9 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceFiles"); err != nil {
 		return err
 	}
 	// Delegate data file replacement to existing logic.
@@ -1499,6 +1526,9 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	if err != nil {
 		return err
 	}
+	if err := t.requireMainBranch("AddFiles"); err != nil {
+		return err
+	}
 	addFilesOp := addFilesOperation{
 		concurrency: runtime.GOMAXPROCS(0),
 	}
@@ -1665,6 +1695,9 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) error {
 	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("Overwrite"); err != nil {
 		return err
 	}
 	overwrite := overwriteOperation{
@@ -1883,6 +1916,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("Delete"); err != nil {
 		return err
 	}
 	deleteOp := deleteOperation{

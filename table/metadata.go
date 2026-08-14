@@ -387,6 +387,31 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
+// currentSnapshotForRef returns the snapshot a write targeting ref must be
+// parented on (createSnapshotProducer and mergeOverwrite). An unknown branch
+// falls back to currentSnapshot() so a new branch forks from main. This is a
+// parent lookup only: the commit's AssertRefSnapshotID requirement is built
+// separately from the base table's ref (Transaction.baseRefSnapshotID), which
+// returns nil for an absent branch so the requirement can prove the branch does
+// not exist yet — never derive one from the other. A ref cannot outlive its
+// snapshot: SetSnapshotRef rejects unknown snapshot ids and checkRefsExist
+// rejects loaded metadata whose ref dangles, so the lookup below cannot turn a
+// dangling ref into a parentless write.
+func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
+	if ref == "" || ref == MainBranch {
+		return b.currentSnapshot()
+	}
+
+	r, ok := b.refs[ref]
+	if !ok {
+		return b.currentSnapshot()
+	}
+
+	s, _ := b.SnapshotByID(r.SnapshotID)
+
+	return s
+}
+
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err
