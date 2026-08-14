@@ -372,8 +372,8 @@ func walkedURIPath(location objectLocation, walked string) string {
 	return location.uriPrefix + walked
 }
 
-// isDirectoryMarker reports whether dirEntry is the marker object for
-// the path passed to WalkDir
+// isDirectoryMarker reports whether dirEntry is the marker object for the
+// path passed to WalkDir
 func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 	// Directory entries and nil entries are never the marker object itself.
 	if dirEntry == nil || dirEntry.IsDir() {
