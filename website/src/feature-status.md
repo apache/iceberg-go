@@ -130,3 +130,17 @@ As long as the FileSystem is supported and the Catalog supports altering the tab
 | Write Pos Delete     |     X     |
 | Write Eq Delete      |     X     |
 | Row Delta            |     X     |
+
+## Metrics reporting
+
+Iceberg's Metrics Reporting API is supported. Reporting is opt-in (default no-op). See [Metrics Reporting](./metrics-reporting.md).
+
+| Feature | Status |
+|---|---|
+| `ScanReport` (scan-planning metrics) | Supported |
+| `CommitReport` (commit metrics) | Supported |
+| Built-in reporters (nop, logging, in-memory, combine) | Supported |
+| Reporter selection via `metrics-reporter-impl` + registry | Supported |
+| REST `/metrics` reporter (opt-in POST to catalog) | Supported |
+| OpenTelemetry reporter (`metrics/otel`) | Supported (experimental; tracks Java [apache/iceberg#16250](https://github.com/apache/iceberg/pull/16250)) |
+| `ScanReport.filter` as structured Expression JSON | Supported (sanitized; falls back to always-true) |
