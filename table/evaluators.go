@@ -76,7 +76,7 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 		partitionFilter: m.partitionFilter,
 	}
 
-	result, err := iceberg.VisitExpr(ev.partitionFilter, &ev)
+	result, err := iceberg.VisitExprEvaluator(ev.partitionFilter, &ev)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
 		return rowsMightMatch, nil
 	}
@@ -792,7 +792,7 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		}
 	}
 
-	result, err := iceberg.VisitExpr(m.expr, m)
+	result, err := iceberg.VisitExprEvaluator(m.expr, m)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
 		return rowsMightMatch, nil
 	}
@@ -813,7 +813,7 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
-	result, err := iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExprEvaluator(m.expr, &ev)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
 		return rowsMightMatch, nil
 	}
@@ -1324,7 +1324,7 @@ func (m *strictMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
-	result, err := iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExprEvaluator(m.expr, &ev)
 	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
 		return rowsMightNotMatch, nil
 	}

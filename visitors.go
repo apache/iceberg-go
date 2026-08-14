@@ -100,6 +100,26 @@ func VisitExpr[T any](expr BooleanExpression, visitor BooleanExprVisitor[T]) (re
 	return visitBoolExpr(expr, visitor), err
 }
 
+// VisitExprEvaluator traverses a boolean expression for a visitor whose
+// boolean results represent expression truth. Unlike VisitExpr, it only visits
+// the nodes required to determine the result: it skips the right side of an
+// AND when the left side is false and the right side of an OR when the left
+// side is true.
+func VisitExprEvaluator(expr BooleanExpression, visitor BooleanExprVisitor[bool]) (res bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during visitExpr: %s", e)
+			case error:
+				err = e
+			}
+		}
+	}()
+
+	return visitEvaluator(expr, visitor), err
+}
+
 func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T {
 	switch e := e.(type) {
 	case AlwaysFalse:
@@ -118,6 +138,36 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 		child := visitBoolExpr(e.child, visitor)
 
 		return visitor.VisitNot(child)
+	case UnboundPredicate:
+		return visitor.VisitUnbound(e)
+	case BoundPredicate:
+		return visitor.VisitBound(e)
+	}
+	panic(fmt.Errorf("%w: VisitBooleanExpression type %s", ErrNotImplemented, e))
+}
+
+func visitEvaluator(e BooleanExpression, visitor BooleanExprVisitor[bool]) bool {
+	switch e := e.(type) {
+	case AlwaysFalse:
+		return visitor.VisitFalse()
+	case AlwaysTrue:
+		return visitor.VisitTrue()
+	case AndExpr:
+		left := visitEvaluator(e.left, visitor)
+		if !left {
+			return visitor.VisitFalse()
+		}
+
+		return visitor.VisitAnd(left, visitEvaluator(e.right, visitor))
+	case OrExpr:
+		left := visitEvaluator(e.left, visitor)
+		if left {
+			return visitor.VisitTrue()
+		}
+
+		return visitor.VisitOr(left, visitEvaluator(e.right, visitor))
+	case NotExpr:
+		return visitor.VisitNot(visitEvaluator(e.child, visitor))
 	case UnboundPredicate:
 		return visitor.VisitUnbound(e)
 	case BoundPredicate:
@@ -276,7 +326,7 @@ func (e *exprEvaluator) Eval(st StructLike) (bool, error) {
 	// from #445.
 	ev := exprEvaluator{bound: e.bound, st: st}
 
-	return VisitExpr(ev.bound, &ev)
+	return VisitExprEvaluator(ev.bound, &ev)
 }
 
 func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
