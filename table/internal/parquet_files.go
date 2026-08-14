@@ -498,19 +498,20 @@ func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.Da
 // lifecycle. It writes Arrow record batches to a Parquet file and tracks bytes
 // written for rolling file decisions.
 type ParquetFileWriter struct {
-	pqWriter      *pqarrow.FileWriter
-	counter       *internal.CountingWriter
-	fileCloser    io.Closer
-	mem           memory.Allocator
-	fs            iceio.WriteFileIO
-	format        parquetFormat
-	info          WriteFileInfo
-	partition     map[int]any
-	colMapping    map[string]int
-	geoCols       []geoColumn
-	geoAccs       map[int]*geoBoundsAccumulator
-	arrowSchema   *arrow.Schema
-	rowGroupBytes int64
+	pqWriter         *pqarrow.FileWriter
+	counter          *internal.CountingWriter
+	fileCloser       io.Closer
+	mem              memory.Allocator
+	fs               iceio.WriteFileIO
+	format           parquetFormat
+	info             WriteFileInfo
+	partition        map[int]any
+	colMapping       map[string]int
+	geoCols          []geoColumn
+	geoNormalizeCols []int
+	geoAccs          map[int]*geoBoundsAccumulator
+	arrowSchema      *arrow.Schema
+	rowGroupBytes    int64
 }
 
 // geoColumn locates a top-level geometry/geography column: its position in the
@@ -538,6 +539,40 @@ func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn 
 	}
 
 	return result
+}
+
+// collectGeoNormalizationColumns finds top-level columns whose supported Arrow
+// container types can contain a GeoArrow WKB value. The result is computed once
+// per writer so batches without geo columns take a constant-time fast path.
+func collectGeoNormalizationColumns(sc *arrow.Schema) []int {
+	var result []int
+	for i, f := range sc.Fields() {
+		if arrowTypeContainsWKB(f.Type) {
+			result = append(result, i)
+		}
+	}
+
+	return result
+}
+
+func arrowTypeContainsWKB(dt arrow.DataType) bool {
+	// Keep this traversal in sync with normalizeNestedArrayReachable. The table
+	// write path does not currently pass dictionary- or run-end-encoded WKB
+	// arrays; supporting those inputs requires unwrapping them in both places.
+	switch t := dt.(type) {
+	case *geoarrow.WKBType:
+		return true
+	case *arrow.StructType:
+		for _, field := range t.Fields() {
+			if arrowTypeContainsWKB(field.Type) {
+				return true
+			}
+		}
+	case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType, *arrow.MapType:
+		return arrowTypeContainsWKB(dt.(arrow.ListLikeType).Elem())
+	}
+
+	return false
 }
 
 // NewFileWriter creates a ParquetFileWriter that writes batches to a single
@@ -585,6 +620,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	geoCols := collectGeoColumns(arrowSchema, colMapping)
+	geoNormalizeCols := collectGeoNormalizationColumns(arrowSchema)
 	geoAccs := make(map[int]*geoBoundsAccumulator, len(geoCols))
 	for _, gc := range geoCols {
 		// The accumulator must know whether the column is geometry or geography
@@ -597,19 +633,20 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	return &ParquetFileWriter{
-		pqWriter:      writer,
-		counter:       counter,
-		fileCloser:    fw,
-		mem:           mem,
-		fs:            fs,
-		format:        p,
-		info:          info,
-		partition:     partitionValues,
-		colMapping:    colMapping,
-		geoCols:       geoCols,
-		geoAccs:       geoAccs,
-		arrowSchema:   arrowSchema,
-		rowGroupBytes: rowGroupTargetSizeBytes,
+		pqWriter:         writer,
+		counter:          counter,
+		fileCloser:       fw,
+		mem:              mem,
+		fs:               fs,
+		format:           p,
+		info:             info,
+		partition:        partitionValues,
+		colMapping:       colMapping,
+		geoCols:          geoCols,
+		geoNormalizeCols: geoNormalizeCols,
+		geoAccs:          geoAccs,
+		arrowSchema:      arrowSchema,
+		rowGroupBytes:    rowGroupTargetSizeBytes,
 	}, nil
 }
 
@@ -702,8 +739,16 @@ type wkbStorage interface {
 }
 
 func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
-	columns := make(map[int]arrow.Array)
-	for idx := range int(batch.NumCols()) {
+	if len(w.geoNormalizeCols) == 0 {
+		return batch, nil
+	}
+
+	columns := make(map[int]arrow.Array, len(w.geoNormalizeCols))
+	for _, idx := range w.geoNormalizeCols {
+		if idx >= int(batch.NumCols()) {
+			continue
+		}
+
 		normalized, changed, err := normalizeNestedArray(batch.Column(idx), w.mem)
 		if err != nil {
 			for _, col := range columns {
@@ -738,7 +783,9 @@ func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.Re
 // logical values with offset zero, so materialized children cannot be sliced a
 // second time by an enclosing Arrow container. Recursive calls carry an
 // optional reachability mask so values hidden by nullable ancestors are copied
-// without being decoded.
+// without being decoded. Such unreachable child slots may retain EWKB or
+// malformed bytes, which is safe because they cannot be observed through the
+// containing null value.
 func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
 	return normalizeNestedArrayReachable(arr, nil, mem)
 }
@@ -756,6 +803,7 @@ func normalizeNestedArrayReachable(arr arrow.Array, active []bool, mem memory.Al
 		return normalizeWKBArrayReachable(ext, active, mem)
 	}
 
+	// The table write path currently supplies unencoded nested arrays.
 	switch nested := arr.(type) {
 	case *array.Struct:
 		return normalizeStruct(nested, active, mem)

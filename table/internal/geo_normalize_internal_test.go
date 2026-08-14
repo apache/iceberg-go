@@ -391,12 +391,42 @@ func TestNormalizeGeoBatchNormalizesNestedEWKB(t *testing.T) {
 	batch := array.NewRecordBatch(schema, []arrow.Array{list}, int64(list.Len()))
 	defer batch.Release()
 
-	writer := &ParquetFileWriter{mem: mem}
+	writer := &ParquetFileWriter{mem: mem, geoNormalizeCols: []int{0}}
 	normalized, err := writer.normalizeGeoBatch(batch)
 	require.NoError(t, err)
 	require.NotSame(t, batch, normalized)
 	defer normalized.Release()
 	assertNoEWKB(t, normalized.Column(0))
+}
+
+func TestCollectGeoNormalizationColumns(t *testing.T) {
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "plain", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "struct", Type: arrow.StructOf(arrow.Field{Name: "geom", Type: typeDef})},
+		{Name: "list", Type: arrow.ListOf(typeDef)},
+		{Name: "map", Type: arrow.MapOf(arrow.BinaryTypes.String, typeDef)},
+	}, nil)
+
+	require.Equal(t, []int{1, 2, 3}, collectGeoNormalizationColumns(schema))
+}
+
+func TestNormalizeGeoBatchSkipsNonGeoColumns(t *testing.T) {
+	mem := memory.DefaultAllocator
+	builder := array.NewInt32Builder(mem)
+	builder.Append(1)
+	values := builder.NewArray()
+	builder.Release()
+	defer values.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{values}, 1)
+	defer batch.Release()
+
+	writer := &ParquetFileWriter{mem: mem}
+	normalized, err := writer.normalizeGeoBatch(batch)
+	require.NoError(t, err)
+	require.Same(t, batch, normalized)
 }
 
 func newGeoWKBArray(t *testing.T, mem memory.Allocator, typeDef *geoarrow.WKBType, values ...[]byte) arrow.Array {

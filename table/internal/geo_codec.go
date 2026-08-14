@@ -116,6 +116,8 @@ func decodeWKB(data []byte) (geom.T, error) {
 		return ewkb.Unmarshal(data)
 	}
 
+	// ISO empty points use NaN coordinates; keep them as empty geometries so the
+	// bounds accumulator can skip them instead of rejecting the value.
 	return wkb.Unmarshal(data, wkbEmptyPointOption)
 }
 
@@ -124,6 +126,8 @@ func normalizeWKB(data []byte) ([]byte, error) {
 		return data, nil
 	}
 
+	// EWKB decoding already preserves empty-point NaNs; the explicit option is
+	// needed on the ISO marshal side so those coordinates remain an empty point.
 	g, err := ewkb.Unmarshal(data)
 	if err != nil {
 		return nil, err
