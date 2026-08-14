@@ -21,13 +21,13 @@ linters:
   enable:
     - errcheck
     - govet
+    - intrange
+    - copyloopvar
+    - usestdlibvars
     - misspell
     - nlreturn
     - perfsprint
     - staticcheck
-    - intrange
-    - copyloopvar
-    - usestdlibvars
   settings:
     errcheck:
       exclude-functions:
