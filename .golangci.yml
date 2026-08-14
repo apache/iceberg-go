@@ -25,6 +25,9 @@ linters:
     - nlreturn
     - perfsprint
     - staticcheck
+    - intrange
+    - copyloopvar
+    - usestdlibvars
   settings:
     errcheck:
       exclude-functions:
