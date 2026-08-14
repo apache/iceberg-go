@@ -1403,3 +1403,291 @@ func transactionTestInt64PtrEqual(left, right *int64) bool {
 
 	return *left == *right
 }
+
+// Builds one canonical fixture shared by the branch-rollback tests.
+// Snapshot graph (parent -> child):
+//
+//	10 -> 20 -> 30      (main's lineage; "feature" extends it to 30)
+//	10 -> 40            ("diverged" forks at 10 and never sees 20)
+//
+// Refs: main -> 20 (branch), feature -> 30 (branch), diverged -> 40 (branch), v1 -> 10 (tag).
+// The tag and the extra branches exist so every test can assert
+// that a rollback leaves the refs it does not target completely alone.
+func newRollbackBranchTable(t *testing.T) *Table {
+	t.Helper()
+
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	now := time.Now().UnixMilli()
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:     10,
+		SequenceNumber: 1,
+		ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		TimestampMs:    now,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       20,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   2,
+		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 1,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: transactionTestPtr(int64(20)),
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 2,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       40,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   4,
+		ManifestList:     "mem://default/table-location/metadata/manifest-40.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 3,
+	}))
+
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("feature", 30, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("diverged", 40, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("v1", 10, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "table"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil)
+}
+
+// requireUntouchedRollbackRefs asserts every ref other than except still holds its fixture snapshot id and ref type,
+// so a rollback cannot quietly move a second ref.
+func requireUntouchedRollbackRefs(t *testing.T, txn *Transaction, except string) {
+	t.Helper()
+
+	want := map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 20, SnapshotRefType: BranchRef},
+		"feature":  {SnapshotID: 30, SnapshotRefType: BranchRef},
+		"diverged": {SnapshotID: 40, SnapshotRefType: BranchRef},
+		"v1":       {SnapshotID: 10, SnapshotRefType: TagRef},
+	}
+	for name, expected := range want {
+		if name == except {
+			continue
+		}
+		actual, ok := txn.meta.refs[name]
+		require.True(t, ok, "ref %q must still exist after a rollback of %q", name, except)
+		require.Equal(t, expected.SnapshotID, actual.SnapshotID,
+			"rollback of %q must not move ref %q", except, name)
+		require.Equal(t, expected.SnapshotRefType, actual.SnapshotRefType,
+			"rollback of %q must not change the type of ref %q", except, name)
+	}
+
+	// main's head pointer is tracked separately from its ref, so pin it too.
+	if except != MainBranch {
+		require.NotNil(t, txn.meta.currentSnapshotID)
+		require.Equal(t, int64(20), *txn.meta.currentSnapshotID,
+			"rollback of %q must not move the table's current-snapshot pointer", except)
+	}
+}
+
+// TestRollbackToSnapshotOnBranchDoesNotCorruptMain asserts a rollback on a branch transaction moves that branch
+// and leaves main's ref and head pointer untouched.
+func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+
+	require.NoError(t, branchTxn.RollbackToSnapshot(10))
+
+	featureRef := branchTxn.meta.refs["feature"]
+	require.Equal(t, int64(10), featureRef.SnapshotID, "rollback must move the targeted branch")
+	require.Equal(t, BranchRef, featureRef.SnapshotRefType, "the rolled-back ref must stay a branch")
+	requireUntouchedRollbackRefs(t, branchTxn, "feature")
+
+	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", transactionTestPtr(int64(30)))
+}
+
+// TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20:
+// it is main's head but absent from "diverged"'s lineage, so validating against main accepts it.
+func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("diverged")
+	require.NoError(t, err)
+
+	err = branchTxn.RollbackToSnapshot(20)
+	require.Error(t, err, "snapshot 20 is only on main's lineage, not diverged's")
+	require.ErrorContains(t, err, "not an ancestor")
+	require.ErrorContains(t, err, `"diverged"`,
+		"the error must name the branch whose lineage rejected the snapshot")
+
+	require.Equal(t, int64(40), branchTxn.meta.refs["diverged"].SnapshotID,
+		"failed rollback must leave the branch untouched")
+	requireUntouchedRollbackRefs(t, branchTxn, "")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsUnknownBranch pins the refusal to fall back to main:
+// reusing the write-parent resolver here would rewind main for a missing branch.
+func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("ghost")
+	require.NoError(t, err)
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err, "an unknown branch must fail rather than fall back to main")
+	require.ErrorContains(t, err, `branch "ghost" does not exist`)
+
+	require.NotContains(t, branchTxn.meta.refs, "ghost", "a failed rollback must not create the branch")
+	requireUntouchedRollbackRefs(t, branchTxn, "")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsDanglingBranchRef separates "absent" from "present but invalid":
+// a ref pointing at an unknown snapshot must fail loudly, not read as empty.
+func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 9999, SnapshotRefType: BranchRef}
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err)
+	require.ErrorContains(t, err, `branch "feature" references unknown snapshot 9999`,
+		"a dangling ref must be reported as inconsistent, not as a missing snapshot")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsTagRef guards the ref type at the operation:
+// a tag must not be rewritten as a branch, dropping its retention.
+func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 30, SnapshotRefType: TagRef}
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err, "a ref that is a tag must not be rolled back as a branch")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, `ref "feature" is a tag, not a branch`)
+
+	require.Equal(t, TagRef, branchTxn.meta.refs["feature"].SnapshotRefType,
+		"the rejected ref must keep its tag type")
+	require.Equal(t, int64(30), branchTxn.meta.refs["feature"].SnapshotID)
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotOnMainIsUnchanged is the steady-state case:
+// a default transaction still rolls main back, and still refuses when only a branch has a head.
+func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
+	t.Run("rolls main back", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn := tbl.NewTransaction()
+
+		require.NoError(t, txn.RollbackToSnapshot(10))
+		require.Equal(t, int64(10), txn.meta.refs[MainBranch].SnapshotID)
+		require.Equal(t, BranchRef, txn.meta.refs[MainBranch].SnapshotRefType)
+		require.NotNil(t, txn.meta.currentSnapshotID)
+		require.Equal(t, int64(10), *txn.meta.currentSnapshotID,
+			"rolling main back must also move the current-snapshot pointer")
+		requireUntouchedRollbackRefs(t, txn, MainBranch)
+		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, transactionTestPtr(int64(20)))
+	})
+
+	t.Run("refuses when only a branch has a head", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+			SnapshotID:     10,
+			SequenceNumber: 1,
+			ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+			Summary:        &Summary{Operation: OpAppend},
+			TimestampMs:    time.Now().UnixMilli(),
+		}))
+		require.NoError(t, txn.meta.SetSnapshotRef("feature", 10, BranchRef))
+
+		err := txn.RollbackToSnapshot(10)
+		require.Error(t, err, "main has no head, so a main transaction cannot roll back")
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID,
+			"a failed main rollback must not touch the branch that does have a head")
+	})
+}
+
+// TestRollbackToSnapshotSharesOneBaseAssertionWithProducer covers an interaction branch scoping enables:
+// both now assert one ref, so either order must keep the base head pinned.
+func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
+	producerAssertion := func(txn *Transaction) error {
+		return txn.apply(nil, []Requirement{
+			AssertRefSnapshotID("feature", transactionTestPtr(int64(30))),
+		})
+	}
+
+	requireSingleBaseFeatureAssertion := func(t *testing.T, txn *Transaction) {
+		t.Helper()
+
+		asserts := refAssertions(txn)
+		require.Len(t, asserts, 1, "the producer and rollback assertions must collapse to one")
+		require.Equal(t, "feature", asserts[0].Ref)
+		require.NotNil(t, asserts[0].SnapshotID)
+		require.Equal(t, int64(30), *asserts[0].SnapshotID,
+			"the surviving assertion must pin the base head, not the rolled-back id")
+	}
+
+	t.Run("producer then rollback", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		require.NoError(t, producerAssertion(txn))
+		require.NoError(t, txn.RollbackToSnapshot(10))
+
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID)
+		requireSingleBaseFeatureAssertion(t, txn)
+	})
+
+	t.Run("rollback then producer", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		require.NoError(t, txn.RollbackToSnapshot(10))
+		require.NoError(t, producerAssertion(txn))
+
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID)
+		requireSingleBaseFeatureAssertion(t, txn)
+	})
+}
+
+// TestRollbackToSnapshotCommitRejectsBranchTurnedTag covers the type-changing race:
+// a branch replaced by a same-id tag before commit must fail, since the id assertion alone still holds.
+func TestRollbackToSnapshotCommitRejectsBranchTurnedTag(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+	baseMeta := tbl.Metadata()
+
+	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.RemoveSnapshotRef("feature"))
+	require.NoError(t, tagBuilder.SetSnapshotRef("feature", 30, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	cat := &headTrackingCatalog{metadata: tagMeta}
+	raced := New(tbl.Identifier(), baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	txn, err := raced.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	require.NoError(t, txn.RollbackToSnapshot(10))
+
+	_, err = txn.Commit(t.Context())
+	require.Error(t, err, "a branch replaced by a tag must fail the commit, not be rolled back")
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load(), "a type conflict must not be retried")
+}
