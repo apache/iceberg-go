@@ -7,7 +7,7 @@
 // with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
-
+//
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"testing"
 )
+
+var orphanCleanupBenchmarkSink string
 
 // BenchmarkApplyURIEquivalence measures the per-path lookup cost as the
 // number of paths and configured equivalence groups grows. Configuration is
@@ -56,9 +58,8 @@ func BenchmarkApplyURIEquivalence(b *testing.B) {
 				}
 			}
 			b.StopTimer()
-			if result == "" {
-				b.Fatal("equivalence lookup returned an empty scheme")
-			}
+			// Keep the result observable without including the sink in the benchmark.
+			orphanCleanupBenchmarkSink = result
 		})
 	}
 }

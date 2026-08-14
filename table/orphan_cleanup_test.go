@@ -94,13 +94,11 @@ func TestFlattenURIEquivalences(t *testing.T) {
 	}
 
 	assert.Equal(t, map[string]string{
-		"s3":         "s3",
-		"s3a":        "gs",
-		"s3n":        "s3",
-		"gs":         "gs",
-		"single":     "canonical",
-		"s3,s3a,s3n": "s3",
-		"s3a,gs":     "gs",
+		"s3":     "s3",
+		"s3a":    "gs",
+		"s3n":    "s3",
+		"gs":     "gs",
+		"single": "canonical",
 	}, flattenURIEquivalences(equivalences))
 }
 

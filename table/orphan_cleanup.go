@@ -172,9 +172,12 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 }
 
 // flattenURIEquivalences expands comma-separated URI equivalence groups into
-// direct lookups. Groups are processed in sorted order so overlapping groups
-// have deterministic behavior; the lexicographically last group wins. Original
-// keys are overlaid afterward so exact mappings retain precedence over groups.
+// direct lookups. This intentionally differs from Java's flattenMap (lines
+// 392-403), which uses input iteration order for conflicts. Go map iteration is
+// unordered, so groups are processed in sorted order and the lexicographically
+// last overlapping group wins. Exact mappings are overlaid afterward so they
+// retain precedence over groups.
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L392-L403
 func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 	if len(equivalences) == 0 {
 		return nil
@@ -198,6 +201,10 @@ func flattenURIEquivalences(equivalences map[string]string) map[string]string {
 	}
 
 	for _, group := range groups {
+		// Group declarations are configuration syntax, not URI lookup keys.
+		if strings.Contains(group, ",") {
+			continue
+		}
 		flattened[group] = equivalences[group]
 	}
 
