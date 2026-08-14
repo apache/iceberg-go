@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -63,8 +64,8 @@ func snapshotForApplyTest(id int64) *Snapshot {
 // builder.updates, or nil if none exists. Tests use this to inspect what was
 // stored after AddSnapshot / AddSnapshotUpdate / Apply.
 func findStoredSnapshotUpdate(b *MetadataBuilder) *addSnapshotUpdate {
-	for i := len(b.updates) - 1; i >= 0; i-- {
-		if su, ok := b.updates[i].(*addSnapshotUpdate); ok {
+	for _, v := range slices.Backward(b.updates) {
+		if su, ok := v.(*addSnapshotUpdate); ok {
 			return su
 		}
 	}

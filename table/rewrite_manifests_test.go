@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -582,13 +583,7 @@ func (f *trackingFS) snapshotCreated() map[string]struct{} {
 func (f *trackingFS) wasRemoved(path string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for _, p := range f.removed {
-		if p == path {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(f.removed, path)
 }
 
 // mergedManifestsCreated returns the data-manifest .avro files (those whose

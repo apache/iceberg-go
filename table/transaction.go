@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"maps"
 	"runtime"
 	"slices"
 	"strconv"
@@ -2024,7 +2025,6 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 	g.SetLimit(min(concurrency, len(manifests)))
 
 	for _, manifest := range manifests {
-		manifest := manifest // capture loop variable
 		g.Go(func() error {
 			manifestEval, err := manifestEvaluators.Get(int(manifest.PartitionSpecID()))
 			if err != nil {
@@ -2093,9 +2093,7 @@ func (t *Transaction) classifyFilesForFilteredDeletions(ctx context.Context, fs 
 				mu.Lock()
 				filesToDelete = append(filesToDelete, localDelete...)
 				filesWithPartialDeletes = append(filesWithPartialDeletes, localRewrite...)
-				for k, v := range localSeqByPath {
-					fileSeqByPath[k] = v
-				}
+				maps.Copy(fileSeqByPath, localSeqByPath)
 				mu.Unlock()
 			}
 
@@ -2520,7 +2518,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		go func() {
 			defer wg.Done()
 			for {

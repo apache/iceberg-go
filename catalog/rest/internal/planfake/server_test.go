@@ -512,9 +512,7 @@ func TestServerHandlesConcurrentPollAndTaskRequests(t *testing.T) {
 	errCh := make(chan error, requestCount)
 	var wg sync.WaitGroup
 	for range requestCount {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			for requestIndex, request := range []struct {
 				method string
@@ -555,7 +553,7 @@ func TestServerHandlesConcurrentPollAndTaskRequests(t *testing.T) {
 				}
 			}
 			errCh <- nil
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)

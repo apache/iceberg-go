@@ -1032,10 +1032,7 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs > maxRetryDurationMs>>attempt {
 		ceiling = maxMs
 	} else {
-		ceiling = minMs << attempt
-		if ceiling > maxMs {
-			ceiling = maxMs
-		}
+		ceiling = min(minMs<<attempt, maxMs)
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent

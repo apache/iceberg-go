@@ -73,7 +73,7 @@ func TestManifestEvalVisitorEvalRace(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		i := i
 		go func() {
 			defer wg.Done()

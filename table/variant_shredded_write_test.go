@@ -340,7 +340,7 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 	defer pb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		pb.Append(int64(i % 2)) // partition values 0 and 1
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i), "b": "row"}))
@@ -390,7 +390,7 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 		}
 	}
 	require.Len(t, seen, 8, "all 8 rows present across the partition files")
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
 }
@@ -413,7 +413,7 @@ func TestShreddedVariantPartitionedDecimalRace(t *testing.T) {
 		defer pb.Release()
 		vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 		defer vb.Release()
-		for i := 0; i < nPart*4; i++ {
+		for i := range nPart * 4 {
 			pb.Append(int64(i % nPart))
 			var b variant.Builder
 			require.NoError(t, b.AppendDecimal4(2, decimal.Decimal32(12345))) // shreds to Decimal128
@@ -494,7 +494,7 @@ func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idb.Append(int64(i))
 		vb.Append(mk())
 	}
@@ -594,7 +594,7 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		if i < nRows-nStr {
@@ -741,7 +741,7 @@ func TestShreddedVariantWriteRowConservation(t *testing.T) {
 
 	require.Greater(t, files, 1, "tiny target should roll into multiple files")
 	require.Len(t, seen, total, "every distinct row id must appear")
-	for i := int64(0); i < total; i++ {
+	for i := range int64(total) {
 		assert.Equalf(t, 1, seen[i], "row id %d must appear exactly once (no loss/duplication)", i)
 	}
 }
@@ -958,7 +958,7 @@ func TestShreddedVariantClusteredWrite(t *testing.T) {
 	defer pb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		pb.Append(int64(i / 4)) // clustered: 0,0,0,0,1,1,1,1
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i), "b": "row"}))
@@ -1005,7 +1005,7 @@ func TestShreddedVariantClusteredWrite(t *testing.T) {
 		}
 	}
 	require.Len(t, seen, 8, "all 8 rows present across the partition files")
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
 }
@@ -1070,7 +1070,7 @@ func TestShreddedVariantWriteLargeBootstrapBatch(t *testing.T) {
 	// Bounded buffer -> many files; whole-batch buffering would yield exactly one.
 	assert.Greater(t, files, 1, "large batch must split across files, not buffer whole")
 	require.Len(t, seen, nRows, "all rows present across files")
-	for i := int64(0); i < nRows; i++ {
+	for i := range int64(nRows) {
 		assert.Equalf(t, 1, seen[i], "row id %d present exactly once", i)
 	}
 }
@@ -1093,7 +1093,7 @@ func TestInferShreddingSkipsUndecodable(t *testing.T) {
 	defer sb.Release()
 	metaB := sb.FieldBuilder(0).(*array.BinaryBuilder)
 	valB := sb.FieldBuilder(1).(*array.BinaryBuilder)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sb.Append(true)
 		metaB.Append(metaBytes)
 		valB.Append(valBytes)
@@ -1171,7 +1171,7 @@ func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		if i < nRows-nNull {
@@ -1241,7 +1241,7 @@ func TestShreddedVariantWriteFloatBound(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"g": 1.5 + float64(i)}))

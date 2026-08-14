@@ -239,10 +239,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	// Shred top-level variant columns on data writes only.
-	f.shredBufferRows = meta.props.GetInt(ParquetVariantBufferSizeKey, ParquetVariantBufferSizeDefault)
-	if f.shredBufferRows < 1 {
-		f.shredBufferRows = 1
-	}
+	f.shredBufferRows = max(meta.props.GetInt(ParquetVariantBufferSizeKey, ParquetVariantBufferSizeDefault), 1)
 	if f.content == iceberg.EntryContentData &&
 		meta.props.GetBool(ParquetShredVariantsKey, ParquetShredVariantsDefault) {
 		for _, fld := range f.fileSchema.Fields() {

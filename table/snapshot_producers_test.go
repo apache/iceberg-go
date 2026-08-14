@@ -1280,8 +1280,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 // This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	blockingIO := newBlockingTrackingIO()
 	spec := iceberg.NewPartitionSpec()

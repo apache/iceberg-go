@@ -251,9 +251,7 @@ func TestInMemoryReporterConcurrent(t *testing.T) {
 	// rather than just confirming the goroutines finish.
 	done := make(chan struct{})
 	var reader sync.WaitGroup
-	reader.Add(1)
-	go func() {
-		defer reader.Done()
+	reader.Go(func() {
 		for {
 			select {
 			case <-done:
@@ -262,7 +260,7 @@ func TestInMemoryReporterConcurrent(t *testing.T) {
 				_ = r.Reports()
 			}
 		}
-	}()
+	})
 
 	wg.Wait()
 	close(done)

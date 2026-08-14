@@ -244,8 +244,8 @@ func main() {
 	// not explicitly provided (i.e. still at their default).
 	explicitFlags := make(map[string]bool)
 	for _, a := range os.Args[1:] {
-		if strings.HasPrefix(a, "--") {
-			name := strings.SplitN(strings.TrimPrefix(a, "--"), "=", 2)[0]
+		if after, ok := strings.CutPrefix(a, "--"); ok {
+			name, _, _ := strings.Cut(after, "=")
 			explicitFlags[name] = true
 		}
 	}

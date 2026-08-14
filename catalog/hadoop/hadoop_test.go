@@ -1670,9 +1670,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMetadataPublishConflic
 	var wg sync.WaitGroup
 
 	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
 			result := createResult{err: err}
@@ -1681,7 +1679,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMetadataPublishConflic
 			}
 
 			results <- result
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -1726,9 +1724,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 		nil,
 		{table.MetadataCompressionKey: table.MetadataCompressionCodecGzip},
 	} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			opts := []catalog.CreateTableOpt(nil)
 			if props != nil {
@@ -1742,7 +1738,7 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 			}
 
 			results <- result
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -2486,7 +2482,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableMultipleSequential() {
 	tbl := s.createTestTable("ns", "tbl")
 	ident := []string{"ns", "tbl"}
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		loaded, err := s.cat.LoadTable(ctx, ident)
 		s.Require().NoError(err)
 
@@ -2637,9 +2633,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 			table.MetadataCompressionKey: table.MetadataCompressionCodecGzip,
 		},
 	} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			_, metaLoc, err := s.cat.CommitTable(
 				ctx, ident,
@@ -2647,7 +2641,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 				[]table.Update{table.NewSetPropertiesUpdate(props)},
 			)
 			results <- commitResult{metaLoc: metaLoc, err: err}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -2809,7 +2803,7 @@ func (s *HadoopCatalogTestSuite) TestCommitTableNoOrphanedTempFiles() {
 	ident := []string{"ns", "tbl"}
 
 	// Do several commits and verify no temp files are left behind.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, _, err := s.cat.CommitTable(
 			ctx, ident,
 			nil,

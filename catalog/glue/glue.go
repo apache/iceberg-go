@@ -732,9 +732,7 @@ func (c *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 
 	props := make(map[string]string)
 	if database.Parameters != nil {
-		for k, v := range database.Parameters {
-			props[k] = v
-		}
+		maps.Copy(props, database.Parameters)
 	}
 	if description, ok := props[legacyPropsKeyDescription]; ok {
 		delete(props, legacyPropsKeyDescription)

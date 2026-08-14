@@ -23,6 +23,7 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -150,9 +151,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for k, v := range schemes {
-			cfg.equalSchemes[k] = v
-		}
+		maps.Copy(cfg.equalSchemes, schemes)
 	}
 }
 
@@ -165,9 +164,7 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for k, v := range authorities {
-			cfg.equalAuthorities[k] = v
-		}
+		maps.Copy(cfg.equalAuthorities, authorities)
 	}
 }
 
@@ -865,7 +862,7 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 	// Check comma-separated lists (e.g., "s3,s3a,s3n" -> "s3")
 	for schemes, canonical := range equalSchemes {
 		if strings.Contains(schemes, ",") {
-			for _, s := range strings.Split(schemes, ",") {
+			for s := range strings.SplitSeq(schemes, ",") {
 				if strings.TrimSpace(s) == scheme {
 					return canonical
 				}
@@ -901,7 +898,7 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 
 	for authorities, canonical := range equalAuthorities {
 		if strings.Contains(authorities, ",") {
-			for _, a := range strings.Split(authorities, ",") {
+			for a := range strings.SplitSeq(authorities, ",") {
 				if strings.TrimSpace(a) == authority {
 					return canonical
 				}

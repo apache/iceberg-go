@@ -2065,7 +2065,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	defer bldr.Release()
 
 	const nRows = 5
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
 		v, err := b.Build()

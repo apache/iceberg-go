@@ -26,6 +26,7 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -130,9 +131,7 @@ func (s *OCCScenarioTestSuite) makeTable(
 	)
 
 	props := iceberg.Properties{table.PropertyFormatVersion: "2"}
-	for k, v := range extraProps {
-		props[k] = v
-	}
+	maps.Copy(props, extraProps)
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, s.location, props)
@@ -705,9 +704,7 @@ func (s *OCCScenarioTestSuite) makeV3Table(
 	)
 
 	props := iceberg.Properties{table.PropertyFormatVersion: "3"}
-	for k, v := range extraProps {
-		props[k] = v
-	}
+	maps.Copy(props, extraProps)
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, s.location, props)

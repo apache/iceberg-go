@@ -122,7 +122,7 @@ func TestShreddedVariantTableScan(t *testing.T) {
 	}
 	assert.Equal(t, 1, nullCount, "exactly one null row")
 	assert.Len(t, seenA, nData, "distinct a values")
-	for i := int64(0); i < nData; i++ {
+	for i := range int64(nData) {
 		assert.True(t, seenA[i], "missing reassembled a=%d", i)
 	}
 }
@@ -219,7 +219,7 @@ func TestShreddedVariantReassemblyNoLeak(t *testing.T) {
 		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
 	))
 	bldr := extensions.NewVariantBuilder(mem, shredded)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
 		v, err := b.Build()
@@ -352,7 +352,7 @@ func writeShreddedVariantFile(t *testing.T, path string, fieldID, nRows int) {
 	bldr := extensions.NewVariantBuilder(mem, shreddedType)
 	defer bldr.Release()
 
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{
 			"a":     int64(i),
@@ -556,7 +556,7 @@ func writeFullyShreddedVariantFile(t *testing.T, path string, fieldID, nRows int
 	))
 	bldr := extensions.NewVariantBuilder(memory.DefaultAllocator, shreddedType)
 	defer bldr.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "b": "row-" + string(rune('A'+i%26))}))
 		v, err := b.Build()

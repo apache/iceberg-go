@@ -1033,7 +1033,7 @@ func TestVariantArrayBuilderLargeValues(t *testing.T) {
 
 	const objFields = 40
 	obj := make(map[string]any, objFields)
-	for i := 0; i < objFields; i++ {
+	for i := range objFields {
 		obj["k"+strconv.Itoa(i)] = int64(i)
 	}
 	bldr.Append(mkVariant(obj))

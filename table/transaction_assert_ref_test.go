@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -58,9 +59,7 @@ func newProducerAssertRefTable(t *testing.T) (*Table, *headTrackingCatalog, stri
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	props := iceberg.Properties{PropertyFormatVersion: "2"}
-	for k, v := range assertRefRetryProps {
-		props[k] = v
-	}
+	maps.Copy(props, assertRefRetryProps)
 	base, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, dir, props)
 	require.NoError(t, err)
 	tbl, cat := newAssertRefTestTable(t, base, base)

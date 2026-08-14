@@ -20,7 +20,7 @@ package table_test
 import (
 	"context"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -132,9 +132,7 @@ func (s *WriteRecordsSortTestSuite) TestPartitionedTableSortedPerFile() {
 		expectedByCat[r.cat] = append(expectedByCat[r.cat], r.id)
 	}
 	for cat := range expectedByCat {
-		sort.Slice(expectedByCat[cat], func(i, j int) bool {
-			return expectedByCat[cat][i] < expectedByCat[cat][j]
-		})
+		slices.Sort(expectedByCat[cat])
 	}
 
 	for _, df := range dataFiles {

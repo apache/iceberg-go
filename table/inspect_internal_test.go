@@ -1253,7 +1253,7 @@ func inspectDataFileEntries(t *testing.T, spec iceberg.PartitionSpec, count int)
 	const snapshotID = int64(1)
 
 	entries := make([]iceberg.ManifestEntry, 0, count)
-	for index := 0; index < count; index++ {
+	for index := range count {
 		path := "mem://default/table-location/data/live-" + strconv.Itoa(index) + ".parquet"
 		file := newTestDataFile(t, spec, path, nil)
 		sequenceNumber := int64(1)
@@ -1271,7 +1271,7 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	schema := simpleSchema()
 
 	entries := make([]iceberg.ManifestEntry, 0, inspectRecordBatchSize+2)
-	for index := 0; index < inspectRecordBatchSize+1; index++ {
+	for index := range inspectRecordBatchSize + 1 {
 		file := newTestDataFile(t, spec,
 			"mem://default/table-location/data/live-"+strconv.Itoa(index)+".parquet", nil)
 		sequenceNumber := int64(1)
