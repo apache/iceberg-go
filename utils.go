@@ -120,7 +120,7 @@ var lzseed = maphash.MakeSeed()
 type literalSet map[any]struct{ orig Literal }
 
 func newLiteralSet(vals ...Literal) Set[Literal] {
-	s := literalSet{}
+	s := make(literalSet, len(vals))
 	for _, v := range vals {
 		s.addliteral(v)
 	}
