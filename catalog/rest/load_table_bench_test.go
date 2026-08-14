@@ -72,13 +72,6 @@ func BenchmarkDecodeTableMetadata(b *testing.B) {
 				return json.Unmarshal(body, v)
 			},
 		},
-		{
-			name:          "10000 snapshots, goccy/go-json",
-			snapshotCount: 10000,
-			decode: func(body []byte, v any) error {
-				return json.Unmarshal(body, v)
-			},
-		},
 	}
 
 	for _, tc := range snapshotCounts {
