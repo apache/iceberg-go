@@ -1600,6 +1600,36 @@ func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
 	require.EqualValues(t, file.Count(), record.Column(countIndex).(*array.Int64).Value(0))
 }
 
+func TestAppendContentFileRecordUsesPartitionFieldIDs(t *testing.T) {
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Int32},
+	}}
+	reorderedPartitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		partitionType.FieldList[1], partitionType.FieldList[0],
+	}}
+	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(reorderedPartitionType), nil, true, false)
+	require.NoError(t, err)
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer bldr.Release()
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+	file := newTestDataFile(t, spec, "mem://default/table-location/data/reordered-partition.parquet", map[int]any{
+		1000: int32(7), 1001: int32(9),
+	})
+	require.NoError(t, appendContentFileRecord(bldr, partitionType, file))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	partitionIndex := record.Schema().FieldIndices("partition")[0]
+	partition := record.Column(partitionIndex).(*array.Struct)
+	require.EqualValues(t, 9, partition.Field(0).(*array.Int32).Value(0))
+	require.EqualValues(t, 7, partition.Field(1).(*array.Int32).Value(0))
+}
+
 func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
