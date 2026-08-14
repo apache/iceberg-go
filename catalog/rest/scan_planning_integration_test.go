@@ -44,6 +44,7 @@ import (
 
 const (
 	runIntegrationTestsEnv            = "RUN_INTEGRATION_TESTS"
+	scanPlanningIntegrationURI        = "http://localhost:8182"
 	integrationAccessDelegation       = "vended-credentials"
 	integrationAccessDelegationHeader = "X-Iceberg-Access-Delegation"
 	integrationGCSToken               = "scan-planning-integration-token"
@@ -55,14 +56,13 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability()
 
 	transport := newScanPlanningCaptureTransport()
 	s.T().Cleanup(transport.CloseIdleConnections)
-	planningCatalog, err := rest.NewCatalog(s.ctx, "scan-planning-java-wire", "http://localhost:8181",
-		rest.WithCustomTransport(transport))
+	planningCatalog, err := loadScanPlanningCatalog(s.ctx, rest.WithCustomTransport(transport))
 	s.Require().NoError(err)
 	s.T().Cleanup(func() { s.Require().NoError(planningCatalog.Close()) })
 	s.requireJavaScanPlanningCapabilities(planningCatalog)
 
 	ident := catalog.ToIdentifier(TestNamespaceIdent, "scan-planning-java-wire")
-	tbl, dataPath := s.createScanPlanningTable(ident)
+	tbl, dataPath := s.createScanPlanningTable(planningCatalog, ident)
 
 	filter, err := json.Marshal(iceberg.EqualTo(iceberg.Reference("foo"), "hello"))
 	s.Require().NoError(err)
@@ -120,16 +120,21 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability()
 	s.JSONEq(`{"type":"eq","term":"foo","value":"hello"}`, string(task.ResidualFilter))
 	s.Empty(task.DeleteFileReferences)
 
-	lowerBounds := valueMapByFieldID(s, task.DataFile.LowerBounds)
-	upperBounds := valueMapByFieldID(s, task.DataFile.UpperBounds)
-	s.ElementsMatch([]int{1, 2}, task.DataFile.LowerBounds.Keys)
-	s.ElementsMatch([]int{1, 2}, task.DataFile.UpperBounds.Keys)
+	lowerBounds := s.valueMapByFieldID(task.DataFile.LowerBounds)
+	upperBounds := s.valueMapByFieldID(task.DataFile.UpperBounds)
+	s.Require().ElementsMatch([]int{1, 2}, task.DataFile.LowerBounds.Keys)
+	s.Require().ElementsMatch([]int{1, 2}, task.DataFile.UpperBounds.Keys)
 	s.Equal("68656C6C6F", lowerBounds[1], "Java string lower bounds must be uppercase hexadecimal")
 	s.Equal("68656C6C6F", upperBounds[1], "Java string upper bounds must be uppercase hexadecimal")
 	s.Equal("11000000", lowerBounds[2], "Java int lower bounds must use Iceberg little-endian binary")
 	s.Equal("11000000", upperBounds[2], "Java int upper bounds must use Iceberg little-endian binary")
 
 	s.Require().Len(raw.StorageCredentials, 1)
+	// The fixture vends these credentials under prefix "gcp", but GCSFileIO (Java
+	// and Go alike) only matches prefixes starting with "gs", so they would not
+	// actually resolve for a real gs:// path today. That's a known fixture quirk,
+	// not something this suite introduces; pinning "gcp" here is a canary that
+	// will trip once the fixture is fixed to vend "gs" instead.
 	s.Equal("gcp", raw.StorageCredentials[0].Prefix)
 	s.Equal(integrationGCSToken, raw.StorageCredentials[0].Config[integrationGCSTokenKey])
 
@@ -141,8 +146,11 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability()
 
 func (s *RestIntegrationSuite) TestScanPlanningJavaErrorTypes() {
 	s.requireScanPlanningIntegration()
-	s.requireJavaScanPlanningCapabilities(s.cat)
-	s.ensureNamespace()
+	planningCatalog, err := loadScanPlanningCatalog(s.ctx)
+	s.Require().NoError(err)
+	s.T().Cleanup(func() { s.Require().NoError(planningCatalog.Close()) })
+	s.requireJavaScanPlanningCapabilities(planningCatalog)
+	s.ensureNamespaceIn(planningCatalog)
 	// The published fixture defaults to synchronous inline planning and exposes
 	// no container setting for async planning or a smaller plan-task page size.
 	// The not-found cases still exercise the live GET and POST routes and their
@@ -150,19 +158,19 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaErrorTypes() {
 	// by planfake until the reference image exposes those controls.
 
 	missingTable := catalog.ToIdentifier(TestNamespaceIdent, "missing-scan-planning-table")
-	_, err := s.cat.PlanTableScan(s.ctx, missingTable, rest.PlanTableScanRequest{})
+	_, err = planningCatalog.PlanTableScan(s.ctx, missingTable, rest.PlanTableScanRequest{})
 	s.ErrorIs(err, catalog.ErrNoSuchTable)
 
 	ident := catalog.ToIdentifier(TestNamespaceIdent, "scan-planning-java-errors")
-	tbl, err := s.cat.CreateTable(s.ctx, ident, tableSchemaSimple)
+	tbl, err := planningCatalog.CreateTable(s.ctx, ident, tableSchemaSimple)
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
-	s.T().Cleanup(func() { s.Require().NoError(s.cat.DropTable(s.ctx, ident)) })
+	s.T().Cleanup(func() { s.Require().NoError(planningCatalog.DropTable(s.ctx, ident)) })
 
-	_, err = s.cat.FetchPlanningResult(s.ctx, ident, "missing-plan-id", rest.FetchPlanningResultOptions{})
+	_, err = planningCatalog.FetchPlanningResult(s.ctx, ident, "missing-plan-id", rest.FetchPlanningResultOptions{})
 	s.ErrorIs(err, rest.ErrPlanExpired)
 
-	_, err = s.cat.FetchScanTasks(s.ctx, ident, rest.FetchScanTasksRequest{PlanTask: "missing-plan-task"})
+	_, err = planningCatalog.FetchScanTasks(s.ctx, ident, rest.FetchScanTasksRequest{PlanTask: "missing-plan-task"})
 	s.ErrorIs(err, rest.ErrNoSuchPlanTask)
 }
 
@@ -175,9 +183,10 @@ func (s *RestIntegrationSuite) requireScanPlanningIntegration() {
 
 func (s *RestIntegrationSuite) requireJavaScanPlanningCapabilities(cat *rest.Catalog) {
 	s.T().Helper()
-	s.Require().True(cat.SupportsPlanTableScan(), "Java fixture must advertise planTableScan")
-	s.Require().True(cat.SupportsFullRemoteScanPlanning(),
-		"Java fixture must advertise plan, poll, cancel, and task-fetch endpoints")
+	if !cat.SupportsPlanTableScan() || !cat.SupportsFullRemoteScanPlanning() {
+		s.T().Skip("Java fixture does not advertise planTableScan/poll/cancel/task-fetch endpoints; " +
+			"is the scan-planning-capable image running?")
+	}
 }
 
 func cancelPlanningWithTimeout(cat *rest.Catalog, ident table.Identifier, planID string) error {
@@ -187,9 +196,31 @@ func cancelPlanningWithTimeout(cat *rest.Catalog, ident table.Identifier, planID
 	return cat.CancelPlanning(ctx, ident, planID)
 }
 
-func (s *RestIntegrationSuite) createScanPlanningTable(ident table.Identifier) (*table.Table, string) {
+func loadScanPlanningCatalog(ctx context.Context, opts ...rest.Option) (*rest.Catalog, error) {
+	opts = append(opts, rest.WithAdditionalProps(iceberg.Properties{
+		iceio.S3Region:          "us-east-1",
+		iceio.S3AccessKeyID:     "admin",
+		iceio.S3SecretAccessKey: "password",
+	}))
+
+	return rest.NewCatalog(ctx, "scan-planning-java-wire", scanPlanningIntegrationURI, opts...)
+}
+
+func (s *RestIntegrationSuite) ensureNamespaceIn(cat *rest.Catalog) {
 	s.T().Helper()
-	s.ensureNamespace()
+	exists, err := cat.CheckNamespaceExists(s.ctx, catalog.ToIdentifier(TestNamespaceIdent))
+	s.Require().NoError(err)
+	if exists {
+		s.Require().NoError(cat.DropNamespace(s.ctx, catalog.ToIdentifier(TestNamespaceIdent)))
+	}
+
+	s.NoError(cat.CreateNamespace(s.ctx, catalog.ToIdentifier(TestNamespaceIdent),
+		iceberg.Properties{"foo": "bar", "prop": "yes"}))
+}
+
+func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident table.Identifier) (*table.Table, string) {
+	s.T().Helper()
+	s.ensureNamespaceIn(cat)
 
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{2},
@@ -197,10 +228,10 @@ func (s *RestIntegrationSuite) createScanPlanningTable(ident table.Identifier) (
 		Name:      "bar",
 		Transform: iceberg.IdentityTransform{},
 	})
-	tbl, err := s.cat.CreateTable(s.ctx, ident, tableSchemaSimple, catalog.WithPartitionSpec(&spec))
+	tbl, err := cat.CreateTable(s.ctx, ident, tableSchemaSimple, catalog.WithPartitionSpec(&spec))
 	s.Require().NoError(err)
 	s.Require().NotNil(tbl)
-	s.T().Cleanup(func() { s.Require().NoError(s.cat.DropTable(s.ctx, ident)) })
+	s.T().Cleanup(func() { s.Require().NoError(cat.DropTable(s.ctx, ident)) })
 
 	arrowSchema, err := table.SchemaToArrowSchema(tableSchemaSimple, nil, false, false)
 	s.Require().NoError(err)
@@ -229,11 +260,13 @@ func (s *RestIntegrationSuite) createScanPlanningTable(ident table.Identifier) (
 func (s *RestIntegrationSuite) assertJavaPlanningCredentials(credentials []rest.StorageCredential) {
 	s.T().Helper()
 	s.Require().Len(credentials, 1)
+	// "gcp" is a known fixture quirk, not a "gs" typo — see the comment on the
+	// equivalent raw-JSON assertion above.
 	s.Equal("gcp", credentials[0].Prefix)
 	s.Equal(integrationGCSToken, credentials[0].Config[integrationGCSTokenKey])
 }
 
-func valueMapByFieldID(s *RestIntegrationSuite, valueMap rawValueMapFixture) map[int]string {
+func (s *RestIntegrationSuite) valueMapByFieldID(valueMap rawValueMapFixture) map[int]string {
 	s.T().Helper()
 	s.Require().Len(valueMap.Values, len(valueMap.Keys))
 
@@ -258,7 +291,7 @@ type scanPlanningCaptureTransport struct {
 }
 
 func newScanPlanningCaptureTransport() *scanPlanningCaptureTransport {
-	return &scanPlanningCaptureTransport{base: http.DefaultTransport.(*http.Transport).Clone()}
+	return &scanPlanningCaptureTransport{base: &http.Transport{}}
 }
 
 func (t *scanPlanningCaptureTransport) RoundTrip(request *http.Request) (*http.Response, error) {

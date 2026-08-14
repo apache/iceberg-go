@@ -82,7 +82,7 @@ make lint-install
    make integration-test
    ```
 
-   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`.
+   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-rest-scan-planning`, `make integration-spark`.
 
 #### Running against Spark 4.0
 

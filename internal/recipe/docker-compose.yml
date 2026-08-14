@@ -46,16 +46,30 @@ services:
       retries: 12
       start_period: 30s
   rest:
-    # 1.10.1 predates the fixture's scan-planning implementation. Pin the
-    # multi-platform image built from apache/iceberg@b0df3ca so the Java wire
-    # compatibility tests are reproducible even though the released tag is not
-    # available yet.
-    image: apache/iceberg-rest-fixture:latest@sha256:db8de90b5b7693d4ac334c336f91d9bbe320d7b19f4f514d26de84cdfbcbfe8d
+    image: apache/iceberg-rest-fixture:1.10.1
     container_name: iceberg-rest
     networks:
       iceberg_net:
     ports:
       - 8181:8181
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+  rest-scan-planning:
+    # 1.10.1 predates the fixture's scan-planning implementation. Pin the
+    # multi-platform image built from apache/iceberg@b0df3ca so the Java wire
+    # compatibility tests are reproducible even though the released tag is not
+    # available yet.
+    image: apache/iceberg-rest-fixture:latest@sha256:db8de90b5b7693d4ac334c336f91d9bbe320d7b19f4f514d26de84cdfbcbfe8d
+    container_name: iceberg-rest-scan-planning
+    networks:
+      iceberg_net:
+    ports:
+      - 8182:8181
     environment:
       - AWS_ACCESS_KEY_ID=admin
       - AWS_SECRET_ACCESS_KEY=password
