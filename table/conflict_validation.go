@@ -653,7 +653,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
 	for _, df := range rewrittenFiles {
 		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 		if err != nil {
 			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
 				df.FilePath(), df.SpecID(), err)
@@ -674,7 +674,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 				return nil
 			}
 
-			key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
+			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
 					df.FilePath(), df.SpecID(), err)
