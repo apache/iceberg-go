@@ -144,7 +144,7 @@ func TestShredRecordVariantsTruthTable(t *testing.T) {
 
 	require.False(t, round.IsShredded())
 	require.Equal(t, src.Len(), round.Len())
-	for i := 0; i < src.Len(); i++ {
+	for i := range src.Len() {
 		assert.Equalf(t, src.Storage().IsNull(i), round.Storage().IsNull(i), "row %d null-ness", i)
 		if src.Storage().IsNull(i) {
 			continue

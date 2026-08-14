@@ -978,7 +978,7 @@ func dropColFromTable(idx int, tbl arrow.Table) arrow.Table {
 	fields = append(fields[:idx], fields[idx+1:]...)
 
 	cols := make([]arrow.Column, 0, tbl.NumCols()-1)
-	for i := 0; i < int(tbl.NumCols()); i++ {
+	for i := range int(tbl.NumCols()) {
 		if i == idx {
 			continue
 		}

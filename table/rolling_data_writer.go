@@ -642,7 +642,7 @@ func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow
 	}
 
 	inferred := make(map[int]arrow.DataType)
-	for col := 0; col < int(buf[0].NumCols()); col++ {
+	for col := range int(buf[0].NumCols()) {
 		if _, ok := buf[0].Column(col).(*extensions.VariantArray); !ok {
 			continue
 		}

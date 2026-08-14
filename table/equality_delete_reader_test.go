@@ -135,7 +135,7 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			ids = append(ids, col.Value(i))
 		}
 		rec.Release()
@@ -193,7 +193,7 @@ func TestEqualityDeleteReadResolvesRenamedDataColumnByFieldID(t *testing.T) {
 	for record, err := range records {
 		require.NoError(t, err)
 		column := record.Column(0).(*array.Int64)
-		for i := 0; i < column.Len(); i++ {
+		for i := range column.Len() {
 			ids = append(ids, column.Value(i))
 		}
 		record.Release()
@@ -258,7 +258,7 @@ func TestEqualityDeleteReadResolvesRenamedDataColumnByNameMapping(t *testing.T) 
 	for record, err := range records {
 		require.NoError(t, err)
 		column := record.Column(0).(*array.Int64)
-		for i := 0; i < column.Len(); i++ {
+		for i := range column.Len() {
 			ids = append(ids, column.Value(i))
 		}
 		record.Release()
@@ -317,7 +317,7 @@ func TestEqualityDeleteReadResolvesLiteralDottedColumnName(t *testing.T) {
 	for record, err := range records {
 		require.NoError(t, err)
 		column := record.Column(0).(*array.Int64)
-		for i := 0; i < column.Len(); i++ {
+		for i := range column.Len() {
 			ids = append(ids, column.Value(i))
 		}
 		record.Release()
@@ -466,7 +466,7 @@ func TestEqualityDeleteMatchingAcrossPartitionSpecEvolution(t *testing.T) {
 	for record, err := range itr {
 		require.NoError(t, err)
 		col := record.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			ids = append(ids, col.Value(i))
 		}
 		record.Release()
@@ -538,7 +538,7 @@ func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			ids = append(ids, col.Value(i))
 		}
 		rec.Release()
@@ -626,7 +626,7 @@ func TestEqualityDeleteMultiColumnKey(t *testing.T) {
 		require.NoError(t, err)
 		idCol := rec.Column(0).(*array.Int64)
 		nameCol := rec.Column(1).(*array.String)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			rows = append(rows, row{id: idCol.Value(i), name: nameCol.Value(i)})
 		}
 		rec.Release()

@@ -244,7 +244,7 @@ func TestRefTypes(t *testing.T) {
 	}
 
 	t.Run("bind term", func(t *testing.T) {
-		for i := 0; i < sc.NumFields(); i++ {
+		for i := range sc.NumFields() {
 			fld := sc.Field(i)
 			t.Run(fld.Type.String(), func(t *testing.T) {
 				ref, err := iceberg.Reference(fld.Name).Bind(sc, true)
@@ -257,7 +257,7 @@ func TestRefTypes(t *testing.T) {
 	})
 
 	t.Run("bind unary", func(t *testing.T) {
-		for i := 0; i < sc.NumFields(); i++ {
+		for i := range sc.NumFields() {
 			fld := sc.Field(i)
 			t.Run(fld.Type.String(), func(t *testing.T) {
 				b, err := iceberg.IsNull(iceberg.Reference(fld.Name)).Bind(sc, true)

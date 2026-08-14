@@ -1126,7 +1126,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	sp := newFastAppendFilesProducer(OpAppend, txn, blockingIO, nil, nil)
 
 	manifests := make([]iceberg.ManifestFile, 0, 8)
-	for i := 0; i < cap(manifests); i++ {
+	for i := range cap(manifests) {
 		manifests = append(manifests, writeTestManifestFile(t, blockingIO, spec, schema, sp.snapshotID, i))
 	}
 

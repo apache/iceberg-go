@@ -1319,7 +1319,7 @@ func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 		record := rr.RecordBatch()
 		batchRows = append(batchRows, int(record.NumRows()))
 		filePaths := record.Column(1).(*array.String)
-		for row := 0; row < filePaths.Len(); row++ {
+		for row := range filePaths.Len() {
 			paths = append(paths, filePaths.Value(row))
 		}
 	}

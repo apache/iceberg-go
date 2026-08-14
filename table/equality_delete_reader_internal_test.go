@@ -62,7 +62,7 @@ func TestMakeColEncoderMatchesGenericForNullFastPathTypes(t *testing.T) {
 				encoder := makeColEncoder(arr)
 
 				var fast, generic bytes.Buffer
-				for row := 0; row < arr.Len(); row++ {
+				for row := range arr.Len() {
 					fast.Reset()
 					generic.Reset()
 

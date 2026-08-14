@@ -235,7 +235,7 @@ func readIDsAndCategories(t *testing.T, path string) ([]int32, []string) {
 	if len(idCol) > 0 {
 		for _, chunk := range tbl.Column(idCol[0]).Data().Chunks() {
 			arr := chunk.(*array.Int32)
-			for i := 0; i < arr.Len(); i++ {
+			for i := range arr.Len() {
 				if arr.IsValid(i) {
 					ids = append(ids, arr.Value(i))
 				}
@@ -246,7 +246,7 @@ func readIDsAndCategories(t *testing.T, path string) ([]int32, []string) {
 	if len(catCol) > 0 {
 		for _, chunk := range tbl.Column(catCol[0]).Data().Chunks() {
 			arr := chunk.(*array.String)
-			for i := 0; i < arr.Len(); i++ {
+			for i := range arr.Len() {
 				if arr.IsValid(i) {
 					cats = append(cats, arr.Value(i))
 				}

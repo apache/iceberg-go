@@ -99,7 +99,7 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	}()
 
 	// If not acquired immediately, wait and retry
-	for attempt := 0; attempt < opts.LockRetries; attempt++ {
+	for attempt := range opts.LockRetries {
 		// Wait before checking again
 		waitTime := applyJitter(
 			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),

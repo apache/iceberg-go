@@ -89,7 +89,7 @@ func payloadHasTypedValue(t *testing.T, path string) bool {
 	require.GreaterOrEqual(t, idx, 0, "payload field must exist")
 	payload, ok := root.Field(idx).(*pqschema.GroupNode)
 	require.True(t, ok, "payload must be a group node")
-	for i := 0; i < payload.NumFields(); i++ {
+	for i := range payload.NumFields() {
 		if payload.Field(i).Name() == "typed_value" {
 			return true
 		}
@@ -110,7 +110,7 @@ func payloadAValues(t *testing.T, path string) []int64 {
 	defer tbl.Release()
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	out := make([]int64, 0, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		j, err := v.MarshalJSON()
@@ -139,7 +139,7 @@ func payloadTypedValuePhysicalType(t *testing.T, path string) parquet.Type {
 
 	root := pf.MetaData().Schema.Root()
 	payload := root.Field(root.FieldIndexByName("payload")).(*pqschema.GroupNode)
-	for i := 0; i < payload.NumFields(); i++ {
+	for i := range payload.NumFields() {
 		if tv, ok := payload.Field(i).(*pqschema.PrimitiveNode); ok && tv.Name() == "typed_value" {
 			return tv.PhysicalType()
 		}
@@ -235,7 +235,7 @@ func TestShreddedVariantWriteRoundTrip(t *testing.T) {
 
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, 8, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		j, err := v.MarshalJSON()
@@ -566,7 +566,7 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 
 			col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 			require.Equal(t, 6, col.Len())
-			for i := 0; i < col.Len(); i++ {
+			for i := range col.Len() {
 				v, err := col.Value(i)
 				require.NoError(t, err)
 				got, err := v.MarshalJSON()
@@ -644,7 +644,7 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	defer tbl.Release()
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, nRows, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		got, err := v.MarshalJSON()
@@ -731,7 +731,7 @@ func TestShreddedVariantWriteRowConservation(t *testing.T) {
 		idCol := tbl.Column(tbl.Schema().FieldIndices("id")[0]).Data()
 		for _, ch := range idCol.Chunks() {
 			chunk := ch.(*array.Int64)
-			for r := 0; r < chunk.Len(); r++ {
+			for r := range chunk.Len() {
 				seen[chunk.Value(r)]++
 			}
 		}
@@ -769,7 +769,7 @@ func TestShreddedVariantWriteLargeDecimal(t *testing.T) {
 
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, 6, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		got, err := v.MarshalJSON()
@@ -789,7 +789,7 @@ func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
 	require.NoError(t, err)
 	defer pf.Close()
 	sc := pf.MetaData().Schema
-	for i := 0; i < sc.NumColumns(); i++ {
+	for i := range sc.NumColumns() {
 		if col := sc.Column(i); col.Name() == name {
 			return col.PhysicalType()
 		}
@@ -1060,7 +1060,7 @@ func TestShreddedVariantWriteLargeBootstrapBatch(t *testing.T) {
 		idCol := tbl.Column(tbl.Schema().FieldIndices("id")[0]).Data()
 		for _, ch := range idCol.Chunks() {
 			chunk := ch.(*array.Int64)
-			for r := 0; r < chunk.Len(); r++ {
+			for r := range chunk.Len() {
 				seen[chunk.Value(r)]++
 			}
 		}

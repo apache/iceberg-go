@@ -95,7 +95,7 @@ func TestShreddedVariantTableScan(t *testing.T) {
 		// The shredded layout must be invisible to the scanner: the column
 		// reads back as a plain (non-shredded) variant.
 		assert.False(t, varr.IsShredded(), "scanned variant column must not be shredded")
-		for i := 0; i < varr.Len(); i++ {
+		for i := range varr.Len() {
 			if varr.IsNull(i) {
 				nullCount++
 
@@ -480,7 +480,7 @@ func requireFixtureShredded(t *testing.T, fixture string) {
 	tbl, err := rdr.ReadTable(t.Context())
 	require.NoError(t, err)
 	defer tbl.Release()
-	for c := 0; c < int(tbl.NumCols()); c++ {
+	for c := range int(tbl.NumCols()) {
 		if va, ok := tbl.Column(c).Data().Chunk(0).(*extensions.VariantArray); ok {
 			require.True(t, va.IsShredded(), "fixture %s must be stored shredded", fixture)
 
@@ -493,7 +493,7 @@ func requireFixtureShredded(t *testing.T, fixture string) {
 // shreddedVarColumn returns the single-chunk VariantArray for the "var" column.
 func shreddedVarColumn(t *testing.T, tbl arrow.Table) *extensions.VariantArray {
 	t.Helper()
-	for c := 0; c < int(tbl.NumCols()); c++ {
+	for c := range int(tbl.NumCols()) {
 		if tbl.Schema().Field(c).Name != "var" {
 			continue
 		}

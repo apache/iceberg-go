@@ -513,7 +513,6 @@ func TestServerHandlesConcurrentPollAndTaskRequests(t *testing.T) {
 	var wg sync.WaitGroup
 	for range requestCount {
 		wg.Go(func() {
-
 			for requestIndex, request := range []struct {
 				method string
 				url    string

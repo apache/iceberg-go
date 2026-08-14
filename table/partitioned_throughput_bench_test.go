@@ -93,7 +93,7 @@ func runBenchmark(b *testing.B, icebergSchema *iceberg.Schema, arrSchema *arrow.
 			b.ReportAllocs()
 
 			totalRecords := int64(0)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				reader, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{testBatch})
 				if err != nil {
 					b.Fatalf("Failed to create reader: %v", err)
@@ -590,7 +590,7 @@ func BenchmarkPartitionedWriteThroughput_PartitionCount(b *testing.B) {
 			b.ReportAllocs()
 
 			totalRecords := int64(0)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				reader, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{testBatch})
 				if err != nil {
 					b.Fatalf("Failed to create reader: %v", err)

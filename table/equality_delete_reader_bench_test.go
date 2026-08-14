@@ -62,7 +62,7 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				b.ResetTimer()
 				b.ReportAllocs()
 
-				for i := 0; i < b.N; i++ {
+				for range b.N {
 					rec.Retain()
 					result, err := filterFn(rec)
 					if err != nil {

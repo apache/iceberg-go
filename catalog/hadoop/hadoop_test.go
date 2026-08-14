@@ -1671,7 +1671,6 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMetadataPublishConflic
 
 	for range 2 {
 		wg.Go(func() {
-
 			tbl, err := s.cat.CreateTable(ctx, ident, s.testSchema())
 			result := createResult{err: err}
 			if err == nil {
@@ -1725,7 +1724,6 @@ func (s *HadoopCatalogTestSuite) TestCreateTableConcurrentMixedCodecVersionClaim
 		{table.MetadataCompressionKey: table.MetadataCompressionCodecGzip},
 	} {
 		wg.Go(func() {
-
 			opts := []catalog.CreateTableOpt(nil)
 			if props != nil {
 				opts = append(opts, catalog.WithProperties(props))
@@ -2634,7 +2632,6 @@ func (s *HadoopCatalogTestSuite) TestCommitTableConcurrentMixedCodecVersionClaim
 		},
 	} {
 		wg.Go(func() {
-
 			_, metaLoc, err := s.cat.CommitTable(
 				ctx, ident,
 				nil,

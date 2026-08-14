@@ -2130,7 +2130,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	chunk := tbl.Column(0).Data().Chunk(0)
 	varArr, ok := chunk.(*extensions.VariantArray)
 	require.True(t, ok, "expected VariantArray, got %T", chunk)
-	for i := 0; i < varArr.Len(); i++ {
+	for i := range varArr.Len() {
 		val, err := varArr.Value(i)
 		require.NoError(t, err, "row %d", i)
 		obj, ok := val.Value().(variant.ObjectValue)

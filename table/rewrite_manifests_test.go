@@ -583,6 +583,7 @@ func (f *trackingFS) snapshotCreated() map[string]struct{} {
 func (f *trackingFS) wasRemoved(path string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	return slices.Contains(f.removed, path)
 }
 

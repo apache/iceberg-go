@@ -676,7 +676,7 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.maxConcurrency)
-	for i := 0; i < cfg.maxConcurrency; i++ {
+	for i := range cfg.maxConcurrency {
 		go func(workerID int) {
 			defer wg.Done()
 			for file := range in {
