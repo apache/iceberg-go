@@ -370,10 +370,10 @@ func TestUnmarshalUpdates(t *testing.T) {
 				{"action": "set-properties", "updates": {"key1": "value1"}},
 				{"action": "remove-properties", "removals": ["key2"]},
 				{"action": "remove-schemas", "schema-ids": [1,2,3,4]},
-				{"action": "remove-partition-specs", "schema-ids": [1,2,3]},
+				{"action": "remove-partition-specs", "spec-ids": [1,2,3]},
 				{"action": "remove-snapshots", "snapshot-ids": [1,2]},
 				{"action": "remove-snapshot-ref", "ref-name": "main"},
-				{"action": "set-default-sort-order", "order-id": 1},
+				{"action": "set-default-sort-order", "sort-order-id": 1},
 				{"action": "set-default-spec", "spec-id": 1},
 				{"action": "set-snapshot-ref", "ref-name": "main", "type": "branch", "snapshot-id": 1}
 			]`),
@@ -540,6 +540,86 @@ func TestUnmarshalUpdates(t *testing.T) {
 	}
 }
 
+func TestUnmarshalAddSpecWithoutIDUsesInitialSpecID(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[{"action":"add-spec","spec":{"fields":[]}}]`), &updates))
+	require.Len(t, updates, 1)
+	update := updates[0].(*addPartitionSpecUpdate)
+	require.NotNil(t, update.Spec)
+	assert.Equal(t, iceberg.InitialPartitionSpecID, update.Spec.ID())
+}
+
+func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
+	data := []byte(`[
+		{"action":"set-properties","updated":{"key":"legacy"}},
+		{"action":"remove-properties","removed":["key"]},
+		{"action":"set-properties","updated":{}},
+		{"action":"remove-properties","removed":[]},
+		{"action":"set-properties","updated":{"key":"legacy"},"updates":{"key":"modern"}},
+		{"action":"remove-properties","removed":["legacy"],"removals":["modern"]}
+	]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	assert.Equal(t, Updates{
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "legacy"}),
+		NewRemovePropertiesUpdate([]string{"key"}),
+		NewSetPropertiesUpdate(iceberg.Properties{}),
+		NewRemovePropertiesUpdate([]string{}),
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "modern"}),
+		NewRemovePropertiesUpdate([]string{"modern"}),
+	}, updates)
+
+	encoded, err := json.Marshal(updates)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[
+		{"action":"set-properties","updates":{"key":"legacy"}},
+		{"action":"remove-properties","removals":["key"]},
+		{"action":"set-properties","updates":{}},
+		{"action":"remove-properties","removals":[]},
+		{"action":"set-properties","updates":{"key":"modern"}},
+		{"action":"remove-properties","removals":["modern"]}
+	]`, string(encoded))
+}
+
+func TestUnmarshalUpdatesRejectsNullLegacyPropertyFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  string
+		field string
+	}{
+		{
+			name:  "set-properties legacy field",
+			data:  `{"action":"set-properties","updated":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties legacy field",
+			data:  `{"action":"remove-properties","removed":null}`,
+			field: "removals",
+		},
+		{
+			name:  "set-properties canonical field takes precedence",
+			data:  `{"action":"set-properties","updated":{"key":"legacy"},"updates":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties canonical field takes precedence",
+			data:  `{"action":"remove-properties","removed":["legacy"],"removals":null}`,
+			field: "removals",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			err := json.Unmarshal([]byte("["+tt.data+"]"), &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
 func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 	var updates Updates
 	require.NoError(t, json.Unmarshal([]byte(`[
@@ -562,6 +642,162 @@ func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal([]byte(`[]`), &updates))
 	assert.Empty(t, updates)
+}
+
+func TestUnmarshalUpdatesRejectsMissingRequiredFields(t *testing.T) {
+	tests := []struct {
+		action string
+		field  string
+	}{
+		{UpdateAssignUUID, "uuid"},
+		{UpdateUpgradeFormatVersion, "format-version"},
+		{UpdateAddSchema, "schema"},
+		{UpdateSetCurrentSchema, "schema-id"},
+		{UpdateAddSpec, "spec"},
+		{UpdateSetDefaultSpec, "spec-id"},
+		{UpdateAddSortOrder, "sort-order"},
+		{UpdateSetDefaultSortOrder, "sort-order-id"},
+		{UpdateAddSnapshot, "snapshot"},
+		{UpdateSetSnapshotRef, "ref-name"},
+		{UpdateSetSnapshotRef, "type"},
+		{UpdateSetSnapshotRef, "snapshot-id"},
+		{UpdateRemoveSnapshots, "snapshot-ids"},
+		{UpdateRemoveSnapshotRef, "ref-name"},
+		{UpdateSetLocation, "location"},
+		{UpdateSetProperties, "updates"},
+		{UpdateRemoveProperties, "removals"},
+		{UpdateRemoveSpec, "spec-ids"},
+		{UpdateRemoveSchemas, "schema-ids"},
+		{UpdateSetStatistics, "statistics"},
+		{UpdateRemoveStatistics, "snapshot-id"},
+		{UpdateSetPartitionStatistics, "partition-statistics"},
+		{UpdateRemovePartitionStatistics, "snapshot-id"},
+		{UpdateAddEncryptionKey, "encryption-key"},
+		{UpdateRemoveEncryptionKey, "key-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			var updates Updates
+			data := []byte(fmt.Sprintf(`[{"action":%q}]`, tt.action))
+			if tt.action == UpdateSetSnapshotRef {
+				data = snapshotRefPayload(tt.field, false)
+			}
+			err := json.Unmarshal(data, &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+func snapshotRefPayload(omittedField string, nullField bool) []byte {
+	fields := map[string]any{
+		"action":      UpdateSetSnapshotRef,
+		"ref-name":    "main",
+		"type":        "branch",
+		"snapshot-id": int64(1),
+	}
+	if nullField {
+		fields[omittedField] = nil
+	} else {
+		delete(fields, omittedField)
+	}
+
+	data, err := json.Marshal([]map[string]any{fields})
+	if err != nil {
+		panic(err)
+	}
+
+	return data
+}
+
+func TestUnmarshalUpdatesRejectsNullRequiredPayload(t *testing.T) {
+	tests := []struct {
+		action string
+		field  string
+	}{
+		{UpdateAssignUUID, "uuid"},
+		{UpdateUpgradeFormatVersion, "format-version"},
+		{UpdateAddSchema, "schema"},
+		{UpdateSetCurrentSchema, "schema-id"},
+		{UpdateAddSpec, "spec"},
+		{UpdateSetDefaultSpec, "spec-id"},
+		{UpdateAddSortOrder, "sort-order"},
+		{UpdateSetDefaultSortOrder, "sort-order-id"},
+		{UpdateAddSnapshot, "snapshot"},
+		{UpdateSetSnapshotRef, "ref-name"},
+		{UpdateSetSnapshotRef, "type"},
+		{UpdateSetSnapshotRef, "snapshot-id"},
+		{UpdateRemoveSnapshots, "snapshot-ids"},
+		{UpdateRemoveSnapshotRef, "ref-name"},
+		{UpdateSetLocation, "location"},
+		{UpdateSetProperties, "updates"},
+		{UpdateRemoveProperties, "removals"},
+		{UpdateRemoveSpec, "spec-ids"},
+		{UpdateRemoveSchemas, "schema-ids"},
+		{UpdateSetStatistics, "statistics"},
+		{UpdateRemoveStatistics, "snapshot-id"},
+		{UpdateSetPartitionStatistics, "partition-statistics"},
+		{UpdateRemovePartitionStatistics, "snapshot-id"},
+		{UpdateAddEncryptionKey, "encryption-key"},
+		{UpdateRemoveEncryptionKey, "key-id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action+"/"+tt.field, func(t *testing.T) {
+			var updates Updates
+			data := []byte(fmt.Sprintf(`[{"action":%q,%q:null}]`, tt.action, tt.field))
+			if tt.action == UpdateSetSnapshotRef {
+				data = snapshotRefPayload(tt.field, true)
+			}
+			err := json.Unmarshal(data, &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
+func TestUnmarshalUpdatesRejectsMissingOrNullAction(t *testing.T) {
+	for _, data := range []string{`{}`, `{"action":null}`} {
+		t.Run(data, func(t *testing.T) {
+			var updates Updates
+			err := json.Unmarshal([]byte("["+data+"]"), &updates)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "action")
+		})
+	}
+}
+
+func TestUnmarshalUpdatesAcceptsOptionalAndEmptyValues(t *testing.T) {
+	data := []byte(`[
+		{"action":"add-schema","schema":{"type":"struct","fields":[]}},
+		{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":1},
+		{"action":"set-properties","updates":{}},
+		{"action":"remove-properties","removals":[]},
+		{"action":"remove-schemas","schema-ids":[]},
+		{"action":"remove-partition-specs","spec-ids":[]},
+		{"action":"remove-snapshots","snapshot-ids":[]}
+	]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 7)
+	assert.Equal(t, UpdateAddSchema, updates[0].Action())
+	assert.Equal(t, UpdateSetSnapshotRef, updates[1].Action())
+}
+
+func TestUnmarshalUpdatesPreservesReceiverAfterRequiredFieldFailure(t *testing.T) {
+	var updates Updates
+	require.NoError(t, json.Unmarshal([]byte(`[
+		{"action":"set-location","location":"s3://bucket/old-location"}
+	]`), &updates))
+	previous := append(Updates(nil), updates...)
+
+	err := json.Unmarshal([]byte(`[
+		{"action":"set-location"}
+	]`), &updates)
+	require.Error(t, err)
+	assert.Equal(t, previous, updates)
 }
 
 // baseMetaJSON is a minimal valid V2 metadata document used by the Apply tests below.
@@ -609,7 +845,6 @@ func TestAssignUUIDUpdate_ApplyRejectsNilUUID(t *testing.T) {
 func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 	data := []byte(`[{
 		"action": "set-statistics",
-		"snapshot-id": 42,
 		"statistics": {
 			"snapshot-id": 42,
 			"statistics-path": "s3://bucket/stats.puffin",
@@ -625,7 +860,7 @@ func TestSetStatisticsUpdate_Unmarshal(t *testing.T) {
 
 	u, ok := updates[0].(*setStatisticsUpdate)
 	require.True(t, ok)
-	assert.Equal(t, int64(42), u.SnapshotID)
+	assert.Zero(t, u.SnapshotID)
 	assert.Equal(t, "s3://bucket/stats.puffin", u.Statistics.StatisticsPath)
 }
 

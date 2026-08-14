@@ -193,13 +193,16 @@ func LiteralFromBytes(typ Type, data []byte) (Literal, error) {
 
 		return GeoLiteral{val: data, typ: typ}, nil
 	case FixedType:
-		if len(data) != t.Len() {
+		if len(data) < t.Len() {
 			// looks like some writers will write a prefix of the fixed length
 			// for lower/upper bounds instead of the full length. so let's pad
 			// it out to the full length if unpacking a fixed length literal
 			padded := make([]byte, t.Len())
 			copy(padded, data)
 			data = padded
+		} else if len(data) > t.Len() {
+			return nil, fmt.Errorf("%w: %w: fixed[%d] value has %d bytes",
+				ErrInvalidBinSerialization, ErrInvalidFixedLength, t.Len(), len(data))
 		}
 		var v FixedLiteral
 		err := v.UnmarshalBinary(data)
@@ -318,7 +321,7 @@ type belowMinLiteral[T int32 | int64 | float32 | float64] struct {
 }
 
 func (bm belowMinLiteral[T]) MarshalBinary() (data []byte, err error) {
-	return nil, fmt.Errorf("%w: cannot marshal above max literal",
+	return nil, fmt.Errorf("%w: cannot marshal below min literal",
 		ErrInvalidBinSerialization)
 }
 
@@ -421,15 +424,13 @@ func (b BoolLiteral) Equals(l Literal) bool {
 	return literalEq(b, l)
 }
 
-var falseBin, trueBin = [1]byte{0x0}, [1]byte{0x1}
-
 func (b BoolLiteral) MarshalBinary() (data []byte, err error) {
 	// stored as 0x00 for false, and anything non-zero for True
 	if b {
-		return trueBin[:], nil
+		return []byte{0x1}, nil
 	}
 
-	return falseBin[:], nil
+	return []byte{0x0}, nil
 }
 
 func (b *BoolLiteral) UnmarshalBinary(data []byte) error {
@@ -824,9 +825,11 @@ func (t TimestampLiteral) To(typ Type) (Literal, error) {
 		return t, nil
 	case TimestampTzType:
 		return t, nil
-	case TimestampNsType:
-		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
-	case TimestampTzNsType:
+	case TimestampNsType, TimestampTzNsType:
+		if t > math.MaxInt64/1000 || t < math.MinInt64/1000 {
+			return nil, fmt.Errorf("%w: timestamp %d is outside the nanosecond range", ErrBadCast, t)
+		}
+
 		return TimestampNsLiteral(Timestamp(t).ToNanos()), nil
 	case DateType:
 		return DateLiteral(Timestamp(t).ToDate()), nil

@@ -17,7 +17,7 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.8.0
 
-.PHONY: test test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hadoop integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
@@ -58,7 +58,7 @@ integration-env:
 	@echo "export SPARK_CONTAINER_ID=$$(docker ps -qf 'name=spark-iceberg')"
 	@echo "export DOCKER_API_VERSION=$$(docker version -f '{{.Server.APIVersion}}')"
 
-integration-test: integration-scanner integration-io integration-rest integration-spark integration-hive integration-hadoop
+integration-test: integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hive integration-hadoop
 
 integration-scanner:
 	go test -tags=integration -v -run="^TestScanner" ./table
@@ -67,7 +67,10 @@ integration-io:
 	go test -tags=integration -v ./io/...
 
 integration-rest:
-	RUN_INTEGRATION_TESTS=1 go test -tags=integration -v -run="^TestRestIntegration$$" ./catalog/rest
+	go test -tags=integration -v -run="^(TestRestIntegration|TestRestCatalogConformance)$$" ./catalog/rest
+
+integration-rest-scan-planning:
+	RUN_INTEGRATION_TESTS=1 go test -tags=integration -v -run="^TestRestIntegration/TestScanPlanningJava" ./catalog/rest
 
 integration-spark:
 	go test -tags=integration -v -run="^TestSparkIntegration" ./table

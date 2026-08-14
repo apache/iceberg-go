@@ -18,6 +18,8 @@
 package table_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -61,10 +63,63 @@ var testNonPartitionedTable = table.New([]string{"non_partitioned"}, testMetadat
 
 var testPartitionedTable = table.New([]string{"partitioned"}, testMetadataPartitioned, "", nil, nil)
 
+func TestNewUpdateSpecRejectsUnknownTransformInBaseSpec(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "id_custom",
+		Transform: unknown,
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+	tbl := table.New([]string{"unknown_spec"}, meta, "", nil, nil)
+
+	_, _, err = table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity").
+		BuildUpdates()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+	require.ErrorContains(t, err, "custom_transform[42]")
+}
+
 func TestNewUpdateSpecWithNilTransactionReturnsError(t *testing.T) {
 	err := table.NewUpdateSpec(nil, false).Commit()
 	require.ErrorIs(t, err, table.ErrInvalidMetadata)
 	assert.ErrorContains(t, err, "transaction is nil")
+}
+
+func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
+		Transform: iceberg.VoidTransform{},
+	})
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	require.NoError(t, err)
+
+	metadataJSON, err := json.Marshal(meta)
+	require.NoError(t, err)
+	source := []byte(`"source-id":1,`)
+	metadataJSON = bytes.ReplaceAll(metadataJSON, source, nil)
+	require.NotContains(t, string(metadataJSON), string(source))
+	meta, err = table.ParseMetadataBytes(metadataJSON)
+	require.NoError(t, err)
+	tbl := table.New([]string{"source_less_void"}, meta, "", nil, nil)
+
+	update := table.NewUpdateSpec(tbl.NewTransaction(), false).
+		AddField("name", iceberg.IdentityTransform{}, "name_identity")
+	_, _, err = update.BuildUpdates()
+	require.NoError(t, err)
+	newSpec, err := update.Apply()
+	require.NoError(t, err)
+	require.Equal(t, 2, newSpec.NumFields())
+	assert.Equal(t, []int{0}, newSpec.Field(0).SourceIDs)
+	assert.Equal(t, 1000, newSpec.Field(0).FieldID)
+	assert.Equal(t, "id", newSpec.Field(0).Name)
+	assert.Equal(t, iceberg.VoidTransform{}, newSpec.Field(0).Transform)
+	assert.Equal(t, 2, newSpec.Field(1).SourceID())
+	assert.Equal(t, "name_identity", newSpec.Field(1).Name)
 }
 
 func TestUpdateSpecAddField(t *testing.T) {
@@ -122,6 +177,40 @@ func TestUpdateSpecAddField(t *testing.T) {
 			BuildUpdates()
 		assert.Error(t, err)
 		assert.ErrorContains(t, err, "year cannot transform string values from name")
+		assert.Nil(t, updates)
+		assert.Nil(t, reqs)
+	})
+
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{"bucket", iceberg.BucketTransform{NumBuckets: 0}},
+		{"truncate", iceberg.TruncateTransform{Width: 0}},
+	} {
+		t.Run("reject invalid "+tt.name+" transform parameters", func(t *testing.T) {
+			specUpdate := table.NewUpdateSpec(testNonPartitionedTable.NewTransaction(), true)
+			updates, reqs, err := specUpdate.
+				AddField("id", tt.transform, "invalid_transform").
+				BuildUpdates()
+
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "invalid partition transform")
+			assert.Nil(t, updates)
+			assert.Nil(t, reqs)
+		})
+	}
+
+	t.Run("add unknown transform field", func(t *testing.T) {
+		unknown, err := iceberg.ParseTransform("custom_transform[42]")
+		require.NoError(t, err)
+
+		txn = testPartitionedTable.NewTransaction()
+		updates, reqs, err := table.NewUpdateSpec(txn, true).
+			AddField("id", unknown, "id_custom").
+			BuildUpdates()
+		require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+		assert.ErrorContains(t, err, "custom_transform[42]")
 		assert.Nil(t, updates)
 		assert.Nil(t, reqs)
 	})
@@ -546,5 +635,324 @@ func TestUpdateSpecCommit(t *testing.T) {
 
 		err := specUpdate.Commit()
 		assert.Nil(t, err)
+	})
+}
+
+func newPartitionedTableWithVersion(t *testing.T, version string) *table.Table {
+	t.Helper()
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   iceberg.PartitionDataIDStart,
+		Name:      "id_identity",
+		Transform: iceberg.IdentityTransform{},
+	})
+	metadata, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", iceberg.Properties{
+		table.PropertyFormatVersion: version,
+	})
+	require.NoError(t, err)
+
+	return table.New([]string{"partitioned_v" + version}, metadata, "", nil, nil)
+}
+
+// TestUpdateSpecReuseSameUpdate covers the rewriteDeleteAndAddField path: a
+// field removed and re-added within the *same* update must keep its permanent
+// field ID (undo-delete plus optional rename), regardless of the requested
+// name.
+func TestUpdateSpecReuseSameUpdate(t *testing.T) {
+	t.Run("re-add without a name keeps the current field ID and name", func(t *testing.T) {
+		specUpdate := table.NewUpdateSpec(testPartitionedTable.NewTransaction(), false)
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+
+		// The untouched field must remain unchanged, and no new ID may be
+		// allocated on the reuse path.
+		untouched := newSpec.FieldsBySourceID(5)
+		require.Len(t, untouched, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, untouched[0].FieldID)
+		assert.Equal(t, "street_void", untouched[0].Name)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, newSpec.LastAssignedFieldID())
+	})
+
+	t.Run("re-add with the matching name keeps the current field ID", func(t *testing.T) {
+		specUpdate := table.NewUpdateSpec(testPartitionedTable.NewTransaction(), false)
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "id_identity").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, newSpec.LastAssignedFieldID())
+	})
+
+	t.Run("re-add with a different name keeps the ID and renames the field", func(t *testing.T) {
+		specUpdate := table.NewUpdateSpec(testPartitionedTable.NewTransaction(), false)
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "id_renamed").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reAdded := newSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_renamed", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, newSpec.LastAssignedFieldID())
+	})
+
+	t.Run("reuse does not bump the field-ID counter for later additions", func(t *testing.T) {
+		// A field added *after* a reuse must get the next sequential ID; if the
+		// reuse path wrongly bumped the counter, this add would skip an ID.
+		specUpdate := table.NewUpdateSpec(testPartitionedTable.NewTransaction(), false)
+		_, _, err := specUpdate.
+			RemoveField("id_identity").
+			AddField("id", iceberg.IdentityTransform{}, "").                      // reuse -> 1000
+			AddField("address.zip_code", iceberg.IdentityTransform{}, "zip_new"). // new -> 1002
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+
+		reused := newSpec.FieldsBySourceID(1)
+		require.Len(t, reused, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reused[0].FieldID)
+
+		added := newSpec.FieldsBySourceID(7)
+		require.Len(t, added, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+2, added[0].FieldID)
+		assert.Equal(t, iceberg.PartitionDataIDStart+2, newSpec.LastAssignedFieldID())
+	})
+}
+
+// TestUpdateSpecReuseHistoricalFieldID covers the partitionField historical
+// lookup: a field removed in an *earlier committed* update lives only in the
+// table's historical partition specs, and re-adding it on the same source +
+// transform must recycle its permanent field ID on format v2+ tables.
+func TestUpdateSpecReuseHistoricalFieldID(t *testing.T) {
+	// removeAndCommit removes the named field and returns the resulting staged
+	// table, whose current spec no longer contains that field but whose history still does.
+	removeAndCommit := func(t *testing.T, tbl *table.Table, name string) *table.StagedTable {
+		t.Helper()
+		txn := tbl.NewTransaction()
+		require.NoError(t, txn.UpdateSpec(false).RemoveField(name).Commit())
+		staged, err := txn.StagedTable()
+		require.NoError(t, err)
+
+		return staged
+	}
+
+	t.Run("re-add without a name reuses the historical field ID (end-to-end)", func(t *testing.T) {
+		staged := removeAndCommit(t, testPartitionedTable, "id_identity")
+		removed := staged.Spec()
+		require.Empty(t, removed.FieldsBySourceID(1), "field should be gone from the current spec")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "").Commit())
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+		// The reuse must not advance the table's last-assigned partition ID.
+		require.NotNil(t, staged2.Metadata().LastPartitionSpecID())
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, *staged2.Metadata().LastPartitionSpecID())
+	})
+
+	t.Run("re-add with the matching name reuses the historical field ID", func(t *testing.T) {
+		staged := removeAndCommit(t, testPartitionedTable, "id_identity")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "id_identity").Commit())
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
+	})
+
+	t.Run("re-add with a different name after a committed removal allocates a new ID", func(t *testing.T) {
+		// Unlike the same-update case, once the removal is committed the field
+		// only lives in history, so a different-name re-add is a brand-new
+		// field and must receive a fresh ID.
+		staged := removeAndCommit(t, testPartitionedTable, "id_identity")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "id_renamed").Commit())
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+2, reAdded[0].FieldID)
+		assert.Equal(t, "id_renamed", reAdded[0].Name)
+	})
+
+	t.Run("reuse applies to format version 3 tables", func(t *testing.T) {
+		// Guards the Version() >= 2 boundary: v3 must reuse historical IDs too.
+		staged := removeAndCommit(t, newPartitionedTableWithVersion(t, "3"), "id_identity")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "").Commit())
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+	})
+
+	t.Run("v1 tables do not reuse historical field IDs", func(t *testing.T) {
+		// v1 lacks the permanent field-ID identity contract, so the historical
+		// lookup is skipped: the removed field remains as a void tombstone and
+		// the re-add gets a fresh, sequential ID with an auto-generated name.
+		staged := removeAndCommit(t, newPartitionedTableWithVersion(t, "1"), "id_identity")
+
+		txn2 := staged.NewTransaction()
+		require.NoError(t, txn2.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "").Commit())
+		staged2, err := txn2.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := staged2.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 2) // void tombstone + freshly-added identity field
+		var identityField *iceberg.PartitionField
+		for i := range reAdded {
+			if _, isIdentity := reAdded[i].Transform.(iceberg.IdentityTransform); isIdentity {
+				identityField = &reAdded[i]
+			}
+		}
+		require.NotNil(t, identityField)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, identityField.FieldID, "v1 must allocate a fresh ID, not reuse 1000")
+		assert.Equal(t, "id", identityField.Name)
+	})
+
+	t.Run("parameterized transform mismatch is not reused", func(t *testing.T) {
+		bucketSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   iceberg.PartitionDataIDStart,
+			Name:      "id_bucket",
+			Transform: iceberg.BucketTransform{NumBuckets: 16},
+		})
+		metadata, err := table.NewMetadata(testSchema, &bucketSpec, table.UnsortedSortOrder, "", nil)
+		require.NoError(t, err)
+		bucketTable := table.New([]string{"bucketed"}, metadata, "", nil, nil)
+
+		staged := removeAndCommit(t, bucketTable, "id_bucket")
+
+		// bucket[8] must NOT match the historical bucket[16]; a fresh ID is used.
+		txnMismatch := staged.NewTransaction()
+		require.NoError(t, txnMismatch.UpdateSpec(false).AddField("id", iceberg.BucketTransform{NumBuckets: 8}, "").Commit())
+		mismatchStaged, err := txnMismatch.StagedTable()
+		require.NoError(t, err)
+		mismatchSpec := mismatchStaged.Spec()
+		mismatch := mismatchSpec.FieldsBySourceID(1)
+		require.Len(t, mismatch, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart+1, mismatch[0].FieldID)
+		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 8}, mismatch[0].Transform)
+
+		// bucket[16] with the same parameter DOES match and reuses 1000.
+		txnMatch := staged.NewTransaction()
+		require.NoError(t, txnMatch.UpdateSpec(false).AddField("id", iceberg.BucketTransform{NumBuckets: 16}, "").Commit())
+		matchStaged, err := txnMatch.StagedTable()
+		require.NoError(t, err)
+		matchSpec := matchStaged.Spec()
+		match := matchSpec.FieldsBySourceID(1)
+		require.Len(t, match, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, match[0].FieldID)
+		assert.Equal(t, iceberg.BucketTransform{NumBuckets: 16}, match[0].Transform)
+	})
+
+	t.Run("lowest-spec-ID historical match wins for an unnamed re-add", func(t *testing.T) {
+		// History contains two fields with the same source + transform but
+		// different IDs/names (id 1000 "id_identity" in spec 0, id 1001 "id_v2"
+		// added later). An unnamed re-add must deterministically resurrect the
+		// lowest-spec-ID match (id 1000 "id_identity").
+		staged := removeAndCommit(t, testPartitionedTable, "id_identity")
+
+		txnAdd := staged.NewTransaction()
+		require.NoError(t, txnAdd.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "id_v2").Commit())
+		stagedAdd, err := txnAdd.StagedTable()
+		require.NoError(t, err)
+		addedSpec := stagedAdd.Spec()
+		added := addedSpec.FieldsBySourceID(1)
+		require.Len(t, added, 1)
+		require.Equal(t, iceberg.PartitionDataIDStart+2, added[0].FieldID) // fresh ID 1002
+
+		txnRemove := stagedAdd.NewTransaction()
+		require.NoError(t, txnRemove.UpdateSpec(false).RemoveField("id_v2").Commit())
+		stagedRemove, err := txnRemove.StagedTable()
+		require.NoError(t, err)
+
+		txnReAdd := stagedRemove.NewTransaction()
+		require.NoError(t, txnReAdd.UpdateSpec(false).AddField("id", iceberg.IdentityTransform{}, "").Commit())
+		stagedReAdd, err := txnReAdd.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := stagedReAdd.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+	})
+
+	t.Run("unnamed re-add returns the stored historical name after a source-column rename", func(t *testing.T) {
+		// Remove the field, rename its source column, then re-add unnamed. The
+		// reuse must return the *stored* historical partition-field name
+		// ("id_identity"), not a name freshly generated from the renamed column
+		// ("identifier"). The source ID is stable across the column rename, so
+		// the historical match still applies and the ID is recycled.
+		staged := removeAndCommit(t, testPartitionedTable, "id_identity")
+
+		txnRename := staged.NewTransaction()
+		require.NoError(t, txnRename.UpdateSchema(false, false).RenameColumn([]string{"id"}, "identifier").Commit())
+		stagedRename, err := txnRename.StagedTable()
+		require.NoError(t, err)
+
+		txnReAdd := stagedRename.NewTransaction()
+		require.NoError(t, txnReAdd.UpdateSpec(false).AddField("identifier", iceberg.IdentityTransform{}, "").Commit())
+		stagedReAdd, err := txnReAdd.StagedTable()
+		require.NoError(t, err)
+
+		reAddedSpec := stagedReAdd.Spec()
+		reAdded := reAddedSpec.FieldsBySourceID(1)
+		require.Len(t, reAdded, 1)
+		assert.Equal(t, iceberg.PartitionDataIDStart, reAdded[0].FieldID)
+		assert.Equal(t, "id_identity", reAdded[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, reAdded[0].Transform)
 	})
 }

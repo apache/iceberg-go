@@ -19,6 +19,7 @@ package dv
 
 import (
 	"context"
+	stdfs "io/fs"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -452,13 +453,17 @@ func TestDVWriterFlushMixedSpecIDs(t *testing.T) {
 func TestDVWriterFlushUnknownSpecID(t *testing.T) {
 	fs := newTestFS()
 	w := NewDVWriter(fs, unpartitionedResolver())
+	location := "mem://test/unknown-spec.puffin"
 
 	// specID 99 is not registered with the resolver.
 	require.NoError(t, w.Add("s3://bucket/file.parquet", []int64{1}, 99, nil))
 
-	_, err := w.Flush(context.Background(), "mem://test/unknown-spec.puffin")
+	_, err := w.Flush(context.Background(), location)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown partition spec id 99")
+
+	_, openErr := fs.Open(location)
+	assert.ErrorIs(t, openErr, stdfs.ErrNotExist)
 }
 
 func verifyDVReadBack(t *testing.T, fs iceio.IO, df iceberg.DataFile) {

@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"runtime"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,9 +35,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
-	"github.com/apache/iceberg-go/table/internal"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/apache/iceberg-go/table/substrait"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
@@ -91,6 +93,19 @@ type Transaction struct {
 	// removal). Fast/merge-append producers do not register a
 	// validator (they are safe under any isolation).
 	validators []conflictValidatorFunc
+
+	// noReplay marks the commit as non-replayable: on a CAS conflict
+	// doCommit fails instead of refreshing and replaying. Set by
+	// snapshot producers whose staged snapshot carries delete-file
+	// removals; see the flag site in commitManifests.
+	noReplay bool
+
+	// pinnedRefs names branches with an explicit AssertRefSnapshotID
+	// requirement. doCommit's refresh-and-replay must not rewrite their
+	// assertions to the fresh branch head between retries: the caller
+	// opted into compare-and-swap semantics, so a branch that has
+	// changed fails the commit.
+	pinnedRefs map[string]struct{}
 
 	mx        sync.Mutex
 	committed bool
@@ -161,13 +176,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return err
 	}
 
-	for _, r := range reqs {
-		if err := r.Validate(current); err != nil {
-			return err
-		}
-	}
-
-	existing := map[string]struct{}{}
+	// Deduplicate requirements by semantic key, rejecting pairs that
+	// share a key but cannot both hold (see checkRequirementConflict).
+	// Only requirements actually appended are validated against the
+	// staged metadata: a deduplicated twin re-asserts base state the
+	// staged metadata has intentionally moved past, and its kept twin
+	// was validated when first added.
+	existing := make(map[string]Requirement, len(t.reqs))
 	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
 	for _, r := range t.reqs {
 		key, err := requirementSemanticKey(r)
@@ -175,7 +190,7 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			return err
 		}
 
-		existing[key] = struct{}{}
+		existing[key] = r
 		stagedReqs = append(stagedReqs, r)
 	}
 
@@ -185,10 +200,18 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			return err
 		}
 
-		if _, ok := existing[key]; !ok {
-			stagedReqs = append(stagedReqs, r)
-			existing[key] = struct{}{}
+		if prev, ok := existing[key]; ok {
+			if err := checkRequirementConflict(prev, r); err != nil {
+				return err
+			}
+
+			continue
 		}
+		if err := r.Validate(current); err != nil {
+			return err
+		}
+		existing[key] = r
+		stagedReqs = append(stagedReqs, r)
 	}
 
 	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
@@ -220,13 +243,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 // from collapsing into one another.
 //
 // assert-ref-snapshot-id is special-cased to key by requirement type + ref name
-// only, deliberately ignoring the asserted snapshot id. Within a single
-// transaction the builder mutates its own ref state across operations (e.g. the
-// first append asserts main == nil, a later append asserts main == snapshot-1),
-// which would otherwise produce multiple, mutually contradictory base-state
-// assertions for the same ref against the pre-transaction metadata. Keying by
-// ref name keeps only the first assertion for each ref while still letting
-// assertions for different refs survive dedupe.
+// only, deliberately ignoring the asserted snapshot id. Producers build their
+// assertion from the BASE table's branch head, so repeated producer commits
+// (and explicit AssertRefSnapshotID calls) for the same ref produce identical
+// assertions that collapse to one, while assertions for different refs
+// survive dedupe. Two assertions for the same ref requiring different
+// snapshot ids share a key but cannot be collapsed —
+// checkRequirementConflict rejects them at apply time.
 func requirementSemanticKey(r Requirement) (string, error) {
 	if ref, ok := r.(*assertRefSnapshotID); ok {
 		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
@@ -238,6 +261,90 @@ func requirementSemanticKey(r Requirement) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+// checkRequirementConflict reports whether two requirements sharing a
+// semantic key can be collapsed into one. Identical ref assertions dedupe
+// to the first; two assert-ref-snapshot-id for the same ref requiring
+// different snapshot ids can never both hold, so keeping either one
+// would silently drop a check the caller registered — reject instead.
+func checkRequirementConflict(prev, next Requirement) error {
+	a, aok := prev.(*assertRefSnapshotID)
+	b, bok := next.(*assertRefSnapshotID)
+	if !aok || !bok {
+		return nil
+	}
+
+	if (a.SnapshotID == nil) != (b.SnapshotID == nil) ||
+		(a.SnapshotID != nil && *a.SnapshotID != *b.SnapshotID) {
+		return fmt.Errorf("conflicting snapshot-id assertions for ref %q: %s vs %s",
+			a.Ref, formatSnapshotID(a.SnapshotID), formatSnapshotID(b.SnapshotID))
+	}
+
+	return nil
+}
+
+// formatSnapshotID renders a required snapshot id for error messages; a
+// nil id asserts the ref's absence.
+func formatSnapshotID(id *int64) string {
+	if id == nil {
+		return "<ref absent>"
+	}
+
+	return strconv.FormatInt(*id, 10)
+}
+
+// baseRefSnapshotID returns the snapshot id the transaction's BASE
+// table metadata records for branch, or nil when the branch does not
+// exist on the base. Ref requirements must be built from this state —
+// the catalog state the writer actually read, as in Java's
+// UpdateRequirements — rather than the staged builder's refs, which
+// move past it as producer commits stage intermediate snapshots the
+// catalog has never seen.
+func (t *Transaction) baseRefSnapshotID(branch string) *int64 {
+	if t.tbl == nil || t.tbl.metadata == nil {
+		return nil
+	}
+	for name, ref := range t.tbl.metadata.Refs() {
+		if name == branch {
+			id := ref.SnapshotID
+
+			return &id
+		}
+	}
+
+	return nil
+}
+
+func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	out := slices.Clone(reqs)
+	for i, req := range out {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.Ref == branch {
+			if ref.requireBranch {
+				return out
+			}
+
+			out[i] = assertBranchRefSnapshotID(branch, ref.SnapshotID)
+
+			return out
+		}
+	}
+
+	var snapshotID *int64
+	for name, ref := range base.Refs() {
+		if name == branch {
+			id := ref.SnapshotID
+			snapshotID = &id
+
+			break
+		}
+	}
+
+	return append(out, assertBranchRefSnapshotID(branch, snapshotID))
 }
 
 // addValidator appends a conflict validator under t.mx. Producers
@@ -282,6 +389,76 @@ func (t *Transaction) SetProperties(props iceberg.Properties) error {
 	return nil
 }
 
+// AssertRefSnapshotID records a requirement that the given branch is
+// unchanged from the transaction's base table metadata — the catalog
+// state this transaction read: the branch must still reference the
+// same snapshot id, or still not exist when the base has none. An
+// empty branch means the transaction's target branch (main unless the
+// transaction was created with NewTransactionOnBranch).
+//
+// It provides optimistic concurrency for metadata-only commits, such
+// as SetProperties used for exactly-once bookkeeping. Commit normally
+// retries against the fresh branch head; with this requirement it
+// instead fails with ErrCommitFailed if any snapshot was committed to
+// the branch after the transaction's read. Snapshot producers
+// targeting the branch in the same transaction fail the same way
+// rather than retry.
+//
+// The requirement is submitted together with the transaction's
+// updates; a transaction with no updates never contacts the catalog,
+// so the requirement alone does not force a commit.
+func (t *Transaction) AssertRefSnapshotID(branch string) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if branch == "" {
+		branch = t.branch
+	}
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	id := t.baseRefSnapshotID(branch)
+
+	// Record the pin before the requirement can become visible to a
+	// concurrent Commit, which would otherwise rewrite the requirement
+	// to the fresh head on retry and silently void the
+	// compare-and-swap. The transient pin is harmless on its own and
+	// is rolled back if the requirement fails to apply.
+	t.mx.Lock()
+	if t.pinnedRefs == nil {
+		t.pinnedRefs = make(map[string]struct{})
+	}
+	_, alreadyPinned := t.pinnedRefs[branch]
+	t.pinnedRefs[branch] = struct{}{}
+	t.mx.Unlock()
+
+	if err := t.apply(nil, []Requirement{AssertRefSnapshotID(branch, id)}); err != nil {
+		if !alreadyPinned {
+			t.mx.Lock()
+			delete(t.pinnedRefs, branch)
+			t.mx.Unlock()
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+// RemoveProperties removes the given property keys from the table. Keys that
+// are not currently set are ignored.
+func (t *Transaction) RemoveProperties(keys []string) error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if len(keys) > 0 {
+		return t.apply([]Update{NewRemovePropertiesUpdate(keys)}, nil)
+	}
+
+	return nil
+}
+
 // UpgradeFormatVersion upgrades the table to the given format version. Downgrading
 // is not allowed. If the table is already at the given version, this is a no-op.
 func (t *Transaction) UpgradeFormatVersion(version int) error {
@@ -313,10 +490,18 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 			snapshotID, cs.SnapshotID)
 	}
 
-	update := NewSetSnapshotRefUpdate(MainBranch, snapshotID, BranchRef, 0, 0, 0)
-	req := AssertRefSnapshotID(MainBranch, &cs.SnapshotID)
+	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
 
-	return t.apply([]Update{update}, []Requirement{req})
+	// Assert the base branch head so a concurrent head move fails the
+	// commit instead of the rollback clobbering it. When main was
+	// staged by this transaction (absent on the base), the update that
+	// created it already carries its own base-state requirement.
+	var reqs []Requirement
+	if id := t.baseRefSnapshotID(MainBranch); id != nil {
+		reqs = append(reqs, AssertRefSnapshotID(MainBranch, id))
+	}
+
+	return t.apply([]Update{update}, reqs)
 }
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
@@ -350,10 +535,9 @@ type expireSnapshotsCfg struct {
 type ExpireSnapshotsOpt func(*expireSnapshotsCfg)
 
 // WithRetainLast sets the minimum number of snapshots to keep per branch,
-// regardless of age. It overrides the MinSnapshotsToKeepKey
-// ("min-snapshots-to-keep") table property for this call. Snapshots beyond this
-// count become eligible for expiry only once they are also older than the
-// configured age (see WithOlderThan).
+// regardless of age. It overrides the MinSnapshotsToKeepKey table property for
+// this call. Snapshots beyond this count become eligible for expiry only once
+// they are also older than the configured age (see WithOlderThan).
 func WithRetainLast(n int) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.minSnapshotsToKeep = &n
@@ -364,10 +548,10 @@ func WithRetainLast(n int) ExpireSnapshotsOpt {
 }
 
 // WithOlderThan expires snapshots older than the given duration, measured from
-// the current time. It overrides the MaxSnapshotAgeMsKey ("max-snapshot-age-ms")
-// table property for this call. The most recent snapshots are still retained up
-// to the count set by WithRetainLast. This option does not expire branches or
-// tags based on their age; configure max-ref-age-ms on the ref or table for that.
+// the current time. It overrides the MaxSnapshotAgeMsKey table property for this
+// call. The most recent snapshots are still retained up to the count set by
+// WithRetainLast. This option does not expire branches or tags based on their
+// age; configure MaxRefAgeMsKey on the ref or table for that.
 func WithOlderThan(t time.Duration) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		n := t.Milliseconds()
@@ -386,6 +570,22 @@ func WithPostCommit(postCommit bool) ExpireSnapshotsOpt {
 	return func(cfg *expireSnapshotsCfg) {
 		cfg.postCommit = postCommit
 	}
+}
+
+func getRetentionInt(props iceberg.Properties, standardKey, legacyKey string, defaultValue int) int {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt(standardKey, defaultValue)
+	}
+
+	return props.GetInt(legacyKey, defaultValue)
+}
+
+func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, defaultValue int64) int64 {
+	if _, ok := props[standardKey]; ok {
+		return props.GetInt64(standardKey, defaultValue)
+	}
+
+	return props.GetInt64(legacyKey, defaultValue)
 }
 
 // ExpireSnapshots removes expired snapshots from the table metadata, staging
@@ -435,23 +635,32 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 	}
 
 	// Read table-level retention properties as the last-resort defaults,
-	// mirroring the Java implementation. When neither the ref nor the
-	// caller provides a value, fall back to the table property; when the
-	// table property is also absent use the constant default (math.MaxInt64,
-	// meaning "keep everything").
-	propMaxRefAgeMs := meta.props.GetInt64(MaxRefAgeMsKey, MaxRefAgeMsDefault)
-	propMinSnapshotsToKeep := meta.props.GetInt(MinSnapshotsToKeepKey, MinSnapshotsToKeepDefault)
-	propMaxSnapshotAgeMs := meta.props.GetInt64(MaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault)
+	// mirroring the Java implementation. The unprefixed property names are
+	// retained as compatibility fallbacks for tables created by older Go
+	// versions.
+	propMaxRefAgeMs := getRetentionInt64(
+		meta.props, MaxRefAgeMsKey, legacyMaxRefAgeMsKey, MaxRefAgeMsDefault,
+	)
+	propMinSnapshotsToKeep := getRetentionInt(
+		meta.props, MinSnapshotsToKeepKey, legacyMinSnapshotsToKeepKey, MinSnapshotsToKeepDefault,
+	)
+	propMaxSnapshotAgeMs := getRetentionInt64(
+		meta.props, MaxSnapshotAgeMsKey, legacyMaxSnapshotAgeMsKey, MaxSnapshotAgeMsDefault,
+	)
+	defaultMaxSnapshotAgeMs := propMaxSnapshotAgeMs
+	if cfg.maxSnapshotAgeMs != nil {
+		defaultMaxSnapshotAgeMs = *cfg.maxSnapshotAgeMs
+	}
 
+	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
-		// Assert that this ref's snapshot ID hasn't changed concurrently.
-		// This ensures we don't accidentally expire snapshots that are now
-		// referenced by updated refs.
-		snapshotID := ref.SnapshotID
-		reqs = append(reqs, AssertRefSnapshotID(refName, &snapshotID))
-
-		if refName == MainBranch {
-			snapsToKeep[ref.SnapshotID] = struct{}{}
+		// Assert the ref's base snapshot id so we don't accidentally
+		// expire snapshots that are now referenced by concurrently
+		// updated refs. Refs the transaction itself staged (absent on
+		// the base) get no assertion here: the update that created
+		// them carries its own base-state requirement.
+		if id := t.baseRefSnapshotID(refName); id != nil {
+			reqs = append(reqs, AssertRefSnapshotID(refName, id))
 		}
 
 		snap, err := meta.SnapshotByID(ref.SnapshotID)
@@ -466,6 +675,11 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			updates = append(updates, NewRemoveSnapshotRefUpdate(refName))
 
 			continue
+		}
+		retainedRefs[refName] = ref
+
+		if refName == MainBranch {
+			snapsToKeep[ref.SnapshotID] = struct{}{}
 		}
 
 		var (
@@ -505,6 +719,41 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 
 			snapId = *snap.ParentSnapshotID
 			numSnapshots++
+		}
+	}
+
+	referencedSnapshots := make(map[int64]struct{})
+	for _, ref := range retainedRefs {
+		if ref.SnapshotRefType != BranchRef {
+			referencedSnapshots[ref.SnapshotID] = struct{}{}
+
+			continue
+		}
+
+		snapshotID := ref.SnapshotID
+		for {
+			snap, err := meta.SnapshotByID(snapshotID)
+			if err != nil {
+				break
+			}
+
+			referencedSnapshots[snap.SnapshotID] = struct{}{}
+			if snap.ParentSnapshotID == nil {
+				break
+			}
+
+			snapshotID = *snap.ParentSnapshotID
+		}
+	}
+
+	unreferencedSnapshotCutoff := nowMs - defaultMaxSnapshotAgeMs
+	for _, snap := range meta.snapshotList {
+		if _, referenced := referencedSnapshots[snap.SnapshotID]; referenced {
+			continue
+		}
+
+		if snap.TimestampMs >= unreferencedSnapshotCutoff {
+			snapsToKeep[snap.SnapshotID] = struct{}{}
 		}
 	}
 
@@ -687,7 +936,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 // validateDataFilePartitionData verifies that DataFile partition values match
 // the current partition spec fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
-	partitionData := df.Partition()
+	partitionData := dataFilePartition(df)
 
 	expectedFieldIDs := make(map[int]string)
 	for _, field := range spec.Fields() {
@@ -729,6 +978,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 	if currentSpec == nil {
 		return nil, errors.New("could not get current partition spec: no current partition spec found")
 	}
+	// The spec forbids committing files against a spec with an unknown
+	// transform, whoever computed the partition tuple.
+	if err := checkNoUnknownTransform(currentSpec); err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
 
 	expectedSpecID := int32(currentSpec.ID())
 	setToAdd := make(map[string]struct{}, len(dataFiles))
@@ -767,7 +1021,8 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
-		if requireFirstRowID && meta.formatVersion >= 3 && df.FirstRowID() == nil {
+		_, firstRowID, _, _, _ := iceberginternal.BorrowedDataFilePointers(df)
+		if requireFirstRowID && meta.formatVersion >= 3 && firstRowID == nil {
 			return nil, fmt.Errorf(
 				"data file %s is missing first_row_id which is required for v3 tables for %s: use DataFileBuilder.FirstRowID() to set it explicitly",
 				path, operation)
@@ -1113,7 +1368,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 			return errors.New("delete file paths must be non-empty for ReplaceFiles")
 		}
 		if IsDeletionVector(df) {
-			ref := df.ReferencedDataFile()
+			ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
 			if ref == nil {
 				return errors.New("deletion vector to remove is missing referenced_data_file for ReplaceFiles")
 			}
@@ -1161,7 +1416,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if !isData {
 			if _, ok := setDeleteFilesToRemove[path]; ok {
 				markedDeleteForRemoval = append(markedDeleteForRemoval, df)
-			} else if ref := df.ReferencedDataFile(); IsDeletionVector(df) && ref != nil {
+			} else if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); IsDeletionVector(df) && ref != nil {
 				if _, ok := dvRefsToRemove[*ref]; ok {
 					markedDVsForRemoval[*ref] = df
 				}
@@ -1959,7 +2214,8 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// end. File-level skipping (against the bound filter's residual on file
 	// stats) could be re-enabled here without breaking _row_id synthesis,
 	// since synthesis depends only on within-file row positions.
-	preserveRowLineage := meta.formatVersion >= 3 && args.originalFile.FirstRowID() != nil
+	_, originalFirstRowID, _, _, _ := iceberginternal.BorrowedDataFilePointers(args.originalFile)
+	preserveRowLineage := meta.formatVersion >= 3 && originalFirstRowID != nil
 	projectedSchema := meta.CurrentSchema()
 	var factoryOpts []writerFactoryOption
 	if preserveRowLineage {
@@ -2010,7 +2266,10 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// recordsToDataFiles can resolve _row_id via field ID rather than the name
 	// mapping (which doesn't include metadata columns).
 	if preserveRowLineage {
-		arrowSchema, err = SchemaToArrowSchema(projectedSchema, nil, true, false)
+		arrowSchema, err = SchemaToArrowSchemaWithOptions(projectedSchema, ArrowSchemaOptions{
+			IncludeFieldIDs: true,
+			TableProperties: builtMeta.Properties(),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to build arrow schema with field IDs: %w", err)
 		}
@@ -2140,7 +2399,7 @@ func (t *Transaction) writePositionDeletesForFiles(ctx context.Context, fs io.IO
 			return nil, err
 		}
 		updater.appendDeleteFile(f)
-		if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(f); ref != nil && *ref != "" {
 			if _, ok := seen[*ref]; !ok {
 				seen[*ref] = struct{}{}
 				referenced = append(referenced, *ref)
@@ -2195,7 +2454,7 @@ func (t *Transaction) collectExistingDVs(fs io.IO, files []iceberg.DataFile) (ma
 		if !IsDeletionVector(df) {
 			continue
 		}
-		ref := df.ReferencedDataFile()
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(df)
 		if ref == nil {
 			continue
 		}
@@ -2254,7 +2513,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	extSet := substrait.NewExtensionSet()
 
 	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan internal.Enumerated[FileScanTask], len(tasks))
+	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
 
 	numWorkers := min(concurrency, len(tasks))
 	records := make(chan enumeratedRecord, numWorkers)
@@ -2285,7 +2544,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 
 	go func() {
 		for i, t := range tasks {
-			taskChan <- internal.Enumerated[FileScanTask]{
+			taskChan <- tblutils.Enumerated[FileScanTask]{
 				Value: t, Index: i, Last: i == len(tasks)-1,
 			}
 		}
@@ -2326,6 +2585,9 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.selectorErr != nil {
+		return nil, s.selectorErr
 	}
 
 	return s, nil
@@ -2369,17 +2631,30 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 		return nil, errors.New("transaction has already been committed")
 	}
 
-	t.committed = true
-
 	if len(meta.updates) > 0 {
-		t.reqs = append(t.reqs, AssertTableUUID(meta.uuid))
-		tbl, err := t.tbl.doCommit(ctx, meta.updates, t.reqs,
+		reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
+		tbl, err := t.tbl.doCommit(ctx, meta.updates, reqs,
 			withCommitBranch(t.branch),
 			withCommitValidators(t.validators...),
+			withCommitNoReplay(t.noReplay),
+			withCommitPinnedRefs(t.pinnedRefs),
 		)
 		if err != nil {
+			// A clean conflict (ErrCommitFailed) committed nothing and stays
+			// retriable. Any other failure leaves the commit state unknown
+			// (the catalog may have accepted it), so mark it terminal to
+			// avoid a double-apply on retry.
+			if !errors.Is(err, ErrCommitFailed) {
+				t.committed = true
+			}
+
 			return tbl, err
 		}
+
+		// Mark committed after the catalog accepts but before PostCommit runs.
+		// A PostCommit failure must not leave the transaction retriable;
+		// otherwise a retry would re-run the catalog commit.
+		t.committed = true
 
 		for _, u := range meta.updates {
 			if perr := u.PostCommit(ctx, t.tbl, tbl); perr != nil {
@@ -2389,6 +2664,8 @@ func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 
 		return tbl, err
 	}
+
+	t.committed = true
 
 	return t.tbl, nil
 }

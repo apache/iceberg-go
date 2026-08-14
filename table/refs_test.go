@@ -21,8 +21,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInvalidSnapshotRef(t *testing.T) {
@@ -68,7 +70,7 @@ func TestSnapshotTagRef(t *testing.T) {
 	ref := `{
 		"snapshot-id": 3051729675574597004,
 		"type": "tag",
-		"min-snapshots-to-keep": 10
+		"max-ref-age-ms": 10
 	}`
 
 	var snapRef table.SnapshotRef
@@ -77,7 +79,34 @@ func TestSnapshotTagRef(t *testing.T) {
 
 	assert.Equal(t, table.TagRef, snapRef.SnapshotRefType)
 	assert.Equal(t, int64(3051729675574597004), snapRef.SnapshotID)
-	assert.Equal(t, 10, *snapRef.MinSnapshotsToKeep)
-	assert.Nil(t, snapRef.MaxRefAgeMs)
+	assert.Nil(t, snapRef.MinSnapshotsToKeep)
+	assert.Equal(t, int64(10), *snapRef.MaxRefAgeMs)
 	assert.Nil(t, snapRef.MaxSnapshotAgeMs)
+}
+
+func TestSnapshotRefRequiresFields(t *testing.T) {
+	for _, ref := range []string{
+		`{"type":"branch"}`,
+		`{"snapshot-id":1}`,
+	} {
+		var snapRef table.SnapshotRef
+		err := json.Unmarshal([]byte(ref), &snapRef)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
+}
+
+func TestSnapshotRefRejectsInvalidRetention(t *testing.T) {
+	tests := []string{
+		`{"snapshot-id":1,"type":"branch","min-snapshots-to-keep":0}`,
+		`{"snapshot-id":1,"type":"branch","max-snapshot-age-ms":-1}`,
+		`{"snapshot-id":1,"type":"branch","max-ref-age-ms":0}`,
+		`{"snapshot-id":1,"type":"tag","min-snapshots-to-keep":1}`,
+		`{"snapshot-id":1,"type":"tag","max-snapshot-age-ms":1}`,
+	}
+
+	for _, ref := range tests {
+		var snapRef table.SnapshotRef
+		err := json.Unmarshal([]byte(ref), &snapRef)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	}
 }

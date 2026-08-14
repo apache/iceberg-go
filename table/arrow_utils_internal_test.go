@@ -42,6 +42,7 @@ import (
 func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaData, Metadata) {
 	tableMeta, err := ParseMetadataString(`{
 		"format-version": 2,
+		"last-sequence-number": 0,
         "location": "s3://bucket/test/location",
         "last-column-id": 7,
         "current-schema-id": 0,
@@ -199,7 +200,7 @@ func (suite *FileStatsMetricsSuite) getDataFile(meta iceberg.Properties, writeSt
 	mapping, err := format.PathToIDMapping(schema)
 	suite.Require().NoError(err)
 
-	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping, nil)
+	stats := format.DataFileStatsFromMeta(fileMeta, collector, mapping, nil, nil)
 
 	return stats.ToDataFile(internal.DataFileOpts{
 		Schema:      tableMeta.CurrentSchema(),
@@ -459,11 +460,21 @@ func TestStatsTypes(t *testing.T) {
 func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 	// Calling the converter directly (outside the schema visitor) must not panic:
 	// an unsupported CRS comes back as an error, symmetric with the read path.
-	t.Run("projjson returns an error instead of panicking", func(t *testing.T) {
-		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs")
+	t.Run("projjson without properties returns an error instead of panicking", func(t *testing.T) {
+		_, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs", nil)
 		require.Error(t, err)
 		require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-		require.ErrorContains(t, err, "projjson CRS not supported yet")
+		require.ErrorContains(t, err, "could not be resolved from table properties")
+	})
+
+	t.Run("projjson resolves from table properties", func(t *testing.T) {
+		const projjson = `{"type":"GeographicCRS","name":"WGS 84"}`
+		meta, err := icebergCRSToGeoArrowMetadata("projjson:my-custom-crs", iceberg.Properties{
+			"my-custom-crs": projjson,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, geoarrow.CRSTypePROJJSON, meta.CRSType)
+		assert.JSONEq(t, projjson, string(meta.CRS))
 	})
 
 	t.Run("supported CRS values map to the expected CRSType", func(t *testing.T) {
@@ -472,24 +483,30 @@ func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
 			wantCRSType geoarrow.CRSType
 		}{
 			{"srid:4326", geoarrow.CRSTypeSRID},
+			{"srid:0", geoarrow.CRSTypeSRID},
 			{"OGC:CRS84", geoarrow.CRSTypeAuthorityCode},
 			{"EPSG:4326", geoarrow.CRSTypeAuthorityCode},
 			{"EPSG:4267", geoarrow.CRSTypeAuthorityCode},
 		}
 		for _, tc := range cases {
 			t.Run(tc.crs, func(t *testing.T) {
-				meta, err := icebergCRSToGeoArrowMetadata(tc.crs)
+				meta, err := icebergCRSToGeoArrowMetadata(tc.crs, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tc.wantCRSType, meta.CRSType)
 			})
 		}
 	})
 
-	t.Run("srid:0 maps to an omitted CRS", func(t *testing.T) {
-		meta, err := icebergCRSToGeoArrowMetadata("srid:0")
+	// An omitted CRS means OGC:CRS84, so the unknown CRS srid:0 must be explicit.
+	t.Run("srid:0 round trips as an explicit srid CRS", func(t *testing.T) {
+		meta, err := icebergCRSToGeoArrowMetadata("srid:0", nil)
 		require.NoError(t, err)
-		assert.Empty(t, meta.CRS)
-		assert.Empty(t, meta.CRSType)
+		assert.JSONEq(t, `"0"`, string(meta.CRS))
+		assert.Equal(t, geoarrow.CRSTypeSRID, meta.CRSType)
+
+		crs, err := geoArrowCRSToIcebergCRS(meta)
+		require.NoError(t, err)
+		assert.Equal(t, "srid:0", crs)
 	})
 }
 
@@ -499,6 +516,27 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 
 		return raw
 	}
+
+	t.Run("absent CRS maps to the default CRS", func(t *testing.T) {
+		got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{})
+		require.NoError(t, err)
+		assert.Equal(t, "OGC:CRS84", got)
+	})
+
+	t.Run("absent CRS with a crs_type annotation maps to the default CRS", func(t *testing.T) {
+		for _, crsType := range []geoarrow.CRSType{
+			geoarrow.CRSTypeSRID,
+			geoarrow.CRSTypeAuthorityCode,
+			geoarrow.CRSTypePROJJSON,
+			geoarrow.CRSTypeWKT22019,
+		} {
+			t.Run(string(crsType), func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{CRSType: crsType})
+				require.NoError(t, err)
+				assert.Equal(t, "OGC:CRS84", got)
+			})
+		}
+	})
 
 	t.Run("accepts long authority code string", func(t *testing.T) {
 		const crs = "EPSGAuthorityLongName:CODE-12345678901234567890"
@@ -540,6 +578,19 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "srid:3857", got)
+	})
+
+	t.Run("already prefixed srid is not prefixed twice", func(t *testing.T) {
+		for _, crs := range []string{"srid:0", "srid:3857", "SRID:3857"} {
+			t.Run(crs, func(t *testing.T) {
+				got, err := geoArrowCRSToIcebergCRS(geoarrow.Metadata{
+					CRS:     stringCRS(crs),
+					CRSType: geoarrow.CRSTypeSRID,
+				})
+				require.NoError(t, err)
+				assert.Equal(t, crs, got)
+			})
+		}
 	})
 
 	t.Run("rejects empty string CRS", func(t *testing.T) {
@@ -629,5 +680,82 @@ func TestGeoArrowCRSToIcebergCRS(t *testing.T) {
 				assert.ErrorContains(t, err, tc.wantErr)
 			})
 		}
+	})
+}
+
+// Delete writes target files written under whatever spec was current at the
+// time, so the guard has to look past the current spec.
+func TestCheckNoUnknownTransformInSpecs(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	tableSchema := schema()
+	cleanSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "y", Transform: iceberg.IdentityTransform{},
+	})
+	unknownSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1001, Name: "y_custom", Transform: unknown,
+	})
+
+	// Specs are added in order; the last one added becomes the default, so the
+	// caller controls which spec is current and which is historic.
+	build := func(t *testing.T, specs ...iceberg.PartitionSpec) Metadata {
+		builder, err := NewMetadataBuilder(2)
+		require.NoError(t, err)
+		require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+		require.NoError(t, builder.AddSchema(&tableSchema))
+		require.NoError(t, builder.SetCurrentSchemaID(-1))
+		sortOrder := sortOrder()
+		require.NoError(t, builder.AddSortOrder(&sortOrder))
+		require.NoError(t, builder.SetDefaultSortOrderID(-1))
+		for i := range specs {
+			require.NoError(t, builder.AddPartitionSpec(&specs[i], i == 0))
+		}
+		require.NoError(t, builder.SetDefaultSpecID(-1))
+		meta, err := builder.Build()
+		require.NoError(t, err)
+
+		return meta
+	}
+
+	specIDWithUnknown := func(t *testing.T, meta Metadata) int32 {
+		for _, spec := range meta.PartitionSpecs() {
+			specID := int32(spec.ID())
+			for _, f := range spec.Fields() {
+				if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+					return specID
+				}
+			}
+		}
+		t.Fatal("no spec with an unknown transform")
+
+		return 0
+	}
+
+	t.Run("unknown in current spec", func(t *testing.T) {
+		meta := build(t, cleanSpec, unknownSpec)
+		err := checkNoUnknownTransformInSpecs(meta, nil)
+		require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+		assert.ErrorContains(t, err, "custom_transform[42]")
+	})
+
+	t.Run("unknown only in historic spec", func(t *testing.T) {
+		meta := build(t, unknownSpec, cleanSpec)
+		files := map[string]partitionContext{
+			"s3://bucket/data/a.parquet": {specID: specIDWithUnknown(t, meta)},
+		}
+		require.ErrorIs(t, checkNoUnknownTransformInSpecs(meta, files), iceberg.ErrInvalidTransform)
+
+		// No file was written under the unknown spec, so there is nothing to reject.
+		require.NoError(t, checkNoUnknownTransformInSpecs(meta, nil))
+	})
+
+	t.Run("all specs clean", func(t *testing.T) {
+		meta := build(t, cleanSpec)
+		currentSpec := meta.PartitionSpec()
+		files := map[string]partitionContext{
+			"s3://bucket/data/a.parquet": {specID: int32(currentSpec.ID())},
+		}
+		require.NoError(t, checkNoUnknownTransformInSpecs(meta, files))
 	})
 }

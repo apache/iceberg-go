@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"fmt"
+	"math"
 	"reflect"
 
 	"github.com/apache/arrow-go/v18/parquet/variant"
@@ -59,6 +60,12 @@ const (
 	OpNot // Not
 	OpAnd // And
 	OpOr  // Or
+	// geospatial ops. Kept after the boolean ops so the group ranges above
+	// (used for quick op-kind validation) are undisturbed. These have their own
+	// predicate constructor (BBoxIntersects) rather than belonging to the
+	// unary/literal/set groups.
+	OpBBoxIntersects    // BBoxIntersects
+	OpBBoxNotIntersects // BBoxNotIntersects
 )
 
 // Negate returns the inverse operation for a given op
@@ -92,6 +99,10 @@ func (op Operation) Negate() Operation {
 		return OpNotStartsWith
 	case OpNotStartsWith:
 		return OpStartsWith
+	case OpBBoxIntersects:
+		return OpBBoxNotIntersects
+	case OpBBoxNotIntersects:
+		return OpBBoxIntersects
 	default:
 		panic("no negation for operation " + op.String())
 	}
@@ -945,7 +956,7 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		if err != nil {
 			return nil, err
 		}
-		typedSet.Add(casted)
+		typedSet.Add(cloneBoundLiteral(casted))
 	}
 
 	switch typedSet.Len() {
@@ -1046,7 +1057,7 @@ func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundP
 }
 
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
-	return bsp.lits
+	return cloneBoundLiteralSet(bsp.lits)
 }
 
 type BoundTransform struct {
@@ -1131,4 +1142,169 @@ func rejectTransformTerm(term BoundTerm) error {
 	}
 
 	return nil
+}
+
+// BoundingBox is a planar (XY) query bounding box used by the geospatial
+// BBoxIntersects predicate. MinX/MinY are the lower-left corner and MaxX/MaxY
+// the upper-right corner (X is longitude/easting, Y is latitude/northing).
+//
+// The box is two-dimensional: pruning only compares the X and Y extents of a
+// geometry column's bounds, which is all the Iceberg spec requires for
+// bbox-based data skipping. Z/M extents in a column's bounds are ignored.
+//
+// Z/M are intentionally omitted for now rather than reserved as fields: XY is
+// sufficient for spec-compliant pruning, and adding optional MinZ/MaxZ/MinM/MaxM
+// later is source-additive. The forward-compat contract is that Valid and Equals
+// are defined over whichever extents the box carries - today X and Y - so adding
+// higher dimensions later extends, rather than reinterprets, existing XY boxes.
+type BoundingBox struct {
+	MinX, MinY, MaxX, MaxY float64
+}
+
+func (b BoundingBox) String() string {
+	return fmt.Sprintf("BoundingBox(minX=%g, minY=%g, maxX=%g, maxY=%g)",
+		b.MinX, b.MinY, b.MaxX, b.MaxY)
+}
+
+// Equals reports whether two bounding boxes have identical extents.
+func (b BoundingBox) Equals(other BoundingBox) bool {
+	return b.MinX == other.MinX && b.MinY == other.MinY &&
+		b.MaxX == other.MaxX && b.MaxY == other.MaxY
+}
+
+// Valid reports whether the box is well-formed: no coordinate is NaN and the
+// minimum of each axis does not exceed its maximum. An infinite bound is allowed
+// (an open half-plane). An invalid box would silently mis-prune - a NaN makes
+// every intersection test false (pruning matching files), and an inverted box
+// (min > max) reports the wrong overlap - so BBoxIntersects rejects one.
+func (b BoundingBox) Valid() bool {
+	if math.IsNaN(b.MinX) || math.IsNaN(b.MinY) ||
+		math.IsNaN(b.MaxX) || math.IsNaN(b.MaxY) {
+		return false
+	}
+
+	return b.MinX <= b.MaxX && b.MinY <= b.MaxY
+}
+
+// isGeoType reports whether t is a geometry or geography type, the only types a
+// bbox predicate may bind to.
+func isGeoType(t Type) bool {
+	switch t.(type) {
+	case GeometryType, GeographyType:
+		return true
+	default:
+		return false
+	}
+}
+
+// BBoxIntersects constructs an unbound geospatial predicate that matches rows
+// whose geometry/geography value's bounding box intersects the query box. It is
+// used to prune data files whose stored geo bounds cannot overlap the query
+// region; the spec only requires bbox-based pruning, so full geometric predicate
+// evaluation (ST_Intersects/ST_Within) remains a query-engine concern.
+//
+// Panics if the term is nil or the bbox is not Valid (NaN coordinate or an
+// inverted min/max), either of which would cause silent mis-pruning. Panicking
+// on invalid construction is consistent with the other predicate constructors in
+// this package (UnaryPredicate, LiteralPredicate, SetPredicate, NewAnd, NewNot),
+// which all panic rather than return an error; a caller building a box from
+// untrusted input should validate it with BoundingBox.Valid first.
+func BBoxIntersects(t UnboundTerm, bbox BoundingBox) UnboundPredicate {
+	if t == nil {
+		panic(fmt.Errorf("%w: cannot create bbox predicate with nil term",
+			ErrInvalidArgument))
+	}
+	if !bbox.Valid() {
+		panic(fmt.Errorf("%w: invalid bounding box %s (NaN coordinate or min > max)",
+			ErrInvalidArgument, bbox))
+	}
+
+	return &unboundBBoxPredicate{op: OpBBoxIntersects, term: t, bbox: bbox}
+}
+
+type unboundBBoxPredicate struct {
+	op   Operation
+	term UnboundTerm
+	bbox BoundingBox
+}
+
+func (u *unboundBBoxPredicate) String() string {
+	return fmt.Sprintf("%s(term=%s, bbox=%s)", u.op, u.term, u.bbox)
+}
+
+func (u *unboundBBoxPredicate) Op() Operation     { return u.op }
+func (u *unboundBBoxPredicate) Term() UnboundTerm { return u.term }
+func (u *unboundBBoxPredicate) Negate() BooleanExpression {
+	return &unboundBBoxPredicate{op: u.op.Negate(), term: u.term, bbox: u.bbox}
+}
+
+func (u *unboundBBoxPredicate) Equals(other BooleanExpression) bool {
+	rhs, ok := other.(*unboundBBoxPredicate)
+	if !ok {
+		return false
+	}
+
+	return u.op == rhs.op && u.term.Equals(rhs.term) && u.bbox.Equals(rhs.bbox)
+}
+
+func (u *unboundBBoxPredicate) Bind(schema *Schema, caseSensitive bool) (BooleanExpression, error) {
+	bound, err := u.term.Bind(schema, caseSensitive)
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectTransformTerm(bound); err != nil {
+		return nil, err
+	}
+
+	if !isGeoType(bound.Type()) {
+		return nil, fmt.Errorf("%w: BBoxIntersects must bind to a geometry or geography type, not %s",
+			ErrType, bound.Type())
+	}
+
+	return &boundBBoxPredicate{op: u.op, term: bound, bbox: u.bbox}, nil
+}
+
+// BoundBBoxPredicate is a bound geospatial predicate that tests whether a
+// geometry/geography column's bounds intersect a query bounding box.
+type BoundBBoxPredicate interface {
+	BoundPredicate
+
+	BBox() BoundingBox
+}
+
+// boundBBoxPredicate carries a bound geo term plus the query box. Unlike the
+// other bound predicates it intentionally has no AsUnbound(Reference) method, so
+// it does NOT satisfy BoundUnaryPredicate: a bbox predicate must never be rebuilt
+// as a generic unary predicate (it would reach substrait and error, or be
+// dropped to AlwaysFalse when a column is absent). It has no record-filter or
+// REST-JSON form at all, so the two visitors that would otherwise rebuild a bound
+// predicate - columnNameTranslator.VisitBound and sanitizeVisitor.VisitBound -
+// special-case *boundBBoxPredicate and collapse it to AlwaysTrue. Data-file
+// pruning is done separately by inclusiveMetricsEval.
+type boundBBoxPredicate struct {
+	op   Operation
+	term BoundTerm
+	bbox BoundingBox
+}
+
+func (b *boundBBoxPredicate) String() string {
+	return fmt.Sprintf("Bound%s(term=%s, bbox=%s)", b.op, b.term, b.bbox)
+}
+
+func (b *boundBBoxPredicate) Op() Operation       { return b.op }
+func (b *boundBBoxPredicate) Term() BoundTerm     { return b.term }
+func (b *boundBBoxPredicate) Ref() BoundReference { return b.term.Ref() }
+func (b *boundBBoxPredicate) BBox() BoundingBox   { return b.bbox }
+
+func (b *boundBBoxPredicate) Negate() BooleanExpression {
+	return &boundBBoxPredicate{op: b.op.Negate(), term: b.term, bbox: b.bbox}
+}
+
+func (b *boundBBoxPredicate) Equals(other BooleanExpression) bool {
+	rhs, ok := other.(*boundBBoxPredicate)
+	if !ok {
+		return false
+	}
+
+	return b.op == rhs.op && b.term.Equals(rhs.term) && b.bbox.Equals(rhs.bbox)
 }

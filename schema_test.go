@@ -19,12 +19,15 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -217,6 +220,219 @@ func TestNestedFieldToString(t *testing.T) {
 	for _, tt := range tests {
 		assert.Equal(t, tt.expected, tableSchemaNested.Field(tt.idx).String())
 	}
+}
+
+func TestSchemaAsStructClonesTopLevelFieldList(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "foo", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+
+	structType := schema.AsStruct()
+	structType.FieldList[0].Name = "hijacked"
+
+	assert.Equal(t, "foo", schema.Field(0).Name)
+}
+
+func TestSchemaAsStructClonesNestedTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "person",
+			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			}},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	personType, ok := structType.FieldList[0].Type.(*iceberg.StructType)
+	require.True(t, ok)
+	personType.FieldList[0].Name = "full_name"
+
+	clonedPersonType, ok := schema.Field(0).Type.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedPersonType.FieldList[0].Name)
+}
+
+func TestSchemaAsStructClonesNestedListTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "people",
+			Type: &iceberg.ListType{
+				ElementID:       2,
+				ElementRequired: true,
+				Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				}},
+			},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	listType, ok := structType.FieldList[0].Type.(*iceberg.ListType)
+	require.True(t, ok)
+
+	elementType, ok := listType.Element.(*iceberg.StructType)
+	require.True(t, ok)
+	elementType.FieldList[0].Name = "full_name"
+
+	clonedListType, ok := schema.Field(0).Type.(*iceberg.ListType)
+	require.True(t, ok)
+
+	clonedElementType, ok := clonedListType.Element.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedElementType.FieldList[0].Name)
+}
+
+func TestSchemaAsStructClonesNestedMapTypes(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "people_by_id",
+			Type: &iceberg.MapType{
+				KeyID:         2,
+				KeyType:       iceberg.PrimitiveTypes.String,
+				ValueID:       3,
+				ValueRequired: true,
+				ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				}},
+			},
+			Required: true,
+		},
+	)
+
+	structType := schema.AsStruct()
+	mapType, ok := structType.FieldList[0].Type.(*iceberg.MapType)
+	require.True(t, ok)
+
+	valueType, ok := mapType.ValueType.(*iceberg.StructType)
+	require.True(t, ok)
+	valueType.FieldList[0].Name = "full_name"
+
+	clonedMapType, ok := schema.Field(0).Type.(*iceberg.MapType)
+	require.True(t, ok)
+
+	clonedValueType, ok := clonedMapType.ValueType.(*iceberg.StructType)
+	require.True(t, ok)
+	assert.Equal(t, "name", clonedValueType.FieldList[0].Name)
+}
+
+func TestSchemaFieldGettersReturnDefensiveCopies(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{
+			ID:   1,
+			Name: "person",
+			Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+		iceberg.NestedField{
+			ID:             3,
+			Name:           "payload",
+			Type:           iceberg.PrimitiveTypes.Binary,
+			InitialDefault: iceberg.BinaryLiteral{1, 2},
+			WriteDefault:   map[string]any{"nested": []any{[]byte{3, 4}}},
+		},
+	)
+
+	assertIndependent := func(t *testing.T, personField, payloadField iceberg.NestedField) {
+		t.Helper()
+		person, ok := personField.Type.(*iceberg.StructType)
+		require.True(t, ok)
+		person.FieldList[0].Name = "hijacked"
+		payloadField.InitialDefault.(iceberg.BinaryLiteral)[0] = 9
+		payloadField.WriteDefault.(map[string]any)["nested"].([]any)[0].([]byte)[0] = 9
+
+		actual, ok := schema.FindFieldByID(2)
+		require.True(t, ok)
+		assert.Equal(t, "name", actual.Name)
+		payload, ok := schema.FindFieldByID(3)
+		require.True(t, ok)
+		assert.Equal(t, iceberg.BinaryLiteral{1, 2}, payload.InitialDefault)
+		assert.Equal(t, map[string]any{"nested": []any{[]byte{3, 4}}}, payload.WriteDefault)
+	}
+
+	t.Run("Field", func(t *testing.T) {
+		assertIndependent(t, schema.Field(0), schema.Field(1))
+	})
+	t.Run("Fields", func(t *testing.T) {
+		fields := schema.Fields()
+		assertIndependent(t, fields[0], fields[1])
+	})
+	t.Run("FindFieldByID", func(t *testing.T) {
+		person, ok := schema.FindFieldByID(1)
+		require.True(t, ok)
+		payload, ok := schema.FindFieldByID(3)
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
+	})
+	t.Run("FindFieldByName", func(t *testing.T) {
+		person, ok := schema.FindFieldByName("person")
+		require.True(t, ok)
+		payload, ok := schema.FindFieldByName("payload")
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
+	})
+	t.Run("FindFieldByNameCaseInsensitive", func(t *testing.T) {
+		person, ok := schema.FindFieldByNameCaseInsensitive("PERSON")
+		require.True(t, ok)
+		payload, ok := schema.FindFieldByNameCaseInsensitive("PAYLOAD")
+		require.True(t, ok)
+		assertIndependent(t, person, payload)
+	})
+	t.Run("FindTypeByID", func(t *testing.T) {
+		typ, ok := schema.FindTypeByID(1)
+		require.True(t, ok)
+		person, ok := typ.(*iceberg.StructType)
+		require.True(t, ok)
+		person.FieldList[0].Name = "hijacked"
+
+		actual, ok := schema.FindFieldByID(2)
+		require.True(t, ok)
+		assert.Equal(t, "name", actual.Name)
+	})
+	t.Run("FlatFields", func(t *testing.T) {
+		fields, err := schema.FlatFields()
+		require.NoError(t, err)
+		byID := make(map[int]iceberg.NestedField)
+		for field := range fields {
+			byID[field.ID] = field
+		}
+		assertIndependent(t, byID[1], byID[3])
+	})
+}
+
+func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
+	children := make([]iceberg.NestedField, 50)
+	for i := range children {
+		children[i] = iceberg.NestedField{
+			ID: i + 2, Name: fmt.Sprintf("child_%d", i), Type: iceberg.PrimitiveTypes.String,
+		}
+	}
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "parent", Type: &iceberg.StructType{FieldList: children},
+	})
+	_, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
+	require.True(t, ok)
+
+	var field iceberg.NestedField
+	assert.Zero(t, testing.AllocsPerRun(100, func() {
+		field, ok = schema.FindFieldByIDRef(1, internal.SchemaRef{})
+		runtime.KeepAlive(field)
+	}))
+	require.True(t, ok)
+	assert.Equal(t, 1, field.ID)
+
+	parent := field.Type.(*iceberg.StructType)
+	parent.FieldList[0].Name = "shared_child"
+	shared, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
+	require.True(t, ok)
+	sharedParent := shared.Type.(*iceberg.StructType)
+	assert.Equal(t, "shared_child", sharedParent.FieldList[0].Name)
 }
 
 func TestSchemaIndexByIDVisitor(t *testing.T) {
@@ -469,6 +685,156 @@ func TestUnmarshalSchema(t *testing.T) {
 	}`), &schema))
 
 	assert.True(t, tableSchemaSimple.Equals(&schema))
+}
+
+func TestUnmarshalSchemaRejectsInvalidTopLevelShape(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		data string
+	}{
+		{name: "missing type", data: `{"fields": []}`},
+		{name: "null type", data: `{"type": null, "fields": []}`},
+		{name: "non-string type", data: `{"type": 1, "fields": []}`},
+		{name: "non-struct type", data: `{"type": "list", "fields": []}`},
+		{name: "missing fields", data: `{"type": "struct"}`},
+		{name: "null fields", data: `{"type": "struct", "fields": null}`},
+		{name: "scalar fields", data: `{"type": "struct", "fields": {}}`},
+		{name: "string fields", data: `{"type": "struct", "fields": "not-an-array"}`},
+		{name: "malformed field", data: `{"type": "struct", "fields": [{"id": 1, "name": "bad", "type": 1}]}`},
+		{name: "malformed json", data: `{"type": "struct", "fields": [`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(7,
+				iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String})
+			err := json.Unmarshal([]byte(tt.data), schema)
+			require.Error(t, err)
+			assert.Equal(t, 7, schema.ID)
+			assert.Equal(t, "old", schema.Field(0).Name)
+		})
+	}
+}
+
+func TestUnmarshalSchemaAcceptsLegacyV1Envelope(t *testing.T) {
+	var schema iceberg.Schema
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [{"id": 1, "name": "id", "type": "long", "required": true}]
+	}`), &schema))
+
+	assert.Zero(t, schema.ID)
+	assert.Empty(t, schema.IdentifierFieldIDs)
+}
+
+func TestMarshalSchemaWritesEmptyFieldsArray(t *testing.T) {
+	data, err := json.Marshal(iceberg.NewSchema(0))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"type": "struct",
+		"fields": [],
+		"schema-id": 0,
+		"identifier-field-ids": []
+	}`, string(data))
+}
+
+func TestUnmarshalSchemaReplacesExistingState(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [{"id": 2, "name": "new", "type": "long", "required": true}]
+	}`), schema))
+
+	assert.Zero(t, schema.ID)
+	assert.Empty(t, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	_, ok = schema.FindFieldByID(1)
+	assert.False(t, ok)
+	_, ok = schema.FindColumnName(1)
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	assert.False(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	assert.False(t, ok)
+	field, ok := schema.FindFieldByID(2)
+	require.True(t, ok)
+	assert.Equal(t, "new", field.Name)
+	assert.Contains(t, schema.NameMapping().String(), "new")
+	assert.NotContains(t, schema.NameMapping().String(), "old")
+}
+
+func TestUnmarshalSchemaPreservesExistingStateOnError(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	_, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	_, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+	assert.False(t, schema.FieldHasOptionalParent(1))
+
+	err := json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [
+			{"id": 2, "name": "first", "type": "long", "required": true},
+			{"id": 2, "name": "duplicate", "type": "string", "required": false}
+		]
+	}`), schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+
+	assert.Equal(t, 7, schema.ID)
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Equal(t, 1, schema.NumFields())
+	field, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	_, ok = schema.FindColumnName(1)
+	require.True(t, ok)
+	field, ok = schema.FindFieldByName("old")
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	field, ok = schema.FindFieldByNameCaseInsensitive("OLD")
+	require.True(t, ok)
+	assert.Equal(t, "old", field.Name)
+	assert.Contains(t, schema.NameMapping().String(), "old")
+	assert.False(t, schema.FieldHasOptionalParent(1))
+}
+
+func TestUnmarshalSchemaPreservesExistingStateOnFieldDecodeError(t *testing.T) {
+	schema := iceberg.NewSchemaWithIdentifiers(7, []int{1},
+		iceberg.NestedField{ID: 1, Name: "old", Type: iceberg.PrimitiveTypes.String},
+	)
+	_, ok := schema.FindFieldByID(1)
+	require.True(t, ok)
+
+	err := json.Unmarshal([]byte(`{
+		"type": "struct",
+		"fields": [{"id": 2, "name": "new", "type": 1}]
+	}`), schema)
+	require.Error(t, err)
+
+	assert.Equal(t, 7, schema.ID)
+	assert.Equal(t, []int{1}, schema.IdentifierFieldIDs)
+	assert.Equal(t, "old", schema.Field(0).Name)
+	_, ok = schema.FindFieldByID(1)
+	assert.True(t, ok)
+	_, ok = schema.FindFieldByID(2)
+	assert.False(t, ok)
 }
 
 func TestUnmarshalSchemaRejectsDuplicateFieldIDs(t *testing.T) {
@@ -1435,6 +1801,134 @@ func TestSanitizeColumnNamesEmptyFieldName(t *testing.T) {
 	_, err := iceberg.SanitizeColumnNames(sc)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "field name cannot be empty")
+}
+
+func TestSanitizeColumnNamesMatchesJavaIceberg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "ASCII letter", input: "Field_9", want: "Field_9"},
+		{name: "underscore", input: "_field", want: "_field"},
+		{name: "ASCII digit first", input: "1field", want: "_1field"},
+		{name: "latin letter", input: "éclair", want: "éclair"},
+		{name: "CJK letters", input: "你好", want: "你好"},
+		{name: "extended latin letter", input: "Łacinka", want: "Łacinka"},
+		{name: "Unicode digit first", input: "١field", want: "_١field"},
+		{name: "Unicode digit later", input: "a١field", want: "a١field"},
+		{name: "supplementary letter", input: "𐐀field", want: "_xD801_xDC00field"},
+		{name: "supplementary digit first", input: "𝟎field", want: "_xD835_xDFCEfield"},
+		{name: "supplementary digit later", input: "a𝟎field", want: "a_xD835_xDFCEfield"},
+		{name: "superscript number", input: "a²", want: "a_xB2"},
+		// Java Character.isLetterOrDigit excludes Unicode letter numbers (Nl).
+		{name: "letter number", input: "aⅡ", want: "a_x2161"},
+		{name: "combining mark", input: "e\u0301", want: "e_x301"},
+		{name: "emoji first", input: "😀field", want: "_xD83D_xDE00field"},
+		{name: "emoji later", input: "a😀field", want: "a_xD83D_xDE00field"},
+		{name: "punctuation first", input: "-field", want: "_x2Dfield"},
+		{name: "punctuation later", input: "a-field", want: "a_x2Dfield"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: test.input, Type: iceberg.PrimitiveTypes.String})
+			sanitized, err := iceberg.SanitizeColumnNames(schema)
+			require.NoError(t, err)
+			got := sanitized.Field(0).Name
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestSanitizeColumnNamesRejectsCollisions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		fields []iceberg.NestedField
+		want   string
+	}{
+		{
+			name: "leading ASCII digit collides with underscored name",
+			fields: []iceberg.NestedField{
+				{ID: 1, Name: "1field", Type: iceberg.PrimitiveTypes.String},
+				{ID: 2, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
+			},
+			want: `fields 1 and 2 produce duplicate sanitized name "_1field"`,
+		},
+		{
+			name: "emoji escape collides with existing name",
+			fields: []iceberg.NestedField{
+				{ID: 3, Name: "😀", Type: iceberg.PrimitiveTypes.String},
+				{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
+			},
+			want: `fields 3 and 4 produce duplicate sanitized name "_xD83D_xDE00"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := iceberg.SanitizeColumnNames(iceberg.NewSchema(1, test.fields...))
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
+func TestSanitizeColumnNamesScopesCollisionChecksToStruct(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{
+			ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "😀", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 4, Name: "_xD83D_xDE00", Type: iceberg.PrimitiveTypes.String},
+			}},
+		},
+	)
+
+	sanitized, err := iceberg.SanitizeColumnNames(schema)
+	require.NoError(t, err)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(0).Type.(*iceberg.StructType).FieldList[0].Name)
+	assert.Equal(t, "_xD83D_xDE00", sanitized.Field(1).Type.(*iceberg.StructType).FieldList[0].Name)
+}
+
+func TestSanitizeColumnNamesRejectsNestedCollision(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "record", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "1field", Type: iceberg.PrimitiveTypes.String},
+			{ID: 3, Name: "_1field", Type: iceberg.PrimitiveTypes.String},
+		}},
+	})
+
+	_, err := iceberg.SanitizeColumnNames(schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, `fields 2 and 3 produce duplicate sanitized name "_1field"`)
+}
+
+func TestSanitizeColumnNamesRejectsInvalidUTF8(t *testing.T) {
+	t.Parallel()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 7, Name: string([]byte{0xff, 'a'}), Type: iceberg.PrimitiveTypes.String,
+	})
+
+	_, err := iceberg.SanitizeColumnNames(schema)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "field 7 name is not valid UTF-8")
 }
 
 func TestSchemaSelectCaseSensitiveSuccess(t *testing.T) {

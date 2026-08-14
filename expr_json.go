@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
@@ -194,6 +196,13 @@ func (usp *unboundSetPredicate) MarshalJSON() ([]byte, error) {
 func (bsp *boundSetPredicate[T]) MarshalJSON() ([]byte, error) {
 	return marshalSetPredicate(bsp.op, bsp.term, bsp.lits.Members())
 }
+
+// Geospatial bbox predicates have no representation in the REST expression JSON
+// grammar; they are used only for local scan planning. Report an error rather
+// than silently emitting an empty object. The sentinel lives in errors.go with
+// the other wrapped sentinels (see ErrBBoxNotSerializable).
+func (u *unboundBBoxPredicate) MarshalJSON() ([]byte, error) { return nil, ErrBBoxNotSerializable }
+func (b *boundBBoxPredicate) MarshalJSON() ([]byte, error)   { return nil, ErrBBoxNotSerializable }
 
 // predicateType returns the wire "type" string for a predicate operation.
 func predicateType(op Operation) (string, error) {
@@ -481,8 +490,21 @@ func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (Boolea
 // without inspecting bytes by hand.
 func firstToken(raw json.RawMessage) (json.Token, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := tok.(bool); ok {
+		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("trailing data after boolean expression")
+			}
 
-	return dec.Token()
+			return nil, err
+		}
+	}
+
+	return tok, nil
 }
 
 func decodePredicate(op Operation, node exprNode, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
@@ -571,6 +593,11 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 		tf, err := ParseTransform(t.Transform)
 		if err != nil {
 			return nil, fmt.Errorf("%w: cannot parse transform term: %s", ErrInvalidArgument, err)
+		}
+		// Unknown transforms are tolerated in partition/sort metadata, but a
+		// filter expression referencing one can't be evaluated.
+		if _, ok := tf.(UnknownTransform); ok {
+			return nil, fmt.Errorf("%w: unknown transform in expression term: %s", ErrInvalidArgument, t.Transform)
 		}
 
 		return NewUnboundTransform(tf, Reference(t.Term)), nil

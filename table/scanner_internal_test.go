@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"runtime"
 	"strconv"
 	"sync"
@@ -31,10 +32,12 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -51,6 +54,219 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
+}
+
+func newEqualityDeleteIndexTestEntry(
+	path string,
+	specID int32,
+	partition map[int]any,
+	sequenceNumber int64,
+) iceberg.ManifestEntry {
+	return iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED,
+		nil,
+		&sequenceNumber,
+		nil,
+		&mockDataFile{path: path, specid: specID, partition: partition},
+	)
+}
+
+type equalityDeleteIndexTestSpecLookup map[int]iceberg.PartitionSpec
+
+func (s equalityDeleteIndexTestSpecLookup) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	spec, ok := s[id]
+	if !ok {
+		return nil
+	}
+
+	return &spec
+}
+
+func equalityDeleteIndexTestSpecs() equalityDeleteIndexTestSpecLookup {
+	partitionedField := func() iceberg.PartitionField {
+		return iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition",
+			Transform: iceberg.IdentityTransform{},
+		}
+	}
+
+	return equalityDeleteIndexTestSpecLookup{
+		0: iceberg.NewPartitionSpecID(0),
+		1: iceberg.NewPartitionSpecID(1, partitionedField()),
+		2: iceberg.NewPartitionSpecID(2, partitionedField()),
+		3: iceberg.NewPartitionSpecID(3, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "void",
+			Transform: iceberg.VoidTransform{},
+		}),
+	}
+}
+
+func TestEqualityDeleteIndexMatchesPartitionAndSequence(t *testing.T) {
+	partition := map[int]any{1000: []byte{0xde, 0xad}}
+	deleteEntries := []iceberg.ManifestEntry{
+		newEqualityDeleteIndexTestEntry("same-sequence.parquet", 1, partition, 5),
+		newEqualityDeleteIndexTestEntry("matching-newer.parquet", 1,
+			map[int]any{1000: append([]byte(nil), 0xde, 0xad)}, 7),
+		newEqualityDeleteIndexTestEntry("matching-older.parquet", 1, partition, 3),
+		newEqualityDeleteIndexTestEntry("different-partition.parquet", 1,
+			map[int]any{1000: []byte{0xbe, 0xef}}, 8),
+		newEqualityDeleteIndexTestEntry("different-spec.parquet", 2, partition, 8),
+		newEqualityDeleteIndexTestEntry("global-newer.parquet", 0, nil, 6),
+		newEqualityDeleteIndexTestEntry("global-same-sequence.parquet", 0, nil, 5),
+	}
+
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 5)
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	require.Len(t, matched, 2)
+	assert.Equal(t, []string{"global-newer.parquet", "matching-newer.parquet"},
+		[]string{matched[0].FilePath(), matched[1].FilePath()})
+}
+
+func TestEqualityDeleteIndexKeepsPartitionedDeletesScoped(t *testing.T) {
+	partitionedDelete := newEqualityDeleteIndexTestEntry(
+		"partitioned-delete.parquet", 1, map[int]any{1000: "a"}, 3)
+	globalDelete := newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 3)
+
+	idx, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
+	matched, err := idx.forDataFile(unpartitionedData)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "global-delete.parquet", matched[0].FilePath())
+}
+
+func TestEqualityDeleteIndexTreatsVoidSpecAsGlobal(t *testing.T) {
+	voidDelete := newEqualityDeleteIndexTestEntry(
+		"void-delete.parquet", 3, map[int]any{1000: nil}, 3)
+
+	idx, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
+	matched, err := idx.forDataFile(unpartitionedData)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "void-delete.parquet", matched[0].FilePath())
+}
+
+func TestEqualityDeleteIndexRejectsUnknownPartitionSpec(t *testing.T) {
+	deleteEntry := newEqualityDeleteIndexTestEntry("delete.parquet", 99, nil, 2)
+
+	_, err := buildEqualityDeleteIndex(
+		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "delete.parquet")
+}
+
+func TestEqualityDeleteIndexSkipsPartitionKeysWithoutPartitionedDeletes(t *testing.T) {
+	dataEntry := newEqualityDeleteIndexTestEntry(
+		"data.parquet", 1, map[int]any{1000: struct{}{}}, 1)
+
+	for _, entries := range [][]iceberg.ManifestEntry{
+		nil,
+		{newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 2)},
+	} {
+		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs())
+		require.NoError(t, err)
+
+		matched, err := idx.forDataFile(dataEntry)
+		require.NoError(t, err)
+		assert.Len(t, matched, len(entries))
+	}
+}
+
+func TestEqualityDeleteIndexSortsBySequence(t *testing.T) {
+	partition := map[int]any{1000: "a"}
+	deleteEntries := []iceberg.ManifestEntry{
+		newEqualityDeleteIndexTestEntry("sequence-4.parquet", 1, partition, 4),
+		newEqualityDeleteIndexTestEntry("sequence-2-a.parquet", 1, partition, 2),
+		newEqualityDeleteIndexTestEntry("sequence-3.parquet", 1, partition, 3),
+		newEqualityDeleteIndexTestEntry("sequence-2-b.parquet", 1, partition, 2),
+	}
+
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	require.NoError(t, err)
+
+	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 1)
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	paths := make([]string, len(matched))
+	for i, file := range matched {
+		paths[i] = file.FilePath()
+	}
+	assert.Equal(t, []string{
+		"sequence-2-a.parquet",
+		"sequence-2-b.parquet",
+		"sequence-3.parquet",
+		"sequence-4.parquet",
+	}, paths)
+}
+
+func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
+	sampleUUID := uuid.MustParse("12345678-9abc-def0-1234-56789abcdef0")
+	tests := []struct {
+		name  string
+		left  any
+		right any
+	}{
+		{name: "integer widths", left: int32(7), right: int64(7)},
+		{name: "date and integer", left: iceberg.Date(7), right: int32(7)},
+		{name: "float widths", left: float32(1.5), right: float64(1.5)},
+		{name: "NaN", left: math.Float32frombits(0x7fc00000), right: math.NaN()},
+		{name: "UUID and bytes", left: sampleUUID, right: sampleUUID[:]},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			left, err := newEqualityDeletePartitionKey(1, map[int]any{1000: tt.left})
+			require.NoError(t, err)
+			right, err := newEqualityDeletePartitionKey(1, map[int]any{1000: tt.right})
+			require.NoError(t, err)
+			assert.Equal(t, left, right)
+		})
+	}
+
+	base, err := newEqualityDeletePartitionKey(1, map[int]any{1000: int32(7)})
+	require.NoError(t, err)
+	differentSpec, err := newEqualityDeletePartitionKey(2, map[int]any{1000: int32(7)})
+	require.NoError(t, err)
+	differentField, err := newEqualityDeletePartitionKey(1, map[int]any{1001: int32(7)})
+	require.NoError(t, err)
+	assert.NotEqual(t, base, differentSpec)
+	assert.NotEqual(t, base, differentField)
+	multiField, err := newEqualityDeletePartitionKey(1, map[int]any{
+		1000: int32(7),
+		1001: "region",
+	})
+	require.NoError(t, err)
+	multiFieldReordered, err := newEqualityDeletePartitionKey(1, map[int]any{
+		1001: "region",
+		1000: int64(7),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, multiField, multiFieldReordered)
+
+	_, err = newEqualityDeletePartitionKey(1, map[int]any{1000: struct{}{}})
+	assert.ErrorContains(t, err, "unsupported partition value type struct {}")
+}
+
+func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {
+	negativeZero := math.Copysign(0, -1)
+
+	negative, err := newEqualityDeletePartitionKey(1, map[int]any{1000: negativeZero})
+	require.NoError(t, err)
+	positive, err := newEqualityDeletePartitionKey(1, map[int]any{1000: float64(0)})
+	require.NoError(t, err)
+
+	assert.NotEqual(t, negative, positive)
 }
 
 func TestMinSequenceNum(t *testing.T) {
@@ -271,6 +487,9 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 	}, nil)
 
 	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+	pio := &countingPlanIO{}
+	scan.planIO = mustPlanIOState(t, pio)
+	state := scan.planIO
 
 	_, err = scan.fetchPartitionSpecFilteredManifests(context.Background())
 	require.Error(t, err, "manifest eval errors must propagate instead of silently dropping manifests")
@@ -278,6 +497,8 @@ func TestFetchPartitionSpecFilteredManifests_PropagatesEvalError(t *testing.T) {
 
 	_, err = scan.PlanFiles(context.Background())
 	require.Error(t, err, "PlanFiles must fail when manifest filtering errors")
+	assert.Same(t, state, scan.planIO)
+	assert.Equal(t, 0, pio.closeCalls)
 }
 
 func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testing.T) {
@@ -321,6 +542,92 @@ func TestFetchPartitionSpecFilteredManifests_InvalidSpecIDDoesNotPanic(t *testin
 	_, err = scan.PlanFiles(context.Background())
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
+}
+
+// TestFetchManifestCountersWithRealSnapshot verifies the scanned/skipped/total
+// manifest accounting against a real snapshot with a mix of data and delete
+// manifests. Partition-spec pruning skips a non-overlapping data manifest, so
+// the scanned and skipped counters are both exercised (an empty-metadata test
+// leaves every counter at zero and would not catch a swapped scanned/skipped or
+// data/delete branch).
+func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// Identity partition on the int32 "id" column; encode partition bounds as
+	// 4-byte little-endian int32 so the manifest evaluator can decode them.
+	enc := func(v int32) *[]byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, uint32(v))
+
+		return &b
+	}
+	match := enc(5)    // overlaps the id == 5 filter
+	noMatch := enc(10) // does not overlap
+
+	const (
+		snapshotID       = int64(1)
+		manifestListPath = "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	)
+	specID := int32(spec.ID())
+
+	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentData).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
+		Build()
+	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
+		Build()
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &seqNum, 0,
+		[]iceberg.ManifestFile{dataScanned, dataSkipped, deleteScanned}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapID := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: seqNum,
+	}}
+	txn.meta.currentSnapshotID = &snapID
+
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json", func(context.Context) (iceio.IO, error) {
+		return memIO, nil
+	}, nil)
+
+	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), int32(5))))
+
+	schema, err := scan.effectiveSchema()
+	require.NoError(t, err)
+
+	var acc scanMetricsAccumulator
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(context.Background(), schema, &acc)
+	require.NoError(t, err)
+
+	// Two data manifests, one delete manifest.
+	assert.Equal(t, int64(2), acc.totalDataManifests)
+	assert.Equal(t, int64(1), acc.totalDeleteManifests)
+	// The overlapping data and delete manifests are scanned; the non-overlapping
+	// data manifest is skipped. Delete manifests must land in the delete counters.
+	assert.Equal(t, int64(1), acc.scannedDataManifests)
+	assert.Equal(t, int64(1), acc.skippedDataManifests)
+	assert.Equal(t, int64(1), acc.scannedDeleteManifests)
+	assert.Equal(t, int64(0), acc.skippedDeleteManifests)
+	// Invariant: scanned + skipped == total, per content type.
+	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
+	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
+	assert.Len(t, filtered, 2, "only the overlapping manifests survive partition-spec filtering")
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
@@ -927,24 +1234,44 @@ func TestProjectionWithRowLineageRequiresV3(t *testing.T) {
 	assert.ErrorContains(t, err, "row lineage")
 }
 
-// TestProjectionV3SchemaAlreadyHasRowID covers the case where the user schema
-// already declares _row_id (a reserved field id, but legal in v3). The
-// projection helper must be idempotent and not panic on the duplicate ID.
+// TestProjectionV3SchemaAlreadyHasRowID covers a v3 table whose stored schema
+// already declares _row_id at its reserved field ID. NewMetadata now rejects
+// such user schemas, but tables loaded from a catalog (e.g. written by Java) can
+// legitimately carry the reserved ID, so the metadata is parsed directly here to
+// bypass the creation-time validator. The end-to-end projection must be
+// idempotent and not duplicate the reserved column.
 func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
-	schema := iceberg.NewSchema(
-		1,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: false},
-		iceberg.RowID(),
-	)
+	metadataJSON := `{
+		"format-version": 3,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
+		"location": "s3://test-bucket/test_table",
+		"last-sequence-number": 0,
+		"last-updated-ms": 1602638573590,
+		"last-column-id": 2,
+		"next-row-id": 0,
+		"current-schema-id": 0,
+		"schemas": [
+			{
+				"type": "struct",
+				"schema-id": 0,
+				"fields": [
+					{"id": 1, "name": "id", "required": true, "type": "long"},
+					{"id": 2, "name": "payload", "required": false, "type": "string"},
+					{"id": 2147483540, "name": "_row_id", "required": false, "type": "long"}
+				]
+			}
+		],
+		"default-spec-id": 0,
+		"partition-specs": [{"spec-id": 0, "fields": []}],
+		"last-partition-id": 999,
+		"default-sort-order-id": 0,
+		"sort-orders": [{"order-id": 0, "fields": []}],
+		"properties": {},
+		"current-snapshot-id": -1,
+		"snapshots": []
+	}`
 
-	metadata, err := NewMetadata(
-		schema,
-		iceberg.UnpartitionedSpec,
-		UnsortedSortOrder,
-		"s3://test-bucket/test_table",
-		iceberg.Properties{"format-version": "3"},
-	)
+	metadata, err := ParseMetadataString(metadataJSON)
 	require.NoError(t, err)
 	assert.Equal(t, 3, metadata.Version(), "sanity: must be v3")
 
@@ -966,6 +1293,173 @@ func TestProjectionV3SchemaAlreadyHasRowID(t *testing.T) {
 				t.Fatalf("duplicate field id %d: %q and %q", f.ID, prev, f.Name)
 			}
 			seen[f.ID] = f.Name
+		}
+		assert.Contains(t, seen, iceberg.RowIDFieldID, "_row_id must survive projection")
+	})
+}
+
+// A filter on the source column of an unknown partition field must not prune:
+// the same manifest summary would prune under an identity transform.
+func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	lower, upper := int32Bound(10), int32Bound(20)
+	dataPath := "mem://default/table/data.parquet"
+	manifestPath := "mem://default/table/metadata/manifest.avro"
+	manifestListPath := "mem://default/table/metadata/snap-7.avro"
+
+	plan := func(t *testing.T, transform iceberg.Transform) []FileScanTask {
+		t.Helper()
+
+		spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: transform,
+		})
+		memIO := iceio.NewMemFS()
+		scan, oldSchema, snapshotID := newSchemaEvolutionScanWithSnapshot(t, &spec, memIO, manifestListPath, nil)
+
+		// Metrics bounds cover the filter value so only partition pruning is
+		// in play.
+		dataFile, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData, dataPath,
+			iceberg.ParquetFile, nil, nil, nil, 1, 1024)
+		require.NoError(t, err)
+		entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID,
+			dataFile.LowerBoundValues(map[int][]byte{1: int32Bound(5)}).
+				UpperBoundValues(map[int][]byte{1: int32Bound(5)}).
+				Build(),
+		).SequenceNum(1).Build()
+
+		var manifestBytes bytes.Buffer
+		_, err = iceberg.WriteManifest(manifestPath, &manifestBytes, 2, spec, oldSchema, snapshotID,
+			[]iceberg.ManifestEntry{entry})
+		require.NoError(t, err)
+		require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+		// Partition summary excludes the filter value (id == 5).
+		manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
+			Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}}).
+			SequenceNum(1, 1).
+			Build()
+
+		var listBytes bytes.Buffer
+		seqNum := int64(1)
+		require.NoError(t, iceberg.WriteManifestList(2, &listBytes, snapshotID, nil, &seqNum, 0,
+			[]iceberg.ManifestFile{manifest}))
+		require.NoError(t, memIO.WriteFile(manifestListPath, listBytes.Bytes()))
+
+		tasks, err := scan.PlanFiles(context.Background())
+		require.NoError(t, err)
+
+		return tasks
+	}
+
+	t.Run("identity prunes", func(t *testing.T) {
+		assert.Empty(t, plan(t, iceberg.IdentityTransform{}))
+	})
+
+	t.Run("unknown does not prune", func(t *testing.T) {
+		assert.Len(t, plan(t, unknown), 1)
+	})
+}
+
+func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
+	tbl := buildV3TableWithRows(t, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	decimalDefault := iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}
+
+	txn := tbl.NewTransaction()
+	require.NoError(t, txn.UpdateSchema(true, false).
+		AddColumn(
+			[]string{"new_col"},
+			iceberg.PrimitiveTypes.Int32,
+			"",
+			false,
+			iceberg.Int32Literal(42),
+		).
+		AddColumn(
+			[]string{"new_decimal"},
+			iceberg.DecimalTypeOf(9, 2),
+			"",
+			false,
+			iceberg.DecimalLiteral(decimalDefault),
+		).
+		Commit())
+	var err error
+	tbl, err = txn.Commit(t.Context())
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		filter   iceberg.BooleanExpression
+		expected int64
+	}{
+		{
+			name:     "matching equality",
+			filter:   iceberg.EqualTo(iceberg.Reference("new_col"), int32(42)),
+			expected: 2,
+		},
+		{
+			name:     "mismatching equality",
+			filter:   iceberg.EqualTo(iceberg.Reference("new_col"), int32(7)),
+			expected: 0,
+		},
+		{
+			name:     "is null",
+			filter:   iceberg.IsNull(iceberg.Reference("new_col")),
+			expected: 0,
+		},
+		{
+			name:     "not null",
+			filter:   iceberg.NotNull(iceberg.Reference("new_col")),
+			expected: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scan := tbl.Scan(
+				WithSelectedFields("id", "new_col"),
+				WithRowFilter(tt.filter),
+			)
+			tasks, err := scan.PlanFiles(t.Context())
+			require.NoError(t, err)
+			require.Len(t, tasks, 1, "manifest planning must retain the old file")
+
+			result, err := scan.ToArrowTable(t.Context())
+			require.NoError(t, err)
+			defer result.Release()
+			require.Equal(t, tt.expected, result.NumRows())
+
+			for _, chunk := range result.Column(1).Data().Chunks() {
+				defaults := chunk.(*array.Int32)
+				for i := range defaults.Len() {
+					require.Equal(t, int32(42), defaults.Value(i))
+				}
+			}
+		})
+	}
+
+	t.Run("matching decimal", func(t *testing.T) {
+		scan := tbl.Scan(
+			WithSelectedFields("id", "new_decimal"),
+			WithRowFilter(iceberg.EqualTo(
+				iceberg.Reference("new_decimal"),
+				decimalDefault,
+			)),
+		)
+		tasks, err := scan.PlanFiles(t.Context())
+		require.NoError(t, err)
+		require.Len(t, tasks, 1, "manifest planning must retain the old file")
+
+		result, err := scan.ToArrowTable(t.Context())
+		require.NoError(t, err)
+		defer result.Release()
+		require.Equal(t, int64(2), result.NumRows())
+
+		for _, chunk := range result.Column(1).Data().Chunks() {
+			defaults := chunk.(*array.Decimal128)
+			for i := range defaults.Len() {
+				require.Equal(t, decimal128.FromI64(1234), defaults.Value(i))
+			}
 		}
 	})
 }

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,6 +64,33 @@ func TestManifestEntrySchemaForCachesByPartitionAvroFingerprint(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, s1, s2,
 		"identical (partition type, version) inputs must reuse the cached schema")
+}
+
+func TestDataFileCodecWithDroppedPartitionSource(t *testing.T) {
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "dropped", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "bucketed", Transform: BucketTransform{NumBuckets: 8}},
+	)
+	schema := NewSchema(0)
+
+	builder, err := NewDataFileBuilder(
+		spec,
+		EntryContentData,
+		"s3://bucket/table/data.parquet",
+		ParquetFile,
+		map[int]any{1000: "historical-value", 1001: int32(3)},
+		nil,
+		nil,
+		1,
+		1024,
+	)
+	require.NoError(t, err)
+
+	encoded, err := builder.Build().(*dataFile).MarshalAvroEntry(spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+	require.NoError(t, err)
+	require.Equal(t, map[int]any{1000: nil, 1001: int32(3)}, decoded.Partition())
 }
 
 // TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes
@@ -113,6 +141,42 @@ func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
 	require.Equal(t, before, after,
 		"MarshalAvroEntry must not mutate any avro-tagged field of the source DataFile, "+
 			"including pointer-typed fields whose backing storage is shared with the clone")
+}
+
+func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
+	)
+	spec := NewPartitionSpecID(1,
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "price", Transform: IdentityTransform{}},
+	)
+	want := Decimal{Val: decimal128.FromI64(-123), Scale: 2}
+	builder, err := NewDataFileBuilder(
+		spec,
+		EntryContentData,
+		"s3://bucket/ns/tbl/data/price=-1.23.parquet",
+		ParquetFile,
+		map[int]any{1000: want},
+		nil,
+		nil,
+		1,
+		1024,
+	)
+	require.NoError(t, err)
+	df := builder.Build()
+
+	// Builder partition values are already Iceberg-typed and are returned
+	// directly; decimal scale reconstruction is only needed after Avro decode.
+	require.Equal(t, want, df.Partition()[1000])
+
+	encoded, err := df.(*dataFile).MarshalAvroEntry(spec, schema, 2)
+	require.NoError(t, err)
+	decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+	require.NoError(t, err)
+
+	got, ok := decoded.Partition()[1000].(DecimalLiteral)
+	require.True(t, ok)
+	require.True(t, got.Equals(DecimalLiteral(want)))
 }
 
 // snapshotAvroFields returns a deep copy of every avro-tagged field on

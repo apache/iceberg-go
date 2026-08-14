@@ -83,7 +83,14 @@ func (s *FanoutWriterTestSuite) createCustomTestRecord(arrSchema *arrow.Schema, 
 			case uuid.UUID:
 				field.(*extensions.UUIDBuilder).Append(t)
 			case []byte:
-				field.(*array.BinaryBuilder).Append(t)
+				switch builder := field.(type) {
+				case *array.BinaryBuilder:
+					builder.Append(t)
+				case *array.FixedSizeBinaryBuilder:
+					builder.Append(t)
+				default:
+					s.FailNow("unsupported byte-slice builder", "%T", field)
+				}
 			default:
 				appendMethod.Call([]reflect.Value{v})
 			}
@@ -280,6 +287,66 @@ func (s *FanoutWriterTestSuite) TestIdentityTransform() {
 
 	s.testTransformPartition(iceberg.IdentityTransform{}, "name", "identity", testRecord, 3)
 	s.testTransformPartition(iceberg.IdentityTransform{}, "large_name", "identity_large_string", testRecord, 5)
+}
+
+func (s *FanoutWriterTestSuite) TestBinaryPartitionValuesUseComparableKeys() {
+	tests := []struct {
+		name        string
+		arrowType   arrow.DataType
+		icebergType iceberg.Type
+	}{
+		{name: "binary", arrowType: arrow.BinaryTypes.Binary, icebergType: iceberg.PrimitiveTypes.Binary},
+		{name: "fixed", arrowType: &arrow.FixedSizeBinaryType{ByteWidth: 4}, icebergType: iceberg.FixedTypeOf(4)},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: test.arrowType}}, nil)
+			record := s.createCustomTestRecord(arrowSchema, [][]any{{[]byte{1, 2, 3, 4}}, {[]byte{1, 2, 3, 4}}, {[]byte{5, 6, 7, 8}}})
+			defer record.Release()
+
+			icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: test.icebergType})
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+			})
+
+			partitions, err := getRecordPartitions(spec, icebergSchema, record)
+			s.Require().NoError(err)
+			s.Require().Len(partitions, 2)
+			switch values := record.Column(0).(type) {
+			case *array.Binary:
+				values.Value(0)[0] = 9
+			case *array.FixedSizeBinary:
+				values.Value(0)[0] = 9
+			}
+
+			rowsByValue := make(map[string]int)
+			for _, partition := range partitions {
+				value, ok := partition.partitionRec[0].([]byte)
+				s.Require().True(ok)
+				rowsByValue[string(value)] = len(partition.rows)
+			}
+			s.Equal(2, rowsByValue[string([]byte{1, 2, 3, 4})])
+			s.Equal(1, rowsByValue[string([]byte{5, 6, 7, 8})])
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestNaNPartitionValuesUseStableKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{{math.NaN()}, {math.NaN()}})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float64})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Len(partitions[0].rows, 2)
+	s.True(math.IsNaN(partitions[0].partitionRec[0].(float64)))
 }
 
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
@@ -610,9 +677,10 @@ func (s *FanoutWriterTestSuite) TestGetRecordPartitionsWithDroppedLeadingSourceC
 	partitions, err := getRecordPartitions(spec, icebergSchema, testRecord)
 	s.Require().NoError(err)
 	s.Require().Len(partitions, 1)
-	s.Equal(int32(7), partitions[0].partitionRec.Get(0))
-	s.Equal(true, partitions[0].partitionRec.Get(1))
-	s.Equal("bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
+	s.Nil(partitions[0].partitionRec.Get(0))
+	s.Equal(int32(7), partitions[0].partitionRec.Get(1))
+	s.Equal(true, partitions[0].partitionRec.Get(2))
+	s.Equal("foo=null/bar=7/baz=true", spec.PartitionToPath(partitions[0].partitionRec, icebergSchema))
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

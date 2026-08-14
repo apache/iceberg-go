@@ -43,6 +43,7 @@ import (
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
 )
@@ -1045,7 +1046,7 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicatedTable() {
 		s.Require().NoError(err)
 
 		_, err = tt.cat.CreateTable(context.Background(), tt.tblID, tableSchemaNested)
-		s.ErrorContains(err, "failed to create table")
+		s.ErrorIs(err, catalog.ErrTableAlreadyExists)
 	}
 }
 
@@ -1769,6 +1770,16 @@ func (s *SqliteCatalogTestSuite) TestCreateDuplicateNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsEmptyIdentifier() {
+	ctx := context.Background()
+	for _, cat := range []*sqlcat.Catalog{s.getCatalogMemory(), s.getCatalogSqlite()} {
+		for _, namespace := range []table.Identifier{nil, {}} {
+			err := cat.CreateNamespace(ctx, namespace, nil)
+			s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+		}
+	}
+}
+
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceSharingPrefix() {
 	tests := []struct {
 		cat       *sqlcat.Catalog
@@ -1852,6 +1863,31 @@ func (s *SqliteCatalogTestSuite) TestDropNamespace() {
 	}
 }
 
+func (s *SqliteCatalogTestSuite) TestDropNamespaceRejectsViewOnlyNamespace() {
+	cat := s.getCatalogSqlite()
+	ctx := context.Background()
+	namespace := table.Identifier{databaseName()}
+	viewID := append(slices.Clone(namespace), tableName())
+	viewSQL := "SELECT 1"
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+
+	s.Require().NoError(cat.CreateNamespace(ctx, namespace, nil))
+	s.Require().NoError(cat.CreateView(ctx, viewID, schema, viewSQL, nil))
+
+	err := cat.DropNamespace(ctx, namespace)
+	s.ErrorIs(err, catalog.ErrNamespaceNotEmpty)
+	s.ErrorContains(err, "catalog objects exist")
+
+	exists, err := cat.CheckNamespaceExists(ctx, namespace)
+	s.Require().NoError(err)
+	s.True(exists)
+	exists, err = cat.CheckViewExists(ctx, viewID)
+	s.Require().NoError(err)
+	s.True(exists)
+}
+
 func (s *SqliteCatalogTestSuite) TestDropNamespaceNotExist() {
 	tests := []struct {
 		cat       *sqlcat.Catalog
@@ -1882,7 +1918,102 @@ func (s *SqliteCatalogTestSuite) TestLoadEmptyNamespaceProperties() {
 		s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, nil))
 		props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
 		s.Require().NoError(err)
-		s.Equal(iceberg.Properties{"exists": "true"}, props)
+		s.Empty(props)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
+	tests := []struct {
+		cat       *sqlcat.Catalog
+		namespace table.Identifier
+	}{
+		{s.getCatalogMemory(), table.Identifier{databaseName()}},
+		{s.getCatalogSqlite(), strings.Split(hiearchicalNamespaceName(), ".")},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		err := tt.cat.CreateNamespace(ctx, tt.namespace, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+		s.ErrorContains(err, "cannot create namespace with reserved namespace property")
+		s.ErrorContains(err, `"exists"`)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+		s.ErrorIs(err, iceberg.ErrInvalidArgument)
+
+		exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+		s.Require().NoError(err)
+		s.False(exists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestNamespacePropertiesCannotUpdateSentinel() {
+	tests := []struct {
+		name          string
+		cat           *sqlcat.Catalog
+		namespace     table.Identifier
+		createProps   iceberg.Properties
+		expectedProps iceberg.Properties
+	}{
+		{
+			name:          "memory with user props",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "memory sentinel only",
+			cat:           s.getCatalogMemory(),
+			namespace:     table.Identifier{databaseName()},
+			createProps:   nil,
+			expectedProps: nil,
+		},
+		{
+			name:          "sqlite with user props",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   iceberg.Properties{"comment": "baseline"},
+			expectedProps: iceberg.Properties{"comment": "baseline"},
+		},
+		{
+			name:          "sqlite sentinel only",
+			cat:           s.getCatalogSqlite(),
+			namespace:     strings.Split(hiearchicalNamespaceName(), "."),
+			createProps:   nil,
+			expectedProps: nil,
+		},
+	}
+
+	ctx := context.Background()
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.Require().NoError(tt.cat.CreateNamespace(ctx, tt.namespace, tt.createProps))
+
+			_, err := tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, []string{"exists"}, nil)
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot remove reserved namespace property")
+			s.ErrorContains(err, `"exists"`)
+
+			_, err = tt.cat.UpdateNamespaceProperties(ctx, tt.namespace, nil, iceberg.Properties{"exists": "false"})
+			s.ErrorIs(err, iceberg.ErrInvalidArgument)
+			s.ErrorContains(err, "cannot update reserved namespace property")
+
+			props, err := tt.cat.LoadNamespaceProperties(ctx, tt.namespace)
+			s.Require().NoError(err)
+			if len(tt.expectedProps) == 0 {
+				s.Empty(props)
+			} else {
+				s.Equal(tt.expectedProps, props)
+			}
+
+			exists, err := tt.cat.CheckNamespaceExists(ctx, tt.namespace)
+			s.Require().NoError(err)
+			s.True(exists)
+		})
 	}
 }
 
@@ -2086,16 +2217,215 @@ func (s *SqliteCatalogTestSuite) TestCreateView() {
 	nsName := databaseName()
 	viewName := tableName()
 	s.Require().NoError(db.CreateNamespace(context.Background(), []string{nsName}, nil))
+	nestedNamespace := table.Identifier{nsName, "child"}
+	s.Require().NoError(db.CreateNamespace(context.Background(), nestedNamespace, nil))
 
 	viewSQL := "SELECT * FROM test_table"
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
 	})
 	s.Require().NoError(db.CreateView(context.Background(), []string{nsName, viewName}, schema, viewSQL, nil))
+	s.Require().NoError(db.CreateView(context.Background(), append(nestedNamespace, viewName), schema, viewSQL, nil))
 
 	exists, err := db.CheckViewExists(context.Background(), []string{nsName, viewName})
 	s.Require().NoError(err)
 	s.True(exists)
+
+	foundNested := false
+	for identifier, err := range db.ListViews(context.Background(), nestedNamespace) {
+		s.Require().NoError(err)
+		s.Equal(append(nestedNamespace, viewName), identifier)
+		foundNested = true
+	}
+	s.True(foundNested)
+}
+
+func TestViewOperationsRejectInvalidIdentifiers(t *testing.T) {
+	invalid := []struct {
+		name       string
+		identifier table.Identifier
+	}{
+		{name: "nil", identifier: nil},
+		{name: "empty", identifier: table.Identifier{}},
+		{name: "missing namespace", identifier: table.Identifier{"view"}},
+		{name: "empty name", identifier: table.Identifier{"ns", ""}},
+		{name: "dot name", identifier: table.Identifier{"ns", "."}},
+		{name: "parent name", identifier: table.Identifier{"ns", ".."}},
+		{name: "path separator", identifier: table.Identifier{"ns", "nested/view"}},
+		{name: "control character", identifier: table.Identifier{"ns", "view\nname"}},
+	}
+
+	loaded, err := catalog.Load(context.Background(), "default", iceberg.Properties{
+		"uri":                   ":memory:",
+		sqlcat.DriverKey:        sqliteshim.ShimName,
+		sqlcat.DialectKey:       string(sqlcat.SQLite),
+		sqlcat.SchemaVersionKey: sqlcat.SchemaVersionV1,
+		"type":                  "sql",
+	})
+	require.NoError(t, err)
+	cat := loaded.(*sqlcat.Catalog)
+	require.NoError(t, cat.CreateSQLTables(context.Background()))
+	for _, err := range cat.ListViews(context.Background(), nil) {
+		require.NoError(t, err, "ListViews with a nil namespace must not reject the root namespace")
+	}
+
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			err := cat.CreateView(context.Background(), test.identifier, nil, "", nil)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+
+			_, err = cat.CheckViewExists(context.Background(), test.identifier)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+
+			_, err = cat.LoadView(context.Background(), test.identifier)
+			assert.ErrorIs(t, err, catalog.ErrNoSuchView)
+		})
+	}
+
+	t.Run("list views rejects missing namespace", func(t *testing.T) {
+		yielded := false
+		var gotErr error
+		for _, err := range cat.ListViews(context.Background(), table.Identifier{".."}) {
+			yielded = true
+			gotErr = err
+
+			break
+		}
+
+		require.True(t, yielded)
+		require.ErrorIs(t, gotErr, catalog.ErrNoSuchNamespace)
+	})
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateTableConflictsWithView() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+	s.Require().NoError(db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil))
+
+	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+	before, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+
+	_, err = db.CreateTable(ctx, identifier, tableSchemaNested)
+	s.ErrorIs(err, catalog.ErrViewAlreadyExists)
+
+	after, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+	s.Len(after, len(before))
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateViewConflictsWithTable() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+	_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+	s.Require().NoError(err)
+
+	metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+	before, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+
+	err = db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+	s.ErrorIs(err, catalog.ErrTableAlreadyExists)
+
+	after, err := os.ReadDir(metadataDir)
+	s.Require().NoError(err)
+	s.Len(after, len(before))
+}
+
+func (s *SqliteCatalogTestSuite) TestConcurrentTableViewCollisionReturnsCatalogSentinel() {
+	ctx := context.Background()
+	sqlDB := s.getDB()
+	_, err := sqlDB.Exec("PRAGMA journal_mode=WAL")
+	s.Require().NoError(err)
+	s.Require().NoError(sqlDB.Close())
+
+	db := s.getCatalogSqlite()
+	identifier := s.randomTableIdentifier()
+	s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+
+	type createResult struct {
+		objectType string
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan createResult, 2)
+	go func() {
+		<-start
+		_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+		results <- createResult{objectType: sqlcat.TableType, err: err}
+	}()
+	go func() {
+		<-start
+		err := db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+		results <- createResult{objectType: sqlcat.ViewType, err: err}
+	}()
+	close(start)
+
+	first, second := <-results, <-results
+	s.Require().NotEqual(first.err == nil, second.err == nil,
+		"expected exactly one concurrent create to succeed; table/view results: %v / %v", first.err, second.err)
+	if first.err != nil {
+		first, second = second, first
+	}
+	s.Require().NoError(first.err)
+	if first.objectType == sqlcat.TableType {
+		s.ErrorIs(second.err, catalog.ErrTableAlreadyExists)
+	} else {
+		s.ErrorIs(second.err, catalog.ErrViewAlreadyExists)
+	}
+}
+
+func (s *SqliteCatalogTestSuite) TestCreateRemovesMetadataIfCatalogInsertFails() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+
+	sqlDB := s.getDB()
+	defer sqlDB.Close()
+	_, err := sqlDB.Exec(`
+		CREATE TRIGGER fail_catalog_insert
+		BEFORE INSERT ON iceberg_tables
+		BEGIN
+			SELECT RAISE(FAIL, 'forced insert failure');
+		END
+	`)
+	s.Require().NoError(err)
+
+	tests := []struct {
+		name   string
+		create func(table.Identifier) error
+	}{
+		{
+			name: "table",
+			create: func(identifier table.Identifier) error {
+				_, err := db.CreateTable(ctx, identifier, tableSchemaNested)
+
+				return err
+			},
+		},
+		{
+			name: "view",
+			create: func(identifier table.Identifier) error {
+				return db.CreateView(ctx, identifier, tableSchemaNested, "SELECT 1", nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			identifier := s.randomTableIdentifier()
+			s.Require().NoError(db.CreateNamespace(ctx, catalog.NamespaceFromIdent(identifier), nil))
+			s.Require().Error(tt.create(identifier))
+
+			metadataDir := filepath.Join(s.warehouse, identifier[0]+".db", identifier[1], "metadata")
+			entries, err := os.ReadDir(metadataDir)
+			s.Require().NoError(err)
+			s.Empty(entries)
+		})
+	}
 }
 
 func (s *SqliteCatalogTestSuite) TestDropView() {
@@ -2125,6 +2455,36 @@ func (s *SqliteCatalogTestSuite) TestDropView() {
 	err = db.DropView(context.Background(), []string{nsName, "nonexistent"})
 	s.Error(err)
 	s.ErrorIs(err, catalog.ErrNoSuchView)
+}
+
+func (s *SqliteCatalogTestSuite) TestDropViewRemovesLegacyInvalidView() {
+	ctx := context.Background()
+	db := s.getCatalogSqlite()
+	s.Require().NoError(db.CreateSQLTables(ctx))
+
+	nsName := databaseName()
+	viewName := "nested/view"
+	s.Require().NoError(db.CreateNamespace(ctx, []string{nsName}, nil))
+
+	sqldb := s.getDB()
+	defer sqldb.Close()
+
+	_, err := sqldb.ExecContext(ctx,
+		`INSERT INTO iceberg_tables `+
+			`(catalog_name, table_namespace, table_name, iceberg_type) VALUES (?, ?, ?, ?)`,
+		db.Name(), nsName, viewName, sqlcat.ViewType,
+	)
+	s.Require().NoError(err)
+
+	s.Require().NoError(db.DropView(ctx, table.Identifier{nsName, viewName}))
+
+	var count int
+	s.Require().NoError(sqldb.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM iceberg_tables `+
+			`WHERE catalog_name = ? AND table_namespace = ? AND table_name = ? AND iceberg_type = ?`,
+		db.Name(), nsName, viewName, sqlcat.ViewType,
+	).Scan(&count))
+	s.Zero(count)
 }
 
 func (s *SqliteCatalogTestSuite) TestDropViewWithInvalidMetadataLocation() {
@@ -2212,12 +2572,25 @@ func (s *SqliteCatalogTestSuite) TestListViews() {
 	}
 
 	viewsIter = db.ListViews(context.Background(), []string{"nonexistent"})
+	yielded := false
 	for _, err := range viewsIter {
+		yielded = true
 		s.Error(err)
 		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
 
 		break
 	}
+	s.Require().True(yielded)
+
+	viewsIter = db.ListViews(context.Background(), []string{".."})
+	yielded = false
+	for _, err := range viewsIter {
+		yielded = true
+		s.ErrorIs(err, catalog.ErrNoSuchNamespace)
+
+		break
+	}
+	s.Require().True(yielded)
 }
 
 func (s *SqliteCatalogTestSuite) TestLoadView() {

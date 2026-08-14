@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,27 +73,19 @@ func TestParseTransform(t *testing.T) {
 		})
 	}
 
+	// A bucket/truncate width that parses as a number but is out of range is an
+	// error, matching Java's Bucket.get/Truncate.get preconditions.
 	errorTests := []struct {
 		name    string
 		toparse string
 	}{
-		{"foobar", "foobar"},
-		{"bucket no brackets", "bucket"},
-		{"truncate no brackets", "truncate"},
-		{"bucket no val", "bucket[]"},
-		{"truncate no val", "truncate[]"},
-		{"bucket neg", "bucket[-1]"},
-		{"truncate neg", "truncate[-1]"},
 		{"bucket zero", "bucket[0]"},
 		{"truncate zero", "truncate[0]"},
 		{"bucket atoi overflow", "bucket[999999999999999999999999999999999999999]"},
 		{"truncate atoi overflow", "truncate[999999999999999999999999999999999999999]"},
 		{"bucket int32 overflow", "bucket[4294967296]"},
 		{"truncate int32 overflow", "truncate[4294967296]"},
-		{"bucket extra suffix", "bucketx[5]"},
-		{"bucket extra token", "bucket_extra[5]"},
-		{"truncate extra suffix", "truncatefoo[10]"},
-		{"truncate extra token", "truncate_garbage[4]"},
+		{"empty string", ""},
 	}
 
 	for _, tt := range errorTests {
@@ -103,6 +96,85 @@ func TestParseTransform(t *testing.T) {
 			assert.ErrorContains(t, err, tt.toparse)
 		})
 	}
+
+	// Unrecognized transform strings parse to an UnknownTransform (v3 requires
+	// readers to load unknown transforms) and round-trip verbatim, preserving
+	// the original casing.
+	unknownTests := []struct {
+		name    string
+		toparse string
+	}{
+		{"foobar", "foobar"},
+		{"bucket no brackets", "bucket"},
+		{"truncate no brackets", "truncate"},
+		{"bucket extra suffix", "bucketx[5]"},
+		{"bucket extra token", "bucket_extra[5]"},
+		{"truncate extra suffix", "truncatefoo[10]"},
+		{"truncate extra token", "truncate_garbage[4]"},
+		{"preserves original case", "Custom_V2[3]"},
+		// Java's width pattern is (\w+)\[(\d+)\], so a reserved name with a
+		// missing/negative/non-numeric width simply doesn't match and becomes an
+		// unknown transform rather than an error.
+		{"bucket empty brackets", "bucket[]"},
+		{"truncate empty brackets", "truncate[]"},
+		{"bucket negative", "bucket[-1]"},
+		{"truncate negative", "truncate[-1]"},
+		{"bucket non-numeric", "bucket[abc]"},
+		{"truncate non-numeric", "truncate[abc]"},
+	}
+
+	for _, tt := range unknownTests {
+		t.Run("unknown/"+tt.name, func(t *testing.T) {
+			tr, err := iceberg.ParseTransform(tt.toparse)
+			require.NoError(t, err)
+			_, ok := tr.(iceberg.UnknownTransform)
+			require.True(t, ok)
+			assert.Equal(t, tt.toparse, tr.String())
+
+			txt, err := tr.MarshalText()
+			require.NoError(t, err)
+			assert.Equal(t, tt.toparse, string(txt))
+
+			// Human rendering is of the value, never the transform name.
+			u := tr.(iceberg.UnknownTransform)
+			assert.Equal(t, "null", u.ToHumanStr(nil))
+			assert.Equal(t, "abc", u.ToHumanStrType(iceberg.StringType{}, "abc"))
+		})
+	}
+}
+
+func TestUnknownTransformEquals(t *testing.T) {
+	custom, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	same, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	assert.True(t, custom.Equals(same))
+
+	other, err := iceberg.ParseTransform("other_transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(other))
+
+	// Names compare byte-for-byte, matching Java's UnknownTransform.
+	upper, err := iceberg.ParseTransform("Custom_Transform[42]")
+	require.NoError(t, err)
+	assert.False(t, custom.Equals(upper))
+
+	assert.False(t, custom.Equals(iceberg.IdentityTransform{}))
+}
+
+// The zero value is constructible outside the package; it must not serialize
+// to "transform": "".
+func TestUnknownTransformRejectsEmptyName(t *testing.T) {
+	_, err := iceberg.UnknownTransform{}.MarshalText()
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32})
+	_, err = iceberg.NewPartitionSpecOpts(
+		iceberg.AddPartitionFieldBySourceID(1, "custom", iceberg.UnknownTransform{}, schema, nil),
+	)
+	require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
 }
 
 func TestToHumanString(t *testing.T) {
@@ -122,6 +194,8 @@ func TestToHumanString(t *testing.T) {
 		{iceberg.DayTransform{}, nil, "null"},
 		{iceberg.HourTransform{}, nil, "null"},
 		{iceberg.HourTransform{}, int32(420042), "2017-12-01-18"},
+		{iceberg.HourTransform{}, int32(4645896), "2500-01-01-00"},
+		{iceberg.HourTransform{}, int32(-4119936), "1500-01-01-00"},
 		{iceberg.YearTransform{}, int32(-1), "1969"},
 		{iceberg.MonthTransform{}, int32(-1), "1969-12"},
 		{iceberg.DayTransform{}, int32(-1), "1969-12-31"},
@@ -337,22 +411,19 @@ func TestManifestPartitionVals(t *testing.T) {
 }
 
 func TestBucketTransform_NumBucketsValidation(t *testing.T) {
-	transform := iceberg.BucketTransform{}
-	t.Run("ApplyRejectsInvalidBuckets", func(t *testing.T) {
+	testValidation := func(t *testing.T, transform iceberg.BucketTransform, errorContains string) {
+		t.Helper()
+
 		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
 			Valid: true,
 			Val:   iceberg.Int32Literal(123),
 		})
 		require.False(t, out.Valid)
-	})
 
-	t.Run("TransformerRejectsInvalidBuckets", func(t *testing.T) {
 		fn := transform.Transformer(iceberg.PrimitiveTypes.String)
-		out := fn("abc")
-		require.False(t, out.Valid)
-	})
+		transformed := fn("abc")
+		require.False(t, transformed.Valid)
 
-	t.Run("ProjectRejectsInvalidBuckets", func(t *testing.T) {
 		schema := iceberg.NewSchema(1, iceberg.NestedField{
 			ID:   1,
 			Name: "id",
@@ -363,7 +434,84 @@ func TestBucketTransform_NumBucketsValidation(t *testing.T) {
 
 		_, err = transform.Project("id_bucket", bound.(iceberg.BoundPredicate))
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-		require.ErrorContains(t, err, "numBuckets > 0")
+		require.ErrorContains(t, err, errorContains)
+	}
+
+	t.Run("non-positive", func(t *testing.T) {
+		testValidation(t, iceberg.BucketTransform{}, "numBuckets > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		testValidation(t, iceberg.BucketTransform{NumBuckets: overflowingInt32TransformParameter(t)}, "numBuckets <=")
+	})
+}
+
+func overflowingInt32TransformParameter(t *testing.T) int {
+	t.Helper()
+	if strconv.IntSize < 64 {
+		t.Skip("an int cannot exceed math.MaxInt32 on this platform")
+	}
+
+	value := uint64(1) << 32
+
+	return int(value)
+}
+
+func TestTruncateTransform_WidthValidation(t *testing.T) {
+	testValidation := func(t *testing.T, transform iceberg.TruncateTransform, errorContains string) {
+		t.Helper()
+
+		out := transform.Apply(iceberg.Optional[iceberg.Literal]{
+			Valid: true,
+			Val:   iceberg.Int32Literal(123),
+		})
+		require.False(t, out.Valid)
+
+		fn, err := transform.Transformer(iceberg.PrimitiveTypes.Int32)
+		require.Nil(t, fn)
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, errorContains)
+
+		schema := iceberg.NewSchema(1, iceberg.NestedField{
+			ID:   1,
+			Name: "id",
+			Type: iceberg.PrimitiveTypes.Int64,
+		})
+		bound, err := iceberg.EqualTo(iceberg.Reference("id"), int64(42)).Bind(schema, true)
+		require.NoError(t, err)
+
+		_, err = transform.Project("id_truncate", bound.(iceberg.BoundPredicate))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, errorContains)
+	}
+
+	t.Run("non-positive", func(t *testing.T) {
+		testValidation(t, iceberg.TruncateTransform{}, "width > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		testValidation(t, iceberg.TruncateTransform{Width: overflowingInt32TransformParameter(t)}, "width <=")
+	})
+}
+
+func TestTruncateTransform_MarshalTextRejectsInvalidWidths(t *testing.T) {
+	t.Run("zero", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: 0}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width > 0")
+	})
+	t.Run("negative", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: -1}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		_, err := iceberg.TruncateTransform{Width: overflowingInt32TransformParameter(t)}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "width <=")
+	})
+	t.Run("valid", func(t *testing.T) {
+		txt, err := iceberg.TruncateTransform{Width: 16}.MarshalText()
+		require.NoError(t, err)
+		assert.Equal(t, "truncate[16]", string(txt))
 	})
 }
 
@@ -377,6 +525,11 @@ func TestBucketTransform_MarshalTextRejectsInvalidBuckets(t *testing.T) {
 		_, err := iceberg.BucketTransform{NumBuckets: -1}.MarshalText()
 		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		require.ErrorContains(t, err, "numBuckets > 0")
+	})
+	t.Run("int32-overflow", func(t *testing.T) {
+		_, err := iceberg.BucketTransform{NumBuckets: overflowingInt32TransformParameter(t)}.MarshalText()
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		require.ErrorContains(t, err, "numBuckets <=")
 	})
 	t.Run("valid", func(t *testing.T) {
 		txt, err := iceberg.BucketTransform{NumBuckets: 16}.MarshalText()
@@ -624,12 +777,23 @@ func TestYearMonthTransformNanoseconds(t *testing.T) {
 
 func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 	transform := iceberg.BucketTransform{NumBuckets: 16}
+	specBucket := int32(6)
 	values := []struct {
-		name string
-		ts   iceberg.TimestampNano
+		name       string
+		nanos      iceberg.TimestampNano
+		micros     iceberg.Timestamp
+		wantBucket *int32
 	}{
-		{name: "post-epoch", ts: iceberg.TimestampNano(123456789)},
-		{name: "pre-epoch", ts: iceberg.TimestampNano(-1)},
+		{name: "post-epoch", nanos: iceberg.TimestampNano(123456789), micros: iceberg.Timestamp(123456)},
+		{name: "sub-microsecond", nanos: iceberg.TimestampNano(1), micros: iceberg.Timestamp(0)},
+		{name: "pre-epoch", nanos: iceberg.TimestampNano(-1), micros: iceberg.Timestamp(-1)},
+		{name: "negative microsecond boundary", nanos: iceberg.TimestampNano(-1000), micros: iceberg.Timestamp(-1)},
+		{
+			name:       "spec appendix B",
+			nanos:      iceberg.TimestampNano(time.Date(2017, 11, 16, 22, 31, 8, 1_001, time.UTC).UnixNano()),
+			micros:     iceberg.Timestamp(time.Date(2017, 11, 16, 22, 31, 8, 1_001, time.UTC).UnixMicro()),
+			wantBucket: &specBucket,
+		},
 	}
 
 	for _, srcType := range []iceberg.Type{
@@ -644,13 +808,22 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 				t.Run(tt.name, func(t *testing.T) {
 					applied := transform.Apply(iceberg.Optional[iceberg.Literal]{
 						Valid: true,
-						Val:   iceberg.NewLiteral(tt.ts),
+						Val:   iceberg.NewLiteral(tt.nanos),
 					})
 					require.True(t, applied.Valid)
+					expected := transform.Apply(iceberg.Optional[iceberg.Literal]{
+						Valid: true,
+						Val:   iceberg.NewLiteral(tt.micros),
+					})
+					require.True(t, expected.Valid)
+					assert.Equal(t, expected.Val, applied.Val)
+					if tt.wantBucket != nil {
+						assert.Equal(t, iceberg.Int32Literal(*tt.wantBucket), applied.Val)
+					}
 
 					var transformed iceberg.Optional[int32]
 					require.NotPanics(t, func() {
-						transformed = fn(tt.ts)
+						transformed = fn(tt.nanos)
 					})
 					require.True(t, transformed.Valid)
 					assert.Equal(t, applied.Val, iceberg.NewLiteral(transformed.Val))
@@ -660,7 +833,7 @@ func TestBucketTransformTimestampNanoseconds(t *testing.T) {
 						Name: "ts",
 						Type: srcType,
 					})
-					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.ts).Bind(schema, true)
+					bound, err := iceberg.EqualTo(iceberg.Reference("ts"), tt.nanos).Bind(schema, true)
 					require.NoError(t, err)
 
 					projected, err := transform.Project("ts_bucket", bound.(iceberg.BoundPredicate))

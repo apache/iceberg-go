@@ -80,6 +80,7 @@ type Representation interface {
 	// isRepresentation seals the interface to the implementations in
 	// this package.
 	isRepresentation()
+	clone() Representation
 }
 
 // SQLRepresentation stores the function body as a SQL expression in a
@@ -105,6 +106,7 @@ func NewSQLRepresentation(dialect, sql string) (SQLRepresentation, error) {
 
 func (SQLRepresentation) RepresentationType() string { return "sql" }
 func (SQLRepresentation) isRepresentation()          {}
+func (r SQLRepresentation) clone() Representation    { return r }
 
 func (r SQLRepresentation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
@@ -122,11 +124,16 @@ type UnknownRepresentation struct {
 	raw json.RawMessage
 }
 
-// Raw returns the representation's original JSON.
-func (r UnknownRepresentation) Raw() json.RawMessage { return r.raw }
+// Raw returns a copy of the representation's original JSON.
+func (r UnknownRepresentation) Raw() json.RawMessage { return slices.Clone(r.raw) }
 
 func (r UnknownRepresentation) RepresentationType() string { return r.TypeName }
 func (UnknownRepresentation) isRepresentation()            {}
+func (r UnknownRepresentation) clone() Representation {
+	r.raw = slices.Clone(r.raw)
+
+	return r
+}
 
 func (r UnknownRepresentation) MarshalJSON() ([]byte, error) {
 	return slices.Clone(r.raw), nil
@@ -145,6 +152,17 @@ func representationsEqual(a, b Representation) bool {
 	default:
 		return false
 	}
+}
+
+func cloneRepresentations(representations []Representation) []Representation {
+	cloned := slices.Clone(representations)
+	for i, repr := range representations {
+		if repr != nil {
+			cloned[i] = repr.clone()
+		}
+	}
+
+	return cloned
 }
 
 func unmarshalRepresentation(b json.RawMessage) (Representation, error) {
@@ -186,24 +204,26 @@ type Parameter struct {
 
 func (p *Parameter) UnmarshalJSON(b []byte) error {
 	type Alias Parameter
+	next := Parameter{}
 	aux := struct {
 		Type json.RawMessage `json:"type"`
 		*Alias
-	}{Alias: (*Alias)(p)}
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
 	if len(aux.Type) == 0 {
-		return fmt.Errorf("%w: parameter %q requires a type", ErrInvalidUDFMetadata, p.Name)
+		return fmt.Errorf("%w: parameter %q requires a type", ErrInvalidUDFMetadata, next.Name)
 	}
 
 	typ, err := unmarshalType(aux.Type)
 	if err != nil {
 		return err
 	}
-	p.Type = typ
+	next.Type = typ
+	*p = next
 
 	return nil
 }
@@ -234,26 +254,25 @@ type DefinitionVersion struct {
 
 func (v *DefinitionVersion) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionVersion
+	next := DefinitionVersion{VersionID: -1, TimestampMS: -1}
 	aux := struct {
 		Representations []json.RawMessage `json:"representations"`
 		*Alias
-	}{Alias: (*Alias)(v)}
-
-	v.VersionID = -1
-	v.TimestampMS = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	v.Representations = make([]Representation, len(aux.Representations))
+	next.Representations = make([]Representation, len(aux.Representations))
 	for i, raw := range aux.Representations {
 		repr, err := unmarshalRepresentation(raw)
 		if err != nil {
 			return err
 		}
-		v.Representations[i] = repr
+		next.Representations[i] = repr
 	}
+	*v = next
 
 	return nil
 }
@@ -284,7 +303,7 @@ func (v *DefinitionVersion) Clone() *DefinitionVersion {
 	}
 
 	cloned := *v
-	cloned.Representations = slices.Clone(v.Representations)
+	cloned.Representations = cloneRepresentations(v.Representations)
 
 	return &cloned
 }
@@ -386,6 +405,7 @@ type Definition struct {
 
 func (d *Definition) UnmarshalJSON(b []byte) error {
 	type Alias Definition
+	next := Definition{CurrentVersionID: -1}
 	// definition-id and parameters are shadowed to distinguish a required
 	// field that is absent from one that is legitimately empty: a
 	// zero-parameter definition has "" as its definition-id and [] as its
@@ -395,9 +415,7 @@ func (d *Definition) UnmarshalJSON(b []byte) error {
 		Parameters   json.RawMessage `json:"parameters"`
 		ReturnType   json.RawMessage `json:"return-type"`
 		*Alias
-	}{Alias: (*Alias)(d)}
-
-	d.CurrentVersionID = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -406,27 +424,28 @@ func (d *Definition) UnmarshalJSON(b []byte) error {
 	if aux.DefinitionID == nil {
 		return fmt.Errorf("%w: definition is missing definition-id", ErrInvalidUDFMetadata)
 	}
-	d.DefinitionID = *aux.DefinitionID
+	next.DefinitionID = *aux.DefinitionID
 
 	if len(aux.Parameters) == 0 {
-		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, d.DefinitionID)
+		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
-	if err := json.Unmarshal(aux.Parameters, &d.Parameters); err != nil {
+	if err := json.Unmarshal(aux.Parameters, &next.Parameters); err != nil {
 		return err
 	}
-	if d.Parameters == nil {
-		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, d.DefinitionID)
+	if next.Parameters == nil {
+		return fmt.Errorf("%w: definition %q is missing parameters", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
 
 	if len(aux.ReturnType) == 0 {
-		return fmt.Errorf("%w: definition %q requires a return-type", ErrInvalidUDFMetadata, d.DefinitionID)
+		return fmt.Errorf("%w: definition %q requires a return-type", ErrInvalidUDFMetadata, next.DefinitionID)
 	}
 
 	typ, err := unmarshalType(aux.ReturnType)
 	if err != nil {
 		return err
 	}
-	d.ReturnType = typ
+	next.ReturnType = typ
+	*d = next
 
 	return nil
 }
@@ -475,8 +494,12 @@ func (d *Definition) Clone() *Definition {
 	}
 
 	cloned := *d
-	// Type values are immutable, so sharing them across clones is safe.
-	cloned.Parameters = slices.Clone(d.Parameters)
+	cloned.Parameters = make([]Parameter, len(d.Parameters))
+	for i, parameter := range d.Parameters {
+		cloned.Parameters[i] = parameter
+		cloned.Parameters[i].Type = cloneType(parameter.Type)
+	}
+	cloned.ReturnType = cloneType(d.ReturnType)
 	cloned.Versions = cloneSlice(d.Versions)
 	if d.ReturnNullable != nil {
 		nullable := *d.ReturnNullable
@@ -583,14 +606,13 @@ type DefinitionVersionRef struct {
 
 func (r *DefinitionVersionRef) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionVersionRef
+	next := DefinitionVersionRef{VersionID: -1}
 	// definition-id is shadowed to distinguish the required field being
 	// absent from the legitimately empty id of a zero-parameter definition.
 	aux := struct {
 		DefinitionID *string `json:"definition-id"`
 		*Alias
-	}{Alias: (*Alias)(r)}
-
-	r.VersionID = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -599,7 +621,8 @@ func (r *DefinitionVersionRef) UnmarshalJSON(b []byte) error {
 	if aux.DefinitionID == nil {
 		return fmt.Errorf("%w: definition-log reference is missing definition-id", ErrInvalidUDFMetadata)
 	}
-	r.DefinitionID = *aux.DefinitionID
+	next.DefinitionID = *aux.DefinitionID
+	*r = next
 
 	return nil
 }
@@ -617,11 +640,14 @@ type DefinitionLogEntry struct {
 
 func (e *DefinitionLogEntry) UnmarshalJSON(b []byte) error {
 	type Alias DefinitionLogEntry
-	aux := (*Alias)(e)
+	next := DefinitionLogEntry{TimestampMS: -1}
 
-	e.TimestampMS = -1
+	if err := json.Unmarshal(b, (*Alias)(&next)); err != nil {
+		return err
+	}
+	*e = next
 
-	return json.Unmarshal(b, aux)
+	return nil
 }
 
 func (e DefinitionLogEntry) validate() error {
@@ -677,14 +703,14 @@ type Metadata interface {
 	// Location returns the function's base location, used to create
 	// metadata file locations. It may be empty.
 	Location() string
-	// Definitions returns the function's definitions, one per signature.
+	// Definitions returns deep copies of the function's definitions, one per signature.
 	Definitions() []*Definition
-	// DefinitionByID returns the definition with the given definition-id.
+	// DefinitionByID returns a deep copy of the definition with the given definition-id.
 	DefinitionByID(definitionID string) (*Definition, bool)
-	// DefinitionLog returns the history of definition version selections.
+	// DefinitionLog returns a deep copy of the definition version selection history.
 	DefinitionLog() []DefinitionLogEntry
-	// Properties returns the function's properties. Entries are treated
-	// as hints, not strict rules.
+	// Properties returns a copy of the function's properties. Entries are
+	// treated as hints, not strict rules.
 	Properties() iceberg.Properties
 	// Secure reports whether this is a secure function whose sensitive
 	// information engines should not leak to end users.
@@ -733,19 +759,24 @@ type metadata struct {
 	lazyDefinitionsByID func() map[string]*Definition
 }
 
-func (m *metadata) FormatVersion() int                  { return m.FormatVersionValue }
-func (m *metadata) FunctionUUID() uuid.UUID             { return *m.UUID }
-func (m *metadata) Location() string                    { return m.Loc }
-func (m *metadata) Definitions() []*Definition          { return m.DefinitionList }
-func (m *metadata) DefinitionLog() []DefinitionLogEntry { return m.DefinitionLogList }
-func (m *metadata) Properties() iceberg.Properties      { return m.Props }
-func (m *metadata) Secure() bool                        { return m.SecureValue }
-func (m *metadata) Doc() string                         { return m.DocValue }
+func (m *metadata) FormatVersion() int         { return m.FormatVersionValue }
+func (m *metadata) FunctionUUID() uuid.UUID    { return *m.UUID }
+func (m *metadata) Location() string           { return m.Loc }
+func (m *metadata) Definitions() []*Definition { return cloneSlice(m.DefinitionList) }
+func (m *metadata) DefinitionLog() []DefinitionLogEntry {
+	return cloneDefinitionLog(m.DefinitionLogList)
+}
+func (m *metadata) Properties() iceberg.Properties { return maps.Clone(m.Props) }
+func (m *metadata) Secure() bool                   { return m.SecureValue }
+func (m *metadata) Doc() string                    { return m.DocValue }
 
 func (m *metadata) DefinitionByID(definitionID string) (*Definition, bool) {
 	def, ok := m.lazyDefinitionsByID()[definitionID]
+	if !ok {
+		return nil, false
+	}
 
-	return def, ok
+	return def.Clone(), true
 }
 
 func (m *metadata) Equals(other Metadata) bool {
@@ -843,14 +874,13 @@ func (m *metadata) init() {
 
 func (m *metadata) UnmarshalJSON(b []byte) error {
 	type Alias metadata
+	next := metadata{FormatVersionValue: -1}
 	// definition-log is shadowed to reject the required field being absent
 	// or null, which the default decoding cannot distinguish from empty.
 	aux := struct {
 		DefinitionLog json.RawMessage `json:"definition-log"`
 		*Alias
-	}{Alias: (*Alias)(m)}
-
-	m.FormatVersionValue = -1
+	}{Alias: (*Alias)(&next)}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -859,16 +889,20 @@ func (m *metadata) UnmarshalJSON(b []byte) error {
 	if len(aux.DefinitionLog) == 0 {
 		return fmt.Errorf("%w: definition-log is required", ErrInvalidUDFMetadata)
 	}
-	if err := json.Unmarshal(aux.DefinitionLog, &m.DefinitionLogList); err != nil {
+	if err := json.Unmarshal(aux.DefinitionLog, &next.DefinitionLogList); err != nil {
 		return err
 	}
-	if m.DefinitionLogList == nil {
+	if next.DefinitionLogList == nil {
 		return fmt.Errorf("%w: definition-log is required", ErrInvalidUDFMetadata)
 	}
+	if err := next.validate(); err != nil {
+		return err
+	}
 
+	*m = next
 	m.init()
 
-	return m.validate()
+	return nil
 }
 
 // indexBy indexes a slice into a map, using a provided extractKey function.

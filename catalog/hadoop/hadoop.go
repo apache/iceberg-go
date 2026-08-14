@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -887,19 +888,12 @@ func (c *Catalog) ListTables(_ context.Context, ns table.Identifier) iter.Seq2[t
 	}
 }
 
-func (c *Catalog) DropTable(_ context.Context, ident table.Identifier) error {
-	if err := validateTableIdentifier(ident); err != nil {
+func (c *Catalog) DropTable(ctx context.Context, ident table.Identifier) error {
+	if _, _, err := c.loadTable(ctx, ident); err != nil {
 		return err
 	}
 
 	tablePath := c.tableToPath(ident)
-	isTable, err := isTableDir(c.filesystem, c.isLocal, tablePath)
-	if err != nil {
-		return fmt.Errorf("hadoop catalog: failed to inspect table directory: %w", err)
-	}
-	if !isTable {
-		return fmt.Errorf("%w: %s", catalog.ErrNoSuchTable, strings.Join(ident, "."))
-	}
 
 	return c.filesystem.RemoveAll(tablePath)
 }
@@ -1067,7 +1061,8 @@ func (c *Catalog) ListNamespaces(_ context.Context, parent table.Identifier) ([]
 			// if a table, not a namespace, don't descend
 			return fs.SkipDir
 		}
-		result = append(result, table.Identifier{d.Name()})
+		child := append(slices.Clone(parent), d.Name())
+		result = append(result, child)
 		// found a namespace dir, don't recurse into it
 		return fs.SkipDir
 	})

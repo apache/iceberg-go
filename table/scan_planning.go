@@ -110,16 +110,19 @@ type ScanPlanningRequest struct {
 }
 
 // PlanIO lazily loads the FileIO used to read a planned scan and closes any
-// resources it holds (e.g. plan-scoped credentials) once reading is done. Nil
-// means the scan keeps using the table's normal FileIO. Remote planners may
-// return a PlanIO backed by plan-scoped storage credentials.
+// resources it holds (e.g. plan-scoped credentials) once the plan is replaced.
+// Nil means the scan keeps using the table's normal FileIO. Remote planners may
+// return a PlanIO backed by plan-scoped storage credentials. Implementations
+// must use a comparable dynamic type with stable identity, normally a pointer.
 //
 // Delivery contract (OQ1): a returned ScanPlanningResult.IO is stored on the
-// Scan that planned it; ReadTasks then loads from it instead of the table's
-// FileIO and closes it after the returned iterator finishes. This ties a
-// plan-scoped scan to the PlanFiles -> ReadTasks sequence on one Scan — tasks
-// from a remote plan must be read by the Scan that produced them, and a Scan
-// carrying plan-scoped IO is not safe for concurrent PlanFiles/ReadTasks.
+// Scan that planned it; every ReadTasks call loads from it instead of the
+// table's FileIO. Replacing the plan releases that Scan's ownership; the old IO
+// closes after its remaining scan owners and active record iterators finish.
+// This ties a plan-scoped scan to PlanFiles -> ReadTasks: tasks from a remote
+// plan must be read by the Scan that produced them or one of its derived scans.
+// A Scan carrying plan-scoped IO is not safe for concurrent PlanFiles or
+// ReadTasks calls, but consuming an existing iterator while replanning is safe.
 type PlanIO interface {
 	Load(context.Context) (icebergio.IO, error)
 	Close() error
@@ -136,11 +139,6 @@ type ScanPlanningResult struct {
 //
 // SupportsRemoteScanPlanning reports whether the planner can complete a remote
 // plan end-to-end for the requested scan.
-//
-// Note: FileScanTask is proposed to gain a `Residual iceberg.BooleanExpression`
-// field so remote tasks can carry the server's residual filter. That field is
-// not added here because it would trip the codec/file_scan_task.go drift guard;
-// it lands with the scan-task decoder PR.
 type ScanPlanner interface {
 	SupportsRemoteScanPlanning() bool
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)

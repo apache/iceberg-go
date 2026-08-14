@@ -23,6 +23,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -445,6 +446,20 @@ func TestSetSortOrder(t *testing.T) {
 	require.True(t, builder.updates[0].(*addSortOrderUpdate).SortOrder.Equals(expected), "expected sort order to match added sort order")
 }
 
+func TestAddSortOrderDoesNotAddDuplicateUpdate(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	first := sortOrder()
+	first.orderID = 10
+	second := sortOrder()
+	second.orderID = 20
+
+	require.NoError(t, builder.AddSortOrder(&first))
+	require.NoError(t, builder.AddSortOrder(&second))
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, 1, first.OrderID())
+	require.Equal(t, 1, second.OrderID())
+}
+
 func TestSetRef(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
@@ -479,6 +494,187 @@ func TestSetRef(t *testing.T) {
 	require.Equal(t, snap.SnapshotID, int64(1))
 	require.True(t, snap.Equals(snapshot), "expected snapshot to match added snapshot")
 	require.Len(t, builder.snapshotLog, 1)
+}
+
+func TestSetSnapshotRefUpdateApplyPreservesRetention(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	parentID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+
+	const (
+		minKeep       = 5
+		maxSnapAgeMs  = int64(172800000) // 2 days
+		maxRefAgeMsIn = int64(604800000) // 7 days
+	)
+
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.NoError(t, builder.SetSnapshotRef(
+		MainBranch, 1, BranchRef,
+		WithMinSnapshotsToKeep(minKeep),
+		WithMaxSnapshotAgeMs(maxSnapAgeMs),
+		WithMaxRefAgeMs(maxRefAgeMsIn),
+	))
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+
+	// build the update the way the commit/rollback producers do.
+	upd := builder.NewRetainingSnapshotRefUpdate(MainBranch, 2, BranchRef)
+
+	require.Equal(t, minKeep, upd.MinSnapshotsToKeep)
+	require.Equal(t, maxSnapAgeMs, upd.MaxSnapshotAgeMs)
+	require.Equal(t, maxRefAgeMsIn, upd.MaxRefAgeMs)
+
+	require.NoError(t, upd.Apply(&builder))
+	ref := builder.refs[MainBranch]
+	require.Equal(t, int64(2), ref.SnapshotID, "snapshot pointer should advance")
+	require.NotNil(t, ref.MinSnapshotsToKeep, "min-snapshots-to-keep must not be wiped out")
+	require.Equal(t, minKeep, *ref.MinSnapshotsToKeep)
+	require.NotNil(t, ref.MaxSnapshotAgeMs, "max-snapshot-age-ms must not be wiped out")
+	require.Equal(t, maxSnapAgeMs, *ref.MaxSnapshotAgeMs)
+	require.NotNil(t, ref.MaxRefAgeMs, "max-ref-age-ms must not be wiped out")
+	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
+}
+
+func TestSetSnapshotRefUpdateApplyClearsRetentionWhenAbsent(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	parentID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, BranchRef, WithMinSnapshotsToKeep(5)))
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+
+	require.NoError(t, NewSetSnapshotRefUpdate(MainBranch, 2, BranchRef, 0, 0, 0).Apply(&builder))
+	ref := builder.refs[MainBranch]
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.Nil(t, ref.MinSnapshotsToKeep, "bare set-ref must clear retention (pure replace)")
+	require.Nil(t, ref.MaxSnapshotAgeMs)
+	require.Nil(t, ref.MaxRefAgeMs)
+}
+
+func TestSetSnapshotRefBranchToTagDropsAllRetention(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.NoError(t, builder.SetSnapshotRef(
+		MainBranch, 1, BranchRef,
+		WithMinSnapshotsToKeep(5),
+		WithMaxSnapshotAgeMs(int64(172800000)),
+		WithMaxRefAgeMs(int64(604800000)),
+	))
+
+	// The retaining helper must not carry retention across a type change.
+	upd := builder.NewRetainingSnapshotRefUpdate(MainBranch, 1, TagRef)
+	require.Zero(t, upd.MinSnapshotsToKeep)
+	require.Zero(t, upd.MaxSnapshotAgeMs)
+	require.Zero(t, upd.MaxRefAgeMs)
+
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 1, TagRef))
+	ref := builder.refs[MainBranch]
+	require.Equal(t, TagRef, ref.SnapshotRefType)
+	require.Nil(t, ref.MinSnapshotsToKeep)
+	require.Nil(t, ref.MaxSnapshotAgeMs)
+	require.Nil(t, ref.MaxRefAgeMs)
+}
+
+func TestNewRetainingSnapshotRefUpdateTagPreservesMaxRefAge(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schemaID := 0
+	snapshot1 := Snapshot{
+		SnapshotID:       1,
+		ParentSnapshotID: nil,
+		SequenceNumber:   0,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 1,
+		ManifestList:     "/snap-1.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+	parentID := int64(1)
+	snapshot2 := Snapshot{
+		SnapshotID:       2,
+		ParentSnapshotID: &parentID,
+		SequenceNumber:   1,
+		TimestampMs:      builder.base.LastUpdatedMillis() + 2,
+		ManifestList:     "/snap-2.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		SchemaID:         &schemaID,
+	}
+
+	const maxRefAgeMsIn = int64(604800000)
+	require.NoError(t, builder.AddSnapshot(&snapshot1))
+	require.NoError(t, builder.SetSnapshotRef("release", 1, TagRef, WithMaxRefAgeMs(maxRefAgeMsIn)))
+	require.NoError(t, builder.AddSnapshot(&snapshot2))
+
+	upd := builder.NewRetainingSnapshotRefUpdate("release", 2, TagRef)
+	require.Equal(t, maxRefAgeMsIn, upd.MaxRefAgeMs)
+	require.Zero(t, upd.MinSnapshotsToKeep)
+	require.Zero(t, upd.MaxSnapshotAgeMs)
+
+	require.NoError(t, upd.Apply(&builder))
+	ref := builder.refs["release"]
+	require.Equal(t, int64(2), ref.SnapshotID)
+	require.NotNil(t, ref.MaxRefAgeMs)
+	require.Equal(t, maxRefAgeMsIn, *ref.MaxRefAgeMs)
+	require.Nil(t, ref.MinSnapshotsToKeep)
+	require.Nil(t, ref.MaxSnapshotAgeMs)
+}
+
+func TestSetRefRejectsInvalidTypeAndTagRetention(t *testing.T) {
+	builder := builderWithoutChanges(2)
+
+	err := builder.SetSnapshotRef("invalid", 1, RefType("invalid"))
+	require.ErrorIs(t, err, ErrInvalidRefType)
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMinSnapshotsToKeep(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting min snapshots to keep")
+
+	err = builder.SetSnapshotRef("tag", 1, TagRef, WithMaxSnapshotAgeMs(1))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "tags do not support setting max snapshot age")
 }
 
 func TestAddPartitionSpecForV1RequiresSequentialIDs(t *testing.T) {
@@ -2057,22 +2253,6 @@ func TestUnknownTypeValidation(t *testing.T) {
 		require.ErrorContains(t, err, "must be optional")
 	})
 
-	t.Run("ReservedFieldIDRowID", func(t *testing.T) {
-		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
-		)
-		err := checkSchemaCompatibility(schema, 3)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "reserved metadata column ID")
-	})
-	t.Run("ReservedFieldIDLastUpdatedSeqNum", func(t *testing.T) {
-		schema := iceberg.NewSchema(1,
-			iceberg.NestedField{ID: iceberg.LastUpdatedSequenceNumberFieldID, Name: "bad_field", Type: iceberg.PrimitiveTypes.Int64},
-		)
-		err := checkSchemaCompatibility(schema, 3)
-		require.Error(t, err)
-		require.ErrorContains(t, err, "reserved metadata column ID")
-	})
 	t.Run("InvalidUnknownMapValue", func(t *testing.T) {
 		invalidSchema := iceberg.NewSchema(1,
 			iceberg.NestedField{ID: 2, Name: "invalid_map", Type: &iceberg.MapType{KeyID: 3, KeyType: iceberg.StringType{}, ValueID: 4, ValueType: iceberg.UnknownType{}, ValueRequired: true}, Required: false},
@@ -2080,6 +2260,147 @@ func TestUnknownTypeValidation(t *testing.T) {
 		err := checkSchemaCompatibility(invalidSchema, 3)
 		require.Error(t, err, "should error when unknown type is used as map value")
 		require.ErrorContains(t, err, "must be optional")
+	})
+}
+
+// reservedNonLineageFieldID is a spec-reserved metadata column ID (_file) that
+// is not one of the row-lineage columns, exercising the full reserved range
+// rather than just iceberg.IsMetadataColumn.
+const reservedNonLineageFieldID = 2147483646
+
+func TestValidateNoReservedFieldIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		schema     *iceberg.Schema
+		wantColumn string // schema path the error must name
+		wantID     int
+	}{
+		{
+			name: "top-level row-lineage id with non-canonical name",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "user_id", Type: iceberg.PrimitiveTypes.Int64},
+			),
+			wantColumn: "user_id",
+			wantID:     iceberg.RowIDFieldID,
+		},
+		{
+			name: "top-level non-lineage reserved id",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: reservedNonLineageFieldID, Name: "bad", Type: iceberg.PrimitiveTypes.Int64},
+			),
+			wantColumn: "bad",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id inside struct child",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "outer", Required: true, Type: &iceberg.StructType{
+					FieldList: []iceberg.NestedField{
+						{ID: reservedNonLineageFieldID, Name: "inner", Type: iceberg.PrimitiveTypes.Int64},
+					},
+				}},
+			),
+			wantColumn: "outer.inner",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on list element",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "arr", Required: true, Type: &iceberg.ListType{
+					ElementID: reservedNonLineageFieldID, Element: iceberg.PrimitiveTypes.Int64, ElementRequired: false,
+				}},
+			),
+			wantColumn: "arr.element",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on map key",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
+					KeyID: reservedNonLineageFieldID, KeyType: iceberg.PrimitiveTypes.String,
+					ValueID: 2, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
+				}},
+			),
+			wantColumn: "m.key",
+			wantID:     reservedNonLineageFieldID,
+		},
+		{
+			name: "reserved id on map value",
+			schema: iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "m", Required: true, Type: &iceberg.MapType{
+					KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+					ValueID: reservedNonLineageFieldID, ValueType: iceberg.PrimitiveTypes.Int64, ValueRequired: false,
+				}},
+			),
+			wantColumn: "m.value",
+			wantID:     reservedNonLineageFieldID,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateNoReservedFieldIDs(tt.schema)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "reserved metadata column ID")
+			assert.Contains(t, err.Error(), tt.wantColumn, "error must report the schema path")
+			assert.Contains(t, err.Error(), strconv.Itoa(tt.wantID))
+		})
+	}
+
+	t.Run("boundary MaxStructFieldID is allowed", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.MaxStructFieldID, Name: "ok", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		require.NoError(t, validateNoReservedFieldIDs(schema))
+	})
+}
+
+// TestNewMetadataRejectsReservedFieldIDsBeforeReassignment guards the #1107
+// regression: reassignIDs would silently remap a user-supplied reserved ID to a
+// fresh value, so NewMetadata must reject it up front instead.
+func TestNewMetadataRejectsReservedFieldIDsBeforeReassignment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field iceberg.NestedField
+	}{
+		{"row_id", iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "user_id", Type: iceberg.PrimitiveTypes.Int64}},
+		{"last_updated_seq", iceberg.NestedField{ID: iceberg.LastUpdatedSequenceNumberFieldID, Name: "seq", Type: iceberg.PrimitiveTypes.Int64}},
+		{"non_lineage_reserved", iceberg.NestedField{ID: reservedNonLineageFieldID, Name: "f", Type: iceberg.PrimitiveTypes.Int64}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				tc.field,
+			)
+
+			_, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+				"s3://bucket/table", iceberg.Properties{"format-version": "3"})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			assert.Contains(t, err.Error(), "reserved metadata column ID")
+		})
+	}
+}
+
+// TestCheckSchemaCompatibilityReservedIDs locks in the deliberate asymmetry of
+// the AddSchema gate: it rejects row-lineage metadata columns, but must permit
+// the position-delete reserved IDs (file_path/pos), which internal writers add
+// via AddSchema. Broadening it to the full reserved range breaks those writers.
+func TestCheckSchemaCompatibilityReservedIDs(t *testing.T) {
+	t.Run("rejects row-lineage column", func(t *testing.T) {
+		schema := iceberg.NewSchema(1,
+			iceberg.NestedField{ID: iceberg.RowIDFieldID, Name: "bad", Type: iceberg.PrimitiveTypes.Int64},
+		)
+		err := checkSchemaCompatibility(schema, 3)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "reserved metadata column ID")
+	})
+
+	t.Run("permits position-delete reserved IDs", func(t *testing.T) {
+		schema := iceberg.NewSchema(0, iceberg.PositionalDeleteSchema.Fields()...)
+		require.NoError(t, checkSchemaCompatibility(schema, 2))
 	})
 }
 

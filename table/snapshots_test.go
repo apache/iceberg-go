@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,17 +94,60 @@ func TestSerializeSnapshotWithProps(t *testing.T) {
 	}`, string(data))
 }
 
-func TestMissingOperation(t *testing.T) {
+func TestMissingOperationDefaultsToOverwrite(t *testing.T) {
 	var summary table.Summary
 	err := json.Unmarshal([]byte(`{"foo": "bar"}`), &summary)
-	assert.ErrorIs(t, err, table.ErrMissingOperation)
+	require.NoError(t, err)
+	assert.Equal(t, table.OpOverwrite, summary.Operation)
+	assert.Equal(t, iceberg.Properties{"foo": "bar"}, summary.Properties)
 }
 
-func TestInvalidOperation(t *testing.T) {
+func TestEmptySummary(t *testing.T) {
 	var summary table.Summary
-	err := json.Unmarshal([]byte(`{"operation": "foobar"}`), &summary)
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &summary))
+	assert.Empty(t, summary.Operation)
+	assert.Empty(t, summary.Properties)
+}
+
+func TestUnknownOperationIsPreserved(t *testing.T) {
+	var summary table.Summary
+	require.NoError(t, json.Unmarshal([]byte(`{"operation":"merge","foo":"bar"}`), &summary))
+	assert.Equal(t, table.Operation("merge"), summary.Operation)
+	assert.Equal(t, iceberg.Properties{"foo": "bar"}, summary.Properties)
+
+	encoded, err := json.Marshal(&summary)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"operation":"merge","foo":"bar"}`, string(encoded))
+}
+
+func TestEmptyOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":""}`), &summary)
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
-	assert.ErrorContains(t, err, "found 'foobar'")
+}
+
+func TestNullOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":null}`), &summary)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+}
+
+func TestSummaryEqualsHandlesNil(t *testing.T) {
+	var nilSummary *table.Summary
+	summary := &table.Summary{Operation: table.OpAppend}
+
+	assert.True(t, nilSummary.Equals(nil))
+	assert.False(t, nilSummary.Equals(summary))
+	assert.False(t, summary.Equals(nilSummary))
+}
+
+func TestSnapshotEqualsHandlesMissingSummary(t *testing.T) {
+	withSummary := Snapshot()
+	withoutSummary := withSummary
+	withoutSummary.Summary = nil
+
+	assert.False(t, withoutSummary.Equals(withSummary))
+	assert.False(t, withSummary.Equals(withoutSummary))
 }
 
 func TestSnapshotString(t *testing.T) {

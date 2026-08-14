@@ -27,6 +27,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"slices"
@@ -40,6 +41,7 @@ import (
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
@@ -64,6 +66,12 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // errors.Is(err, iceberg.ErrNotImplemented) for compatibility with older
 // WriteRecords behavior.
 var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
+
+const allManifestsMaxWorkers = 16
+
+func allManifestsWorkerCount(snapshotCount int) int {
+	return max(1, min(snapshotCount, allManifestsMaxWorkers))
+}
 
 // requireWriteFileIO should run immediately after resolving the table FS and
 // before mutating transaction state such as automatic name mapping.
@@ -182,6 +190,18 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 // callers to receive the precise initialization error instead of hitting
 // panic/undefined behavior later.
 func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	for name, ref := range t.metadata.Refs() {
+		if name != branch {
+			continue
+		}
+		if ref.SnapshotRefType != BranchRef {
+			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
+				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+		}
+
+		break
+	}
+
 	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 	if err != nil {
 		return nil, err
@@ -201,6 +221,11 @@ func (t *Table) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if t.metadata != nil && fresh.metadata != nil {
+		if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+			return err
+		}
+	}
 
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
@@ -217,6 +242,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func validateTableUUID(identifier Identifier, expected, actual uuid.UUID) error {
+	if expected == uuid.Nil || actual == uuid.Nil || expected == actual {
+		return nil
+	}
+
+	return fmt.Errorf("%w: table %s UUID changed during refresh or commit: expected %s, got %s; load a new table handle",
+		ErrInvalidMetadata, strings.Join(identifier, "."), expected, actual)
 }
 
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
@@ -326,23 +360,53 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	}
 
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
-	g := errgroup.Group{}
+	snapshots := t.metadata.Snapshots()
+	n := len(snapshots)
+	workCtx, cancel := context.WithCancel(ctx)
+	jobs := make(chan int)
+	// This buffer lets workers finish after an early consumer stop. The result
+	// channel created below still retains all snapshot results, so this is not a
+	// memory bound; all remote reads are bounded by allManifestsMaxWorkers.
+	ch := make(chan list, allManifestsWorkerCount(n))
+	workers := allManifestsWorkerCount(n)
+	g, groupCtx := errgroup.WithContext(workCtx)
 
-	n := len(t.metadata.Snapshots())
-	ch := make(chan list, n)
-
-	for i, sn := range t.metadata.Snapshots() {
+	for range workers {
 		g.Go(func() error {
-			manifests, err := sn.Manifests(fs)
-			if err != nil {
-				return err
+			for {
+				select {
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case i, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+
+					manifests, err := snapshots[i].Manifests(fs)
+					if err != nil {
+						return err
+					}
+
+					select {
+					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
+					case <-groupCtx.Done():
+						return groupCtx.Err()
+					}
+				}
 			}
-
-			ch <- list{Index: i, Value: manifests, Last: i == n-1}
-
-			return nil
 		})
 	}
+
+	go func() {
+		defer close(jobs)
+		for i := range snapshots {
+			select {
+			case jobs <- i:
+			case <-groupCtx.Done():
+				return
+			}
+		}
+	}()
 
 	errch := make(chan error, 1)
 	go func() {
@@ -372,6 +436,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 		}, list{Index: -1})
 
 	return func(yield func(iceberg.ManifestFile, error) bool) {
+		defer cancel()
 		defer func() {
 			// drain channels if we exited early
 			go func() {
@@ -429,9 +494,24 @@ type commitOpts struct {
 	// may leave this empty; Transaction.Commit always sets it.
 	branch string
 
-	// validators runs once before cat.CommitTable on the first attempt
-	// only. Refresh-and-replay across retries is deferred to PR 2.5.
+	// validators run before cat.CommitTable on every attempt of the
+	// retry loop. On attempt 0 the writer's metadata and the catalog
+	// state coincide, so the conflict context has no concurrent
+	// snapshots and validators short-circuit; on retries they run
+	// against the freshly refreshed catalog state (refresh-and-replay).
 	validators []conflictValidatorFunc
+
+	// noReplay makes a CAS conflict terminal: doCommit returns the
+	// ErrCommitFailed error instead of entering refresh-and-replay.
+	// Set for commits carrying delete-file removals; see the flag site
+	// in snapshotProducer.commitManifests for the rationale.
+	noReplay bool
+
+	// pinnedRefs names branches with an explicit requirement from
+	// Transaction.AssertRefSnapshotID, whose assertions must not be
+	// rewritten to the fresh branch head between retries (see
+	// Transaction.pinnedRefs).
+	pinnedRefs map[string]struct{}
 }
 
 type commitOption func(*commitOpts)
@@ -452,13 +532,24 @@ func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
 }
 
+func withCommitNoReplay(noReplay bool) commitOption {
+	return func(o *commitOpts) { o.noReplay = noReplay }
+}
+
+func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
+	return func(o *commitOpts) { o.pinnedRefs = refs }
+}
+
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
 	var co commitOpts
 	for _, apply := range opts {
 		apply(&co)
 	}
 
-	cfg := readRetryConfig(t.metadata.Properties())
+	cfg, err := readRetryConfig(t.metadata.Properties())
+	if err != nil {
+		return nil, err
+	}
 
 	// Bound total retry time with a derived context so both the wait loop
 	// and the CommitTable call itself respect the deadline uniformly.
@@ -483,7 +574,13 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		newLoc            string
 		timer             *time.Timer
 		orphanedManifests []string // manifest-list files orphaned by rebuilds
+		commitDuration    time.Duration
 	)
+
+	// attemptsUsed initializes to 1: the emit block below is reached only via the
+	// success break, which always runs at least one attempt. Deriving it from a
+	// 0-based counter risks emitting 0 if a second success exit is ever added.
+	var attemptsUsed int64 = 1
 
 	// cleanupOrphans controls whether the defer below removes orphaned manifest-list
 	// files on exit. It defaults to true (clean on all safe exits) and is set to
@@ -510,6 +607,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	// numRetries counts retries; total attempts = 1 initial + numRetries.
 	totalAttempts := cfg.numRetries + 1
+
+	// commitStart brackets the commit loop itself (not FS resolution above or
+	// metadata cleanup below) so TotalDuration times only the CommitTable
+	// submission loop, matching Java's CommitReport.
+	commitStart := time.Now()
 
 	for attempt := range totalAttempts {
 		if attempt != 0 {
@@ -538,8 +640,23 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
+			if t.metadata != nil && fresh.metadata != nil {
+				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+					return nil, err
+				}
+			}
 			current = fresh.metadata
-			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
+
+			// A pinned assertion the fresh catalog state violates can
+			// never succeed — fail now instead of burning the remaining
+			// retries on it.
+			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
+				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			}
+			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+				return nil, err
+			}
 
 			// Rebuild snapshot manifest lists to inherit all files committed
 			// by concurrent writers since the snapshot was originally built.
@@ -552,6 +669,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
+		}
+
+		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+			return nil, err
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -592,6 +713,11 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 		newMeta, newLoc, err = t.cat.CommitTable(retryCtx, slices.Clone(t.identifier), reqs, updates)
 		if err == nil {
+			attemptsUsed = int64(attempt) + 1
+			// Capture elapsed time at the commit boundary, before orphan
+			// cleanup and deleteOldMetadata below (both can do I/O).
+			commitDuration = time.Since(commitStart)
+
 			break
 		}
 
@@ -604,6 +730,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			cleanupOrphans = false
 
 			return nil, err
+		}
+
+		// Non-replayable commits fail on the first CAS conflict instead
+		// of replaying (see commitOpts.noReplay). The annotation
+		// distinguishes this abort from an exhausted retry budget while
+		// preserving errors.Is(err, ErrCommitFailed).
+		if co.noReplay {
+			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
 		}
 	}
 
@@ -628,6 +762,29 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 	deleteOldMetadata(fs, t.metadata, newMeta)
 
+	// Emit a commit report on success. Prefer the just-committed branch head
+	// over the table's current snapshot so commits to a non-default branch
+	// report the snapshot they actually created.
+	//
+	// Mirrors the scan path: building the report is skipped for a no-op
+	// reporter (the opt-in default), since a nop discards it and assembling one
+	// would be pure overhead. A metadata-only commit produces no snapshot and
+	// must be skipped too — its branch head is unchanged, so reporting it would
+	// attribute a prior snapshot's metrics to this commit.
+	if rep := t.MetricsReporter(); !metrics.IsNop(rep) && commitAddedSnapshot(updates) {
+		committed := newMeta.CurrentSnapshot()
+		if co.branch != "" {
+			// A nil lookup means the branch head could not be resolved (e.g. a
+			// fresh non-default branch); attributing CurrentSnapshot() would
+			// carry the wrong snapshot, so skip emission entirely.
+			committed = newMeta.SnapshotByName(co.branch)
+		}
+		if committed != nil {
+			safeReport(ctx, rep,
+				buildCommitReport(strings.Join(t.identifier, "."), committed, attemptsUsed, commitDuration))
+		}
+	}
+
 	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
 }
 
@@ -646,7 +803,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // the branch is empty or the new head cannot be resolved (branch
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
-func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata) []Requirement {
+//
+// Assertions on branches in pinned were registered explicitly by the
+// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
+// semantics and are never rewritten: a branch that has changed must
+// fail the commit, not be replayed against the new head.
+func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
 	}
@@ -658,15 +820,56 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	out := make([]Requirement, len(reqs))
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
-			newID := head.SnapshotID
-			out[i] = AssertRefSnapshotID(branch, &newID)
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				newID := head.SnapshotID
+				if a.requireBranch {
+					out[i] = assertBranchRefSnapshotID(branch, &newID)
+				} else {
+					out[i] = AssertRefSnapshotID(branch, &newID)
+				}
 
-			continue
+				continue
+			}
 		}
 		out[i] = r
 	}
 
 	return out
+}
+
+// validatePinnedRefRequirements validates every assert-ref-snapshot-id
+// requirement on a pinned branch against the freshly refreshed catalog
+// metadata. A failure means the branch has changed from the required
+// snapshot: the assertion is never rewritten, so it can never hold and
+// the commit must fail instead of retrying.
+func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	for _, r := range reqs {
+		a, ok := r.(*assertRefSnapshotID)
+		if !ok {
+			continue
+		}
+		if _, isPinned := pinned[a.Ref]; !isPinned {
+			continue
+		}
+		if err := a.Validate(fresh); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
+	for _, req := range reqs {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.requireBranch && ref.Ref == branch {
+			return ref.Validate(meta)
+		}
+	}
+
+	return nil
 }
 
 // rebuildSnapshotUpdates returns a new slice of updates where any
@@ -730,20 +933,67 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 	return result, orphanedPaths, nil
 }
 
+const (
+	maxRetryDurationMs = uint64(math.MaxInt64 / int64(time.Millisecond))
+	maxRetryCount      = uint64(math.MaxUint32)
+)
+
 type retryConfig struct {
 	numRetries     uint
-	minWaitMs      uint
-	maxWaitMs      uint
-	totalTimeoutMs uint
+	minWaitMs      uint64
+	maxWaitMs      uint64
+	totalTimeoutMs uint64
 }
 
-func readRetryConfig(props iceberg.Properties) retryConfig {
-	return retryConfig{
-		numRetries:     iceberg.PropUInt(props, CommitNumRetriesKey, CommitNumRetriesDefault),
-		minWaitMs:      iceberg.PropUInt(props, CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
-		maxWaitMs:      iceberg.PropUInt(props, CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
-		totalTimeoutMs: iceberg.PropUInt(props, CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+func readRetryConfig(props iceberg.Properties) (retryConfig, error) {
+	numRetries := props.GetUInt64(CommitNumRetriesKey, CommitNumRetriesDefault)
+	if numRetries >= uint64(^uint(0)) || numRetries > maxRetryCount {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry property %q=%d: retry count exceeds the maximum of %d",
+			CommitNumRetriesKey, numRetries, maxRetryCount)
 	}
+
+	cfg := retryConfig{
+		numRetries:     uint(numRetries),
+		minWaitMs:      props.GetUInt64(CommitMinRetryWaitMsKey, CommitMinRetryWaitMsDefault),
+		maxWaitMs:      props.GetUInt64(CommitMaxRetryWaitMsKey, CommitMaxRetryWaitMsDefault),
+		totalTimeoutMs: props.GetUInt64(CommitTotalRetryTimeoutMsKey, CommitTotalRetryTimeoutMsDefault),
+	}
+
+	if cfg.minWaitMs == 0 {
+		cfg.minWaitMs = CommitMinRetryWaitMsDefault
+	}
+	if cfg.maxWaitMs == 0 {
+		cfg.maxWaitMs = CommitMaxRetryWaitMsDefault
+	}
+	if cfg.totalTimeoutMs == 0 {
+		cfg.totalTimeoutMs = CommitTotalRetryTimeoutMsDefault
+	}
+
+	for _, property := range []struct {
+		key   string
+		value uint64
+	}{
+		{CommitMinRetryWaitMsKey, cfg.minWaitMs},
+		{CommitMaxRetryWaitMsKey, cfg.maxWaitMs},
+		{CommitTotalRetryTimeoutMsKey, cfg.totalTimeoutMs},
+	} {
+		key, value := property.key, property.value
+		if value > maxRetryDurationMs {
+			return retryConfig{}, fmt.Errorf(
+				"invalid retry property %q=%d: exceeds maximum duration of %d milliseconds",
+				key, value, maxRetryDurationMs)
+		}
+	}
+
+	if cfg.minWaitMs > cfg.maxWaitMs {
+		return retryConfig{}, fmt.Errorf(
+			"invalid retry properties %q=%d and %q=%d: minimum wait exceeds maximum wait",
+			CommitMinRetryWaitMsKey, cfg.minWaitMs,
+			CommitMaxRetryWaitMsKey, cfg.maxWaitMs)
+	}
+
+	return cfg, nil
 }
 
 // backoffDuration computes wait time for the given 0-based retry attempt
@@ -754,46 +1004,55 @@ func readRetryConfig(props iceberg.Properties) retryConfig {
 // concurrent Go writers. Backoff is client-local, so this does not
 // affect cross-client interop.
 //
-// Inputs are trusted: readRetryConfig is responsible for normalizing
-// user-supplied properties (negatives, zero, min > max).
-func backoffDuration(attempt, minMs, maxMs uint) time.Duration {
+// Inputs from readRetryConfig are validated. The defensive bounds below also
+// keep direct callers from reaching an invalid random bound or duration.
+func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs == 0 {
 		minMs = CommitMinRetryWaitMsDefault
 	}
 	if maxMs == 0 {
 		maxMs = CommitMaxRetryWaitMsDefault
 	}
+	if minMs > maxRetryDurationMs {
+		minMs = maxRetryDurationMs
+	}
+	if maxMs > maxRetryDurationMs {
+		maxMs = maxRetryDurationMs
+	}
 	if minMs > maxMs {
 		minMs = maxMs
 	}
-	// Cap the shift count so the signed int64 below does not overflow
-	// past its operand width; overflow would just be clamped to maxMs
-	// anyway, so keep the math obvious instead.
+	// Cap the shift count so the exponential calculation stays within the
+	// bounded duration range.
 	if attempt > 62 {
 		attempt = 62
 	}
 
-	ceiling := int64(minMs) << attempt
-	if ceiling <= 0 || ceiling > int64(maxMs) {
-		ceiling = int64(maxMs)
+	var ceiling uint64
+	if minMs > maxRetryDurationMs>>attempt {
+		ceiling = maxMs
+	} else {
+		ceiling = minMs << attempt
+		if ceiling > maxMs {
+			ceiling = maxMs
+		}
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
 	// writers don't all sample 0 and retry in lockstep.
-	//nolint:gosec // non-security randomness, jitter for retry spread
-	wait := int64(minMs) + rand.Int64N(ceiling-int64(minMs)+1)
+	// Both conversions are safe because minMs and ceiling-minMs+1 are bounded
+	// by maxRetryDurationMs, which fits in int64.
+	//nolint:gosec // non-security randomness; bounded int64 conversions are safe
+	wait := int64(minMs) + rand.Int64N(int64(ceiling-minMs+1))
 
 	return time.Duration(wait) * time.Millisecond
 }
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
 func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entries := slices.Collect(t.metadata.SnapshotLogs())
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := entries[i]
-		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
-			return t.metadata.SnapshotByID(entry.SnapshotID)
-		}
+	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+	if ok {
+		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
 
 	return nil
@@ -863,15 +1122,25 @@ func WithSnapshotID(n int64) ScanOption {
 	}
 
 	return func(scan *Scan) {
+		if scan.asOfTimestamp != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select snapshot ID %d when as-of timestamp %d is already selected",
+				iceberg.ErrInvalidArgument, n, *scan.asOfTimestamp)
+
+			return
+		}
 		scan.snapshotID = &n
-		scan.asOfTimestamp = nil
 	}
 }
 
 func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 	return func(scan *Scan) {
+		if scan.snapshotID != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select as-of timestamp %d when snapshot ID %d is already selected",
+				iceberg.ErrInvalidArgument, timeStampMs, *scan.snapshotID)
+
+			return
+		}
 		scan.asOfTimestamp = &timeStampMs
-		scan.snapshotID = nil
 	}
 }
 

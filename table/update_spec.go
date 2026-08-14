@@ -54,6 +54,13 @@ type transformKey struct {
 	Transform string
 }
 
+// NewUpdateSpec starts a partition spec evolution.
+//
+// If the table's current spec contains an unknown transform, the returned
+// UpdateSpec carries an error and no evolution is possible -- including
+// renaming or dropping an unrelated field. That matches Java's
+// BaseUpdatePartitionSpec, which rejects at construction rather than at commit.
+// Loading such a table is still fine; only evolving its spec is blocked.
 func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	us := &UpdateSpec{
 		txn:                   t,
@@ -86,6 +93,12 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 	nameToField := make(map[string]iceberg.PartitionField)
 	partitionSpec := t.tbl.Metadata().PartitionSpec()
 	for _, partitionField := range partitionSpec.Fields() {
+		if _, ok := partitionField.Transform.(iceberg.UnknownTransform); ok {
+			us.err = fmt.Errorf("%w: cannot update partition spec with unknown transform: %s",
+				iceberg.ErrInvalidTransform, partitionField.Transform)
+
+			return us
+		}
 		transformToField[transformKey{
 			SourceId:  partitionField.SourceID(),
 			Transform: partitionField.Transform.String(),
@@ -194,12 +207,8 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
-	opts := make([]iceberg.PartitionOption, len(partitionFields))
-	for i, field := range partitionFields {
-		opts[i] = iceberg.AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, us.txn.tbl.Schema(), &field.FieldID)
-	}
-
-	newSpec, err := iceberg.NewPartitionSpecOpts(opts...)
+	candidate := iceberg.NewPartitionSpec(partitionFields...)
+	newSpec, err := candidate.BindToSchema(us.txn.tbl.Schema(), nil, nil)
 	if err != nil {
 		return iceberg.PartitionSpec{}, err
 	}
@@ -244,6 +253,9 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 		}
 
 		// Validate the transform
+		if _, ok := transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot add partition field with unknown transform: %s", iceberg.ErrInvalidTransform, transform)
+		}
 		outputType := boundTerm.Type()
 		if !transform.CanTransform(outputType) {
 			return fmt.Errorf("%s cannot transform %s values from %s", transform.String(), outputType.String(), boundTerm.Ref().Field().Name)
@@ -255,6 +267,13 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 			Transform: transform.String(),
 		}
 		existingPartitionField, exists := us.transformToField[key]
+
+		if exists && transform.Equals(existingPartitionField.Transform) {
+			if _, deleted := us.deletes[existingPartitionField.FieldID]; deleted {
+				return us.rewriteDeleteAndAddField(existingPartitionField, partitionFieldName)
+			}
+		}
+
 		if exists && us.isDuplicatePartition(transform, existingPartitionField) {
 			return fmt.Errorf("duplicate partition field for %s=%v, %v already exists", ref.String(), ref, existingPartitionField)
 		}
@@ -325,6 +344,18 @@ func (us *UpdateSpec) removeField(name string) updateSpecOp {
 	}
 }
 
+// rewriteDeleteAndAddField restores a field removed earlier in this same
+// update, keeping its permanent ID and renaming it if a different name is
+// requested.
+func (us *UpdateSpec) rewriteDeleteAndAddField(existing iceberg.PartitionField, name string) error {
+	delete(us.deletes, existing.FieldID)
+	if name == "" || existing.Name == name {
+		return nil
+	}
+
+	return us.renameField(existing.Name, name)()
+}
+
 func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 	return func() error {
 		existingField, exists := us.nameToField[newName]
@@ -353,21 +384,45 @@ func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 }
 
 func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.PartitionField, error) {
-	if us.txn.tbl.Metadata().Version() == 2 {
-		sourceId, transform := key.SourceId, key.Transform
+	transform, err := iceberg.ParseTransform(key.Transform)
+	if err != nil {
+		return iceberg.PartitionField{}, fmt.Errorf("%w: invalid partition transform %q: %w",
+			iceberg.ErrInvalidArgument, key.Transform, err)
+	}
+
+	// Reuse applies to format v2+ (v1 has no permanent field-ID contract) and
+	// resurrects fields removed in an earlier committed update; same-update
+	// remove/re-add is handled ahead of this call by rewriteDeleteAndAddField.
+	if us.txn.tbl.Metadata().Version() >= 2 {
+		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
+		// PartitionSpecs() is ordered by ascending spec ID, so when the same
+		// source + transform appears under different names across specs (e.g. a
+		// field renamed before it was removed), the lowest-spec-ID match wins.
+		// The match's own name is returned, which for the no-name case may be an
+		// older name than the current schema uses; this precedence is
+		// deterministic and preserves the original (permanent) field ID.
 		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
 			for _, field := range spec.Fields() {
 				historicalFields = append(historicalFields, field)
 			}
 		}
 		for _, field := range historicalFields {
-			if field.SourceID() == sourceId && field.Transform.String() == transform {
-				if len(name) > 0 && field.Name == name {
+			// Transform.String() is canonical: field.Transform is a parsed
+			// Transform whose String() re-normalizes any non-canonical on-disk
+			// text (e.g. "bucket[016]" -> "bucket[16]"), and transformName comes
+			// from a Transform.String() as well. The textual compare therefore
+			// distinguishes parameterized transforms (bucket[16] vs bucket[8])
+			// correctly without a structural comparison.
+			if field.SourceID() == sourceId && field.Transform.String() == transformName {
+				// Reuse the historical field's ID when no explicit name is
+				// requested (match on source + transform alone) or when the
+				// requested name matches.
+				if len(name) == 0 || field.Name == name {
 					return iceberg.PartitionField{
 						SourceIDs: []int{sourceId},
 						FieldID:   field.FieldID,
-						Name:      name,
+						Name:      field.Name,
 						Transform: field.Transform,
 					}, nil
 				}
@@ -375,7 +430,6 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 		}
 	}
 	newFieldId := us.newFieldId()
-	transform, _ := iceberg.ParseTransform(key.Transform)
 	if name == "" {
 		tmpField := iceberg.PartitionField{
 			SourceIDs: []int{key.SourceId},
@@ -410,9 +464,10 @@ func (us *UpdateSpec) isDuplicatePartition(transform iceberg.Transform, partitio
 	return !deleted && transform.Equals(partitionField.Transform)
 }
 
-func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name string, sourceId int, partitionNames map[string]bool) error {
+func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name string, sourceId int, transform iceberg.Transform, partitionNames map[string]bool) error {
 	field, found := schema.FindFieldByName(name)
-	if found && field.ID != sourceId {
+	_, isVoid := transform.(iceberg.VoidTransform)
+	if found && field.ID != sourceId && (sourceId != 0 || !isVoid) {
 		return fmt.Errorf("cannot create partition from name that exists in schema %s", name)
 	}
 	if _, exists := partitionNames[name]; exists {
@@ -424,7 +479,7 @@ func (us *UpdateSpec) checkAndAddPartitionName(schema *iceberg.Schema, name stri
 }
 
 func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId int, name string, transform iceberg.Transform, partitionNames map[string]bool) (iceberg.PartitionField, error) {
-	err := us.checkAndAddPartitionName(schema, name, sourceId, partitionNames)
+	err := us.checkAndAddPartitionName(schema, name, sourceId, transform, partitionNames)
 	if err != nil {
 		return iceberg.PartitionField{}, err
 	}

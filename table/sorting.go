@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,16 +99,18 @@ func (s *SortField) String() string {
 	return fmt.Sprintf("%s(%d) %s %s", s.Transform, s.SourceID(), s.Direction, s.NullOrder)
 }
 
-func (s *SortField) MarshalJSON() ([]byte, error) {
-	if s.Direction == "" {
-		s.Direction = SortASC
+func (s SortField) MarshalJSON() ([]byte, error) {
+	direction := s.Direction
+	if direction == "" {
+		direction = SortASC
 	}
 
-	if s.NullOrder == "" {
-		if s.Direction == SortASC {
-			s.NullOrder = NullsFirst
+	nullOrder := s.NullOrder
+	if nullOrder == "" {
+		if direction == SortASC {
+			nullOrder = NullsFirst
 		} else {
-			s.NullOrder = NullsLast
+			nullOrder = NullsLast
 		}
 	}
 
@@ -117,7 +120,7 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 			Transform iceberg.Transform `json:"transform"`
 			Direction SortDirection     `json:"direction"`
 			NullOrder NullOrder         `json:"null-order"`
-		}{s.SourceIDs, s.Transform, s.Direction, s.NullOrder})
+		}{s.SourceIDs, s.Transform, direction, nullOrder})
 	}
 
 	return json.Marshal(struct {
@@ -125,7 +128,7 @@ func (s *SortField) MarshalJSON() ([]byte, error) {
 		Transform iceberg.Transform `json:"transform"`
 		Direction SortDirection     `json:"direction"`
 		NullOrder NullOrder         `json:"null-order"`
-	}{s.SourceID(), s.Transform, s.Direction, s.NullOrder})
+	}{s.SourceID(), s.Transform, direction, nullOrder})
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
@@ -143,6 +146,10 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int           `json:"source-id"`
 		SourceIDs       []int         `json:"source-ids,omitempty"`
@@ -155,35 +162,39 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	s.Direction = aux.Direction
-	s.NullOrder = aux.NullOrder
-
-	if hasSourceIDs {
-		s.SourceIDs = aux.SourceIDs
-	} else {
-		s.SourceIDs = []int{aux.SourceID}
+	next := SortField{
+		Direction: aux.Direction,
+		NullOrder: aux.NullOrder,
 	}
 
-	if err := validateSortSourceIDs(s.SourceIDs); err != nil {
+	if hasSourceIDs {
+		next.SourceIDs = aux.SourceIDs
+	} else {
+		next.SourceIDs = []int{aux.SourceID}
+	}
+
+	if err := validateSortSourceIDs(next.SourceIDs); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
 	}
 
 	var err error
-	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
 		return err
 	}
 
-	switch s.Direction {
+	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
 		return ErrInvalidSortDirection
 	}
 
-	switch s.NullOrder {
+	switch next.NullOrder {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
 	}
+
+	*s = next
 
 	return nil
 }
@@ -233,11 +244,24 @@ func (s SortOrder) OrderID() int {
 }
 
 func (s SortOrder) Fields() iter.Seq2[int, SortField] {
-	return slices.All(s.fields)
+	return func(yield func(int, SortField) bool) {
+		for i, field := range s.fields {
+			if !yield(i, cloneSortField(field)) {
+				return
+			}
+		}
+	}
 }
 
 func (s SortOrder) Len() int {
 	return len(s.fields)
+}
+
+// Field returns a copy of the sort field at index i, like Fields does, so a
+// caller can't reach the sort order's internals through SortField.SourceIDs.
+// It panics if i is out of range.
+func (s SortOrder) Field(i int) SortField {
+	return cloneSortField(s.fields[i])
 }
 
 func (s SortOrder) MarshalJSON() ([]byte, error) {
@@ -309,6 +333,11 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		if field.Transform == nil {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d has no transform", ErrInvalidTransform, idx)
 		}
+		if marshaler, ok := field.Transform.(encoding.TextMarshaler); ok {
+			if _, err := marshaler.MarshalText(); err != nil {
+				return SortOrder{}, fmt.Errorf("%w: sort field at index %d: %w", ErrInvalidTransform, idx, err)
+			}
+		}
 		if field.Direction != SortASC && field.Direction != SortDESC {
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidSortDirection, idx)
 		}
@@ -323,7 +352,30 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		}
 	}
 
-	return SortOrder{orderID, fields}, nil
+	fieldCopies := make([]SortField, len(fields))
+	for i, field := range fields {
+		fieldCopies[i] = cloneSortField(field)
+	}
+
+	return SortOrder{orderID, fieldCopies}, nil
+}
+
+func cloneSortField(field SortField) SortField {
+	field.SourceIDs = slices.Clone(field.SourceIDs)
+	switch transform := field.Transform.(type) {
+	case *iceberg.BucketTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	case *iceberg.TruncateTransform:
+		if transform != nil {
+			cloned := *transform
+			field.Transform = &cloned
+		}
+	}
+
+	return field
 }
 
 func (s SortOrder) IsUnsorted() bool {

@@ -36,11 +36,15 @@ import (
 	"github.com/apache/iceberg-go/catalog/hadoop"
 	"github.com/apache/iceberg-go/catalog/hive"
 	"github.com/apache/iceberg-go/catalog/rest"
+	sqlcat "github.com/apache/iceberg-go/catalog/sql"
 	"github.com/apache/iceberg-go/config"
 	_ "github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/table"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	// The default CLI binary only compiles in sqliteshim. Other database/sql
+	// drivers (postgres, mysql, mssql, oracle) require a custom build.
+	_ "github.com/uptrace/bun/driver/sqliteshim"
 )
 
 // Subcommand structs
@@ -200,7 +204,7 @@ type Args struct {
 	Upgrade          *UpgradeCmd          `arg:"subcommand:upgrade" help:"upgrade table format version"`
 	Rollback         *RollbackCmd         `arg:"subcommand:rollback" help:"roll back to a previous snapshot"`
 
-	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type"`
+	Catalog     string `arg:"--catalog" default:"rest" help:"catalog type (rest, glue, hive, hadoop, sql; dynamodb recognized but not implemented)"`
 	CatalogName string `arg:"--catalog-name" default:"default" help:"catalog name from config"`
 	URI         string `arg:"--uri" help:"catalog URI"`
 	Output      string `arg:"--output" default:"text" help:"output type (json/text)"`
@@ -210,6 +214,8 @@ type Args struct {
 	Scope       string `arg:"--scope" default:"catalog" help:"OAuth scope"`
 	Config      string `arg:"--config" help:"path to configuration file"`
 	AwsProfile  string `arg:"--aws-profile" help:"AWS profile to use (Glue catalog)"`
+	SQLDriver   string `arg:"--sql-driver" help:"database/sql driver name (SQL catalog; default binary includes sqliteshim only)"`
+	SQLDialect  string `arg:"--sql-dialect" help:"SQL dialect (SQL catalog; default binary includes sqlite via sqliteshim; other dialects need a custom build with their drivers)"`
 
 	RestOptions *config.RestOptions `arg:"-"`
 }
@@ -290,6 +296,13 @@ func main() {
 		}
 	}
 
+	// Reject known-but-unimplemented catalog types through the same output path
+	// as other user-facing errors (respects --output).
+	if catalog.Type(strings.ToLower(args.Catalog)) == catalog.DynamoDB {
+		output.Error(errors.New("dynamodb catalog is not implemented"))
+		os.Exit(1)
+	}
+
 	cat := initCatalog(ctx, args)
 
 	switch {
@@ -358,7 +371,7 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		err error
 	)
 
-	switch catalog.Type(args.Catalog) {
+	switch catalog.Type(strings.ToLower(args.Catalog)) {
 	case catalog.REST:
 		opts := []rest.Option{}
 		if len(args.Token) > 0 {
@@ -422,6 +435,27 @@ func initCatalog(ctx context.Context, args Args) catalog.Catalog {
 		}); err != nil {
 			log.Fatal(err)
 		}
+	case catalog.SQL:
+		// Always set uri/warehouse/credential keys (even when empty) so
+		// catalog.Load does not fill them from EnvConfig for a differently typed
+		// catalog of the same name. mergeConf populates these from the config
+		// file before initCatalog runs when the flags were omitted.
+		props := iceberg.Properties{
+			"type":       string(catalog.SQL),
+			"uri":        args.URI,
+			"warehouse":  args.Warehouse,
+			"credential": args.Credential,
+		}
+		if len(args.SQLDriver) > 0 {
+			props[sqlcat.DriverKey] = args.SQLDriver
+		}
+		if len(args.SQLDialect) > 0 {
+			props[sqlcat.DialectKey] = args.SQLDialect
+		}
+
+		if cat, err = catalog.Load(ctx, args.CatalogName, props); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		log.Fatal("unrecognized catalog type")
 	}
@@ -462,11 +496,11 @@ func runCreate(ctx context.Context, output Output, cat catalog.Catalog, cmd *Cre
 		ns := cmd.Namespace
 		props := iceberg.Properties{}
 		if ns.Description != "" {
-			props["Description"] = ns.Description
+			props["comment"] = ns.Description
 		}
 
 		if ns.LocationURI != "" {
-			props["Location"] = ns.LocationURI
+			props["location"] = ns.LocationURI
 		}
 
 		err := cat.CreateNamespace(ctx, catalog.ToIdentifier(ns.Identifier), props)
@@ -563,24 +597,43 @@ func runDrop(ctx context.Context, output Output, cat catalog.Catalog, cmd *DropC
 		if err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Namespace " + cmd.Namespace.Identifier + " dropped successfully")
 	case cmd.Table != nil:
 		ident := catalog.ToIdentifier(cmd.Table.Identifier)
-		var err error
+
 		if cmd.Table.Purge {
-			if purger, ok := cat.(catalog.PurgeableTable); ok {
-				err = purger.PurgeTable(ctx, ident)
-			} else {
+			purger, ok := cat.(catalog.PurgeableTable)
+			if !ok {
 				output.Error(fmt.Errorf("catalog %s does not support purge", cat.CatalogType()))
 				osExit(1)
+
+				return
 			}
-		} else {
-			err = cat.DropTable(ctx, ident)
+
+			if err := purger.PurgeTable(ctx, ident); err != nil {
+				output.Error(err)
+				osExit(1)
+
+				return
+			}
+
+			output.Text("Table " + cmd.Table.Identifier + " purged successfully")
+
+			return
 		}
-		if err != nil {
+
+		if err := cat.DropTable(ctx, ident); err != nil {
 			output.Error(err)
 			osExit(1)
+
+			return
 		}
+
+		output.Text("Table " + cmd.Table.Identifier + " dropped successfully")
 	}
 }
 
@@ -633,8 +686,8 @@ func runProperties(ctx context.Context, output Output, cat catalog.Catalog, cmd 
 		if val, ok := props[get.PropName]; ok {
 			output.Text(val)
 		} else {
-			output.Error(errors.New("could not find property " + get.PropName + " on namespace " + get.Identifier))
-			os.Exit(1)
+			output.Error(fmt.Errorf("could not find property %s on %s %s", get.PropName, get.Type, get.Identifier))
+			osExit(1)
 		}
 	case cmd.Set != nil:
 		set := cmd.Set
@@ -883,6 +936,14 @@ func mergeConf(fileConf *config.CatalogConfig, args *Args, explicitFlags map[str
 
 	if !explicitFlags["aws-profile"] && len(fileConf.AwsProfile) > 0 {
 		args.AwsProfile = fileConf.AwsProfile
+	}
+
+	if !explicitFlags["sql-driver"] && len(fileConf.SQLDriver) > 0 {
+		args.SQLDriver = fileConf.SQLDriver
+	}
+
+	if !explicitFlags["sql-dialect"] && len(fileConf.SQLDialect) > 0 {
+		args.SQLDialect = fileConf.SQLDialect
 	}
 
 	if fileConf.RestOptions != nil {

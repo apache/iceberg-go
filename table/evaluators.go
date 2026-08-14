@@ -19,12 +19,14 @@ package table
 
 import (
 	"encoding"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
 
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
@@ -39,7 +41,8 @@ const (
 // manifest file has rows that might or might not match a given partition filter by using
 // the stats provided in the partitions (UpperBound/LowerBound/ContainsNull/ContainsNaN).
 func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitionFilter iceberg.BooleanExpression, caseSensitive bool) (func(iceberg.ManifestFile) (bool, error), error) {
-	partSchema := iceberg.NewSchema(0, manifestPartitionFields(spec, schema)...)
+	partType := spec.PartitionType(schema)
+	partSchema := iceberg.NewSchema(0, partType.FieldList...)
 	filter, err := iceberg.RewriteNotExpr(partitionFilter)
 	if err != nil {
 		return nil, err
@@ -51,30 +54,6 @@ func newManifestEvaluator(spec iceberg.PartitionSpec, schema *iceberg.Schema, pa
 	}
 
 	return (&manifestEvalVisitor{partitionFilter: boundFilter}).Eval, nil
-}
-
-// manifestPartitionFields builds the partition-struct fields for evaluating
-// manifest FieldSummary lists. Summaries are positional per the spec's full
-// field list, so unlike PartitionSpec.PartitionType (which compacts fields
-// whose source column is missing from the schema), every spec field must be
-// kept. A dropped-source field becomes an Unknown-typed placeholder that no
-// projected predicate can reference, preserving positions of later fields.
-func manifestPartitionFields(spec iceberg.PartitionSpec, schema *iceberg.Schema) []iceberg.NestedField {
-	fields := make([]iceberg.NestedField, 0, spec.NumFields())
-	for _, field := range spec.Fields() {
-		typ := iceberg.Type(iceberg.UnknownType{})
-		if sourceType, ok := schema.FindTypeByID(field.SourceID()); ok {
-			typ = field.Transform.ResultType(sourceType)
-		}
-		fields = append(fields, iceberg.NestedField{
-			ID:       field.FieldID,
-			Name:     field.Name,
-			Type:     typ,
-			Required: false,
-		})
-	}
-
-	return fields
 }
 
 type manifestEvalVisitor struct {
@@ -97,7 +76,12 @@ func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) 
 		partitionFilter: m.partitionFilter,
 	}
 
-	return iceberg.VisitExpr(ev.partitionFilter, &ev)
+	result, err := iceberg.VisitExpr(ev.partitionFilter, &ev)
+	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func removeBoundCmp[T iceberg.LiteralType](bound iceberg.Literal, vals []iceberg.Literal, cmpToDelete int) []iceberg.Literal {
@@ -553,6 +537,31 @@ func (m *manifestEvalVisitor) VisitNotStartsWith(term iceberg.BoundTerm, lit ice
 	return rowsMightMatch
 }
 
+// Manifest (partition-summary) pruning does not apply to geo predicates: no
+// partition transform accepts a geometry/geography source (Transform.CanTransform
+// rejects them), so a geo column is never a partition field and a bbox predicate
+// always projects to AlwaysTrue before reaching this evaluator. These methods
+// exist only to satisfy the visitor interface and conservatively keep every
+// manifest. Data-file pruning is handled by inclusiveMetricsEval.
+func (m *manifestEvalVisitor) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) bool {
+	return rowsMightMatch
+}
+
+func (m *manifestEvalVisitor) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) bool {
+	return rowsMightMatch
+}
+
+// These evaluators handle geospatial predicates, so they implement the optional
+// iceberg.BoundGeospatialExprVisitor. The assertions keep that wiring
+// compile-checked now that the geo methods live on that extension interface
+// rather than on BoundBooleanExprVisitor.
+var (
+	_ iceberg.BoundGeospatialExprVisitor[bool]                         = (*manifestEvalVisitor)(nil)
+	_ iceberg.BoundGeospatialExprVisitor[bool]                         = (*inclusiveMetricsEval)(nil)
+	_ iceberg.BoundGeospatialExprVisitor[bool]                         = (*strictMetricsEval)(nil)
+	_ iceberg.BoundGeospatialExprVisitor[[]internal.RowGroupBloomPred] = (*bloomPredicateCollector)(nil)
+)
+
 func (m *manifestEvalVisitor) VisitTrue() bool {
 	return rowsMightMatch
 }
@@ -566,7 +575,7 @@ func (m *manifestEvalVisitor) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *manifestEvalVisitor) VisitNot(child bool) bool       { return !child }
@@ -717,7 +726,6 @@ func newInclusiveMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpress
 	}
 
 	return (&inclusiveMetricsEval{
-		st:                s.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              bound,
 	}).Eval, nil
@@ -732,7 +740,6 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 	}
 
 	return (&inclusiveMetricsEval{
-		st:                fileSchema.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              rewritten,
 	}).TestRowGroup, nil
@@ -740,8 +747,6 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 
 type inclusiveMetricsEval struct {
 	metricsEvaluator
-
-	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
 }
@@ -787,7 +792,12 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		}
 	}
 
-	return iceberg.VisitExpr(m.expr, m)
+	result, err := iceberg.VisitExpr(m.expr, m)
+	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
@@ -797,16 +807,18 @@ func (m *inclusiveMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	// avoid race condition while maintaining existing state
 	ev := inclusiveMetricsEval{
-		st:                m.st,
 		includeEmptyFiles: m.includeEmptyFiles,
 		expr:              m.expr,
 	}
 
-	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
-	ev.nanCounts = file.NaNValueCounts()
-	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
-	return iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExpr(m.expr, &ev)
+	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
+		return rowsMightMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *inclusiveMetricsEval) mayContainNull(fieldID int) bool {
@@ -824,7 +836,7 @@ func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *inclusiveMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
@@ -1237,6 +1249,43 @@ func (m *inclusiveMetricsEval) VisitNotStartsWith(t iceberg.BoundTerm, lit icebe
 	return rowsMightMatch
 }
 
+func (m *inclusiveMetricsEval) VisitBBoxIntersects(t iceberg.BoundTerm, bbox iceberg.BoundingBox) bool {
+	fieldID := t.Ref().Field().ID
+
+	// If the column is entirely null, no geometry can intersect the query box.
+	if m.containsNullsOnly(fieldID) {
+		return rowsCannotMatch
+	}
+
+	// Only geometry bounds are safe to prune with a planar min/max compare.
+	// Geography bounds are geodesic and may cross the antimeridian (lower_x >
+	// upper_x; spec Appendix D), which scalar XY intersection would mis-handle
+	// and wrongly prune. iceberg-go emits no geography bounds, but files written
+	// by other engines can, so guard on the column type rather than on presence.
+	if _, isGeography := t.Ref().Field().Type.(iceberg.GeographyType); isGeography {
+		return rowsMightMatch
+	}
+
+	// Prune only when both geo bounds are present and decode cleanly. A missing
+	// or malformed bound leaves the file unprunable, which is always safe.
+	minX, minY, maxX, maxY, ok := internal.GeoBoundsXY(m.lowerBounds[fieldID], m.upperBounds[fieldID])
+	if !ok {
+		return rowsMightMatch
+	}
+
+	if internal.BBoxIntersectsXY(minX, minY, maxX, maxY, bbox.MinX, bbox.MinY, bbox.MaxX, bbox.MaxY) {
+		return rowsMightMatch
+	}
+
+	return rowsCannotMatch
+}
+
+func (m *inclusiveMetricsEval) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) bool {
+	// A file whose bounds intersect the query box may still hold only geometries
+	// outside it, so not-intersects cannot be answered from bounds alone.
+	return rowsMightMatch
+}
+
 func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression,
 	caseSensitive bool, includeEmptyFiles bool,
 ) (func(iceberg.DataFile) (bool, error), error) {
@@ -1251,7 +1300,6 @@ func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression
 	}
 
 	return (&strictMetricsEval{
-		st:                s.AsStruct(),
 		includeEmptyFiles: includeEmptyFiles,
 		expr:              bound,
 	}).Eval, nil
@@ -1259,8 +1307,6 @@ func newStrictMetricsEvaluator(s *iceberg.Schema, expr iceberg.BooleanExpression
 
 type strictMetricsEval struct {
 	metricsEvaluator
-
-	st                iceberg.StructType
 	expr              iceberg.BooleanExpression
 	includeEmptyFiles bool
 }
@@ -1272,16 +1318,18 @@ func (m *strictMetricsEval) Eval(file iceberg.DataFile) (bool, error) {
 
 	// avoid race condition while maintaining existing state
 	ev := strictMetricsEval{
-		st:                m.st,
 		includeEmptyFiles: m.includeEmptyFiles,
 		expr:              m.expr,
 	}
 
-	ev.valueCounts, ev.nullCounts = file.ValueCounts(), file.NullValueCounts()
-	ev.nanCounts = file.NaNValueCounts()
-	ev.lowerBounds, ev.upperBounds = file.LowerBoundValues(), file.UpperBoundValues()
+	ev.valueCounts, ev.nullCounts, ev.nanCounts, ev.lowerBounds, ev.upperBounds = dataFileStats(file)
 
-	return iceberg.VisitExpr(m.expr, &ev)
+	result, err := iceberg.VisitExpr(m.expr, &ev)
+	if errors.Is(err, iceberg.ErrInvalidFixedLength) {
+		return rowsMightNotMatch, nil
+	}
+
+	return result, err
 }
 
 func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
@@ -1289,7 +1337,7 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
-	return iceberg.VisitBoundPredicate(pred, m)
+	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
 func (m *strictMetricsEval) VisitIsNull(t iceberg.BoundTerm) bool {
@@ -1592,6 +1640,17 @@ func (m *strictMetricsEval) VisitNotStartsWith(iceberg.BoundTerm, iceberg.Litera
 	return rowsMightNotMatch
 }
 
+// Strict evaluation asks whether every row must match. Bounds can prove a bbox
+// predicate false for a file (disjoint bounds) but never that every geometry
+// intersects the query box, so neither variant can assert rowsMustMatch.
+func (m *strictMetricsEval) VisitBBoxIntersects(iceberg.BoundTerm, iceberg.BoundingBox) bool {
+	return rowsMightNotMatch
+}
+
+func (m *strictMetricsEval) VisitBBoxNotIntersects(iceberg.BoundTerm, iceberg.BoundingBox) bool {
+	return rowsMightNotMatch
+}
+
 func (m *strictMetricsEval) mayContainNulls(field iceberg.NestedField) bool {
 	cnt, exists := m.nullCounts[field.ID]
 	if !exists {
@@ -1700,7 +1759,7 @@ func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []int
 }
 
 func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
-	return iceberg.VisitBoundPredicate(pred, c)
+	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
 }
 
 func (c *bloomPredicateCollector) VisitEqual(t iceberg.BoundTerm, lit iceberg.Literal) []internal.RowGroupBloomPred {
@@ -1785,6 +1844,14 @@ func (c *bloomPredicateCollector) VisitStartsWith(_ iceberg.BoundTerm, _ iceberg
 }
 
 func (c *bloomPredicateCollector) VisitNotStartsWith(_ iceberg.BoundTerm, _ iceberg.Literal) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitBBoxIntersects(_ iceberg.BoundTerm, _ iceberg.BoundingBox) []internal.RowGroupBloomPred {
+	return nil
+}
+
+func (c *bloomPredicateCollector) VisitBBoxNotIntersects(_ iceberg.BoundTerm, _ iceberg.BoundingBox) []internal.RowGroupBloomPred {
 	return nil
 }
 

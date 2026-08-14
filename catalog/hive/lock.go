@@ -21,7 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"time"
@@ -101,7 +101,11 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	// If not acquired immediately, wait and retry
 	for attempt := 0; attempt < opts.LockRetries; attempt++ {
 		// Wait before checking again
-		waitTime := calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime)
+		waitTime := applyJitter(
+			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),
+			opts.LockMinWaitTime,
+			opts.LockMaxWaitTime,
+		)
 
 		select {
 		case <-ctx.Done():
@@ -148,16 +152,127 @@ func formatLockIdentifiers(identifiers []tableLockIdentifier) string {
 }
 
 func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration {
-	wait := time.Duration(float64(minWait) * math.Pow(2, float64(attempt)))
-	if wait > maxWait {
-		wait = maxWait
+	if minWait >= maxWait {
+		return maxWait
+	}
+	if attempt <= 0 || minWait <= 0 {
+		return minWait
 	}
 
-	return wait
+	// Match Java's lock-check schedule: minWait * 1.5^attempt, capped at maxWait.
+	// (MetastoreLock uses scaleFactor 1.5 for checkLock retries; the lock-create
+	// path still uses 2.0, and is not mirrored here.)
+	wait := float64(minWait)
+	for i := 0; i < attempt; i++ {
+		next := wait * lockCheckBackoffScale
+		// next <= wait catches +Inf / non-advancing overflow on extreme inputs.
+		if next >= float64(maxWait) || next <= wait {
+			return maxWait
+		}
+		wait = next
+	}
+
+	return time.Duration(wait)
+}
+
+// applyJitter spreads a backoff interval so clients contending for the same lock
+// stop re-polling in lockstep. calculateBackoff is a pure function of the attempt
+// and the configured bounds, and contention is the precondition for retrying at
+// all, so without this every waiter issues its CheckLock calls at the same instants
+// and each round reaches the metastore as a burst.
+//
+// The invariants, in the order the code establishes them:
+//   - below the cap the jitter is added rather than centred, so the wait is never
+//     shorter than the interval calculateBackoff produced;
+//   - at the cap there is no headroom left to add into, so the wait is spread
+//     downward instead, floored at the last interval the sequence produced before
+//     it saturated — a bound the schedule has already cleared, which stops a later
+//     attempt from being allowed to wait less than an earlier one;
+//   - the result never exceeds maxWait, and never falls below minWait when
+//     minWait <= maxWait. When minWait > maxWait the configuration is
+//     self-contradictory, calculateBackoff resolves it to maxWait, and this
+//     returns exactly maxWait — below the configured minimum, because there is no
+//     value that honours both bounds.
+//
+// The spread below the cap is wider than the Java implementation's. Java's
+// Tasks.exponentialBackoff jitters by roughly 10% of the current delay, whereas
+// this draws from [d, 2d]. The wider window is deliberate — it decorrelates a
+// contended fleet faster — but it does mean Go and Java clients polling the same
+// metastore spread differently, so do not assume the two are interchangeable when
+// reasoning about load.
+func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+
+	// A caller that hands in an interval already past the cap is outside the
+	// contract; leave it exactly as given rather than silently reshaping it.
+	headroom := maxWait - d
+	if headroom < 0 {
+		return d
+	}
+
+	// Add up to another full interval, without exceeding the configured maximum.
+	extra := d
+	if headroom < extra {
+		extra = headroom
+	}
+	if extra > 0 {
+		return d + time.Duration(rand.Int64N(int64(extra)+1))
+	}
+
+	// Everything below this point is unreachable under the default configuration.
+	// iceberg.hive.lock-check-min-wait-ms=50, iceberg.hive.lock-check-max-wait-ms=5000
+	// and lock-check-retries=4 top the sequence out at 168.75ms (50×1.5³), so it never
+	// saturates and the branch above always wins. Getting here needs a lowered
+	// maximum or a raised retry count. Stated plainly because this is the most
+	// intricate part of the helper and the least exercised in practice.
+	//
+	// Replay the 1.5× backoff sequence and keep the largest interval that still
+	// fitted under the cap. The guard on scheduled keeps a non-positive or
+	// non-advancing minWait from spinning here.
+	//
+	// The replay is what a flat max(minWait, d/scale) floor cannot do, and the gap
+	// is not hypothetical: at minWait=300ms, maxWait=1s the sequence runs 300ms,
+	// 450ms, 675ms, then saturates. The last uncapped interval is 675ms, but
+	// d/1.5 is ~666ms, so a flat floor would let the first capped attempt wait less
+	// than the one before it.
+	//
+	// minWait is applied before the replay rather than relying on it. When minWait
+	// is itself >= maxWait the loop cannot run at all. ApplyProperties ignores that
+	// configuration, but direct callers can still pass it, so leaving the floor at
+	// d/scale there would allow a wait below the configured minimum.
+	floor := max(minWait, time.Duration(float64(d)/lockCheckBackoffScale))
+	for scheduled := float64(minWait); scheduled > 0 && scheduled < float64(maxWait); {
+		if s := time.Duration(scheduled); s > floor {
+			floor = s
+		}
+		next := scheduled * lockCheckBackoffScale
+		if next <= scheduled {
+			break
+		}
+		scheduled = next
+	}
+	if floor >= d {
+		return d
+	}
+
+	return d - time.Duration(rand.Int64N(int64(d-floor)+1))
 }
 
 func (l *HiveLock) Release(ctx context.Context) error {
 	return l.client.Unlock(ctx, l.lockId)
+}
+
+func (l *HiveLock) releaseForCleanup(ctx context.Context) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pendingLockCleanupTimeout)
+	defer cancel()
+
+	if err := l.Release(cleanupCtx); err != nil {
+		return fmt.Errorf("failed to release acquired lock %d: %w", l.lockId, err)
+	}
+
+	return nil
 }
 
 func (l *HiveLock) LockID() int64 {

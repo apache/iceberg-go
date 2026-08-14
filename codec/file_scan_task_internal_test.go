@@ -18,11 +18,42 @@
 package codec
 
 import (
+	"encoding/binary"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateScanRange(t *testing.T) {
+	for _, tt := range []struct {
+		name              string
+		start, length     int64
+		fileSize          int64
+		shouldReturnError bool
+	}{
+		{name: "full file", length: 100, fileSize: 100},
+		{name: "empty range at EOF", start: 100, fileSize: 100},
+		{name: "empty file", fileSize: 0},
+		{name: "one byte at EOF", start: 100, length: 1, fileSize: 100, shouldReturnError: true},
+		{name: "maximum file size with empty range", start: math.MaxInt64, fileSize: math.MaxInt64},
+		{name: "maximum file size boundary", start: math.MaxInt64 - 1, length: 1, fileSize: math.MaxInt64},
+		{name: "start after EOF", start: 101, fileSize: 100, shouldReturnError: true},
+		{name: "end after EOF", start: 99, length: 2, fileSize: 100, shouldReturnError: true},
+		{name: "start plus length overflows", start: math.MaxInt64 - 1, length: 2, fileSize: math.MaxInt64, shouldReturnError: true},
+		{name: "negative file size", fileSize: -1, shouldReturnError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateScanRange(tt.start, tt.length, tt.fileSize)
+			if tt.shouldReturnError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 // TestDecodeFileScanTaskInnerErrorCarriesMarker covers an inner decode path:
 // the outer Avro envelope decodes fine, but the framed primary-file blob is not
@@ -46,6 +77,30 @@ func TestDecodeFileScanTaskInnerErrorCarriesMarker(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "codec: DecodeFileScanTask: file:",
 		"an inner (primary-file) decode error must carry the function + sub-path marker")
+}
+
+func TestDecodeFileScanTaskResidualExtension(t *testing.T) {
+	schema := iceberg.NewSchema(123,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.Int64Type{}, Required: true},
+	)
+	payload := []byte(`{"type":"eq","term":"id","value":42}`)
+	extension := append([]byte(nil), fileScanTaskResidualMagic...)
+	extension = binary.AppendUvarint(extension, uint64(len(payload)))
+	extension = append(extension, payload...)
+
+	residual, err := decodeFileScanTaskResidual(extension, schema)
+	require.NoError(t, err)
+	require.True(t, residual.Equals(iceberg.EqualTo(iceberg.Reference("id"), int64(42))))
+
+	legacy, err := decodeFileScanTaskResidual(nil, schema)
+	require.NoError(t, err)
+	require.Nil(t, legacy)
+
+	_, err = decodeFileScanTaskResidual([]byte("unknown"), schema)
+	require.ErrorContains(t, err, "unknown trailing extension")
+
+	_, err = decodeFileScanTaskResidual(extension[:len(extension)-1], schema)
+	require.ErrorContains(t, err, "residual length")
 }
 
 func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
@@ -84,4 +139,22 @@ func TestDecodeFileScanTaskRejectsNegativeScanRanges(t *testing.T) {
 		require.Contains(t, err.Error(), "codec: DecodeFileScanTask:")
 		require.Contains(t, err.Error(), "length must be non-negative")
 	})
+}
+
+func TestDecodeFileScanTaskAllowsRangeBeyondFileSize(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+		"data.parquet", iceberg.ParquetFile, nil, nil, nil, 1, 100)
+	require.NoError(t, err)
+	file, err := EncodeDataFile(builder.Build(), spec, nil, 2)
+	require.NoError(t, err)
+	envelope, err := fileScanTaskSchema.Encode(&fileScanTaskEnvelope{
+		File: file, Start: 90, Length: 11,
+	})
+	require.NoError(t, err)
+
+	decoded, err := DecodeFileScanTask(envelope, spec, nil, 2)
+	require.NoError(t, err)
+	require.Equal(t, int64(90), decoded.Start)
+	require.Equal(t, int64(11), decoded.Length)
 }

@@ -57,6 +57,7 @@ import (
 	"strings"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -358,7 +359,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 // predicate call this so that a concurrent append into the same
 // partition is rejected before the commit overwrites it.
 //
-// The check runs in two layers:
+// The check runs in three layers:
 //  1. A manifest-level partition-summary evaluator prunes manifests
 //     whose summaries cannot overlap the filter.
 //  2. Inside surviving manifests, every ADDED entry attributed to the
@@ -366,10 +367,8 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 //     evaluator on its partition tuple, so a manifest whose summary
 //     straddles the filter only triggers a conflict when at least
 //     one actual added file's partition value satisfies the filter.
-//
-// Per-file metric evaluation (a third pass in Java that refines
-// beyond partition for columns not in the spec) is TODO and tracked
-// under issue #830 follow-ups.
+//  3. The surviving files are evaluated against their column metrics so
+//     files whose bounds cannot match the filter are ignored.
 func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
 	if len(ctx.concurrent) == 0 {
 		return nil
@@ -394,6 +393,14 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
+	// Eval copies each file's metrics into fresh evaluator state, so this
+	// evaluator can be reused across concurrent manifests.
+	// includeEmptyFiles=false is intentional: an empty file has no rows that
+	// can match the filter and must not create a conflict.
+	metricsEval, err := newInclusiveMetricsEvaluator(ctx.current.CurrentSchema(), filter, ctx.caseSensitive, false)
+	if err != nil {
+		return fmt.Errorf("failed to build metrics evaluator: %w", err)
+	}
 
 	for _, snap := range ctx.concurrent {
 		manifests, err := snap.Manifests(ctx.fs)
@@ -431,6 +438,13 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				matches, err := pEval(e.DataFile())
 				if err != nil {
 					return err
+				}
+				if !matches {
+					continue
+				}
+				matches, err = metricsEval(e.DataFile())
+				if err != nil {
+					return fmt.Errorf("evaluating metrics for data file %s: %w", e.DataFile().FilePath(), err)
 				}
 				if !matches {
 					continue
@@ -516,7 +530,7 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
 	for _, f := range files {
-		p := f.Partition()
+		p := iceberginternal.BorrowedDataFilePartition(f)
 		if len(p) == 0 {
 			return iceberg.AlwaysTrue{}, nil
 		}
@@ -639,7 +653,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
 	for _, df := range rewrittenFiles {
 		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := partitionConflictKey(df.SpecID(), df.Partition())
+		key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
 		if err != nil {
 			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
 				df.FilePath(), df.SpecID(), err)
@@ -660,7 +674,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 				return nil
 			}
 
-			key, err := partitionConflictKey(df.SpecID(), df.Partition())
+			key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
 					df.FilePath(), df.SpecID(), err)
@@ -692,12 +706,13 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 // can be determined), which callers must treat conservatively via a
 // partition-tuple match rather than skipping the delete.
 func referencedDataFilePath(df iceberg.DataFile) string {
-	if ref := df.ReferencedDataFile(); ref != nil {
+	if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); ref != nil {
 		return *ref
 	}
 
-	lower := df.LowerBoundValues()[filePathFieldID]
-	upper := df.UpperBoundValues()[filePathFieldID]
+	lowerBounds, upperBounds := iceberginternal.BorrowedDataFileBounds(df)
+	lower := lowerBounds[filePathFieldID]
+	upper := upperBounds[filePathFieldID]
 	if len(lower) == 0 || !bytes.Equal(lower, upper) {
 		return ""
 	}
