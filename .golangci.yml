@@ -70,6 +70,3 @@ formatters:
       - third_party$
       - builtin$
       - examples$
-issues:
-  max-same-issues: 0
-  max-issues-per-linter: 0
