@@ -486,7 +486,8 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	// main instead. An absent ref must fail here, never fall back.
 	ref, ok := meta.refs[branch]
 	if !ok {
-		return fmt.Errorf("cannot rollback: branch %q does not exist", branch)
+		return fmt.Errorf("%w: cannot rollback: branch %q does not exist",
+			iceberg.ErrInvalidArgument, branch)
 	}
 
 	if ref.SnapshotRefType != BranchRef {
@@ -498,6 +499,8 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	// (checkRefsExist) rejects dangling refs on load, so reaching this means
 	// in-flight builder state is inconsistent. Fail closed and name the ref
 	// rather than reporting the branch as empty.
+	// Delibertely not wrapped in iceberg.ErrInvalidArgument:
+	// table state is invalid; not caller input
 	cs, err := meta.SnapshotByID(ref.SnapshotID)
 	if err != nil {
 		return fmt.Errorf("cannot rollback: branch %q references unknown snapshot %d: %w",
@@ -511,8 +514,8 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	}
 
 	if !IsAncestorOf(cs.SnapshotID, snapshotID, lookup) {
-		return fmt.Errorf("snapshot %d is not an ancestor of branch %q head snapshot %d",
-			snapshotID, branch, cs.SnapshotID)
+		return fmt.Errorf("%w: snapshot %d is not an ancestor of branch %q head snapshot %d",
+			iceberg.ErrInvalidArgument, snapshotID, branch, cs.SnapshotID)
 	}
 
 	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
