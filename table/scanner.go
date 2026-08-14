@@ -146,28 +146,30 @@ func newManifestEntries() *manifestEntries {
 	}
 }
 
-func (m *manifestEntries) addDataEntry(e iceberg.ManifestEntry) {
+func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.dataEntries = append(m.dataEntries, e)
-}
 
-func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
-}
+	for _, entry := range entries {
+		dataFile := entry.DataFile()
+		switch dataFile.ContentType() {
+		case iceberg.EntryContentData:
+			m.dataEntries = append(m.dataEntries, entry)
+		case iceberg.EntryContentPosDeletes:
+			if IsDeletionVector(dataFile) {
+				m.dvEntries = append(m.dvEntries, entry)
+			} else {
+				m.positionalDeleteEntries = append(m.positionalDeleteEntries, entry)
+			}
+		case iceberg.EntryContentEqDeletes:
+			m.equalityDeleteEntries = append(m.equalityDeleteEntries, entry)
+		default:
+			return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
+				ErrInvalidMetadata, dataFile.ContentType(), entry)
+		}
+	}
 
-func (m *manifestEntries) addEqualityDeleteEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.equalityDeleteEntries = append(m.equalityDeleteEntries, e)
-}
-
-func (m *manifestEntries) addDVEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.dvEntries = append(m.dvEntries, e)
+	return nil
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
@@ -785,24 +787,8 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			if err != nil {
 				return err
 			}
-
-			for _, e := range manifestEntries {
-				df := e.DataFile()
-				switch df.ContentType() {
-				case iceberg.EntryContentData:
-					entries.addDataEntry(e)
-				case iceberg.EntryContentPosDeletes:
-					if IsDeletionVector(e.DataFile()) {
-						entries.addDVEntry(e)
-					} else {
-						entries.addPositionalDeleteEntry(e)
-					}
-				case iceberg.EntryContentEqDeletes:
-					entries.addEqualityDeleteEntry(e)
-				default:
-					return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
-						ErrInvalidMetadata, df.ContentType(), e)
-				}
+			if err := entries.merge(manifestEntries); err != nil {
+				return err
 			}
 
 			return nil
