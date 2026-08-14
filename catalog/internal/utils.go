@@ -228,10 +228,14 @@ func getDefaultWarehouseLocation(namespaceKey, tablename string, nsprops, catpro
 // -                -> separator
 // ([\w-]{36})      -> UUID (36 characters, including hyphens)
 // (?:\.\w+)?       -> optional codec name
-// \.metadata\.json -> file extension
+// \.metadata\.json -> file extension at the end of the filename
 var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json$`)
 
 func ParseMetadataVersion(location string) int {
+	if strings.HasSuffix(location, "/") {
+		return -1
+	}
+
 	fileName := path.Base(location)
 	matches := tableMetadataFileNameRegex.FindStringSubmatch(fileName)
 
