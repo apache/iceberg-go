@@ -121,6 +121,8 @@ func TestCatalogRegistryNormalizesType(t *testing.T) {
 		return nil, nil
 	}))
 	t.Cleanup(func() { catalog.Unregister("MyCatalog") })
+	assert.Contains(t, catalog.GetRegisteredCatalogs(), "mycatalog")
+	assert.NotContains(t, catalog.GetRegisteredCatalogs(), "MyCatalog")
 
 	c, err := catalog.Load(ctx, "test", iceberg.Properties{"type": "MYCATALOG"})
 	assert.NoError(t, err)
