@@ -209,7 +209,7 @@ func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.
 	for record, err := range records {
 		require.NoError(t, err)
 		column := record.Column(0).(*array.Int64)
-		for i := 0; i < column.Len(); i++ {
+		for i := range column.Len() {
 			ids = append(ids, column.Value(i))
 		}
 		record.Release()

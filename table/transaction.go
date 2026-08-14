@@ -560,7 +560,7 @@ func sameSortFields(a, b SortOrder) bool {
 	if a.Len() != b.Len() {
 		return false
 	}
-	for i := 0; i < a.Len(); i++ {
+	for i := range a.Len() {
 		if !a.Field(i).Equals(b.Field(i)) {
 			return false
 		}

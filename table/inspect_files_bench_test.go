@@ -40,7 +40,7 @@ func BenchmarkInspectContentFileAppender(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				for _, file := range files {
 					if err := appendFile(builder, file); err != nil {
 						b.Fatal(err)
@@ -63,7 +63,7 @@ func benchmarkInspectContentFiles(
 
 	schemaFields := make([]iceberg.NestedField, fieldCount)
 	partitionFields := make([]iceberg.PartitionField, fieldCount)
-	for i := 0; i < fieldCount; i++ {
+	for i := range fieldCount {
 		sourceID := i + 1
 		fieldID := 1000 + i
 		schemaFields[i] = iceberg.NestedField{
