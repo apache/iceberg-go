@@ -684,12 +684,14 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 
 	newOrderID := b.reuseOrCreateNewSortOrderID(sortOrder)
 	if _, err := b.GetSortOrderByID(newOrderID); err == nil {
+		// The order already exists in this metadata: reuse its ID and
+		// do NOT emit an add-sort-order update (REST catalogs reject
+		// adding a sort order under an existing ID). Record it as
+		// last-added so a following SetDefaultSortOrderID(-1) resolves
+		// to the reused ID; SetDefaultSortOrderID encodes the concrete
+		// ID in that case because no add update precedes it.
 		sortOrder.orderID = newOrderID
-
-		if b.lastAddedSortOrderID == nil || *b.lastAddedSortOrderID != newOrderID {
-			b.lastAddedSortOrderID = &newOrderID
-			b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
-		}
+		b.lastAddedSortOrderID = &newOrderID
 
 		return nil
 	}
@@ -773,7 +775,11 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 		return fmt.Errorf("%w: can't set default sort order to sort order with id %d: %w", iceberg.ErrInvalidArgument, defaultSortOrderID, err)
 	}
 
-	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID {
+	// Encode -1 ("last added") only when this builder actually emitted
+	// an add-sort-order update for that ID; when the last AddSortOrder
+	// reused an existing order no add update precedes this one, so the
+	// payload must carry the concrete ID to stay self-contained.
+	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.hasAddSortOrderUpdate(defaultSortOrderID) {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(-1))
 	} else {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(defaultSortOrderID))
@@ -1284,6 +1290,18 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	default:
 		return nil, fmt.Errorf("%w: unknown format version %d", ErrInvalidMetadata, b.formatVersion)
 	}
+}
+
+// hasAddSortOrderUpdate reports whether this builder has emitted an
+// add-sort-order update for the given order ID.
+func (b *MetadataBuilder) hasAddSortOrderUpdate(orderID int) bool {
+	for _, u := range b.updates {
+		if a, ok := u.(*addSortOrderUpdate); ok && a.SortOrder.OrderID() == orderID {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (b *MetadataBuilder) reuseOrCreateNewSortOrderID(newOrder *SortOrder) int {
