@@ -62,3 +62,17 @@ func TestParseMetadataVersionAcceptsLegacyMetadataLocation(t *testing.T) {
 	require.Equal(t, 1, ParseMetadataVersion("file:///tmp/table/metadata/v1.metadata.json"))
 	require.Equal(t, 2, ParseMetadataVersion("file:///tmp/table/metadata/v2.gz.metadata.json"))
 }
+
+func TestUpdateAndStageTableUsesVersionZeroForCreate(t *testing.T) {
+	staged, err := UpdateAndStageTable(
+		context.Background(),
+		nil,
+		nil,
+		[]string{"db", "tbl"},
+		nil,
+		[]table.Update{table.NewSetLocationUpdate("file:///tmp/table")},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, 0, ParseMetadataVersion(staged.MetadataLocation()))
+}
