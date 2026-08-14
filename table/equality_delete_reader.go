@@ -19,10 +19,13 @@ package table
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -42,7 +45,8 @@ var ErrAmbiguousEqualityColumn = errors.New("equality delete column is ambiguous
 // equalityDeleteSet holds the set of delete keys and the column names
 // used to look them up in data records. Each set corresponds to one
 // group of equality field IDs — delete files with different field IDs
-// produce separate sets.
+// produce separate sets. The set is immutable after construction so it
+// can be shared by tasks with the same delete files.
 type equalityDeleteSet struct {
 	keys     set[string]
 	fieldIDs []int
@@ -178,12 +182,18 @@ func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID 
 	}, nil
 }
 
+type equalityDeleteFileSet struct {
+	id int
+	*equalityDeleteSet
+}
+
 // readAllEqualityDeleteFiles reads all unique equality delete files from
 // the tasks and builds per-task delete key sets. Returns nil if there are
 // no equality deletes. Delete files with different equality field IDs are
 // kept as separate sets (not merged).
 func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceberg.Schema, nameMapping iceberg.NameMapping, tasks []FileScanTask, concurrency int) (map[int][]*equalityDeleteSet, error) {
 	type deleteFileInfo struct {
+		id       int
 		file     iceberg.DataFile
 		fieldIDs []int
 	}
@@ -204,6 +214,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			hasAny = true
 			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
 				uniqueDeletes[d.FilePath()] = deleteFileInfo{
+					id:       len(uniqueDeletes),
 					file:     d,
 					fieldIDs: d.EqualityFieldIDs(),
 				}
@@ -216,6 +227,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 	}
 
 	type deleteFileResult struct {
+		id       int
 		path     string
 		fieldIDs []int
 		colNames []string
@@ -238,6 +250,7 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 				}
 
 				resultCh <- deleteFileResult{
+					id:       info.id,
 					path:     info.file.FilePath(),
 					fieldIDs: info.fieldIDs,
 					colNames: colNames,
@@ -251,18 +264,15 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		_ = g.Wait()
 	}()
 
-	type perFileDeleteKeys struct {
-		fieldIDs []int
-		colNames []string
-		keys     set[string]
-	}
-
-	perFile := make(map[string]*perFileDeleteKeys)
+	perFile := make(map[string]*equalityDeleteFileSet)
 	for result := range resultCh {
-		perFile[result.path] = &perFileDeleteKeys{
-			fieldIDs: result.fieldIDs,
-			colNames: result.colNames,
-			keys:     result.keys,
+		perFile[result.path] = &equalityDeleteFileSet{
+			id: result.id,
+			equalityDeleteSet: &equalityDeleteSet{
+				fieldIDs: result.fieldIDs,
+				colNames: result.colNames,
+				keys:     result.keys,
+			},
 		}
 	}
 
@@ -270,16 +280,26 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		return nil, err
 	}
 
-	// Build per-task delete sets. Group by field IDs so delete files with
-	// different equality field sets are applied independently.
+	return buildEqualityDeleteSetsPerTask(tasks, perFile), nil
+}
+
+// buildEqualityDeleteSetsPerTask groups delete files by field IDs and merges
+// their keys into the sets used by each scan task.
+func buildEqualityDeleteSetsPerTask(
+	tasks []FileScanTask,
+	perFile map[string]*equalityDeleteFileSet,
+) map[int][]*equalityDeleteSet {
 	perTask := make(map[int][]*equalityDeleteSet)
+	// File IDs are sufficient as the cache key because each ID identifies one
+	// immutable delete set with a fixed equality-field group for this call.
+	sharedSets := make(map[string]*equalityDeleteSet)
 	for i, t := range tasks {
 		if len(t.EqualityDeleteFiles) == 0 {
 			continue
 		}
 
 		// Group delete files by their field IDs key.
-		groups := make(map[string]*equalityDeleteSet)
+		groups := make(map[string][]*equalityDeleteFileSet)
 		for _, d := range t.EqualityDeleteFiles {
 			dk, ok := perFile[d.FilePath()]
 			if !ok {
@@ -287,25 +307,14 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 			}
 
 			groupKey := fmt.Sprint(dk.fieldIDs)
-			g, exists := groups[groupKey]
-			if !exists {
-				g = &equalityDeleteSet{
-					keys:     make(set[string]),
-					fieldIDs: dk.fieldIDs,
-					colNames: dk.colNames,
-				}
-				groups[groupKey] = g
-			}
-
-			for k := range dk.keys {
-				g.keys[k] = struct{}{}
-			}
+			groups[groupKey] = append(groups[groupKey], dk)
 		}
 
 		sets := make([]*equalityDeleteSet, 0, len(groups))
-		for _, g := range groups {
-			if len(g.keys) > 0 {
-				sets = append(sets, g)
+		for _, files := range groups {
+			deleteSet := equalityDeleteSetForFiles(files, sharedSets)
+			if len(deleteSet.keys) > 0 {
+				sets = append(sets, deleteSet)
 			}
 		}
 
@@ -314,7 +323,47 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 		}
 	}
 
-	return perTask, nil
+	return perTask
+}
+
+func equalityDeleteSetForFiles(
+	files []*equalityDeleteFileSet,
+	sharedSets map[string]*equalityDeleteSet,
+) *equalityDeleteSet {
+	slices.SortFunc(files, func(a, b *equalityDeleteFileSet) int {
+		return cmp.Compare(a.id, b.id)
+	})
+	files = slices.CompactFunc(files, func(a, b *equalityDeleteFileSet) bool {
+		return a.id == b.id
+	})
+
+	if len(files) == 1 {
+		return files[0].equalityDeleteSet
+	}
+
+	combinationKey := make([]byte, 0, len(files)*8)
+	for _, file := range files {
+		combinationKey = binary.LittleEndian.AppendUint64(combinationKey, uint64(file.id))
+	}
+	key := string(combinationKey)
+	if deleteSet, ok := sharedSets[key]; ok {
+		return deleteSet
+	}
+
+	deleteSet := &equalityDeleteSet{
+		keys:     make(set[string]),
+		fieldIDs: files[0].fieldIDs,
+		colNames: files[0].colNames,
+	}
+	for _, file := range files {
+		for key := range file.keys {
+			deleteSet.keys[key] = struct{}{}
+		}
+	}
+
+	sharedSets[key] = deleteSet
+
+	return deleteSet
 }
 
 // readEqualityDeleteFile reads a single equality delete file and returns

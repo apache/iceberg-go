@@ -144,6 +144,80 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
 }
 
+func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.T) {
+	ctx := t.Context()
+	tbl := newEqDeleteReadTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := []string{
+		tbl.Location() + "/data/data-001.parquet",
+		tbl.Location() + "/data/data-002.parquet",
+	}
+	writeParquetFile(t, dataPaths[0], arrowSc, `[
+		{"id": 1, "data": "one"},
+		{"id": 2, "data": "two"}
+	]`)
+	writeParquetFile(t, dataPaths[1], arrowSc, `[
+		{"id": 3, "data": "three"},
+		{"id": 4, "data": "four"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(ctx, dataPaths, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		), nil, true, false)
+	require.NoError(t, err)
+	deleteTwoRecords, releaseTwo := makeEqDeleteRecords(t, deleteSchema, `[{"id": 2}]`)
+	defer releaseTwo()
+	deleteThreeRecords, releaseThree := makeEqDeleteRecords(t, deleteSchema, `[{"id": 3}]`)
+	defer releaseThree()
+
+	tx = tbl.NewTransaction()
+	deleteTwoFiles, err := tx.WriteEqualityDeletes(ctx, []int{1}, deleteTwoRecords)
+	require.NoError(t, err)
+	deleteThreeFiles, err := tx.WriteEqualityDeletes(ctx, []int{1}, deleteThreeRecords)
+	require.NoError(t, err)
+	require.Len(t, deleteTwoFiles, 1)
+	require.Len(t, deleteThreeFiles, 1)
+	require.NotEqual(t, deleteTwoFiles[0].FilePath(), deleteThreeFiles[0].FilePath())
+
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteTwoFiles...)
+	rowDelta.AddDeletes(deleteThreeFiles...)
+	require.NoError(t, rowDelta.Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	scan := tbl.Scan(table.WithMaxConcurrency(4), table.WithSelectedFields("id"))
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	for _, task := range tasks {
+		require.Len(t, task.EqualityDeleteFiles, 2,
+			"each task must use the same multi-file equality-delete union")
+	}
+
+	_, records, err := scan.ReadTasks(ctx, tasks)
+	require.NoError(t, err)
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.ElementsMatch(t, []int64{1, 4}, ids)
+}
+
 func TestEqualityDeleteReadResolvesRenamedDataColumnByFieldID(t *testing.T) {
 	tbl := newEqDeleteReadTestTable(t)
 
