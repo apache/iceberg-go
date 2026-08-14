@@ -280,7 +280,7 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		}
 	}
 	newVersion := 0
-	if metadataLoc != "" {
+	if current != nil {
 		metadataVersion := ParseMetadataVersion(metadataLoc)
 		if metadataVersion < 0 {
 			return nil, fmt.Errorf("invalid metadata location: %s", metadataLoc)

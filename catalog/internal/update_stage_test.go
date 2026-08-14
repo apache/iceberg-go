@@ -58,6 +58,38 @@ func TestUpdateAndStageTableRejectsInvalidMetadataLocation(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid metadata location")
 }
 
+func TestUpdateAndStageTableRejectsEmptyMetadataLocationForExistingTable(t *testing.T) {
+	metadata, err := table.NewMetadata(
+		iceberg.NewSchema(0),
+		nil,
+		table.UnsortedSortOrder,
+		"file:///tmp/table",
+		nil,
+	)
+	require.NoError(t, err)
+
+	current := table.New(
+		[]string{"db", "tbl"},
+		metadata,
+		"",
+		nil,
+		nil,
+	)
+
+	staged, err := UpdateAndStageTable(
+		context.Background(),
+		nil,
+		current,
+		current.Identifier(),
+		nil,
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+	require.Nil(t, staged)
+	require.Contains(t, err.Error(), "invalid metadata location")
+}
+
 func TestParseMetadataVersionAcceptsLegacyMetadataLocation(t *testing.T) {
 	require.Equal(t, 1, ParseMetadataVersion("file:///tmp/table/metadata/v1.metadata.json"))
 	require.Equal(t, 2, ParseMetadataVersion("file:///tmp/table/metadata/v2.gz.metadata.json"))
