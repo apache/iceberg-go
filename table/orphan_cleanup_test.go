@@ -102,6 +102,19 @@ func TestFlattenURIEquivalences(t *testing.T) {
 	}, flattenURIEquivalences(equivalences))
 }
 
+func TestFlattenURIEquivalencesUsesLexicographicallyLastGroup(t *testing.T) {
+	equivalences := map[string]string{
+		"s3, s3a": "s3",
+		"s3a,s3n": "s3n",
+	}
+
+	assert.Equal(t, map[string]string{
+		"s3":  "s3",
+		"s3a": "s3n",
+		"s3n": "s3n",
+	}, flattenURIEquivalences(equivalences))
+}
+
 func TestFlattenURIEquivalencesPreservesExactMappingPrecedence(t *testing.T) {
 	equivalences := map[string]string{
 		"host1":       "canonical",
@@ -127,6 +140,22 @@ func TestEqualAuthoritiesPreservesExactMappingAcrossOptions(t *testing.T) {
 
 	assert.Equal(t, "canonical", applyAuthorityEquivalence("host1", cfg.equalAuthorities))
 	assert.Equal(t, "canonical", applyAuthorityEquivalence("host2", cfg.equalAuthorities))
+}
+
+func TestNewOrphanCleanupConfigFlattensURIEquivalences(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualSchemes(map[string]string{
+			"s3,s3a": "s3",
+		}),
+		WithEqualAuthorities(map[string]string{
+			"host1,host2": "canonical",
+		}),
+	)
+
+	assert.Equal(t, "s3", applySchemeEquivalence("s3a", cfg.equalSchemes))
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host2", cfg.equalAuthorities))
+	assert.NotContains(t, cfg.equalSchemes, "s3,s3a")
+	assert.NotContains(t, cfg.equalAuthorities, "host1,host2")
 }
 
 func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
