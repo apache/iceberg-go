@@ -349,6 +349,92 @@ func TestUpdateSpecAddField(t *testing.T) {
 	})
 }
 
+func TestUpdateSpecReadsStagedTransactionMetadata(t *testing.T) {
+	t.Run("end-to-end: partition by column added earlier in the same transaction", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		require.NoError(t, txn.UpdateSchema(false, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Commit())
+
+		require.NoError(t, txn.UpdateSpec(false).
+			AddField("new_col", iceberg.IdentityTransform{}, "new_col_identity").
+			Commit())
+
+		stagedTbl, err := txn.StagedTable()
+		require.NoError(t, err)
+
+		// Resolve the new column's id from the staged schema rather than
+		// hard-coding it, so the test does not silently break if the fixture
+		// schema changes.
+		newCol, ok := stagedTbl.Schema().FindFieldByName("new_col")
+		require.True(t, ok)
+
+		spec := stagedTbl.Spec()
+		added := spec.FieldsBySourceID(newCol.ID)
+		require.Len(t, added, 1)
+		assert.Equal(t, "new_col_identity", added[0].Name)
+		assert.Equal(t, iceberg.IdentityTransform{}, added[0].Transform)
+		assert.Equal(t, iceberg.PartitionDataIDStart, added[0].FieldID)
+	})
+
+	t.Run("auto-generated partition name resolves against the staged schema", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		require.NoError(t, txn.UpdateSchema(false, false).
+			AddColumn([]string{"new_col"}, iceberg.PrimitiveTypes.String, "", false, nil).
+			Commit())
+
+		// An empty target name forces GeneratePartitionFieldName, which must
+		// resolve the source column against the staged schema.
+		specUpdate := txn.UpdateSpec(false)
+		_, _, err := specUpdate.
+			AddField("new_col", iceberg.IdentityTransform{}, "").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		stagedTbl, err := txn.StagedTable()
+		require.NoError(t, err)
+		newCol, ok := stagedTbl.Schema().FindFieldByName("new_col")
+		require.True(t, ok)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		added := newSpec.FieldsBySourceID(newCol.ID)
+		require.Len(t, added, 1)
+		assert.Equal(t, "new_col", added[0].Name)
+	})
+
+	t.Run("partition by renamed column staged in the same transaction", func(t *testing.T) {
+		txn := testNonPartitionedTable.NewTransaction()
+
+		// Rename an existing column, staging it into the transaction.
+		require.NoError(t, txn.UpdateSchema(false, false).
+			RenameColumn([]string{"name"}, "full_name").
+			Commit())
+
+		// The old name must no longer bind against the staged schema.
+		_, _, err := txn.UpdateSpec(false).
+			AddField("name", iceberg.IdentityTransform{}, "name_identity").
+			BuildUpdates()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "could not bind reference")
+
+		// The new name must bind and produce a partition field on the same source column id.
+		specUpdate := txn.UpdateSpec(false)
+		_, _, err = specUpdate.
+			AddField("full_name", iceberg.IdentityTransform{}, "full_name_identity").
+			BuildUpdates()
+		require.NoError(t, err)
+
+		newSpec, err := specUpdate.Apply()
+		require.NoError(t, err)
+		added := newSpec.FieldsBySourceID(2)
+		require.Len(t, added, 1)
+		assert.Equal(t, "full_name_identity", added[0].Name)
+	})
+}
+
 func TestUpdateSpecAddIdentityField(t *testing.T) {
 	var txn *table.Transaction
 

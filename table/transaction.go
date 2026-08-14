@@ -243,13 +243,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 // from collapsing into one another.
 //
 // assert-ref-snapshot-id is special-cased to key by requirement type + ref name
-// only, deliberately ignoring the asserted snapshot id. Producers build their
-// assertion from the BASE table's branch head, so repeated producer commits
-// (and explicit AssertRefSnapshotID calls) for the same ref produce identical
-// assertions that collapse to one, while assertions for different refs
-// survive dedupe. Two assertions for the same ref requiring different
-// snapshot ids share a key but cannot be collapsed —
-// checkRequirementConflict rejects them at apply time.
+// only, deliberately ignoring the asserted snapshot id. Within a single
+// transaction the builder mutates its own ref state across operations (e.g. the
+// first append asserts main == nil, a later append asserts main == snapshot-1),
+// which would otherwise produce multiple, mutually contradictory base-state
+// assertions for the same ref against the pre-transaction metadata. Keying by
+// ref name keeps only the first assertion for each ref while still letting
+// assertions for different refs survive dedupe.
 func requirementSemanticKey(r Requirement) (string, error) {
 	if ref, ok := r.(*assertRefSnapshotID); ok {
 		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
