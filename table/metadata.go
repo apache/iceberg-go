@@ -42,6 +42,7 @@ const (
 	supportedTableFormatVersion = 3
 	minFormatVersionRowLineage  = 3
 	initialRowID                = int64(0)
+	initialSequenceNumber       = int64(0)
 	oneMinuteInMs               = int64(60_000)
 )
 
@@ -524,6 +525,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return nil
 	}
 
+	lastSeqNum := b.currentLastSequenceNumber()
 	if len(b.schemaList) == 0 {
 		return errors.New("can't add snapshot with no added schemas")
 	} else if len(b.specs) == 0 {
@@ -532,9 +534,9 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
 	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
-		snapshot.SequenceNumber <= *b.lastSequenceNumber {
+		snapshot.SequenceNumber <= lastSeqNum {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
-			snapshot.SequenceNumber, *b.lastSequenceNumber)
+			snapshot.SequenceNumber, lastSeqNum)
 	}
 
 	if len(b.snapshotLog) > 0 {
@@ -544,7 +546,15 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 				snapshot.TimestampMs, last.TimestampMs)
 		}
 	}
-	maxTS := max(b.lastUpdatedMS, b.base.LastUpdatedMillis())
+
+	// b.base is nil for builders created by NewMetadataBuilder (the create-table path);
+	// only MetadataBuilderFromBase populates it. Treat the missing base as "no previous update"
+	// instead of dereferencing it, mirroring the fallback in currentNextRowID.
+	var baseLastUpdated int64
+	if b.base != nil {
+		baseLastUpdated = b.base.LastUpdatedMillis()
+	}
+	maxTS := max(b.lastUpdatedMS, baseLastUpdated)
 	if snapshot.TimestampMs-maxTS < -oneMinuteInMs {
 		return fmt.Errorf("invalid snapshot timestamp %d: before last updated timestamp %d",
 			snapshot.TimestampMs, maxTS)
@@ -602,6 +612,18 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 	b.nextRowID = &newNextRowID
 
 	return nil
+}
+
+// currentLastSequenceNumber returns the last sequence number assigned to a
+// snapshot. b.lastSequenceNumber is nil for v1 tables and for builders created
+// by NewMetadataBuilder that have not added a snapshot yet, in which case the
+// spec's initial sequence number is the correct floor.
+func (b *MetadataBuilder) currentLastSequenceNumber() int64 {
+	if b.lastSequenceNumber != nil {
+		return *b.lastSequenceNumber
+	}
+
+	return initialSequenceNumber
 }
 
 func (b *MetadataBuilder) currentNextRowID() int64 {

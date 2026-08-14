@@ -118,6 +118,41 @@ func builderWithoutChanges(formatVersion int) MetadataBuilder {
 	return *builder
 }
 
+func freshMetadataBuilder(t *testing.T, formatVersion int) *MetadataBuilder {
+	t.Helper()
+
+	tableSchema := schema()
+	partitionSpec := partitionSpec()
+	sortOrder := sortOrder()
+
+	builder, err := NewMetadataBuilder(formatVersion)
+	require.NoError(t, err)
+	require.NoError(t, builder.SetLoc("s3://bucket/test/location"))
+	require.NoError(t, builder.AddSchema(&tableSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.AddSortOrder(&sortOrder))
+	require.NoError(t, builder.SetDefaultSortOrderID(-1))
+	require.NoError(t, builder.AddPartitionSpec(&partitionSpec, true))
+	require.NoError(t, builder.SetDefaultSpecID(-1))
+	require.Nil(t, builder.base, "builder from NewMetadataBuilder must have no base metadata")
+
+	return builder
+}
+
+func freshBuilderSnapshot(snapshotID int64, parentSnapshotID *int64, sequenceNumber, timestampMs int64) Snapshot {
+	schemaID := 0
+
+	return Snapshot{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: parentSnapshotID,
+		SequenceNumber:   sequenceNumber,
+		TimestampMs:      timestampMs,
+		ManifestList:     fmt.Sprintf("/snap-%d.avro", snapshotID),
+		Summary:          &Summary{Operation: OpAppend, Properties: map[string]string{}},
+		SchemaID:         &schemaID,
+	}
+}
+
 func TestBuildUnpartitionedUnsorted(t *testing.T) {
 	TestLocation := "file:///tmp/iceberg-test"
 	tableSchema := schema()
@@ -1299,6 +1334,104 @@ func TestAddSnapshotRejectsInvalidTimestamp(t *testing.T) {
 	snapshot2.TimestampMs = snapshot.TimestampMs + (60000 * 2) + 1
 	err = builder.AddSnapshot(&snapshot2)
 	require.NoError(t, err)
+}
+
+func TestAddSnapshotOnBuilderWithoutBase(t *testing.T) {
+	t.Run("parentless snapshot", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		snapshot := freshBuilderSnapshot(1, nil, 0, time.Now().UnixMilli())
+
+		require.NoError(t, builder.AddSnapshot(&snapshot))
+
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Len(t, meta.Snapshots(), 1)
+		require.Equal(t, snapshot.TimestampMs, meta.LastUpdatedMillis())
+	})
+
+	t.Run("snapshot with parent", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		parentSnapshotID := int64(1)
+		snapshot := freshBuilderSnapshot(2, &parentSnapshotID, 1, time.Now().UnixMilli())
+
+		require.NoError(t, builder.AddSnapshot(&snapshot))
+
+		meta, err := builder.Build()
+		require.NoError(t, err)
+		require.Len(t, meta.Snapshots(), 1)
+		require.Equal(t, int64(1), meta.LastSequenceNumber())
+	})
+
+	t.Run("rejects sequence number at the initial value", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		parentSnapshotID := int64(1)
+		snapshot := freshBuilderSnapshot(2, &parentSnapshotID, 0, time.Now().UnixMilli())
+
+		err := builder.AddSnapshot(&snapshot)
+		require.ErrorContains(t, err, "can't add snapshot with sequence number 0, must be > than last sequence number 0")
+	})
+
+	t.Run("rejects timestamp before last update", func(t *testing.T) {
+		builder := freshMetadataBuilder(t, 2)
+		now := time.Now().UnixMilli()
+		first := freshBuilderSnapshot(1, nil, 0, now)
+		require.NoError(t, builder.AddSnapshot(&first))
+
+		// No ref has been set, so the snapshot log is empty and this exercises the
+		// last-updated bound rather than the last-snapshot bound.
+		require.Empty(t, builder.snapshotLog)
+		second := freshBuilderSnapshot(2, nil, 1, now-(2*oneMinuteInMs))
+
+		err := builder.AddSnapshot(&second)
+		require.ErrorContains(t, err, "before last updated timestamp")
+	})
+}
+
+func TestAddSnapshotOnBuilderWithoutBaseV3(t *testing.T) {
+	// v3 row lineage validation only became reachable for a builder without base
+	// metadata once AddSnapshot stopped panicking before it.
+	builder := freshMetadataBuilder(t, 3)
+	firstRowID, addedRows := int64(0), int64(10)
+	snapshot := freshBuilderSnapshot(1, nil, 0, time.Now().UnixMilli())
+	snapshot.FirstRowID, snapshot.AddedRows = &firstRowID, &addedRows
+
+	require.NoError(t, builder.AddSnapshot(&snapshot))
+	require.Equal(t, addedRows, builder.NextRowID())
+
+	behindFirstRowID := int64(5)
+	parentSnapshotID := int64(1)
+	stale := freshBuilderSnapshot(2, &parentSnapshotID, 1, time.Now().UnixMilli())
+	stale.FirstRowID, stale.AddedRows = &behindFirstRowID, &addedRows
+
+	err := builder.AddSnapshot(&stale)
+	require.ErrorIs(t, err, ErrInvalidRowLineage)
+	require.ErrorContains(t, err, "first-row-id 5 is behind table next-row-id 10")
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+	require.Equal(t, addedRows, meta.NextRowID())
+}
+
+func TestAddSnapshotUpdateOnBuilderWithoutBase(t *testing.T) {
+	builder := freshMetadataBuilder(t, 2)
+	parentSnapshotID := int64(1)
+	snapshot := freshBuilderSnapshot(2, &parentSnapshotID, 1, time.Now().UnixMilli())
+	update := NewAddSnapshotUpdate(&snapshot)
+
+	require.NoError(t, builder.AddSnapshotUpdate(update))
+
+	// AddSnapshotUpdate must store the caller's update verbatim rather than
+	// rebuilding it, so runtime-only fields survive the OCC retry path.
+	require.NotEmpty(t, builder.updates)
+	stored, ok := builder.updates[len(builder.updates)-1].(*addSnapshotUpdate)
+	require.True(t, ok, "expected last update to be *addSnapshotUpdate, got %T", builder.updates[len(builder.updates)-1])
+	require.Same(t, update, stored)
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+	require.Len(t, meta.Snapshots(), 1)
+	require.Equal(t, int64(1), meta.LastSequenceNumber())
 }
 
 func TestConstructDefaultMainBranch(t *testing.T) {
