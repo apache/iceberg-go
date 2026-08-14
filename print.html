@@ -1843,7 +1843,7 @@ not yet wrap their conflict errors, so the retry loop will not fire on them.</p>
 <tr><td>Sequence numbers</td><td>Supported</td></tr>
 <tr><td>Manifest entry status (added / existing / deleted)</td><td>Supported</td></tr>
 <tr><td>Positional deletes</td><td>Supported (read + write)</td></tr>
-<tr><td>Equality deletes</td><td>Supported (read + write). Write via <code>Transaction.WriteEqualityDeletes</code>; row-level commits via <code>Transaction.NewRowDelta</code></td></tr>
+<tr><td>Equality deletes</td><td>Supported (read + write). Write via <code>Transaction.WriteEqualityDeletes</code>; row-level commits via <code>Transaction.NewRowDelta</code>; delete-only CDC via <code>Transaction.CommitEqualityDeletes</code></td></tr>
 <tr><td>Partition spec evolution</td><td>Supported</td></tr>
 <tr><td>Sort order enforcement on write</td><td>Supported (PR <a href="https://github.com/apache/iceberg-go/pull/1157">#1157</a>, closes <a href="https://github.com/apache/iceberg-go/issues/833">#833</a>)</td></tr>
 <tr><td><code>ReplaceDataFiles</code> using <code>OpReplace</code></td><td>Pending (<a href="https://github.com/apache/iceberg-go/issues/841">#841</a>)</td></tr>
