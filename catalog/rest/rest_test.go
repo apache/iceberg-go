@@ -3481,6 +3481,77 @@ func (r *RestCatalogSuite) TestCommitTableErrCommitStateUnknown() {
 	}
 }
 
+func (r *RestCatalogSuite) TestCommitTableErrorBodyKeepsCommitStateUnknown() {
+	// A 5xx commit with a well-formed Iceberg error envelope and one whose
+	// body a proxy replaced with invalid JSON must classify the same:
+	// ErrCommitStateUnknown. The status line, not the payload, carries the
+	// ambiguous-commit semantics callers retry on.
+	var statusCode int
+	var body []byte
+
+	r.mux.HandleFunc("/v1/oauth/tokens", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": TestToken, "token_type": "Bearer", "expires_in": 3600,
+		})
+	})
+
+	r.mux.HandleFunc("/v1/namespaces/db/tables/tbl", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		w.Write(body)
+	})
+
+	cat, err := rest.NewCatalog(context.Background(), "rest", r.srv.URL,
+		rest.WithCredential(TestCreds))
+	r.Require().NoError(err)
+
+	wellFormed := func(code int) []byte {
+		b, err := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": http.StatusText(code),
+				"type":    "ServerException",
+				"code":    code,
+			},
+		})
+		r.Require().NoError(err)
+
+		return b
+	}
+
+	for _, tc := range []struct {
+		name       string
+		body       func(int) []byte
+		wantDecode bool
+	}{
+		{"well-formed envelope", wellFormed, false},
+		{"malformed body", func(int) []byte { return []byte(`{"error":{"message":"boom`) }, true},
+	} {
+		for _, code := range []int{
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout,
+		} {
+			statusCode = code
+			body = tc.body(code)
+			r.Run(tc.name+"/"+strconv.Itoa(code), func() {
+				_, _, err := cat.CommitTable(context.Background(),
+					table.Identifier{"db", "tbl"},
+					[]table.Requirement{},
+					[]table.Update{},
+				)
+				r.Require().Error(err)
+				r.ErrorIs(err, rest.ErrCommitStateUnknown,
+					"%s %d should return ErrCommitStateUnknown, got: %v", tc.name, code, err)
+				if tc.wantDecode {
+					r.ErrorContains(err, "failed to decode error response")
+				}
+			})
+		}
+	}
+}
+
 func (r *RestCatalogSuite) TestUpdateTableErrCommitStateUnknown() {
 	var statusCode int
 

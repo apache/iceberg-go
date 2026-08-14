@@ -63,7 +63,7 @@ func (s snapshotUpdate) fastAppend() *snapshotProducer {
 // checks.
 func (s snapshotUpdate) mergeOverwrite(commitUUID *uuid.UUID, filter iceberg.BooleanExpression) *snapshotProducer {
 	op := s.operation
-	if s.operation == OpOverwrite && s.txn.meta.currentSnapshot() == nil {
+	if s.operation == OpOverwrite && s.txn.meta.currentSnapshotForRef(s.txn.branch) == nil {
 		op = OpAppend
 	}
 	prod := newOverwriteFilesProducer(op, s.txn, s.io, commitUUID, s.snapshotProps)
@@ -244,13 +244,13 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 // from collapsing into one another.
 //
 // assert-ref-snapshot-id is special-cased to key by requirement type + ref name
-// only, deliberately ignoring the asserted snapshot id. Producers build their
-// assertion from the BASE table's branch head, so repeated producer commits
-// (and explicit AssertRefSnapshotID calls) for the same ref produce identical
-// assertions that collapse to one, while assertions for different refs
-// survive dedupe. Two assertions for the same ref requiring different
-// snapshot ids share a key but cannot be collapsed —
-// checkRequirementConflict rejects them at apply time.
+// only, deliberately ignoring the asserted snapshot id. Within a single
+// transaction the builder mutates its own ref state across operations (e.g. the
+// first append asserts main == nil, a later append asserts main == snapshot-1),
+// which would otherwise produce multiple, mutually contradictory base-state
+// assertions for the same ref against the pre-transaction metadata. Keying by
+// ref name keeps only the first assertion for each ref while still letting
+// assertions for different refs survive dedupe.
 func requirementSemanticKey(r Requirement) (string, error) {
 	if ref, ok := r.(*assertRefSnapshotID); ok {
 		return fmt.Sprintf("%s\x00%s", reqAssertRefSnapshotID, ref.Ref), nil
@@ -475,9 +475,34 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	if err != nil {
 		return err
 	}
-	cs := meta.currentSnapshot()
-	if cs == nil {
-		return errors.New("cannot rollback: table has no current snapshot")
+
+	branch := t.branch
+	if branch == "" {
+		branch = MainBranch
+	}
+
+	// Resolve the head from the target branch's OWN ref. This deliberately does
+	// not reuse a resolver that falls back to main's head for an unknown ref:
+	// rolling back a branch that does not exist would then rewind
+	// main instead. An absent ref must fail here, never fall back.
+	ref, ok := meta.refs[branch]
+	if !ok {
+		return fmt.Errorf("cannot rollback: branch %q does not exist", branch)
+	}
+
+	if ref.SnapshotRefType != BranchRef {
+		return fmt.Errorf("%w: cannot rollback: ref %q is a %s, not a branch",
+			iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+	}
+
+	// Present but invalid is not the same as absent: metadata validation
+	// (checkRefsExist) rejects dangling refs on load, so reaching this means
+	// in-flight builder state is inconsistent. Fail closed and name the ref
+	// rather than reporting the branch as empty.
+	cs, err := meta.SnapshotByID(ref.SnapshotID)
+	if err != nil {
+		return fmt.Errorf("cannot rollback: branch %q references unknown snapshot %d: %w",
+			branch, ref.SnapshotID, err)
 	}
 
 	lookup := func(id int64) *Snapshot {
@@ -487,19 +512,19 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 	}
 
 	if !IsAncestorOf(cs.SnapshotID, snapshotID, lookup) {
-		return fmt.Errorf("snapshot %d is not an ancestor of current snapshot %d",
-			snapshotID, cs.SnapshotID)
+		return fmt.Errorf("snapshot %d is not an ancestor of branch %q head snapshot %d",
+			snapshotID, branch, cs.SnapshotID)
 	}
 
-	update := meta.NewRetainingSnapshotRefUpdate(MainBranch, snapshotID, BranchRef)
+	update := meta.NewRetainingSnapshotRefUpdate(branch, snapshotID, BranchRef)
 
 	// Assert the base branch head so a concurrent head move fails the
-	// commit instead of the rollback clobbering it. When main was
+	// commit instead of the rollback clobbering it. When the branch was
 	// staged by this transaction (absent on the base), the update that
 	// created it already carries its own base-state requirement.
 	var reqs []Requirement
-	if id := t.baseRefSnapshotID(MainBranch); id != nil {
-		reqs = append(reqs, AssertRefSnapshotID(MainBranch, id))
+	if id := t.baseRefSnapshotID(branch); id != nil {
+		reqs = append(reqs, AssertRefSnapshotID(branch, id))
 	}
 
 	return t.apply([]Update{update}, reqs)
@@ -507,6 +532,41 @@ func (t *Transaction) RollbackToSnapshot(snapshotID int64) error {
 
 func (t *Transaction) UpdateSpec(caseSensitive bool) *UpdateSpec {
 	return NewUpdateSpec(t, caseSensitive)
+}
+
+// ReplaceSortOrder stages order as the table's new default sort order,
+// the analogue of Java's Table.replaceSortOrder() / BaseReplaceSortOrder.
+// The metadata builder reuses the ID of an equivalent existing order or
+// assigns the next available one, so order's own ID is ignored. The
+// commit is fenced by AssertDefaultSortOrderID, matching
+// UpdateRequirements.forUpdateTable on SetDefaultSortOrder. Replacing
+// the default with a field-identical order is a no-op.
+func (t *Transaction) ReplaceSortOrder(order SortOrder) error {
+	meta, err := t.txnMeta()
+	if err != nil {
+		return err
+	}
+	if cur, err := meta.GetSortOrderByID(meta.defaultSortOrderID); err == nil && sameSortFields(*cur, order) {
+		return nil
+	}
+
+	return t.apply(
+		[]Update{NewAddSortOrderUpdate(&order), NewSetDefaultSortOrderUpdate(-1)},
+		[]Requirement{AssertDefaultSortOrderID(t.tbl.Metadata().DefaultSortOrder())},
+	)
+}
+
+func sameSortFields(a, b SortOrder) bool {
+	if a.Len() != b.Len() {
+		return false
+	}
+	for i := 0; i < a.Len(); i++ {
+		if !a.Field(i).Equals(b.Field(i)) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // UpdateSchema creates a new UpdateSchema instance for managing schema changes
@@ -828,9 +888,27 @@ func (t *Transaction) Append(ctx context.Context, rdr array.RecordReader, snapsh
 // operation is only valid if the data is exactly the same as the previous snapshot.
 //
 // For now, we'll keep using an overwrite operation.
+// requireMainBranch fails loudly for operations whose read-side planning (which
+// existing files to delete, replace, or dedupe against) still resolves against
+// main's head and is not yet branch-aware. On a non-main branch it returns
+// ErrInvalidOperation rather than silently planning against the wrong snapshot;
+// branch-aware planning is tracked as a follow-up (#1638). Appends need no such
+// planning and remain supported on a branch.
+func (t *Transaction) requireMainBranch(op string) error {
+	if t.branch != "" && t.branch != MainBranch {
+		return fmt.Errorf("%w: %s is not yet supported on a branch transaction (branch %q)",
+			ErrInvalidOperation, op, t.branch)
+	}
+
+	return nil
+}
+
 func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, filesToAdd []string, snapshotProps iceberg.Properties) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceDataFiles"); err != nil {
 		return err
 	}
 	if len(filesToDelete) == 0 {
@@ -935,7 +1013,7 @@ func (t *Transaction) ReplaceDataFiles(ctx context.Context, filesToDelete, files
 }
 
 // validateDataFilePartitionData verifies that DataFile partition values match
-// the current partition spec fields by ID without reading file contents.
+// the given partition spec's fields by ID without reading file contents.
 func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
 	partitionData := dataFilePartition(df)
 
@@ -985,7 +1063,12 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
 
-	expectedSpecID := int32(currentSpec.ID())
+	// A data file may target any partition spec registered in the table
+	// metadata, not just the default: its manifest is written with that
+	// spec (see snapshotProducer.manifestProducer). Cache lookups since
+	// files typically share a handful of specs.
+	specsByID := make(map[int32]*iceberg.PartitionSpec)
+
 	setToAdd := make(map[string]struct{}, len(dataFiles))
 
 	for i, df := range dataFiles {
@@ -1013,12 +1096,20 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 			return nil, fmt.Errorf("data file %s has invalid file format %s for %s", path, df.FileFormat(), operation)
 		}
 
-		if df.SpecID() != expectedSpecID {
-			return nil, fmt.Errorf("data file %s has invalid partition spec id %d for %s: expected %d",
-				path, df.SpecID(), operation, expectedSpecID)
+		spec, ok := specsByID[df.SpecID()]
+		if !ok {
+			spec, err = meta.GetSpecByID(int(df.SpecID()))
+			if err != nil || spec == nil {
+				return nil, fmt.Errorf("data file %s has unregistered partition spec id %d for %s",
+					path, df.SpecID(), operation)
+			}
+			if err := checkNoUnknownTransform(spec); err != nil {
+				return nil, fmt.Errorf("data file %s for %s: %w", path, operation, err)
+			}
+			specsByID[df.SpecID()] = spec
 		}
 
-		if err := validateDataFilePartitionData(df, currentSpec); err != nil {
+		if err := validateDataFilePartitionData(df, spec); err != nil {
 			return nil, fmt.Errorf("data file %s has invalid partition data for %s: %w", path, operation, err)
 		}
 
@@ -1110,6 +1201,12 @@ func (t *Transaction) ensureNameMapping() error {
 // Unlike AddFiles, this method does not read files from storage. It validates only metadata
 // that can be checked without opening files (for example spec-id and partition field IDs).
 //
+// Each DataFile may target any partition spec registered in the table metadata,
+// identified by its SpecID; files are grouped into one manifest per spec. This
+// permits writers to continue producing data under a previous spec after a
+// partition evolution, and rewrites that migrate files between specs.
+// Unregistered spec ids are rejected.
+//
 // By default this method automatically sets the schema name mapping in table
 // properties if one does not already exist. Pass [WithoutAutoNameMapping] to
 // disable this behavior, for example when working with catalogs that reject
@@ -1119,6 +1216,9 @@ func (t *Transaction) ensureNameMapping() error {
 // Supplying incorrect DataFile metadata can produce an invalid snapshot and break reads.
 func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("AddDataFiles"); err != nil {
 		return err
 	}
 	if len(dataFiles) == 0 {
@@ -1215,6 +1315,9 @@ func (t *Transaction) AddDataFiles(ctx context.Context, dataFiles []iceberg.Data
 func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesToDelete, filesToAdd []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceDataFilesWithDataFiles"); err != nil {
 		return err
 	}
 	if len(filesToDelete) == 0 {
@@ -1326,6 +1429,9 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataFilesToAdd, deleteFilesToRemove []iceberg.DataFile, snapshotProps iceberg.Properties, opts ...WriteOption) error {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("ReplaceFiles"); err != nil {
 		return err
 	}
 	// Delegate data file replacement to existing logic.
@@ -1500,6 +1606,9 @@ func (t *Transaction) AddFiles(ctx context.Context, filePaths []string, snapshot
 	if err != nil {
 		return err
 	}
+	if err := t.requireMainBranch("AddFiles"); err != nil {
+		return err
+	}
 	addFilesOp := addFilesOperation{
 		concurrency: runtime.GOMAXPROCS(0),
 	}
@@ -1666,6 +1775,9 @@ func WithOverwriteCaseInsensitive() OverwriteOption {
 // If concurrency <= 0, defaults to runtime.GOMAXPROCS(0).
 func (t *Transaction) Overwrite(ctx context.Context, rdr array.RecordReader, snapshotProps iceberg.Properties, opts ...OverwriteOption) error {
 	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("Overwrite"); err != nil {
 		return err
 	}
 	overwrite := overwriteOperation{
@@ -1884,6 +1996,9 @@ func WithDeleteCaseInsensitive() DeleteOption {
 func (t *Transaction) Delete(ctx context.Context, filter iceberg.BooleanExpression, snapshotProps iceberg.Properties, opts ...DeleteOption) (err error) {
 	meta, err := t.txnMeta()
 	if err != nil {
+		return err
+	}
+	if err := t.requireMainBranch("Delete"); err != nil {
 		return err
 	}
 	deleteOp := deleteOperation{
@@ -2248,6 +2363,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              args.fs,
+		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: projectedSchema,
 		boundRowFilter:  scanFilter,
 		caseSensitive:   args.caseSensitive,
@@ -2492,6 +2608,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 	scanner := &arrowScan{
 		metadata:        builtMeta,
 		fs:              fs,
+		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: meta.CurrentSchema(),
 		boundRowFilter:  boundFilter,
 		caseSensitive:   caseSensitive,

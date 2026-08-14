@@ -15,40 +15,32 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//go:build integration
-
-package rest_test
+package table_test
 
 import (
-	"context"
+	"encoding/json"
 	"testing"
 
-	"github.com/apache/iceberg-go"
-	"github.com/apache/iceberg-go/catalog"
-	"github.com/apache/iceberg-go/catalog/catalogtest"
-	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRestCatalogConformance(t *testing.T) {
-	catalogtest.RunCatalogTests(t, catalogtest.Config{
-		SupportsNamespaceProperties: true,
-		NewCatalog: func(t *testing.T) catalog.Catalog {
-			cat, err := catalog.Load(context.Background(), "local", iceberg.Properties{
-				"type":               "rest",
-				"uri":                "http://localhost:8181",
-				io.S3Region:          "us-east-1",
-				io.S3AccessKeyID:     "admin",
-				io.S3SecretAccessKey: "password",
-			})
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				if closer, ok := cat.(catalog.Closer); ok {
-					require.NoError(t, closer.Close())
-				}
-			})
+func TestSerializeEmbeddedSnapshotPreservesNonzeroSequenceNumber(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		SequenceNumber:    7,
+		TimestampMs:       1602638573590,
+		ManifestLocations: []string{"s3:/a/b/manifest.avro"},
+	}
 
-			return cat
-		},
-	})
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"sequence-number": 7,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["s3:/a/b/manifest.avro"]
+	}`, string(data))
 }

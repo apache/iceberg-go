@@ -113,6 +113,52 @@ func (s *ScannerSuite) TestScanner() {
 			s.Len(tasks, tt.expectedNumTasks)
 		})
 	}
+
+	s.Run("task residual", func() {
+		ident := catalog.ToIdentifier("default", "test_positional_mor_deletes")
+		tbl, err := s.cat.LoadTable(s.ctx, ident)
+		s.Require().NoError(err)
+
+		mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+		defer mem.AssertSize(s.T(), 0)
+
+		expectedSchema := arrow.NewSchema([]arrow.Field{
+			{Name: "number", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		}, nil)
+		ref := iceberg.Reference("letter")
+
+		ctx := compute.WithAllocator(s.ctx, mem)
+		scan := tbl.Scan(table.WithRowFilter(iceberg.AlwaysTrue{}),
+			table.WithSelectedFields("number"))
+		tasks, err := scan.PlanFiles(ctx)
+		s.Require().NoError(err)
+		s.Require().Len(tasks, 1)
+
+		// A remote planner can return a residual that is narrower than the
+		// original scan filter. ReadTasks must apply it even when the caller
+		// supplies the planned tasks directly.
+		tasks[0].Residual = iceberg.GreaterThanEqual(ref, "i")
+		_, itr, err := scan.ReadTasks(ctx, tasks)
+		s.Require().NoError(err)
+
+		next, stop := iter.Pull2(itr)
+		defer stop()
+		rec, err, valid := next()
+		s.Require().True(valid)
+		s.Require().NoError(err)
+		defer rec.Release()
+
+		arr, _, err := array.FromJSON(mem, arrow.PrimitiveTypes.Int32, strings.NewReader(`[10, 11, 12]`))
+		s.Require().NoError(err)
+		defer arr.Release()
+		expected := array.NewRecord(expectedSchema, []arrow.Array{arr}, int64(arr.Len()))
+		defer expected.Release()
+		s.True(array.RecordEqual(expected, rec), "task residual must filter the planned task")
+
+		_, err, valid = next()
+		s.Require().NoError(err)
+		s.Require().False(valid)
+	})
 }
 
 func (s *ScannerSuite) TestScannerWithDeletes() {

@@ -1051,7 +1051,21 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 
 				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))
 			}
-			statsCol := statsCols[fieldID]
+			statsCol, ok := statsCols[fieldID]
+			if !ok {
+				// Only the reserved row-lineage metadata columns (_row_id,
+				// _last_updated_sequence_number) may legitimately appear in
+				// a file without a metrics-plan entry: writers materialize
+				// them without adding them to the table schema. Any other
+				// field id missing from the plan means the plan and the
+				// file disagree — fail loudly rather than silently dropping
+				// that column's stats.
+				if iceberg.IsMetadataColumn(fieldID) {
+					continue
+				}
+
+				panic(fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, colChunk.PathInSchema()))
+			}
 			if statsCol.Mode.Typ == MetricModeNone {
 				continue
 			}

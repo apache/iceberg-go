@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"testing"
 
@@ -49,6 +50,18 @@ import (
 // log entry references an expired snapshot (id 999, absent from the snapshot
 // list) to exercise the null-parent path.
 func historyTestTable() *Table {
+	return inspectTestTable(Identifier{"history"}, map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+	})
+}
+
+func refsTestTable(snapshotRefs map[string]SnapshotRef) *Table {
+	return inspectTestTable(Identifier{"refs"}, snapshotRefs)
+}
+
+// inspectTestTable builds the shared metadata fixture with the supplied
+// identifier and snapshot refs.
+func inspectTestTable(identifier Identifier, snapshotRefs map[string]SnapshotRef) *Table {
 	const (
 		s1 = int64(101)
 		s2 = int64(102)
@@ -85,10 +98,10 @@ func historyTestTable() *Table {
 		},
 		SortOrderList:      []SortOrder{UnsortedSortOrder},
 		DefaultSortOrderID: 0,
-		SnapshotRefs:       map[string]SnapshotRef{MainBranch: {SnapshotID: current, SnapshotRefType: BranchRef}},
+		SnapshotRefs:       snapshotRefs,
 	}}
 
-	return New(Identifier{"history"}, meta, "", nil, nil)
+	return New(identifier, meta, "", nil, nil)
 }
 
 // collectRecord drains a RecordReader into a single record for assertions and
@@ -300,6 +313,165 @@ func TestInspectHistoryNoCurrentSnapshot(t *testing.T) {
 	require.EqualValues(t, 1, rec.NumRows())
 	isCurrentAncestor := rec.Column(3).(*array.Boolean)
 	require.False(t, isCurrentAncestor.Value(0), "no current snapshot means no ancestors")
+}
+
+func TestInspectRefsSchema(t *testing.T) {
+	sc := RefsSchema()
+
+	require.Equal(t, []string{
+		"name",
+		"type",
+		"snapshot_id",
+		"max_reference_age_in_ms",
+		"min_snapshots_to_keep",
+		"max_snapshot_age_in_ms",
+	}, testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, []int{1, 2, 3, 4, 5, 6}, []int{
+		fields[0].ID,
+		fields[1].ID,
+		fields[2].ID,
+		fields[3].ID,
+		fields[4].ID,
+		fields[5].ID,
+	})
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[0].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.String, fields[1].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[2].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[3].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int32, fields[4].Type)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[5].Type)
+	require.True(t, fields[0].Required)
+	require.True(t, fields[1].Required)
+	require.True(t, fields[2].Required)
+	require.False(t, fields[3].Required)
+	require.False(t, fields[4].Required)
+	require.False(t, fields[5].Required)
+}
+
+func TestInspectRefs(t *testing.T) {
+	minSnapshotsToKeep := 2
+	maxSnapshotAge := int64(3000)
+	maxReferenceAge := int64(4000)
+	tbl := refsTestTable(map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+			MaxSnapshotAgeMs:   &maxSnapshotAge,
+		},
+		"release": {
+			SnapshotID:      102,
+			SnapshotRefType: TagRef,
+			MaxRefAgeMs:     &maxReferenceAge,
+		},
+	})
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 2, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+
+	names := rec.Column(0).(*array.String)
+	types := rec.Column(1).(*array.String)
+	snapshotIDs := rec.Column(2).(*array.Int64)
+	maxReferences := rec.Column(3).(*array.Int64)
+	minSnapshots := rec.Column(4).(*array.Int32)
+	maxSnapshots := rec.Column(5).(*array.Int64)
+
+	// Map iteration is normalized to name order by the metadata-table reader.
+	require.Equal(t, "main", names.Value(0))
+	require.Equal(t, "release", names.Value(1))
+	require.Equal(t, "BRANCH", types.Value(0))
+	require.Equal(t, "TAG", types.Value(1))
+	require.EqualValues(t, 103, snapshotIDs.Value(0))
+	require.EqualValues(t, 102, snapshotIDs.Value(1))
+
+	require.True(t, maxReferences.IsNull(0))
+	require.EqualValues(t, maxReferenceAge, maxReferences.Value(1))
+	require.EqualValues(t, minSnapshotsToKeep, minSnapshots.Value(0))
+	require.True(t, minSnapshots.IsNull(1))
+	require.EqualValues(t, maxSnapshotAge, maxSnapshots.Value(0))
+	require.True(t, maxSnapshots.IsNull(1))
+}
+
+func TestInspectRefsEmpty(t *testing.T) {
+	tbl := refsTestTable(map[string]SnapshotRef{})
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 0, rec.NumRows())
+	require.EqualValues(t, 6, rec.NumCols())
+}
+
+func TestInspectRefsAllocator(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	tbl := refsTestTable(map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 103, SnapshotRefType: BranchRef},
+	})
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	require.EqualValues(t, 1, rec.NumRows())
+}
+
+func TestInspectRefsRejectsMinSnapshotsToKeepOverflow(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("requires 64-bit int")
+	}
+
+	tooLarge := int64(math.MaxInt32) + 1
+	minSnapshotsToKeep := int(tooLarge)
+	tbl := refsTestTable(map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+		},
+	})
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.ErrorContains(t, err, "min snapshots to keep 2147483648 is outside int32 range")
+	require.Nil(t, rr)
+}
+
+func TestInspectRefsAcceptsMaxInt32MinSnapshotsToKeep(t *testing.T) {
+	minSnapshotsToKeep := int(math.MaxInt32)
+	tbl := refsTestTable(map[string]SnapshotRef{
+		"main": {
+			SnapshotID:         103,
+			SnapshotRefType:    BranchRef,
+			MinSnapshotsToKeep: &minSnapshotsToKeep,
+		},
+	})
+
+	rr, err := tbl.Inspect().Refs(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	rec := collectRecord(t, rr)
+	defer rec.Release()
+
+	minSnapshots := rec.Column(4).(*array.Int32)
+	require.False(t, minSnapshots.IsNull(0))
+	require.Equal(t, int32(math.MaxInt32), minSnapshots.Value(0))
 }
 
 // snapshotsTestTable builds a table with two snapshots: a root carrying a
@@ -1426,6 +1598,36 @@ func TestAppendContentFileRecordUsesFieldIDs(t *testing.T) {
 	countIndex := record.Schema().FieldIndices("record_count")[0]
 	require.Equal(t, file.FilePath(), record.Column(pathIndex).(*array.String).Value(0))
 	require.EqualValues(t, file.Count(), record.Column(countIndex).(*array.Int64).Value(0))
+}
+
+func TestAppendContentFileRecordUsesPartitionFieldIDs(t *testing.T) {
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Int32},
+	}}
+	reorderedPartitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		partitionType.FieldList[1], partitionType.FieldList[0],
+	}}
+	arrowSchema, err := SchemaToArrowSchema(DataFilesSchema(reorderedPartitionType), nil, true, false)
+	require.NoError(t, err)
+
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, arrowSchema)
+	defer bldr.Release()
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+	file := newTestDataFile(t, spec, "mem://default/table-location/data/reordered-partition.parquet", map[int]any{
+		1000: int32(7), 1001: int32(9),
+	})
+	require.NoError(t, appendContentFileRecord(bldr, partitionType, file))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	partitionIndex := record.Schema().FieldIndices("partition")[0]
+	partition := record.Column(partitionIndex).(*array.Struct)
+	require.EqualValues(t, 9, partition.Field(0).(*array.Int32).Value(0))
+	require.EqualValues(t, 7, partition.Field(1).(*array.Int32).Value(0))
 }
 
 func TestInspectPartitionTypeUsesAllActiveSpecs(t *testing.T) {

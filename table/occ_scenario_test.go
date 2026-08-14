@@ -694,6 +694,158 @@ func (s *OCCScenarioTestSuite) makeArrowTableN(n int) arrow.Table {
 	return tbl
 }
 
+// TestMultipleStagedSnapshotsChainOnRetry is a regression test for the
+// silent-data-loss bug where a transaction that staged more than one snapshot
+// rebuilt every staged snapshot against the SAME fresh branch head on retry.
+// The staged snapshots (chained A1 -> A2 at build time) then became siblings:
+// the branch ref advanced only to A2, A1 was orphaned, and A1's data was
+// dropped. (The shared parent also gives both the same sequence number, which
+// AddSnapshot rejects on apply.)
+//
+// Scenario:
+//   - Peer P commits one row to an empty table (snapshot P, next head).
+//   - Writer A loads the empty base (no knowledge of P) and stages TWO appends
+//     in a single transaction: A1 then A2 (A2 parented on A1 at build time).
+//   - Writer A's first commit attempt conflicts (409); the retry reloads and
+//     sees P as the fresh head, forcing a real rebuild.
+//
+// Correct: the staged snapshots replay as a chain P <- A1 <- A2, the committed
+// head (A2) inherits P + A1 + A2 = 3 data files, and A1 remains reachable.
+func (s *OCCScenarioTestSuite) TestMultipleStagedSnapshotsChainOnRetry() {
+	props := iceberg.Properties{
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "2",
+	}
+
+	// Peer P commits one row to the empty table.
+	emptyTbl, catP := s.makeTable(0, props)
+	rowP := s.makeArrowTable()
+	defer rowP.Release()
+	txP := emptyTbl.NewTransaction()
+	s.Require().NoError(txP.AppendTable(s.ctx, rowP, rowP.NumRows(), nil))
+	_, err := txP.Commit(s.ctx)
+	s.Require().NoError(err, "peer P must commit successfully")
+
+	metaAfterP := catP.current
+	peerHead := metaAfterP.CurrentSnapshot()
+	s.Require().NotNil(peerHead)
+
+	// Writer A starts from the empty base and conflicts once so the retry
+	// rebuilds the staged snapshots against P.
+	catA := &occScenarioCatalog{
+		current:       metaAfterP,
+		conflictsLeft: 1,
+		location:      s.location,
+	}
+	writerATable := table.New(
+		emptyTbl.Identifier(),
+		emptyTbl.Metadata(), // empty base — no knowledge of P
+		s.location+"/metadata/v1.metadata.json",
+		func(_ context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		catA,
+	)
+
+	// Stage TWO appends in a single transaction: A1 then A2 (chained).
+	row1 := s.makeArrowTable()
+	defer row1.Release()
+	row2 := s.makeArrowTable()
+	defer row2.Release()
+
+	txA := writerATable.NewTransaction()
+	s.Require().NoError(txA.AppendTable(s.ctx, row1, row1.NumRows(), nil))
+	s.Require().NoError(txA.AppendTable(s.ctx, row2, row2.NumRows(), nil))
+
+	_, err = txA.Commit(s.ctx)
+	s.Require().NoError(err,
+		"two staged snapshots must commit after one retry; a shared rebuilt "+
+			"parent gives both the same sequence number and AddSnapshot rejects the second")
+	s.Equal(int32(2), catA.commitTableCalls.Load(), "1 conflict + 1 success")
+
+	final := catA.current
+	head := final.CurrentSnapshot()
+	s.Require().NotNil(head)
+
+	// Lineage must be P <- A1 <- A2 (a chain), not P <- {A1, A2} (siblings).
+	s.Require().NotNil(head.ParentSnapshotID, "committed head (A2) must have a parent")
+	a1 := final.SnapshotByID(*head.ParentSnapshotID)
+	s.Require().NotNil(a1, "A2's parent (A1) must stay reachable, not be orphaned by a sibling rebuild")
+	s.NotEqual(peerHead.SnapshotID, head.SnapshotID)
+	s.Require().NotNil(a1.ParentSnapshotID, "A1 must be parented on the peer head")
+	s.Equal(peerHead.SnapshotID, *a1.ParentSnapshotID,
+		"A1 must fork from the peer head P, not remain on the stale empty base")
+	s.Greater(head.SequenceNumber, a1.SequenceNumber,
+		"the chained snapshot must have a strictly greater sequence number")
+
+	// The committed head must inherit every row's data file: P + A1 + A2 = 3.
+	live := s.liveDataFilePaths(head)
+	s.Len(live, 3,
+		"head must inherit P + A1 + A2 = 3 data files; a sibling rebuild drops A1's file")
+}
+
+// TestMultipleStagedSnapshotsV3RowLineageOnRetry is the v3 companion to
+// TestMultipleStagedSnapshotsChainOnRetry. Row-id ranges are also derived per
+// snapshot; rebuilding chained siblings against the same fresh head hands both
+// the same first-row-id, overlapping their row-id ranges. The chained replay
+// must claim gap-free, non-overlapping ranges: P=[0,1), A1=[1,2), A2=[2,3).
+func (s *OCCScenarioTestSuite) TestMultipleStagedSnapshotsV3RowLineageOnRetry() {
+	props := iceberg.Properties{
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "2",
+	}
+
+	emptyTbl, catP := s.makeV3Table(0, props)
+	rowP := s.makeArrowTable()
+	defer rowP.Release()
+	txP := emptyTbl.NewTransaction()
+	s.Require().NoError(txP.AppendTable(s.ctx, rowP, rowP.NumRows(), nil))
+	_, err := txP.Commit(s.ctx)
+	s.Require().NoError(err)
+	metaAfterP := catP.current
+	s.Equal(int64(1), metaAfterP.NextRowID(), "peer P claims row-id range [0,1)")
+
+	catA := &occScenarioCatalog{
+		current:       metaAfterP,
+		conflictsLeft: 1,
+		location:      s.location,
+	}
+	writerATable := table.New(
+		emptyTbl.Identifier(),
+		emptyTbl.Metadata(),
+		s.location+"/metadata/v1.metadata.json",
+		func(_ context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		catA,
+	)
+
+	row1 := s.makeArrowTable()
+	defer row1.Release()
+	row2 := s.makeArrowTable()
+	defer row2.Release()
+
+	txA := writerATable.NewTransaction()
+	s.Require().NoError(txA.AppendTable(s.ctx, row1, row1.NumRows(), nil))
+	s.Require().NoError(txA.AppendTable(s.ctx, row2, row2.NumRows(), nil))
+	_, err = txA.Commit(s.ctx)
+	s.Require().NoError(err, "two staged v3 snapshots must commit after one retry")
+	s.Equal(int32(2), catA.commitTableCalls.Load())
+
+	final := catA.current
+	head := final.CurrentSnapshot()
+	s.Require().NotNil(head)
+	s.Require().NotNil(head.ParentSnapshotID)
+	a1 := final.SnapshotByID(*head.ParentSnapshotID)
+	s.Require().NotNil(a1)
+	s.Require().NotNil(a1.FirstRowID)
+	s.Require().NotNil(head.FirstRowID)
+
+	s.Equal(int64(1), *a1.FirstRowID, "A1 must claim row-id range [1,2) after P's [0,1)")
+	s.Equal(int64(2), *head.FirstRowID, "A2 must claim row-id range [2,3), not overlap A1")
+	s.Equal(int64(3), final.NextRowID(), "final next-row-id must be gap-free: 3")
+}
+
 func (s *OCCScenarioTestSuite) makeV3Table(
 	conflicts int,
 	extraProps iceberg.Properties,

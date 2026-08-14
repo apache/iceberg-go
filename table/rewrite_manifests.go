@@ -352,8 +352,8 @@ func manifestActiveFiles(fs iceio.IO, manifests []iceberg.ManifestFile) (int64, 
 // row count even though no rows are written, so running it on a cadence
 // steadily consumes row-ID space.
 //
-// A no-op result (IsNoOp) means there was nothing to do — either the table has
-// no current snapshot (NoOpNoSnapshot) or the eligible manifests are already
+// A no-op result (IsNoOp) means there was nothing to do — either the target
+// branch has no head (NoOpNoSnapshot) or the eligible manifests are already
 // optimal (NoOpAlreadyOptimal). A no-op writes no manifest list and stages
 // nothing on the transaction, so a following Commit is a true no-op; callers
 // can skip it either way.
@@ -363,7 +363,11 @@ func (t *Transaction) RewriteManifests(ctx context.Context, opts ...RewriteManif
 		return nil, err
 	}
 
-	if meta.currentSnapshot() == nil {
+	// Ask the target branch for its head, not main: the manifests actually
+	// rewritten below come from prod.parentSnapshot(), which resolves the
+	// branch head. A main-only check reports NoOpNoSnapshot for a branch that
+	// has manifests to merge whenever main has no head of its own.
+	if meta.currentSnapshotForRef(t.branch) == nil {
 		return &RewriteManifestsResult{NoOpReason: NoOpNoSnapshot}, nil
 	}
 

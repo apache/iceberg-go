@@ -362,3 +362,115 @@ func TestResolveArrowFieldRejectsDuplicateMetadataIDs(t *testing.T) {
 	require.ErrorIs(t, err, ErrAmbiguousEqualityColumn)
 	require.ErrorContains(t, err, "data.parquet")
 }
+
+func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
+	deleteA := newEqualityDeleteSetAssemblyTestFile(t, "delete-a.parquet", []int{1})
+	deleteB := newEqualityDeleteSetAssemblyTestFile(t, "delete-b.parquet", []int{1})
+	deleteC := newEqualityDeleteSetAssemblyTestFile(t, "delete-c.parquet", []int{1})
+
+	perFile := map[string]*equalityDeleteFileSet{
+		deleteA.FilePath(): {
+			id: 0,
+			equalityDeleteSet: &equalityDeleteSet{
+				keys:     set[string]{"a": {}},
+				fieldIDs: []int{1},
+				colNames: []string{"id"},
+			},
+		},
+		deleteB.FilePath(): {
+			id: 1,
+			equalityDeleteSet: &equalityDeleteSet{
+				keys:     set[string]{"b": {}},
+				fieldIDs: []int{1},
+				colNames: []string{"id"},
+			},
+		},
+		deleteC.FilePath(): {
+			id: 2,
+			equalityDeleteSet: &equalityDeleteSet{
+				keys:     set[string]{"c": {}},
+				fieldIDs: []int{1},
+				colNames: []string{"id"},
+			},
+		},
+	}
+
+	tasks := []FileScanTask{
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteA}},
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteA}},
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteA, deleteB}},
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteB, deleteA}},
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteA, deleteB, deleteA}},
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteA, deleteC}},
+	}
+
+	perTask := buildEqualityDeleteSetsPerTask(tasks, perFile)
+	require.Len(t, perTask, len(tasks))
+
+	assert.Same(t, perFile[deleteA.FilePath()].equalityDeleteSet, perTask[0][0])
+	assert.Same(t, perTask[0][0], perTask[1][0])
+	assert.Same(t, perTask[2][0], perTask[3][0])
+	assert.Same(t, perTask[2][0], perTask[4][0])
+	assert.NotSame(t, perTask[2][0], perTask[5][0])
+	assert.Equal(t, set[string]{"a": {}, "b": {}}, perTask[2][0].keys)
+	assert.Equal(t, set[string]{"a": {}, "c": {}}, perTask[5][0].keys)
+}
+
+func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
+	deleteID := newEqualityDeleteSetAssemblyTestFile(t, "delete-id.parquet", []int{1})
+	deleteCategory := newEqualityDeleteSetAssemblyTestFile(t, "delete-category.parquet", []int{2})
+
+	perFile := map[string]*equalityDeleteFileSet{
+		deleteID.FilePath(): {
+			id: 0,
+			equalityDeleteSet: &equalityDeleteSet{
+				keys:     set[string]{"id": {}},
+				fieldIDs: []int{1},
+				colNames: []string{"id"},
+			},
+		},
+		deleteCategory.FilePath(): {
+			id: 1,
+			equalityDeleteSet: &equalityDeleteSet{
+				keys:     set[string]{"category": {}},
+				fieldIDs: []int{2},
+				colNames: []string{"category"},
+			},
+		},
+	}
+
+	perTask := buildEqualityDeleteSetsPerTask([]FileScanTask{{
+		EqualityDeleteFiles: []iceberg.DataFile{deleteID, deleteCategory},
+	}}, perFile)
+	require.Len(t, perTask[0], 2)
+
+	setsByFieldID := make(map[int]*equalityDeleteSet)
+	for _, deleteSet := range perTask[0] {
+		setsByFieldID[deleteSet.fieldIDs[0]] = deleteSet
+	}
+	assert.Same(t, perFile[deleteID.FilePath()].equalityDeleteSet, setsByFieldID[1])
+	assert.Same(t, perFile[deleteCategory.FilePath()].equalityDeleteSet, setsByFieldID[2])
+}
+
+func newEqualityDeleteSetAssemblyTestFile(
+	t *testing.T,
+	path string,
+	fieldIDs []int,
+) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentEqDeletes,
+		path,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		128,
+	)
+	require.NoError(t, err)
+
+	return builder.EqualityFieldIDs(fieldIDs).Build()
+}

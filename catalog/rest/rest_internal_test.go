@@ -1419,6 +1419,97 @@ func TestHandleNon200_PreservesStatusOnMalformedBody(t *testing.T) {
 	require.ErrorIs(t, err, ErrRESTError)
 }
 
+func TestHandleNon200_StatusOverrideAppliesOnMalformedBody(t *testing.T) {
+	// The caller-supplied status override carries the semantics of the status
+	// line itself, so a 5xx commit with a garbled body must classify the same
+	// as a well-formed envelope: ErrCommitStateUnknown. Callers retry on that
+	// sentinel; stripping it when a proxy mangles the payload would turn a
+	// retryable unknown commit into a fatal decode error. Unmapped statuses
+	// keep the plain decode-failure classification.
+	commitOverride := map[int]error{
+		http.StatusConflict:            ErrCommitFailed,
+		http.StatusInternalServerError: ErrCommitStateUnknown,
+		http.StatusBadGateway:          ErrCommitStateUnknown,
+		http.StatusServiceUnavailable:  ErrCommitStateUnknown,
+		http.StatusGatewayTimeout:      ErrCommitStateUnknown,
+	}
+
+	wellFormed := func(status int) string {
+		return fmt.Sprintf(`{"error":{"message":"%s","type":"ServerException","code":%d}}`,
+			http.StatusText(status), status)
+	}
+	const malformed = `{"error":{"message":"boom`
+
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantIs     error
+		wantNotIs  error
+		wantDecode bool
+	}{
+		{
+			name:   "well-formed 500",
+			status: http.StatusInternalServerError,
+			body:   wellFormed(http.StatusInternalServerError),
+			wantIs: ErrCommitStateUnknown,
+		},
+		{
+			name:       "malformed 500",
+			status:     http.StatusInternalServerError,
+			body:       malformed,
+			wantIs:     ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+		{
+			name:   "well-formed 409",
+			status: http.StatusConflict,
+			body:   wellFormed(http.StatusConflict),
+			wantIs: ErrCommitFailed,
+		},
+		{
+			name:       "malformed 409",
+			status:     http.StatusConflict,
+			body:       malformed,
+			wantIs:     ErrCommitFailed,
+			wantNotIs:  ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+		{
+			name:       "malformed unmapped 404",
+			status:     http.StatusNotFound,
+			body:       malformed,
+			wantIs:     ErrRESTError,
+			wantNotIs:  ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rsp := &http.Response{
+				StatusCode:    tc.status,
+				ContentLength: int64(len(tc.body)),
+				Body:          io.NopCloser(bytes.NewBufferString(tc.body)),
+			}
+
+			err := handleNon200(rsp, commitOverride, nil)
+			require.Error(t, err)
+			require.ErrorIs(t, err, tc.wantIs)
+			if tc.wantNotIs != nil {
+				require.NotErrorIs(t, err, tc.wantNotIs)
+			}
+			if tc.wantDecode {
+				require.ErrorContains(t, err, "failed to decode error response")
+			}
+
+			var restErr errorResponse
+			require.ErrorAs(t, err, &restErr)
+			require.Equal(t, tc.status, restErr.statusCode)
+		})
+	}
+}
+
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
 	t.Parallel()
 

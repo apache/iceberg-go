@@ -1232,6 +1232,16 @@ func (a *arrowProjectionVisitor) Schema(_ *iceberg.Schema, _ arrow.Array, result
 	return result
 }
 
+func ownsChildResult(arr arrow.Array) bool {
+	if arr == nil {
+		return false
+	}
+
+	_, nested := arr.DataType().(arrow.NestedType)
+
+	return nested
+}
+
 func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.Array, fieldResults []arrow.Array) arrow.Array {
 	if structArr == nil {
 		return nil
@@ -1242,7 +1252,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 	for i, field := range st.FieldList {
 		arr := fieldResults[i]
 		if arr != nil {
-			if _, ok := arr.DataType().(arrow.NestedType); ok {
+			if ownsChildResult(arr) {
 				defer arr.Release()
 			}
 
@@ -1299,6 +1309,10 @@ func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fie
 }
 
 func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.Array, valArr arrow.Array) arrow.Array {
+	if ownsChildResult(valArr) {
+		defer valArr.Release()
+	}
+
 	arr, ok := listArr.(array.ListLike)
 	if !ok || valArr == nil {
 		return nil
@@ -1345,6 +1359,14 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
+	if ownsChildResult(keyResult) {
+		defer keyResult.Release()
+	}
+
+	if ownsChildResult(valResult) {
+		defer valResult.Release()
+	}
+
 	if keyResult == nil || valResult == nil {
 		return nil
 	}
@@ -1389,7 +1411,8 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 	}
 	// UnshredVariant returns a caller-owned array whose ref is balanced by
 	// castIfNeeded's Retain/Release. This holds only because VariantType is not
-	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// an arrow.NestedType; if it were, ownsChildResult would report true and the
+	// parent Struct/List/Map would Release and double-free.
 	// The checked-allocator leak tests guard this invariant.
 	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
 	if err != nil {
@@ -1740,7 +1763,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			// Pass 0 so AddFiles does not claim sort_order_id on files
+			// it did not write (#1184). Callers that know the file's
+			// sort layout use FileToDataFile with an explicit id.
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props)
 
 			return nil
 		})
@@ -1753,9 +1779,30 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-// fileToDataFile builds a DataFile for a pre-existing file. The caller cannot
-// convey its sort layout, so no sort_order_id is claimed.
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
+// FileToDataFile builds a DataFile for an existing parquet file at
+// filePath, reading its footer to populate record count, file size,
+// column sizes, value/null counts and lower/upper bounds, and to infer
+// partition values for order-preserving transforms. sortOrderID is
+// stamped onto the DataFile so callers converting foreign parquet
+// footers can convey the file's sort layout (spec data-file field
+// sort_order_id); pass 0 to make no claim. Panics from the unexported
+// conversion are recovered into an error.
+func FileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) (df iceberg.DataFile, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case error:
+				err = fmt.Errorf("error encountered during file conversion: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during file conversion: %v", e)
+			}
+		}
+	}()
+
+	return fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, sortOrderID, props), nil
+}
+
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1802,6 +1849,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		Content:         iceberg.EntryContentData,
 		FileSize:        rdr.SourceFileSize(),
 		PartitionValues: partitionValues,
+		SortOrderID:     sortOrderID,
 	})
 }
 

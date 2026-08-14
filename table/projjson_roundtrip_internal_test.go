@@ -88,6 +88,7 @@ func TestWriteRecordsRecoversExactProjJSONCRSOnRead(t *testing.T) {
 	readSchema, _, rdr, err := (&arrowScan{
 		metadata:        tbl.Metadata(),
 		fs:              fs,
+		scanSchema:      tbl.Schema(),
 		projectedSchema: tbl.Schema(),
 		concurrency:     1,
 		nameMapping:     tbl.Metadata().NameMapping(),
