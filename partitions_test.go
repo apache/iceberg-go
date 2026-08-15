@@ -1043,33 +1043,6 @@ func TestNewPartitionSpecOptsRejectsRedundantTimeTransforms(t *testing.T) {
 	}
 }
 
-func TestNewPartitionSpecOptsAllowsTimeAndNonTimeOnSameSource(t *testing.T) {
-	schema := iceberg.NewSchema(1,
-		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
-	)
-
-	tests := []struct {
-		name  string
-		other iceberg.Transform
-	}{
-		{name: "identity", other: iceberg.IdentityTransform{}},
-		{name: "bucket", other: iceberg.BucketTransform{NumBuckets: 16}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			spec, err := iceberg.NewPartitionSpecOpts(
-				iceberg.WithSpecID(1),
-				iceberg.AddPartitionFieldByName("ts", "ts_day", iceberg.DayTransform{}, schema, nil),
-				iceberg.AddPartitionFieldByName("ts", "ts_other", tt.other, schema, nil),
-			)
-
-			require.NoError(t, err)
-			assert.Equal(t, 2, spec.NumFields())
-		})
-	}
-}
-
 func TestNewPartitionSpecOptsAllowsTimeTransformsOnDistinctSources(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "ts1", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
@@ -1283,27 +1256,51 @@ func TestBindToSchemaAllowsTimeGranularityOverlap(t *testing.T) {
 	assert.Equal(t, 2, bound.NumFields())
 }
 
-func TestTimeTransformMembership(t *testing.T) {
+// A row flips if a non-time transform grows the TimeTransform method set, or a
+// time transform loses it.
+func TestNewPartitionSpecOptsTimeTransformMembership(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+	// The zero value is rejected as nameless and name is unexported, so
+	// ParseTransform is the only source of a spec-legal UnknownTransform.
+	unknown, err := iceberg.ParseTransform("custom_transform")
+	require.NoError(t, err)
+	require.IsType(t, iceberg.UnknownTransform{}, unknown)
+
 	tests := []struct {
-		name     string
-		trans    iceberg.Transform
-		wantTime bool
+		name          string
+		trans         iceberg.Transform
+		wantRedundant bool
 	}{
-		{name: "year", trans: iceberg.YearTransform{}, wantTime: true},
-		{name: "month", trans: iceberg.MonthTransform{}, wantTime: true},
-		{name: "day", trans: iceberg.DayTransform{}, wantTime: true},
-		{name: "hour", trans: iceberg.HourTransform{}, wantTime: true},
-		{name: "identity", trans: iceberg.IdentityTransform{}, wantTime: false},
-		{name: "void", trans: iceberg.VoidTransform{}, wantTime: false},
-		{name: "bucket", trans: iceberg.BucketTransform{NumBuckets: 16}, wantTime: false},
-		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantTime: false},
-		{name: "unknown", trans: iceberg.UnknownTransform{}, wantTime: false},
+		{name: "year", trans: iceberg.YearTransform{}, wantRedundant: true},
+		{name: "month", trans: iceberg.MonthTransform{}, wantRedundant: true},
+		{name: "day", trans: iceberg.DayTransform{}, wantRedundant: true},
+		{name: "hour", trans: iceberg.HourTransform{}, wantRedundant: true},
+		{name: "identity", trans: iceberg.IdentityTransform{}, wantRedundant: false},
+		{name: "bucket", trans: iceberg.BucketTransform{NumBuckets: 16}, wantRedundant: false},
+		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantRedundant: false},
+		{name: "unknown", trans: unknown, wantRedundant: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, isTime := tt.trans.(iceberg.TimeTransform)
-			assert.Equal(t, tt.wantTime, isTime)
+			spec, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldByName("ts", "ts_day", iceberg.DayTransform{}, schema, nil),
+				iceberg.AddPartitionFieldByName("ts", "ts_other", tt.trans, schema, nil),
+			)
+
+			if tt.wantRedundant {
+				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+				assert.ErrorContains(t, err, "redundant partition field")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, 2, spec.NumFields())
+			assert.Equal(t, tt.trans, spec.Field(1).Transform)
 		})
 	}
 }
