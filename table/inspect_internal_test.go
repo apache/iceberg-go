@@ -885,6 +885,243 @@ func TestInspectMetadataLogEntriesSkipsEmptyCurrentMetadataLocation(t *testing.T
 	require.EqualValues(t, 5, rec.NumCols())
 }
 
+func TestInspectDeleteFiles(t *testing.T) {
+	const (
+		snapshotID = int64(1)
+		dataPath   = "mem://default/table-location/data/data.parquet"
+	)
+	spec := partitionedSpec()
+	partition := map[int]any{1000: int32(7)}
+
+	equalityBuilder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentEqDeletes,
+		"mem://default/table-location/delete/equality.parquet",
+		iceberg.ParquetFile,
+		partition,
+		nil,
+		nil,
+		2,
+		2048,
+	)
+	require.NoError(t, err)
+	equalityFile := equalityBuilder.
+		ColumnSizes(map[int]int64{1: 128}).
+		ValueCounts(map[int]int64{1: 2}).
+		NullValueCounts(map[int]int64{1: 0}).
+		NaNValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(map[int][]byte{1: {0x01}}).
+		UpperBoundValues(map[int][]byte{1: {0x14}}).
+		KeyMetadata([]byte{0xab, 0xcd}).
+		SplitOffsets([]int64{4, 16}).
+		EqualityFieldIDs([]int{1}).
+		SortOrderID(5).
+		Build()
+	positionFile := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/delete/position.parquet", partition, dataPath)
+	deletionVectorBuilder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentPosDeletes,
+		"mem://default/table-location/delete/vector.puffin",
+		iceberg.PuffinFile,
+		partition,
+		nil,
+		nil,
+		3,
+		4096,
+	)
+	require.NoError(t, err)
+	deletionVectorFile := deletionVectorBuilder.
+		ReferencedDataFile(dataPath).
+		ContentOffset(128).
+		ContentSizeInBytes(512).
+		Build()
+	deletedFile := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/delete/deleted.parquet", partition, dataPath)
+
+	entry := func(status iceberg.ManifestEntryStatus, file iceberg.DataFile) iceberg.ManifestEntry {
+		sequenceNumber := int64(1)
+
+		return iceberg.NewManifestEntry(status, int64Ptr(snapshotID), &sequenceNumber, &sequenceNumber, file)
+	}
+	tbl := inspectFilesTableWithManifests(t, spec,
+		inspectManifestSpec{
+			content: iceberg.ManifestContentData,
+			entries: []iceberg.ManifestEntry{entry(iceberg.EntryStatusADDED,
+				newTestDataFile(t, spec, dataPath, partition))},
+		},
+		inspectManifestSpec{
+			content: iceberg.ManifestContentDeletes,
+			entries: []iceberg.ManifestEntry{
+				entry(iceberg.EntryStatusADDED, equalityFile),
+				entry(iceberg.EntryStatusADDED, positionFile),
+				entry(iceberg.EntryStatusADDED, deletionVectorFile),
+				entry(iceberg.EntryStatusDELETED, deletedFile),
+			},
+		})
+
+	rr, err := tbl.Inspect().DeleteFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 3, record.NumRows())
+	require.EqualValues(t, 21, record.NumCols())
+
+	content := record.Column(0).(*array.Int32)
+	paths := record.Column(1).(*array.String)
+	formats := record.Column(2).(*array.String)
+	partitions := record.Column(4).(*array.Struct)
+	partitionValues := partitions.Field(0).(*array.Int32)
+	require.EqualValues(t, iceberg.EntryContentEqDeletes, content.Value(0))
+	require.EqualValues(t, iceberg.EntryContentPosDeletes, content.Value(1))
+	require.EqualValues(t, iceberg.EntryContentPosDeletes, content.Value(2))
+	require.Equal(t, equalityFile.FilePath(), paths.Value(0))
+	require.Equal(t, positionFile.FilePath(), paths.Value(1))
+	require.Equal(t, deletionVectorFile.FilePath(), paths.Value(2))
+	require.Equal(t, "PARQUET", formats.Value(0))
+	require.Equal(t, "PARQUET", formats.Value(1))
+	require.Equal(t, "PUFFIN", formats.Value(2))
+	require.EqualValues(t, 7, partitionValues.Value(0))
+	require.EqualValues(t, 7, partitionValues.Value(1))
+	require.EqualValues(t, 7, partitionValues.Value(2))
+
+	recordCounts := record.Column(5).(*array.Int64)
+	fileSizes := record.Column(6).(*array.Int64)
+	require.EqualValues(t, 2, recordCounts.Value(0))
+	require.EqualValues(t, 1, recordCounts.Value(1))
+	require.EqualValues(t, 3, recordCounts.Value(2))
+	require.EqualValues(t, 2048, fileSizes.Value(0))
+	require.EqualValues(t, 1, fileSizes.Value(1))
+	require.EqualValues(t, 4096, fileSizes.Value(2))
+
+	assertInt64Map := func(column int, key int32, value int64) {
+		t.Helper()
+		m := record.Column(column).(*array.Map)
+		require.False(t, m.IsNull(0))
+		start, end := m.ValueOffsets(0)
+		require.EqualValues(t, 1, end-start)
+		require.Equal(t, key, m.Keys().(*array.Int32).Value(int(start)))
+		require.Equal(t, value, m.Items().(*array.Int64).Value(int(start)))
+	}
+	assertInt64Map(7, 1, 128)
+	assertInt64Map(8, 1, 2)
+	assertInt64Map(9, 1, 0)
+	assertInt64Map(10, 1, 0)
+	assertBinaryMap := func(column int, key int32, value []byte) {
+		t.Helper()
+		m := record.Column(column).(*array.Map)
+		require.False(t, m.IsNull(0))
+		start, end := m.ValueOffsets(0)
+		require.EqualValues(t, 1, end-start)
+		require.Equal(t, key, m.Keys().(*array.Int32).Value(int(start)))
+		require.Equal(t, value, m.Items().(*array.Binary).Value(int(start)))
+	}
+	assertBinaryMap(11, 1, []byte{0x01})
+	assertBinaryMap(12, 1, []byte{0x14})
+
+	keyMetadata := record.Column(13).(*array.Binary)
+	require.Equal(t, []byte{0xab, 0xcd}, keyMetadata.Value(0))
+	splitOffsets := record.Column(14).(*array.List)
+	require.Equal(t, []int64{4, 16}, splitOffsets.ListValues().(*array.Int64).Int64Values())
+	equalityIDs := record.Column(15).(*array.List)
+	require.Equal(t, []int32{1}, equalityIDs.ListValues().(*array.Int32).Int32Values())
+	sortOrderIDs := record.Column(16).(*array.Int32)
+	require.False(t, sortOrderIDs.IsNull(0))
+	require.EqualValues(t, 5, sortOrderIDs.Value(0))
+	referencedDataFiles := record.Column(18).(*array.String)
+	require.True(t, referencedDataFiles.IsNull(0))
+	require.Equal(t, dataPath, referencedDataFiles.Value(1))
+	require.Equal(t, dataPath, referencedDataFiles.Value(2))
+
+	contentOffsets := record.Column(19).(*array.Int64)
+	contentSizes := record.Column(20).(*array.Int64)
+	require.True(t, contentOffsets.IsNull(0))
+	require.True(t, contentOffsets.IsNull(1))
+	require.EqualValues(t, 128, contentOffsets.Value(2))
+	require.True(t, contentSizes.IsNull(0))
+	require.True(t, contentSizes.IsNull(1))
+	require.EqualValues(t, 512, contentSizes.Value(2))
+}
+
+func TestInspectDeleteFilesEmpty(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{simpleSchema()},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   0,
+	}}
+	tbl := New(Identifier{"empty-delete-files"}, meta, "metadata.json", nil, nil)
+
+	rr, err := tbl.Inspect().DeleteFiles(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 0, record.NumRows())
+	require.EqualValues(t, 20, record.NumCols())
+}
+
+type inspectManifestSpec struct {
+	content iceberg.ManifestContent
+	entries []iceberg.ManifestEntry
+}
+
+func inspectFilesTableWithManifests(t *testing.T, spec iceberg.PartitionSpec, manifests ...inspectManifestSpec) *Table {
+	t.Helper()
+	const snapshotID = int64(1)
+
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	manifestFiles := make([]iceberg.ManifestFile, 0, len(manifests))
+	for index, manifestSpec := range manifests {
+		manifestPath := "mem://default/table-location/metadata/inspect-" + strconv.Itoa(index) + ".avro"
+		var manifestBuf bytes.Buffer
+		writer, err := iceberg.NewManifestWriter(3, &manifestBuf, spec, simpleSchema(), snapshotID,
+			iceberg.WithManifestWriterContent(manifestSpec.content))
+		require.NoError(t, err)
+		for _, entry := range manifestSpec.entries {
+			switch entry.Status() {
+			case iceberg.EntryStatusADDED:
+				require.NoError(t, writer.Add(entry))
+			case iceberg.EntryStatusEXISTING:
+				require.NoError(t, writer.Existing(entry))
+			case iceberg.EntryStatusDELETED:
+				require.NoError(t, writer.Delete(entry))
+			default:
+				t.Fatalf("unexpected manifest entry status %v", entry.Status())
+			}
+		}
+		require.NoError(t, writer.Close())
+		manifest, err := writer.ToManifestFile(manifestPath, int64(manifestBuf.Len()),
+			iceberg.WithManifestFileContent(manifestSpec.content))
+		require.NoError(t, err)
+		require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+		manifestFiles = append(manifestFiles, manifest)
+	}
+
+	manifestListPath := "mem://default/table-location/metadata/inspect-manifest-list.avro"
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(3, &listBuf, snapshotID, nil, &sequenceNumber, 0, manifestFiles))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	snapshotIDValue := snapshotID
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: sequenceNumber,
+	}}
+	txn.meta.currentSnapshotID = &snapshotIDValue
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "inspect-files"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+}
+
 func TestInspectManifestsSchema(t *testing.T) {
 	sc := ManifestsSchema()
 
@@ -1384,6 +1621,19 @@ func TestDataFilesSchema(t *testing.T) {
 
 	unpartitioned := DataFilesSchema(&iceberg.StructType{})
 	require.NotContains(t, testFieldNames(unpartitioned), "partition")
+}
+
+func TestDeleteFilesSchema(t *testing.T) {
+	sc := DeleteFilesSchema(&iceberg.StructType{})
+	names := testFieldNames(sc)
+	require.Equal(t, testFieldNames(DataFilesSchema(&iceberg.StructType{})), names)
+	require.Equal(t, "content", names[0])
+	require.Equal(t, "file_path", names[1])
+	require.Equal(t, "equality_ids", names[14])
+	require.Equal(t, "referenced_data_file", names[17])
+	require.Equal(t, 134, sc.Fields()[0].ID)
+	require.Equal(t, 145, sc.Fields()[len(sc.Fields())-1].ID)
+	require.NotContains(t, names, "partition")
 }
 
 func inspectDataFilesTable(t *testing.T, spec iceberg.PartitionSpec, entries []iceberg.ManifestEntry) *Table {
