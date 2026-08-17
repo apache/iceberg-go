@@ -656,8 +656,9 @@ func getRetentionInt64(props iceberg.Properties, standardKey, legacyKey string, 
 // with reference age falling back through the ref's max-ref-age-ms, the table's
 // MaxRefAgeMsKey property, and the specification default. Snapshot age falls
 // back through the ref's own settings, the options passed here, and finally the
-// table's MinSnapshotsToKeepKey and MaxSnapshotAgeMsKey properties. The current
-// snapshot of the main branch is always kept.
+// table's MinSnapshotsToKeepKey and MaxSnapshotAgeMsKey properties. The snapshot
+// a retained ref points at is always kept, for every branch and tag, so expiry
+// can never leave a ref referencing a snapshot that no longer exists.
 //
 // By default the now-unreferenced manifests, manifest lists, and data files are
 // deleted once the commit lands; pass WithPostCommit(false) to defer that
@@ -712,6 +713,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		defaultMaxSnapshotAgeMs = *cfg.maxSnapshotAgeMs
 	}
 
+	lookup := func(id int64) *Snapshot {
+		s, _ := meta.SnapshotByID(id)
+
+		return s
+	}
+
 	retainedRefs := make(map[string]SnapshotRef, len(meta.refs))
 	for refName, ref := range meta.refs {
 		// Assert the ref's base snapshot id so we don't accidentally
@@ -738,8 +745,12 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 		}
 		retainedRefs[refName] = ref
 
-		if refName == MainBranch {
-			snapsToKeep[ref.SnapshotID] = struct{}{}
+		// Retained regardless of age: the branch walk below can skip the head
+		// when min-snapshots-to-keep is 0, and tags never run that walk.
+		snapsToKeep[ref.SnapshotID] = struct{}{}
+
+		if ref.SnapshotRefType != BranchRef {
+			continue
 		}
 
 		var (
@@ -747,38 +758,15 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			maxSnapshotAgeMs   = cmp.Or(ref.MaxSnapshotAgeMs, cfg.maxSnapshotAgeMs, &propMaxSnapshotAgeMs)
 		)
 
-		if ref.SnapshotRefType != BranchRef {
-			snapsToKeep[ref.SnapshotID] = struct{}{}
-
-			continue
-		}
-
-		var (
-			numSnapshots int
-			snapId       = ref.SnapshotID
-		)
-
-		for {
-			snap, err := meta.SnapshotByID(snapId)
-			if err != nil {
-				// Parent snapshot may have been removed by a previous expiration.
-				// Treat missing parent as end of chain - this is expected behavior.
-				break
-			}
-
-			snapAge := time.Now().UnixMilli() - snap.TimestampMs
+		for numSnapshots, snap := range AncestorsOf(ref.SnapshotID, lookup) {
+			// Age against the single nowMs so this cutoff and the
+			// unreferenced-snapshot cutoff below cannot disagree.
+			snapAge := nowMs - snap.TimestampMs
 			if (snapAge > *maxSnapshotAgeMs) && (numSnapshots >= *minSnapshotsToKeep) {
 				break
 			}
 
 			snapsToKeep[snap.SnapshotID] = struct{}{}
-
-			if snap.ParentSnapshotID == nil {
-				break
-			}
-
-			snapId = *snap.ParentSnapshotID
-			numSnapshots++
 		}
 	}
 
@@ -790,19 +778,8 @@ func (t *Transaction) ExpireSnapshots(opts ...ExpireSnapshotsOpt) error {
 			continue
 		}
 
-		snapshotID := ref.SnapshotID
-		for {
-			snap, err := meta.SnapshotByID(snapshotID)
-			if err != nil {
-				break
-			}
-
+		for _, snap := range AncestorsOf(ref.SnapshotID, lookup) {
 			referencedSnapshots[snap.SnapshotID] = struct{}{}
-			if snap.ParentSnapshotID == nil {
-				break
-			}
-
-			snapshotID = *snap.ParentSnapshotID
 		}
 	}
 
