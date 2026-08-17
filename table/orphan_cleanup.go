@@ -842,14 +842,44 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	}
 
 	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
+	normalizedUser, normalizedHost := normalizeURLAuthority(parsedURL, equalAuthorities)
 	normalizedURL := &url.URL{
 		Scheme: normalizedScheme,
-		Host:   normalizedAuthority,
+		User:   normalizedUser,
+		Host:   normalizedHost,
 		Path:   filepath.Clean(parsedURL.Path),
 	}
 
 	return normalizedURL.String()
+}
+
+// completeURLAuthority returns the URI authority, including user-info when it
+// is present. url.URL stores user-info separately from Host, but URI authority
+// equivalence applies to the complete authority (for example,
+// container@account.dfs.core.windows.net).
+func completeURLAuthority(parsedURL *url.URL) string {
+	if parsedURL.User == nil {
+		return parsedURL.Host
+	}
+
+	return parsedURL.User.String() + "@" + parsedURL.Host
+}
+
+func normalizeURLAuthority(parsedURL *url.URL, equalAuthorities map[string]string) (*url.Userinfo, string) {
+	authority := completeURLAuthority(parsedURL)
+	normalizedAuthority := applyAuthorityEquivalence(authority, equalAuthorities)
+	if normalizedAuthority == authority {
+		return parsedURL.User, parsedURL.Host
+	}
+
+	// Parse the canonical authority back into User and Host because url.URL
+	// serializes user-info separately from the host component.
+	canonicalURL, err := url.Parse("//" + normalizedAuthority)
+	if err != nil {
+		return parsedURL.User, parsedURL.Host
+	}
+
+	return canonicalURL.User, canonicalURL.Host
 }
 
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
@@ -943,8 +973,8 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 
 	refScheme := applySchemeEquivalence(refURL.Scheme, cfg.equalSchemes)
 	fsScheme := applySchemeEquivalence(fsURL.Scheme, cfg.equalSchemes)
-	refAuth := applyAuthorityEquivalence(refURL.Host, cfg.equalAuthorities)
-	fsAuth := applyAuthorityEquivalence(fsURL.Host, cfg.equalAuthorities)
+	refAuth := applyAuthorityEquivalence(completeURLAuthority(refURL), cfg.equalAuthorities)
+	fsAuth := applyAuthorityEquivalence(completeURLAuthority(fsURL), cfg.equalAuthorities)
 
 	// Check for mismatches
 	schemeMismatch := refScheme != fsScheme

@@ -564,6 +564,22 @@ func TestCheckPrefixMismatchPreservesExactEquivalencePrecedence(t *testing.T) {
 	assert.Equal(t, prefixMismatchKeep, decision)
 }
 
+func TestCheckPrefixMismatchUsesCompleteAuthority(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"container@account-a.dfs.core.windows.net,container@account-b.dfs.core.windows.net": "container@canonical.dfs.core.windows.net",
+		}),
+	)
+
+	decision, err := checkPrefixMismatch(
+		"abfs://container@account-a.dfs.core.windows.net/data/file.parquet",
+		"abfs://container@account-b.dfs.core.windows.net/data/file.parquet",
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, prefixMismatchKeep, decision)
+}
+
 func TestIsFileOrphan(t *testing.T) {
 	// PrefixMismatchError ensures that metadata files (value=false) found via
 	// normalized lookup don't accidentally fall through to the prefix-mismatch
@@ -681,6 +697,37 @@ func TestNormalizeURLPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := normalizeURLPath(tt.input, cfg)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestNormalizeURLPathUsesCompleteAuthority(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"container@account-a.dfs.core.windows.net,container@account-b.dfs.core.windows.net": "container@canonical.dfs.core.windows.net",
+		}),
+	)
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "account_a",
+			input:    "abfs://container@account-a.dfs.core.windows.net/data/../file.parquet",
+			expected: "abfs://container@canonical.dfs.core.windows.net/file.parquet",
+		},
+		{
+			name:     "account_b",
+			input:    "abfs://container@account-b.dfs.core.windows.net/data/file.parquet",
+			expected: "abfs://container@canonical.dfs.core.windows.net/data/file.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, normalizeURLPath(tt.input, cfg))
 		})
 	}
 }
