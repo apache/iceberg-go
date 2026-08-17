@@ -144,7 +144,7 @@ func TestWriteEqualityDeleteFilesParquetContent(t *testing.T) {
 	var vals []int64
 	for i := range chunked.Chunks() {
 		arr := chunked.Chunks()[i].(*array.Int64)
-		for j := 0; j < arr.Len(); j++ {
+		for j := range arr.Len() {
 			vals = append(vals, arr.Value(j))
 		}
 	}

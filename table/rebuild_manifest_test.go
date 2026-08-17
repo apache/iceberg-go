@@ -446,17 +446,21 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	freshParentID := int64(77)
 	freshParent := &Snapshot{
 		SnapshotID: freshParentID,
-		// Set a SequenceNumber that DIFFERS from freshMeta.LastSequenceNumber()
-		// so the assertion below can distinguish "newSeq derived from
-		// freshMeta.LastSequenceNumber()" (correct) from "newSeq derived from
-		// freshParent.SequenceNumber" (regression). Using freshParentSeq = 99
-		// versus freshMeta.LastSequenceNumber() = 1 makes the two paths
-		// disagree by 98.
-		SequenceNumber: 99,
+		// a concurrent writer on a DIFFERENT branch bumped the table-wide last-sequence-number (to 99)
+		// without advancing THIS branch's parent (seq 1). newSeq must track the
+		// fresh table-wide counter (100), not freshParent.SequenceNumber+1 (2),
+		// or MetadataBuilder.AddSnapshot rejects seq <= lastSequenceNumber.
+		//
+		// newSeq = max(freshMeta.LastSequenceNumber(), freshParent.SequenceNumber)
+		// + 1: for a real external parent the table last-seq always dominates
+		// (the parent is part of freshMeta), so this reduces to the fresh
+		// table-wide counter. It only diverges for an in-transaction chained
+		// sibling whose seq already equals lastSequenceNumber+1 — covered by TestMultipleStagedSnapshots*
+		SequenceNumber: 1,
 		ManifestList:   parentManifestListPath,
 		Summary:        &Summary{Operation: OpAppend, Properties: freshParentSummary},
 	}
-	freshMeta := newMetadataWithLastSeqNum(t, 1)
+	freshMeta := newMetadataWithLastSeqNum(t, 99)
 	require.NotEqual(t, freshParent.SequenceNumber, freshMeta.LastSequenceNumber(),
 		"test fixture must keep these distinct so the seq-num source is observable")
 
@@ -465,8 +469,8 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	require.NotNil(t, rebuilt.Summary)
 
 	// R2: pin the seq-num source. Must equal freshMeta.LastSequenceNumber()+1
-	// (=2) and must NOT equal freshParent.SequenceNumber+1 (=100). A regression
-	// that derives newSeq from freshParent would fail this assertion.
+	// (=100) and must NOT equal freshParent.SequenceNumber+1 (=2). A regression
+	// that derives newSeq from freshParent alone would fail this assertion.
 	require.Equal(t, freshMeta.LastSequenceNumber()+1, rebuilt.SequenceNumber,
 		"newSeq must derive from freshMeta.LastSequenceNumber(), not freshParent.SequenceNumber")
 

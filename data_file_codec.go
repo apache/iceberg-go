@@ -107,7 +107,8 @@ func (d *dataFile) MarshalAvroEntry(spec PartitionSpec, schema *Schema, version 
 		return nil, err
 	}
 	clone := cloneDataFileAvroFields(d)
-	partitionData, err := avroEncodePartitionData(d.Partition(), maps)
+	partitionData, err := avroEncodePartitionData(
+		d.DataFilePartitionRef(internal.DataFileRef{}), maps)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +197,7 @@ func cloneDataFileAvroFields(src *dataFile) *dataFile {
 	srcVal := reflect.ValueOf(src).Elem()
 	outVal := reflect.ValueOf(out).Elem()
 	t := srcVal.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		if _, hasAvroTag := t.Field(i).Tag.Lookup("avro"); hasAvroTag {
 			outVal.Field(i).Set(srcVal.Field(i))
 		}

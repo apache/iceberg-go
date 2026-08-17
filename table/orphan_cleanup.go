@@ -23,6 +23,7 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/errgroup"
 )
@@ -149,9 +151,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for k, v := range schemes {
-			cfg.equalSchemes[k] = v
-		}
+		maps.Copy(cfg.equalSchemes, schemes)
 	}
 }
 
@@ -164,9 +164,7 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for k, v := range authorities {
-			cfg.equalAuthorities[k] = v
-		}
+		maps.Copy(cfg.equalAuthorities, authorities)
 	}
 }
 
@@ -510,7 +508,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 					path:   normalizeFilePath(entry.DataFile().FilePath()),
 					isData: true,
 				})
-				if ref := entry.DataFile().ReferencedDataFile(); ref != nil {
+				if ref := iceberginternal.BorrowedDataFileReferencedDataFile(entry.DataFile()); ref != nil {
 					// This is a deletion vector entry referencing a data file.
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.
@@ -678,7 +676,7 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.maxConcurrency)
-	for i := 0; i < cfg.maxConcurrency; i++ {
+	for i := range cfg.maxConcurrency {
 		go func(workerID int) {
 			defer wg.Done()
 			for file := range in {
@@ -864,7 +862,7 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 	// Check comma-separated lists (e.g., "s3,s3a,s3n" -> "s3")
 	for schemes, canonical := range equalSchemes {
 		if strings.Contains(schemes, ",") {
-			for _, s := range strings.Split(schemes, ",") {
+			for s := range strings.SplitSeq(schemes, ",") {
 				if strings.TrimSpace(s) == scheme {
 					return canonical
 				}
@@ -900,7 +898,7 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 
 	for authorities, canonical := range equalAuthorities {
 		if strings.Contains(authorities, ",") {
-			for _, a := range strings.Split(authorities, ",") {
+			for a := range strings.SplitSeq(authorities, ",") {
 				if strings.TrimSpace(a) == authority {
 					return canonical
 				}

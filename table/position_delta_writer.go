@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
 	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -283,8 +284,8 @@ func appendNullRowIDColumn(alloc memory.Allocator, batch arrow.RecordBatch) (arr
 	// internal arrs/fields when len < cap.
 	srcFields := batch.Schema().Fields()
 	srcCols := batch.Columns()
-	fields := append(srcFields[:len(srcFields):len(srcFields)], rowIDField)
-	cols := append(srcCols[:len(srcCols):len(srcCols)], nullCol)
+	fields := append(slices.Clip(srcFields), rowIDField)
+	cols := append(slices.Clip(srcCols), nullCol)
 	newSchema := arrow.NewSchema(fields, nil)
 
 	return array.NewRecordBatch(newSchema, cols, nrows), nil
