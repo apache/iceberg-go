@@ -7,7 +7,6 @@
 // with the License.  You may obtain a copy of the License at
 //
 //   http://www.apache.org/licenses/LICENSE-2.0
-
 // Unless required by applicable law or agreed to in writing,
 // software distributed under the License is distributed on an
 // "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -41,26 +40,33 @@ type rowLineageRewriteBenchmarkFixture struct {
 }
 
 func BenchmarkRowLineageRewriteRowGroupPruning(b *testing.B) {
-	const numRows = 1_000_000
+	const (
+		rowGroups       = 100
+		rowsPerRowGroup = 10_000
+		numRows         = rowGroups * rowsPerRowGroup
+	)
 
 	for _, tc := range []struct {
-		name         string
-		deleteFilter iceberg.BooleanExpression
+		name              string
+		retainedRowGroups int
+		deleteFilter      iceberg.BooleanExpression
 	}{
 		{
-			name:         "keep-1-of-100",
-			deleteFilter: iceberg.LessThan(iceberg.Reference("id"), int64(numRows-10_000)),
+			name:              "keep-1-of-100",
+			retainedRowGroups: 1,
+			deleteFilter:      iceberg.LessThan(iceberg.Reference("id"), int64(numRows-rowsPerRowGroup)),
 		},
 		{
-			name:         "keep-10-of-100",
-			deleteFilter: iceberg.LessThan(iceberg.Reference("id"), int64(numRows-100_000)),
+			name:              "keep-10-of-100",
+			retainedRowGroups: 10,
+			deleteFilter:      iceberg.LessThan(iceberg.Reference("id"), int64(numRows-10*rowsPerRowGroup)),
 		},
 		{
-			name:         "keep-100-of-100",
-			deleteFilter: iceberg.EqualTo(iceberg.Reference("id"), int64(0)),
+			name:              "keep-100-of-100",
+			retainedRowGroups: rowGroups,
+			deleteFilter:      iceberg.EqualTo(iceberg.Reference("id"), int64(0)),
 		},
 	} {
-		tc := tc
 		b.Run(tc.name, func(b *testing.B) {
 			fixture := newRowLineageRewriteBenchmarkFixture(b, numRows)
 			ctx := context.Background()
@@ -76,6 +82,8 @@ func BenchmarkRowLineageRewriteRowGroupPruning(b *testing.B) {
 				fixture.reset(b)
 				b.StartTimer()
 			}
+			b.ReportMetric(float64(numRows), "rows/op")
+			b.ReportMetric(float64(tc.retainedRowGroups), "retained-row-groups/op")
 		})
 	}
 }
