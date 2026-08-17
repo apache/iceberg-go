@@ -972,11 +972,29 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 		]
 	}`
 
+	// A client is free to number its request schema however it likes; the remap
+	// resolves each placeholder through that schema's own IDs, not through the
+	// ordinal positions of its columns.
+	const nonOrdinalSchema = `{
+		"type": "struct", "schema-id": 0,
+		"fields": [
+			{"id": 5, "name": "ints", "required": false, "type": "int"},
+			{"id": 7, "name": "floats", "required": false, "type": "double"},
+			{"id": 9, "name": "strings", "required": false, "type": "string"}
+		]
+	}`
+
 	for _, tt := range []struct {
-		name          string
+		name string
+		// schema and order default to requestSchema and a sort by the first
+		// column when empty.
+		schema        string
 		spec          string
+		order         string
 		wantSourceIDs []int
 		wantNames     []string
+		wantSortID    int
+		wantErr       string
 	}{
 		{
 			// PARTITIONED BY (ints)
@@ -1021,20 +1039,71 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			wantSourceIDs: []int{1, 1},
 			wantNames:     []string{"ints", "ints_bucket"},
 		},
+		{
+			// The remap goes through the request schema by ID, so it is not tied
+			// to the Spark ordinal wire format: the same request numbered 5,7,9
+			// remaps to the same fresh IDs.
+			name:          "non-ordinal request schema",
+			schema:        nonOrdinalSchema,
+			spec:          `{"spec-id":0,"fields":[{"name":"strings","transform":"identity","source-id":9,"field-id":1000}]}`,
+			order:         `{"order-id":1,"fields":[{"transform":"identity","source-id":5,"direction":"asc","null-order":"nulls-first"}]}`,
+			wantSourceIDs: []int{3},
+			wantNames:     []string{"strings"},
+			wantSortID:    1,
+		},
+		{
+			// A placeholder naming no column in the request schema cannot be
+			// resolved, so it must fail rather than produce invalid metadata.
+			name:    "placeholder outside request schema",
+			spec:    `{"spec-id":0,"fields":[{"name":"missing","transform":"identity","source-id":5,"field-id":1000}]}`,
+			wantErr: "partition source field 5 not found in schema",
+		},
+		{
+			name:    "sort placeholder outside request schema",
+			spec:    `{"spec-id":0,"fields":[{"name":"ints","transform":"identity","source-id":0,"field-id":1000}]}`,
+			order:   `{"order-id":1,"fields":[{"transform":"identity","source-id":5,"direction":"asc","null-order":"nulls-first"}]}`,
+			wantErr: "cannot find source column id",
+		},
+		{
+			// Ordinal placeholders against a schema that does not use ordinals
+			// resolve to nothing; an ID-based remap that happened to hit a valid
+			// field would silently bind the wrong column.
+			name:    "ordinal placeholder against non-ordinal schema",
+			schema:  nonOrdinalSchema,
+			spec:    `{"spec-id":0,"fields":[{"name":"ints","transform":"identity","source-id":0,"field-id":1000}]}`,
+			order:   `{"order-id":1,"fields":[{"transform":"identity","source-id":5,"direction":"asc","null-order":"nulls-first"}]}`,
+			wantErr: "partition source field 0 not found in schema",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			schemaJSON := requestSchema
+			if tt.schema != "" {
+				schemaJSON = tt.schema
+			}
+			orderJSON := `{"order-id":1,"fields":[{"transform":"identity","source-id":0,"direction":"asc","null-order":"nulls-first"}]}`
+			if tt.order != "" {
+				orderJSON = tt.order
+			}
+			wantSortID := tt.wantSortID
+			if wantSortID == 0 {
+				wantSortID = 1
+			}
+
 			var sc iceberg.Schema
-			require.NoError(t, json.Unmarshal([]byte(requestSchema), &sc))
+			require.NoError(t, json.Unmarshal([]byte(schemaJSON), &sc))
 
 			var spec iceberg.UnboundPartitionSpec
 			require.NoError(t, json.Unmarshal([]byte(tt.spec), &spec))
 
 			var order UnboundSortOrder
-			require.NoError(t, json.Unmarshal([]byte(
-				`{"order-id":1,"fields":[{"transform":"identity","source-id":0,"direction":"asc","null-order":"nulls-first"}]}`,
-			), &order))
+			require.NoError(t, json.Unmarshal([]byte(orderJSON), &order))
 
 			meta, err := NewMetadata(&sc, &spec.PartitionSpec, order.SortOrder, "s3://bucket/tbl", nil)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+
+				return
+			}
 			require.NoError(t, err)
 
 			gotSpec := meta.PartitionSpec()
@@ -1047,7 +1116,7 @@ func TestNewMetadataFromOrdinalNumberedRequest(t *testing.T) {
 			// The sort order references the first column, so it remaps to 1.
 			require.Equal(t, 1, meta.SortOrder().Len())
 			for _, field := range meta.SortOrder().Fields() {
-				assert.Equal(t, 1, field.SourceID())
+				assert.Equal(t, wantSortID, field.SourceID())
 			}
 
 			// Written metadata carries bound IDs only, so it parses back as

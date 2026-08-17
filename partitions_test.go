@@ -995,6 +995,91 @@ func TestUnboundPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
 	}
 }
 
+// Mirrors Java's checkAndAddPartitionName: a partition name that is also a
+// schema column must be sourced from that column.
+func TestPartitionNameMatchingSchemaColumn(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ints", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "strings", Type: iceberg.PrimitiveTypes.String},
+	)
+
+	for _, tt := range []struct {
+		name       string
+		sourceID   int
+		targetName string
+		transform  iceberg.Transform
+		wantErr    string
+	}{
+		{
+			name:     "identity named after its own column",
+			sourceID: 1, targetName: "ints", transform: iceberg.IdentityTransform{},
+		},
+		{
+			// The usual derived name collides with nothing in the schema.
+			name:     "derived name does not collide",
+			sourceID: 1, targetName: "ints_bucket", transform: iceberg.BucketTransform{NumBuckets: 16},
+		},
+		{
+			name:     "named after a different column",
+			sourceID: 1, targetName: "strings", transform: iceberg.IdentityTransform{},
+			wantErr: "partition name strings matches schema column with field ID 2, but the field is sourced from 1",
+		},
+		{
+			name:     "non-identity named after a different column",
+			sourceID: 2, targetName: "ints", transform: iceberg.TruncateTransform{Width: 4},
+			wantErr: "partition name ints matches schema column with field ID 1, but the field is sourced from 2",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := iceberg.NewPartitionSpecOpts(
+				iceberg.AddPartitionFieldBySourceID(tt.sourceID, tt.targetName, tt.transform, schema, nil),
+			)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+
+				return
+			}
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// Placeholders are field IDs of the schema the client sent, so they bind
+// against that schema and only that schema.
+func TestUnboundPartitionSpecBindToSchema(t *testing.T) {
+	// What Spark posts for CREATE TABLE t (ints INT, floats DOUBLE):
+	// columns numbered from zero, partitioned by the second one.
+	requestSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 0, Name: "ints", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 1, Name: "floats", Type: iceberg.PrimitiveTypes.Float64},
+	)
+
+	var spec iceberg.UnboundPartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,"name":"floats","transform":"identity"}]}`,
+	), &spec))
+
+	bound, err := spec.BindToSchema(requestSchema, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, bound.NumFields())
+	source, ok := requestSchema.FindFieldByID(bound.Field(0).SourceID())
+	require.True(t, ok)
+	assert.Equal(t, "floats", source.Name)
+
+	// AssignFreshSchemaIDs numbers from 1 while the placeholders start at 0, so
+	// binding against the reassigned schema resolves source-id 1 to "ints" and
+	// shifts the partition field one column left. The name check catches it
+	// rather than letting the spec through pointing at the wrong column.
+	freshSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "ints", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "floats", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	_, err = spec.BindToSchema(freshSchema, nil, nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "partition name floats matches schema column with field ID 2, but the field is sourced from 1")
+}
+
 // NewPartitionSpecOpts used to accept a redundant field and emit a spec that
 // UnmarshalJSON then rejected, so the builder could write table metadata this
 // library could not read back.

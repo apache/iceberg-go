@@ -221,10 +221,17 @@ type PartitionSpec struct {
 
 // UnboundPartitionSpec decodes a partition spec that a client sent in a
 // create-table request, before it has been bound to a schema. Such a spec
-// carries the client's placeholder source IDs rather than schema field IDs, and
-// those placeholders start at zero: Spark numbers the columns of a new table
-// from zero, so partitioning by the first column arrives as source-id 0.
-// Binding the embedded spec to a schema resolves the placeholders to field IDs.
+// carries the client's placeholder source IDs rather than table field IDs.
+// A client numbers those placeholders however it likes, so unlike bound field
+// IDs they need not be positive: Spark numbers the columns of a new table from
+// zero, so partitioning by the first column arrives as source-id 0.
+//
+// The placeholders are field IDs of the schema the client sent with the spec,
+// so BindToSchema resolves them only when given that same schema. Passing the
+// schema the table ends up with instead binds against unrelated IDs, and a
+// placeholder that collides with one of them binds silently to the wrong
+// column. table.NewMetadata does the whole create-table flow, resolving the
+// placeholders through the request schema by name and reassigning fresh IDs.
 //
 // Use PartitionSpec for specs read from table metadata, where source IDs are
 // bound field IDs and must be positive. Catalog implementations that serve the
@@ -329,7 +336,7 @@ func AddPartitionFieldByName(sourceName string, targetName string, transform Tra
 		if !ok {
 			return fmt.Errorf("cannot find source column with name: %s in schema", sourceName)
 		}
-		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
+		err := p.addSpecFieldInternal(schema, targetName, field, transform, fieldID)
 		if err != nil {
 			return err
 		}
@@ -347,7 +354,7 @@ func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Tran
 		if !ok {
 			return fmt.Errorf("cannot find source column with id: %d in schema", sourceID)
 		}
-		err := p.addSpecFieldInternal(targetName, field, transform, fieldID)
+		err := p.addSpecFieldInternal(schema, targetName, field, transform, fieldID)
 		if err != nil {
 			return err
 		}
@@ -356,7 +363,7 @@ func AddPartitionFieldBySourceID(sourceID int, targetName string, transform Tran
 	}
 }
 
-func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedField, transform Transform, fieldID *int) error {
+func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, field NestedField, transform Transform, fieldID *int) error {
 	if targetName == "" {
 		return errors.New("cannot use empty partition name")
 	}
@@ -367,6 +374,9 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 		if existingField.Name == targetName {
 			return errors.New("duplicate partition name: " + targetName)
 		}
+	}
+	if err := validatePartitionNameAgainstSchema(schema, targetName, field.ID); err != nil {
+		return err
 	}
 	var fieldIDValue int
 	if fieldID == nil {
@@ -383,6 +393,20 @@ func (p *PartitionSpec) addSpecFieldInternal(targetName string, field NestedFiel
 	p.fields = append(p.fields, unboundField)
 
 	return nil
+}
+
+// A partition field named after a schema column must be sourced from that
+// column. Without this, a spec bound to a schema its source IDs do not refer to
+// resolves each field to whichever column happens to hold that ID and reports
+// no error, so every partition field silently shifts.
+func validatePartitionNameAgainstSchema(schema *Schema, targetName string, sourceID int) error {
+	collision, ok := schema.FindFieldByName(targetName)
+	if !ok || collision.ID == sourceID {
+		return nil
+	}
+
+	return fmt.Errorf("partition name %s matches schema column with field ID %d, but the field is sourced from %d",
+		targetName, collision.ID, sourceID)
 }
 
 func validateTransform(transform Transform) error {

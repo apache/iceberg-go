@@ -187,7 +187,7 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	}
 
 	if err := validateSortSourceIDs(next.SourceIDs, binding); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
+		return err
 	}
 
 	var err error
@@ -216,10 +216,10 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 // bound to a schema. Unbound orders carry client placeholders that start at zero.
 func validateSortSourceID(id int, binding orderBinding) error {
 	if binding == boundOrder && id <= 0 {
-		return fmt.Errorf("source ID must be positive: %d", id)
+		return fmt.Errorf("%w: source ID must be positive: %d", ErrInvalidSortSourceID, id)
 	}
 	if id < 0 {
-		return fmt.Errorf("source ID must be non-negative: %d", id)
+		return fmt.Errorf("%w: source ID must be non-negative: %d", ErrInvalidSortSourceID, id)
 	}
 
 	return nil
@@ -227,7 +227,7 @@ func validateSortSourceID(id int, binding orderBinding) error {
 
 func validateSortSourceIDs(ids []int, binding orderBinding) error {
 	if len(ids) == 0 {
-		return errors.New("source-ids must not be empty")
+		return fmt.Errorf("%w: source-ids must not be empty", ErrInvalidSortSourceID)
 	}
 
 	for _, id := range ids {
@@ -259,10 +259,11 @@ type SortOrder struct {
 
 // UnboundSortOrder decodes a sort order that a client sent in a create-table
 // request, before it has been bound to a schema. Such an order carries the
-// client's placeholder source IDs rather than schema field IDs, and those
-// placeholders start at zero: Spark numbers the columns of a new table from
-// zero, so sorting by the first column arrives as source-id 0. Binding the
-// embedded order to a schema resolves the placeholders to field IDs.
+// client's placeholder source IDs rather than table field IDs. A client numbers
+// those placeholders however it likes, so unlike bound field IDs they need not
+// be positive: Spark numbers the columns of a new table from zero, so sorting
+// by the first column arrives as source-id 0. Binding the embedded order to the
+// schema the client sent resolves the placeholders to field IDs.
 //
 // Use SortOrder for orders read from table metadata, where source IDs are bound
 // field IDs and must be positive. Catalog implementations that serve the REST
@@ -391,8 +392,7 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 		}
 		if validateSourceIDs {
 			if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
-				return SortOrder{}, fmt.Errorf("%w: sort field at index %d has invalid source IDs: %v",
-					ErrInvalidSortSourceID, idx, err)
+				return SortOrder{}, fmt.Errorf("sort field at index %d has invalid source IDs: %w", idx, err)
 			}
 		}
 	}
@@ -438,7 +438,7 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 		}
 
 		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
-			return fmt.Errorf("%w: sort field has invalid source IDs: %v", ErrInvalidSortSourceID, err)
+			return fmt.Errorf("sort field has invalid source IDs: %w", err)
 		}
 
 		var firstField iceberg.NestedField
