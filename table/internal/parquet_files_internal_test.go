@@ -18,11 +18,14 @@
 package internal
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/geoarrow/geoarrow-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -87,4 +90,29 @@ func TestWriteDataFileBatchesAbortsOnWriteError(t *testing.T) {
 			assert.False(t, writer.closeCalled)
 		})
 	}
+}
+
+func TestNewFileWriterCachesGeoNormalizationColumns(t *testing.T) {
+	typeDef := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage())
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+		{Name: "geom", Type: typeDef, Nullable: true},
+	}, nil)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "geom", Type: iceberg.GeometryType{}, Required: false},
+	)
+	format := parquetFormat{}
+	writer, err := format.NewFileWriter(context.Background(), iceio.NewMemFS(), nil, WriteFileInfo{
+		FileSchema: fileSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   "geo-cache.parquet",
+		WriteProps: format.GetWriteProperties(iceberg.Properties{}),
+	}, arrowSchema)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, writer.Abort()) }()
+
+	parquetWriter, ok := writer.(*ParquetFileWriter)
+	require.True(t, ok)
+	require.Equal(t, []int{1}, parquetWriter.geoNormalizeCols)
 }

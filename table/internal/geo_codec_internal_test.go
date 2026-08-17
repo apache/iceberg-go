@@ -242,14 +242,16 @@ func TestGeoBoundsAccumulatorInvalidWKB(t *testing.T) {
 // of the type word (ewkbFlagZ etc., shared with geo_codec.go) and optionally
 // embeds an SRID after it.
 const (
-	wkbPoint               = 1
-	wkbLineString          = 2
-	wkbGeometryCollection  = 7
-	wkbPointZ              = 1001
-	wkbPointM              = 2001
-	wkbPointZM             = 3001
-	wkbLineStringZ         = 1002
-	wkbGeometryCollectionZ = 1007
+	wkbPoint                = 1
+	wkbLineString           = 2
+	wkbGeometryCollection   = 7
+	wkbPointZ               = 1001
+	wkbPointM               = 2001
+	wkbPointZM              = 3001
+	wkbLineStringZ          = 1002
+	wkbLineStringZM         = 3002
+	wkbGeometryCollectionZ  = 1007
+	wkbGeometryCollectionZM = 3007
 )
 
 // wkbBuilder assembles a WKB value byte by byte: the byte-order marker, then
@@ -521,6 +523,98 @@ func TestGeoBoundsAccumulatorEWKBMatchesISO(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizeWKB(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []byte
+		want []byte
+	}{
+		{
+			name: "little endian z",
+			in:   newWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			want: newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "big endian z",
+			in:   newXDRWKBBuilder(wkbPoint|ewkbFlagZ).f64(1, 2, 3).bytes(),
+			want: newXDRWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+		{
+			name: "embedded srid",
+			in:   newWKBBuilder(wkbPoint|ewkbFlagSRID).u32(4326).f64(1, 2).bytes(),
+			want: newWKBBuilder(wkbPoint).f64(1, 2).bytes(),
+		},
+		{
+			name: "iso unchanged",
+			in:   newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+			want: newWKBBuilder(wkbPointZ).f64(1, 2, 3).bytes(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeWKB(tt.in)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+			if tt.name == "iso unchanged" {
+				require.Same(t, &tt.in[0], &got[0])
+			}
+		})
+	}
+}
+
+func TestNormalizeWKBEmptyPoints(t *testing.T) {
+	tests := []struct {
+		name    string
+		flags   uint32
+		isoType uint32
+		coords  []float64
+	}{
+		{name: "xy", flags: 0, isoType: wkbPoint, coords: []float64{geom.PointEmptyCoord(), geom.PointEmptyCoord()}},
+		{name: "z", flags: ewkbFlagZ, isoType: wkbPointZ, coords: []float64{geom.PointEmptyCoord(), geom.PointEmptyCoord(), geom.PointEmptyCoord()}},
+		{name: "m", flags: ewkbFlagM, isoType: wkbPointM, coords: []float64{geom.PointEmptyCoord(), geom.PointEmptyCoord(), geom.PointEmptyCoord()}},
+		{name: "zm", flags: ewkbFlagZ | ewkbFlagM, isoType: wkbPointZM, coords: []float64{geom.PointEmptyCoord(), geom.PointEmptyCoord(), geom.PointEmptyCoord(), geom.PointEmptyCoord()}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := newWKBBuilder(wkbPoint | tt.flags | ewkbFlagSRID).u32(4326).f64(tt.coords...).bytes()
+			want := newWKBBuilder(tt.isoType).f64(tt.coords...).bytes()
+
+			got, err := normalizeWKB(in)
+			require.NoError(t, err)
+			require.Equal(t, want, got)
+
+			decoded, err := decodeWKB(got)
+			require.NoError(t, err)
+			require.True(t, decoded.Empty())
+			acc := newGeoBoundsAccumulator(false)
+			require.NoError(t, acc.AddWKB(got))
+		})
+	}
+}
+
+func TestNormalizeWKBGeometryCollection(t *testing.T) {
+	in := newXDRWKBBuilder(wkbGeometryCollection|ewkbFlagZ|ewkbFlagM|ewkbFlagSRID).
+		u32(4326).
+		u32(2).
+		nested(
+			newXDRWKBBuilder(wkbPoint|ewkbFlagZ|ewkbFlagM|ewkbFlagSRID).u32(4326).f64(1, 2, 3, 4).bytes(),
+			newXDRWKBBuilder(wkbLineString|ewkbFlagZ|ewkbFlagM|ewkbFlagSRID).u32(4326).u32(2).f64(5, 6, 7, 8, 9, 10, 11, 12).bytes(),
+		).bytes()
+	want := newXDRWKBBuilder(wkbGeometryCollectionZM).
+		u32(2).
+		nested(
+			newXDRWKBBuilder(wkbPointZM).f64(1, 2, 3, 4).bytes(),
+			newXDRWKBBuilder(wkbLineStringZM).u32(2).f64(5, 6, 7, 8, 9, 10, 11, 12).bytes(),
+		).bytes()
+
+	got, err := normalizeWKB(in)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.False(t, isEWKB(got))
 }
 
 // TestGeoBoundsAccumulatorRejectsInvalidWKB verifies that malformed values still
