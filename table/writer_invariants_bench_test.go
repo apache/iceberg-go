@@ -88,4 +88,5 @@ func BenchmarkDefaultDataFileWriter(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	b.ReportMetric(float64(rows), "rows/op")
 }
