@@ -50,7 +50,7 @@ func BenchmarkBucketTransformDecimal(b *testing.B) {
 	b.Run("Apply", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			benchmarkDecimalBucketLiteralResult = transform.Apply(iceberg.Optional[iceberg.Literal]{
 				Valid: true,
 				Val:   literals[i%len(literals)],
@@ -62,7 +62,7 @@ func BenchmarkBucketTransformDecimal(b *testing.B) {
 		transformer := transform.Transformer(iceberg.DecimalTypeOf(38, 0))
 		b.ReportAllocs()
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for i := range b.N {
 			benchmarkDecimalBucketResult = transformer(boxedValues[i%len(boxedValues)])
 		}
 	})
