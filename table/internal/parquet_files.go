@@ -919,7 +919,7 @@ func normalizeListChild(list array.ListLike, active []bool, mem memory.Allocator
 	}
 
 	childActive := make([]bool, int(end-start))
-	for i := 0; i < list.Len(); i++ {
+	for i := range list.Len() {
 		rowStart, rowEnd := list.ValueOffsets(i)
 		if !isReachable(active, i) || list.IsNull(i) {
 			continue
@@ -981,7 +981,7 @@ func rebasedValidity(arr arrow.Array, mem memory.Allocator) (*memory.Buffer, int
 	for i := range data {
 		data[i] = 0
 	}
-	for i := 0; i < arr.Len(); i++ {
+	for i := range arr.Len() {
 		if arr.IsValid(i) {
 			bitutil.SetBit(data, i)
 		}
@@ -1013,7 +1013,7 @@ func rebasedListOffsets(list array.ListLike, first int64, mem memory.Allocator) 
 	}
 
 	buffer := memory.NewBufferWithAllocator(data, mem)
-	for i := 0; i < list.Len(); i++ {
+	for i := range list.Len() {
 		start, end := list.ValueOffsets(i)
 		set(i, start-first)
 		set(i+1, end-first)
