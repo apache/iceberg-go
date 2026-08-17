@@ -2016,6 +2016,155 @@ func TestPartitionsSchema(t *testing.T) {
 	}, testFieldNames(unpartitioned))
 }
 
+func TestInspectPartitionAggregateTreeHandlesBinaryAndNaNValues(t *testing.T) {
+	tree := newInspectPartitionAggregateTree()
+	aggregate := &inspectPartitionAggregate{specID: 1}
+	record := partitionRecord{[]byte{1, 2, 3}, math.NaN()}
+	tree.insert(record, aggregate)
+
+	require.Same(t, aggregate, tree.lookup(partitionRecord{[]byte{1, 2, 3}, math.NaN()}))
+	require.Nil(t, tree.lookup(partitionRecord{[]byte{1, 2, 4}, math.NaN()}))
+}
+
+func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
+	const snapshotID = int64(1)
+	spec := partitionedSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	partition := map[int]any{1000: int32(7)}
+	dataSequenceNumber := int64(1)
+	dataFiles := []iceberg.DataFile{
+		newTestDataFileWithCount(t, spec,
+			"mem://default/table-location/data/first.parquet", partition, 3),
+		newTestDataFileWithCount(t, spec,
+			"mem://default/table-location/data/second.parquet", partition, 2),
+	}
+	dataEntries := make([]iceberg.ManifestEntry, 0, len(dataFiles))
+	for _, file := range dataFiles {
+		dataEntries = append(dataEntries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(snapshotID), &dataSequenceNumber, &dataSequenceNumber, file))
+	}
+
+	dataManifestPath := "mem://default/table-location/metadata/data-manifest.avro"
+	var dataManifestBuf bytes.Buffer
+	dataManifest, err := iceberg.WriteManifest(dataManifestPath, &dataManifestBuf, 2, spec, schema, snapshotID, dataEntries)
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(dataManifestPath, dataManifestBuf.Bytes()))
+
+	deleteFile := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/delete/positions.parquet", partition,
+		dataFiles[0].FilePath())
+	deleteManifestPath := "mem://default/table-location/metadata/delete-manifest.avro"
+	var deleteManifestBuf bytes.Buffer
+	deleteWriter, err := iceberg.NewManifestWriter(2, &deleteManifestBuf, spec, schema, snapshotID,
+		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	require.NoError(t, deleteWriter.Add(iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, int64Ptr(snapshotID), &dataSequenceNumber, &dataSequenceNumber, deleteFile)))
+	require.NoError(t, deleteWriter.Close())
+	deleteManifest, err := deleteWriter.ToManifestFile(deleteManifestPath, int64(deleteManifestBuf.Len()),
+		iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(deleteManifestPath, deleteManifestBuf.Bytes()))
+
+	manifestListPath := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	var listBuf bytes.Buffer
+	manifestListSequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil,
+		&manifestListSequenceNumber, 0, []iceberg.ManifestFile{dataManifest, deleteManifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     snapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: manifestListSequenceNumber,
+		TimestampMs:    2000,
+	}}
+	txn.meta.currentSnapshotID = int64Ptr(snapshotID)
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().Partitions(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+
+	partitionValues := record.Column(0).(*array.Struct)
+	require.EqualValues(t, 7, partitionValues.Field(0).(*array.Int32).Value(0))
+	require.EqualValues(t, spec.ID(), record.Column(1).(*array.Int32).Value(0))
+	require.EqualValues(t, 5, record.Column(2).(*array.Int64).Value(0))
+	require.EqualValues(t, 2, record.Column(3).(*array.Int32).Value(0))
+	require.EqualValues(t, 5, record.Column(4).(*array.Int64).Value(0))
+	require.EqualValues(t, 1, record.Column(5).(*array.Int64).Value(0))
+	require.EqualValues(t, 1, record.Column(6).(*array.Int32).Value(0))
+	require.EqualValues(t, 0, record.Column(7).(*array.Int64).Value(0))
+	require.EqualValues(t, 0, record.Column(8).(*array.Int32).Value(0))
+	require.EqualValues(t, 2000*1000, record.Column(9).(*array.Timestamp).Value(0))
+	require.EqualValues(t, snapshotID, record.Column(10).(*array.Int64).Value(0))
+}
+
+func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
+	const (
+		expiredSnapshotID = int64(1)
+		currentSnapshotID = int64(2)
+	)
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	file := newTestDataFile(t, spec,
+		"mem://default/table-location/data/expired.parquet", map[int]any{1000: int32(7)})
+	sequenceNumber := int64(1)
+	manifestPath := "mem://default/table-location/metadata/expired-manifest.avro"
+	var manifestBuf bytes.Buffer
+	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, expiredSnapshotID,
+		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, int64Ptr(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
+	require.NoError(t, err)
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
+	manifest = iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
+		SequenceNum(sequenceNumber, sequenceNumber).
+		AddedFiles(1).
+		AddedRows(1).
+		Build()
+
+	manifestListPath := "mem://default/table-location/metadata/snap-2-manifest-list.avro"
+	var listBuf bytes.Buffer
+	currentSequenceNumber := int64(2)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, currentSnapshotID, nil,
+		&currentSequenceNumber, 0, []iceberg.ManifestFile{manifest}))
+	require.NoError(t, memIO.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	txn.meta.snapshotList = []Snapshot{{
+		SnapshotID:     currentSnapshotID,
+		ManifestList:   manifestListPath,
+		SequenceNumber: currentSequenceNumber,
+		TimestampMs:    2000,
+	}}
+	txn.meta.currentSnapshotID = int64Ptr(currentSnapshotID)
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+	rr, err := tbl.Inspect().Partitions(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 1, record.NumRows())
+	require.EqualValues(t, 0, record.Column(1).(*array.Int32).Value(0))
+	require.True(t, record.Column(9).IsNull(0))
+	require.True(t, record.Column(10).IsNull(0))
+}
+
 // TestInspectAllocatorOption verifies WithInspectAllocator routes allocations
 // through the supplied allocator, and that all buffers are released.
 func TestInspectAllocatorOption(t *testing.T) {
