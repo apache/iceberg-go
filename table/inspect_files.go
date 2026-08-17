@@ -404,7 +404,24 @@ type inspectPartitionFieldBuilder struct {
 }
 
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
-	lookup, err := newInspectBuilderLookup("content-file", bldr.Schema().Fields(), bldr.Field)
+	return newInspectContentFileBuilderFromFields(bldr.Schema().Fields(), bldr.Field, partitionType)
+}
+
+func newInspectContentFileStructBuilder(bldr *array.StructBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
+	structType, ok := bldr.Type().(*arrow.StructType)
+	if !ok {
+		return inspectContentFileBuilder{}, fmt.Errorf("content-file builder has type %T, want struct", bldr.Type())
+	}
+
+	return newInspectContentFileBuilderFromFields(structType.Fields(), bldr.FieldBuilder, partitionType)
+}
+
+func newInspectContentFileBuilderFromFields(
+	fields []arrow.Field,
+	builder func(int) array.Builder,
+	partitionType *iceberg.StructType,
+) (inspectContentFileBuilder, error) {
+	lookup, err := newInspectBuilderLookup("content-file", fields, builder)
 	if err != nil {
 		return inspectContentFileBuilder{}, err
 	}
