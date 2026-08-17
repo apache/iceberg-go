@@ -60,7 +60,7 @@ func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
 
 			dataFileBuilder.Append(true)
 
-			return contentFileBuilder.append(partitionType, entry.DataFile())
+			return contentFileBuilder.append(entry.DataFile())
 		})
 	if err != nil {
 		return nil, fmt.Errorf("inspect entries: %w", err)
@@ -88,7 +88,7 @@ func appendContentFile(builder *array.StructBuilder, partitionType *iceberg.Stru
 
 	builder.Append(true)
 
-	return contentFileBuilder.append(partitionType, file)
+	return contentFileBuilder.append(file)
 }
 
 func inspectContentFileType(partitionType *iceberg.StructType) *iceberg.StructType {
