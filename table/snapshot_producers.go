@@ -816,7 +816,8 @@ func (sp *snapshotProducer) deleteManifestProducer(output *[]iceberg.ManifestFil
 			groups[specID] = append(groups[specID], addition)
 		}
 
-		for specID, additions := range groups {
+		for _, specID := range slices.Sorted(maps.Keys(groups)) {
+			additions := groups[specID]
 			mf, err := sp.writeAddedDeleteManifest(specID, additions)
 			if err != nil {
 				return err

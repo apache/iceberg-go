@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -78,6 +79,10 @@ func (c *concurrentTestCatalog) CommitTable(_ context.Context, _ table.Identifie
 }
 
 func newConcurrentRewriteTestTable(t *testing.T) (*table.Table, *concurrentTestCatalog) {
+	return newConcurrentRewriteTestTableVersion(t, 2)
+}
+
+func newConcurrentRewriteTestTableVersion(t *testing.T, version int) (*table.Table, *concurrentTestCatalog) {
 	t.Helper()
 
 	location := filepath.ToSlash(t.TempDir())
@@ -87,7 +92,7 @@ func newConcurrentRewriteTestTable(t *testing.T) (*table.Table, *concurrentTestC
 	)
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec, table.UnsortedSortOrder, location,
 		iceberg.Properties{
-			table.PropertyFormatVersion:        "2",
+			table.PropertyFormatVersion:        strconv.Itoa(version),
 			table.CommitNumRetriesKey:          "2",
 			table.CommitMinRetryWaitMsKey:      "1",
 			table.CommitMaxRetryWaitMsKey:      "2",
@@ -188,6 +193,29 @@ func TestRewriteFiles_RejectsNegativeDataSequenceNumber(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 	assert.Contains(t, err.Error(), "invalid rewrite data sequence number")
+}
+
+func TestRewriteFiles_RejectsDataSequenceNumberAboveSnapshot(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	oldData := newDataFile(t, tbl.Location()+"/data/old-data.parquet")
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{oldData}, nil))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	snapshot := tbl.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	nextSnapshotSequence := snapshot.SequenceNumber + 1
+	replacement := newDataFile(t, tbl.Location()+"/data/replacement-data.parquet")
+	tx = tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil).
+		DeleteFile(oldData).
+		AddDataFile(replacement).
+		DataSequenceNumber(nextSnapshotSequence + 1)
+	err = rewrite.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
+	assert.Contains(t, err.Error(), "cannot be greater than new snapshot sequence number")
 }
 
 func TestRewriteFiles_AddDataFile_RejectsNonDataFile(t *testing.T) {
@@ -764,6 +792,57 @@ func TestRewriteFiles_RejectsConcurrentEqDelete(t *testing.T) {
 	// pre-flight; a delta of ≥2 means the retry reached the catalog.
 	assert.Equal(t, int32(1), cat.attempts.Load()-beforeLeader,
 		"only the stale-assertion attempt landed; the retry never reached CommitTable")
+}
+
+// TestRewriteFiles_RejectsConcurrentDeleteForAddedDVTarget covers a pure
+// delete-file rewrite. The rewrite does not replace a data file, but it adds
+// a deletion vector for one, so the target still needs rewrite conflict
+// validation. A concurrent DV for the same target must not be allowed to
+// commit alongside it.
+func TestRewriteFiles_RejectsConcurrentDeleteForAddedDVTarget(t *testing.T) {
+	tbl, cat := newConcurrentRewriteTestTableVersion(t, 2)
+
+	dataPath := tbl.Location() + "/data/dv-target.parquet"
+	dataFile := newDataFile(t, dataPath)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{dataFile}, nil))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	oldDelete := newPosDeleteFile(t, tbl.Location()+"/data/old-pos-delete.parquet")
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	oldDeleteSequence := fileDataSequence(t, tbl, oldDelete.FilePath())
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	firstOffset, secondOffset, length := int64(8), int64(24), int64(16)
+	leaderDV := newRewriteDeletionVector(t, tbl.Location()+"/data/leader.puffin", dataPath, &firstOffset, &length)
+	leaderTxn := tbl.NewTransaction()
+	rewrite := leaderTxn.NewRewrite(nil).
+		DeleteFile(oldDelete).
+		AddDeleteFileWithDataSequenceNumber(leaderDV, oldDeleteSequence)
+	require.NoError(t, rewrite.Commit(t.Context()),
+		"the conflict must be checked when the transaction commits")
+
+	peerDV := newRewriteDeletionVector(t, tbl.Location()+"/data/peer.puffin", dataPath, &secondOffset, &length)
+	peerTxn := tbl.NewTransaction()
+	require.NoError(t, peerTxn.NewRowDelta(nil).AddDeletes(peerDV).Commit(t.Context()))
+	_, err = peerTxn.Commit(t.Context())
+	require.NoError(t, err, "the peer commit advances the catalog")
+
+	beforeLeader := cat.attempts.Load()
+	_, err = leaderTxn.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrCommitFailed,
+		"a concurrent delete for an added DV target must be rejected before replay")
+	assert.Equal(t, int32(1), cat.attempts.Load()-beforeLeader,
+		"the retry must stop in conflict validation before a second catalog commit")
 }
 
 // TestRewriteFiles_RejectsConcurrentPartitionScopedPosDelete covers the

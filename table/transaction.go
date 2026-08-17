@@ -1286,12 +1286,12 @@ func validateAddedDeletionVectorTargets(
 		}
 		dataFile := dataState.file
 
-		partitionKey, err := partitionConflictKey(dataFile.SpecID(), dataFile.Partition())
+		partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), dataFile.Partition())
 		if err != nil {
 			return fmt.Errorf("building partition key for deletion vector target %s (spec %d): %w",
 				ref, dataFile.SpecID(), err)
 		}
-		dvPartitionKey, err := partitionConflictKey(addition.file.SpecID(), addition.file.Partition())
+		dvPartitionKey, err := canonicalPartitionKey(addition.file.SpecID(), addition.file.Partition())
 		if err != nil {
 			return fmt.Errorf("building partition key for deletion vector %s (spec %d): %w",
 				addition.file.FilePath(), addition.file.SpecID(), err)
@@ -1328,7 +1328,7 @@ func validateAddedDeletionVectorTargets(
 				continue
 			}
 
-			deletePartitionKey, err := partitionConflictKey(deleteFile.SpecID(), deleteFile.Partition())
+			deletePartitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), deleteFile.Partition())
 			if err != nil {
 				return fmt.Errorf("building partition key for surviving position-delete file %s (spec %d): %w",
 					deleteFile.FilePath(), deleteFile.SpecID(), err)
@@ -1689,6 +1689,17 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if err != nil {
 		return err
 	}
+	var cfg dataFileCfg
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	nextSequenceNumber := meta.nextSequenceNumber()
+	if cfg.dataSequenceNumber != nil && *cfg.dataSequenceNumber > nextSequenceNumber {
+		return fmt.Errorf("%w: data sequence number %d cannot be greater than new snapshot sequence number %d",
+			ErrInvalidOperation, *cfg.dataSequenceNumber, nextSequenceNumber)
+	}
+
 	// Delegate data file replacement to existing logic.
 	if len(deleteFilesToRemove) == 0 && len(autoDeleteFilesToRemove) == 0 && len(deleteFilesToAdd) == 0 {
 		return t.ReplaceDataFilesWithDataFiles(ctx, dataFilesToDelete, dataFilesToAdd, snapshotProps, opts...)
@@ -1696,11 +1707,6 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 	if len(deleteFilesToAdd) > 0 && len(deleteFilesToRemove) == 0 {
 		return fmt.Errorf("%w: adding delete files requires replacing at least one existing delete file",
 			ErrInvalidOperation)
-	}
-
-	var cfg dataFileCfg
-	for _, o := range opts {
-		o(&cfg)
 	}
 
 	setToAdd, err := t.validateDataFilesToAdd(dataFilesToAdd, "ReplaceFiles", !cfg.rewriteSemantics)
@@ -1907,7 +1913,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 	}
 
-	addedDataSequenceNumber := meta.nextSequenceNumber()
+	addedDataSequenceNumber := nextSequenceNumber
 	if cfg.dataSequenceNumber != nil {
 		addedDataSequenceNumber = *cfg.dataSequenceNumber
 	}
@@ -1987,6 +1993,26 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return err
 	}
 
+	var rewriteValidationFiles []iceberg.DataFile
+	var referencedDataFilePaths []string
+	if cfg.rewriteSemantics && len(deleteFilesToAdd) > 0 {
+		rewriteValidationFiles = slices.Clone(dataFilesToDelete)
+		for ref := range setDeleteFilesToAdd.dvsByRef {
+			if _, added := setToAdd[ref]; added {
+				continue
+			}
+
+			state, ok := liveDataFiles[ref]
+			if !ok {
+				return fmt.Errorf("%w: deletion vector target %s is not live in the rewrite",
+					ErrInvalidOperation, ref)
+			}
+			rewriteValidationFiles = append(rewriteValidationFiles, state.file)
+			referencedDataFilePaths = append(referencedDataFilePaths, ref)
+		}
+		slices.Sort(referencedDataFilePaths)
+	}
+
 	if !cfg.skipAutoNameMapping {
 		if err := t.ensureNameMapping(); err != nil {
 			return err
@@ -2036,7 +2062,14 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		return err
 	}
 
-	return t.apply(updates, reqs)
+	if err := t.apply(updates, reqs); err != nil {
+		return err
+	}
+	if len(rewriteValidationFiles) > 0 {
+		t.addValidator(rewriteValidatorWithReferencedDataFiles(rewriteValidationFiles, referencedDataFilePaths))
+	}
+
+	return nil
 }
 
 type AddFilesOption func(addFilesOp *addFilesOperation)
