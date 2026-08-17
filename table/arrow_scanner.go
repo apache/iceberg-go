@@ -345,7 +345,7 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 			indices = dict
 		}
 
-		for i := 0; i < filePathChunk.Len(); i++ {
+		for i := range filePathChunk.Len() {
 			if i&(cancellationCheckInterval-1) == 0 {
 				if err := ctx.Err(); err != nil {
 					return nil, err
