@@ -191,7 +191,6 @@ func TestPositionalDeleteIndexMatchesReferenceApplicability(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, dataEntry := range dataEntries {
-		dataEntry := dataEntry
 		t.Run(fmt.Sprintf("%s/spec=%d/sequence=%d",
 			dataEntry.DataFile().FilePath(), dataEntry.DataFile().SpecID(), dataEntry.SequenceNum()), func(t *testing.T) {
 			matched, err := idx.forDataFile(dataEntry)
