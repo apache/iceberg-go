@@ -46,7 +46,7 @@ jobs:
       max-parallel: 15
       fail-fast: false
       matrix:
-        go: [ '1.25.8', '1.26.1' ]
+        go: [ '1.25.9', '1.26.1' ]
         os:
           - 'ubuntu-latest'
           - 'macos-latest'
