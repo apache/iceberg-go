@@ -84,6 +84,8 @@ func TestObjectStoreLocationProvider(t *testing.T) {
 	assert.Equal(t, "table_location/data/1110/0111/1110/00000011/b", provider.NewDataLocation("b"))
 	assert.Equal(t, "table_location/data/0010/1101/0110/01011111/c", provider.NewDataLocation("c"))
 	assert.Equal(t, "table_location/data/1001/0001/0100/01110011/d", provider.NewDataLocation("d"))
+	assert.Equal(t, "table_location/data/0000/0000/0000/00000000/part-00164929.parquet",
+		provider.NewDataLocation("part-00164929.parquet"))
 }
 
 // TestObjectStoreLocationProviderPartitionedPathsDisabled tests that when partitioned paths are disabled,

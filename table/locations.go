@@ -28,9 +28,11 @@ import (
 )
 
 const (
-	hashBinaryStringBits = 20
-	entropyDirDepth      = 3
-	hashPathLength       = hashBinaryStringBits + entropyDirDepth
+	hashBits         = 20
+	entropyDirLength = 4
+	entropyDirDepth  = 3
+	hashPathLength   = hashBits + entropyDirDepth
+	hashNibbleMask   = (1 << entropyDirLength) - 1
 	// Binary representation of all 4-bit values, indexed by nibble.
 	binaryHashNibbles = "0000000100100011010001010110011110001001101010111100110111101111"
 )
@@ -120,20 +122,22 @@ type objectStoreLocationProvider struct {
 }
 
 func computeHash(dataFileName string) string {
-	hashCode := murmur3.Sum32([]byte(dataFileName)) & ((1 << hashBinaryStringBits) - 1)
+	hashCode := murmur3.Sum32([]byte(dataFileName)) & ((1 << hashBits) - 1)
 
 	// Format the hash directly into the final directory layout. The fixed
 	// buffer contains 20 bits and one separator for each of the three
 	// four-bit entropy directories.
+	// Masking the hash is equivalent to the old sentinel-bit approach because
+	// each nibble is copied explicitly, including leading zeroes.
 	var hashPath [hashPathLength]byte
-	copy(hashPath[0:4], binaryHashNibbles[((hashCode>>16)&0xf)*4:])
-	hashPath[4] = '/'
-	copy(hashPath[5:9], binaryHashNibbles[((hashCode>>12)&0xf)*4:])
-	hashPath[9] = '/'
-	copy(hashPath[10:14], binaryHashNibbles[((hashCode>>8)&0xf)*4:])
-	hashPath[14] = '/'
-	copy(hashPath[15:19], binaryHashNibbles[((hashCode>>4)&0xf)*4:])
-	copy(hashPath[19:23], binaryHashNibbles[(hashCode&0xf)*4:])
+	copy(hashPath[0:entropyDirLength], binaryHashNibbles[((hashCode>>(hashBits-entropyDirLength))&hashNibbleMask)*entropyDirLength:])
+	hashPath[entropyDirLength] = '/'
+	copy(hashPath[entropyDirLength+1:2*entropyDirLength+1], binaryHashNibbles[((hashCode>>(hashBits-2*entropyDirLength))&hashNibbleMask)*entropyDirLength:])
+	hashPath[2*entropyDirLength+1] = '/'
+	copy(hashPath[2*entropyDirLength+2:3*entropyDirLength+2], binaryHashNibbles[((hashCode>>(hashBits-3*entropyDirLength))&hashNibbleMask)*entropyDirLength:])
+	hashPath[3*entropyDirLength+2] = '/'
+	copy(hashPath[3*entropyDirLength+3:4*entropyDirLength+3], binaryHashNibbles[((hashCode>>(hashBits-4*entropyDirLength))&hashNibbleMask)*entropyDirLength:])
+	copy(hashPath[4*entropyDirLength+3:5*entropyDirLength+3], binaryHashNibbles[(hashCode&hashNibbleMask)*entropyDirLength:])
 
 	return string(hashPath[:])
 }
