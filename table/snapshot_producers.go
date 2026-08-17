@@ -1007,7 +1007,12 @@ func (sp *snapshotProducer) writeAddedDeleteManifest(specID int, additions []del
 		return nil, err
 	}
 	defer internal.CheckedClose(out, &retErr)
-	defer internal.CheckedClose(wr, &retErr)
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			internal.CheckedClose(wr, &retErr)
+		}
+	}()
 
 	for _, addition := range additions {
 		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
@@ -1017,6 +1022,7 @@ func (sp *snapshotProducer) writeAddedDeleteManifest(specID int, additions []del
 		}
 	}
 
+	writerClosed = true
 	if err := wr.Close(); err != nil {
 		return nil, err
 	}

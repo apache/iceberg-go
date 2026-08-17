@@ -373,7 +373,7 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return err
 	}
 
-	if len(r.dataFilesToDelete) > 0 {
+	if len(r.dataFilesToDelete) > 0 && len(r.deleteFilesToAdd) == 0 {
 		r.txn.addValidator(rewriteValidator(r.dataFilesToDelete))
 	}
 

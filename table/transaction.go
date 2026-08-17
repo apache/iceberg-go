@@ -1923,9 +1923,7 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		}
 	}
 	for path := range setToDelete {
-		if _, replacement := setToAdd[path]; !replacement {
-			delete(liveDataFiles, path)
-		}
+		delete(liveDataFiles, path)
 	}
 	if len(markedDataForDeletion) != len(setToDelete) {
 		return errors.New("cannot delete data files that do not belong to the table")
