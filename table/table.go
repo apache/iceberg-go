@@ -494,9 +494,24 @@ type commitOpts struct {
 	// may leave this empty; Transaction.Commit always sets it.
 	branch string
 
-	// validators runs once before cat.CommitTable on the first attempt
-	// only. Refresh-and-replay across retries is deferred to PR 2.5.
+	// validators run before cat.CommitTable on every attempt of the
+	// retry loop. On attempt 0 the writer's metadata and the catalog
+	// state coincide, so the conflict context has no concurrent
+	// snapshots and validators short-circuit; on retries they run
+	// against the freshly refreshed catalog state (refresh-and-replay).
 	validators []conflictValidatorFunc
+
+	// noReplay makes a CAS conflict terminal: doCommit returns the
+	// ErrCommitFailed error instead of entering refresh-and-replay.
+	// Set for commits carrying delete-file removals; see the flag site
+	// in snapshotProducer.commitManifests for the rationale.
+	noReplay bool
+
+	// pinnedRefs names branches with an explicit requirement from
+	// Transaction.AssertRefSnapshotID, whose assertions must not be
+	// rewritten to the fresh branch head between retries (see
+	// Transaction.pinnedRefs).
+	pinnedRefs map[string]struct{}
 }
 
 type commitOption func(*commitOpts)
@@ -515,6 +530,14 @@ func withCommitBranch(branch string) commitOption {
 
 func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
+}
+
+func withCommitNoReplay(noReplay bool) commitOption {
+	return func(o *commitOpts) { o.noReplay = noReplay }
+}
+
+func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
+	return func(o *commitOpts) { o.pinnedRefs = refs }
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
@@ -623,7 +646,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 				}
 			}
 			current = fresh.metadata
-			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
+
+			// A pinned assertion the fresh catalog state violates can
+			// never succeed — fail now instead of burning the remaining
+			// retries on it.
+			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
+				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			}
 			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
 				return nil, err
 			}
@@ -701,6 +731,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 
 			return nil, err
 		}
+
+		// Non-replayable commits fail on the first CAS conflict instead
+		// of replaying (see commitOpts.noReplay). The annotation
+		// distinguishes this abort from an exhausted retry budget while
+		// preserving errors.Is(err, ErrCommitFailed).
+		if co.noReplay {
+			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
+		}
 	}
 
 	// Inner data manifests written by superseded retry attempts (a rewrite
@@ -765,7 +803,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // the branch is empty or the new head cannot be resolved (branch
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
-func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata) []Requirement {
+//
+// Assertions on branches in pinned were registered explicitly by the
+// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
+// semantics and are never rewritten: a branch that has changed must
+// fail the commit, not be replayed against the new head.
+func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
 	}
@@ -777,19 +820,46 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	out := make([]Requirement, len(reqs))
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
-			newID := head.SnapshotID
-			if a.requireBranch {
-				out[i] = assertBranchRefSnapshotID(branch, &newID)
-			} else {
-				out[i] = AssertRefSnapshotID(branch, &newID)
-			}
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				newID := head.SnapshotID
+				if a.requireBranch {
+					out[i] = assertBranchRefSnapshotID(branch, &newID)
+				} else {
+					out[i] = AssertRefSnapshotID(branch, &newID)
+				}
 
-			continue
+				continue
+			}
 		}
 		out[i] = r
 	}
 
 	return out
+}
+
+// validatePinnedRefRequirements validates every assert-ref-snapshot-id
+// requirement on a pinned branch against the freshly refreshed catalog
+// metadata. A failure means the branch has changed from the required
+// snapshot: the assertion is never rewritten, so it can never hold and
+// the commit must fail instead of retrying.
+func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	for _, r := range reqs {
+		a, ok := r.(*assertRefSnapshotID)
+		if !ok {
+			continue
+		}
+		if _, isPinned := pinned[a.Ref]; !isPinned {
+			continue
+		}
+		if err := a.Validate(fresh); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
@@ -800,6 +870,23 @@ func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata)
 	}
 
 	return nil
+}
+
+// latestSnapshotForBranch returns the head a write targeting branch is parented
+// on: a branch that does not exist yet resolves to nil here and falls back to
+// main's head so the first write to a new branch forks from main. The two must
+// stay in sync — the replay path uses this one, and a divergence would reparent
+// a retried snapshot somewhere its first attempt never pointed.
+func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
+	if branch == "" || branch == MainBranch {
+		return meta.CurrentSnapshot()
+	}
+
+	if s := meta.SnapshotByName(branch); s != nil {
+		return s
+	}
+
+	return meta.CurrentSnapshot()
 }
 
 // rebuildSnapshotUpdates returns a new slice of updates where any
@@ -818,26 +905,41 @@ func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata)
 // list is rewritten to include the fresh parent's manifests so that the
 // rebuilt snapshot contains every committed file.
 func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int) (rebuilt []Update, orphanedPaths []string, err error) {
-	// Determine the fresh branch head to use as the rebuilt snapshot's parent.
+	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
+	// branch rebuilds with a nil parent and silently drops main's data.
 	var freshHead *Snapshot
-	if branch != "" && freshMeta != nil {
-		freshHead = freshMeta.SnapshotByName(branch)
-	} else if freshMeta != nil {
-		freshHead = freshMeta.CurrentSnapshot()
+	if freshMeta != nil {
+		freshHead = latestSnapshotForBranch(freshMeta, branch)
 	}
 
 	result := make([]Update, len(updates))
 	copy(result, updates)
 
+	// A single transaction can stage several snapshots on the same branch (an
+	// append followed by a delete, say). They were chained at build time so
+	// snapshot[n].parent == snapshot[n-1]; on retry they must be replayed as a
+	// chain, each rebuilt snapshot becoming the parent of the next. Feeding
+	// every staged snapshot the same fresh branch head would turn the chain
+	// into siblings — the branch ref advances only to the last one, silently
+	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
+	// after the first rebuild to rebuild too: its recorded parent is an earlier
+	// staged snapshot that has itself just been reparented onto the fresh head.
+	chainRebuilt := false
 	for i, u := range result {
 		su, ok := u.(*addSnapshotUpdate)
 		if !ok || su.rebuildManifestList == nil {
 			continue
 		}
 
-		// Skip if the parent has not changed — saves an unnecessary S3 write.
-		if freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
+		// Skip only when nothing upstream changed: the running head still
+		// matches this snapshot's recorded parent and no earlier snapshot in
+		// this chain was rebuilt. Saves an unnecessary S3 write.
+		if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
 			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID {
+			// Already parented on the running head; it becomes the parent of
+			// the next staged snapshot in the chain.
+			freshHead = su.Snapshot
+
 			continue
 		}
 
@@ -858,6 +960,10 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		// The old manifest list is now an orphaned object in object storage.
 		orphanedPaths = append(orphanedPaths, oldManifestList)
+
+		// Chain the next staged snapshot onto the one just rebuilt.
+		freshHead = newSnap
+		chainRebuilt = true
 	}
 
 	return result, orphanedPaths, nil
@@ -1052,15 +1158,25 @@ func WithSnapshotID(n int64) ScanOption {
 	}
 
 	return func(scan *Scan) {
+		if scan.asOfTimestamp != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select snapshot ID %d when as-of timestamp %d is already selected",
+				iceberg.ErrInvalidArgument, n, *scan.asOfTimestamp)
+
+			return
+		}
 		scan.snapshotID = &n
-		scan.asOfTimestamp = nil
 	}
 }
 
 func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 	return func(scan *Scan) {
+		if scan.snapshotID != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select as-of timestamp %d when snapshot ID %d is already selected",
+				iceberg.ErrInvalidArgument, timeStampMs, *scan.snapshotID)
+
+			return
+		}
 		scan.asOfTimestamp = &timeStampMs
-		scan.snapshotID = nil
 	}
 }
 

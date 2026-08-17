@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -36,16 +39,26 @@ import (
 func newEqDeleteReadTestTable(t *testing.T) *table.Table {
 	t.Helper()
 
-	location := filepath.ToSlash(t.TempDir())
-
 	iceSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
 	)
 
+	return newEqDeleteReadTestTableWithSchema(t, iceSchema, nil)
+}
+
+func newEqDeleteReadTestTableWithSchema(t *testing.T, iceSchema *iceberg.Schema, properties iceberg.Properties) *table.Table {
+	t.Helper()
+
+	location := filepath.ToSlash(t.TempDir())
+	if properties == nil {
+		properties = iceberg.Properties{}
+	}
+	properties[table.PropertyFormatVersion] = "2"
+
 	meta, err := table.NewMetadata(iceSchema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: "2"})
+		properties)
 	require.NoError(t, err)
 
 	return table.New(
@@ -56,6 +69,15 @@ func newEqDeleteReadTestTable(t *testing.T) *table.Table {
 		},
 		&rowDeltaCatalog{metadata: meta},
 	)
+}
+
+func nameMappingProperties(t *testing.T, mapping iceberg.NameMapping) iceberg.Properties {
+	t.Helper()
+
+	mappingJSON, err := json.Marshal(mapping)
+	require.NoError(t, err)
+
+	return iceberg.Properties{table.DefaultNameMappingKey: string(mappingJSON)}
 }
 
 func TestEqualityDeleteReadRoundTrip(t *testing.T) {
@@ -120,6 +142,410 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	}
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
+}
+
+func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.T) {
+	ctx := t.Context()
+	tbl := newEqDeleteReadTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := []string{
+		tbl.Location() + "/data/data-001.parquet",
+		tbl.Location() + "/data/data-002.parquet",
+	}
+	writeParquetFile(t, dataPaths[0], arrowSc, `[
+		{"id": 1, "data": "one"},
+		{"id": 2, "data": "two"}
+	]`)
+	writeParquetFile(t, dataPaths[1], arrowSc, `[
+		{"id": 3, "data": "three"},
+		{"id": 4, "data": "four"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(ctx, dataPaths, nil, false))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		), nil, true, false)
+	require.NoError(t, err)
+	deleteTwoRecords, releaseTwo := makeEqDeleteRecords(t, deleteSchema, `[{"id": 2}]`)
+	defer releaseTwo()
+	deleteThreeRecords, releaseThree := makeEqDeleteRecords(t, deleteSchema, `[{"id": 3}]`)
+	defer releaseThree()
+
+	tx = tbl.NewTransaction()
+	deleteTwoFiles, err := tx.WriteEqualityDeletes(ctx, []int{1}, deleteTwoRecords)
+	require.NoError(t, err)
+	deleteThreeFiles, err := tx.WriteEqualityDeletes(ctx, []int{1}, deleteThreeRecords)
+	require.NoError(t, err)
+	require.Len(t, deleteTwoFiles, 1)
+	require.Len(t, deleteThreeFiles, 1)
+	require.NotEqual(t, deleteTwoFiles[0].FilePath(), deleteThreeFiles[0].FilePath())
+
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteTwoFiles...)
+	rowDelta.AddDeletes(deleteThreeFiles...)
+	require.NoError(t, rowDelta.Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	scan := tbl.Scan(table.WithMaxConcurrency(4), table.WithSelectedFields("id"))
+	tasks, err := scan.PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	for _, task := range tasks {
+		require.Len(t, task.EqualityDeleteFiles, 2,
+			"each task must use the same multi-file equality-delete union")
+	}
+
+	_, records, err := scan.ReadTasks(ctx, tasks)
+	require.NoError(t, err)
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.ElementsMatch(t, []int64{1, 4}, ids)
+}
+
+func TestEqualityDeleteReadResolvesRenamedDataColumnByFieldID(t *testing.T) {
+	tbl := newEqDeleteReadTestTable(t)
+
+	dataSchema, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, true, false)
+	require.NoError(t, err)
+	dataFields := dataSchema.Fields()
+	dataFields[0].Name = "legacy_id"
+	dataMetadata := dataSchema.Metadata()
+	dataSchema = arrow.NewSchema(dataFields, &dataMetadata)
+
+	dataPath := tbl.Location() + "/data/data-renamed.parquet"
+	writeParquetFile(t, dataPath, dataSchema, `[
+		{"legacy_id": 1, "data": "one"},
+		{"legacy_id": 2, "data": "two"},
+		{"legacy_id": 3, "data": "three"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	deletePath := tbl.Location() + "/data/delete-renamed.parquet"
+	writeParquetFile(t, deletePath, deleteSchema, `[{"id": 2}]`)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, records, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.Equal(t, []int64{1, 3}, ids)
+}
+
+func TestEqualityDeleteReadResolvesRenamedDataColumnByNameMapping(t *testing.T) {
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	mapping := iceSchema.NameMapping()
+	mapping[0].Names = append(mapping[0].Names, "legacy_id")
+	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, nameMappingProperties(t, mapping))
+
+	dataSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "legacy_id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	dataPath := tbl.Location() + "/data/data-name-mapped.parquet"
+	writeParquetFile(t, dataPath, dataSchema, `[
+		{"legacy_id": 1, "data": "one"},
+		{"legacy_id": 2, "data": "two"},
+		{"legacy_id": 3, "data": "three"}
+	]`)
+	dataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		dataPath, iceberg.ParquetFile, nil, nil, nil, 3, mustFileSize(t, dataPath))
+	require.NoError(t, err)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddDataFiles(t.Context(), []iceberg.DataFile{dataBuilder.Build()}, nil))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	deletePath := tbl.Location() + "/data/delete-name-mapped.parquet"
+	writeParquetFile(t, deletePath, deleteSchema, `[{"id": 2}]`)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, records, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.Equal(t, []int64{1, 3}, ids)
+}
+
+func TestEqualityDeleteReadResolvesLiteralDottedColumnName(t *testing.T) {
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "user.id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	tbl := newEqDeleteReadTestTableWithSchema(t, iceSchema, nameMappingProperties(t, iceSchema.NameMapping()))
+
+	dataSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "user.id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	dataPath := tbl.Location() + "/data/data-dotted-name.parquet"
+	writeParquetFile(t, dataPath, dataSchema, `[
+		{"user.id": 1, "data": "one"},
+		{"user.id": 2, "data": "two"},
+		{"user.id": 3, "data": "three"}
+	]`)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "user.id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	deletePath := tbl.Location() + "/data/delete-dotted-name.parquet"
+	writeParquetFile(t, deletePath, deleteSchema, `[{"user.id": 2}]`)
+
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	rowDelta := tx.NewRowDelta(nil)
+	rowDelta.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rowDelta.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, records, err := tbl.Scan().ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var ids []int64
+	for record, err := range records {
+		require.NoError(t, err)
+		column := record.Column(0).(*array.Int64)
+		for i := 0; i < column.Len(); i++ {
+			ids = append(ids, column.Value(i))
+		}
+		record.Release()
+	}
+
+	assert.Equal(t, []int64{1, 3}, ids)
+}
+
+func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
+	tbl := newEqDeleteReadTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/data.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "one"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	deleteSchema, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		nil, true, false)
+	require.NoError(t, err)
+	duplicateSchema := arrow.NewSchema([]arrow.Field{deleteSchema.Field(0), deleteSchema.Field(0)}, nil)
+	deletePath := tbl.Location() + "/data/delete.parquet"
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.Append(1)
+	first := builder.NewArray()
+	builder.Append(2)
+	second := builder.NewArray()
+	builder.Release()
+	batch := array.NewRecordBatch(duplicateSchema, []arrow.Array{first, second}, 1)
+	first.Release()
+	second.Release()
+	deleteTable := array.NewTableFromRecords(duplicateSchema, []arrow.RecordBatch{batch})
+	batch.Release()
+	file, err := iceio.LocalFS{}.Create(deletePath)
+	require.NoError(t, err)
+	defer file.Close()
+	require.NoError(t, pqarrow.WriteTable(deleteTable, file, 1,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	deleteTable.Release()
+	deleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	deleteBuilder.EqualityFieldIDs([]int{1})
+	tx = tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(deleteBuilder.Build())
+	require.NoError(t, rd.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	_, _, err = tbl.Scan().ToArrowRecords(t.Context())
+	require.ErrorIs(t, err, table.ErrAmbiguousEqualityColumn)
+}
+
+func TestEqualityDeleteMatchingAcrossPartitionSpecEvolution(t *testing.T) {
+	ctx := t.Context()
+	tbl := newEqDeleteReadTestTable(t)
+
+	// Keep spec 0 available for the global delete, then write data under a
+	// partitioned spec and rename that partition field to create a second spec
+	// with the same field ID and identical-looking partition tuple.
+	tx := tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(tx, false).
+		AddField("data", iceberg.IdentityTransform{}, "data_partition").Commit())
+	var err error
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	dataSpec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 1, dataSpec.ID())
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
+	require.NoError(t, err)
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSc, strings.NewReader(`[
+		{"id": 1, "data": "books"},
+		{"id": 2, "data": "books"}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+	data := array.NewTableFromRecords(arrowSc, []arrow.RecordBatch{rec})
+	defer data.Release()
+
+	tbl, err = tbl.AppendTable(ctx, data, rec.NumRows(), nil)
+	require.NoError(t, err)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(tx, false).
+		RenameField("data_partition", "renamed_data_partition").Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+	deleteSpec := tbl.Metadata().PartitionSpec()
+	require.Equal(t, 2, deleteSpec.ID())
+
+	delSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	delArrowSc, err := table.SchemaToArrowSchema(delSchema, nil, true, false)
+	require.NoError(t, err)
+	partitionedRecords, release := makeEqDeleteRecords(t, delArrowSc,
+		`[{"id": 1, "data": "books"}]`)
+	defer release()
+
+	tx = tbl.NewTransaction()
+	partitionedDeletes, err := tx.WriteEqualityDeletes(ctx, []int{1}, partitionedRecords)
+	require.NoError(t, err)
+	require.Len(t, partitionedDeletes, 1)
+	require.EqualValues(t, 2, partitionedDeletes[0].SpecID())
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(partitionedDeletes...).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	globalDeletePath := tbl.Location() + "/data/global-eq-delete.parquet"
+	globalArrowSc, err := table.SchemaToArrowSchema(
+		iceberg.NewSchema(0,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		), nil, true, false)
+	require.NoError(t, err)
+	writeParquetFile(t, globalDeletePath, globalArrowSc, `[{"id": 2}]`)
+	globalBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		globalDeletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	globalBuilder.EqualityFieldIDs([]int{1})
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(globalBuilder.Build()).Commit(ctx))
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.EqualValues(t, 1, tasks[0].File.SpecID())
+	require.Equal(t, partitionedDeletes[0].Partition(), tasks[0].File.Partition(),
+		"the data and partitioned delete must have identical tuples under different specs")
+	require.Len(t, tasks[0].EqualityDeleteFiles, 1)
+	assert.Equal(t, globalDeletePath, tasks[0].EqualityDeleteFiles[0].FilePath())
+
+	_, itr, err := tbl.Scan(table.WithSelectedFields("id")).ToArrowRecords(ctx)
+	require.NoError(t, err)
+	var ids []int64
+	for record, err := range itr {
+		require.NoError(t, err)
+		col := record.Column(0).(*array.Int64)
+		for i := 0; i < col.Len(); i++ {
+			ids = append(ids, col.Value(i))
+		}
+		record.Release()
+	}
+	assert.Equal(t, []int64{1}, ids)
 }
 
 func TestEqualityDeleteDoesNotAffectSameSnapshot(t *testing.T) {

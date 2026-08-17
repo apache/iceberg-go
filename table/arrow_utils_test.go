@@ -21,7 +21,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -60,7 +59,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.FixedTypeOf(0), true, ""},
 		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), true, ""},
 		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.DecimalTypeOf(8, 2), false, ""},
-		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, iceberg.DecimalTypeOf(8, 9), false, ""},
+		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, nil, false, "invalid scale 9: must be less than or equal to precision 8"},
 		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), false, ""},
 		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), true, ""},
 		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, false, "unsupported arrow type for conversion - decimal256(8, 9)"},
@@ -1404,6 +1403,196 @@ func TestToRequestedSchemaListLargeTypeCoercion(t *testing.T) {
 	})
 }
 
+func TestToRequestedSchemaListOfStructNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	elemStruct := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("2")},
+	)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "nested", Type: arrow.ListOfField(arrow.Field{
+			Name: "element", Type: elemStruct, Nullable: false, Metadata: fieldIDMeta("3"),
+		}), Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	lb := bldr.Field(0).(*array.ListBuilder)
+	sb := lb.ValueBuilder().(*array.StructBuilder)
+	lb.Append(true)
+	sb.Append(true)
+	sb.FieldBuilder(0).(*array.Int32Builder).Append(42)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "nested", Type: &iceberg.ListType{
+			ElementID: 3, Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				},
+			}, ElementRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	list := converted.Column(0).(*array.List)
+	require.Equal(t, 1, list.Len())
+	elems := list.ListValues().(*array.Struct)
+	require.Equal(t, 1, elems.Len())
+	assert.Equal(t, int32(42), elems.Field(0).(*array.Int32).Value(0))
+}
+
+func TestToRequestedSchemaMapStructValueNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	valStruct := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("3")},
+	)
+	mapType := arrow.MapOfWithMetadata(arrow.BinaryTypes.String, fieldIDMeta("2"), valStruct, fieldIDMeta("4"))
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "m", Type: mapType, Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	mb := bldr.Field(0).(*array.MapBuilder)
+	kb := mb.KeyBuilder().(*array.StringBuilder)
+	vb := mb.ItemBuilder().(*array.StructBuilder)
+	mb.Append(true)
+	kb.Append("k")
+	vb.Append(true)
+	vb.FieldBuilder(0).(*array.Int32Builder).Append(7)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 4, ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				},
+			}, ValueRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	m := converted.Column(0).(*array.Map)
+	require.Equal(t, 1, m.Keys().Len())
+	assert.Equal(t, "k", m.Keys().(*array.String).Value(0))
+	vals := m.Items().(*array.Struct)
+	require.Equal(t, 1, vals.Len())
+	assert.Equal(t, int32(7), vals.Field(0).(*array.Int32).Value(0))
+}
+
+func TestToRequestedSchemaMapStructKeyNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	keyStruct := arrow.StructOf(
+		arrow.Field{Name: "k", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldIDMeta("3")},
+	)
+	mapType := arrow.MapOfWithMetadata(keyStruct, fieldIDMeta("2"), arrow.PrimitiveTypes.Int32, fieldIDMeta("4"))
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "m", Type: mapType, Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	mb := bldr.Field(0).(*array.MapBuilder)
+	kb := mb.KeyBuilder().(*array.StructBuilder)
+	vb := mb.ItemBuilder().(*array.Int32Builder)
+	mb.Append(true)
+	kb.Append(true)
+	kb.FieldBuilder(0).(*array.StringBuilder).Append("k")
+	vb.Append(7)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "k", Type: iceberg.PrimitiveTypes.String, Required: true},
+				},
+			},
+			ValueID: 4, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	m := converted.Column(0).(*array.Map)
+	keys := m.Keys().(*array.Struct)
+	require.Equal(t, 1, keys.Len())
+	assert.Equal(t, "k", keys.Field(0).(*array.String).Value(0))
+	vals := m.Items().(*array.Int32)
+	require.Equal(t, 1, vals.Len())
+	assert.Equal(t, int32(7), vals.Value(0))
+}
+
+func TestToRequestedSchemaListOfListNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	innerList := arrow.ListOfField(arrow.Field{
+		Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("3"),
+	})
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "nested", Type: arrow.ListOfField(arrow.Field{
+			Name: "element", Type: innerList, Nullable: false, Metadata: fieldIDMeta("2"),
+		}), Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	outerLb := bldr.Field(0).(*array.ListBuilder)
+	innerLb := outerLb.ValueBuilder().(*array.ListBuilder)
+	ib := innerLb.ValueBuilder().(*array.Int32Builder)
+	outerLb.Append(true)
+	innerLb.Append(true)
+	ib.Append(9)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "nested", Type: &iceberg.ListType{
+			ElementID: 2, Element: &iceberg.ListType{
+				ElementID: 3, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
+			}, ElementRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	outer := converted.Column(0).(*array.List)
+	require.Equal(t, 1, outer.Len())
+	inner := outer.ListValues().(*array.List)
+	require.Equal(t, 1, inner.Len())
+	assert.Equal(t, int32(9), inner.ListValues().(*array.Int32).Value(0))
+}
+
 func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
@@ -2149,8 +2338,8 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:      "binary as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "binary as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BINARY, col.DataType().ID())
 				arr := col.(*array.Binary)
@@ -2160,13 +2349,33 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:      "fixed as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "fixed as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"initial-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
 				arr := col.(*array.FixedSizeBinary)
 				for i := 0; i < arr.Len(); i++ {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as legacy base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"aGVsbG8="}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Binary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "fixed uses legacy base64 when hex width differs",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[6]","required":false,"initial-default":"deadbeef"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.FixedSizeBinary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte{0x75, 0xe6, 0x9d, 0x6d, 0xe7, 0x9f}, arr.Value(i), "row %d", i)
 				}
 			},
 		},
@@ -2271,6 +2480,44 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			require.EqualValues(t, 2, result.NumCols())
 			tt.check(t, result.Column(1))
 		})
+	}
+}
+
+func TestInitialDefaultFilterProjectionConsistency(t *testing.T) {
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"id":2,"name":"data","type":"binary","required":false,"initial-default":"000102ff"}`,
+	), &field))
+
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	requestedSchema := iceberg.NewSchema(1, fileSchema.Field(0), field)
+	bound, err := iceberg.BindExpr(requestedSchema,
+		iceberg.EqualTo(iceberg.Reference("data"), []byte{0, 1, 2, 0xff}), true)
+	require.NoError(t, err)
+	translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+	require.NoError(t, err)
+	require.True(t, translated.Equals(iceberg.AlwaysTrue{}), "matching default must retain the rows")
+
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+		Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+	}}, nil)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	builder.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2}, nil)
+	record := builder.NewRecordBatch()
+	builder.Release()
+	defer record.Release()
+
+	projected, err := table.ToRequestedSchema(t.Context(), requestedSchema, fileSchema, record, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer projected.Release()
+	values := projected.Column(1).(*array.Binary)
+	for i := range values.Len() {
+		assert.Equal(t, []byte{0, 1, 2, 0xff}, values.Value(i), "row %d", i)
 	}
 }
 
@@ -2395,8 +2642,8 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:      "binary as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "binary as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BINARY, col.DataType().ID())
 				arr := col.(*array.Binary)
@@ -2406,11 +2653,21 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			},
 		},
 		{
-			name:      "fixed as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "fixed as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"write-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
 				arr := col.(*array.FixedSizeBinary)
+				for i := 0; i < arr.Len(); i++ {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as legacy base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"aGVsbG8="}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Binary)
 				for i := 0; i < arr.Len(); i++ {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
 				}

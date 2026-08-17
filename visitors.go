@@ -18,12 +18,14 @@
 package iceberg
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
 	"slices"
 	"strings"
 
+	"github.com/apache/iceberg-go/internal"
 	"github.com/google/uuid"
 )
 
@@ -42,7 +44,10 @@ type BooleanExprVisitor[T any] interface {
 // BoundBooleanExprVisitor builds on BooleanExprVisitor by adding interface
 // methods for visiting bound expressions, because we do casting of literals
 // during binding you can assume that the BoundTerm and the Literal passed
-// to a method have the same type.
+// to a method have the same type. Sets passed to VisitIn and VisitNotIn are
+// detached when dispatched through VisitBoundPredicate. The internal
+// VisitBoundPredicateRef path may pass borrowed sets to trusted built-in
+// visitors, which must not call Add or mutate their literal values.
 type BoundBooleanExprVisitor[T any] interface {
 	BooleanExprVisitor[T]
 
@@ -95,6 +100,26 @@ func VisitExpr[T any](expr BooleanExpression, visitor BooleanExprVisitor[T]) (re
 	return visitBoolExpr(expr, visitor), err
 }
 
+// VisitExprEvaluator traverses a boolean expression for a visitor whose
+// boolean results represent expression truth. Unlike VisitExpr, it only visits
+// the nodes required to determine the result: it skips the right side of an
+// AND when the left side is false and the right side of an OR when the left
+// side is true.
+func VisitExprEvaluator(expr BooleanExpression, visitor BooleanExprVisitor[bool]) (res bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during visitExpr: %s", e)
+			case error:
+				err = e
+			}
+		}
+	}()
+
+	return visitEvaluator(expr, visitor), err
+}
+
 func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T {
 	switch e := e.(type) {
 	case AlwaysFalse:
@@ -121,6 +146,36 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 	panic(fmt.Errorf("%w: VisitBooleanExpression type %s", ErrNotImplemented, e))
 }
 
+func visitEvaluator(e BooleanExpression, visitor BooleanExprVisitor[bool]) bool {
+	switch e := e.(type) {
+	case AlwaysFalse:
+		return visitor.VisitFalse()
+	case AlwaysTrue:
+		return visitor.VisitTrue()
+	case AndExpr:
+		left := visitEvaluator(e.left, visitor)
+		if !left {
+			return visitor.VisitFalse()
+		}
+
+		return visitor.VisitAnd(left, visitEvaluator(e.right, visitor))
+	case OrExpr:
+		left := visitEvaluator(e.left, visitor)
+		if left {
+			return visitor.VisitTrue()
+		}
+
+		return visitor.VisitOr(left, visitEvaluator(e.right, visitor))
+	case NotExpr:
+		return visitor.VisitNot(visitEvaluator(e.child, visitor))
+	case UnboundPredicate:
+		return visitor.VisitUnbound(e)
+	case BoundPredicate:
+		return visitor.VisitBound(e)
+	}
+	panic(fmt.Errorf("%w: VisitBooleanExpression type %s", ErrNotImplemented, e))
+}
+
 // VisitBoundPredicate uses a BoundBooleanExprVisitor to call the appropriate method
 // based on the type of operation in the predicate. This is a convenience function
 // for implementing the VisitBound method of a BoundBooleanExprVisitor by simply calling
@@ -131,12 +186,25 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 // panics with an error wrapping ErrNotImplemented. When reached through VisitExpr
 // that panic is recovered into a returned error; a caller invoking this directly
 // must implement the extension or recover the panic itself.
+// Set predicates are dispatched with detached literal sets. Trusted built-in
+// visitors that need the zero-copy path can use [VisitBoundPredicateRef].
 func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T]) T {
+	return visitBoundPredicate(e, visitor, false)
+}
+
+// VisitBoundPredicateRef is the zero-copy dispatch path for trusted visitors
+// inside this module. It is gated by an internal token so external visitors
+// use VisitBoundPredicate and receive a detached set.
+func VisitBoundPredicateRef[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], _ internal.BoundPredicateRef) T {
+	return visitBoundPredicate(e, visitor, true)
+}
+
+func visitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], borrowed bool) T {
 	switch e.Op() {
 	case OpIn:
-		return visitor.VisitIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitIn(e.Term(), literalSetForVisit(e, borrowed))
 	case OpNotIn:
-		return visitor.VisitNotIn(e.Term(), e.(BoundSetPredicate).Literals())
+		return visitor.VisitNotIn(e.Term(), literalSetForVisit(e, borrowed))
 	case OpIsNan:
 		return visitor.VisitIsNan(e.Term())
 	case OpNotNan:
@@ -180,6 +248,19 @@ func VisitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisito
 		return gv.VisitBBoxNotIntersects(e.Term(), bbox)
 	}
 	panic(fmt.Errorf("%w: unhandled bound predicate type: %s", ErrNotImplemented, e))
+}
+
+func literalSetForVisit(predicate BoundPredicate, borrowed bool) Set[Literal] {
+	setPredicate, ok := predicate.(BoundSetPredicate)
+	if !ok {
+		panic(fmt.Errorf("%w: %s predicate %T does not implement BoundSetPredicate",
+			ErrNotImplemented, predicate.Op(), predicate))
+	}
+	if borrowed {
+		return boundSetLiteralsForVisit(predicate)
+	}
+
+	return setPredicate.Literals()
 }
 
 // BindExpr recursively binds each portion of an expression using the provided schema.
@@ -245,7 +326,7 @@ func (e *exprEvaluator) Eval(st StructLike) (bool, error) {
 	// from #445.
 	ev := exprEvaluator{bound: e.bound, st: st}
 
-	return VisitExpr(ev.bound, &ev)
+	return VisitExprEvaluator(ev.bound, &ev)
 }
 
 func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
@@ -253,7 +334,7 @@ func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
 }
 
 func (e *exprEvaluator) VisitBound(pred BoundPredicate) bool {
-	return VisitBoundPredicate(pred, e)
+	return visitBoundPredicate(pred, e, true)
 }
 
 func (*exprEvaluator) VisitTrue() bool                { return true }
@@ -539,6 +620,12 @@ type columnNameTranslator struct {
 	fileSchema *Schema
 }
 
+type defaultValueStruct []any
+
+func (s defaultValueStruct) Size() int            { return len(s) }
+func (s defaultValueStruct) Get(pos int) any      { return s[pos] }
+func (s defaultValueStruct) Set(pos int, val any) { s[pos] = val }
+
 func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
 func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
 func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
@@ -557,17 +644,57 @@ func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpressio
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
 }
 
+func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
+	switch p := pred.(type) {
+	case BoundUnaryPredicate:
+		return p.AsUnbound(ref)
+	case BoundLiteralPredicate:
+		return p.AsUnbound(ref, p.Literal())
+	case BoundSetPredicate:
+		return p.AsUnbound(ref, boundSetLiteralsForVisit(p).Members())
+	default:
+		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
+	}
+}
+
+func initialDefaultLiteral(field NestedField) (Literal, error) {
+	switch typ := field.Type.(type) {
+	case BinaryType, FixedType:
+		if val, ok := field.InitialDefault.([]byte); ok {
+			return BinaryLiteral(val).To(field.Type)
+		}
+		// Metadata defaults are spec hex strings. The shared decoder also accepts
+		// legacy base64 written by iceberg-go v0.6.0.
+		if val, ok := field.InitialDefault.(string); ok {
+			fixedLen := -1
+			if fixed, ok := typ.(FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			decoded, err := internal.DecodeDefaultBytes(val, fixedLen)
+			if err != nil {
+				return nil, err
+			}
+
+			return BinaryLiteral(decoded).To(field.Type)
+		}
+	case DecimalType:
+		if val, ok := field.InitialDefault.(Decimal); ok {
+			return DecimalLiteral(val).To(field.Type)
+		}
+	}
+
+	data, err := json.Marshal(field.InitialDefault)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeValue(data, field.Type)
+}
+
 func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
 	// A bbox predicate has no substrait/record-filter form; it is evaluated only
 	// during metrics-based file pruning, so the record filter must conservatively
-	// keep every row. It must be matched before the column-not-found early return,
-	// which would otherwise return AlwaysFalse and silently drop every row of a
-	// file that predates the geo column, and before the switch below, whose
-	// default panics on an unhandled predicate. Collapse it to always-true
-	// (mirrors exprEvaluator and sanitizeVisitor); this also keeps it out of
-	// substrait, where it would otherwise error. Match the exported
-	// BoundBBoxPredicate interface, not just the concrete type, so a future
-	// implementation is covered too.
+	// keep every row.
 	if _, ok := pred.(BoundBBoxPredicate); ok {
 		return AlwaysTrue{}
 	}
@@ -576,24 +703,51 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 	if !found {
 		// in the case of schema evolution, the column might not be present
 		// in the file schema when reading older data
-		if pred.Op() == OpIsNull {
+		field := pred.Ref().Field()
+		// A nested field can still be null when an optional parent is null, so
+		// its default is not a file-wide constant. Preserve the existing
+		// missing-column behavior until translation has row-level parent state.
+		if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
+			if pred.Op() == OpIsNull {
+				return AlwaysTrue{}
+			}
+
+			return AlwaysFalse{}
+		}
+		// The spec requires geo defaults to be null, but fail open for metadata
+		// written by non-conforming V3 writers rather than aborting the scan.
+		switch field.Type.(type) {
+		case GeometryType, GeographyType:
+			return AlwaysTrue{}
+		}
+
+		withContext := func(err error) error {
+			return fmt.Errorf("initial-default for column %q (id %d): %w",
+				field.Name, field.ID, err)
+		}
+		eval, err := ExpressionEvaluator(NewSchema(0, field),
+			unbindPredicate(pred, Reference(field.Name)), true)
+		if err != nil {
+			panic(withContext(err))
+		}
+
+		lit, err := initialDefaultLiteral(field)
+		if err != nil {
+			panic(withContext(err))
+		}
+
+		matches, err := eval(defaultValueStruct{lit.Any()})
+		if err != nil {
+			panic(withContext(err))
+		}
+		if matches {
 			return AlwaysTrue{}
 		}
 
 		return AlwaysFalse{}
 	}
 
-	ref := Reference(fileColName)
-	switch p := pred.(type) {
-	case BoundUnaryPredicate:
-		return p.AsUnbound(ref)
-	case BoundLiteralPredicate:
-		return p.AsUnbound(ref, p.Literal())
-	case BoundSetPredicate:
-		return p.AsUnbound(ref, p.Literals().Members())
-	default:
-		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
-	}
+	return unbindPredicate(pred, Reference(fileColName))
 }
 
 // sanitizedLiteralMask is the placeholder substituted for every literal value in
@@ -674,7 +828,7 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	case BoundLiteralPredicate:
 		return sanitizeLiteralPredicate(p.Op(), ref)
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), ref, p.Literals().Len())
+		return sanitizeSetPredicate(p.Op(), ref, boundSetLiteralsForVisit(p).Len())
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}

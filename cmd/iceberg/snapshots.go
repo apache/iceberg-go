@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -35,8 +36,25 @@ func runSnapshots(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 }
 
 func runRefs(ctx context.Context, output Output, cat catalog.Catalog, cmd *RefsCmd) {
+	if err := validateRefType(cmd.Type); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	output.Refs(tbl, cmd.Type)
+}
+
+func validateRefType(refType string) error {
+	switch refType {
+	case "", string(table.BranchRef), string(table.TagRef):
+		return nil
+	default:
+		return fmt.Errorf("invalid --type %q: expected %q or %q",
+			refType, table.BranchRef, table.TagRef)
+	}
 }
 
 func buildSnapshotEntries(tbl *table.Table) []SnapshotEntry {

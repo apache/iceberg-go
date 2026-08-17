@@ -152,6 +152,7 @@ func newAbortTestWriter(t *testing.T, fs iceio.WriteFileIO, fileName string) int
 func constructTestTablePrimitiveTypes(t *testing.T) (*metadata.FileMetaData, table.Metadata) {
 	tableMeta, err := table.ParseMetadataString(`{
         "format-version": 2,
+        "last-sequence-number": 0,
         "location": "s3://bucket/test/location",
         "last-column-id": 7,
         "current-schema-id": 0,
@@ -436,6 +437,63 @@ func getCollector() map[int]internal.StatisticsCollector {
 	}
 }
 
+// TestMetricsSkipColumnOutsidePlan: only a reserved row-lineage
+// metadata column (e.g. a writer-materialized _row_id, which is never
+// part of the table schema) may appear in a file without a
+// metrics-plan entry; it must be skipped entirely, not aggregated
+// through a zero-value collector (whose nil Iceberg type panics inside
+// the stats aggregator). Any other field id missing from the plan is a
+// plan/file mismatch and must fail loudly.
+func TestMetricsSkipColumnOutsidePlan(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	t.Run("reserved lineage column is skipped", func(t *testing.T) {
+		meta, tblMeta := constructTestTablePrimitiveTypes(t)
+		mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+		require.NoError(t, err)
+
+		// Simulate a writer-materialized lineage column: the file column
+		// "binaries" resolves to the reserved _row_id field id, which has
+		// no entry in the metrics plan.
+		mapping["binaries"] = iceberg.RowIDFieldID
+		collector := getCollector()
+		delete(collector, 12)
+
+		stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:   tblMeta.CurrentSchema(),
+			Spec:     tblMeta.PartitionSpec(),
+			Path:     "fake-path.parquet",
+			Format:   iceberg.ParquetFile,
+			Content:  iceberg.EntryContentData,
+			FileSize: meta.GetSourceFileSize(),
+		})
+
+		for _, id := range []int{12, iceberg.RowIDFieldID} {
+			assert.NotContains(t, df.ValueCounts(), id)
+			assert.NotContains(t, df.NullValueCounts(), id)
+			assert.NotContains(t, df.ColumnSizes(), id)
+			assert.NotContains(t, df.LowerBoundValues(), id)
+			assert.NotContains(t, df.UpperBoundValues(), id)
+		}
+		assert.Len(t, df.ValueCounts(), 14)
+		assert.Len(t, df.LowerBoundValues(), 14)
+	})
+
+	t.Run("non-reserved column missing from plan fails", func(t *testing.T) {
+		meta, tblMeta := constructTestTablePrimitiveTypes(t)
+		mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+		require.NoError(t, err)
+
+		collector := getCollector()
+		delete(collector, 12) // "binaries" is a schema column: mismatch
+
+		assert.PanicsWithError(t, `field id 12 (column "binaries") not found in the metrics plan`, func() {
+			format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+		})
+	})
+}
+
 func TestMetricsPrimitiveTypes(t *testing.T) {
 	format := internal.GetFileFormat(iceberg.ParquetFile)
 
@@ -639,6 +697,7 @@ func TestNanosecondTimestampMetrics(t *testing.T) {
 
 	tableMeta, err := table.ParseMetadataString(`{
 		"format-version": 3,
+		"last-sequence-number": 0,
 		"location": "s3://bucket/test/location",
 		"last-column-id": 2,
 		"current-schema-id": 0,
@@ -825,6 +884,7 @@ func TestDecimalPhysicalTypes(t *testing.T) {
 			// Create table metadata with decimal type
 			tableMeta, err := table.ParseMetadataString(fmt.Sprintf(`{
 				"format-version": 2,
+				"last-sequence-number": 0,
 				"location": "s3://bucket/test/location",
 				"last-column-id": 1,
 				"current-schema-id": 0,
@@ -1087,11 +1147,22 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
 	require.NoError(t, err)
 
+	// The stats plan must cover every non-lineage file column: the list
+	// element (field id 2) is the only parquet leaf column here.
+	statsCols := map[int]internal.StatisticsCollector{
+		2: {
+			FieldID:    2,
+			Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
+			ColName:    "nested.element",
+			IcebergTyp: iceberg.PrimitiveTypes.Int32,
+		},
+	}
+
 	_, err = fm.WriteDataFile(ctx, &mockfs, nil, internal.WriteFileInfo{
 		FileSchema: icesc,
 		Spec:       iceberg.PartitionSpec{},
 		FileName:   "f",
-		StatsCols:  nil,
+		StatsCols:  statsCols,
 		WriteProps: []parquet.WriterProperty{},
 	}, []arrow.RecordBatch{rec})
 	require.ErrorContains(t, err, "error on close")

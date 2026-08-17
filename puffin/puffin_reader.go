@@ -205,6 +205,8 @@ func (r *Reader) readFooter() error {
 	// Total footer size: magic(4) + payload + trailer(12)
 	totalFooterSize := MagicSize + payloadSize + footerTrailerSize
 
+	var payloadReader io.Reader
+
 	// Validate footer start magic
 	if totalFooterSize <= readSize {
 		// We already have the footer magic in buf
@@ -212,6 +214,9 @@ func (r *Reader) readFooter() error {
 		if !bytes.Equal(buf[footerOffset:footerOffset+MagicSize], magic[:]) {
 			return errors.New("puffin: invalid footer start magic")
 		}
+
+		payloadOffset := footerOffset + MagicSize
+		payloadReader = bytes.NewReader(buf[payloadOffset : payloadOffset+int(payloadSize)])
 	} else {
 		// Footer is larger than our initial read, need to read magic separately
 		var footerMagic [MagicSize]byte
@@ -221,9 +226,10 @@ func (r *Reader) readFooter() error {
 		if !bytes.Equal(footerMagic[:], magic[:]) {
 			return errors.New("puffin: invalid footer start magic")
 		}
+
+		payloadReader = io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	}
 
-	payloadReader := io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	decoder := json.NewDecoder(payloadReader)
 	var footer Footer
 	if err := decoder.Decode(&footer); err != nil {
