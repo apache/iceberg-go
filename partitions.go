@@ -581,6 +581,8 @@ func validatePartitionFields(fields []PartitionField, redundant func(a, b Transf
 			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
 		}
 		names[field.Name] = struct{}{}
+		// Reject a nil transform before the redundancy comparison below calls
+		// Equals on it. The option constructors accept any Transform and
 		// validateTransform's default branch passes nil through, so this is the
 		// first place a nil would be dereferenced.
 		if field.Transform == nil {
