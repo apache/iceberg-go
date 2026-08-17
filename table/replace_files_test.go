@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -48,7 +49,7 @@ func newReplaceFilesTestTableVersion(t *testing.T, version int) *table.Table {
 
 	meta, err := table.NewMetadata(schema, iceberg.UnpartitionedSpec,
 		table.UnsortedSortOrder, location,
-		iceberg.Properties{table.PropertyFormatVersion: fmt.Sprint(version)})
+		iceberg.Properties{table.PropertyFormatVersion: strconv.Itoa(version)})
 	require.NoError(t, err)
 
 	return table.New(
@@ -667,6 +668,7 @@ func fileDataSequence(t *testing.T, tbl *table.Table, path string) int64 {
 		}
 	}
 	t.Fatalf("file %q not found in current snapshot", path)
+
 	return -1
 }
 
@@ -678,7 +680,7 @@ func scanIDs(t *testing.T, tbl *table.Table) []int64 {
 	for record, err := range records {
 		require.NoError(t, err)
 		values := record.Column(record.Schema().FieldIndices("id")[0]).(*array.Int64)
-		for i := 0; i < values.Len(); i++ {
+		for i := range values.Len() {
 			ids = append(ids, values.Value(i))
 		}
 		record.Release()
