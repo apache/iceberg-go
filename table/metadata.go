@@ -612,6 +612,8 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 
 		return ok
 	})
+	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
+	// removed entries remain available when trimming history gaps.
 
 	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
 	for _, snapshot := range b.snapshotList {
