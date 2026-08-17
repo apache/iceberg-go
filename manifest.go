@@ -469,7 +469,7 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	decimalScales := make(map[int]int)
 	unknownFieldIDs := make(map[int]struct{})
 
-	entryField := getField(root, "data_file")
+	entryField := getField(*root, "data_file")
 	partitionField := getField(entryField.Type, "partition")
 
 	for _, field := range partitionField.Type.Fields {
@@ -1013,6 +1013,8 @@ func schemaFieldID(f avro.SchemaField) (int, bool) {
 	switch v := f.Props["field-id"].(type) {
 	case int:
 		return v, true
+	case int64:
+		return int(v), true
 	case float64:
 		return int(v), true
 	}

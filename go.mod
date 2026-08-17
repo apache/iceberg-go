@@ -47,7 +47,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/substrait-io/substrait-go/v8 v8.1.1
 	github.com/testcontainers/testcontainers-go/modules/compose v0.44.0
-	github.com/twmb/avro v1.7.2
+	github.com/twmb/avro v1.8.0
 	github.com/twmb/murmur3 v1.1.8
 	github.com/twpayne/go-geom v1.6.1
 	github.com/uptrace/bun v1.2.18
