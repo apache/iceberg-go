@@ -23,6 +23,7 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -150,9 +151,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for scheme, canonical := range schemes {
-			cfg.equalSchemes[scheme] = canonical
-		}
+		maps.Copy(cfg.equalSchemes, schemes)
 	}
 }
 
@@ -165,9 +164,7 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for authority, canonical := range authorities {
-			cfg.equalAuthorities[authority] = canonical
-		}
+		maps.Copy(cfg.equalAuthorities, authorities)
 	}
 }
 
