@@ -741,6 +741,117 @@ func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
 	}
 }
 
+// min-snapshots-to-keep=0 is only reachable through the table property:
+// WithRetainLast and SnapshotRef.validate both reject values below 1.
+func TestExpireSnapshotsRetainsRefHeads(t *testing.T) {
+	tests := []struct {
+		name         string
+		refName      string
+		refType      RefType
+		minSnapshots string
+	}{
+		{name: "non-main branch with no minimum", refName: "feature", refType: BranchRef, minSnapshots: "0"},
+		{name: "non-main branch with default minimum", refName: "feature", refType: BranchRef, minSnapshots: "1"},
+		{name: "main branch with no minimum", refName: MainBranch, refType: BranchRef, minSnapshots: "0"},
+		{name: "tag with no minimum", refName: "release", refType: TagRef, minSnapshots: "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			require.NoError(t, txn.meta.SetSnapshotRef(tt.refName, 20, tt.refType))
+			txn.meta.props = iceberg.Properties{
+				MinSnapshotsToKeepKey: tt.minSnapshots,
+				MaxSnapshotAgeMsKey:   "0",
+			}
+			expireSnapshotsSnapshot(t, txn, 20).TimestampMs = time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+			require.NoError(t, txn.ExpireSnapshots())
+
+			ref, refExists := txn.meta.refs[tt.refName]
+			require.True(t, refExists, "ref %q must survive expiry", tt.refName)
+			require.Equal(t, int64(20), ref.SnapshotID, "ref %q must still point at its head", tt.refName)
+			require.Equal(t, tt.refType, ref.SnapshotRefType, "ref %q must keep its type", tt.refName)
+
+			_, err := txn.meta.SnapshotByID(20)
+			require.NoError(t, err, "head snapshot of ref %q must not be expired", tt.refName)
+		})
+	}
+}
+
+// Protecting a ref's head must not spill over into retaining that branch's expired ancestors.
+func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	old := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+	// Chain 30 -> 20 -> 10 with main on 10 and feature on 30 leaves 20 as an
+	// interior ancestor held by no ref head.
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: transactionTestPtr(int64(20)),
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      time.Now().UnixMilli(),
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef("feature", 30, BranchRef))
+	txn.meta.props = iceberg.Properties{
+		MinSnapshotsToKeepKey: "0",
+		MaxSnapshotAgeMsKey:   "0",
+	}
+	for _, id := range []int64{10, 20, 30} {
+		expireSnapshotsSnapshot(t, txn, id).TimestampMs = old
+	}
+
+	require.NoError(t, txn.ExpireSnapshots())
+
+	_, err := txn.meta.SnapshotByID(30)
+	require.NoError(t, err, "feature head must be retained")
+	_, err = txn.meta.SnapshotByID(10)
+	require.NoError(t, err, "main head must be retained")
+	_, err = txn.meta.SnapshotByID(20)
+	require.Error(t, err, "expired interior ancestor must not be retained by the head-retention fix")
+}
+
+// Both ancestor walks in ExpireSnapshots must terminate on a parent cycle in
+// malformed metadata. Snapshots are left young so the age cutoff cannot end
+// the retention walk, leaving AncestorsOf's cycle guard as the only exit.
+func TestExpireSnapshotsTerminatesOnParentCycle(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = transactionTestPtr(int64(20))
+
+	done := make(chan error, 1)
+	go func() { done <- txn.ExpireSnapshots() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("ExpireSnapshots did not terminate on a snapshot parent cycle")
+	}
+
+	for _, id := range []int64{10, 20} {
+		_, err := txn.meta.SnapshotByID(id)
+		require.NoError(t, err, "snapshot %d is referenced by a ref and must be retained", id)
+	}
+}
+
+// expireSnapshotsSnapshot returns the builder's own copy of a fixture snapshot
+// so tests can set fields that AddSnapshot validates against.
+func expireSnapshotsSnapshot(t *testing.T, txn *Transaction, snapshotID int64) *Snapshot {
+	t.Helper()
+
+	for i := range txn.meta.snapshotList {
+		if txn.meta.snapshotList[i].SnapshotID == snapshotID {
+			return &txn.meta.snapshotList[i]
+		}
+	}
+
+	t.Fatalf("snapshot %d not found in test fixture", snapshotID)
+
+	return nil
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 
