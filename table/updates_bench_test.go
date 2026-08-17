@@ -39,15 +39,18 @@ func BenchmarkUnmarshalUpdates(b *testing.B) {
 				}
 
 				b.ReportAllocs()
+				b.SetBytes(int64(len(payload)))
 				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
+				for b.Loop() {
 					var updates Updates
 					if err := json.Unmarshal(payload, &updates); err != nil {
 						b.Fatal(err)
 					}
+					if len(updates) != count {
+						b.Fatalf("decoded %d updates, want %d", len(updates), count)
+					}
 					benchmarkUpdates = updates
 				}
-				b.StopTimer()
 			})
 		}
 	}
