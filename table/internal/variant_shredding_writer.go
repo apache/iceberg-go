@@ -93,7 +93,7 @@ func ShreddedArrowSchema(base *arrow.Schema, inferred map[int]arrow.DataType) *a
 // shreddedSchema (the inverse of UnshredVariant); other columns pass through.
 func ShredRecordVariants(rec arrow.RecordBatch, shreddedSchema *arrow.Schema, mem memory.Allocator) (out arrow.RecordBatch, err error) {
 	shredIdx := make([]int, 0)
-	for i := 0; i < shreddedSchema.NumFields(); i++ {
+	for i := range shreddedSchema.NumFields() {
 		if vt, ok := shreddedSchema.Field(i).Type.(*extensions.VariantType); ok && vt.TypedValue().Type != nil {
 			shredIdx = append(shredIdx, i)
 		}
@@ -122,7 +122,7 @@ func ShredRecordVariants(rec arrow.RecordBatch, shreddedSchema *arrow.Schema, me
 		shredSet[i] = true
 	}
 
-	for i := 0; i < int(rec.NumCols()); i++ {
+	for i := range int(rec.NumCols()) {
 		if !shredSet[i] {
 			cols[i] = rec.Column(i)
 
@@ -166,7 +166,7 @@ func shredVariantColumn(src *extensions.VariantArray, vt *extensions.VariantType
 	}()
 
 	storage := src.Storage()
-	for i := 0; i < src.Len(); i++ {
+	for i := range src.Len() {
 		if storage.IsNull(i) {
 			bldr.AppendNull()
 

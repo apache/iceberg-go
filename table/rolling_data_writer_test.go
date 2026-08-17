@@ -752,7 +752,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	for c := range idChunks {
 		idArr := idChunks[c].(*array.Int32)
 		nameArr := nameChunks[c].(*array.String)
-		for i := 0; i < idArr.Len(); i++ {
+		for i := range idArr.Len() {
 			o := observed{}
 			if idArr.IsValid(i) {
 				o.id = idArr.Value(i)
@@ -825,7 +825,7 @@ func (s *RollingDataWriterTestSuite) TestUnsortedOrderIsNoOp() {
 	var ids []int32
 	for _, chunk := range tbl.Column(0).Data().Chunks() {
 		arr := chunk.(*array.Int32)
-		for i := 0; i < arr.Len(); i++ {
+		for i := range arr.Len() {
 			ids = append(ids, arr.Value(i))
 		}
 	}

@@ -296,6 +296,14 @@ func TestMapTypeUnmarshalRequiresKey(t *testing.T) {
 	assert.ErrorContains(t, err, "missing required 'key' key")
 }
 
+func TestMapTypeUnmarshalRequiresValue(t *testing.T) {
+	var typ iceberg.MapType
+	err := json.Unmarshal([]byte(`{"key-id": 1, "key": "string", "value-id": 2}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'value' key")
+}
+
 var NonParameterizedTypes = []iceberg.Type{
 	iceberg.PrimitiveTypes.Bool,
 	iceberg.PrimitiveTypes.Int32,
@@ -673,6 +681,48 @@ func TestNestedFieldUnmarshalWrongTypeKey(t *testing.T) {
 	err := json.Unmarshal(data, &f)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "missing required 'type'")
+}
+
+func TestNestedFieldMarshalBinaryDefaultsAsHex(t *testing.T) {
+	tests := []struct {
+		name     string
+		field    iceberg.NestedField
+		expected string
+	}{
+		{
+			name: "binary",
+			field: iceberg.NestedField{
+				ID: 1, Name: "data", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: []byte{0, 1, 2, 0xff},
+				WriteDefault:   iceberg.BinaryLiteral{0xde, 0xad},
+			},
+			expected: `{"id":1,"name":"data","required":false,"initial-default":"000102ff","write-default":"dead","type":"binary"}`,
+		},
+		{
+			name: "fixed",
+			field: iceberg.NestedField{
+				ID: 2, Name: "fixed", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: iceberg.FixedLiteral{1, 2, 3},
+			},
+			expected: `{"id":2,"name":"fixed","required":false,"initial-default":"010203","type":"fixed[3]"}`,
+		},
+		{
+			name: "empty binary",
+			field: iceberg.NestedField{
+				ID: 3, Name: "empty", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: []byte{},
+			},
+			expected: `{"id":3,"name":"empty","required":false,"initial-default":"","type":"binary"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := json.Marshal(tt.field)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.expected, string(actual))
+		})
+	}
 }
 
 func TestTypeIFaceMarshalJSONNilType(t *testing.T) {

@@ -494,6 +494,47 @@ func TestGroupPosDeletesByFilePathHonorsCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+type cancelAfterErrContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterErrContext) Err() error {
+	if c.remaining == 0 {
+		return context.Canceled
+	}
+	c.remaining--
+
+	return nil
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	baseCtx := compute.WithAllocator(t.Context(), mem)
+	ctx := &cancelAfterErrContext{Context: baseCtx, remaining: 3}
+	const numRows = positionalDeleteCancellationCheckInterval + 1
+
+	filePaths := make([]string, numRows)
+	positions := make([]int64, numRows)
+	for i := range numRows {
+		filePaths[i] = "file-a.parquet"
+		positions[i] = int64(i)
+	}
+	filePathArr := stringArray(mem, filePaths...)
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, positions...)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestGroupPosDeletesByFilePathReleasesBuildersAfterError(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)

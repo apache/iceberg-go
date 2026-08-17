@@ -82,10 +82,10 @@ func TestAnalyzeUniformObject(t *testing.T) {
 
 func TestAnalyzeRareFieldDropped(t *testing.T) {
 	var sample []variant.Value
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		sample = append(sample, mkVar(t, map[string]any{"common": bigI64}))
 	}
-	for i := 0; i < 5; i++ { // 5/105 = 4.8% < 10% floor
+	for range 5 { // 5/105 = 4.8% < 10% floor
 		sample = append(sample, mkVar(t, map[string]any{"common": bigI64, "rare": "z"}))
 	}
 	dt, ok := AnalyzeVariantShredding(sample)
@@ -118,10 +118,10 @@ func TestAnalyzeIntegerWidening(t *testing.T) {
 func TestAnalyzeMixedTypeMajority(t *testing.T) {
 	// "v" is an int in 7 rows, a string in 3 -> majority int wins.
 	var sample []variant.Value
-	for i := 0; i < 7; i++ {
+	for range 7 {
 		sample = append(sample, mkVar(t, map[string]any{"v": bigI64}))
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sample = append(sample, mkVar(t, map[string]any{"v": "s"}))
 	}
 	dt, ok := AnalyzeVariantShredding(sample)
@@ -353,7 +353,7 @@ func TestAnalyzeNestedHighCardinality(t *testing.T) {
 // nothing shreds. Fails (ok=true) if the recursion depth guard is removed or raised.
 func TestAnalyzeDepthCap(t *testing.T) {
 	var nested any = bigI64
-	for i := 0; i < maxShreddingDepth+50; i++ {
+	for range maxShreddingDepth + 50 {
 		nested = map[string]any{"n": nested}
 	}
 	_, ok := AnalyzeVariantShredding(mkVars(t, nested, nested))

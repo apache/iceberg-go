@@ -21,17 +21,20 @@ import (
 	"context"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 )
 
-// CollectDeadEqualityDeletes walks the given snapshot's manifests and
-// returns the equality delete files that are provably dead after a
-// rewrite removes the data files in rewrittenPaths.
+// CollectDeadEqualityDeletes walks the given snapshot's manifests and returns
+// equality delete files that are provably dead after a rewrite removes the
+// data files in rewrittenPaths. It preserves the original conservative API,
+// which treats every candidate as potentially global because it has no spec
+// metadata. New callers should use [CollectDeadEqualityDeletesWithSpecs].
 //
 // "Dead" means: no surviving data file in the snapshot (excluding
-// rewrittenPaths) could ever apply to the eq-delete per the v2 reader
-// predicate (see [DecideDeadEqualityDeletes] for the exact rule).
+// rewrittenPaths) could apply to the eq-delete under the conservative
+// compatibility predicate (see [DecideDeadEqualityDeletes]).
 //
 // rewrittenPaths is the union of every old data file path being
 // replaced by a planned rewrite (across all groups). The caller
@@ -50,6 +53,28 @@ import (
 func CollectDeadEqualityDeletes(
 	ctx context.Context,
 	fs iceio.IO,
+	snap *table.Snapshot,
+	rewrittenPaths map[string]struct{},
+) ([]iceberg.DataFile, error) {
+	return collectDeadEqualityDeletes(ctx, fs, nil, snap, rewrittenPaths)
+}
+
+// CollectDeadEqualityDeletesWithSpecs walks the given snapshot's manifests and
+// uses partition spec metadata to identify dead equality deletes exactly.
+func CollectDeadEqualityDeletesWithSpecs(
+	ctx context.Context,
+	fs iceio.IO,
+	specs PartitionSpecLookup,
+	snap *table.Snapshot,
+	rewrittenPaths map[string]struct{},
+) ([]iceberg.DataFile, error) {
+	return collectDeadEqualityDeletes(ctx, fs, specs, snap, rewrittenPaths)
+}
+
+func collectDeadEqualityDeletes(
+	ctx context.Context,
+	fs iceio.IO,
+	specs PartitionSpecLookup,
 	snap *table.Snapshot,
 	rewrittenPaths map[string]struct{},
 ) ([]iceberg.DataFile, error) {
@@ -105,9 +130,18 @@ func CollectDeadEqualityDeletes(
 			if _, beingRewritten := rewrittenPaths[df.FilePath()]; beingRewritten {
 				continue
 			}
-			survey.AddSurvivor(df.Partition(), e.SequenceNum())
+			partition := internal.BorrowedDataFilePartition(df)
+			if specs == nil {
+				survey.AddSurvivor(partition, e.SequenceNum())
+			} else {
+				survey.AddSurvivorWithSpec(df.SpecID(), partition, e.SequenceNum())
+			}
 		}
 	}
 
-	return DecideDeadEqualityDeletes(survey, candidates), nil
+	if specs == nil {
+		return DecideDeadEqualityDeletes(survey, candidates), nil
+	}
+
+	return DecideDeadEqualityDeletesWithSpecs(survey, candidates, specs)
 }

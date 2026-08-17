@@ -220,6 +220,69 @@ type failingOpenFS struct {
 func (f failingOpenFS) Open(string) (iceio.File, error) { return nil, f.err }
 func (f failingOpenFS) Remove(string) error             { return nil }
 
+// Why: SerializeDV run-length encodes before emitting bytes, so a caller that
+// records contiguous deletes one position at a time still gets a compact blob
+// rather than dense containers. Without that step the envelope carries a full
+// 8 KiB word block per container.
+// Condition: 100,000 contiguous positions recorded with individual Set calls,
+// measured against what the bare bitmap encoder would have produced.
+// Assertion: the envelope is two orders of magnitude smaller and still decodes
+// to the same positions and cardinality.
+func TestSerializeDVRunLengthEncodesContiguousPositions(t *testing.T) {
+	const positions = 100_000
+
+	bm := NewRoaringPositionBitmap()
+	for pos := range uint64(positions) {
+		bm.Set(pos)
+	}
+
+	var unencoded bytes.Buffer
+	require.NoError(t, bm.Serialize(&unencoded))
+
+	data, err := SerializeDV(bm)
+	require.NoError(t, err)
+	t.Logf("%d contiguous positions: %d bytes unencoded, %d bytes in the DV envelope",
+		positions, unencoded.Len(), len(data))
+
+	assert.Less(t, len(data), unencoded.Len()/100, "run encoding must dominate the envelope size")
+
+	got, err := DeserializeDV(data, positions)
+	require.NoError(t, err)
+	assert.Equal(t, int64(positions), got.Cardinality())
+	assert.True(t, got.Contains(0))
+	assert.True(t, got.Contains(positions-1))
+	assert.False(t, got.Contains(positions))
+}
+
+// Why: SetRange is the cheap way to record a block-granular delete, and its
+// output has to survive the envelope it was built for.
+// Condition: two disjoint ranges in one bucket plus one in a higher bucket,
+// round-tripped through SerializeDV and DeserializeDV.
+// Assertion: cardinality and membership at both ends of every range survive,
+// and the gaps between ranges stay undeleted.
+func TestSerializeDVRoundTripsRanges(t *testing.T) {
+	const bucket = uint64(1) << 32
+
+	bm := NewRoaringPositionBitmap()
+	bm.SetRange(0, 1000)
+	bm.SetRange(5000, 5010)
+	bm.SetRange(bucket-5, bucket+5)
+
+	data, err := SerializeDV(bm)
+	require.NoError(t, err)
+
+	got, err := DeserializeDV(data, bm.Cardinality())
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(1020), got.Cardinality())
+	for _, pos := range []uint64{0, 999, 5000, 5009, bucket - 5, bucket - 1, bucket, bucket + 4} {
+		assert.Truef(t, got.Contains(pos), "position %d should survive the round trip", pos)
+	}
+	for _, pos := range []uint64{1000, 4999, 5010, bucket - 6, bucket + 5} {
+		assert.Falsef(t, got.Contains(pos), "position %d was never deleted", pos)
+	}
+}
+
 // Why: proves the DV envelope can successfully decode a representative valid blob.
 // Condition: Java-produced DV with deleted positions [1, 3, 5, 7, 9] and cardinality validation disabled.
 // Assertion: no error, cardinality is 5, expected positions are present, and an adjacent unset position is absent.
