@@ -138,6 +138,7 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 
 	dead := make([]iceberg.DataFile, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
+	minSeq := survey.conservativeMinSeq()
 	for _, e := range candidates {
 		df := e.DataFile()
 		path := df.FilePath()
@@ -147,7 +148,7 @@ func DecideDeadEqualityDeletes(survey *SurvivorSurvey, candidates []iceberg.Mani
 		if e.SequenceNum() < 0 {
 			continue
 		}
-		if survey.conservativeMinSeq() >= e.SequenceNum() {
+		if minSeq >= e.SequenceNum() {
 			seen[path] = struct{}{}
 			dead = append(dead, df)
 		}
