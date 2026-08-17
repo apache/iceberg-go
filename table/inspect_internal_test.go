@@ -2123,12 +2123,12 @@ func TestInspectPartitionsLeavesSpecIDUnsetForExpiredSnapshot(t *testing.T) {
 	sequenceNumber := int64(1)
 	manifestPath := "mem://default/table-location/metadata/expired-manifest.avro"
 	var manifestBuf bytes.Buffer
-	manifest, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, expiredSnapshotID,
+	_, err := iceberg.WriteManifest(manifestPath, &manifestBuf, 2, spec, schema, expiredSnapshotID,
 		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
 			iceberg.EntryStatusADDED, int64Ptr(expiredSnapshotID), &sequenceNumber, &sequenceNumber, file)})
 	require.NoError(t, err)
 	require.NoError(t, memIO.WriteFile(manifestPath, manifestBuf.Bytes()))
-	manifest = iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
+	manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBuf.Len()), int32(spec.ID()), expiredSnapshotID).
 		SequenceNum(sequenceNumber, sequenceNumber).
 		AddedFiles(1).
 		AddedRows(1).
