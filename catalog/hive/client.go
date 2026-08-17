@@ -19,6 +19,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -58,6 +59,9 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	}
 
 	host := parsed.Hostname()
+	if host == "" {
+		return nil, errors.New("invalid URI: host is required")
+	}
 	portStr := parsed.Port()
 	if portStr == "" {
 		portStr = "9083"
@@ -65,6 +69,9 @@ func newHiveClient(uri string, opts *HiveOptions) (HiveClient, error) {
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid port: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return nil, fmt.Errorf("invalid port: %d", port)
 	}
 
 	config := gohive.NewMetastoreConnectConfiguration()

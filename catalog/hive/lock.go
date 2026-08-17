@@ -99,7 +99,7 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	}()
 
 	// If not acquired immediately, wait and retry
-	for attempt := 0; attempt < opts.LockRetries; attempt++ {
+	for attempt := range opts.LockRetries {
 		// Wait before checking again
 		waitTime := applyJitter(
 			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),
@@ -158,11 +158,21 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 	if attempt <= 0 || minWait <= 0 {
 		return minWait
 	}
-	if attempt > 62 || minWait > maxWait>>attempt {
-		return maxWait
+
+	// Match Java's lock-check schedule: minWait * 1.5^attempt, capped at maxWait.
+	// (MetastoreLock uses scaleFactor 1.5 for checkLock retries; the lock-create
+	// path still uses 2.0, and is not mirrored here.)
+	wait := float64(minWait)
+	for range attempt {
+		next := wait * lockCheckBackoffScale
+		// next <= wait catches +Inf / non-advancing overflow on extreme inputs.
+		if next >= float64(maxWait) || next <= wait {
+			return maxWait
+		}
+		wait = next
 	}
 
-	return minWait << attempt
+	return time.Duration(wait)
 }
 
 // applyJitter spreads a backoff interval so clients contending for the same lock
@@ -178,7 +188,18 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 //     downward instead, floored at the last interval the sequence produced before
 //     it saturated — a bound the schedule has already cleared, which stops a later
 //     attempt from being allowed to wait less than an earlier one;
-//   - the result never exceeds maxWait and never falls below minWait.
+//   - the result never exceeds maxWait, and never falls below minWait when
+//     minWait <= maxWait. When minWait > maxWait the configuration is
+//     self-contradictory, calculateBackoff resolves it to maxWait, and this
+//     returns exactly maxWait — below the configured minimum, because there is no
+//     value that honours both bounds.
+//
+// The spread below the cap is wider than the Java implementation's. Java's
+// Tasks.exponentialBackoff jitters by roughly 10% of the current delay, whereas
+// this draws from [d, 2d]. The wider window is deliberate — it decorrelates a
+// contended fleet faster — but it does mean Go and Java clients polling the same
+// metastore spread differently, so do not assume the two are interchangeable when
+// reasoning about load.
 func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	if d <= 0 {
 		return d
@@ -192,27 +213,42 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	}
 
 	// Add up to another full interval, without exceeding the configured maximum.
-	extra := d
-	if headroom < extra {
-		extra = headroom
-	}
+	extra := min(headroom, d)
 	if extra > 0 {
 		return d + time.Duration(rand.Int64N(int64(extra)+1))
 	}
 
-	// Replay the doubling sequence and keep the largest interval that still fitted
-	// under the cap. The guard on scheduled keeps a non-positive or overflowing
-	// minWait from spinning here.
+	// Everything below this point is unreachable under the default configuration.
+	// iceberg.hive.lock-check-min-wait-ms=50, iceberg.hive.lock-check-max-wait-ms=5000
+	// and lock-check-retries=4 top the sequence out at 168.75ms (50×1.5³), so it never
+	// saturates and the branch above always wins. Getting here needs a lowered
+	// maximum or a raised retry count. Stated plainly because this is the most
+	// intricate part of the helper and the least exercised in practice.
+	//
+	// Replay the 1.5× backoff sequence and keep the largest interval that still
+	// fitted under the cap. The guard on scheduled keeps a non-positive or
+	// non-advancing minWait from spinning here.
+	//
+	// The replay is what a flat max(minWait, d/scale) floor cannot do, and the gap
+	// is not hypothetical: at minWait=300ms, maxWait=1s the sequence runs 300ms,
+	// 450ms, 675ms, then saturates. The last uncapped interval is 675ms, but
+	// d/1.5 is ~666ms, so a flat floor would let the first capped attempt wait less
+	// than the one before it.
 	//
 	// minWait is applied before the replay rather than relying on it. When minWait
-	// is itself >= maxWait the loop cannot run at all, and options.go accepts that
-	// configuration, so leaving the floor at d/2 there would allow a wait of a third
-	// of the configured minimum.
-	floor := max(minWait, d/2)
-	for scheduled := minWait; scheduled > 0 && scheduled < maxWait; scheduled <<= 1 {
-		if scheduled > floor {
-			floor = scheduled
+	// is itself >= maxWait the loop cannot run at all. ApplyProperties ignores that
+	// configuration, but direct callers can still pass it, so leaving the floor at
+	// d/scale there would allow a wait below the configured minimum.
+	floor := max(minWait, time.Duration(float64(d)/lockCheckBackoffScale))
+	for scheduled := float64(minWait); scheduled > 0 && scheduled < float64(maxWait); {
+		if s := time.Duration(scheduled); s > floor {
+			floor = s
 		}
+		next := scheduled * lockCheckBackoffScale
+		if next <= scheduled {
+			break
+		}
+		scheduled = next
 	}
 	if floor >= d {
 		return d

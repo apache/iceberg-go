@@ -17,7 +17,7 @@
 ---
 repos:
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.8.0
+    rev: v2.12.2
     hooks:
       - id: golangci-lint
         entry: bash -c 'golangci-lint run --fix --timeout 5m'
