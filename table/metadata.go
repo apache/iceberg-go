@@ -389,9 +389,10 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 }
 
 // currentSnapshotForRef returns the snapshot a write targeting ref must be
-// parented on (createSnapshotProducer and mergeOverwrite). An unknown branch
-// falls back to currentSnapshot() so a new branch forks from main. This is a
-// parent lookup only: the commit's AssertRefSnapshotID requirement is built
+// parented on (createSnapshotProducer) and plan against
+// (Transaction.planningSnapshot). An unknown branch falls back to
+// currentSnapshot() so a new branch forks from main. This is a head lookup
+// only: the commit's AssertRefSnapshotID requirement is built
 // separately from the base table's ref (Transaction.baseRefSnapshotID), which
 // returns nil for an absent branch so the requirement can prove the branch does
 // not exist yet — never derive one from the other. A ref cannot outlive its
