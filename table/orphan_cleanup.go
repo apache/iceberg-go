@@ -168,6 +168,46 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 	}
 }
 
+// flattenURIEquivalences expands comma-separated URI equivalence groups into
+// direct lookups. This intentionally differs from Java's flattenMap (lines
+// 392-403), which uses input iteration order for conflicts. Go map iteration is
+// unordered, so groups are processed in sorted order and the lexicographically
+// last overlapping group wins. Exact mappings are overlaid afterward so they
+// retain precedence over groups.
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L392-L403
+func flattenURIEquivalences(equivalences map[string]string) map[string]string {
+	if len(equivalences) == 0 {
+		return nil
+	}
+
+	groups := make([]string, 0, len(equivalences))
+	for group := range equivalences {
+		groups = append(groups, group)
+	}
+	slices.Sort(groups)
+
+	flattened := make(map[string]string, len(equivalences))
+	for _, group := range groups {
+		if !strings.Contains(group, ",") {
+			continue
+		}
+
+		for _, value := range strings.Split(group, ",") {
+			flattened[strings.TrimSpace(value)] = equivalences[group]
+		}
+	}
+
+	for _, group := range groups {
+		// Group declarations are configuration syntax, not URI lookup keys.
+		if strings.Contains(group, ",") {
+			continue
+		}
+		flattened[group] = equivalences[group]
+	}
+
+	return flattened
+}
+
 type OrphanCleanupResult struct {
 	// OrphanFileLocations is retained for backward compatibility with callers
 	// that consume only orphan paths. Prefer OrphanFiles for canonical path+size data.
@@ -247,6 +287,9 @@ func newOrphanCleanupConfigWithMode(executingPlan bool, opts ...OrphanCleanupOpt
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	cfg.equalSchemes = flattenURIEquivalences(cfg.equalSchemes)
+	cfg.equalAuthorities = flattenURIEquivalences(cfg.equalAuthorities)
 
 	return cfg
 }
@@ -799,14 +842,44 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 	}
 
 	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
+	normalizedUser, normalizedHost := normalizeURLAuthority(parsedURL, equalAuthorities)
 	normalizedURL := &url.URL{
 		Scheme: normalizedScheme,
-		Host:   normalizedAuthority,
+		User:   normalizedUser,
+		Host:   normalizedHost,
 		Path:   filepath.Clean(parsedURL.Path),
 	}
 
 	return normalizedURL.String()
+}
+
+// completeURLAuthority returns the URI authority, including user-info when it
+// is present. url.URL stores user-info separately from Host, but URI authority
+// equivalence applies to the complete authority (for example,
+// container@account.dfs.core.windows.net).
+func completeURLAuthority(parsedURL *url.URL) string {
+	if parsedURL.User == nil {
+		return parsedURL.Host
+	}
+
+	return parsedURL.User.String() + "@" + parsedURL.Host
+}
+
+func normalizeURLAuthority(parsedURL *url.URL, equalAuthorities map[string]string) (*url.Userinfo, string) {
+	authority := completeURLAuthority(parsedURL)
+	normalizedAuthority := applyAuthorityEquivalence(authority, equalAuthorities)
+	if normalizedAuthority == authority {
+		return parsedURL.User, parsedURL.Host
+	}
+
+	// Parse the canonical authority back into User and Host because url.URL
+	// serializes user-info separately from the host component.
+	canonicalURL, err := url.Parse("//" + normalizedAuthority)
+	if err != nil {
+		return parsedURL.User, parsedURL.Host
+	}
+
+	return canonicalURL.User, canonicalURL.Host
 }
 
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
@@ -852,22 +925,8 @@ func filePathKey(file string) string {
 // Based on Apache Iceberg Java's flattenMap() (lines 392-403) and EQUAL_SCHEMES_DEFAULT (line 102).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applySchemeEquivalence(scheme string, equalSchemes map[string]string) string {
-	if equalSchemes == nil {
-		return scheme
-	}
 	if canonical, exists := equalSchemes[scheme]; exists {
 		return canonical
-	}
-
-	// Check comma-separated lists (e.g., "s3,s3a,s3n" -> "s3")
-	for schemes, canonical := range equalSchemes {
-		if strings.Contains(schemes, ",") {
-			for s := range strings.SplitSeq(schemes, ",") {
-				if strings.TrimSpace(s) == scheme {
-					return canonical
-				}
-			}
-		}
 	}
 
 	return scheme
@@ -888,22 +947,8 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 // Based on Apache Iceberg Java's equalAuthorities logic (lines 546, 161-165, 392-403).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applyAuthorityEquivalence(authority string, equalAuthorities map[string]string) string {
-	if equalAuthorities == nil {
-		return authority
-	}
-
 	if canonical, exists := equalAuthorities[authority]; exists {
 		return canonical
-	}
-
-	for authorities, canonical := range equalAuthorities {
-		if strings.Contains(authorities, ",") {
-			for a := range strings.SplitSeq(authorities, ",") {
-				if strings.TrimSpace(a) == authority {
-					return canonical
-				}
-			}
-		}
 	}
 
 	return authority
@@ -928,8 +973,8 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 
 	refScheme := applySchemeEquivalence(refURL.Scheme, cfg.equalSchemes)
 	fsScheme := applySchemeEquivalence(fsURL.Scheme, cfg.equalSchemes)
-	refAuth := applyAuthorityEquivalence(refURL.Host, cfg.equalAuthorities)
-	fsAuth := applyAuthorityEquivalence(fsURL.Host, cfg.equalAuthorities)
+	refAuth := applyAuthorityEquivalence(completeURLAuthority(refURL), cfg.equalAuthorities)
+	fsAuth := applyAuthorityEquivalence(completeURLAuthority(fsURL), cfg.equalAuthorities)
 
 	// Check for mismatches
 	schemeMismatch := refScheme != fsScheme
