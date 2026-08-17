@@ -569,19 +569,30 @@ func (m *mergeAppendFiles) needsValidation() bool { return false }
 type snapshotProducer struct {
 	producerImpl
 
-	commitUuid         uuid.UUID
-	io                 iceio.WriteFileIO
-	txn                *Transaction
-	op                 Operation
-	snapshotID         int64
-	parentSnapshotID   int64
-	addedFiles         []iceberg.DataFile
-	addedDeleteFiles   []iceberg.DataFile
-	manifestCount      atomic.Int32
-	deletedFiles       map[string]iceberg.DataFile
-	deletedDeleteFiles map[string]iceberg.DataFile
-	deletedDVsByRef    map[string]iceberg.DataFile
-	snapshotProps      iceberg.Properties
+	commitUuid              uuid.UUID
+	io                      iceio.WriteFileIO
+	txn                     *Transaction
+	op                      Operation
+	snapshotID              int64
+	parentSnapshotID        int64
+	addedFiles              []iceberg.DataFile
+	addedDataSequenceNumber *int64
+	addedDeleteFiles        []deleteFileAddition
+	manifestCount           atomic.Int32
+	deletedFiles            map[string]iceberg.DataFile
+	deletedDeleteFiles      map[string]iceberg.DataFile
+	deletedDVsByRef         map[string]iceberg.DataFile
+	snapshotProps           iceberg.Properties
+}
+
+// deleteFileAddition carries the data sequence number of a rewritten delete
+// file. A nil sequence means the file is a normal delete added by the current
+// snapshot and should inherit that snapshot's sequence number. Rewrite paths
+// use an explicit sequence so replacing delete files cannot change which data
+// files the delete applies to.
+type deleteFileAddition struct {
+	file               iceberg.DataFile
+	dataSequenceNumber *int64
 }
 
 func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -629,8 +640,24 @@ func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProduce
 	return sp
 }
 
+func (sp *snapshotProducer) setNewDataFilesDataSequenceNumber(seq int64) *snapshotProducer {
+	seqCopy := seq
+	sp.addedDataSequenceNumber = &seqCopy
+
+	return sp
+}
+
 func (sp *snapshotProducer) appendDeleteFile(df iceberg.DataFile) *snapshotProducer {
-	sp.addedDeleteFiles = append(sp.addedDeleteFiles, df)
+	sp.addedDeleteFiles = append(sp.addedDeleteFiles, deleteFileAddition{file: df})
+
+	return sp
+}
+
+func (sp *snapshotProducer) appendDeleteFileWithDataSequenceNumber(df iceberg.DataFile, seq int64) *snapshotProducer {
+	sp.addedDeleteFiles = append(sp.addedDeleteFiles, deleteFileAddition{
+		file:               df,
+		dataSequenceNumber: &seq,
+	})
 
 	return sp
 }
@@ -771,7 +798,7 @@ func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, err
 	}
 
 	if len(sp.addedDeleteFiles) > 0 {
-		g.Go(sp.manifestProducer(iceberg.ManifestContentDeletes, sp.addedDeleteFiles, &positionDeleteManifests))
+		g.Go(sp.deleteManifestProducer(&positionDeleteManifests))
 	}
 
 	if err := g.Wait(); err != nil {
@@ -779,6 +806,27 @@ func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, err
 	}
 
 	return slices.Concat(addedManifests, positionDeleteManifests), nil
+}
+
+func (sp *snapshotProducer) deleteManifestProducer(output *[]iceberg.ManifestFile) func() error {
+	return func() error {
+		groups := make(map[int][]deleteFileAddition)
+		for _, addition := range sp.addedDeleteFiles {
+			specID := int(addition.file.SpecID())
+			groups[specID] = append(groups[specID], addition)
+		}
+
+		for _, specID := range slices.Sorted(maps.Keys(groups)) {
+			additions := groups[specID]
+			mf, err := sp.writeAddedDeleteManifest(specID, additions)
+			if err != nil {
+				return err
+			}
+			*output = append(*output, mf)
+		}
+
+		return nil
+	}
 }
 
 // assembleManifests recomputes the parent-dependent manifests against parent and
@@ -938,7 +986,7 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 
 	for _, df := range files {
 		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
-			nil, nil, df))
+			sp.addedDataSequenceNumber, nil, df))
 		if err != nil {
 			return nil, err
 		}
@@ -951,6 +999,35 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 	}
 
 	return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(content))
+}
+
+func (sp *snapshotProducer) writeAddedDeleteManifest(specID int, additions []deleteFileAddition) (_ iceberg.ManifestFile, retErr error) {
+	wr, path, counter, out, err := sp.newManifestWriter(sp.spec(specID), iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CheckedClose(out, &retErr)
+	writerClosed := false
+	defer func() {
+		if !writerClosed {
+			internal.CheckedClose(wr, &retErr)
+		}
+	}()
+
+	for _, addition := range additions {
+		err := wr.Add(iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &sp.snapshotID,
+			addition.dataSequenceNumber, nil, addition.file))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	writerClosed = true
+	if err := wr.Close(); err != nil {
+		return nil, err
+	}
+
+	return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(iceberg.ManifestContentDeletes))
 }
 
 func (sp *snapshotProducer) summary(props iceberg.Properties) (Summary, error) {
@@ -1019,8 +1096,8 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 			return nil, err
 		}
 	}
-	for _, df := range sp.addedDeleteFiles {
-		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
+	for _, addition := range sp.addedDeleteFiles {
+		if err = ssc.addFile(addition.file, currentSchema, sp.spec(int(addition.file.SpecID()))); err != nil {
 			return nil, err
 		}
 	}
