@@ -81,12 +81,12 @@ func Register(catalogType string, reg Registrar) {
 	if reg == nil {
 		panic("catalog: RegisterCatalog catalog factory is nil")
 	}
-	defaultRegistry.set(catalogType, reg)
+	defaultRegistry.set(strings.ToLower(catalogType), reg)
 }
 
 // Unregister removes the requested catalog factory from the registry.
 func Unregister(catalogType string) {
-	defaultRegistry.remove(catalogType)
+	defaultRegistry.remove(strings.ToLower(catalogType))
 }
 
 // GetRegisteredCatalogs returns the list of registered catalog names that can
