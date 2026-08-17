@@ -41,7 +41,7 @@ func BenchmarkDecideDeadEqualityDeletes(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			survey := compaction.NewSurvivorSurvey()
-			for i := 0; i < tc.partitions; i++ {
+			for i := range tc.partitions {
 				survey.AddSurvivor(map[int]any{1000: i}, 10)
 			}
 
@@ -54,7 +54,7 @@ func BenchmarkDecideDeadEqualityDeletes(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				benchmarkDeadEqualityDeletes = compaction.DecideDeadEqualityDeletes(
 					survey, candidates)
 			}
