@@ -2271,17 +2271,21 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 	// scanner because _row_id synthesis depends on original file position. The
 	// filter is applied post-synthesis in the record iterator instead.
 	//
-	// TODO(perf): disabling the scan-time row filter forfeits both manifest-
-	// and file-level pushdown for the rewrite read. For selective deletes on
-	// wide partitions this means re-reading every survivor candidate end-to-
-	// end. File-level skipping (against the bound filter's residual on file
-	// stats) could be re-enabled here without breaking _row_id synthesis,
-	// since synthesis depends only on within-file row positions.
+	// Keep the real filter available to Parquet row-group pruning while the
+	// scanner's row filter stays AlwaysTrue. Pruning happens before rows are
+	// materialized, so _row_id synthesis still sees the original positions of
+	// every surviving row group and the post-synthesis filter remains correct.
 	_, originalFirstRowID, _, _, _ := iceberginternal.BorrowedDataFilePointers(args.originalFile)
 	preserveRowLineage := meta.formatVersion >= 3 && originalFirstRowID != nil
 	projectedSchema := meta.CurrentSchema()
 	var factoryOpts []writerFactoryOption
+	var rowGroupFilter iceberg.BooleanExpression
 	if preserveRowLineage {
+		rowGroupFilter, err = iceberg.BindExpr(meta.CurrentSchema(), args.filter, args.caseSensitive)
+		if err != nil {
+			return nil, fmt.Errorf("failed to bind row-group filter: %w", err)
+		}
+
 		projectedSchema = iceberg.SchemaWithRowLineage(projectedSchema)
 		factoryOpts = append(factoryOpts, withFactoryFileSchema(projectedSchema))
 		scanTask.FirstRowID = args.originalFile.FirstRowID()
@@ -2316,6 +2320,7 @@ func (t *Transaction) rewriteSingleFile(ctx context.Context, args rewriteSingleF
 		scanSchema:      meta.CurrentSchema(),
 		projectedSchema: projectedSchema,
 		boundRowFilter:  scanFilter,
+		rowGroupFilter:  rowGroupFilter,
 		caseSensitive:   args.caseSensitive,
 		rowLimit:        -1, // No limit
 		concurrency:     args.concurrency,
