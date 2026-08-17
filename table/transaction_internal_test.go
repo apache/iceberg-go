@@ -1522,6 +1522,8 @@ func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
 
 	err = branchTxn.RollbackToSnapshot(20)
 	require.Error(t, err, "snapshot 20 is only on main's lineage, not diverged's")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"every caller-input rejection must be matchable with errors.Is, not just the tag-type one")
 	require.ErrorContains(t, err, "not an ancestor")
 	require.ErrorContains(t, err, `"diverged"`,
 		"the error must name the branch whose lineage rejected the snapshot")
@@ -1542,6 +1544,8 @@ func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
 
 	err = branchTxn.RollbackToSnapshot(10)
 	require.Error(t, err, "an unknown branch must fail rather than fall back to main")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"every caller-input rejection must be matchable with errors.Is, not just the tag-type one")
 	require.ErrorContains(t, err, `branch "ghost" does not exist`)
 
 	require.NotContains(t, branchTxn.meta.refs, "ghost", "a failed rollback must not create the branch")
@@ -1562,6 +1566,9 @@ func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, `branch "feature" references unknown snapshot 9999`,
 		"a dangling ref must be reported as inconsistent, not as a missing snapshot")
+	require.ErrorIs(t, err, ErrSnapshotNotFound)
+	require.NotErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"inconsistent table state is not a caller-input error and must stay distinguishable from one")
 	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
 }
 
