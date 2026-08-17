@@ -1168,14 +1168,6 @@ type partitionFieldStats[T LiteralType] struct {
 	cmp Comparator[T]
 }
 
-func clonePartitionStatValue[T LiteralType](value T) T {
-	if data, ok := any(value).([]byte); ok {
-		return any(slices.Clone(data)).(T)
-	}
-
-	return value
-}
-
 // unknownPartitionFieldStats records null presence but omits bounds because
 // the dropped source type needed to encode and compare non-null values is lost.
 type unknownPartitionFieldStats struct {
@@ -1274,6 +1266,9 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	}
 
 	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
+	if data, ok := any(actualVal).([]byte); ok {
+		actualVal = any(slices.Clone(data)).(T)
+	}
 
 	switch f := any(actualVal).(type) {
 	case float32:
@@ -1291,18 +1286,15 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	}
 
 	if p.min == nil {
-		actualVal = clonePartitionStatValue(actualVal)
 		p.min = &actualVal
 		p.max = &actualVal
 	} else {
 		if p.cmp(actualVal, *p.min) < 0 {
-			min := clonePartitionStatValue(actualVal)
-			p.min = &min
+			p.min = &actualVal
 		}
 
 		if p.cmp(actualVal, *p.max) > 0 {
-			max := clonePartitionStatValue(actualVal)
-			p.max = &max
+			p.max = &actualVal
 		}
 	}
 
