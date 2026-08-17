@@ -133,7 +133,7 @@ func BenchmarkFanoutMemory(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		loc := filepath.ToSlash(b.TempDir())
 
 		cat, err := catalog.Load(ctx, "bench", iceberg.Properties{

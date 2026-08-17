@@ -794,7 +794,7 @@ func TestVariantLiteralLargeArray(t *testing.T) {
 func TestVariantLiteralLargeObject(t *testing.T) {
 	const n = 40
 	obj := make(map[string]any, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		obj["k"+strconv.Itoa(i)] = int64(i)
 	}
 
@@ -810,7 +810,7 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 	require.NotEmpty(t, bytes)
 
 	s := lit.String()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		assert.Contains(t, s, "k"+strconv.Itoa(i))
 	}
 }

@@ -31,9 +31,9 @@ func parseProperties(propStr string) (iceberg.Properties, error) {
 		return iceberg.Properties{}, nil
 	}
 	props := make(iceberg.Properties)
-	pairs := strings.Split(propStr, ",")
+	pairs := strings.SplitSeq(propStr, ",")
 
-	for _, pair := range pairs {
+	for pair := range pairs {
 		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid property pair: %s (expected key=value)", pair)

@@ -64,7 +64,7 @@ func TestReadTasksUsesTaskResidual(t *testing.T) {
 	for record, err := range records {
 		require.NoError(t, err)
 		values := record.Column(0).(*array.Int64)
-		for i := 0; i < values.Len(); i++ {
+		for i := range values.Len() {
 			got = append(got, values.Value(i))
 		}
 		record.Release()
@@ -108,7 +108,7 @@ func TestReadTasksAppliesDifferentResidualsPerTask(t *testing.T) {
 	for record, err := range records {
 		require.NoError(t, err)
 		values := record.Column(0).(*array.Int64)
-		for i := 0; i < values.Len(); i++ {
+		for i := range values.Len() {
 			got = append(got, values.Value(i))
 		}
 		record.Release()

@@ -1182,7 +1182,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	sp := newFastAppendFilesProducer(OpAppend, txn, blockingIO, nil, nil)
 
 	manifests := make([]iceberg.ManifestFile, 0, 8)
-	for i := 0; i < cap(manifests); i++ {
+	for i := range cap(manifests) {
 		manifests = append(manifests, writeTestManifestFile(t, blockingIO, spec, schema, sp.snapshotID, i))
 	}
 
@@ -1336,8 +1336,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 // This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	blockingIO := newBlockingTrackingIO()
 	spec := iceberg.NewPartitionSpec()

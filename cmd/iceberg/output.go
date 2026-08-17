@@ -267,9 +267,9 @@ func (j jsonOutput) DescribeTable(tbl *table.Table) {
 	type dataType struct {
 		Metadata         table.Metadata        `json:"metadata,omitempty"`
 		MetadataLocation string                `json:"metadata-location,omitempty"`
-		SortOrder        table.SortOrder       `json:"sort-order,omitempty"`
+		SortOrder        table.SortOrder       `json:"sort-order"`
 		CurrentSnapshot  *table.Snapshot       `json:"current-snapshot,omitempty"`
-		Spec             iceberg.PartitionSpec `json:"spec,omitempty"`
+		Spec             iceberg.PartitionSpec `json:"spec"`
 		Schema           *iceberg.Schema       `json:"schema,omitempty"`
 	}
 

@@ -1476,7 +1476,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 func buildFieldIDToColIdx(meta *metadata.FileMetaData) map[int]int {
 	sc := meta.Schema
 	result := make(map[int]int, sc.NumColumns())
-	for i := 0; i < sc.NumColumns(); i++ {
+	for i := range sc.NumColumns() {
 		fieldID := int(sc.Column(i).SchemaNode().FieldID())
 		result[fieldID] = i
 	}

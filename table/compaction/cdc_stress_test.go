@@ -217,7 +217,7 @@ func TestCDCStress(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			survivors[col.Value(i)] = struct{}{}
 		}
 		rec.Release()

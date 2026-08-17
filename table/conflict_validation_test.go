@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
 	"testing"
@@ -238,9 +239,7 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	props := iceberg.Properties{PropertyFormatVersion: "2"}
-	for k, v := range extraProps {
-		props[k] = v
-	}
+	maps.Copy(props, extraProps)
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/conflict-test", props)
 	require.NoError(t, err)
 

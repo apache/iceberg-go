@@ -232,7 +232,7 @@ func TestSerializeDVRunLengthEncodesContiguousPositions(t *testing.T) {
 	const positions = 100_000
 
 	bm := NewRoaringPositionBitmap()
-	for pos := uint64(0); pos < positions; pos++ {
+	for pos := range uint64(positions) {
 		bm.Set(pos)
 	}
 

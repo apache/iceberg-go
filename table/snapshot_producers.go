@@ -456,7 +456,6 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 	g := errgroup.Group{}
 	g.SetLimit(manifestMergeConcurrencyLimit(m.mergeConcurrency))
 	for i, bin := range bins {
-		i, bin := i, bin
 		g.Go(func() error {
 			var err error
 			binResults[i], err = mergeBin(bin)

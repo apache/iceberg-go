@@ -289,7 +289,7 @@ func validateFilePathValues(values arrow.TypedArray[string], arr arrow.Array) er
 		dict = dictionary.Dictionary()
 	}
 
-	for i := 0; i < values.Len(); i++ {
+	for i := range values.Len() {
 		if values.IsNull(i) {
 			return fmt.Errorf("%w: null file_path in position delete file",
 				iceberg.ErrInvalidSchema)
@@ -349,7 +349,7 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 	}
 
 	results := make(map[string]*arrow.Chunked, uniquePaths.Len())
-	for i := 0; i < uniquePaths.Len(); i++ {
+	for i := range uniquePaths.Len() {
 		sc, err := scalar.GetScalar(uniquePaths, i)
 		if err != nil {
 			releasePosDeletes(results)
@@ -1469,7 +1469,7 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		go func() {
 			defer wg.Done()
 			for {

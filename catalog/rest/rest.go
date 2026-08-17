@@ -33,6 +33,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1036,8 +1037,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
 	}
 	cleanup := func() {
-		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
-			cleanupFuncs[i]()
+		for _, cleanupFunc := range slices.Backward(cleanupFuncs) {
+			cleanupFunc()
 		}
 	}
 

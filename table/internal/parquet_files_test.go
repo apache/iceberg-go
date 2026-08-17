@@ -2133,7 +2133,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	defer bldr.Release()
 
 	const nRows = 5
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
 		v, err := b.Build()
@@ -2198,7 +2198,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	chunk := tbl.Column(0).Data().Chunk(0)
 	varArr, ok := chunk.(*extensions.VariantArray)
 	require.True(t, ok, "expected VariantArray, got %T", chunk)
-	for i := 0; i < varArr.Len(); i++ {
+	for i := range varArr.Len() {
 		val, err := varArr.Value(i)
 		require.NoError(t, err, "row %d", i)
 		obj, ok := val.Value().(variant.ObjectValue)

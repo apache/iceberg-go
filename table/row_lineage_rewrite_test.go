@@ -86,7 +86,7 @@ func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int
 
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			require.False(t, rowIDCol.IsNull(i), "_row_id must be non-null for id=%d", idCol.Value(i))
 			got[idCol.Value(i)] = rowIDCol.Value(i)
 		}
@@ -154,7 +154,7 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(rowIDIdx).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			originalRowIDs = append(originalRowIDs, col.Value(i))
 		}
 		rec.Release()
@@ -194,7 +194,7 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIndices[0]).(*array.Int64)
 		seqCol := rec.Column(seqIndices[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			afterIDs = append(afterIDs, idCol.Value(i))
 			afterRowIDs = append(afterRowIDs, rowIDCol.Value(i))
 			require.False(t, seqCol.IsNull(i),
@@ -326,7 +326,7 @@ func TestExecuteCompactionGroupPreservesRowID(t *testing.T) {
 
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			got[idCol.Value(i)] = rowIDCol.Value(i)
 		}
 		rec.Release()

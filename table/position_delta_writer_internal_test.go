@@ -61,13 +61,13 @@ func TestPositionDeltaWriter_BuildUnifiedIterator_AbortNoDoubleRelease(t *testin
 			w := &PositionDeltaWriter{}
 
 			reinserts := make([]arrow.RecordBatch, 0, tc.numReinserts)
-			for i := 0; i < tc.numReinserts; i++ {
+			for i := range tc.numReinserts {
 				b := buildIntPlusRowIDBatch(mem, []int64{int64(i)}, []int64{int64(1<<40 + i)})
 				reinserts = append(reinserts, b)
 				require.NoError(t, w.Reinsert(b))
 			}
 			inserts := make([]arrow.RecordBatch, 0, tc.numInserts)
-			for i := 0; i < tc.numInserts; i++ {
+			for i := range tc.numInserts {
 				b := buildIntBatch(mem, []int64{int64(100 + i)})
 				inserts = append(inserts, b)
 				require.NoError(t, w.Insert(b))

@@ -3347,7 +3347,7 @@ func TestMetadataBuilderCloneCoversAllFields(t *testing.T) {
 			"field %q not copied by clone()", name)
 
 		switch of.Kind() {
-		case reflect.Slice, reflect.Map, reflect.Ptr:
+		case reflect.Slice, reflect.Map, reflect.Pointer:
 			require.NotEqualf(t, of.Pointer(), cf.Pointer(),
 				"field %q shares backing storage with the original", name)
 		}
@@ -3386,7 +3386,7 @@ func fillReferenceFields(t *testing.T, sv reflect.Value) {
 // non-zero data (interfaces, funcs), which clone() shares by reference anyway.
 func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 	switch v.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 		if !seen[v.Type()] {
 			seen[v.Type()] = true
