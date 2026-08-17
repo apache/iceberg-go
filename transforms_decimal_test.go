@@ -59,11 +59,20 @@ func TestBucketTransformDecimalHashMatchesMarshalBinary(t *testing.T) {
 		})
 	}
 
+	// Generate random signed 128-bit values, including ordinary negative
+	// values. The boundary cases above cover the sign-width changes.
 	rng := rand.New(rand.NewSource(0))
 	for i := 0; i < 10_000; i++ {
-		value := Decimal{Val: decimal128.New(rng.Int63(), rng.Uint64())}
+		value := Decimal{Val: decimal128.New(int64(rng.Uint64()), rng.Uint64())}
 		encoded, err := DecimalLiteral(value).MarshalBinary()
 		require.NoError(t, err)
 		assert.Equal(t, murmur3.Sum32(encoded), hashDecimal(value), "random value %d", i)
 	}
+}
+
+func TestBucketTransformDecimalHashMatchesSpecExample(t *testing.T) {
+	value := Decimal{Val: decimal128.FromI64(1420), Scale: 2}
+
+	assert.Equal(t, int32(-500754589), int32(hashDecimal(value)))
+	assert.Equal(t, hashDecimal(value), hashDecimal(Decimal{Val: value.Val, Scale: 7}))
 }
