@@ -151,14 +151,16 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	p.FieldID = aux.FieldID
-	p.Name = aux.Name
+	next := PartitionField{
+		FieldID: aux.FieldID,
+		Name:    aux.Name,
+	}
 
 	var err error
-	if p.Transform, err = ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = ParseTransform(aux.TransformString); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
-	if err := validateTransform(p.Transform); err != nil {
+	if err := validateTransform(next.Transform); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 	}
 
@@ -166,25 +168,27 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: partition source-ids cannot be empty", ErrInvalidPartitionSpec)
 	}
 	if !hasSourceID && !hasSourceIDs {
-		if _, isVoid := p.Transform.(VoidTransform); !isVoid {
+		if _, isVoid := next.Transform.(VoidTransform); !isVoid {
 			return fmt.Errorf("%w: partition field requires source-id or source-ids", ErrInvalidPartitionSpec)
 		}
 		// Preserve compatibility with historical source-less void tombstones.
-		p.SourceIDs = []int{0}
+		next.SourceIDs = []int{0}
 	} else if len(aux.SourceIDs) > 0 {
-		p.SourceIDs = aux.SourceIDs
+		next.SourceIDs = aux.SourceIDs
 	} else {
-		p.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{aux.SourceID}
 	}
-	for _, sourceID := range p.SourceIDs {
-		_, isVoid := p.Transform.(VoidTransform)
+	for _, sourceID := range next.SourceIDs {
+		_, isVoid := next.Transform.(VoidTransform)
 		if sourceID <= 0 && (!isVoid || hasSourceID || hasSourceIDs) {
 			return fmt.Errorf("%w: partition source ID must be positive: %d", ErrInvalidPartitionSpec, sourceID)
 		}
 	}
-	if p.Name == "" {
+	if next.Name == "" {
 		return fmt.Errorf("%w: partition name cannot be empty", ErrInvalidPartitionSpec)
 	}
+
+	*p = next
 
 	return nil
 }
@@ -231,7 +235,9 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 		opts = append(opts, AddPartitionFieldBySourceID(field.SourceID(), field.Name, field.Transform, schema, &field.FieldID))
 	}
 
-	freshSpec, err := NewPartitionSpecOpts(opts...)
+	// Replay, not authoring: the spec may come from another client, so it only
+	// has to satisfy what every spec must. See validateReplayedFields.
+	freshSpec, err := newPartitionSpec(validateReplayedFields, opts...)
 	if err != nil {
 		return PartitionSpec{}, err
 	}
@@ -242,7 +248,16 @@ func (p *PartitionSpec) BindToSchema(schema *Schema, lastPartitionID *int, newSp
 	return freshSpec, err
 }
 
+// NewPartitionSpecOpts assembles a brand new spec and validates it as authored,
+// so it permits at most one time transform per source column.
+// That rule is narrower than the replay rule, so anything it accepts still parses back.
 func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
+	return newPartitionSpec(validateAuthoredFields, opts...)
+}
+
+// newPartitionSpec validates the assembled set rather than each field as it is
+// added, so the outcome does not depend on the order of opts.
+func newPartitionSpec(validate func([]PartitionField) error, opts ...PartitionOption) (PartitionSpec, error) {
 	spec := PartitionSpec{
 		id: 0,
 	}
@@ -251,17 +266,7 @@ func NewPartitionSpecOpts(opts ...PartitionOption) (PartitionSpec, error) {
 			return PartitionSpec{}, fmt.Errorf("%w: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
-	// Validate the assembled field set rather than each field as it is added:
-	// the redundancy check needs every field in place, and routing the builder
-	// through the same validator as UnmarshalJSON keeps one definition of a
-	// redundant field, so a spec this constructor accepts is one this package's
-	// UnmarshalJSON can read back. NewPartitionSpec and NewPartitionSpecID do
-	// not validate, so that guarantee covers this constructor only.
-	//
-	// ErrInvalidPartitionSpec is attached exactly once per error, by whichever
-	// layer knows the sentinel: options return bare errors and the loop above
-	// wraps them, while validatePartitionFields wraps its own.
-	if err := validatePartitionFields(spec.fields); err != nil {
+	if err := validate(spec.fields); err != nil {
 		return PartitionSpec{}, err
 	}
 	spec.initialize()
@@ -536,7 +541,7 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 			return fmt.Errorf("%w: invalid partition field: %w", ErrInvalidPartitionSpec, err)
 		}
 	}
-	if err := validatePartitionFields(fields); err != nil {
+	if err := validateReplayedFields(fields); err != nil {
 		return err
 	}
 
@@ -550,27 +555,27 @@ func (ps *PartitionSpec) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// validatePartitionFields rejects duplicate partition names and redundant
-// fields (the same transform applied to the same source columns). It is the
-// single definition of a well-formed field set, shared by NewPartitionSpecOpts
-// and UnmarshalJSON so the builder cannot produce a spec the parser rejects.
-//
-// Repeated void fields are exempt: void is the tombstone written for a dropped
-// partition field, so a spec that has dropped several fields legitimately
-// carries more than one.
-//
-// TODO: this does not implement Java's dedupName rule, which collapses year,
-// month, day and hour to a single name per source column and so rejects
-// year(ts) alongside month(ts). We accept that pairing, which means a spec
-// built here can be refused by Java's PartitionSpec.Builder. UpdateSpec.addField
-// already carries an added-vs-added guard for time transforms, so the rule
-// exists in the codebase but not in this validator.
-func validatePartitionFields(fields []PartitionField) error {
+// validateReplayedFields checks a spec that already exists, from metadata JSON
+// or BindToSchema; "partition-specs" retains every old spec.
+func validateReplayedFields(fields []PartitionField) error {
+	return validatePartitionFields(fields, Transform.Equals)
+}
+
+// validateAuthoredFields checks a spec this process is building from scratch.
+// Refusing to author a bad spec is cheap; refusing to read one costs the table,
+// so only this side gets the one-time-transform-per-source rule.
+func validateAuthoredFields(fields []PartitionField) error {
+	return validatePartitionFields(fields, transformsRedundant)
+}
+
+// validatePartitionFields is the single definition of a well-formed field set;
+// its two callers differ only in which transform pairs count as redundant.
+func validatePartitionFields(fields []PartitionField, redundant func(a, b Transform) bool) error {
 	names := make(map[string]struct{}, len(fields))
-	// Keyed by source IDs only; the transforms behind each key are compared with
-	// Transform.Equals rather than their rendered names, so a transform whose
-	// String() is not injective cannot make two distinct transforms collide.
-	bySource := make(map[string][]Transform, len(fields))
+	// Keyed by source IDs only, with transforms compared by the redundant
+	// predicate rather than by name, so a transform whose String() is not
+	// injective cannot make two distinct transforms collide.
+	bySource := make(map[string][]PartitionField, len(fields))
 	for _, field := range fields {
 		if _, ok := names[field.Name]; ok {
 			return fmt.Errorf("%w: duplicate partition name: %s", ErrInvalidPartitionSpec, field.Name)
@@ -589,15 +594,28 @@ func validatePartitionFields(fields []PartitionField) error {
 
 		key := fmt.Sprint(field.SourceIDs)
 		for _, existing := range bySource[key] {
-			if existing.Equals(field.Transform) {
-				return fmt.Errorf("%w: redundant partition field for source IDs %v and transform %s",
-					ErrInvalidPartitionSpec, field.SourceIDs, field.Transform)
+			if redundant(existing.Transform, field.Transform) {
+				return fmt.Errorf("%w: redundant partition field for source IDs %v: %s (%s) conflicts with %s (%s)",
+					ErrInvalidPartitionSpec, field.SourceIDs, field.Name, field.Transform, existing.Name, existing.Transform)
 			}
 		}
-		bySource[key] = append(bySource[key], field.Transform)
+		bySource[key] = append(bySource[key], field)
 	}
 
 	return nil
+}
+
+// transformsRedundant widens Transform.Equals to collide any two time
+// transforms regardless of granularity: time partitions nest, so day(ts) prunes
+// nothing hour(ts) has not already pruned.
+func transformsRedundant(a, b Transform) bool {
+	if a.Equals(b) {
+		return true
+	}
+	_, aTime := a.(TimeTransform)
+	_, bTime := b.(TimeTransform)
+
+	return aTime && bTime
 }
 
 func (ps *PartitionSpec) initialize() {

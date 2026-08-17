@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -757,6 +758,23 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		assert.ErrorContains(t, err, "partition field cannot contain both source-id and source-ids")
 	})
 
+	t.Run("unmarshal rejects empty source-ids", func(t *testing.T) {
+		var field iceberg.PartitionField
+		err := json.Unmarshal([]byte(`{
+			"source-ids": [],
+			"field-id": 1002,
+			"transform": "identity",
+			"name": "identity"
+		}`), &field)
+		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+		assert.ErrorContains(t, err, "source-ids cannot be empty")
+	})
+
+	t.Run("unmarshal rejects non-object JSON", func(t *testing.T) {
+		var field iceberg.PartitionField
+		require.Error(t, json.Unmarshal([]byte(`[1, 2]`), &field))
+	})
+
 	t.Run("unmarshal source-less void tombstone", func(t *testing.T) {
 		jsonData := `
 		{
@@ -767,6 +785,7 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		var field iceberg.PartitionField
 		require.NoError(t, json.Unmarshal([]byte(jsonData), &field))
 		assert.Equal(t, 0, field.SourceID())
+		assert.Equal(t, []int{0}, field.SourceIDs)
 	})
 
 	t.Run("unmarshal void with source id", func(t *testing.T) {
@@ -776,6 +795,66 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 		}`), &field))
 		assert.Equal(t, 1, field.SourceID())
 	})
+}
+
+func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{
+			name: "invalid transform",
+			data: `{"source-id":1,"field-id":1000,"transform":"bucket[0]","name":"new"}`,
+		},
+		{
+			name: "non-positive source ID",
+			data: `{"source-id":0,"field-id":1000,"transform":"identity","name":"new"}`,
+		},
+		{
+			name: "missing source ID",
+			data: `{"field-id":1000,"transform":"identity","name":"new"}`,
+		},
+		{
+			name: "empty name",
+			data: `{"source-id":1,"field-id":1000,"transform":"identity","name":""}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			initial := iceberg.PartitionField{
+				SourceIDs: []int{7},
+				FieldID:   1007,
+				Name:      "old",
+				Transform: iceberg.IdentityTransform{},
+			}
+			field := initial
+			field.SourceIDs = slices.Clone(initial.SourceIDs)
+			require.Error(t, json.Unmarshal([]byte(test.data), &field))
+			assert.Equal(t, initial, field)
+		})
+	}
+}
+
+func TestPartitionFieldUnmarshalReplacesStateOnSuccess(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
+		SourceIDs: []int{1, 2},
+		FieldID:   1000,
+		Name:      "old field",
+		Transform: iceberg.IdentityTransform{},
+	})
+	field := spec.Field(0)
+
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"source-id": 2,
+		"field-id": 1001,
+		"transform": "identity",
+		"name": "new field"
+	}`), &field))
+
+	assert.Equal(t, []int{2}, field.SourceIDs)
+	assert.Equal(t, 1001, field.FieldID)
+	assert.Equal(t, "new field", field.Name)
+	assert.Equal(t, iceberg.IdentityTransform{}, field.Transform)
+	assert.Equal(t, "new+field", field.EscapedName())
 }
 
 func TestPartitionSpecUnmarshalRejectsInvalidStructure(t *testing.T) {
@@ -926,6 +1005,60 @@ func TestNewPartitionSpecOptsAllowsDistinctTransformsOnSameSource(t *testing.T) 
 	assert.Equal(t, 2, spec.NumFields())
 }
 
+func TestNewPartitionSpecOptsRejectsRedundantTimeTransforms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	tests := []struct {
+		name  string
+		first iceberg.Transform
+		last  iceberg.Transform
+	}{
+		{name: "year_month", first: iceberg.YearTransform{}, last: iceberg.MonthTransform{}},
+		{name: "year_day", first: iceberg.YearTransform{}, last: iceberg.DayTransform{}},
+		{name: "year_hour", first: iceberg.YearTransform{}, last: iceberg.HourTransform{}},
+		{name: "month_day", first: iceberg.MonthTransform{}, last: iceberg.DayTransform{}},
+		{name: "month_hour", first: iceberg.MonthTransform{}, last: iceberg.HourTransform{}},
+		{name: "day_hour", first: iceberg.DayTransform{}, last: iceberg.HourTransform{}},
+		// order must not matter
+		{name: "hour_day", first: iceberg.HourTransform{}, last: iceberg.DayTransform{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldByName("ts", "first", tt.first, schema, nil),
+				iceberg.AddPartitionFieldByName("ts", "second", tt.last, schema, nil),
+			)
+
+			require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+			assert.ErrorContains(t, err, "redundant partition field")
+			// Both offending fields must be named, or a wide spec leaves the
+			// caller nothing to act on.
+			assert.ErrorContains(t, err,
+				fmt.Sprintf("second (%s) conflicts with first (%s)", tt.last, tt.first))
+		})
+	}
+}
+
+func TestNewPartitionSpecOptsAllowsTimeTransformsOnDistinctSources(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts1", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "ts2", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+
+	spec, err := iceberg.NewPartitionSpecOpts(
+		iceberg.WithSpecID(1),
+		iceberg.AddPartitionFieldByName("ts1", "ts1_day", iceberg.DayTransform{}, schema, nil),
+		iceberg.AddPartitionFieldByName("ts2", "ts2_hour", iceberg.HourTransform{}, schema, nil),
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, spec.NumFields())
+}
+
 // void is the tombstone for a dropped partition field, so a spec that dropped
 // several fields on one column carries several voids. BindToSchema replays such
 // a spec through the builder, which must not reject it.
@@ -1002,10 +1135,10 @@ func TestNewPartitionSpecOptsRedundancyUsesTransformEquals(t *testing.T) {
 	assert.Equal(t, 2, spec.NumFields())
 }
 
-// BindToSchema replays an existing spec through the builder, so it inherits the
-// same redundancy check. The specs are built with NewPartitionSpecID because
-// that constructor does not validate, which is the only way to get a redundant
-// spec into BindToSchema in the first place.
+// BindToSchema uses the replay rule, which still rejects two fields applying the
+// same transform to one column. The spec is built with NewPartitionSpecID
+// because that constructor does not validate, the only way to get a redundant
+// spec into BindToSchema at all.
 func TestBindToSchemaRejectsRedundantField(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "s", Type: iceberg.PrimitiveTypes.String, Required: true},
@@ -1083,21 +1216,91 @@ func TestValidatePartitionFieldsMultiSourceRedundancy(t *testing.T) {
 	assert.Equal(t, 2, back.NumFields())
 }
 
-// Known divergence from Java: dedupName collapses the time transforms to one
-// name per source column, so Java rejects this pairing while we accept it. If
-// that rule ever lands here, this test should flip rather than silently break
-// callers building hierarchical time specs.
-func TestNewPartitionSpecOptsAllowsMultipleTimeTransforms(t *testing.T) {
+func TestUnmarshalPartitionSpecAllowsTimeGranularityOverlap(t *testing.T) {
+	data := `{"spec-id":0,"fields":[` +
+		`{"source-id":1,"field-id":1000,"name":"ts_day","transform":"day"},` +
+		`{"source-id":1,"field-id":1001,"name":"ts_hour","transform":"hour"}]}`
+
+	var spec iceberg.PartitionSpec
+	require.NoError(t, json.Unmarshal([]byte(data), &spec))
+	require.Equal(t, 2, spec.NumFields())
+	assert.Equal(t, iceberg.DayTransform{}, spec.Field(0).Transform)
+	assert.Equal(t, iceberg.HourTransform{}, spec.Field(1).Transform)
+
+	duplicate := `{"spec-id":0,"fields":[` +
+		`{"source-id":1,"field-id":1000,"name":"first","transform":"day"},` +
+		`{"source-id":1,"field-id":1001,"name":"second","transform":"day"}]}`
+	err := json.Unmarshal([]byte(duplicate), &spec)
+	require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+	assert.ErrorContains(t, err, "redundant partition field")
+}
+
+func TestBindToSchemaAllowsTimeGranularityOverlap(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
 	)
 
-	spec, err := iceberg.NewPartitionSpecOpts(
-		iceberg.WithSpecID(1),
-		iceberg.AddPartitionFieldByName("ts", "ts_year", iceberg.YearTransform{}, schema, nil),
-		iceberg.AddPartitionFieldByName("ts", "ts_month", iceberg.MonthTransform{}, schema, nil),
+	overlapping := iceberg.NewPartitionSpecID(1,
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "ts_day",
+			Transform: iceberg.DayTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001, Name: "ts_hour",
+			Transform: iceberg.HourTransform{},
+		},
 	)
 
+	bound, err := overlapping.BindToSchema(schema, nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, 2, spec.NumFields())
+	assert.Equal(t, 2, bound.NumFields())
+}
+
+// A row flips if a non-time transform grows the TimeTransform method set, or a
+// time transform loses it.
+func TestNewPartitionSpecOptsTimeTransformMembership(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+	// The zero value is rejected as nameless and name is unexported, so
+	// ParseTransform is the only source of a spec-legal UnknownTransform.
+	unknown, err := iceberg.ParseTransform("custom_transform")
+	require.NoError(t, err)
+	require.IsType(t, iceberg.UnknownTransform{}, unknown)
+
+	tests := []struct {
+		name          string
+		trans         iceberg.Transform
+		wantRedundant bool
+	}{
+		{name: "year", trans: iceberg.YearTransform{}, wantRedundant: true},
+		{name: "month", trans: iceberg.MonthTransform{}, wantRedundant: true},
+		{name: "day", trans: iceberg.DayTransform{}, wantRedundant: true},
+		{name: "hour", trans: iceberg.HourTransform{}, wantRedundant: true},
+		{name: "identity", trans: iceberg.IdentityTransform{}, wantRedundant: false},
+		{name: "bucket", trans: iceberg.BucketTransform{NumBuckets: 16}, wantRedundant: false},
+		{name: "truncate", trans: iceberg.TruncateTransform{Width: 4}, wantRedundant: false},
+		{name: "unknown", trans: unknown, wantRedundant: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec, err := iceberg.NewPartitionSpecOpts(
+				iceberg.WithSpecID(1),
+				iceberg.AddPartitionFieldByName("ts", "ts_day", iceberg.DayTransform{}, schema, nil),
+				iceberg.AddPartitionFieldByName("ts", "ts_other", tt.trans, schema, nil),
+			)
+
+			if tt.wantRedundant {
+				require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
+				assert.ErrorContains(t, err, "redundant partition field")
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, 2, spec.NumFields())
+			assert.Equal(t, tt.trans, spec.Field(1).Transform)
+		})
+	}
 }

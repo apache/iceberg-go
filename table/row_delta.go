@@ -24,6 +24,7 @@ import (
 	"maps"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 )
 
@@ -405,7 +406,7 @@ func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.Data
 // need; deltas without removals do not pay for it (nor get it — see
 // AddDeletes).
 func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (resolved, replacedLive []iceberg.DataFile, _ error) {
-	snap := meta.currentSnapshot()
+	snap := rd.txn.planningSnapshot(meta)
 	if snap == nil {
 		return nil, nil, errors.New("cannot remove delete files from a table without an existing snapshot")
 	}
@@ -553,7 +554,7 @@ func (rd *RowDelta) validate(cc *conflictContext) error {
 	for _, f := range rd.delFiles {
 		switch f.ContentType() {
 		case iceberg.EntryContentPosDeletes:
-			if ref := f.ReferencedDataFile(); ref != nil && *ref != "" {
+			if ref := iceberginternal.BorrowedDataFileReferencedDataFile(f); ref != nil && *ref != "" {
 				referenced = append(referenced, *ref)
 			}
 		case iceberg.EntryContentEqDeletes:

@@ -25,7 +25,6 @@ import (
 	"iter"
 	"maps"
 	"slices"
-	"sort"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
@@ -193,7 +192,7 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 			keys = append(keys, k)
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 
 	if err := binary.Write(w, binary.LittleEndian, int64(len(keys))); err != nil {
 		return fmt.Errorf("write bitmap count: %w", err)
@@ -301,16 +300,13 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 		// validBits=8 path is byte-aligned only when offset == 0.
 		wr := bitutil.NewBitmapWordWriter(out, int(bucketBitBase), int(bucketBits))
 		full := int(bucketBits / 64)
-		for i := 0; i < full; i++ {
+		for i := range full {
 			wr.PutNextWord(^dense[i])
 		}
 		if rem := int(bucketBits & 63); rem > 0 {
 			last := ^dense[full]
 			for rem > 0 {
-				valid := 8
-				if rem < 8 {
-					valid = rem
-				}
+				valid := min(rem, 8)
 				wr.PutNextTrailingByte(byte(last), valid)
 				last >>= 8
 				rem -= valid

@@ -322,7 +322,7 @@ func withSerializableWriteTx(ctx context.Context, db *bun.DB, fn func(context.Co
 
 func retrySerializableWriteTx(ctx context.Context, run func() error) error {
 	var err error
-	for attempt := 0; attempt < serializableWriteMaxAttempts; attempt++ {
+	for attempt := range serializableWriteMaxAttempts {
 		err = run()
 		if err == nil || !isRetryableSerializableError(err) {
 			return err

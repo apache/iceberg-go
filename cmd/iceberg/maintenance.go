@@ -215,8 +215,8 @@ func parseDuration(s string) (time.Duration, error) {
 		return 0, errors.New("empty duration string")
 	}
 
-	if strings.HasSuffix(s, "d") {
-		daysStr := strings.TrimSuffix(s, "d")
+	if before, ok := strings.CutSuffix(s, "d"); ok {
+		daysStr := before
 		days, err := strconv.ParseFloat(daysStr, 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid day duration %q: %w", s, err)

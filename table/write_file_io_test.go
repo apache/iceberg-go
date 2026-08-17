@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"testing"
 
@@ -35,9 +36,7 @@ func newReadOnlyWriteTable(t *testing.T, overrides ...iceberg.Properties) *Table
 
 	props := iceberg.Properties{PropertyFormatVersion: "2"}
 	for _, override := range overrides {
-		for k, v := range override {
-			props[k] = v
-		}
+		maps.Copy(props, override)
 	}
 
 	schema := simpleSchema()

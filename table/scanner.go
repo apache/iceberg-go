@@ -18,10 +18,10 @@
 package table
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"iter"
+	"maps"
 	"math"
 	"reflect"
 	"slices"
@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	"golang.org/x/sync/errgroup"
@@ -145,34 +146,41 @@ func newManifestEntries() *manifestEntries {
 	}
 }
 
-func (m *manifestEntries) addDataEntry(e iceberg.ManifestEntry) {
+func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.dataEntries = append(m.dataEntries, e)
-}
 
-func (m *manifestEntries) addPositionalDeleteEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.positionalDeleteEntries = append(m.positionalDeleteEntries, e)
-}
+	for _, entry := range entries {
+		dataFile := entry.DataFile()
+		switch dataFile.ContentType() {
+		case iceberg.EntryContentData:
+			m.dataEntries = append(m.dataEntries, entry)
+		case iceberg.EntryContentPosDeletes:
+			if IsDeletionVector(dataFile) {
+				m.dvEntries = append(m.dvEntries, entry)
+			} else {
+				m.positionalDeleteEntries = append(m.positionalDeleteEntries, entry)
+			}
+		case iceberg.EntryContentEqDeletes:
+			m.equalityDeleteEntries = append(m.equalityDeleteEntries, entry)
+		default:
+			return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
+				ErrInvalidMetadata, dataFile.ContentType(), entry)
+		}
+	}
 
-func (m *manifestEntries) addEqualityDeleteEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.equalityDeleteEntries = append(m.equalityDeleteEntries, e)
-}
-
-func (m *manifestEntries) addDVEntry(e iceberg.ManifestEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.dvEntries = append(m.dvEntries, e)
+	return nil
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
-		out[i] = partitionData[f.ID]
+		value := partitionData[f.ID]
+		if bytes, ok := value.([]byte); ok {
+			out[i] = slices.Clone(bytes)
+		} else {
+			out[i] = value
+		}
 	}
 
 	return out
@@ -181,7 +189,7 @@ func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.Struct
 // GetPartitionRecord converts a DataFile's partition map into a positional
 // record ordered by the fields of the given partition struct type.
 func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.StructType) iceberg.StructLike {
-	return newPartitionRecord(dataFile.Partition(), partitionType)
+	return newPartitionRecord(dataFilePartition(dataFile), partitionType)
 }
 
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
@@ -564,30 +572,44 @@ func minSequenceNum(manifests []iceberg.ManifestFile) int64 {
 	return n
 }
 
-func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg.ManifestEntry) ([]iceberg.DataFile, error) {
-	idx, _ := slices.BinarySearchFunc(positionalDeletes, entry, func(me1, me2 iceberg.ManifestEntry) int {
-		return cmp.Compare(me1.SequenceNum(), me2.SequenceNum())
-	})
-
-	evaluator, err := newInclusiveMetricsEvaluator(iceberg.PositionalDeleteSchema,
-		iceberg.EqualTo(iceberg.Reference("file_path"), entry.DataFile().FilePath()), true, false)
-	if err != nil {
-		return nil, err
-	}
+// matchEqualityDeletesToData returns the equality delete files that apply to
+// the given data entry. An equality delete applies when:
+//   - it has a strictly greater sequence number than the data file
+//   - it shares the same partition (for partitioned tables)
+//
+// The "strictly greater" rule ensures that data files committed in the same
+// snapshot as the equality deletes are not affected — this is how RowDelta
+// atomically adds new rows alongside deletes for old rows.
+func matchEqualityDeletesToData(dataEntry iceberg.ManifestEntry, eqDeleteEntries []iceberg.ManifestEntry) []iceberg.DataFile {
+	dataSeqNum := dataEntry.SequenceNum()
+	dataPartition := dataEntry.DataFile().Partition()
 
 	out := make([]iceberg.DataFile, 0)
-	for _, relevant := range positionalDeletes[idx:] {
-		df := relevant.DataFile()
-		ok, err := evaluator(df)
-		if err != nil {
-			return nil, err
+	for _, del := range eqDeleteEntries {
+		// Equality deletes only apply to data files with a strictly lower
+		// sequence number.
+		if del.SequenceNum() <= dataSeqNum {
+			continue
 		}
-		if ok {
-			out = append(out, df)
+
+		// For partitioned tables, equality deletes must share the same
+		// partition as the data file. Unpartitioned deletes (nil/empty
+		// partition) apply globally.
+		delPartition := del.DataFile().Partition()
+		if len(delPartition) > 0 && len(dataPartition) > 0 {
+			if !partitionsMatch(dataPartition, delPartition) {
+				continue
+			}
 		}
+
+		out = append(out, del.DataFile())
 	}
 
-	return out, nil
+	return out
+}
+
+func partitionsMatch(a, b map[int]any) bool {
+	return maps.EqualFunc(a, b, reflect.DeepEqual)
 }
 
 // buildDVIndex indexes deletion vectors by the data file path they reference.
@@ -596,7 +618,7 @@ func matchDeletesToData(entry iceberg.ManifestEntry, positionalDeletes []iceberg
 func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
 	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
 	for _, del := range dvEntries {
-		if ref := del.DataFile().ReferencedDataFile(); ref != nil {
+		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(del.DataFile()); ref != nil {
 			if _, exists := dvIndex[*ref]; exists {
 				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
 			}
@@ -670,6 +692,17 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 		return nil, err
 	}
 
+	return scan.filterManifestsWithSchema(manifestList, schema, acc)
+}
+
+// filterManifestsWithSchema applies partition-summary pruning to an existing
+// list of manifests. Callers use this after resolving a snapshot's manifest
+// list, or after collecting manifests across an incremental snapshot range.
+func (scan *Scan) filterManifestsWithSchema(
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+) ([]iceberg.ManifestFile, error) {
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
 	partitionFilters := scan.partitionFiltersForSchema(schema)
 	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
@@ -768,24 +801,8 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			if err != nil {
 				return err
 			}
-
-			for _, e := range manifestEntries {
-				df := e.DataFile()
-				switch df.ContentType() {
-				case iceberg.EntryContentData:
-					entries.addDataEntry(e)
-				case iceberg.EntryContentPosDeletes:
-					if IsDeletionVector(e.DataFile()) {
-						entries.addDVEntry(e)
-					} else {
-						entries.addPositionalDeleteEntry(e)
-					}
-				case iceberg.EntryContentEqDeletes:
-					entries.addEqualityDeleteEntry(e)
-				default:
-					return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
-						ErrInvalidMetadata, df.ContentType(), e)
-				}
+			if err := entries.merge(manifestEntries); err != nil {
+				return err
 			}
 
 			return nil
@@ -895,10 +912,11 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		return nil, err
 	}
 
-	// Step 3: Sort positional deletes and match them to data files.
-	slices.SortFunc(entries.positionalDeleteEntries, func(a, b iceberg.ManifestEntry) int {
-		return cmp.Compare(a.SequenceNum(), b.SequenceNum())
-	})
+	// Step 3: Index positional deletes and match them to data files.
+	posDeleteIndex, err := buildPositionalDeleteIndex(entries.positionalDeleteEntries)
+	if err != nil {
+		return nil, err
+	}
 
 	dvIndex, err := buildDVIndex(entries.dvEntries)
 	if err != nil {
@@ -920,7 +938,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		dvFiles := matchDVToData(e, dvIndex)
 		var deleteFiles []iceberg.DataFile
 		if len(dvFiles) == 0 {
-			deleteFiles, err = matchDeletesToData(e, entries.positionalDeleteEntries)
+			deleteFiles, err = posDeleteIndex.forDataFile(e)
 			if err != nil {
 				return nil, err
 			}
@@ -1186,6 +1204,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 	outSchema, records, err := (&arrowScan{
 		metadata:        scan.metadata,
 		fs:              fs,
+		scanSchema:      effectiveSchema,
 		projectedSchema: schema,
 		boundRowFilter:  boundFilter,
 		caseSensitive:   scan.caseSensitive,

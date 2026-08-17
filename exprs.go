@@ -950,7 +950,7 @@ type BoundSetPredicate interface {
 func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (BooleanExpression, error) {
 	boundType := term.Type()
 
-	typedSet := newLiteralSet()
+	typedSet := make(literalSet, lits.Len())
 	for _, v := range lits.Members() {
 		casted, err := v.To(boundType)
 		if err != nil {

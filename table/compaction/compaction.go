@@ -210,7 +210,7 @@ func (cfg Config) PlanCompaction(tasks []table.FileScanTask) (Plan, error) {
 	var partitionOrder []string
 
 	for _, t := range tasks {
-		key := partitionBucketKey(t.File.SpecID(), t.File.Partition())
+		key := partitionBucketKey(t.File.SpecID(), internal.BorrowedDataFilePartition(t.File))
 		bucket, ok := partitions[key]
 		if !ok {
 			bucket = partitionBucket{key: key}
@@ -360,12 +360,13 @@ func isFileScoped(d iceberg.DataFile) bool {
 // referenced_data_file is optional in V2 and our own scan planning never sets
 // it (see matchDeletesToData).
 func referencedDataFilePath(d iceberg.DataFile) string {
-	if ref := d.ReferencedDataFile(); ref != nil && *ref != "" {
+	if ref := internal.BorrowedDataFileReferencedDataFile(d); ref != nil && *ref != "" {
 		return *ref
 	}
 
-	lower := d.LowerBoundValues()[filePathFieldID]
-	upper := d.UpperBoundValues()[filePathFieldID]
+	lowerBounds, upperBounds := internal.BorrowedDataFileBounds(d)
+	lower := lowerBounds[filePathFieldID]
+	upper := upperBounds[filePathFieldID]
 	if len(lower) == 0 || !bytes.Equal(lower, upper) {
 		return ""
 	}

@@ -56,6 +56,22 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
+func TestArrowScanBindsTaskResidualAgainstScanSchema(t *testing.T) {
+	const historicalFieldID = 7
+	scanSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: historicalFieldID, Name: "historical", Type: iceberg.PrimitiveTypes.String,
+	})
+	scanner := arrowScan{scanSchema: scanSchema, caseSensitive: true}
+
+	filter, err := scanner.rowFilterForTask(FileScanTask{Residual: iceberg.EqualTo(
+		iceberg.Reference("historical"), "value",
+	)})
+	require.NoError(t, err)
+	fieldIDs, err := iceberg.ExtractFieldIDs(filter)
+	require.NoError(t, err)
+	require.Equal(t, []int{historicalFieldID}, fieldIDs)
+}
+
 func newEqualityDeleteIndexTestEntry(
 	path string,
 	specID int32,
@@ -388,12 +404,10 @@ func TestKeyDefaultMapRaceCondition(t *testing.T) {
 
 	numGoroutines := 1000
 	for range numGoroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_ = kdm.Get("same-key")
-		}()
+		})
 	}
 
 	close(start)
@@ -890,13 +904,13 @@ func TestSynthesizeRowLineageColumns(t *testing.T) {
 	// _row_id should be 1000, 1001, 1002
 	rowIDCol := out.Column(1).(*array.Int64)
 	require.Equal(t, nrows, rowIDCol.Len())
-	for i := 0; i < nrows; i++ {
+	for i := range nrows {
 		assert.False(t, rowIDCol.IsNull(i), "row %d", i)
 		assert.EqualValues(t, 1000+int64(i), rowIDCol.Value(i), "row %d", i)
 	}
 	// _last_updated_sequence_number should be 5 for all
 	seqCol := out.Column(2).(*array.Int64)
-	for i := 0; i < nrows; i++ {
+	for i := range nrows {
 		assert.False(t, seqCol.IsNull(i), "row %d", i)
 		assert.EqualValues(t, 5, seqCol.Value(i), "row %d", i)
 	}

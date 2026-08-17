@@ -34,14 +34,18 @@ import (
 type UpdateSpec struct {
 	operations []updateSpecOp
 
-	txn                   *Transaction
+	txn *Transaction
+	// meta is an immutable snapshot of the transaction's staged metadata, frozen
+	// when this UpdateSpec is constructed. Schema and partition-spec resolution
+	// read from it so partitioning can reference columns/specs staged earlier in
+	// the transaction; concurrency assertions are handled separately (BuildUpdates).
+	meta                  Metadata
 	err                   error
 	nameToField           map[string]iceberg.PartitionField
 	nameToAddedField      map[string]iceberg.PartitionField
 	transformToField      map[transformKey]iceberg.PartitionField
 	transformToAddedField map[transformKey]iceberg.PartitionField
 	renames               map[string]string
-	addedTimeFields       map[int]iceberg.PartitionField
 	caseSensitive         bool
 	adds                  []iceberg.PartitionField
 	deletes               map[int]bool
@@ -69,7 +73,6 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		transformToField:      make(map[transformKey]iceberg.PartitionField),
 		transformToAddedField: make(map[transformKey]iceberg.PartitionField),
 		renames:               make(map[string]string),
-		addedTimeFields:       make(map[int]iceberg.PartitionField),
 		caseSensitive:         caseSensitive,
 		adds:                  make([]iceberg.PartitionField, 0),
 		deletes:               make(map[int]bool),
@@ -80,18 +83,27 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 
 		return us
 	}
-	// UpdateSpec reads exclusively from the committed table metadata
-	// (t.tbl.Metadata() / t.tbl.Schema()) rather than the transaction's
-	// metadata builder, but still routes its initialization check through the
-	// canonical txnMeta accessor for consistency.
-	_, us.err = t.txnMeta()
-	if us.err != nil {
+	// Resolve schema and partition state from the transaction's staged metadata
+	// rather than the frozen table snapshot captured when the transaction began,
+	// so that columns and specs added earlier in the same transaction are
+	// visible immediately.
+	meta, err := t.txnMeta()
+	if err != nil {
+		us.err = err
+
 		return us
 	}
+	stagedMeta, err := meta.Build() // immutable snapshot
+	if err != nil {
+		us.err = err
+
+		return us
+	}
+	us.meta = stagedMeta
 
 	transformToField := make(map[transformKey]iceberg.PartitionField)
 	nameToField := make(map[string]iceberg.PartitionField)
-	partitionSpec := t.tbl.Metadata().PartitionSpec()
+	partitionSpec := us.meta.PartitionSpec()
 	for _, partitionField := range partitionSpec.Fields() {
 		if _, ok := partitionField.Transform.(iceberg.UnknownTransform); ok {
 			us.err = fmt.Errorf("%w: cannot update partition spec with unknown transform: %s",
@@ -105,7 +117,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
 	}
-	lastAssignedFieldId := t.tbl.Metadata().LastPartitionSpecID()
+	lastAssignedFieldId := us.meta.LastPartitionSpecID()
 	if lastAssignedFieldId == nil {
 		v := iceberg.PartitionDataIDStart - 1
 		lastAssignedFieldId = &v
@@ -158,15 +170,26 @@ func (us *UpdateSpec) BuildUpdates() ([]Update, []Requirement, error) {
 	updates := make([]Update, 0)
 	requirements := make([]Requirement, 0)
 
-	if us.txn.tbl.Metadata().DefaultPartitionSpec() != newSpec.ID() {
+	if us.meta.DefaultPartitionSpec() != newSpec.ID() {
 		if us.isNewPartitionSpec(newSpec.ID()) {
 			updates = append(updates, NewAddPartitionSpecUpdate(&newSpec, false))
 			updates = append(updates, NewSetDefaultSpecUpdate(-1))
 		} else {
 			updates = append(updates, NewSetDefaultSpecUpdate(newSpec.ID()))
 		}
-		requiredLastAssignedPartitionId := us.txn.tbl.Metadata().LastPartitionSpecID()
-		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionId))
+		// This concurrency assertion must describe the base (pre-transaction)
+		// catalog state, not the staged/advancing one: every chained
+		// UpdateSpec.Commit() in the transaction then asserts the same value,
+		// so they collapse to one via the ordinary semantic-key dedupe instead
+		// of reaching the catalog as several contradictory values.
+		requiredLastAssignedPartitionID := us.txn.tbl.Metadata().LastPartitionSpecID()
+		if requiredLastAssignedPartitionID == nil {
+			// Mirror the constructor's guard: an unpartitioned table may not
+			// have a last-assigned partition id yet.
+			base := iceberg.PartitionDataIDStart - 1
+			requiredLastAssignedPartitionID = &base
+		}
+		requirements = append(requirements, AssertLastAssignedPartitionID(*requiredLastAssignedPartitionID))
 	}
 
 	return updates, requirements, nil
@@ -179,25 +202,25 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 
 	partitionFields := make([]iceberg.PartitionField, 0)
 	partitionNames := make(map[string]bool)
-	spec := us.txn.tbl.Metadata().PartitionSpec()
+	spec := us.meta.PartitionSpec()
 	for _, field := range spec.Fields() {
 		var newField iceberg.PartitionField
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
 			}
 			partitionFields = append(partitionFields, newField)
-		} else if us.txn.tbl.Metadata().Version() == 1 {
+		} else if us.meta.Version() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.txn.tbl.Schema(), field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -207,13 +230,16 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	partitionFields = append(partitionFields, us.adds...)
+	if err := validateNoRedundantTimeFields(partitionFields); err != nil {
+		return iceberg.PartitionSpec{}, err
+	}
 	candidate := iceberg.NewPartitionSpec(partitionFields...)
-	newSpec, err := candidate.BindToSchema(us.txn.tbl.Schema(), nil, nil)
+	newSpec, err := candidate.BindToSchema(us.meta.CurrentSchema(), nil, nil)
 	if err != nil {
 		return iceberg.PartitionSpec{}, err
 	}
 	newSpecId := iceberg.InitialPartitionSpecID
-	for _, spec = range us.txn.tbl.Metadata().PartitionSpecs() {
+	for _, spec = range us.meta.PartitionSpecs() {
 		if newSpec.CompatibleWith(&spec) {
 			newSpecId = spec.ID()
 
@@ -224,6 +250,34 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 	}
 
 	return iceberg.NewPartitionSpecID(newSpecId, partitionFields...), nil
+}
+
+// validateNoRedundantTimeFields rejects hour(ts) alongside day(ts).
+// Taking the assembled set is load bearing: only it knows which fields survive
+// the deletes, so AddField(month) -> RemoveField(year) works in either order.
+//
+// So a redundancy inherited from the current spec blocks every update, even
+// unrelated ones, until it is removed here: the update authors a whole new
+// spec, and passing the old fields through would carry the redundancy into it.
+// Loading such metadata still works, under the lenient equality-only rule.
+func validateNoRedundantTimeFields(fields []iceberg.PartitionField) error {
+	timeFields := make(map[int]iceberg.PartitionField, len(fields))
+	for _, field := range fields {
+		// Void is not a TimeTransform, so a v1 tombstone left by a removed
+		// year(ts) does not block adding month(ts) on the same column.
+		if _, isTime := field.Transform.(iceberg.TimeTransform); !isTime {
+			continue
+		}
+		source := field.SourceID()
+		if existing, exists := timeFields[source]; exists {
+			return fmt.Errorf("%w: redundant partition field for source ID %d: %s (%s) conflicts with %s (%s); remove one of them in this update",
+				iceberg.ErrInvalidPartitionSpec, source,
+				field.Name, field.Transform, existing.Name, existing.Transform)
+		}
+		timeFields[source] = field
+	}
+
+	return nil
 }
 
 func (us *UpdateSpec) Commit() error {
@@ -247,7 +301,7 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 	return func() error {
 		// Finds the column in the schema and binds it with case sensitivity.
 		ref := iceberg.Reference(sourceColName)
-		boundTerm, err := ref.Bind(us.txn.tbl.Schema(), us.caseSensitive)
+		boundTerm, err := ref.Bind(us.meta.CurrentSchema(), us.caseSensitive)
 		if err != nil {
 			return err
 		}
@@ -267,6 +321,13 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 			Transform: transform.String(),
 		}
 		existingPartitionField, exists := us.transformToField[key]
+
+		if exists && transform.Equals(existingPartitionField.Transform) {
+			if _, deleted := us.deletes[existingPartitionField.FieldID]; deleted {
+				return us.rewriteDeleteAndAddField(existingPartitionField, partitionFieldName)
+			}
+		}
+
 		if exists && us.isDuplicatePartition(transform, existingPartitionField) {
 			return fmt.Errorf("duplicate partition field for %s=%v, %v already exists", ref.String(), ref, existingPartitionField)
 		}
@@ -287,13 +348,9 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 			return fmt.Errorf("already added partition field with name: %s", newField.Name)
 		}
 
-		// Handle special case for time transforms
-		if _, isTimeTransform := newField.Transform.(iceberg.TimeTransform); isTimeTransform {
-			if existingTimeField, exists := us.addedTimeFields[newField.SourceID()]; exists {
-				return fmt.Errorf("cannot add time partition field: %s conflicts with %s", newField.Name, existingTimeField.Name)
-			}
-			us.addedTimeFields[newField.SourceID()] = newField
-		}
+		// Time conflicts are not checked here: they depend on which existing
+		// fields survive this update's deletes, so validateNoRedundantTimeFields
+		// checks the set Apply assembles once every operation has run.
 		us.transformToAddedField[key] = newField
 
 		// If name matches an existing field, rename it if it's VOID transform
@@ -337,6 +394,18 @@ func (us *UpdateSpec) removeField(name string) updateSpecOp {
 	}
 }
 
+// rewriteDeleteAndAddField restores a field removed earlier in this same
+// update, keeping its permanent ID and renaming it if a different name is
+// requested.
+func (us *UpdateSpec) rewriteDeleteAndAddField(existing iceberg.PartitionField, name string) error {
+	delete(us.deletes, existing.FieldID)
+	if name == "" || existing.Name == name {
+		return nil
+	}
+
+	return us.renameField(existing.Name, name)()
+}
+
 func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 	return func() error {
 		existingField, exists := us.nameToField[newName]
@@ -371,21 +440,39 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			iceberg.ErrInvalidArgument, key.Transform, err)
 	}
 
-	if us.txn.tbl.Metadata().Version() == 2 {
+	// Reuse applies to format v2+ (v1 has no permanent field-ID contract) and
+	// resurrects fields removed in an earlier committed update; same-update
+	// remove/re-add is handled ahead of this call by rewriteDeleteAndAddField.
+	if us.meta.Version() >= 2 {
 		sourceId, transformName := key.SourceId, key.Transform
 		historicalFields := make([]iceberg.PartitionField, 0)
-		for _, spec := range us.txn.tbl.Metadata().PartitionSpecs() {
+		// PartitionSpecs() is ordered by ascending spec ID, so when the same
+		// source + transform appears under different names across specs (e.g. a
+		// field renamed before it was removed), the lowest-spec-ID match wins.
+		// The match's own name is returned, which for the no-name case may be an
+		// older name than the current schema uses; this precedence is
+		// deterministic and preserves the original (permanent) field ID.
+		for _, spec := range us.meta.PartitionSpecs() {
 			for _, field := range spec.Fields() {
 				historicalFields = append(historicalFields, field)
 			}
 		}
 		for _, field := range historicalFields {
+			// Transform.String() is canonical: field.Transform is a parsed
+			// Transform whose String() re-normalizes any non-canonical on-disk
+			// text (e.g. "bucket[016]" -> "bucket[16]"), and transformName comes
+			// from a Transform.String() as well. The textual compare therefore
+			// distinguishes parameterized transforms (bucket[16] vs bucket[8])
+			// correctly without a structural comparison.
 			if field.SourceID() == sourceId && field.Transform.String() == transformName {
-				if len(name) > 0 && field.Name == name {
+				// Reuse the historical field's ID when no explicit name is
+				// requested (match on source + transform alone) or when the
+				// requested name matches.
+				if len(name) == 0 || field.Name == name {
 					return iceberg.PartitionField{
 						SourceIDs: []int{sourceId},
 						FieldID:   field.FieldID,
-						Name:      name,
+						Name:      field.Name,
 						Transform: field.Transform,
 					}, nil
 				}
@@ -401,7 +488,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			Transform: transform,
 		}
 		var err error
-		name, err = iceberg.GeneratePartitionFieldName(us.txn.tbl.Schema(), tmpField)
+		name, err = iceberg.GeneratePartitionFieldName(us.meta.CurrentSchema(), tmpField)
 		if err != nil {
 			return iceberg.PartitionField{}, err
 		}
@@ -456,7 +543,7 @@ func (us *UpdateSpec) addNewField(schema *iceberg.Schema, sourceId int, fieldId 
 }
 
 func (us *UpdateSpec) isNewPartitionSpec(newSpecId int) bool {
-	spec := us.txn.tbl.Metadata().PartitionSpecByID(newSpecId)
+	spec := us.meta.PartitionSpecByID(newSpecId)
 
 	return spec == nil
 }
