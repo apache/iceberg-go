@@ -492,17 +492,17 @@ func TestReferencedDataFilePath(t *testing.T) {
 	})
 }
 
-// mustPartitionConflictKey unwraps partitionConflictKey for test
+// mustCanonicalPartitionKey unwraps canonicalPartitionKey for test
 // tuples that only contain supported value types.
-func mustPartitionConflictKey(t *testing.T, specID int32, partition map[int]any) string {
+func mustCanonicalPartitionKey(t *testing.T, specID int32, partition map[int]any) string {
 	t.Helper()
-	key, err := partitionConflictKey(specID, partition)
+	key, err := canonicalPartitionKey(specID, partition)
 	require.NoError(t, err)
 
 	return key
 }
 
-func TestPartitionConflictKey(t *testing.T) {
+func TestCanonicalPartitionKey(t *testing.T) {
 	sampleUUID := uuid.MustParse("12345678-9abc-def0-1234-56789abcdef0")
 	dec := iceberg.Decimal{Val: decimal128.FromI64(12345), Scale: 2}
 	decOther := iceberg.Decimal{Val: decimal128.FromI64(12346), Scale: 2}
@@ -532,8 +532,8 @@ func TestPartitionConflictKey(t *testing.T) {
 	for _, tt := range equal {
 		t.Run("equal/"+tt.name, func(t *testing.T) {
 			assert.Equal(t,
-				mustPartitionConflictKey(t, 0, tt.a),
-				mustPartitionConflictKey(t, 0, tt.b))
+				mustCanonicalPartitionKey(t, 0, tt.a),
+				mustCanonicalPartitionKey(t, 0, tt.b))
 		})
 	}
 
@@ -563,24 +563,24 @@ func TestPartitionConflictKey(t *testing.T) {
 	for _, tt := range distinct {
 		t.Run("distinct/"+tt.name, func(t *testing.T) {
 			assert.NotEqual(t,
-				mustPartitionConflictKey(t, 0, tt.a),
-				mustPartitionConflictKey(t, 0, tt.b))
+				mustCanonicalPartitionKey(t, 0, tt.a),
+				mustCanonicalPartitionKey(t, 0, tt.b))
 		})
 	}
 
 	t.Run("different spec ids never collide", func(t *testing.T) {
 		tuple := map[int]any{1: int32(1), 2: "x"}
 		assert.NotEqual(t,
-			mustPartitionConflictKey(t, 0, tuple),
-			mustPartitionConflictKey(t, 1, tuple))
+			mustCanonicalPartitionKey(t, 0, tuple),
+			mustCanonicalPartitionKey(t, 1, tuple))
 		assert.NotEqual(t,
-			mustPartitionConflictKey(t, 0, nil),
-			mustPartitionConflictKey(t, 1, nil))
+			mustCanonicalPartitionKey(t, 0, nil),
+			mustCanonicalPartitionKey(t, 1, nil))
 	})
 
 	t.Run("unsupported types fail closed", func(t *testing.T) {
 		for _, v := range []any{struct{}{}, time.Now()} {
-			_, err := partitionConflictKey(0, map[int]any{1: v})
+			_, err := canonicalPartitionKey(0, map[int]any{1: v})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "unsupported partition value type")
 		}
@@ -699,7 +699,7 @@ func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts(t *testin
 
 // TestValidateNoNewDeletesForRewrittenFiles_UnsupportedPartitionType
 // pins the fail-closed contract: a rewritten file whose partition
-// carries a value type outside partitionConflictKey's closed set must
+// carries a value type outside canonicalPartitionKey's closed set must
 // fail the validation loudly instead of silently skipping the file.
 // Only the rewritten side is testable — the delete side is decoded
 // from real Avro manifests whose value domain is exactly the closed
