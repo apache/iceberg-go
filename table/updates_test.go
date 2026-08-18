@@ -826,6 +826,10 @@ func TestUnmarshalUpdatesPreservesDuplicateActionTypeError(t *testing.T) {
 			data: `[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`,
 		},
 		{
+			name: "valid final action with missing required field",
+			data: `[{"action":123,"action":"set-location"}]`,
+		},
+		{
 			name: "unknown final action",
 			data: `[{"action":123,"action":"unknown"}]`,
 		},

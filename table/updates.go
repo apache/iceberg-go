@@ -143,6 +143,14 @@ func validateRequiredUpdateFields(action string, object map[string]json.RawMessa
 	return nil
 }
 
+func validateUpdateActionDecode(raw json.RawMessage) error {
+	var actionWire struct {
+		Action *string `json:"action"`
+	}
+
+	return json.Unmarshal(raw, &actionWire)
+}
+
 func (u *Updates) UnmarshalJSON(data []byte) error {
 	var rawUpdates []json.RawMessage
 	if err := json.Unmarshal(data, &rawUpdates); err != nil {
@@ -154,29 +162,48 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		updates = make(Updates, 0, len(rawUpdates))
 	}
 	for _, raw := range rawUpdates {
-		var baseWire struct {
-			Action *string `json:"action"`
-		}
-		if err := json.Unmarshal(raw, &baseWire); err != nil {
-			return err
-		}
-		if baseWire.Action == nil {
-			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
-		}
-
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &object); err != nil {
 			return err
 		}
 
+		actionValue, exactAction := object["action"]
 		actionFieldCount := 0
+		caseVariantAction := false
 		for field := range object {
 			if strings.EqualFold(field, "action") {
 				actionFieldCount++
+				if field != "action" {
+					caseVariantAction = true
+				}
 			}
 		}
 
-		base := baseUpdate{ActionName: *baseWire.Action}
+		var action string
+		if exactAction && !caseVariantAction {
+			if bytes.Equal(bytes.TrimSpace(actionValue), []byte("null")) {
+				if err := validateUpdateActionDecode(raw); err != nil {
+					return err
+				}
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			if err := json.Unmarshal(actionValue, &action); err != nil {
+				return err
+			}
+		} else {
+			var baseWire struct {
+				Action *string `json:"action"`
+			}
+			if err := json.Unmarshal(raw, &baseWire); err != nil {
+				return err
+			}
+			if baseWire.Action == nil {
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			action = *baseWire.Action
+		}
+
+		base := baseUpdate{ActionName: action}
 
 		var upd Update
 		switch base.ActionName {
@@ -227,9 +254,15 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		case UpdateRemoveEncryptionKey:
 			upd = &removeEncryptionKeyUpdate{}
 		default:
+			if err := validateUpdateActionDecode(raw); err != nil {
+				return err
+			}
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 		if normalizeLegacyPropertyFields(base.ActionName, object) {
+			if err := validateUpdateActionDecode(raw); err != nil {
+				return err
+			}
 			if actionFieldCount > 1 {
 				for field := range object {
 					if strings.EqualFold(field, "action") {
@@ -249,6 +282,9 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			raw = normalized
 		}
 		if err := validateRequiredUpdateFields(base.ActionName, object); err != nil {
+			if actionErr := validateUpdateActionDecode(raw); actionErr != nil {
+				return actionErr
+			}
 			return err
 		}
 
