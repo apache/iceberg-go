@@ -619,6 +619,11 @@ func TestFilePathKey(t *testing.T) {
 			expected: hierarchicalWindowsFileURI,
 		},
 		{
+			name:     "uppercase hierarchical Windows file URI",
+			input:    "FILE:///C:/Warehouse/data/../file.parquet",
+			expected: hierarchicalWindowsFileURI,
+		},
+		{
 			name:     "Windows drive authority file URI",
 			input:    "file://C:/Warehouse/data/../file.parquet",
 			expected: "c:/warehouse/file.parquet",
