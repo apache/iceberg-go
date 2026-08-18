@@ -323,6 +323,107 @@ func (s *SQLIntegrationSuite) TestWriteCommitTable() {
 	s.Equal(pqfile, entries[0].DataFile().FilePath())
 }
 
+func (s *SQLIntegrationSuite) TestMultiTableTransaction() {
+	s.ensureNamespace()
+
+	// Create two tables.
+	tbl1, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1"),
+		tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl1)
+
+	tbl2, err := s.cat.CreateTable(s.ctx,
+		catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2"),
+		tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	s.Require().NotNil(tbl2)
+
+	defer func() {
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1")))
+		s.Require().NoError(s.cat.DropTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2")))
+	}()
+
+	// Build a multi-table transaction using the high-level API.
+	mtx, err := catalog.NewMultiTableTransaction(s.cat)
+	s.Require().NoError(err)
+
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.SetProperties(map[string]string{"pipeline": "v2", "owner": "team-a"}))
+	s.Require().NoError(mtx.AddTransaction(tx1))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.SetProperties(map[string]string{"pipeline": "v2", "owner": "team-b"}))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+
+	// CommitAndReload commits atomically and reloads both tables.
+	tables, err := mtx.CommitAndReload(s.ctx)
+	s.Require().NoError(err)
+	s.Require().Len(tables, 2)
+
+	// Verify both tables have the new properties.
+	s.Equal("v2", tables[0].Properties()["pipeline"])
+	s.Equal("team-a", tables[0].Properties()["owner"])
+	s.Equal("v2", tables[1].Properties()["pipeline"])
+	s.Equal("team-b", tables[1].Properties()["owner"])
+
+	// Also verify via independent LoadTable calls.
+	loaded1, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-1"))
+	s.Require().NoError(err)
+	s.Equal("v2", loaded1.Properties()["pipeline"])
+
+	loaded2, err := s.cat.LoadTable(s.ctx, catalog.ToIdentifier(TestNamespaceIdent, "mtx-table-2"))
+	s.Require().NoError(err)
+	s.Equal("v2", loaded2.Properties()["pipeline"])
+}
+
+func (s *SQLIntegrationSuite) TestMultiTableTransactionWriteData() {
+	s.ensureNamespace()
+
+	ident1 := catalog.ToIdentifier(TestNamespaceIdent, "mtx-write-1")
+	ident2 := catalog.ToIdentifier(TestNamespaceIdent, "mtx-write-2")
+
+	tbl1, err := s.cat.CreateTable(s.ctx, ident1, tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+	tbl2, err := s.cat.CreateTable(s.ctx, ident2, tableSchemaSimple, catalog.WithLocation(location))
+	s.Require().NoError(err)
+
+	defer func() {
+		_ = s.cat.DropTable(s.ctx, ident1)
+		_ = s.cat.DropTable(s.ctx, ident2)
+	}()
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(s.T(), 0)
+
+	arrSchema, err := table.SchemaToArrowSchema(tbl1.Schema(), nil, false, false)
+	s.Require().NoError(err)
+
+	tblData, err := array.TableFromJSON(mem, arrSchema, []string{`[{"foo": "data", "bar": 42, "baz": true}]`})
+	s.Require().NoError(err)
+	defer tblData.Release()
+
+	mtx, err := catalog.NewMultiTableTransaction(s.cat)
+	s.Require().NoError(err)
+
+	tx1 := tbl1.NewTransaction()
+	s.Require().NoError(tx1.AppendTable(s.ctx, tblData, 100, nil))
+	s.Require().NoError(mtx.AddTransaction(tx1))
+
+	tx2 := tbl2.NewTransaction()
+	s.Require().NoError(tx2.SetProperties(map[string]string{"status": "linked"}))
+	s.Require().NoError(mtx.AddTransaction(tx2))
+
+	s.Require().NoError(mtx.Commit(s.ctx))
+
+	loaded1, _ := s.cat.LoadTable(s.ctx, ident1)
+	s.NotNil(loaded1.CurrentSnapshot())
+	s.Equal("1", loaded1.CurrentSnapshot().Summary.Properties["total-records"])
+
+	loaded2, _ := s.cat.LoadTable(s.ctx, ident2)
+	s.Equal("linked", loaded2.Properties()["status"])
+}
+
 func TestSQLIntegration(t *testing.T) {
 	suite.Run(t, new(SQLIntegrationSuite))
 }
