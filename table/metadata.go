@@ -2062,12 +2062,12 @@ func (c *commonMetadata) Snapshots() []Snapshot {
 }
 
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
-	if snapshotIndexNeedsRebuild(c.snapshotIndex, c.SnapshotList) {
-		c.snapshotIndex = buildSnapshotIndex(c.SnapshotList)
+	index := c.snapshotIndex
+	if snapshotIndexNeedsRebuild(index, c.SnapshotList) {
+		index = buildSnapshotIndex(c.SnapshotList)
 	}
 
-	i, ok, index := snapshotIndexPosition(c.snapshotIndex, c.SnapshotList, id)
-	c.snapshotIndex = index
+	i, ok, _ := snapshotIndexPosition(index, c.SnapshotList, id)
 	if ok {
 		return cloneSnapshotPtr(&c.SnapshotList[i])
 	}
