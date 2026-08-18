@@ -65,6 +65,7 @@ func clusteredPartitionedWrite(
 			currentRec          partitionRecord
 			currentWriter       *RollingDataWriter
 			completedPartitions = make(closedPartitionSet)
+			extractionPlan      *partitionExtractionPlan
 		)
 
 		closeCurrentWriter := func() error {
@@ -144,7 +145,16 @@ func clusteredPartitionedWrite(
 				return
 			}
 
-			partitions, err := getRecordPartitions(spec, schema, rec)
+			if extractionPlan == nil {
+				extractionPlan, err = newPartitionExtractionPlan(spec, schema, rec.Schema())
+				if err != nil {
+					fail(err)
+
+					return
+				}
+			}
+
+			partitions, err := extractionPlan.getRecordPartitions(rec)
 			if err != nil {
 				fail(err)
 

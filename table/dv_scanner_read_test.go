@@ -193,6 +193,15 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		assert.Contains(t, err.Error(), "missing referenced_data_file")
 	})
 
+	t.Run("DV identity mismatch propagates from ReadDV", func(t *testing.T) {
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{0}, "file:///table/data/data-001.parquet")
+		dvFile := newDVMockDataFile(puffinPath, "file:///table/data/data-002.parquet", offset, length, card)
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{dvFile}}}, 1)
+		require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
+		assert.Contains(t, err.Error(), "manifest referenced_data_file")
+	})
+
 	t.Run("DV missing content_offset is rejected", func(t *testing.T) {
 		// content_offset is required by spec; without it ReadDV can't
 		// locate the blob. Pinned at the pre-pass so two such entries
@@ -334,7 +343,7 @@ func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
 
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
-	for i := int64(0); i < 3; i++ {
+	for i := range int64(3) {
 		bldr.Append(i)
 	}
 	col := bldr.NewArray()

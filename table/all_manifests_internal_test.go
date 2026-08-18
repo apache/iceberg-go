@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,10 +65,99 @@ func TestAllManifestsCompletesAfterErrorChannelCloses(t *testing.T) {
 	}
 }
 
+func TestAllManifestsLimitsConcurrentReads(t *testing.T) {
+	const snapshotCount = 64
+
+	var trackingFS *manifestTrackingIO
+	tbl, _ := tableWithManifestListsUsingIO(t, snapshotCount, func(memFS *iceio.MemFS) iceio.IO {
+		trackingFS = &manifestTrackingIO{IO: memFS, delay: 5 * time.Millisecond}
+
+		return trackingFS
+	})
+
+	for mf, err := range tbl.AllManifests(context.Background()) {
+		require.NoError(t, err)
+		require.NotNil(t, mf)
+	}
+
+	trackingFS.mu.Lock()
+	maxOpen := trackingFS.maxOpen
+	trackingFS.mu.Unlock()
+	require.LessOrEqual(t, maxOpen, allManifestsMaxWorkers)
+}
+
+func TestAllManifestsWorkerCount(t *testing.T) {
+	tests := []struct {
+		name          string
+		snapshotCount int
+		want          int
+	}{
+		{name: "empty", snapshotCount: 0, want: 1},
+		{name: "single snapshot", snapshotCount: 1, want: 1},
+		{name: "at limit", snapshotCount: allManifestsMaxWorkers, want: allManifestsMaxWorkers},
+		{name: "above limit", snapshotCount: allManifestsMaxWorkers + 1, want: allManifestsMaxWorkers},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, allManifestsWorkerCount(tt.snapshotCount))
+		})
+	}
+}
+
+type manifestTrackingIO struct {
+	iceio.IO
+	mu      sync.Mutex
+	open    int
+	maxOpen int
+	delay   time.Duration
+}
+
+func (fs *manifestTrackingIO) Open(name string) (iceio.File, error) {
+	f, err := fs.IO.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	fs.mu.Lock()
+	fs.open++
+	if fs.open > fs.maxOpen {
+		fs.maxOpen = fs.open
+	}
+	fs.mu.Unlock()
+	time.Sleep(fs.delay)
+
+	return &manifestTrackingFile{File: f, onClose: func() {
+		fs.mu.Lock()
+		fs.open--
+		fs.mu.Unlock()
+	}}, nil
+}
+
+type manifestTrackingFile struct {
+	iceio.File
+	onClose func()
+	once    sync.Once
+}
+
+func (f *manifestTrackingFile) Close() error {
+	f.once.Do(f.onClose)
+
+	return f.File.Close()
+}
+
 func tableWithManifestLists(t *testing.T, snapshotCount int) (*Table, []string) {
+	return tableWithManifestListsUsingIO(t, snapshotCount, nil)
+}
+
+func tableWithManifestListsUsingIO(t *testing.T, snapshotCount int, readIOFn func(*iceio.MemFS) iceio.IO) (*Table, []string) {
 	t.Helper()
 
 	memFS := iceio.NewMemFS()
+	var readIO iceio.IO = memFS
+	if readIOFn != nil {
+		readIO = readIOFn(memFS)
+	}
 	schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
 	})
@@ -121,7 +211,7 @@ func tableWithManifestLists(t *testing.T, snapshotCount int) (*Table, []string) 
 
 	tbl := New(Identifier{"db", "all_manifests"}, built, tableLocation+"/metadata/metadata.json",
 		func(context.Context) (iceio.IO, error) {
-			return memFS, nil
+			return readIO, nil
 		}, nil)
 
 	return tbl, expectedPaths

@@ -822,6 +822,36 @@ func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 	)
 }
 
+func (p *ProjectionTestSuite) unknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
+// Both fields partition the same column: the bucket field still prunes, the
+// unknown one contributes nothing.
+func (p *ProjectionTestSuite) bucketAndUnknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.BucketTransform{NumBuckets: 4}, Name: "id_bucket",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
@@ -1154,6 +1184,26 @@ func (p *ProjectionTestSuite) TestProjectionCaseInsensitive() {
 	expr, err := project(iceberg.NotNull(iceberg.Reference("ID")))
 	p.Require().NoError(err)
 	p.True(expr.Equals(iceberg.NotNull(iceberg.Reference("id_part"))))
+}
+
+// Unknown partition transforms must not prune: Project returns nil, which
+// projects to AlwaysTrue.
+func (p *ProjectionTestSuite) TestUnknownTransformProjection() {
+	project := newInclusiveProjection(p.schema(), p.unknownSpec(), true)
+	expr, err := project(iceberg.LessThan(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.Equal(iceberg.AlwaysTrue{}, expr)
+}
+
+// An unknown field alongside a usable one must not disable the usable one's
+// pruning, and must not add a term of its own.
+func (p *ProjectionTestSuite) TestMixedSpecUnknownTransformProjection() {
+	spec := p.bucketAndUnknownSpec()
+	project := newInclusiveProjection(p.schema(), spec, true)
+
+	expr, err := project(iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.True(expr.Equals(iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(3))))
 }
 
 func (p *ProjectionTestSuite) TestProjectEmptySpec() {
@@ -3061,9 +3111,7 @@ func TestBloomPredicateCollector(t *testing.T) {
 	)
 
 	bind := func(expr iceberg.BooleanExpression) iceberg.BooleanExpression {
-		rewritten, err := iceberg.RewriteNotExpr(expr)
-		require.NoError(t, err)
-		bound, err := iceberg.BindExpr(sc, rewritten, true)
+		bound, err := iceberg.BindExpr(sc, expr, true)
 		require.NoError(t, err)
 
 		return bound
@@ -3102,6 +3150,34 @@ func TestBloomPredicateCollector(t *testing.T) {
 			iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
 			iceberg.EqualTo(iceberg.Reference("name"), "alice"),
 		))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("NOT(NotEqual) is normalized to Equal", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotEqualTo(iceberg.Reference("id"), int64(42))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 1)
+	})
+
+	t.Run("NOT(NotIn) is normalized to In", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotIn(iceberg.Reference("id"), int64(1), int64(2))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 2)
+	})
+
+	t.Run("NOT(Equal) remains unsupported", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(42))))
 		preds, err := newBloomFilterPredicates(expr)
 		require.NoError(t, err)
 		assert.Empty(t, preds)

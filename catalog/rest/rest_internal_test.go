@@ -1419,6 +1419,97 @@ func TestHandleNon200_PreservesStatusOnMalformedBody(t *testing.T) {
 	require.ErrorIs(t, err, ErrRESTError)
 }
 
+func TestHandleNon200_StatusOverrideAppliesOnMalformedBody(t *testing.T) {
+	// The caller-supplied status override carries the semantics of the status
+	// line itself, so a 5xx commit with a garbled body must classify the same
+	// as a well-formed envelope: ErrCommitStateUnknown. Callers retry on that
+	// sentinel; stripping it when a proxy mangles the payload would turn a
+	// retryable unknown commit into a fatal decode error. Unmapped statuses
+	// keep the plain decode-failure classification.
+	commitOverride := map[int]error{
+		http.StatusConflict:            ErrCommitFailed,
+		http.StatusInternalServerError: ErrCommitStateUnknown,
+		http.StatusBadGateway:          ErrCommitStateUnknown,
+		http.StatusServiceUnavailable:  ErrCommitStateUnknown,
+		http.StatusGatewayTimeout:      ErrCommitStateUnknown,
+	}
+
+	wellFormed := func(status int) string {
+		return fmt.Sprintf(`{"error":{"message":"%s","type":"ServerException","code":%d}}`,
+			http.StatusText(status), status)
+	}
+	const malformed = `{"error":{"message":"boom`
+
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantIs     error
+		wantNotIs  error
+		wantDecode bool
+	}{
+		{
+			name:   "well-formed 500",
+			status: http.StatusInternalServerError,
+			body:   wellFormed(http.StatusInternalServerError),
+			wantIs: ErrCommitStateUnknown,
+		},
+		{
+			name:       "malformed 500",
+			status:     http.StatusInternalServerError,
+			body:       malformed,
+			wantIs:     ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+		{
+			name:   "well-formed 409",
+			status: http.StatusConflict,
+			body:   wellFormed(http.StatusConflict),
+			wantIs: ErrCommitFailed,
+		},
+		{
+			name:       "malformed 409",
+			status:     http.StatusConflict,
+			body:       malformed,
+			wantIs:     ErrCommitFailed,
+			wantNotIs:  ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+		{
+			name:       "malformed unmapped 404",
+			status:     http.StatusNotFound,
+			body:       malformed,
+			wantIs:     ErrRESTError,
+			wantNotIs:  ErrCommitStateUnknown,
+			wantDecode: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rsp := &http.Response{
+				StatusCode:    tc.status,
+				ContentLength: int64(len(tc.body)),
+				Body:          io.NopCloser(bytes.NewBufferString(tc.body)),
+			}
+
+			err := handleNon200(rsp, commitOverride, nil)
+			require.Error(t, err)
+			require.ErrorIs(t, err, tc.wantIs)
+			if tc.wantNotIs != nil {
+				require.NotErrorIs(t, err, tc.wantNotIs)
+			}
+			if tc.wantDecode {
+				require.ErrorContains(t, err, "failed to decode error response")
+			}
+
+			var restErr errorResponse
+			require.ErrorAs(t, err, &restErr)
+			require.Equal(t, tc.status, restErr.statusCode)
+		})
+	}
+}
+
 func TestHandleNon200_ErrorTypeOverride(t *testing.T) {
 	t.Parallel()
 
@@ -1696,6 +1787,56 @@ func (t *closeTrackingTransport) CloseIdleConnections() {
 	t.closed.Store(true)
 }
 
+func TestCatalogCloseReleasesOwnedSessionOnce(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	var transports []*closeTrackingTransport
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithTransportFactory(func(*tls.Config) (http.RoundTripper, func()) {
+		transport := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+		transports = append(transports, transport)
+
+		return transport, transport.CloseIdleConnections
+	}))
+	require.NoError(t, err)
+	require.Len(t, transports, 2)
+	assert.True(t, transports[0].closed.Load(), "bootstrap transport should be closed after config fetch")
+	assert.False(t, transports[1].closed.Load(), "catalog transport should remain open until Close")
+
+	require.NoError(t, cat.Close())
+	require.NoError(t, cat.Close())
+	assert.True(t, transports[1].closed.Load())
+}
+
+func TestCatalogCloseDoesNotReleaseCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/v1/config", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"defaults":  map[string]any{},
+			"overrides": map[string]any{},
+		})
+	})
+
+	base := &closeTrackingTransport{RoundTripper: http.DefaultTransport}
+	cat, err := NewCatalog(context.Background(), "rest", srv.URL, WithCustomTransport(base))
+	require.NoError(t, err)
+	require.NoError(t, cat.Close())
+	assert.False(t, base.closed.Load(), "user-provided transports must remain caller-owned")
+}
+
 func TestFetchConfigDoesNotCloseCustomTransport(t *testing.T) {
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -1828,6 +1969,31 @@ func TestEncodeNamespace(t *testing.T) {
 			r := &Catalog{namespaceSeparator: tt.separator}
 			assert.Equal(t, tt.wantPath, r.encodeNamespace(tt.namespace))
 			assert.Equal(t, tt.wantQueryPart, r.namespaceToQueryParam(tt.namespace))
+		})
+	}
+}
+
+func TestCheckValidNamespaceRejectsDecodedSeparator(t *testing.T) {
+	tests := []struct {
+		name      string
+		separator string
+		namespace table.Identifier
+		wantErr   bool
+	}{
+		{name: "default separator in component", namespace: table.Identifier{"a\x1fb"}, wantErr: true},
+		{name: "configured separator in component", separator: "%2E", namespace: table.Identifier{"a.b"}, wantErr: true},
+		{name: "separator between components", namespace: table.Identifier{"a", "b"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cat := &Catalog{namespaceSeparator: tt.separator}
+			err := cat.checkValidNamespace(tt.namespace)
+			if tt.wantErr {
+				require.ErrorIs(t, err, catalog.ErrNoSuchNamespace)
+			} else {
+				require.NoError(t, err)
+			}
 		})
 	}
 }

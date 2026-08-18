@@ -41,6 +41,7 @@ import (
 	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/metrics"
 	tblutils "github.com/apache/iceberg-go/table/internal"
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 	"golang.org/x/sync/errgroup"
 )
@@ -65,6 +66,12 @@ var ErrCommitFailed = errors.New("commit failed, refresh and try again")
 // errors.Is(err, iceberg.ErrNotImplemented) for compatibility with older
 // WriteRecords behavior.
 var ErrWriteIORequired = fmt.Errorf("%w: file system does not implement WriteFileIO", iceberg.ErrNotImplemented)
+
+const allManifestsMaxWorkers = 16
+
+func allManifestsWorkerCount(snapshotCount int) int {
+	return max(1, min(snapshotCount, allManifestsMaxWorkers))
+}
 
 // requireWriteFileIO should run immediately after resolving the table FS and
 // before mutating transaction state such as automatic name mapping.
@@ -183,6 +190,18 @@ func (t Table) newBrokenTransaction(branch string, err error) *Transaction {
 // callers to receive the precise initialization error instead of hitting
 // panic/undefined behavior later.
 func (t Table) NewTransactionOnBranchWithError(branch string) (*Transaction, error) {
+	for name, ref := range t.metadata.Refs() {
+		if name != branch {
+			continue
+		}
+		if ref.SnapshotRefType != BranchRef {
+			return nil, fmt.Errorf("%w: ref %q is a %s; tags cannot be transaction targets",
+				iceberg.ErrInvalidArgument, branch, ref.SnapshotRefType)
+		}
+
+		break
+	}
+
 	meta, err := MetadataBuilderFromBase(t.metadata, t.metadataLocation)
 	if err != nil {
 		return nil, err
@@ -202,6 +221,11 @@ func (t *Table) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if t.metadata != nil && fresh.metadata != nil {
+		if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+			return err
+		}
+	}
 
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
@@ -218,6 +242,15 @@ func (t *Table) Refresh(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func validateTableUUID(identifier Identifier, expected, actual uuid.UUID) error {
+	if expected == uuid.Nil || actual == uuid.Nil || expected == actual {
+		return nil
+	}
+
+	return fmt.Errorf("%w: table %s UUID changed during refresh or commit: expected %s, got %s; load a new table handle",
+		ErrInvalidMetadata, strings.Join(identifier, "."), expected, actual)
 }
 
 // AppendTable is a shortcut for NewTransaction().AppendTable() and then committing the transaction
@@ -327,23 +360,53 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	}
 
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
-	g := errgroup.Group{}
+	snapshots := t.metadata.Snapshots()
+	n := len(snapshots)
+	workCtx, cancel := context.WithCancel(ctx)
+	jobs := make(chan int)
+	// This buffer lets workers finish after an early consumer stop. The result
+	// channel created below still retains all snapshot results, so this is not a
+	// memory bound; all remote reads are bounded by allManifestsMaxWorkers.
+	ch := make(chan list, allManifestsWorkerCount(n))
+	workers := allManifestsWorkerCount(n)
+	g, groupCtx := errgroup.WithContext(workCtx)
 
-	n := len(t.metadata.Snapshots())
-	ch := make(chan list, n)
-
-	for i, sn := range t.metadata.Snapshots() {
+	for range workers {
 		g.Go(func() error {
-			manifests, err := sn.Manifests(fs)
-			if err != nil {
-				return err
+			for {
+				select {
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case i, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+
+					manifests, err := snapshots[i].Manifests(fs)
+					if err != nil {
+						return err
+					}
+
+					select {
+					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
+					case <-groupCtx.Done():
+						return groupCtx.Err()
+					}
+				}
 			}
-
-			ch <- list{Index: i, Value: manifests, Last: i == n-1}
-
-			return nil
 		})
 	}
+
+	go func() {
+		defer close(jobs)
+		for i := range snapshots {
+			select {
+			case jobs <- i:
+			case <-groupCtx.Done():
+				return
+			}
+		}
+	}()
 
 	errch := make(chan error, 1)
 	go func() {
@@ -373,6 +436,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 		}, list{Index: -1})
 
 	return func(yield func(iceberg.ManifestFile, error) bool) {
+		defer cancel()
 		defer func() {
 			// drain channels if we exited early
 			go func() {
@@ -430,9 +494,24 @@ type commitOpts struct {
 	// may leave this empty; Transaction.Commit always sets it.
 	branch string
 
-	// validators runs once before cat.CommitTable on the first attempt
-	// only. Refresh-and-replay across retries is deferred to PR 2.5.
+	// validators run before cat.CommitTable on every attempt of the
+	// retry loop. On attempt 0 the writer's metadata and the catalog
+	// state coincide, so the conflict context has no concurrent
+	// snapshots and validators short-circuit; on retries they run
+	// against the freshly refreshed catalog state (refresh-and-replay).
 	validators []conflictValidatorFunc
+
+	// noReplay makes a CAS conflict terminal: doCommit returns the
+	// ErrCommitFailed error instead of entering refresh-and-replay.
+	// Set for commits carrying delete-file removals; see the flag site
+	// in snapshotProducer.commitManifests for the rationale.
+	noReplay bool
+
+	// pinnedRefs names branches with an explicit requirement from
+	// Transaction.AssertRefSnapshotID, whose assertions must not be
+	// rewritten to the fresh branch head between retries (see
+	// Transaction.pinnedRefs).
+	pinnedRefs map[string]struct{}
 }
 
 type commitOption func(*commitOpts)
@@ -451,6 +530,14 @@ func withCommitBranch(branch string) commitOption {
 
 func withCommitValidators(vs ...conflictValidatorFunc) commitOption {
 	return func(o *commitOpts) { o.validators = append(o.validators, vs...) }
+}
+
+func withCommitNoReplay(noReplay bool) commitOption {
+	return func(o *commitOpts) { o.noReplay = noReplay }
+}
+
+func withCommitPinnedRefs(refs map[string]struct{}) commitOption {
+	return func(o *commitOpts) { o.pinnedRefs = refs }
 }
 
 func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requirement, opts ...commitOption) (*Table, error) {
@@ -553,8 +640,23 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			if refreshErr != nil {
 				return nil, fmt.Errorf("refresh table for retry: %w", refreshErr)
 			}
+			if t.metadata != nil && fresh.metadata != nil {
+				if err := validateTableUUID(t.identifier, t.metadata.TableUUID(), fresh.metadata.TableUUID()); err != nil {
+					return nil, err
+				}
+			}
 			current = fresh.metadata
-			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current)
+			reqs = rewriteRefSnapshotRequirements(reqs, co.branch, current, co.pinnedRefs)
+
+			// A pinned assertion the fresh catalog state violates can
+			// never succeed — fail now instead of burning the remaining
+			// retries on it.
+			if err := validatePinnedRefRequirements(reqs, co.pinnedRefs, current); err != nil {
+				return nil, fmt.Errorf("%w: explicit ref requirement failed: %w", ErrCommitFailed, err)
+			}
+			if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+				return nil, err
+			}
 
 			// Rebuild snapshot manifest lists to inherit all files committed
 			// by concurrent writers since the snapshot was originally built.
@@ -567,6 +669,10 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			}
 			orphanedManifests = append(orphanedManifests, orphaned...)
 			updates = rebuiltUpdates
+		}
+
+		if err := validateBranchRequirement(reqs, co.branch, current); err != nil {
+			return nil, err
 		}
 
 		// Pre-flight client-side conflict validation. Producers can
@@ -624,6 +730,14 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			cleanupOrphans = false
 
 			return nil, err
+		}
+
+		// Non-replayable commits fail on the first CAS conflict instead
+		// of replaying (see commitOpts.noReplay). The annotation
+		// distinguishes this abort from an exhausted retry budget while
+		// preserving errors.Is(err, ErrCommitFailed).
+		if co.noReplay {
+			return nil, fmt.Errorf("%w (commit carries snapshot-relative delete-file removals and cannot be replayed; reload the table and rebuild the removals)", err)
 		}
 	}
 
@@ -689,7 +803,12 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 // the branch is empty or the new head cannot be resolved (branch
 // deleted underneath us), reqs is returned unchanged — newConflict-
 // Context will surface the divergence on the next pre-flight pass.
-func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata) []Requirement {
+//
+// Assertions on branches in pinned were registered explicitly by the
+// committer (Transaction.AssertRefSnapshotID) for compare-and-swap
+// semantics and are never rewritten: a branch that has changed must
+// fail the commit, not be replayed against the new head.
+func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Metadata, pinned map[string]struct{}) []Requirement {
 	if branch == "" || fresh == nil {
 		return reqs
 	}
@@ -701,15 +820,95 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 	out := make([]Requirement, len(reqs))
 	for i, r := range reqs {
 		if a, ok := r.(*assertRefSnapshotID); ok && a.Ref == branch {
-			newID := head.SnapshotID
-			out[i] = AssertRefSnapshotID(branch, &newID)
+			if _, isPinned := pinned[a.Ref]; !isPinned {
+				newID := head.SnapshotID
+				if a.requireBranch {
+					out[i] = assertBranchRefSnapshotID(branch, &newID)
+				} else {
+					out[i] = AssertRefSnapshotID(branch, &newID)
+				}
 
-			continue
+				continue
+			}
 		}
 		out[i] = r
 	}
 
 	return out
+}
+
+// validatePinnedRefRequirements validates every assert-ref-snapshot-id
+// requirement on a pinned branch against the freshly refreshed catalog
+// metadata. A failure means the branch has changed from the required
+// snapshot: the assertion is never rewritten, so it can never hold and
+// the commit must fail instead of retrying.
+func validatePinnedRefRequirements(reqs []Requirement, pinned map[string]struct{}, fresh Metadata) error {
+	if len(pinned) == 0 {
+		return nil
+	}
+	for _, r := range reqs {
+		a, ok := r.(*assertRefSnapshotID)
+		if !ok {
+			continue
+		}
+		if _, isPinned := pinned[a.Ref]; !isPinned {
+			continue
+		}
+		if err := a.Validate(fresh); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata) error {
+	for _, req := range reqs {
+		if ref, ok := req.(*assertRefSnapshotID); ok && ref.requireBranch && ref.Ref == branch {
+			return ref.Validate(meta)
+		}
+	}
+
+	return nil
+}
+
+// latestSnapshotForBranch returns the head a write targeting branch is parented
+// on: a branch that does not exist yet resolves to nil here and falls back to
+// main's head so the first write to a new branch forks from main. It is the
+// Metadata-side twin of currentSnapshotForRef, which the retry path cannot use
+// because it has no builder; the two must resolve a ref identically, or a
+// retried snapshot is reparented somewhere its first attempt never pointed.
+func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
+	if branch == "" || branch == MainBranch {
+		return meta.CurrentSnapshot()
+	}
+
+	if s := meta.SnapshotByName(branch); s != nil {
+		return s
+	}
+
+	return meta.CurrentSnapshot()
+}
+
+// stagedSnapshotStillValid reports whether a snapshot built on an earlier
+// attempt would still be accepted by AddSnapshot against fresh. Both values it
+// checks are table-wide, so a peer committing on ANOTHER branch invalidates them
+// without moving this branch's head — the case the caller's parent check misses,
+// and one AddSnapshot rejects terminally rather than retryably.
+func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
+	if snap == nil || fresh == nil {
+		return true
+	}
+
+	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+		return false
+	}
+
+	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+		return false
+	}
+
+	return true
 }
 
 // rebuildSnapshotUpdates returns a new slice of updates where any
@@ -728,26 +927,43 @@ func rewriteRefSnapshotRequirements(reqs []Requirement, branch string, fresh Met
 // list is rewritten to include the fresh parent's manifests so that the
 // rebuilt snapshot contains every committed file.
 func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Metadata, branch string, fs icebergio.WriteFileIO, attempt int) (rebuilt []Update, orphanedPaths []string, err error) {
-	// Determine the fresh branch head to use as the rebuilt snapshot's parent.
+	// Must mirror createSnapshotProducer's attempt-0 fallback, or a retried new
+	// branch rebuilds with a nil parent and silently drops main's data.
 	var freshHead *Snapshot
-	if branch != "" && freshMeta != nil {
-		freshHead = freshMeta.SnapshotByName(branch)
-	} else if freshMeta != nil {
-		freshHead = freshMeta.CurrentSnapshot()
+	if freshMeta != nil {
+		freshHead = latestSnapshotForBranch(freshMeta, branch)
 	}
 
 	result := make([]Update, len(updates))
 	copy(result, updates)
 
+	// A single transaction can stage several snapshots on the same branch (an
+	// append followed by a delete, say). They were chained at build time so
+	// snapshot[n].parent == snapshot[n-1]; on retry they must be replayed as a
+	// chain, each rebuilt snapshot becoming the parent of the next. Feeding
+	// every staged snapshot the same fresh branch head would turn the chain
+	// into siblings — the branch ref advances only to the last one, silently
+	// dropping the earlier snapshots' data. chainRebuilt forces every snapshot
+	// after the first rebuild to rebuild too: its recorded parent is an earlier
+	// staged snapshot that has itself just been reparented onto the fresh head.
+	chainRebuilt := false
 	for i, u := range result {
 		su, ok := u.(*addSnapshotUpdate)
 		if !ok || su.rebuildManifestList == nil {
 			continue
 		}
 
-		// Skip if the parent has not changed — saves an unnecessary S3 write.
-		if freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
-			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID {
+		// Skip only when nothing upstream changed: the running head still
+		// matches this snapshot's recorded parent, no earlier snapshot in this
+		// chain was rebuilt, and the table-wide values the rebuild recomputes
+		// are still acceptable. Saves an unnecessary S3 write.
+		if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
+			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID &&
+			stagedSnapshotStillValid(su.Snapshot, freshMeta) {
+			// Already parented on the running head; it becomes the parent of
+			// the next staged snapshot in the chain.
+			freshHead = su.Snapshot
+
 			continue
 		}
 
@@ -768,6 +984,10 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 
 		// The old manifest list is now an orphaned object in object storage.
 		orphanedPaths = append(orphanedPaths, oldManifestList)
+
+		// Chain the next staged snapshot onto the one just rebuilt.
+		freshHead = newSnap
+		chainRebuilt = true
 	}
 
 	return result, orphanedPaths, nil
@@ -872,10 +1092,7 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs > maxRetryDurationMs>>attempt {
 		ceiling = maxMs
 	} else {
-		ceiling = minMs << attempt
-		if ceiling > maxMs {
-			ceiling = maxMs
-		}
+		ceiling = min(minMs<<attempt, maxMs)
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent
@@ -890,12 +1107,9 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 
 // SnapshotAsOf finds the snapshot that was current as of or right before the given timestamp.
 func (t Table) SnapshotAsOf(timestampMs int64, inclusive bool) *Snapshot {
-	entries := slices.Collect(t.metadata.SnapshotLogs())
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := entries[i]
-		if (inclusive && entry.TimestampMs <= timestampMs) || (!inclusive && entry.TimestampMs < timestampMs) {
-			return t.metadata.SnapshotByID(entry.SnapshotID)
-		}
+	entry, ok := snapshotLogEntryAsOf(t.metadata.SnapshotLogs(), timestampMs, inclusive)
+	if ok {
+		return t.metadata.SnapshotByID(entry.SnapshotID)
 	}
 
 	return nil
@@ -965,15 +1179,25 @@ func WithSnapshotID(n int64) ScanOption {
 	}
 
 	return func(scan *Scan) {
+		if scan.asOfTimestamp != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select snapshot ID %d when as-of timestamp %d is already selected",
+				iceberg.ErrInvalidArgument, n, *scan.asOfTimestamp)
+
+			return
+		}
 		scan.snapshotID = &n
-		scan.asOfTimestamp = nil
 	}
 }
 
 func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 	return func(scan *Scan) {
+		if scan.snapshotID != nil {
+			scan.selectorErr = fmt.Errorf("%w: cannot select as-of timestamp %d when snapshot ID %d is already selected",
+				iceberg.ErrInvalidArgument, timeStampMs, *scan.snapshotID)
+
+			return
+		}
 		scan.asOfTimestamp = &timeStampMs
-		scan.snapshotID = nil
 	}
 }
 

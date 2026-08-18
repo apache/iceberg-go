@@ -86,7 +86,7 @@ func readRowIDsByID(t *testing.T, ctx context.Context, tbl *table.Table) map[int
 
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			require.False(t, rowIDCol.IsNull(i), "_row_id must be non-null for id=%d", idCol.Value(i))
 			got[idCol.Value(i)] = rowIDCol.Value(i)
 		}
@@ -154,7 +154,7 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(rowIDIdx).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			originalRowIDs = append(originalRowIDs, col.Value(i))
 		}
 		rec.Release()
@@ -194,7 +194,7 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIndices[0]).(*array.Int64)
 		seqCol := rec.Column(seqIndices[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			afterIDs = append(afterIDs, idCol.Value(i))
 			afterRowIDs = append(afterRowIDs, rowIDCol.Value(i))
 			require.False(t, seqCol.IsNull(i),
@@ -209,6 +209,108 @@ func TestCoWRewritePreservesRowID(t *testing.T) {
 		"_row_id must be preserved through CoW rewrite: row with id=1 keeps _row_id=0, row with id=3 keeps _row_id=2")
 	assert.Equal(t, []int64{createSeq, createSeq}, afterSeq,
 		"_last_updated_sequence_number must report the original creation snapshot's sequence number, not the rewrite's")
+}
+
+// TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis verifies that the
+// rewrite path can prune a non-matching row group without renumbering rows in
+// the group that survives. The row filter is still applied after lineage
+// synthesis, while Parquet statistics can skip the first group entirely.
+func TestCoWRewritePrunesRowGroupsBeforeLineageSynthesis(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV3RowLineageTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{
+		table.ParquetRowGroupLimitKey: "5",
+	}))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, parquetRowGroupCount(t, tbl), "fixture must have two row groups")
+
+	// Delete ids 1..5, which occupy the first row group. The survivor filter
+	// can therefore skip that group by statistics while the second group's
+	// rows retain their original IDs.
+	tbl, err = tbl.Delete(ctx, iceberg.LessThanEqual(iceberg.Reference("id"), int64(5)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{
+		6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+	}, readRowIDsByID(t, ctx, tbl))
+}
+
+func TestCoWRewriteDoesNotPruneMissingInitialDefault(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.DefaultAllocator
+
+	tbl := newV3RowLineageTestTable(t)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(iceberg.Properties{
+		table.ParquetRowGroupLimitKey: "5",
+	}))
+	tbl, err := tx.Commit(ctx)
+	require.NoError(t, err)
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "data", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+	data, err := array.TableFromJSON(mem, arrowSchema, []string{
+		`[{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},{"id":10,"data":"j"}]`,
+	})
+	require.NoError(t, err)
+	t.Cleanup(data.Release)
+
+	tbl, err = tbl.Append(ctx, array.NewTableReader(data, -1), nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, parquetRowGroupCount(t, tbl), "fixture must have two row groups")
+
+	// The existing file has no flag column, but its rows logically read flag=1.
+	// The survivor complement is id > 5 AND flag IS NOT NULL, so pruning must
+	// not translate the missing physical column to false before projection.
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpdateSchema(true, false).
+		AddColumn([]string{"flag"}, iceberg.PrimitiveTypes.Int32, "", false, iceberg.Int32Literal(1)).
+		Commit())
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	deleteFilter := iceberg.NewOr(
+		iceberg.LessThanEqual(iceberg.Reference("id"), int64(5)),
+		iceberg.IsNull(iceberg.Reference("flag")),
+	)
+	tbl, err = tbl.Delete(ctx, deleteFilter, nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{
+		6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+	}, readRowIDsByID(t, ctx, tbl))
+}
+
+func TestCoWRewriteNormalizesTheSurvivorComplement(t *testing.T) {
+	ctx := context.Background()
+	tbl := buildTwoRowGroupV3Table(t)
+
+	var err error
+	tbl, err = tbl.Delete(ctx,
+		iceberg.NotEqualTo(iceberg.Reference("id"), int64(7)), nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[int64]int64{7: 6}, readRowIDsByID(t, ctx, tbl),
+		"the complement of id != 7 must retain only the original row at position 6")
 }
 
 // TestCoWRewriteRowIDNextRowIDAccounting verifies that row-id accounting remains
@@ -326,7 +428,7 @@ func TestExecuteCompactionGroupPreservesRowID(t *testing.T) {
 
 		idCol := rec.Column(idIdx[0]).(*array.Int64)
 		rowIDCol := rec.Column(rowIDIdx[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			got[idCol.Value(i)] = rowIDCol.Value(i)
 		}
 		rec.Release()

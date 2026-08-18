@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,7 @@ import (
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -228,6 +230,18 @@ func writeTestManifestFile(
 	snapshotID int64,
 	index int,
 ) iceberg.ManifestFile {
+	return writeTestManifestFileWithVersion(t, fs, spec, schema, snapshotID, index, 2)
+}
+
+func writeTestManifestFileWithVersion(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	index int,
+	version int,
+) iceberg.ManifestFile {
 	t.Helper()
 
 	df := newTestDataFile(t, spec, "file://data-"+strconv.Itoa(index)+".parquet", nil)
@@ -237,7 +251,7 @@ func writeTestManifestFile(
 
 	path := "table-location/metadata/source-" + strconv.Itoa(index) + ".avro"
 	var buf bytes.Buffer
-	manifestFile, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+	manifestFile, err := iceberg.WriteManifest(path, &buf, version, spec, schema, snapshotID, entries)
 	require.NoError(t, err, "write manifest")
 	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
 
@@ -621,9 +635,15 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 
 // trackingWriteCloser wraps a bytes.Buffer and tracks if Close was called.
 type trackingWriteCloser struct {
-	buf     *bytes.Buffer
-	closed  bool
-	closeMu sync.Mutex
+	buf         *bytes.Buffer
+	closed      bool
+	closeErr    error
+	closeCount  int
+	writeCount  int
+	failWriteAt int
+	writeErr    error
+	onClose     func([]byte)
+	closeMu     sync.Mutex
 }
 
 func newTrackingWriteCloser() *trackingWriteCloser {
@@ -631,6 +651,16 @@ func newTrackingWriteCloser() *trackingWriteCloser {
 }
 
 func (t *trackingWriteCloser) Write(p []byte) (int, error) {
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+	if t.closed {
+		return 0, errors.New("write after close")
+	}
+	t.writeCount++
+	if t.failWriteAt > 0 && t.writeCount == t.failWriteAt {
+		return 0, t.writeErr
+	}
+
 	return t.buf.Write(p)
 }
 
@@ -638,8 +668,12 @@ func (t *trackingWriteCloser) Close() error {
 	t.closeMu.Lock()
 	defer t.closeMu.Unlock()
 	t.closed = true
+	t.closeCount++
+	if t.onClose != nil && t.closeCount == 1 {
+		t.onClose(t.buf.Bytes())
+	}
 
-	return nil
+	return t.closeErr
 }
 
 func (t *trackingWriteCloser) ReadFrom(r io.Reader) (int64, error) {
@@ -651,6 +685,13 @@ func (t *trackingWriteCloser) IsClosed() bool {
 	defer t.closeMu.Unlock()
 
 	return t.closed
+}
+
+func (t *trackingWriteCloser) CloseCount() int {
+	t.closeMu.Lock()
+	defer t.closeMu.Unlock()
+
+	return t.closeCount
 }
 
 // trackingIO is an IO implementation that tracks file writer closure.
@@ -717,6 +758,240 @@ func (t *trackingIO) GetWriterCount() int {
 	defer t.writersMu.Unlock()
 
 	return len(t.writers)
+}
+
+type closeErrorIO struct {
+	*trackingIO
+	closeErr    error
+	removeErr   error
+	failWriteAt int
+	writeErr    error
+	removes     []string
+}
+
+func newCloseErrorIO(closeErr, removeErr error) *closeErrorIO {
+	return &closeErrorIO{
+		trackingIO: newTrackingIO(),
+		closeErr:   closeErr,
+		removeErr:  removeErr,
+	}
+}
+
+func (c *closeErrorIO) Create(name string) (iceio.FileWriter, error) {
+	writer, err := c.trackingIO.Create(name)
+	if err == nil {
+		tracked := writer.(*trackingWriteCloser)
+		tracked.closeErr = c.closeErr
+		tracked.failWriteAt = c.failWriteAt
+		tracked.writeErr = c.writeErr
+		tracked.onClose = func(data []byte) {
+			c.files[name] = append([]byte(nil), data...)
+		}
+	}
+
+	return writer, err
+}
+
+func (c *closeErrorIO) Remove(name string) error {
+	c.removes = append(c.removes, name)
+	if c.removeErr != nil {
+		return c.removeErr
+	}
+
+	return c.trackingIO.Remove(name)
+}
+
+func TestCommitManifestsCloseFailureReturnsNoUpdates(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	removeErr := errors.New("manifest list cleanup failed")
+
+	for _, version := range []int{1, 2, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			fs := newCloseErrorIO(closeErr, removeErr)
+			spec := iceberg.NewPartitionSpec()
+			txn := createTestTransaction(t, fs, spec)
+			txn.meta.formatVersion = version
+			sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+			manifestVersion := version
+			if manifestVersion == 3 {
+				manifestVersion = 2
+			}
+			manifest := writeTestManifestFileWithVersion(
+				t, fs, spec, simpleSchema(), sp.snapshotID, 1, manifestVersion,
+			)
+
+			updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
+			require.ErrorIs(t, err, closeErr)
+			require.ErrorIs(t, err, removeErr)
+			require.NotContains(t, err.Error(), "write after close",
+				"the manifest-list writer must flush before the outer file writer closes")
+			require.Nil(t, updates)
+			require.Nil(t, requirements)
+			require.Len(t, fs.removes, 1)
+
+			if version == 3 {
+				fs.writersMu.Lock()
+				writerCount := len(fs.writers)
+				var output []byte
+				for _, writer := range fs.writers {
+					output = append([]byte(nil), writer.buf.Bytes()...)
+				}
+				fs.writersMu.Unlock()
+
+				require.Equal(t, 1, writerCount)
+				for _, writer := range fs.writers {
+					require.Equal(t, 1, writer.CloseCount(), "each output writer must close exactly once")
+				}
+				writtenManifests, readErr := iceberg.ReadManifestList(bytes.NewReader(output))
+				require.NoError(t, readErr)
+				require.Len(t, writtenManifests, 1, "manifest-list writer must flush before the output is closed")
+			}
+		})
+	}
+}
+
+func newFlushErrorIO(writeErr error) *closeErrorIO {
+	fs := newCloseErrorIO(nil, nil)
+	fs.failWriteAt = 2 // header write succeeds; the OCF close-time block flush fails.
+	fs.writeErr = writeErr
+
+	return fs
+}
+
+func TestRebuildManifestListCloseFailureReturnsNoSnapshot(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	removeErr := errors.New("manifest list cleanup failed")
+
+	for _, version := range []int{1, 2, 3} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			initialIO := newTrackingIO()
+			spec := iceberg.NewPartitionSpec()
+			txn := createTestTransaction(t, initialIO, spec)
+			txn.meta.formatVersion = version
+			sp := newFastAppendFilesProducer(OpAppend, txn, initialIO, nil, nil)
+			manifestVersion := version
+			if manifestVersion == 3 {
+				manifestVersion = 2
+			}
+			manifest := writeTestManifestFileWithVersion(
+				t, initialIO, spec, simpleSchema(), sp.snapshotID, 1, manifestVersion,
+			)
+
+			updates, _, err := sp.commitManifests(
+				[]iceberg.ManifestFile{manifest},
+				[]iceberg.ManifestFile{manifest},
+			)
+			require.NoError(t, err)
+			addSnap := updates[0].(*addSnapshotUpdate)
+
+			retryFS := newCloseErrorIO(closeErr, removeErr)
+			var freshMeta Metadata
+			if version == 3 {
+				freshMeta = newV3MetadataWithNextRowID(t, 0)
+			} else {
+				freshMeta = newMetadataWithLastSeqNum(t, 1)
+			}
+
+			rebuilt, err := addSnap.rebuildManifestList(
+				context.Background(), freshMeta, nil, retryFS, 1,
+			)
+			require.ErrorIs(t, err, closeErr)
+			require.ErrorIs(t, err, removeErr)
+			require.Nil(t, rebuilt)
+			require.Len(t, retryFS.removes, 1)
+			require.Empty(t, retryFS.GetUnclosedWriters())
+			retryFS.writersMu.Lock()
+			retryWriters := make([]*trackingWriteCloser, 0, len(retryFS.writers))
+			for _, writer := range retryFS.writers {
+				retryWriters = append(retryWriters, writer)
+			}
+			retryFS.writersMu.Unlock()
+			for _, writer := range retryWriters {
+				require.Equal(t, 1, writer.CloseCount(), "each retry writer must close exactly once")
+			}
+		})
+	}
+}
+
+func TestCommitManifestsCloseFailureRemovesPartialOutput(t *testing.T) {
+	closeErr := errors.New("manifest list close failed")
+	fs := newCloseErrorIO(closeErr, nil)
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, fs, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+	manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	_, _, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
+	require.ErrorIs(t, err, closeErr)
+	require.Len(t, fs.removes, 1)
+	assert.NotContains(t, fs.files, fs.removes[0], "failed manifest-list output must be removed after close failure")
+
+	fs.writersMu.Lock()
+	defer fs.writersMu.Unlock()
+	for _, writer := range fs.writers {
+		require.Equal(t, 1, writer.CloseCount())
+	}
+}
+
+func TestCommitManifestsInnerCloseFailureReturnsNoUpdates(t *testing.T) {
+	flushErr := errors.New("manifest list flush failed")
+	fs := newFlushErrorIO(flushErr)
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, fs, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, fs, nil, nil)
+	manifest := writeTestManifestFile(t, fs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	updates, requirements, err := sp.commitManifests([]iceberg.ManifestFile{manifest}, nil)
+	require.ErrorIs(t, err, flushErr)
+	require.NotContains(t, err.Error(), "write after close")
+	require.Nil(t, updates)
+	require.Nil(t, requirements)
+	require.Len(t, fs.removes, 1)
+	assert.NotContains(t, fs.files, fs.removes[0])
+
+	fs.writersMu.Lock()
+	defer fs.writersMu.Unlock()
+	for _, writer := range fs.writers {
+		require.Equal(t, 1, writer.CloseCount())
+	}
+}
+
+func TestRebuildManifestListSummaryFailureCreatesNoOutput(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	txn.meta.formatVersion = 2
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	manifest := writeTestManifestFile(t, wfs, spec, simpleSchema(), sp.snapshotID, 1)
+
+	updates, _, err := sp.commitManifests(
+		[]iceberg.ManifestFile{manifest},
+		[]iceberg.ManifestFile{manifest},
+	)
+	require.NoError(t, err)
+	addSnap := updates[0].(*addSnapshotUpdate)
+
+	parentManifestList := "mem://default/table-location/metadata/fresh-parent.avro"
+	out, err := wfs.Create(parentManifestList)
+	require.NoError(t, err)
+	require.NoError(t, iceberg.WriteManifestList(2, out, 77, nil, ptr(int64(0)), 0, nil))
+	require.NoError(t, out.Close())
+
+	sp.op = Operation("unsupported")
+	freshParent := &Snapshot{
+		SnapshotID:   77,
+		ManifestList: parentManifestList,
+		Summary:      &Summary{Operation: OpAppend},
+	}
+	retryFS := newTrackingIO()
+
+	rebuilt, err := addSnap.rebuildManifestList(
+		context.Background(), newMetadataWithLastSeqNum(t, 1), freshParent, retryFS, 1,
+	)
+	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	require.Nil(t, rebuilt)
+	require.Zero(t, retryFS.GetWriterCount())
 }
 
 // TestManifestWriterClosesUnderlyingFile tests that when using newManifestWriter,
@@ -788,6 +1063,61 @@ func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
 	require.ElementsMatch(t, []int32{0, 1}, deleteManifestSpecIDs)
 }
 
+// changedPartitionPaths returns the partition paths named by a snapshot
+// summary's changed-partition entries.
+func changedPartitionPaths(summary iceberg.Properties) map[string]bool {
+	paths := make(map[string]bool)
+	for key := range summary {
+		if path, ok := strings.CutPrefix(key, changedPartitionPrefix); ok {
+			paths[path] = true
+		}
+	}
+
+	return paths
+}
+
+// TestAccumulateSummaryDeltaResolvesRemovedFileSpecByID checks that removed
+// files resolve their partition spec by ID, the way added files already do.
+// Removing a non-default spec that precedes the default one leaves a specs
+// slice whose positions no longer line up with spec IDs, so treating a spec ID
+// as a slice index reads the wrong spec or runs off the end of the slice.
+func TestAccumulateSummaryDeltaResolvesRemovedFileSpecByID(t *testing.T) {
+	txn, wfs := createTestTransactionWithMemIO(t, iceberg.NewPartitionSpec())
+	require.NoError(t, txn.meta.SetProperties(iceberg.Properties{WritePartitionSummaryLimitKey: "10"}))
+
+	bucketSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+	require.NoError(t, txn.meta.AddPartitionSpec(&bucketSpec, false))
+	truncSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id_trunc", Transform: iceberg.TruncateTransform{Width: 8},
+	})
+	require.NoError(t, txn.meta.AddPartitionSpec(&truncSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	require.NoError(t, txn.meta.RemovePartitionSpecs([]int{1}))
+
+	currentSpec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	require.Equal(t, 2, currentSpec.ID(), "test setup should leave spec 2 as the default")
+	require.Len(t, txn.meta.specs, 2, "removing spec 1 should decouple slice positions from spec IDs")
+
+	df := newTestDataFile(t, *currentSpec, "mem://default/table-location/data/spec-2.parquet",
+		map[int]any{currentSpec.Field(0).FieldID: int32(0)})
+
+	appended := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	appended.appendDataFile(df)
+	addedSummary, err := appended.accumulateSummaryDelta(nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"id_trunc=0": true}, changedPartitionPaths(addedSummary))
+
+	deleted := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	deleted.deleteDataFile(df)
+	removedSummary, err := deleted.accumulateSummaryDelta(nil)
+	require.NoError(t, err)
+	require.Equal(t, changedPartitionPaths(addedSummary), changedPartitionPaths(removedSummary),
+		"adding and removing the same file must report the same changed partition")
+}
+
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
 // closes the underlying file writer. This is related to issue #644 and #681.
 func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
@@ -852,7 +1182,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	sp := newFastAppendFilesProducer(OpAppend, txn, blockingIO, nil, nil)
 
 	manifests := make([]iceberg.ManifestFile, 0, 8)
-	for i := 0; i < cap(manifests); i++ {
+	for i := range cap(manifests) {
 		manifests = append(manifests, writeTestManifestFile(t, blockingIO, spec, schema, sp.snapshotID, i))
 	}
 
@@ -1006,8 +1336,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 // This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	blockingIO := newBlockingTrackingIO()
 	spec := iceberg.NewPartitionSpec()
@@ -1198,6 +1527,38 @@ func TestSummary_InheritsPreviousSnapshotTotals(t *testing.T) {
 	require.Equal(t, "6", sum.Properties[totalDataFilesKey],
 		"total-data-files must inherit parent total (5) plus one added file")
 	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
+}
+
+func TestCommitPersistsEnvironmentContextInSnapshotSummary(t *testing.T) {
+	keys := []string{
+		iceberg.EnvironmentEngineNameKey,
+		iceberg.EnvironmentEngineVersionKey,
+	}
+	preserveEnvironmentProperties(t, keys...)
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineNameKey, "iceberg-go-test")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineVersionKey, "1.0")
+
+	spec := iceberg.NewPartitionSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, iceberg.Properties{
+		iceberg.EnvironmentEngineNameKey: "snapshot-property",
+		"user-summary":                   "present",
+	})
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	updates, requirements, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(updates, requirements))
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	snapshot := meta.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	require.NotNil(t, snapshot.Summary)
+	require.Equal(t, "Apache Iceberg Go "+iceberg.Version(), snapshot.Summary.Properties["iceberg-version"])
+	require.Equal(t, "iceberg-go-test", snapshot.Summary.Properties[iceberg.EnvironmentEngineNameKey])
+	require.Equal(t, "1.0", snapshot.Summary.Properties[iceberg.EnvironmentEngineVersionKey])
+	require.Equal(t, "present", snapshot.Summary.Properties["user-summary"])
 }
 
 // TestSummary_ParentSnapshotWithoutSummary verifies that summary computation

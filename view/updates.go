@@ -20,6 +20,8 @@ package view
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -207,7 +209,7 @@ type setPropertiesUpdate struct {
 func NewSetPropertiesUpdate(updates iceberg.Properties) *setPropertiesUpdate {
 	return &setPropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateSetProperties},
-		Updates:    updates,
+		Updates:    maps.Clone(updates),
 	}
 }
 
@@ -228,7 +230,7 @@ type removePropertiesUpdate struct {
 func NewRemovePropertiesUpdate(removals []string) *removePropertiesUpdate {
 	return &removePropertiesUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateRemoveProperties},
-		Removals:   removals,
+		Removals:   slices.Clone(removals),
 	}
 }
 

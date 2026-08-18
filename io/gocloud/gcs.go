@@ -86,6 +86,14 @@ func ParseGCSConfig(props map[string]string) *gcsblob.Options {
 const gcsScope = "https://www.googleapis.com/auth/devstorage.read_write"
 
 func gcsCredentials(ctx context.Context, props map[string]string) (*google.Credentials, error) {
+	return gcsCredentialsWithDefault(ctx, props, gcp.DefaultCredentials)
+}
+
+func gcsCredentialsWithDefault(
+	ctx context.Context,
+	props map[string]string,
+	defaultCredentials func(context.Context) (*google.Credentials, error),
+) (*google.Credentials, error) {
 	// Explicit no-auth wins over everything: use an anonymous client even when
 	// ADC is available.
 	if noAuth, err := strconv.ParseBool(props[io.GCSNoAuth]); err == nil && noAuth {
@@ -131,7 +139,13 @@ func gcsCredentials(ctx context.Context, props map[string]string) (*google.Crede
 		return parse(data, fmt.Sprintf("%s %q", io.GCSKeyPath, path))
 	}
 
-	creds, _ := gcp.DefaultCredentials(ctx)
+	creds, err := defaultCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcs: no credentials found; set %s=true for anonymous/public bucket access: %w", io.GCSNoAuth, err)
+	}
+	if creds == nil {
+		return nil, fmt.Errorf("gcs: no credentials found; set %s=true for anonymous/public bucket access", io.GCSNoAuth)
+	}
 
 	return creds, nil
 }

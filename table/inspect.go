@@ -18,9 +18,13 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -319,12 +323,16 @@ func (i InspectTable) appendManifestRows(
 		default:
 			return fmt.Errorf("manifest %s has unknown content %d", manifest.FilePath(), manifestContent)
 		}
+		snapshotID := manifest.SnapshotID()
+		if snapshotID < 0 {
+			return fmt.Errorf("manifest %s has negative added_snapshot_id %d", manifest.FilePath(), snapshotID)
+		}
 
 		content.Append(int32(manifestContent))
 		path.Append(manifest.FilePath())
 		length.Append(manifest.Length())
 		partitionSpecID.Append(manifest.PartitionSpecID())
-		addedSnapshotID.Append(manifest.SnapshotID())
+		addedSnapshotID.Append(snapshotID)
 		appendCount := func(builder *array.Int32Builder, name string, count int32) error {
 			if err := appendManifestCount(builder, manifest.Version(), name, count); err != nil {
 				return fmt.Errorf("manifest %s: %w", manifest.FilePath(), err)
@@ -351,6 +359,8 @@ func (i InspectTable) appendManifestRows(
 			addedDataFiles.Append(0)
 			existingDataFiles.Append(0)
 			deletedDataFiles.Append(0)
+			// ManifestFile's data-file accessors expose the generic manifest-list
+			// file counts, which represent delete files for delete manifests.
 			if err := appendCount(addedDeleteFiles, "added_delete_files", manifest.AddedDataFiles()); err != nil {
 				return err
 			}
@@ -370,18 +380,19 @@ func (i InspectTable) appendManifestRows(
 			}
 		}
 
+		partitions := manifest.Partitions()
+		if partitions == nil {
+			partitionSummaries.Append(true)
+
+			continue
+		}
+
 		spec := i.tbl.metadata.PartitionSpecByID(int(manifest.PartitionSpecID()))
 		if spec == nil {
 			return fmt.Errorf("manifest %s references missing partition spec %d",
 				manifest.FilePath(), manifest.PartitionSpecID())
 		}
 		partType := spec.PartitionType(i.tbl.metadata.CurrentSchema())
-		partitions := manifest.Partitions()
-		if partitions == nil {
-			partitionSummaries.AppendNull()
-
-			continue
-		}
 		if len(partitions) > spec.NumFields() {
 			return fmt.Errorf("manifest %s has %d partition summaries for partition spec %d with %d fields",
 				manifest.FilePath(), len(partitions), manifest.PartitionSpecID(), spec.NumFields())
@@ -400,10 +411,12 @@ func (i InspectTable) appendManifestRows(
 			fieldType := partType.FieldList[idx].Type
 			transform := spec.Field(idx).Transform
 			if err := appendManifestBound(summaryLower, fieldType, transform, summary.LowerBound); err != nil {
-				return fmt.Errorf("manifest %s partition field %d lower bound: %w", manifest.FilePath(), idx, err)
+				return fmt.Errorf("manifest %s partition field %q lower bound: %w",
+					manifest.FilePath(), partType.FieldList[idx].Name, err)
 			}
 			if err := appendManifestBound(summaryUpper, fieldType, transform, summary.UpperBound); err != nil {
-				return fmt.Errorf("manifest %s partition field %d upper bound: %w", manifest.FilePath(), idx, err)
+				return fmt.Errorf("manifest %s partition field %q upper bound: %w",
+					manifest.FilePath(), partType.FieldList[idx].Name, err)
 			}
 		}
 	}
@@ -413,7 +426,9 @@ func (i InspectTable) appendManifestRows(
 
 func appendManifestCount(builder *array.Int32Builder, version int, name string, count int32) error {
 	if count < 0 {
-		if version == 1 {
+		if version == 1 && count == -1 {
+			// V1 counts are optional, and an absent count means unknown rather
+			// than zero. The V1 decoder represents that absent value as -1.
 			builder.AppendNull()
 
 			return nil
@@ -438,7 +453,7 @@ func (i InspectTable) currentSnapshotManifests(ctx context.Context) ([]iceberg.M
 
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get file IO: %w", err)
 	}
 
 	return snapshot.Manifests(fs)
@@ -464,6 +479,183 @@ func appendManifestBound(builder *array.StringBuilder, typ iceberg.Type, transfo
 	builder.Append(transform.ToHumanStrType(typ, literal.Any()))
 
 	return nil
+}
+
+// Refs returns one row per snapshot reference known to the table. Reference
+// names are sorted to make the result deterministic even though table metadata
+// stores refs in a map.
+//
+// Columns:
+//   - name (string, required): the branch or tag name
+//   - type (string, required): BRANCH or TAG
+//   - snapshot_id (long, required): the referenced snapshot
+//   - max_reference_age_in_ms (long, optional): tag/branch reference retention
+//   - min_snapshots_to_keep (int, optional): branch snapshot retention
+//   - max_snapshot_age_in_ms (long, optional): branch snapshot retention
+//
+// The returned reader holds a single record batch. The caller must Release it.
+func (i InspectTable) Refs(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := SchemaToArrowSchema(RefsSchema(), nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect refs: build arrow schema: %w", err)
+	}
+
+	type refRow struct {
+		name string
+		ref  SnapshotRef
+	}
+	var refs []refRow
+	for name, ref := range i.tbl.metadata.Refs() {
+		refs = append(refs, refRow{name: name, ref: ref})
+	}
+	slices.SortFunc(refs, func(a, b refRow) int {
+		return cmp.Compare(a.name, b.name)
+	})
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	name := bldr.Field(0).(*array.StringBuilder)
+	refType := bldr.Field(1).(*array.StringBuilder)
+	snapshotID := bldr.Field(2).(*array.Int64Builder)
+	maxReferenceAge := bldr.Field(3).(*array.Int64Builder)
+	minSnapshotsToKeep := bldr.Field(4).(*array.Int32Builder)
+	maxSnapshotAge := bldr.Field(5).(*array.Int64Builder)
+
+	for _, row := range refs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		name.Append(row.name)
+		refType.Append(strings.ToUpper(string(row.ref.SnapshotRefType)))
+		snapshotID.Append(row.ref.SnapshotID)
+
+		if row.ref.MaxRefAgeMs != nil {
+			maxReferenceAge.Append(*row.ref.MaxRefAgeMs)
+		} else {
+			maxReferenceAge.AppendNull()
+		}
+		if row.ref.MinSnapshotsToKeep != nil {
+			value := *row.ref.MinSnapshotsToKeep
+			if value < math.MinInt32 || value > math.MaxInt32 {
+				return nil, fmt.Errorf(
+					"inspect refs: min snapshots to keep %d is outside int32 range",
+					value,
+				)
+			}
+			minSnapshotsToKeep.Append(int32(value))
+		} else {
+			minSnapshotsToKeep.AppendNull()
+		}
+		if row.ref.MaxSnapshotAgeMs != nil {
+			maxSnapshotAge.Append(*row.ref.MaxSnapshotAgeMs)
+		} else {
+			maxSnapshotAge.AppendNull()
+		}
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect refs: %w", err)
+	}
+
+	return rr, nil
+}
+
+// MetadataLogEntries returns one row for every metadata file in the table's
+// metadata log, plus the current metadata file when its location is set.
+// Snapshot information is resolved from the snapshot log at each metadata
+// file's timestamp.
+//
+// Columns:
+//   - timestamp (timestamptz, required): when the metadata file was written
+//   - file (string, required): metadata file location
+//   - latest_snapshot_id (long, optional): latest snapshot visible then
+//   - latest_schema_id (int, optional): schema used by that snapshot
+//   - latest_sequence_number (long, optional): sequence number of that snapshot
+//
+// The returned reader holds a single record batch. The caller must Release it.
+func (i InspectTable) MetadataLogEntries(ctx context.Context) (array.RecordReader, error) {
+	arrowSchema, err := SchemaToArrowSchema(MetadataLogEntriesSchema(), nil, true, false)
+	if err != nil {
+		return nil, fmt.Errorf("inspect metadata log entries: build arrow schema: %w", err)
+	}
+
+	entries := slices.Collect(i.tbl.metadata.PreviousFiles())
+	if i.tbl.metadataLocation != "" {
+		entries = append(entries, MetadataLogEntry{
+			MetadataFile: i.tbl.metadataLocation,
+			TimestampMs:  i.tbl.metadata.LastUpdatedMillis(),
+		})
+	}
+
+	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+	defer bldr.Release()
+
+	timestamp := bldr.Field(0).(*array.TimestampBuilder)
+	file := bldr.Field(1).(*array.StringBuilder)
+	latestSnapshotID := bldr.Field(2).(*array.Int64Builder)
+	latestSchemaID := bldr.Field(3).(*array.Int32Builder)
+	latestSequenceNumber := bldr.Field(4).(*array.Int64Builder)
+
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		timestamp.Append(arrow.Timestamp(entry.TimestampMs * 1000))
+		file.Append(entry.MetadataFile)
+
+		snapshotID, snapshot, found := latestSnapshotAt(i.tbl.metadata, entry.TimestampMs)
+		if !found {
+			latestSnapshotID.AppendNull()
+			latestSchemaID.AppendNull()
+			latestSequenceNumber.AppendNull()
+
+			continue
+		}
+
+		latestSnapshotID.Append(snapshotID)
+		if snapshot == nil {
+			latestSchemaID.AppendNull()
+			latestSequenceNumber.AppendNull()
+
+			continue
+		}
+		if snapshot.SchemaID != nil {
+			// Iceberg schema IDs are bounded to int32 by the specification.
+			//nolint:gosec // schema IDs are spec-bounded to int32
+			latestSchemaID.Append(int32(*snapshot.SchemaID))
+		} else {
+			latestSchemaID.AppendNull()
+		}
+		latestSequenceNumber.Append(snapshot.SequenceNumber)
+	}
+
+	rr, err := singleBatchReader(arrowSchema, bldr)
+	if err != nil {
+		return nil, fmt.Errorf("inspect metadata log entries: %w", err)
+	}
+
+	return rr, nil
+}
+
+// latestSnapshotAt follows the metadata-table behavior used by Java's
+// MetadataLogEntriesTable: it resolves against the current snapshot log, not
+// a point-in-time copy of that log. Trimming old entries can therefore shift
+// the result to a later eligible entry or make it unavailable. Equal
+// timestamps keep the first entry encountered, matching Java's
+// SnapshotUtil.snapshotIdAsOfTime; PyIceberg keeps the last entry instead.
+// The snapshot ID remains available when the snapshot itself has expired from
+// metadata.
+func latestSnapshotAt(metadata Metadata, timestampMs int64) (int64, *Snapshot, bool) {
+	entry, found := snapshotLogEntryAsOf(metadata.SnapshotLogs(), timestampMs, true)
+	if !found {
+		return 0, nil, false
+	}
+
+	return entry.SnapshotID, metadata.SnapshotByID(entry.SnapshotID), true
 }
 
 func manifestBoundLiteral(typ iceberg.Type, bound []byte) (iceberg.Literal, error) {
@@ -532,6 +724,33 @@ func SnapshotsSchema() *iceberg.Schema {
 	)
 }
 
+// RefsSchema returns a fresh Iceberg schema for the refs metadata table. The
+// field IDs and names match Java's RefsTable for cross-client parity; callers
+// should not rely on pointer identity.
+func RefsSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 2, Name: "type", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 4, Name: "max_reference_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: 5, Name: "min_snapshots_to_keep", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 6, Name: "max_snapshot_age_in_ms", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	)
+}
+
+// MetadataLogEntriesSchema returns a fresh Iceberg schema for the
+// metadata-log-entries metadata table. The field IDs and names match Java's
+// implementation; callers should not rely on pointer identity.
+func MetadataLogEntriesSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "timestamp", Type: iceberg.PrimitiveTypes.TimestampTz, Required: true},
+		iceberg.NestedField{ID: 2, Name: "file", Type: iceberg.PrimitiveTypes.String, Required: true},
+		iceberg.NestedField{ID: 3, Name: "latest_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+		iceberg.NestedField{ID: 4, Name: "latest_schema_id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 5, Name: "latest_sequence_number", Type: iceberg.PrimitiveTypes.Int64, Required: false},
+	)
+}
+
 // ManifestsSchema returns the Iceberg schema of the manifests metadata table.
 func ManifestsSchema() *iceberg.Schema {
 	return iceberg.NewSchema(0,
@@ -540,12 +759,12 @@ func ManifestsSchema() *iceberg.Schema {
 		iceberg.NestedField{ID: 2, Name: "length", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 		iceberg.NestedField{ID: 3, Name: "partition_spec_id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
 		iceberg.NestedField{ID: 4, Name: "added_snapshot_id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
-		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
-		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 5, Name: "added_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 6, Name: "existing_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 7, Name: "deleted_data_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 15, Name: "added_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 16, Name: "existing_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 17, Name: "deleted_delete_files_count", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 8, Name: "partition_summaries", Required: true, Type: &iceberg.ListType{
 			ElementID:       9,
 			ElementRequired: true,

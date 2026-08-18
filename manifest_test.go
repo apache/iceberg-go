@@ -486,10 +486,14 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	})
 	schema := NewSchema(0)
 
-	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
+	stats, err := newPartitionSummaryStats(spec, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := stats.update(map[int]any{1000: "historical-value"}); err != nil {
+		t.Fatal(err)
+	}
+	summaries := stats.summaries()
 	if len(summaries) != 1 {
 		t.Fatalf("expected one partition summary, got %d", len(summaries))
 	}
@@ -498,6 +502,169 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	}
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
+func TestManifestWriterUpdatesPartitionSummariesIncrementally(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "region", Type: PrimitiveTypes.String},
+		NestedField{ID: 2, Name: "temperature", Type: PrimitiveTypes.Float64},
+		NestedField{ID: 3, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "temperature", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+
+	newEntry := func(path string, partition map[int]any) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []ManifestEntry{
+		newEntry("east.parquet", map[int]any{1000: "east", 1001: 1.0, 1002: []byte{2}}),
+		newEntry("null.parquet", map[int]any{1000: nil, 1001: math.NaN(), 1002: []byte{1}}),
+		newEntry("west.parquet", map[int]any{1000: "west", 1001: 3.0, 1002: []byte{3}}),
+	}
+	if err := writer.Add(entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Existing(entries[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Delete(entries[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 3 {
+		t.Fatalf("expected three partition summaries, got %d", len(summaries))
+	}
+
+	assertSummary := func(index int, containsNull, containsNaN bool, lower, upper Literal) {
+		t.Helper()
+		lowerBytes, err := lower.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upperBytes, err := upper.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		summary := summaries[index]
+		if summary.ContainsNull != containsNull || summary.ContainsNaN == nil || *summary.ContainsNaN != containsNaN {
+			t.Fatalf("summary %d flags = (%v, %v), want (%v, %v)", index, summary.ContainsNull, summary.ContainsNaN, containsNull, containsNaN)
+		}
+		if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, lowerBytes) {
+			t.Fatalf("summary %d lower bound = %v, want %v", index, summary.LowerBound, lowerBytes)
+		}
+		if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, upperBytes) {
+			t.Fatalf("summary %d upper bound = %v, want %v", index, summary.UpperBound, upperBytes)
+		}
+	}
+
+	assertSummary(0, true, false, NewLiteral("east"), NewLiteral("west"))
+	assertSummary(1, false, true, NewLiteral(1.0), NewLiteral(3.0))
+	assertSummary(2, false, false, NewLiteral([]byte{1}), NewLiteral([]byte{3}))
+}
+
+func TestManifestWriterCopiesBinaryPartitionSummaryBounds(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+	low := []byte{1}
+	high := []byte{2}
+
+	newEntry := func(path string, partition []byte) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			map[int]any{1000: partition},
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("low.parquet", low)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("high.parquet", high)); err != nil {
+		t.Fatal(err)
+	}
+
+	low[0] = 3
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 1 {
+		t.Fatalf("expected one partition summary, got %d", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, []byte{1}) {
+		t.Fatalf("lower bound = %v, want [1]", summary.LowerBound)
+	}
+	if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, []byte{2}) {
+		t.Fatalf("upper bound = %v, want [2]", summary.UpperBound)
 	}
 }
 
@@ -512,6 +679,41 @@ type ManifestTestSuite struct {
 
 	v3ManifestList    bytes.Buffer
 	v3ManifestEntries bytes.Buffer
+}
+
+type manifestFailingWriter struct {
+	err error
+}
+
+func (w manifestFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type manifestCloseErrorCodec struct {
+	ocf.Codec
+	err error
+}
+
+func (c manifestCloseErrorCodec) Close() error {
+	return c.err
+}
+
+func (m *ManifestTestSuite) setManifestWriterCloseError(writer *ManifestWriter, closeErr error) {
+	m.T().Helper()
+
+	avroSchema := writer.writer.Schema()
+	m.Require().NoError(writer.writer.Close())
+
+	replacement, err := ocf.NewWriter(
+		io.Discard,
+		avroSchema,
+		ocf.WithCodec(manifestCloseErrorCodec{
+			Codec: ocf.DeflateCodec(flate.DefaultCompression),
+			err:   closeErr,
+		}),
+	)
+	m.Require().NoError(err)
+	writer.writer = replacement
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
@@ -2152,6 +2354,160 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Equal("[]", string(md["partition-spec"]))
 }
 
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+			writer, err := NewManifestWriter(version, &out, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorContains(writer.Add(manifestEntryV2Records[0]), "closed manifest writer")
+			m.Same(firstErr, writer.Close())
+
+			_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
+			m.Same(firstErr, err)
+
+			manifest := NewManifestFile(
+				version,
+				"manifest.avro",
+				int64(out.Len()),
+				int32(UnpartitionedSpec.ID()),
+				snapshotID,
+			).Build()
+			entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+			m.Require().NoError(err)
+			m.Empty(entries)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterSuccessfulCloseIsTerminal() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.NoError(writer.Close())
+			m.NoError(writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseAfterConstructionFailure() {
+	writeErr := errors.New("write failed")
+
+	writer, err := NewManifestWriter(
+		2,
+		manifestFailingWriter{err: writeErr},
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().ErrorIs(err, writeErr)
+	m.Require().NotNil(writer)
+
+	var closeErr error
+	m.NotPanics(func() {
+		closeErr = writer.Close()
+	})
+	m.ErrorIs(closeErr, ErrEmptyManifest)
+
+	m.Same(closeErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseJoinsUnderlyingError() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(
+				version,
+				io.Discard,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+			)
+			m.Require().NoError(err)
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorIs(firstErr, underlyingErr)
+			m.EqualError(
+				firstErr,
+				"empty manifest file has been written\nunderlying close failed",
+			)
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCloseAfterAddEntryFailure() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.Require().Error(writer.addEntry(&manifestEntry{EntryStatus: ManifestEntryStatus(-1)}))
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().Same(underlyingErr, firstErr)
+			m.False(errors.Is(firstErr, ErrEmptyManifest))
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestWriteManifestEmptyErrorIsNotDuplicated() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+
+			_, err := WriteManifest(
+				"manifest.avro",
+				&out,
+				version,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+				nil,
+			)
+			m.ErrorIs(err, ErrEmptyManifest)
+			m.Same(ErrEmptyManifest, err)
+		})
+	}
+
+	var out bytes.Buffer
+	_, _, err := WriteManifestV3(
+		"manifest.avro",
+		&out,
+		0,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.ErrorIs(err, ErrEmptyManifest)
+	m.Same(ErrEmptyManifest, err)
+}
+
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
 	schema := NewSchema(
 		0,
@@ -2826,9 +3182,50 @@ func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() 
 	m.Zero(writer.existingRows)
 	m.Zero(writer.deletedFiles)
 	m.Zero(writer.deletedRows)
-	m.Empty(writer.partitions)
+	m.NoError(writer.partitionStatsErr)
+	m.Equal([]FieldSummary{{ContainsNaN: &falseBool}}, writer.partitionStats.summaries())
 	m.Equal(int64(-1), writer.minSeqNum)
 	m.Equal(originalPartitionData, dataFile.PartitionData)
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionSummaryBounds() {
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	partitionSpec := NewPartitionSpecID(
+		1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "part", Transform: IdentityTransform{}},
+	)
+	partition := []byte{0x01, 0x02}
+	builder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/file.parquet",
+		ParquetFile,
+		map[int]any{1000: partition},
+		nil,
+		nil,
+		1,
+		10,
+	)
+	m.Require().NoError(err)
+
+	seqNum := int64(1)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+	writer, err := NewManifestWriter(2, io.Discard, partitionSpec, schema, snapshotID)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(entry))
+
+	borrowed := entry.DataFile().(*dataFile).DataFilePartitionRef(internal.DataFileRef{})
+	borrowed[1000].([]byte)[0] = 0xff
+	borrowed[1000] = []byte{0xff, 0xff}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	m.Require().NoError(err)
+	summaries := manifest.Partitions()
+	m.Require().Len(summaries, 1)
+	m.Require().NotNil(summaries[0].LowerBound)
+	m.Require().NotNil(summaries[0].UpperBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].LowerBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].UpperBound)
 }
 
 func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
@@ -3087,23 +3484,243 @@ func (m *ManifestTestSuite) TestManifestEntryPresentEmptyListSurvivesRewrite() {
 	// manifest-list partitions field (*[]FieldSummary); split_offsets is *[]int64,
 	// an array of primitives. Cover both so the record-element case (the one that
 	// actually broke for partitions) is guarded here too.
-	built := builder.SplitOffsets([]int64{}).ColumnSizes(map[int]int64{}).Build()
+	built := builder.
+		ColumnSizes(map[int]int64{}).
+		ValueCounts(map[int]int64{}).
+		NullValueCounts(map[int]int64{}).
+		NaNValueCounts(map[int]int64{}).
+		LowerBoundValues(map[int][]byte{}).
+		UpperBoundValues(map[int][]byte{}).
+		KeyMetadata([]byte{}).
+		SplitOffsets([]int64{}).
+		EqualityFieldIDs([]int{}).
+		Build()
 	m.Require().NotNil(built.(*dataFile).Splits, "builder should keep split_offsets present")
 	m.Require().NotNil(built.(*dataFile).ColSizes, "builder should keep column_sizes present")
 
 	// First round trip mirrors reading an existing manifest: a present-empty
 	// array decodes to a non-nil pointer over a nil slice.
 	first := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, built).SequenceNum(1).Build())
-	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
 	m.Require().NotNil(first.ColSizes, "decoded column_sizes must stay present, not null")
+	m.Require().NotNil(first.ValCounts, "decoded value_counts must stay present, not null")
+	m.Require().NotNil(first.NullCounts, "decoded null_value_counts must stay present, not null")
+	m.Require().NotNil(first.NaNCounts, "decoded nan_value_counts must stay present, not null")
+	m.Require().NotNil(first.LowerBounds, "decoded lower_bounds must stay present, not null")
+	m.Require().NotNil(first.UpperBounds, "decoded upper_bounds must stay present, not null")
+	m.Require().NotNil(first.Key, "decoded key_metadata must stay present, not null")
+	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
+	m.Require().NotNil(first.EqualityIDs, "decoded equality_ids must stay present, not null")
 
 	// Re-encoding the decoded entry is what a manifest rewrite/merge does. The
 	// present-empty lists must not collapse to null here.
 	second := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, first).SequenceNum(1).Build())
+	m.Require().NotNil(second.ColSizes,
+		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.ValCounts,
+		"present-empty value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NullCounts,
+		"present-empty null_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NaNCounts,
+		"present-empty nan_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.LowerBounds,
+		"present-empty lower_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.UpperBounds,
+		"present-empty upper_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.Key,
+		"present-empty key_metadata must survive a decode -> re-encode rewrite as a present value")
 	m.Require().NotNil(second.Splits,
 		"present-empty split_offsets must survive a decode -> re-encode rewrite as a present array")
 	m.Require().NotNil(second.ColSizes,
 		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.EqualityIDs,
+		"present-empty equality_ids must survive a decode -> re-encode rewrite as a present array")
+}
+
+func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation() {
+	partition := []byte{0x01, 0x02}
+	partitionData := map[int]any{1000: partition}
+	spec := NewPartitionSpec(PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{}})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		partitionData, nil, nil, 1, 10)
+	m.Require().NoError(err)
+
+	columnSizes := map[int]int64{1: 10}
+	valueCounts := map[int]int64{1: 2}
+	nullCounts := map[int]int64{1: 1}
+	nanCounts := map[int]int64{1: 0}
+	distinctCounts := map[int]int64{1: 2}
+	lower := map[int][]byte{1: {0x03, 0x04}}
+	upper := map[int][]byte{1: {0x05, 0x06}}
+	key := []byte{0x07, 0x08}
+	splits := []int64{10, 20}
+	equalityIDs := []int{1, 2}
+
+	dataFile := builder.
+		ColumnSizes(columnSizes).
+		ValueCounts(valueCounts).
+		NullValueCounts(nullCounts).
+		NaNValueCounts(nanCounts).
+		DistinctValueCounts(distinctCounts).
+		LowerBoundValues(lower).
+		UpperBoundValues(upper).
+		KeyMetadata(key).
+		SplitOffsets(splits).
+		EqualityFieldIDs(equalityIDs).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+
+	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
+	partitionData[1000] = []byte{0xff}
+	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
+
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
+	dataFile.Partition()[1000].([]byte)[0] = 0xff
+	dataFile.ColumnSizes()[1] = 99
+	dataFile.ValueCounts()[1] = 99
+	dataFile.NullValueCounts()[1] = 99
+	dataFile.NaNValueCounts()[1] = 99
+	dataFile.DistinctValueCounts()[1] = 99
+	dataFile.LowerBoundValues()[1][0] = 0xff
+	dataFile.UpperBoundValues()[1][0] = 0xff
+	dataFile.KeyMetadata()[0] = 0xff
+	dataFile.SplitOffsets()[0] = 99
+	dataFile.EqualityFieldIDs()[0] = 99
+	*dataFile.SortOrderID() = 99
+	*dataFile.FirstRowID() = 99
+	*dataFile.ReferencedDataFile() = "changed"
+	*dataFile.ContentOffset() = 99
+	*dataFile.ContentSizeInBytes() = 99
+
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, dataFile.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, dataFile.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, dataFile.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, dataFile.NaNValueCounts())
+	m.Equal(map[int]int64{1: 2}, dataFile.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, dataFile.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, dataFile.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, dataFile.KeyMetadata())
+	m.Equal([]int64{10, 20}, dataFile.SplitOffsets())
+	m.Equal([]int{1, 2}, dataFile.EqualityFieldIDs())
+	m.Equal(3, *dataFile.SortOrderID())
+	m.Equal(int64(4), *dataFile.FirstRowID())
+	m.Equal("data.parquet", *dataFile.ReferencedDataFile())
+	m.Equal(int64(5), *dataFile.ContentOffset())
+	m.Equal(int64(6), *dataFile.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGetterMutation() {
+	partition := []byte{0x01, 0x02}
+	lower := []byte{0x03, 0x04}
+	upper := []byte{0x05, 0x06}
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{},
+	})
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		map[int]any{1000: partition}, nil, nil, 1, 10)
+	m.Require().NoError(err)
+	dataFile := builder.
+		ColumnSizes(map[int]int64{1: 10}).
+		ValueCounts(map[int]int64{1: 2}).
+		NullValueCounts(map[int]int64{1: 1}).
+		NaNValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(map[int][]byte{1: lower}).
+		UpperBoundValues(map[int][]byte{1: upper}).
+		KeyMetadata([]byte{0x07, 0x08}).
+		SplitOffsets([]int64{10, 20}).
+		EqualityFieldIDs([]int{1, 2}).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+
+	var buf bytes.Buffer
+	manifest, err := WriteManifest("/manifest.avro", &buf, 3, spec, schema, snapshotID,
+		[]ManifestEntry{NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile).SequenceNum(1).Build()})
+	m.Require().NoError(err)
+	encoded := buf.Bytes()
+	entries, err := ReadManifest(manifest, bytes.NewReader(encoded), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	decoded := entries[0].DataFile()
+
+	for i := range encoded {
+		encoded[i] = ^encoded[i]
+	}
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
+
+	partitionResult := decoded.Partition()
+	columnSizesResult := decoded.ColumnSizes()
+	valueCountsResult := decoded.ValueCounts()
+	nullCountsResult := decoded.NullValueCounts()
+	nanCountsResult := decoded.NaNValueCounts()
+	lowerResult := decoded.LowerBoundValues()
+	upperResult := decoded.UpperBoundValues()
+	keyResult := decoded.KeyMetadata()
+	splitsResult := decoded.SplitOffsets()
+	equalityIDsResult := decoded.EqualityFieldIDs()
+	partitionResult[1000].([]byte)[0] = 0xff
+	columnSizesResult[1] = 99
+	valueCountsResult[1] = 99
+	nullCountsResult[1] = 99
+	nanCountsResult[1] = 99
+	lowerResult[1][0] = 0xff
+	upperResult[1][0] = 0xff
+	keyResult[0] = 0xff
+	splitsResult[0] = 99
+	equalityIDsResult[0] = 99
+	*decoded.SortOrderID() = 99
+	*decoded.FirstRowID() = 99
+	*decoded.ReferencedDataFile() = "changed"
+	*decoded.ContentOffset() = 99
+	*decoded.ContentSizeInBytes() = 99
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDataFileCloneHelpersPreserveNilAndEmptyState() {
+	m.Nil(clonePartitionMap(nil))
+	m.NotNil(clonePartitionMap(map[int]any{}))
+	m.Nil(cloneByteMap(nil))
+	m.NotNil(cloneByteMap(map[int][]byte{}))
+	m.Nil(mapToAvroColMapClonedBytes(nil))
+	m.NotNil(mapToAvroColMapClonedBytes(map[int][]byte{}))
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {

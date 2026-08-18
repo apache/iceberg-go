@@ -146,6 +146,10 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
+	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
+	}
+
 	aux := struct {
 		SourceID        int           `json:"source-id"`
 		SourceIDs       []int         `json:"source-ids,omitempty"`
@@ -158,35 +162,39 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	s.Direction = aux.Direction
-	s.NullOrder = aux.NullOrder
-
-	if hasSourceIDs {
-		s.SourceIDs = aux.SourceIDs
-	} else {
-		s.SourceIDs = []int{aux.SourceID}
+	next := SortField{
+		Direction: aux.Direction,
+		NullOrder: aux.NullOrder,
 	}
 
-	if err := validateSortSourceIDs(s.SourceIDs); err != nil {
+	if hasSourceIDs {
+		next.SourceIDs = aux.SourceIDs
+	} else {
+		next.SourceIDs = []int{aux.SourceID}
+	}
+
+	if err := validateSortSourceIDs(next.SourceIDs); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
 	}
 
 	var err error
-	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
 		return err
 	}
 
-	switch s.Direction {
+	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
 		return ErrInvalidSortDirection
 	}
 
-	switch s.NullOrder {
+	switch next.NullOrder {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
 	}
+
+	*s = next
 
 	return nil
 }
@@ -247,6 +255,13 @@ func (s SortOrder) Fields() iter.Seq2[int, SortField] {
 
 func (s SortOrder) Len() int {
 	return len(s.fields)
+}
+
+// Field returns a copy of the sort field at index i, like Fields does, so a
+// caller can't reach the sort order's internals through SortField.SourceIDs.
+// It panics if i is out of range.
+func (s SortOrder) Field(i int) SortField {
+	return cloneSortField(s.fields[i])
 }
 
 func (s SortOrder) MarshalJSON() ([]byte, error) {

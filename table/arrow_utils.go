@@ -20,7 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -870,7 +869,7 @@ func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ st
 		return nil
 	}
 
-	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	field, ok := a.fileSchema.FindFieldByIDRef(fieldID, internal.SchemaRef{})
 	if !ok {
 		return nil
 	}
@@ -1000,9 +999,13 @@ func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
 
 			return s
 		case string:
-			b, err := base64.StdEncoding.DecodeString(val)
+			fixedLen := -1
+			if fixed, ok := t.(iceberg.FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			b, err := internal.DecodeDefaultBytes(val, fixedLen)
 			if err != nil {
-				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot base64-decode string %q: %w", t, val, err))
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot decode string %q: %w", t, val, err))
 			}
 			s, err := scalar.MakeScalarParam(b, dt)
 			if err != nil {
@@ -1062,7 +1065,7 @@ func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType 
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
-	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	fileField, ok := a.fileSchema.FindFieldByIDRef(field.ID, internal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
 	}
@@ -1229,6 +1232,16 @@ func (a *arrowProjectionVisitor) Schema(_ *iceberg.Schema, _ arrow.Array, result
 	return result
 }
 
+func ownsChildResult(arr arrow.Array) bool {
+	if arr == nil {
+		return false
+	}
+
+	_, nested := arr.DataType().(arrow.NestedType)
+
+	return nested
+}
+
 func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.Array, fieldResults []arrow.Array) arrow.Array {
 	if structArr == nil {
 		return nil
@@ -1239,7 +1252,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 	for i, field := range st.FieldList {
 		arr := fieldResults[i]
 		if arr != nil {
-			if _, ok := arr.DataType().(arrow.NestedType); ok {
+			if ownsChildResult(arr) {
 				defer arr.Release()
 			}
 
@@ -1296,6 +1309,10 @@ func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fie
 }
 
 func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.Array, valArr arrow.Array) arrow.Array {
+	if ownsChildResult(valArr) {
+		defer valArr.Release()
+	}
+
 	arr, ok := listArr.(array.ListLike)
 	if !ok || valArr == nil {
 		return nil
@@ -1342,6 +1359,14 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
+	if ownsChildResult(keyResult) {
+		defer keyResult.Release()
+	}
+
+	if ownsChildResult(valResult) {
+		defer valResult.Release()
+	}
+
 	if keyResult == nil || valResult == nil {
 		return nil
 	}
@@ -1386,7 +1411,8 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 	}
 	// UnshredVariant returns a caller-owned array whose ref is balanced by
 	// castIfNeeded's Retain/Release. This holds only because VariantType is not
-	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// an arrow.NestedType; if it were, ownsChildResult would report true and the
+	// parent Struct/List/Map would Release and double-free.
 	// The checked-allocator leak tests guard this invariant.
 	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
 	if err != nil {
@@ -1715,6 +1741,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1733,7 +1763,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			// Pass 0 so AddFiles does not claim sort_order_id on files
+			// it did not write (#1184). Callers that know the file's
+			// sort layout use FileToDataFile with an explicit id.
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props)
 
 			return nil
 		})
@@ -1746,9 +1779,30 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-// fileToDataFile builds a DataFile for a pre-existing file. The caller cannot
-// convey its sort layout, so no sort_order_id is claimed.
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
+// FileToDataFile builds a DataFile for an existing parquet file at
+// filePath, reading its footer to populate record count, file size,
+// column sizes, value/null counts and lower/upper bounds, and to infer
+// partition values for order-preserving transforms. sortOrderID is
+// stamped onto the DataFile so callers converting foreign parquet
+// footers can convey the file's sort layout (spec data-file field
+// sort_order_id); pass 0 to make no claim. Panics from the unexported
+// conversion are recovered into an error.
+func FileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) (df iceberg.DataFile, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case error:
+				err = fmt.Errorf("error encountered during file conversion: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during file conversion: %v", e)
+			}
+		}
+	}()
+
+	return fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, sortOrderID, props), nil
+}
+
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1795,6 +1849,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		Content:         iceberg.EntryContentData,
 		FileSize:        rdr.SourceFileSize(),
 		PartitionValues: partitionValues,
+		SortOrderID:     sortOrderID,
 	})
 }
 
@@ -1837,7 +1892,54 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1976,6 +2078,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}

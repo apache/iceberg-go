@@ -33,6 +33,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestCatalogLoadTypeIsCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	defer catalog.Unregister("foobar")
+
+	catalog.Register("foobar", catalog.RegistrarFunc(func(ctx context.Context, s string, p iceberg.Properties) (catalog.Catalog, error) {
+		return nil, nil
+	}))
+
+	for _, catalogType := range []string{"foobar", "FOOBAR", "FooBar"} {
+		c, err := catalog.Load(ctx, "not found", iceberg.Properties{"type": catalogType})
+		assert.Nil(t, c)
+		assert.NoError(t, err)
+	}
+
+	c, err := catalog.Load(ctx, "not found", iceberg.Properties{"type": "FOOBARX"})
+	assert.Nil(t, c)
+	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
+}
+
 func TestCatalogRegistry(t *testing.T) {
 	ctx := context.Background()
 	assert.ElementsMatch(t, []string{
@@ -94,6 +113,24 @@ func TestCatalogRegistry(t *testing.T) {
 		"https",
 		"glue",
 	}, catalog.GetRegisteredCatalogs())
+}
+
+func TestCatalogRegistryNormalizesType(t *testing.T) {
+	ctx := context.Background()
+	catalog.Register("MyCatalog", catalog.RegistrarFunc(func(context.Context, string, iceberg.Properties) (catalog.Catalog, error) {
+		return nil, nil
+	}))
+	t.Cleanup(func() { catalog.Unregister("MyCatalog") })
+	assert.Contains(t, catalog.GetRegisteredCatalogs(), "mycatalog")
+	assert.NotContains(t, catalog.GetRegisteredCatalogs(), "MyCatalog")
+
+	c, err := catalog.Load(ctx, "test", iceberg.Properties{"type": "MYCATALOG"})
+	assert.NoError(t, err)
+	assert.Nil(t, c)
+
+	catalog.Unregister("MYCATALOG")
+	_, err = catalog.Load(ctx, "test", iceberg.Properties{"type": "mycatalog"})
+	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
 }
 
 func TestRegistryPanic(t *testing.T) {

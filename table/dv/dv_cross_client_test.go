@@ -82,7 +82,7 @@ func TestCrossClientReadJavaMultiBlobDV(t *testing.T) {
 
 	seen := make(map[string]struct{}, len(expected))
 	for i, blob := range blobs {
-		ref, ok := blob.Properties["referenced-data-file"]
+		ref, ok := blob.Properties[dvReferencedDataFileProperty]
 		require.True(t, ok, "blob %d missing referenced-data-file property", i)
 		want, ok := expected[ref]
 		require.Truef(t, ok, "blob %d references unexpected data file %q", i, ref)
@@ -101,15 +101,11 @@ func TestCrossClientReadJavaMultiBlobDV(t *testing.T) {
 }
 
 // TestCrossClientGoSerializeMatchesJavaSingleArrayContainer asserts byte-equal
-// envelope output for the narrow case it actually covers: scattered
-// low-cardinality positions [1, 3, 5, 7, 9] that fit in a single roaring
-// array container. Byte equality is *not* a general cross-client guarantee:
-// Java's BitmapPositionDeleteIndex.serialize() runs runLengthEncode() before
-// emitting bytes, while Go's RoaringPositionBitmap.Serialize() does not, so
-// for range-style deletes (or any input that hits the array→bitmap or
-// run-encoded thresholds) the two outputs diverge at the byte level while
-// both remaining spec-compliant. End-to-end interop for those cases is
-// covered by TestCrossClientReadJavaSingleBlobDV / ...MultiBlobDV.
+// envelope output for scattered low-cardinality positions [1, 3, 5, 7, 9] that
+// fit in a single roaring array container — the shape run encoding leaves
+// alone, since five single-value runs cost more than five array entries.
+// Together with ...AllContainerTypes it pins both sides of the run-encoding
+// decision against Java's own output.
 func TestCrossClientGoSerializeMatchesJavaSingleArrayContainer(t *testing.T) {
 	javaBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
 
@@ -125,6 +121,58 @@ func TestCrossClientGoSerializeMatchesJavaSingleArrayContainer(t *testing.T) {
 
 	assert.Equal(t, javaBytes, goBytes,
 		"Go-serialized envelope must match Java byte-for-byte for a single-array-container fixture")
+}
+
+// TestCrossClientGoSerializeMatchesJavaAllContainerTypes rebuilds the position
+// set behind Java's all-container-types fixture with SetRange and Set, then
+// asserts the Go envelope is byte-identical to Java's. The fixture is the
+// strongest available parity check for range writes: Java built it from
+// PositionDeleteIndex.delete(posStart, posEnd) calls — setRange under the hood —
+// and emitted it through BitmapPositionDeleteIndex.serialize, which
+// run-length encodes first. It therefore pins three things at once: SetRange
+// splits a range across buckets and containers exactly as Java does, Go's
+// roaring library run-encodes to the same bytes, and SerializeDV run-encodes at
+// all. Drop the run encoding and 132,561 positions balloon from 94 bytes to
+// tens of kilobytes of dense containers, and this assertion fails.
+func TestCrossClientGoSerializeMatchesJavaAllContainerTypes(t *testing.T) {
+	const (
+		bucketOffset    = uint64(1) << 32 // one 32-bit roaring bitmap per key
+		containerOffset = uint64(1) << 16 // one roaring container per 65,536 positions
+	)
+	// position mirrors the fixture generator's helper in Java's
+	// TestBitmapPositionDeleteIndex, addressing a position by which bucket and
+	// which container within that bucket it lands in.
+	position := func(bucket, container int, value uint64) uint64 {
+		return uint64(bucket)*bucketOffset + uint64(container)*containerOffset + value
+	}
+
+	bm := NewRoaringPositionBitmap()
+	for _, bucket := range []int{0, 1} {
+		// Container 0: two scattered positions, which stay an array container.
+		// Container 1: a range short enough that roaring keeps it as a
+		// run-encoded array. Container 2: a range covering all but the first
+		// and last position of the container, which starts as a dense bitmap.
+		switch bucket {
+		case 0:
+			bm.Set(position(bucket, 0, 5))
+			bm.Set(position(bucket, 0, 7))
+			bm.SetRange(position(bucket, 1, 1), position(bucket, 1, 1000))
+		case 1:
+			bm.Set(position(bucket, 0, 10))
+			bm.Set(position(bucket, 0, 20))
+			bm.SetRange(position(bucket, 1, 10), position(bucket, 1, 500))
+		}
+		bm.SetRange(position(bucket, 2, 1), position(bucket, 2, containerOffset-1))
+	}
+	require.Equal(t, int64(132561), bm.Cardinality(), "reconstructed fixture cardinality")
+
+	javaBytes := readDVTestData(t, "all-container-types-position-index.bin")
+	goBytes, err := SerializeDV(bm)
+	require.NoError(t, err)
+	t.Logf("%d positions serialize to %d bytes", bm.Cardinality(), len(goBytes))
+
+	assert.Equal(t, javaBytes, goBytes,
+		"Go-serialized envelope must match Java byte-for-byte for range-built deletes across all container types")
 }
 
 // TestCrossClientHighKeyFixtureRejected asserts Go rejects the same
@@ -173,7 +221,7 @@ func loadJavaPuffinBlob(t *testing.T, fixture string, blobIdx int, referencedDat
 	require.Greaterf(t, len(blobs), blobIdx, "fixture %s has only %d blob(s)", fixture, len(blobs))
 	blob := blobs[blobIdx]
 
-	cardStr, ok := blob.Properties["cardinality"]
+	cardStr, ok := blob.Properties[dvCardinalityProperty]
 	require.Truef(t, ok, "blob %d missing cardinality property", blobIdx)
 	cardinality, err := strconv.ParseInt(cardStr, 10, 64)
 	require.NoErrorf(t, err, "parse cardinality %q", cardStr)

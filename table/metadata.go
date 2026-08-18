@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -41,6 +42,7 @@ const (
 	supportedTableFormatVersion = 3
 	minFormatVersionRowLineage  = 3
 	initialRowID                = int64(0)
+	initialSequenceNumber       = int64(0)
 	oneMinuteInMs               = int64(60_000)
 )
 
@@ -386,6 +388,32 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 	return s
 }
 
+// currentSnapshotForRef returns the snapshot a write targeting ref must be
+// parented on (createSnapshotProducer) and plan against
+// (Transaction.planningSnapshot). An unknown branch falls back to
+// currentSnapshot() so a new branch forks from main. This is a head lookup
+// only: the commit's AssertRefSnapshotID requirement is built
+// separately from the base table's ref (Transaction.baseRefSnapshotID), which
+// returns nil for an absent branch so the requirement can prove the branch does
+// not exist yet — never derive one from the other. A ref cannot outlive its
+// snapshot: SetSnapshotRef rejects unknown snapshot ids and checkRefsExist
+// rejects loaded metadata whose ref dangles, so the lookup below cannot turn a
+// dangling ref into a parentless write.
+func (b *MetadataBuilder) currentSnapshotForRef(ref string) *Snapshot {
+	if ref == "" || ref == MainBranch {
+		return b.currentSnapshot()
+	}
+
+	r, ok := b.refs[ref]
+	if !ok {
+		return b.currentSnapshot()
+	}
+
+	s, _ := b.SnapshotByID(r.SnapshotID)
+
+	return s
+}
+
 func (b *MetadataBuilder) AddSchema(schema *iceberg.Schema) error {
 	if err := checkSchemaCompatibility(schema, b.formatVersion); err != nil {
 		return err
@@ -498,6 +526,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return nil
 	}
 
+	lastSeqNum := b.currentLastSequenceNumber()
 	if len(b.schemaList) == 0 {
 		return errors.New("can't add snapshot with no added schemas")
 	} else if len(b.specs) == 0 {
@@ -506,9 +535,9 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 		return fmt.Errorf("can't add snapshot with id %d, already exists", snapshot.SnapshotID)
 	} else if b.formatVersion >= 2 &&
 		snapshot.ParentSnapshotID != nil &&
-		snapshot.SequenceNumber <= *b.lastSequenceNumber {
+		snapshot.SequenceNumber <= lastSeqNum {
 		return fmt.Errorf("can't add snapshot with sequence number %d, must be > than last sequence number %d",
-			snapshot.SequenceNumber, *b.lastSequenceNumber)
+			snapshot.SequenceNumber, lastSeqNum)
 	}
 
 	if len(b.snapshotLog) > 0 {
@@ -518,7 +547,15 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 				snapshot.TimestampMs, last.TimestampMs)
 		}
 	}
-	maxTS := max(b.lastUpdatedMS, b.base.LastUpdatedMillis())
+
+	// b.base is nil for builders created by NewMetadataBuilder (the create-table path);
+	// only MetadataBuilderFromBase populates it. Treat the missing base as "no previous update"
+	// instead of dereferencing it, mirroring the fallback in currentNextRowID.
+	var baseLastUpdated int64
+	if b.base != nil {
+		baseLastUpdated = b.base.LastUpdatedMillis()
+	}
+	maxTS := max(b.lastUpdatedMS, baseLastUpdated)
 	if snapshot.TimestampMs-maxTS < -oneMinuteInMs {
 		return fmt.Errorf("invalid snapshot timestamp %d: before last updated timestamp %d",
 			snapshot.TimestampMs, maxTS)
@@ -578,6 +615,18 @@ func (b *MetadataBuilder) validateAndUpdateRowLineage(snapshot *Snapshot) error 
 	return nil
 }
 
+// currentLastSequenceNumber returns the last sequence number assigned to a
+// snapshot. b.lastSequenceNumber is nil for v1 tables and for builders created
+// by NewMetadataBuilder that have not added a snapshot yet, in which case the
+// spec's initial sequence number is the correct floor.
+func (b *MetadataBuilder) currentLastSequenceNumber() int64 {
+	if b.lastSequenceNumber != nil {
+		return *b.lastSequenceNumber
+	}
+
+	return initialSequenceNumber
+}
+
 func (b *MetadataBuilder) currentNextRowID() int64 {
 	if b.nextRowID != nil {
 		return *b.nextRowID
@@ -595,20 +644,33 @@ func (b *MetadataBuilder) NextRowID() int64 {
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) error {
-	if b.currentSnapshotID != nil && slices.Contains(snapshotIds, *b.currentSnapshotID) {
-		return errors.New("current snapshot cannot be removed")
+	removedIDs := make(map[int64]struct{}, len(snapshotIds))
+	for _, snapshotID := range snapshotIds {
+		removedIDs[snapshotID] = struct{}{}
+	}
+
+	if b.currentSnapshotID != nil {
+		if _, ok := removedIDs[*b.currentSnapshotID]; ok {
+			return errors.New("current snapshot cannot be removed")
+		}
 	}
 
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
-	})
-	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
-	})
+		_, ok := removedIDs[e.SnapshotID]
 
-	newRefs := make(map[string]SnapshotRef)
+		return ok
+	})
+	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
+	// removed entries remain available when trimming history gaps.
+
+	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+	for _, snapshot := range b.snapshotList {
+		validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+	}
+
+	newRefs := make(map[string]SnapshotRef, len(b.refs))
 	for name, ref := range b.refs {
-		if _, err := b.SnapshotByID(ref.SnapshotID); err == nil {
+		if _, ok := validSnapshotIDs[ref.SnapshotID]; ok {
 			newRefs[name] = ref
 		}
 	}
@@ -617,10 +679,14 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	// Prune statistics entries whose snapshot was removed so that table
 	// metadata does not retain stale statistics references.
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(e StatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+
+		return ok
 	})
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(e PartitionStatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+
+		return ok
 	})
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
@@ -636,11 +702,14 @@ func (b *MetadataBuilder) AddSortOrder(sortOrder *SortOrder) error {
 
 	newOrderID := b.reuseOrCreateNewSortOrderID(sortOrder)
 	if _, err := b.GetSortOrderByID(newOrderID); err == nil {
-		if b.lastAddedSortOrderID != &newOrderID {
-			b.lastAddedSortOrderID = &newOrderID
-			sortOrder.orderID = newOrderID
-			b.updates = append(b.updates, NewAddSortOrderUpdate(sortOrder))
-		}
+		// The order already exists in this metadata: reuse its ID and
+		// do NOT emit an add-sort-order update (REST catalogs reject
+		// adding a sort order under an existing ID). Record it as
+		// last-added so a following SetDefaultSortOrderID(-1) resolves
+		// to the reused ID; SetDefaultSortOrderID encodes the concrete
+		// ID in that case because no add update precedes it.
+		sortOrder.orderID = newOrderID
+		b.lastAddedSortOrderID = &newOrderID
 
 		return nil
 	}
@@ -724,7 +793,11 @@ func (b *MetadataBuilder) SetDefaultSortOrderID(defaultSortOrderID int) error {
 		return fmt.Errorf("%w: can't set default sort order to sort order with id %d: %w", iceberg.ErrInvalidArgument, defaultSortOrderID, err)
 	}
 
-	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID {
+	// Encode -1 ("last added") only when this builder actually emitted
+	// an add-sort-order update for that ID; when the last AddSortOrder
+	// reused an existing order no add update precedes this one, so the
+	// payload must carry the concrete ID to stay self-contained.
+	if b.lastAddedSortOrderID != nil && defaultSortOrderID == *b.lastAddedSortOrderID && b.hasAddSortOrderUpdate(defaultSortOrderID) {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(-1))
 	} else {
 		b.updates = append(b.updates, NewSetDefaultSortOrderUpdate(defaultSortOrderID))
@@ -1080,14 +1153,19 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		}
 	}
 	if len(intermediateIDs) != 0 || hasRemoved {
+		validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+		for _, snapshot := range b.snapshotList {
+			validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+		}
+
 		newSnapsLog := make([]SnapshotLogEntry, 0, len(b.snapshotLog))
 		for _, s := range b.snapshotLog {
-			if snap, _ := b.SnapshotByID(s.SnapshotID); snap != nil {
+			if _, ok := validSnapshotIDs[s.SnapshotID]; ok {
 				if _, ok := intermediateIDs[s.SnapshotID]; !ok {
 					newSnapsLog = append(newSnapsLog, s)
 				}
 			} else if hasRemoved {
-				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
+				newSnapsLog = newSnapsLog[:0]
 			}
 		}
 		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {
@@ -1235,6 +1313,18 @@ func (b *MetadataBuilder) Build() (Metadata, error) {
 	default:
 		return nil, fmt.Errorf("%w: unknown format version %d", ErrInvalidMetadata, b.formatVersion)
 	}
+}
+
+// hasAddSortOrderUpdate reports whether this builder has emitted an
+// add-sort-order update for the given order ID.
+func (b *MetadataBuilder) hasAddSortOrderUpdate(orderID int) bool {
+	for _, u := range b.updates {
+		if a, ok := u.(*addSortOrderUpdate); ok && a.SortOrder.OrderID() == orderID {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (b *MetadataBuilder) reuseOrCreateNewSortOrderID(newOrder *SortOrder) int {
@@ -1511,11 +1601,11 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	var ret Metadata
 	switch ver.FormatVersion {
 	case 1:
-		ret = initMetadataV1Deser()
+		ret = &metadataV1{}
 	case 2:
-		ret = initMetadataV2Deser()
+		ret = &metadataV2{}
 	case 3:
-		ret = initMetadataV3Deser()
+		ret = &metadataV3{}
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
 	}
@@ -1524,12 +1614,44 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requirePartitionSpecIDs(normalized); err != nil {
+		return nil, err
+	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
 	return ret, nil
+}
+
+func requirePartitionSpecIDs(b []byte) error {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	rawSpecs, ok := metadata["partition-specs"]
+	if !ok {
+		return nil
+	}
+
+	var specs []json.RawMessage
+	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
+		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
+	}
+	for i, rawSpec := range specs {
+		var spec map[string]json.RawMessage
+		if err := json.Unmarshal(rawSpec, &spec); err != nil {
+			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
+		}
+		rawID, ok := spec["spec-id"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
+		}
+	}
+
+	return nil
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
@@ -1659,6 +1781,8 @@ type commonMetadata struct {
 
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
+		// These fields use negative sentinels so validation can distinguish omitted
+		// values from explicit zero values.
 		LastColumnId:       -1,
 		CurrentSchemaID:    -1,
 		DefaultSpecID:      -1,
@@ -1884,6 +2008,10 @@ func (c *commonMetadata) DefaultSortOrder() int {
 }
 
 func (c *commonMetadata) Properties() iceberg.Properties {
+	if c.Props == nil {
+		return iceberg.Properties{}
+	}
+
 	return maps.Clone(c.Props)
 }
 
@@ -2027,6 +2155,10 @@ func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {
 	clone := snapshot
+	if snapshot.ManifestLocations != nil {
+		clone.ManifestLocations = make([]string, len(snapshot.ManifestLocations))
+		copy(clone.ManifestLocations, snapshot.ManifestLocations)
+	}
 	if snapshot.ParentSnapshotID != nil {
 		value := *snapshot.ParentSnapshotID
 		clone.ParentSnapshotID = &value
@@ -2465,10 +2597,8 @@ func (m *metadataV1) preValidate() {
 
 func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	type Alias metadataV1
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV1Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
@@ -2493,9 +2623,15 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 		}
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV1) ToV2() metadataV2 {
@@ -2540,10 +2676,8 @@ func (m *metadataV2) Equals(other Metadata) bool {
 
 func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	type Alias metadataV2
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV2Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
@@ -2557,9 +2691,15 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 		return err
 	}
 
-	m.preValidate()
+	next.preValidate()
 
-	return m.validate()
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 func (m *metadataV2) validate() error {
@@ -2616,18 +2756,26 @@ func (m *metadataV3) Equals(other Metadata) bool {
 
 func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	type Alias metadataV3
-	aux := (*Alias)(m)
-
-	// Set LastColumnId to -1 to indicate that it is not set as LastColumnId = 0 is a valid value for when no schema is present
-	aux.LastColumnId = -1
+	next := initMetadataV3Deser()
+	aux := (*Alias)(next)
 
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
 
-	m.preValidate()
+	if err := rejectFieldsBeyondVersion(aux.FormatVersion); err != nil {
+		return err
+	}
 
-	return m.validate()
+	next.preValidate()
+
+	if err := next.validate(); err != nil {
+		return err
+	}
+
+	*m = *next
+
+	return nil
 }
 
 // MarshalJSON serializes v3 metadata with the spec-mandated emission of
@@ -2707,10 +2855,15 @@ type SequenceNumberValidator interface {
 
 // checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
 func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
+	lastSequenceNumber := validator.LastSequenceNumber()
+	if lastSequenceNumber == -1 {
+		return fmt.Errorf("%w: last-sequence-number is required for format versions greater than 1", ErrInvalidMetadata)
+	}
+
 	for _, snap := range snapshotList {
-		if snap.SequenceNumber > validator.LastSequenceNumber() {
+		if snap.SequenceNumber > lastSequenceNumber {
 			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
-				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, validator.LastSequenceNumber())
+				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, lastSequenceNumber)
 		}
 	}
 
