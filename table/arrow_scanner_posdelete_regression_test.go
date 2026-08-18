@@ -210,65 +210,34 @@ func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	}
 }
 
-func TestGroupPosDeletesByFilePathHonorsCancellation(t *testing.T) {
+func TestGroupPosDeletesByFilePathPreservesRepeatedPositions(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
-
 	ctx := compute.WithAllocator(t.Context(), mem)
-	ctx, cancel := context.WithCancel(ctx)
-	cancel()
 
-	filePathArr := stringArray(mem, "file-a.parquet")
+	filePathArr := stringArray(mem,
+		"file-a.parquet", "file-b.parquet", "file-a.parquet", "file-c.parquet", "file-b.parquet")
 	defer filePathArr.Release()
 	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
 	defer filePathCol.Release()
-	posArr := int64Array(mem, 1)
+	posArr := int64Array(mem, 7, 8, 7, 9, 8)
 	defer posArr.Release()
 	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
 	defer posCol.Release()
 
-	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
-	require.ErrorIs(t, err, context.Canceled)
-}
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
 
-func TestGroupPosDeletesByFilePathReleasesBuildersAfterError(t *testing.T) {
-	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-	defer mem.AssertSize(t, 0)
-	ctx := compute.WithAllocator(t.Context(), mem)
-
-	dict := nullableStringArray(mem, "file-a.parquet", "")
-	defer dict.Release()
-	dictType := &arrow.DictionaryType{
-		IndexType: arrow.PrimitiveTypes.Int32,
-		ValueType: arrow.BinaryTypes.String,
-	}
-	idxA := int32Array(mem, 0)
-	defer idxA.Release()
-	filePathA := array.NewDictionaryArray(dictType, idxA, dict)
-	defer filePathA.Release()
-	idxB := int32Array(mem, 1)
-	defer idxB.Release()
-	filePathB := array.NewDictionaryArray(dictType, idxB, dict)
-	defer filePathB.Release()
-	filePathCol := arrow.NewChunked(dictType, []arrow.Array{filePathA, filePathB})
-	defer filePathCol.Release()
-
-	posA := int64Array(mem, 1)
-	defer posA.Release()
-	posB := int64Array(mem, 2)
-	defer posB.Release()
-	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
-	defer posCol.Release()
-
-	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
-	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
-	assert.Contains(t, err.Error(), "null file_path dictionary value")
+	assert.Equal(t, []int64{7, 7}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{8, 8}, int64Values(got["file-b.parquet"]))
+	assert.Equal(t, []int64{9}, int64Values(got["file-c.parquet"]))
 }
 
 func TestGroupPosDeletesByFilePathHandlesDifferentChunkBoundaries(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
-	ctx := compute.WithAllocator(t.Context(), mem)
 	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
 
 	filePathA := stringArray(mem, "file-a.parquet", "file-b.parquet", "file-a.parquet")
 	defer filePathA.Release()
@@ -291,6 +260,110 @@ func TestGroupPosDeletesByFilePathHandlesDifferentChunkBoundaries(t *testing.T) 
 	assert.Equal(t, []int64{1, 3}, int64Values(got["file-a.parquet"]))
 	assert.Equal(t, []int64{2}, int64Values(got["file-b.parquet"]))
 	assert.Equal(t, []int64{4}, int64Values(got["file-c.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathSkipsEmptyPositionChunks(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet", "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+
+	empty := int64Array(mem)
+	defer empty.Release()
+	posA := int64Array(mem, 10)
+	defer posA.Release()
+	posB := int64Array(mem, 20, 30)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{empty, posA, posB})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+
+	assert.Equal(t, []int64{10, 30}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{20}, int64Values(got["file-b.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathRejectsMismatchedLengths(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "file_path and pos columns have different lengths: 2 and 1")
+}
+
+func TestGroupPosDeletesByFilePathOwnsResults(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet")
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	posArr := int64Array(mem, 3, 5)
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	releaseInputs := func() {
+		if filePathCol != nil {
+			filePathCol.Release()
+			filePathCol = nil
+		}
+		if filePathArr != nil {
+			filePathArr.Release()
+			filePathArr = nil
+		}
+		if posCol != nil {
+			posCol.Release()
+			posCol = nil
+		}
+		if posArr != nil {
+			posArr.Release()
+			posArr = nil
+		}
+	}
+	defer releaseInputs()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+	releaseInputs()
+
+	assert.Equal(t, []int64{3}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{5}, int64Values(got["file-b.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathHandlesEmptyInput(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem)
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
 }
 
 func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T) {
@@ -398,6 +471,102 @@ func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T)
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestGroupPosDeletesByFilePathHonorsCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(t.Context(), mem)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	filePathArr := stringArray(mem, "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+type cancelAfterErrContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterErrContext) Err() error {
+	if c.remaining == 0 {
+		return context.Canceled
+	}
+	c.remaining--
+
+	return nil
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	baseCtx := compute.WithAllocator(t.Context(), mem)
+	ctx := &cancelAfterErrContext{Context: baseCtx, remaining: 3}
+	const numRows = positionalDeleteCancellationCheckInterval + 1
+
+	filePaths := make([]string, numRows)
+	positions := make([]int64, numRows)
+	for i := range numRows {
+		filePaths[i] = "file-a.parquet"
+		positions[i] = int64(i)
+	}
+	filePathArr := stringArray(mem, filePaths...)
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, positions...)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	dict := nullableStringArray(mem, "file-a.parquet", "")
+	defer dict.Release()
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int32,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	idxA := int32Array(mem, 0)
+	defer idxA.Release()
+	filePathA := array.NewDictionaryArray(dictType, idxA, dict)
+	defer filePathA.Release()
+	idxB := int32Array(mem, 1)
+	defer idxB.Release()
+	filePathB := array.NewDictionaryArray(dictType, idxB, dict)
+	defer filePathB.Release()
+	filePathCol := arrow.NewChunked(dictType, []arrow.Array{filePathA, filePathB})
+	defer filePathCol.Release()
+
+	posA := int64Array(mem, 1)
+	defer posA.Release()
+	posB := int64Array(mem, 2)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "null file_path dictionary value")
 }
 
 func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {

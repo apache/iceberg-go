@@ -43,8 +43,9 @@ import (
 )
 
 const (
-	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
-	ScanOptionRowLineageEnabled  = "row_lineage.enabled"
+	ScanOptionArrowUseLargeTypes              = "arrow.use_large_types"
+	ScanOptionRowLineageEnabled               = "row_lineage.enabled"
+	positionalDeleteCancellationCheckInterval = 16 * 1024
 )
 
 var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
@@ -282,9 +283,43 @@ func filePathValues(values arrow.Array) (arrow.TypedArray[string], error) {
 	}
 }
 
-func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	const cancellationCheckInterval = 16 * 1024
+type posDeleteCursor struct {
+	chunks     []*array.Int64
+	chunkIndex int
+	offset     int
+}
 
+func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
+	chunks := posCol.Chunks()
+	arrays := make([]*array.Int64, len(chunks))
+	for i, chunk := range chunks {
+		posArr, ok := chunk.(*array.Int64)
+		if !ok {
+			return posDeleteCursor{}, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
+				iceberg.ErrInvalidSchema, chunk)
+		}
+		arrays[i] = posArr
+	}
+
+	return posDeleteCursor{chunks: arrays}, nil
+}
+
+func (c *posDeleteCursor) next() (int64, bool) {
+	for c.chunkIndex < len(c.chunks) && c.offset == c.chunks[c.chunkIndex].Len() {
+		c.chunkIndex++
+		c.offset = 0
+	}
+	if c.chunkIndex == len(c.chunks) {
+		return 0, false
+	}
+
+	pos := c.chunks[c.chunkIndex].Value(c.offset)
+	c.offset++
+
+	return pos, true
+}
+
+func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -308,15 +343,9 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 	}
 
 	mem := compute.GetAllocator(ctx)
-	posChunks := posCol.Chunks()
-	posArrays := make([]*array.Int64, len(posChunks))
-	for i, chunk := range posChunks {
-		posArr, ok := chunk.(*array.Int64)
-		if !ok {
-			return nil, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
-				iceberg.ErrInvalidSchema, chunk)
-		}
-		posArrays[i] = posArr
+	posCursor, err := newPosDeleteCursor(posCol)
+	if err != nil {
+		return nil, err
 	}
 
 	builders := make(map[string]*array.Int64Builder)
@@ -328,7 +357,6 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 		}
 	}()
 
-	posChunkIndex, posOffset := 0, 0
 	for _, filePathChunk := range filePathCol.Chunks() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -347,17 +375,14 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 		}
 
 		for i := range filePathChunk.Len() {
-			if i&(cancellationCheckInterval-1) == 0 {
+			if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}
 			}
 
-			for posChunkIndex < len(posArrays) && posOffset == posArrays[posChunkIndex].Len() {
-				posChunkIndex++
-				posOffset = 0
-			}
-			if posChunkIndex == len(posArrays) {
+			pos, ok := posCursor.next()
+			if !ok {
 				return nil, fmt.Errorf("%w: position delete columns ended before file_path column",
 					iceberg.ErrInvalidSchema)
 			}
@@ -373,8 +398,7 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 				builder = array.NewInt64Builder(mem)
 				builders[path] = builder
 			}
-			builder.Append(posArrays[posChunkIndex].Value(posOffset))
-			posOffset++
+			builder.Append(pos)
 		}
 	}
 	if err := ctx.Err(); err != nil {
