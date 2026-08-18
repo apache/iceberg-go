@@ -817,11 +817,33 @@ func TestUnmarshalUpdatesUsesJSONActionFieldSemantics(t *testing.T) {
 }
 
 func TestUnmarshalUpdatesPreservesDuplicateActionTypeError(t *testing.T) {
-	var updates Updates
-	var typeErr *json.UnmarshalTypeError
-	err := json.Unmarshal([]byte(`[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`), &updates)
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "valid final action",
+			data: `[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`,
+		},
+		{
+			name: "unknown final action",
+			data: `[{"action":123,"action":"unknown"}]`,
+		},
+		{
+			name: "null final action",
+			data: `[{"action":123,"action":null}]`,
+		},
+	}
 
-	require.ErrorAs(t, err, &typeErr)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			var typeErr *json.UnmarshalTypeError
+			err := json.Unmarshal([]byte(tt.data), &updates)
+
+			require.ErrorAs(t, err, &typeErr)
+		})
+	}
 }
 
 func TestUnmarshalUpdatesAcceptsOptionalAndEmptyValues(t *testing.T) {

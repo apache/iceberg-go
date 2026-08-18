@@ -154,45 +154,29 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		updates = make(Updates, 0, len(rawUpdates))
 	}
 	for _, raw := range rawUpdates {
+		var baseWire struct {
+			Action *string `json:"action"`
+		}
+		if err := json.Unmarshal(raw, &baseWire); err != nil {
+			return err
+		}
+		if baseWire.Action == nil {
+			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+		}
+
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &object); err != nil {
 			return err
 		}
 
-		actionValue, exactAction := object["action"]
 		actionFieldCount := 0
-		caseVariantAction := false
 		for field := range object {
 			if strings.EqualFold(field, "action") {
 				actionFieldCount++
-				if field != "action" {
-					caseVariantAction = true
-				}
 			}
 		}
 
-		var action string
-		if exactAction && !caseVariantAction {
-			if bytes.Equal(bytes.TrimSpace(actionValue), []byte("null")) {
-				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
-			}
-			if err := json.Unmarshal(actionValue, &action); err != nil {
-				return err
-			}
-		} else {
-			var baseWire struct {
-				Action *string `json:"action"`
-			}
-			if err := json.Unmarshal(raw, &baseWire); err != nil {
-				return err
-			}
-			if baseWire.Action == nil {
-				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
-			}
-			action = *baseWire.Action
-		}
-
-		base := baseUpdate{ActionName: action}
+		base := baseUpdate{ActionName: *baseWire.Action}
 
 		var upd Update
 		switch base.ActionName {
@@ -246,12 +230,6 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 		if normalizeLegacyPropertyFields(base.ActionName, object) {
-			var actionWire struct {
-				Action *string `json:"action"`
-			}
-			if err := json.Unmarshal(raw, &actionWire); err != nil {
-				return err
-			}
 			if actionFieldCount > 1 {
 				for field := range object {
 					if strings.EqualFold(field, "action") {
