@@ -18,7 +18,6 @@
 package internal
 
 import (
-	"slices"
 	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -27,10 +26,11 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/variant"
 )
 
-// Variant shredding inference: most-common-type selection with explicit
-// tie-break, integer/decimal widening, and frequency/depth/field-count bounds.
-// Field caps are per-object-node (matching Java); no global budget - total is
-// bounded by the sample, maxShreddingDepth, and the per-node caps.
+// Variant shredding inference: a field shreds only when all its non-null values
+// share one type family (the integer and decimal families widen to their widest
+// observed member); a field mixing more than one family is not shreddable and
+// stays in the residual value. Frequency/depth/field-count bounds and per-object-
+// node caps match Java; no global budget.
 const (
 	minFieldFrequency     = 0.10
 	maxShreddedFields     = 300
@@ -45,17 +45,6 @@ var integerPriority = map[variant.Type]int{
 
 var decimalPriority = map[variant.Type]int{
 	variant.Decimal4: 0, variant.Decimal8: 1, variant.Decimal16: 2,
-}
-
-// tieBreakPriority breaks count ties in most-common-type selection; higher wins.
-// Types absent here (Null, Array, Object) resolve to -1.
-var tieBreakPriority = map[variant.Type]int{
-	variant.Bool: 0, variant.Int8: 1, variant.Int16: 2, variant.Int32: 3,
-	variant.Int64: 4, variant.Float: 5, variant.Double: 6, variant.Decimal4: 7,
-	variant.Decimal8: 8, variant.Decimal16: 9, variant.Date: 10, variant.Time: 11,
-	variant.TimestampMicros: 12, variant.TimestampMicrosNTZ: 13, variant.Binary: 14,
-	variant.String: 15, variant.TimestampNanos: 16, variant.TimestampNanosNTZ: 17,
-	variant.UUID: 18,
 }
 
 type fieldInfo struct {
@@ -88,67 +77,52 @@ func (f *fieldInfo) observe(v variant.Value) {
 	}
 }
 
-// mostCommonType collapses int/decimal families to the widest, then picks max by count.
-func (f *fieldInfo) mostCommonType() (variant.Type, bool) {
-	combined := make(map[variant.Type]int)
-
-	intTotal, decTotal := 0, 0
-	var widestInt, widestDec variant.Type
+// admittedType returns the single type this node shreds to. The integer and
+// decimal families each collapse to their widest observed member; if more than one
+// family remains the field is mixed-type and not shreddable (ok=false), mirroring
+// Java VariantShreddingAnalyzer's admittedType.
+func (f *fieldInfo) admittedType() (variant.Type, bool) {
+	var widestInt, widestDec, other variant.Type
 	haveInt, haveDec := false, false
+	otherFamilies := 0
 
-	for t, c := range f.typeCounts {
+	for t := range f.typeCounts {
 		switch {
 		case isIntegerType(t):
-			intTotal += c
 			if !haveInt || integerPriority[t] > integerPriority[widestInt] {
-				widestInt, haveInt = t, true
+				widestInt = t
 			}
+			haveInt = true
 		case isDecimalType(t):
-			decTotal += c
 			if !haveDec || decimalPriority[t] > decimalPriority[widestDec] {
-				widestDec, haveDec = t, true
+				widestDec = t
 			}
+			haveDec = true
 		default:
-			combined[t] = c
+			other = t
+			otherFamilies++
 		}
 	}
+
+	families := otherFamilies
 	if haveInt {
-		combined[widestInt] = intTotal
+		families++
 	}
 	if haveDec {
-		combined[widestDec] = decTotal
+		families++
 	}
-
-	if len(combined) == 0 {
+	if families != 1 {
 		return 0, false
 	}
 
-	// Max by count, then tieBreakPriority, then type value (stable, sorted keys).
-	var best variant.Type
-	bestCount, bestPrio := -1, -2
-	first := true
-	keys := make([]variant.Type, 0, len(combined))
-	for t := range combined {
-		keys = append(keys, t)
+	switch {
+	case haveInt:
+		return widestInt, true
+	case haveDec:
+		return widestDec, true
+	default:
+		return other, true
 	}
-	slices.Sort(keys)
-	for _, t := range keys {
-		c := combined[t]
-		p := tiePriority(t)
-		if first || c > bestCount || (c == bestCount && p > bestPrio) {
-			best, bestCount, bestPrio, first = t, c, p, false
-		}
-	}
-
-	return best, true
-}
-
-func tiePriority(t variant.Type) int {
-	if p, ok := tieBreakPriority[t]; ok {
-		return p
-	}
-
-	return -1
 }
 
 func isIntegerType(t variant.Type) bool {
@@ -213,7 +187,7 @@ func AnalyzeVariantShredding(sample []variant.Value) (arrow.DataType, bool) {
 		traverseVariant(root, v, 0)
 	}
 
-	rootType, ok := root.info.mostCommonType()
+	rootType, ok := root.info.admittedType()
 	if !ok {
 		return nil, false
 	}
@@ -324,7 +298,7 @@ func buildInnerType(node *pathNode, t variant.Type) arrow.DataType {
 		fields := make([]arrow.Field, 0, len(names))
 		for _, name := range names {
 			child := node.objectChildren[name]
-			ct, ok := child.info.mostCommonType()
+			ct, ok := child.info.admittedType()
 			if !ok {
 				continue
 			}
@@ -343,7 +317,7 @@ func buildInnerType(node *pathNode, t variant.Type) arrow.DataType {
 		if node.arrayElement == nil {
 			return nil
 		}
-		et, ok := node.arrayElement.info.mostCommonType()
+		et, ok := node.arrayElement.info.admittedType()
 		if !ok {
 			return nil
 		}

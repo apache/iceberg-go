@@ -578,8 +578,8 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 }
 
 // TestShreddedVariantWriteMixedTypeField writes an object field that is int64 in most
-// rows and string in a few. Inference shreds it as int64 (the majority); the minority
-// string rows must round-trip through the unshredded residual, not be dropped.
+// rows and string in a few. The mixed field is not uniform, so it is not shredded at
+// all; every row must still round-trip through the unshredded value.
 func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -633,7 +633,8 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 		files = append(files, df)
 	}
 	require.Len(t, files, 1)
-	assert.True(t, payloadHasTypedValue(t, files[0].FilePath()), "f shreds as int64 (majority)")
+	assert.False(t, payloadHasTypedValue(t, files[0].FilePath()),
+		"mixed-type field is not uniform, so payload must not shred")
 
 	p := strings.TrimPrefix(files[0].FilePath(), "file://")
 	f, err := os.Open(p)
@@ -656,10 +657,10 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 		assert.JSONEqf(t, want, string(got), "row %d (mixed-type minority must round-trip)", i)
 	}
 
-	// f shreds as int64 but the string rows land in the residual value column, so its
-	// typed stats do not cover all values: the bound must be dropped (Java value() rule).
+	// The mixed-type field is not shredded, so there is no typed_value to derive stats
+	// from: the field must not emit a variant bound.
 	_, hasLower := files[0].LowerBoundValues()[2]
-	assert.False(t, hasLower, "partial-shred field must not emit a variant bound")
+	assert.False(t, hasLower, "unshredded field must not emit a variant bound")
 }
 
 // TestShreddedVariantWriteRowConservation verifies every row survives bootstrap ->
