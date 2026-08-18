@@ -1703,7 +1703,14 @@ func writeInspectManifest(
 		iceberg.WithManifestWriterContent(content))
 	require.NoError(t, err)
 	for _, entry := range entries {
-		require.NoError(t, writer.Add(entry))
+		switch entry.Status() {
+		case iceberg.EntryStatusDELETED:
+			require.NoError(t, writer.Delete(entry))
+		case iceberg.EntryStatusEXISTING:
+			require.NoError(t, writer.Existing(entry))
+		default:
+			require.NoError(t, writer.Add(entry))
+		}
 	}
 	require.NoError(t, writer.Close())
 	manifest, err := writer.ToManifestFile(path, int64(buf.Len()),
@@ -1728,13 +1735,19 @@ func inspectAllFilesTable(t *testing.T) *Table {
 			&sequenceNumber, &sequenceNumber, file)
 	}
 	sharedData := newTestDataFile(t, spec, "mem://default/table-location/data/shared.parquet", nil)
+	deletedData := newTestDataFile(t, spec, "mem://default/table-location/data/deleted.parquet", nil)
 	newData := newTestDataFile(t, spec, "mem://default/table-location/data/new.parquet", nil)
 	deleteFile := newTestPosDeleteFileForSpec(t, spec,
 		"mem://default/table-location/data/delete.parquet", nil, sharedData.FilePath())
+	deletedSequence := sequenceOne
+	deletedEntry := iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &snapshotOne,
+		&deletedSequence, &deletedSequence, deletedData)
 
 	sharedManifest := writeInspectManifest(t, memIO,
 		"mem://default/table-location/metadata/shared.avro", spec, schema, snapshotOne,
-		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotOne, sequenceOne, sharedData)})
+		iceberg.ManifestContentData, []iceberg.ManifestEntry{
+			entry(snapshotOne, sequenceOne, sharedData), deletedEntry,
+		})
 	newManifest := writeInspectManifest(t, memIO,
 		"mem://default/table-location/metadata/new.avro", spec, schema, snapshotTwo,
 		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotTwo, sequenceTwo, newData)})
@@ -1854,6 +1867,7 @@ func TestInspectFilesTables(t *testing.T) {
 func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
 	tbl := inspectAllFilesTable(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	rr, err := tbl.Inspect().AllFiles(ctx)
 	require.NoError(t, err)
 
