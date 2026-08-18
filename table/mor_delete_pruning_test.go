@@ -262,33 +262,11 @@ func newPartitionedMergeOnReadTestTable(t *testing.T) *table.Table {
 }
 
 // liveDVCount returns the number of live deletion-vector entries in the table's
-// current snapshot.
+// current snapshot, which is main's head.
 func liveDVCount(t *testing.T, tbl *table.Table) int {
 	t.Helper()
 
-	fs, err := tbl.FS(context.Background())
-	require.NoError(t, err)
-
-	snapshot := tbl.CurrentSnapshot()
-	require.NotNil(t, snapshot)
-	manifests, err := snapshot.Manifests(fs)
-	require.NoError(t, err)
-
-	count := 0
-	for _, m := range manifests {
-		for entry, err := range m.Entries(fs, false) {
-			require.NoError(t, err)
-			if entry.Status() == iceberg.EntryStatusDELETED {
-				continue
-			}
-			df := entry.DataFile()
-			if table.IsDeletionVector(df) && df.ReferencedDataFile() != nil {
-				count++
-			}
-		}
-	}
-
-	return count
+	return liveDVCountOnRef(t, tbl, table.MainBranch)
 }
 
 // idsInTable scans the table and returns the surviving id values, sorted.

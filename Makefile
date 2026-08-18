@@ -15,7 +15,7 @@
 # limitations under the License.
 
 # golangci-lint version (keep in sync with CI and README)
-GOLANGCI_LINT_VERSION := v2.8.0
+GOLANGCI_LINT_VERSION := v2.12.2
 
 .PHONY: test test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
 

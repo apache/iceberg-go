@@ -20,7 +20,7 @@ package table_test
 import (
 	"context"
 	"path/filepath"
-	"sort"
+	"slices"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -132,9 +132,7 @@ func (s *WriteRecordsSortTestSuite) TestPartitionedTableSortedPerFile() {
 		expectedByCat[r.cat] = append(expectedByCat[r.cat], r.id)
 	}
 	for cat := range expectedByCat {
-		sort.Slice(expectedByCat[cat], func(i, j int) bool {
-			return expectedByCat[cat][i] < expectedByCat[cat][j]
-		})
+		slices.Sort(expectedByCat[cat])
 	}
 
 	for _, df := range dataFiles {
@@ -237,7 +235,7 @@ func readIDsAndCategories(t *testing.T, path string) ([]int32, []string) {
 	if len(idCol) > 0 {
 		for _, chunk := range tbl.Column(idCol[0]).Data().Chunks() {
 			arr := chunk.(*array.Int32)
-			for i := 0; i < arr.Len(); i++ {
+			for i := range arr.Len() {
 				if arr.IsValid(i) {
 					ids = append(ids, arr.Value(i))
 				}
@@ -248,7 +246,7 @@ func readIDsAndCategories(t *testing.T, path string) ([]int32, []string) {
 	if len(catCol) > 0 {
 		for _, chunk := range tbl.Column(catCol[0]).Data().Chunks() {
 			arr := chunk.(*array.String)
-			for i := 0; i < arr.Len(); i++ {
+			for i := range arr.Len() {
 				if arr.IsValid(i) {
 					cats = append(cats, arr.Value(i))
 				}

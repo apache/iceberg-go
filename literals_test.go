@@ -347,6 +347,12 @@ func TestInt64ToInt32OutsideBound(t *testing.T) {
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, belowMin.Type())
 }
 
+func TestBelowMinLiteralMarshalBinary(t *testing.T) {
+	_, err := iceberg.Int32BelowMinLiteral().MarshalBinary()
+	require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
+	assert.EqualError(t, err, "invalid binary serialization: cannot marshal below min literal")
+}
+
 func TestFloatConversions(t *testing.T) {
 	n1, _ := decimal128.FromFloat32(34.56, 9, 1)
 	n2, _ := decimal128.FromFloat32(34.56, 9, 2)
@@ -788,7 +794,7 @@ func TestVariantLiteralLargeArray(t *testing.T) {
 func TestVariantLiteralLargeObject(t *testing.T) {
 	const n = 40
 	obj := make(map[string]any, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		obj["k"+strconv.Itoa(i)] = int64(i)
 	}
 
@@ -804,7 +810,7 @@ func TestVariantLiteralLargeObject(t *testing.T) {
 	require.NotEmpty(t, bytes)
 
 	s := lit.String()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		assert.Contains(t, s, "k"+strconv.Itoa(i))
 	}
 }
@@ -935,6 +941,31 @@ func TestBoolLiteralComparator(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, cmp(tt.v1, tt.v2))
+		})
+	}
+}
+
+func TestBoolLiteralMarshalBinaryReturnsIndependentBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		value iceberg.BoolLiteral
+		want  byte
+	}{
+		{name: "false", value: iceberg.BoolLiteral(false), want: 0x0},
+		{name: "true", value: iceberg.BoolLiteral(true), want: 0x1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, data)
+
+			data[0] ^= 0x1
+
+			again, err := tt.value.MarshalBinary()
+			require.NoError(t, err)
+			assert.Equal(t, []byte{tt.want}, again)
 		})
 	}
 }

@@ -168,6 +168,51 @@ func (t *Transaction) WriteEqualityDeletes(ctx context.Context, equalityFieldIDs
 	return result, nil
 }
 
+// CommitEqualityDeletes is a convenience wrapper that writes the given
+// records as equality delete files and stages a delete-only row delta in
+// this transaction. It composes [Transaction.WriteEqualityDeletes] with
+// [Transaction.NewRowDelta] + [RowDelta.AddDeletes] + [RowDelta.Commit],
+// so it is the delete-only shortcut for CDC/upsert workloads whose caller
+// already holds the equality-key values.
+//
+// Like the other row-level operations, the change is staged within the
+// transaction; call [Transaction.Commit] to make it durable in the
+// catalog. Conflict detection runs at that point.
+//
+// It adds no behavior of its own beyond that composition. In particular:
+//   - the format-version >= 2 requirement is enforced by WriteEqualityDeletes;
+//   - equality field IDs are validated by WriteEqualityDeletes and again by
+//     RowDelta.Commit;
+//   - concurrent-writer conflict detection is inherited from RowDelta, which
+//     validates against write.delete.isolation-level (serializable by
+//     default) when the transaction is committed.
+//
+// snapshotProps are recorded in the resulting snapshot summary. For update
+// CDC events that must commit deletes and appends in one snapshot, use the
+// lower-level RowDelta flow (AddRows + AddDeletes) directly.
+//
+// When records yields no rows, no delete files are produced and this is a
+// no-op that returns nil rather than staging an empty snapshot.
+//
+// Usage:
+//
+//	if err := tx.CommitEqualityDeletes(ctx, []int{1, 2}, records, nil); err != nil {
+//		return err
+//	}
+//	_, err := tx.Commit(ctx)
+func (t *Transaction) CommitEqualityDeletes(ctx context.Context, equalityFieldIDs []int, records iter.Seq2[arrow.RecordBatch, error], snapshotProps iceberg.Properties) error {
+	deleteFiles, err := t.WriteEqualityDeletes(ctx, equalityFieldIDs, records)
+	if err != nil {
+		return err
+	}
+
+	if len(deleteFiles) == 0 {
+		return nil
+	}
+
+	return t.NewRowDelta(snapshotProps).AddDeletes(deleteFiles...).Commit(ctx)
+}
+
 func equalityDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, deleteSchema *iceberg.Schema, equalityFieldIDs []int, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error], retErr error) {
 	if args.counter == nil {
 		args.counter = internal.Counter(0)

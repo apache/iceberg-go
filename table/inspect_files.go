@@ -230,6 +230,7 @@ func (i InspectTable) manifestEntryReaderFromManifests(
 			batch := bldr.NewRecordBatch()
 			rows = 0
 			emitted = true
+
 			if yield(batch, nil) {
 				return true
 			}
@@ -499,7 +500,7 @@ func appendContentFileRecord(bldr *array.RecordBuilder, partitionType *iceberg.S
 		return err
 	}
 
-	return contentFileBuilder.append(partitionType, file)
+	return contentFileBuilder.append(file)
 }
 
 func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*array.RecordBuilder, iceberg.DataFile) error {
@@ -516,7 +517,7 @@ func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*arra
 			return bindErr
 		}
 
-		return contentFileBuilder.append(partitionType, file)
+		return contentFileBuilder.append(file)
 	}
 }
 
@@ -525,7 +526,7 @@ type inspectContentFileBuilder struct {
 	filePath           *array.StringBuilder
 	fileFormat         *array.StringBuilder
 	specID             *array.Int32Builder
-	partition          *array.StructBuilder
+	partition          *inspectPartitionBuilder
 	recordCount        *array.Int64Builder
 	fileSize           *array.Int64Builder
 	columnSizes        *array.MapBuilder
@@ -544,8 +545,38 @@ type inspectContentFileBuilder struct {
 	contentSize        *array.Int64Builder
 }
 
+type inspectPartitionBuilder struct {
+	builder *array.StructBuilder
+	fields  []inspectPartitionFieldBuilder
+}
+
+type inspectPartitionFieldBuilder struct {
+	id        int
+	name      string
+	typ       iceberg.Type
+	arrowType arrow.DataType
+	builder   array.Builder
+}
+
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
-	lookup, err := newInspectBuilderLookup("content-file", bldr.Schema().Fields(), bldr.Field)
+	return newInspectContentFileBuilderFromFields(bldr.Schema().Fields(), bldr.Field, partitionType)
+}
+
+func newInspectContentFileStructBuilder(bldr *array.StructBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
+	structType, ok := bldr.Type().(*arrow.StructType)
+	if !ok {
+		return inspectContentFileBuilder{}, fmt.Errorf("content-file builder has type %T, want struct", bldr.Type())
+	}
+
+	return newInspectContentFileBuilderFromFields(structType.Fields(), bldr.FieldBuilder, partitionType)
+}
+
+func newInspectContentFileBuilderFromFields(
+	fields []arrow.Field,
+	builder func(int) array.Builder,
+	partitionType *iceberg.StructType,
+) (inspectContentFileBuilder, error) {
+	lookup, err := newInspectBuilderLookup("content-file", fields, builder)
 	if err != nil {
 		return inspectContentFileBuilder{}, err
 	}
@@ -567,7 +598,11 @@ func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceb
 		return out, err
 	}
 	if partitionType != nil && len(partitionType.FieldList) > 0 {
-		if out.partition, err = inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition"); err != nil {
+		partitionBuilder, bindErr := inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition")
+		if bindErr != nil {
+			return out, bindErr
+		}
+		if out.partition, err = newInspectPartitionBuilder(partitionBuilder, partitionType); err != nil {
 			return out, err
 		}
 	}
@@ -623,14 +658,14 @@ func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceb
 	return out, nil
 }
 
-func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, file iceberg.DataFile) error {
+func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.content.Append(int32(file.ContentType()))
 	b.filePath.Append(file.FilePath())
 	b.fileFormat.Append(string(file.FileFormat()))
 	b.specID.Append(file.SpecID())
 
 	if b.partition != nil {
-		if err := appendInspectPartition(b.partition, partitionType, file.Partition()); err != nil {
+		if err := b.partition.append(file.Partition()); err != nil {
 			return err
 		}
 	}
@@ -673,37 +708,55 @@ func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, fil
 	return nil
 }
 
-func appendInspectPartition(builder *array.StructBuilder, partitionType *iceberg.StructType, values map[int]any) error {
+func newInspectPartitionBuilder(
+	builder *array.StructBuilder,
+	partitionType *iceberg.StructType,
+) (*inspectPartitionBuilder, error) {
 	arrowType, ok := builder.Type().(*arrow.StructType)
 	if !ok {
-		return fmt.Errorf("partition builder has type %T, want struct", builder.Type())
+		return nil, fmt.Errorf("partition builder has type %T, want struct", builder.Type())
 	}
 	lookup, err := newInspectBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	expected := make(map[int]struct{}, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
 		expected[field.ID] = struct{}{}
 	}
 	if err := validateInspectBuilderLookup("partition", lookup, expected); err != nil {
-		return err
+		return nil, err
 	}
 
-	builder.Append(true)
+	fields := make([]inspectPartitionFieldBuilder, 0, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
-		value := values[field.ID]
 		fieldBuilder := lookup[field.ID]
+		fields = append(fields, inspectPartitionFieldBuilder{
+			id:        field.ID,
+			name:      field.Name,
+			typ:       field.Type,
+			arrowType: fieldBuilder.Type(),
+			builder:   fieldBuilder,
+		})
+	}
+
+	return &inspectPartitionBuilder{builder: builder, fields: fields}, nil
+}
+
+func (b *inspectPartitionBuilder) append(values map[int]any) error {
+	b.builder.Append(true)
+	for _, field := range b.fields {
+		value := values[field.id]
 		if value == nil {
-			fieldBuilder.AppendNull()
+			field.builder.AppendNull()
 
 			continue
 		}
-		sc, err := inspectValueScalar(value, field.Type, fieldBuilder.Type())
+		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
 		if err != nil {
-			return fmt.Errorf("partition field %q: %w", field.Name, err)
+			return fmt.Errorf("partition field %q: %w", field.name, err)
 		}
-		if err := scalar.Append(fieldBuilder, sc); err != nil {
+		if err := scalar.Append(field.builder, sc); err != nil {
 			return err
 		}
 	}
