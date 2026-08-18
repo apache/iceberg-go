@@ -201,3 +201,116 @@ func TestStandardEncryptionManager_BadNoncePrefixLengthMetadataRejectedOnRead(t 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
 }
+
+func TestStandardEncryptionManager_InvalidDEKLengthRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithDEKLength(15))
+	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyLength))
+}
+
+// shortReadFile is an icebergio.File stub whose ReadAt returns fewer bytes
+// than requested along with io.EOF once truncateAt is reached, mimicking a
+// real backend (S3, local fs) reading a genuinely truncated file. A plain
+// bytes.Reader always fills the requested slice, which is why the round-trip
+// tests never exercise this path.
+type shortReadFile struct {
+	*memFile
+	truncateAt int64
+}
+
+func (f *shortReadFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= f.truncateAt {
+		return 0, io.EOF
+	}
+	if off+int64(len(p)) > f.truncateAt {
+		p = p[:f.truncateAt-off]
+	}
+	n, err := f.memFile.ReadAt(p, off)
+	if err == nil && int64(n) < int64(len(p)) {
+		err = io.EOF
+	}
+
+	return n, err
+}
+
+func TestStandardEncryptionManager_TruncatedBackendReadReportsCiphertextTooShort(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4)
+
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+	truncated := &shortReadFile{memFile: newMemFile(ciphertext), truncateAt: int64(len(ciphertext) - 5)}
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), truncated, keyMetadata)
+	require.NoError(t, err)
+
+	_, err = io.ReadAll(in)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrCiphertextTooShort))
+	assert.False(t, errors.Is(err, encryption.ErrAuthenticationFailed), "a truncated read must not be misreported as tampering")
+}
+
+func TestStandardEncryptionManager_EmptyFile_ZeroLengthReadAt(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", nil)
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.NoError(t, err)
+
+	n, err := in.ReadAt(nil, 0)
+	assert.NoError(t, err, "a zero-length ReadAt on an empty file should behave like bytes.Reader, not report io.EOF")
+	assert.Equal(t, 0, n)
+}
+
+// failAfterNWriter is an icebergio.FileWriter stub that fails the Nth call
+// to Write, simulating a mid-stream flush failure on the underlying storage.
+type failAfterNWriter struct {
+	memFileWriter
+	failAt int
+	writes int
+}
+
+func (w *failAfterNWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == w.failAt {
+		return 0, errors.New("simulated write failure")
+	}
+
+	return w.memFileWriter.Write(p)
+}
+
+func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(4))
+	fw := &failAfterNWriter{failAt: 2}
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "kek-1")
+	require.NoError(t, err)
+
+	// First block (4 bytes) flushes fine; the second block's flush fails.
+	_, err = out.Write([]byte("aaaabbbb"))
+	require.Error(t, err)
+
+	// A subsequent Write must return the same sticky error, not attempt more I/O.
+	_, err2 := out.Write([]byte("c"))
+	require.Error(t, err2)
+	assert.ErrorIs(t, err2, err)
+
+	// Close must report the failure rather than silently succeeding.
+	closeErr := out.Close()
+	require.Error(t, closeErr)
+	assert.Nil(t, out.KeyMetadata(), "key metadata must not be finalized when the file failed to write")
+
+	// A retried Close must keep reporting the same error, not nil.
+	closeErr2 := out.Close()
+	require.Error(t, closeErr2)
+}
+
+func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t)
+	out, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	_, err = out.Write([]byte("late"))
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrOutputFileClosed))
+}
