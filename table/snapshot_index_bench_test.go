@@ -29,8 +29,10 @@ func BenchmarkSnapshotByID(b *testing.B) {
 		snapshots[i].SnapshotID = int64(i)
 	}
 
-	metadata := commonMetadata{SnapshotList: snapshots}
-	metadata.SnapshotByID(int64(snapshotCount - 1))
+	metadata := commonMetadata{
+		SnapshotList:  snapshots,
+		snapshotIndex: buildSnapshotIndex(snapshots),
+	}
 
 	b.Run("indexed", func(b *testing.B) {
 		b.ReportAllocs()
