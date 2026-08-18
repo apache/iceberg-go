@@ -185,6 +185,7 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 				if err := validateUpdateActionDecode(raw); err != nil {
 					return err
 				}
+
 				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
 			}
 			if err := json.Unmarshal(actionValue, &action); err != nil {
@@ -257,6 +258,7 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			if err := validateUpdateActionDecode(raw); err != nil {
 				return err
 			}
+
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 		if normalizeLegacyPropertyFields(base.ActionName, object) {
@@ -285,6 +287,7 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			if actionErr := validateUpdateActionDecode(raw); actionErr != nil {
 				return actionErr
 			}
+
 			return err
 		}
 
