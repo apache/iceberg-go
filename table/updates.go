@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -157,13 +158,38 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(raw, &object); err != nil {
 			return err
 		}
-		actionValue, ok := object["action"]
-		if !ok || bytes.Equal(bytes.TrimSpace(actionValue), []byte("null")) {
-			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+
+		actionValue, exactAction := object["action"]
+		actionFieldCount := 0
+		caseVariantAction := false
+		for field := range object {
+			if strings.EqualFold(field, "action") {
+				actionFieldCount++
+				if field != "action" {
+					caseVariantAction = true
+				}
+			}
 		}
+
 		var action string
-		if err := json.Unmarshal(actionValue, &action); err != nil {
-			return err
+		if exactAction && !caseVariantAction {
+			if bytes.Equal(bytes.TrimSpace(actionValue), []byte("null")) {
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			if err := json.Unmarshal(actionValue, &action); err != nil {
+				return err
+			}
+		} else {
+			var baseWire struct {
+				Action *string `json:"action"`
+			}
+			if err := json.Unmarshal(raw, &baseWire); err != nil {
+				return err
+			}
+			if baseWire.Action == nil {
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			action = *baseWire.Action
 		}
 
 		base := baseUpdate{ActionName: action}
@@ -220,6 +246,18 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 		if normalizeLegacyPropertyFields(base.ActionName, object) {
+			if actionFieldCount > 1 {
+				for field := range object {
+					if strings.EqualFold(field, "action") {
+						delete(object, field)
+					}
+				}
+				actionJSON, err := json.Marshal(base.ActionName)
+				if err != nil {
+					return err
+				}
+				object["action"] = actionJSON
+			}
 			normalized, err := json.Marshal(object)
 			if err != nil {
 				return err
