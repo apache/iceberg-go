@@ -18,6 +18,7 @@
 package table
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -155,4 +156,51 @@ func TestMetadataBuilderCloneSharesSnapshotIndexUntilSnapshotMutation(t *testing
 	require.NotSame(t, builder.snapshotIndex, cloned.snapshotIndex)
 	require.NotContains(t, builder.snapshotIndex.positions, second.SnapshotID)
 	require.Equal(t, 1, cloned.snapshotIndex.positions[second.SnapshotID])
+}
+
+func TestCommonMetadataSnapshotLookupsConcurrent(t *testing.T) {
+	currentSnapshotID := int64(2)
+	metadata := &commonMetadata{
+		SnapshotList:      []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}},
+		CurrentSnapshotID: &currentSnapshotID,
+		SnapshotRefs: map[string]SnapshotRef{
+			MainBranch: {SnapshotID: currentSnapshotID, SnapshotRefType: BranchRef},
+		},
+	}
+	metadata.snapshotIndex = buildSnapshotIndex(metadata.SnapshotList)
+
+	const (
+		goroutineCount = 8
+		lookupCount    = 100
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutineCount)
+	for i := range goroutineCount {
+		go func(i int) {
+			defer wg.Done()
+
+			for range lookupCount {
+				var snapshot *Snapshot
+				var expectedID int64
+				switch i % 3 {
+				case 0:
+					snapshot = metadata.SnapshotByID(1)
+					expectedID = 1
+				case 1:
+					snapshot = metadata.SnapshotByName(MainBranch)
+					expectedID = currentSnapshotID
+				default:
+					snapshot = metadata.CurrentSnapshot()
+					expectedID = currentSnapshotID
+				}
+
+				if snapshot == nil || snapshot.SnapshotID != expectedID {
+					t.Errorf("expected snapshot %d, got %v", expectedID, snapshot)
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }
