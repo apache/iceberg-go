@@ -915,6 +915,50 @@ func TestSnapshotLogSkipsIntermediate(t *testing.T) {
 	require.True(t, res.CurrentSnapshot().Equals(snapshot2))
 }
 
+func TestRemoveSnapshotsPrunesSnapshotLogHistory(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	baseTimestamp := builder.base.LastUpdatedMillis()
+	const (
+		snapshot1ID int64 = 1
+		snapshot2ID int64 = 2
+		snapshot3ID int64 = 3
+	)
+
+	builder.snapshotList = []Snapshot{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}
+	builder.snapshotLog = []SnapshotLogEntry{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}
+	builder.currentSnapshotID = ptr(snapshot3ID)
+	builder.refs = map[string]SnapshotRef{
+		MainBranch: {SnapshotID: snapshot3ID, SnapshotRefType: BranchRef},
+	}
+
+	meta, err := builder.Build()
+	require.NoError(t, err)
+
+	newBuilder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+	require.NoError(t, newBuilder.RemoveSnapshots([]int64{snapshot2ID}, false))
+	require.Equal(t, []SnapshotLogEntry{
+		{SnapshotID: snapshot1ID, TimestampMs: baseTimestamp + 1},
+		{SnapshotID: snapshot2ID, TimestampMs: baseTimestamp + 2},
+		{SnapshotID: snapshot3ID, TimestampMs: baseTimestamp + 3},
+	}, newBuilder.snapshotLog)
+
+	rebuilt, err := newBuilder.Build()
+	require.NoError(t, err)
+	require.Equal(t, []SnapshotLogEntry{{
+		SnapshotID:  snapshot3ID,
+		TimestampMs: baseTimestamp + 3,
+	}}, slices.Collect(rebuilt.SnapshotLogs()))
+}
+
 func TestSetBranchSnapshotCreatesBranchIfNotExists(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	schemaID := 0
@@ -1037,6 +1081,11 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 
 	builder, err := MetadataBuilderFromBase(meta, "")
 	require.NoError(t, err)
+	require.EqualError(t,
+		builder.RemoveSnapshots([]int64{removedID, currentID}, false),
+		"current snapshot cannot be removed")
+	require.Len(t, builder.snapshotList, 2)
+	require.Empty(t, builder.updates)
 	require.NoError(t, builder.RemoveSnapshots([]int64{removedID}, false))
 
 	rebuilt, err := builder.Build()
@@ -1045,6 +1094,94 @@ func TestRemoveSnapshotsWithCurrentSnapshotAndEmptyLog(t *testing.T) {
 	current := rebuilt.CurrentSnapshot()
 	require.NotNil(t, current)
 	require.Equal(t, currentID, current.SnapshotID)
+}
+
+func TestRemoveSnapshotsRemovesMultipleIDs(t *testing.T) {
+	const (
+		removedID1 = int64(100)
+		removedID2 = int64(200)
+		keptID     = int64(300)
+	)
+	currentID := int64(400)
+	lastPartitionID := 999
+	commonMeta := commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		Loc:             "s3://test/table",
+		LastUpdatedMS:   1000,
+		LastColumnId:    1,
+		SchemaList:      []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+		LastPartitionID: &lastPartitionID,
+		Props:           iceberg.Properties{},
+		SnapshotList: []Snapshot{
+			{SnapshotID: removedID1, TimestampMs: 1001, ManifestList: "/snap-100.avro"},
+			{SnapshotID: removedID2, TimestampMs: 1002, ManifestList: "/snap-200.avro"},
+			{SnapshotID: keptID, TimestampMs: 1003, ManifestList: "/snap-300.avro"},
+			{SnapshotID: currentID, TimestampMs: 1004, ManifestList: "/snap-400.avro"},
+		},
+		CurrentSnapshotID: &currentID,
+		SnapshotLog: []SnapshotLogEntry{
+			{SnapshotID: removedID1, TimestampMs: 1001},
+			{SnapshotID: removedID2, TimestampMs: 1002},
+			{SnapshotID: keptID, TimestampMs: 1003},
+			{SnapshotID: currentID, TimestampMs: 1004},
+		},
+		SortOrderList:      []SortOrder{UnsortedSortOrder},
+		DefaultSortOrderID: 0,
+		SnapshotRefs: map[string]SnapshotRef{
+			MainBranch:       {SnapshotID: currentID, SnapshotRefType: BranchRef},
+			"removed-branch": {SnapshotID: removedID2, SnapshotRefType: BranchRef},
+			"kept-branch":    {SnapshotID: keptID, SnapshotRefType: BranchRef},
+		},
+		StatisticsList: []StatisticsFile{
+			{SnapshotID: removedID1, StatisticsPath: "s3://stats/removed-1.puffin"},
+			{SnapshotID: removedID2, StatisticsPath: "s3://stats/removed-2.puffin"},
+			{SnapshotID: keptID, StatisticsPath: "s3://stats/kept.puffin"},
+			{SnapshotID: currentID, StatisticsPath: "s3://stats/current.puffin"},
+		},
+		PartitionStatsList: []PartitionStatisticsFile{
+			{SnapshotID: removedID1, StatisticsPath: "s3://partstats/removed-1.parquet"},
+			{SnapshotID: removedID2, StatisticsPath: "s3://partstats/removed-2.parquet"},
+			{SnapshotID: keptID, StatisticsPath: "s3://partstats/kept.parquet"},
+			{SnapshotID: currentID, StatisticsPath: "s3://partstats/current.parquet"},
+		},
+	}
+
+	builder, err := MetadataBuilderFromBase(&metadataV2{LastSeqNum: 0, commonMetadata: commonMeta}, "")
+	require.NoError(t, err)
+
+	removedIDs := []int64{removedID1, removedID2}
+	require.NoError(t, builder.RemoveSnapshots(removedIDs, false))
+
+	require.Equal(t, []int64{keptID, currentID}, []int64{
+		builder.snapshotList[0].SnapshotID,
+		builder.snapshotList[1].SnapshotID,
+	})
+	require.NotContains(t, builder.refs, "removed-branch")
+	require.Contains(t, builder.refs, "kept-branch")
+	require.Equal(t, currentID, builder.refs[MainBranch].SnapshotID)
+	require.Equal(t, []int64{keptID, currentID}, []int64{
+		builder.statisticsList[0].SnapshotID,
+		builder.statisticsList[1].SnapshotID,
+	})
+	require.Equal(t, []int64{keptID, currentID}, []int64{
+		builder.partitionStatsList[0].SnapshotID,
+		builder.partitionStatsList[1].SnapshotID,
+	})
+	require.Len(t, builder.updates, 1)
+	update, ok := builder.updates[0].(*removeSnapshotsUpdate)
+	require.True(t, ok)
+	require.Equal(t, removedIDs, update.SnapshotIDs)
+
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	require.Equal(t, []SnapshotLogEntry{
+		{SnapshotID: keptID, TimestampMs: 1003},
+		{SnapshotID: currentID, TimestampMs: 1004},
+	}, slices.Collect(rebuilt.SnapshotLogs()))
 }
 
 // TestRemoveSnapshotsPrunesStatistics verifies that RemoveSnapshots also
@@ -3347,7 +3484,7 @@ func TestMetadataBuilderCloneCoversAllFields(t *testing.T) {
 			"field %q not copied by clone()", name)
 
 		switch of.Kind() {
-		case reflect.Slice, reflect.Map, reflect.Ptr:
+		case reflect.Slice, reflect.Map, reflect.Pointer:
 			require.NotEqualf(t, of.Pointer(), cf.Pointer(),
 				"field %q shares backing storage with the original", name)
 		}
@@ -3386,7 +3523,7 @@ func fillReferenceFields(t *testing.T, sv reflect.Value) {
 // non-zero data (interfaces, funcs), which clone() shares by reference anyway.
 func fillNonZero(v reflect.Value, seen map[reflect.Type]bool) bool {
 	switch v.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 		if !seen[v.Type()] {
 			seen[v.Type()] = true

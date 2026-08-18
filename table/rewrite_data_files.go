@@ -503,9 +503,24 @@ func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 // Always runs — no isolation gating, because rewrite is a structural
 // operation, not a user-facing isolation choice.
 func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
+	return rewriteValidatorWithReferencedDataFiles(rewrittenFiles, nil)
+}
+
+// rewriteValidatorWithReferencedDataFiles extends rewrite validation to data
+// files targeted by deletion vectors added by the rewrite. Existing targets
+// must remain live, and no concurrent delete may be added for them before the
+// rewrite commits; otherwise the rewrite could create a duplicate DV or leave
+// a position delete surviving beside the new DV.
+func rewriteValidatorWithReferencedDataFiles(
+	rewrittenFiles []iceberg.DataFile,
+	referencedDataFilePaths []string,
+) conflictValidatorFunc {
 	return func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
+		}
+		if err := validateDataFilesExist(cc, referencedDataFilePaths); err != nil {
+			return err
 		}
 
 		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)

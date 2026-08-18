@@ -274,6 +274,7 @@ func TestUpdateSpecOnInheritedTimeOverlap(t *testing.T) {
 			BuildUpdates()
 		require.ErrorIs(t, err, iceberg.ErrInvalidPartitionSpec)
 		assert.ErrorContains(t, err, "ts_hour (hour) conflicts with ts_day (day)")
+		assert.ErrorContains(t, err, "remove one of them in this update")
 	})
 
 	t.Run("unrelated rename is blocked", func(t *testing.T) {

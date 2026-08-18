@@ -18,6 +18,7 @@
 package internal
 
 import (
+	"slices"
 	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -130,7 +131,7 @@ func (f *fieldInfo) mostCommonType() (variant.Type, bool) {
 	for t := range combined {
 		keys = append(keys, t)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	for _, t := range keys {
 		c := combined[t]
 		p := tiePriority(t)
@@ -404,10 +405,7 @@ func decimalArrowType(info *fieldInfo) arrow.DataType {
 	// Always Decimal128: arrow-go's pqarrow maps it to INT32/INT64/FLBA by
 	// precision and cannot serialize Decimal32/Decimal64.
 	intDigits := max(info.maxDecimalIntDigits, 0)
-	prec := intDigits + info.maxDecimalScale
-	if prec > 38 {
-		prec = 38
-	}
+	prec := min(intDigits+info.maxDecimalScale, 38)
 	if prec < 1 {
 		prec = 1
 	}

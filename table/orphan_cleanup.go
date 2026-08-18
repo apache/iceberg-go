@@ -23,6 +23,7 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	pathpkg "path"
@@ -152,9 +153,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for k, v := range schemes {
-			cfg.equalSchemes[k] = v
-		}
+		maps.Copy(cfg.equalSchemes, schemes)
 	}
 }
 
@@ -167,10 +166,48 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for k, v := range authorities {
-			cfg.equalAuthorities[k] = v
+		maps.Copy(cfg.equalAuthorities, authorities)
+	}
+}
+
+// flattenURIEquivalences expands comma-separated URI equivalence groups into
+// direct lookups. This intentionally differs from Java's flattenMap (lines
+// 392-403), which uses input iteration order for conflicts. Go map iteration is
+// unordered, so groups are processed in sorted order and the lexicographically
+// last overlapping group wins. Exact mappings are overlaid afterward so they
+// retain precedence over groups.
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L392-L403
+func flattenURIEquivalences(equivalences map[string]string) map[string]string {
+	if len(equivalences) == 0 {
+		return nil
+	}
+
+	groups := make([]string, 0, len(equivalences))
+	for group := range equivalences {
+		groups = append(groups, group)
+	}
+	slices.Sort(groups)
+
+	flattened := make(map[string]string, len(equivalences))
+	for _, group := range groups {
+		if !strings.Contains(group, ",") {
+			continue
+		}
+
+		for _, value := range strings.Split(group, ",") {
+			flattened[strings.TrimSpace(value)] = equivalences[group]
 		}
 	}
+
+	for _, group := range groups {
+		// Group declarations are configuration syntax, not URI lookup keys.
+		if strings.Contains(group, ",") {
+			continue
+		}
+		flattened[group] = equivalences[group]
+	}
+
+	return flattened
 }
 
 type OrphanCleanupResult struct {
@@ -252,6 +289,9 @@ func newOrphanCleanupConfigWithMode(executingPlan bool, opts ...OrphanCleanupOpt
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	cfg.equalSchemes = flattenURIEquivalences(cfg.equalSchemes)
+	cfg.equalAuthorities = flattenURIEquivalences(cfg.equalAuthorities)
 
 	return cfg
 }
@@ -695,7 +735,7 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.maxConcurrency)
-	for i := 0; i < cfg.maxConcurrency; i++ {
+	for i := range cfg.maxConcurrency {
 		go func(workerID int) {
 			defer wg.Done()
 			for file := range in {
@@ -1089,22 +1129,8 @@ func filePathKey(file string) string {
 // Based on Apache Iceberg Java's flattenMap() (lines 392-403) and EQUAL_SCHEMES_DEFAULT (line 102).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applySchemeEquivalence(scheme string, equalSchemes map[string]string) string {
-	if equalSchemes == nil {
-		return scheme
-	}
 	if canonical, exists := equalSchemes[scheme]; exists {
 		return canonical
-	}
-
-	// Check comma-separated lists (e.g., "s3,s3a,s3n" -> "s3")
-	for schemes, canonical := range equalSchemes {
-		if strings.Contains(schemes, ",") {
-			for _, s := range strings.Split(schemes, ",") {
-				if strings.TrimSpace(s) == scheme {
-					return canonical
-				}
-			}
-		}
 	}
 
 	return scheme
@@ -1125,22 +1151,8 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 // Based on Apache Iceberg Java's equalAuthorities logic (lines 546, 161-165, 392-403).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applyAuthorityEquivalence(authority string, equalAuthorities map[string]string) string {
-	if equalAuthorities == nil {
-		return authority
-	}
-
 	if canonical, exists := equalAuthorities[authority]; exists {
 		return canonical
-	}
-
-	for authorities, canonical := range equalAuthorities {
-		if strings.Contains(authorities, ",") {
-			for _, a := range strings.Split(authorities, ",") {
-				if strings.TrimSpace(a) == authority {
-					return canonical
-				}
-			}
-		}
 	}
 
 	// ADLS authorities use container@host. Preserve the container while still

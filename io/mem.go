@@ -176,7 +176,7 @@ func (m *MemFS) WalkDir(root string, fn fs.WalkDirFunc) error {
 
 		left := strings.Split(strings.TrimPrefix(paths[i], root+"/"), "/")
 		right := strings.Split(strings.TrimPrefix(paths[j], root+"/"), "/")
-		for index := 0; index < min(len(left), len(right)); index++ {
+		for index := range min(len(left), len(right)) {
 			if left[index] != right[index] {
 				return left[index] < right[index]
 			}

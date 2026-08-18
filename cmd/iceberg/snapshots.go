@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -61,8 +62,7 @@ func buildSnapshotEntries(tbl *table.Table) []SnapshotEntry {
 	snapshots := tbl.Metadata().Snapshots()
 	entries := make([]SnapshotEntry, 0, len(snapshots))
 
-	for i := len(snapshots) - 1; i >= 0; i-- {
-		s := snapshots[i]
+	for _, s := range slices.Backward(snapshots) {
 
 		op := ""
 		addedFiles := "-"

@@ -115,6 +115,24 @@ func TestCatalogRegistry(t *testing.T) {
 	}, catalog.GetRegisteredCatalogs())
 }
 
+func TestCatalogRegistryNormalizesType(t *testing.T) {
+	ctx := context.Background()
+	catalog.Register("MyCatalog", catalog.RegistrarFunc(func(context.Context, string, iceberg.Properties) (catalog.Catalog, error) {
+		return nil, nil
+	}))
+	t.Cleanup(func() { catalog.Unregister("MyCatalog") })
+	assert.Contains(t, catalog.GetRegisteredCatalogs(), "mycatalog")
+	assert.NotContains(t, catalog.GetRegisteredCatalogs(), "MyCatalog")
+
+	c, err := catalog.Load(ctx, "test", iceberg.Properties{"type": "MYCATALOG"})
+	assert.NoError(t, err)
+	assert.Nil(t, c)
+
+	catalog.Unregister("MYCATALOG")
+	_, err = catalog.Load(ctx, "test", iceberg.Properties{"type": "mycatalog"})
+	assert.ErrorIs(t, err, catalog.ErrCatalogNotFound)
+}
+
 func TestRegistryPanic(t *testing.T) {
 	assert.PanicsWithValue(t, "catalog: RegisterCatalog catalog factory is nil", func() { catalog.Register("foobar", nil) })
 }

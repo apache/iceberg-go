@@ -252,7 +252,7 @@ func TestReporterNilMetricsEmitNothing(t *testing.T) {
 // TestReporterMultipleReports verifies counters accumulate across reports.
 func TestReporterMultipleReports(t *testing.T) {
 	rep, collect := newTestReporter(t)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rep.Report(context.Background(), metrics.CommitReport{
 			TableName: "db.t",
 			Operation: "append",

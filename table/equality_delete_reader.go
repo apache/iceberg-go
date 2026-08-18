@@ -451,7 +451,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		}
 
 		numRows := int(rec.NumRows())
-		for row := 0; row < numRows; row++ {
+		for row := range numRows {
 			keyBuf.Reset()
 			for _, enc := range encoders {
 				enc(&keyBuf, row)
@@ -779,7 +779,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				}
 			}
 
-			for row := 0; row < numRows; row++ {
+			for row := range numRows {
 				if !bitutil.BitIsSet(maskBytes, row) {
 					continue
 				}

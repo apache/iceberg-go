@@ -389,9 +389,10 @@ func (b *MetadataBuilder) currentSnapshot() *Snapshot {
 }
 
 // currentSnapshotForRef returns the snapshot a write targeting ref must be
-// parented on (createSnapshotProducer and mergeOverwrite). An unknown branch
-// falls back to currentSnapshot() so a new branch forks from main. This is a
-// parent lookup only: the commit's AssertRefSnapshotID requirement is built
+// parented on (createSnapshotProducer) and plan against
+// (Transaction.planningSnapshot). An unknown branch falls back to
+// currentSnapshot() so a new branch forks from main. This is a head lookup
+// only: the commit's AssertRefSnapshotID requirement is built
 // separately from the base table's ref (Transaction.baseRefSnapshotID), which
 // returns nil for an absent branch so the requirement can prove the branch does
 // not exist yet — never derive one from the other. A ref cannot outlive its
@@ -643,20 +644,33 @@ func (b *MetadataBuilder) NextRowID() int64 {
 }
 
 func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) error {
-	if b.currentSnapshotID != nil && slices.Contains(snapshotIds, *b.currentSnapshotID) {
-		return errors.New("current snapshot cannot be removed")
+	removedIDs := make(map[int64]struct{}, len(snapshotIds))
+	for _, snapshotID := range snapshotIds {
+		removedIDs[snapshotID] = struct{}{}
+	}
+
+	if b.currentSnapshotID != nil {
+		if _, ok := removedIDs[*b.currentSnapshotID]; ok {
+			return errors.New("current snapshot cannot be removed")
+		}
 	}
 
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
-	})
-	b.snapshotLog = slices.DeleteFunc(b.snapshotLog, func(e SnapshotLogEntry) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
-	})
+		_, ok := removedIDs[e.SnapshotID]
 
-	newRefs := make(map[string]SnapshotRef)
+		return ok
+	})
+	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
+	// removed entries remain available when trimming history gaps.
+
+	validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+	for _, snapshot := range b.snapshotList {
+		validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+	}
+
+	newRefs := make(map[string]SnapshotRef, len(b.refs))
 	for name, ref := range b.refs {
-		if _, err := b.SnapshotByID(ref.SnapshotID); err == nil {
+		if _, ok := validSnapshotIDs[ref.SnapshotID]; ok {
 			newRefs[name] = ref
 		}
 	}
@@ -665,10 +679,14 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 	// Prune statistics entries whose snapshot was removed so that table
 	// metadata does not retain stale statistics references.
 	b.statisticsList = slices.DeleteFunc(b.statisticsList, func(e StatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+
+		return ok
 	})
 	b.partitionStatsList = slices.DeleteFunc(b.partitionStatsList, func(e PartitionStatisticsFile) bool {
-		return slices.Contains(snapshotIds, e.SnapshotID)
+		_, ok := removedIDs[e.SnapshotID]
+
+		return ok
 	})
 
 	b.updates = append(b.updates, NewRemoveSnapshotsUpdate(snapshotIds, postCommit))
@@ -1135,14 +1153,19 @@ func (b *MetadataBuilder) updateSnapshotLog() error {
 		}
 	}
 	if len(intermediateIDs) != 0 || hasRemoved {
+		validSnapshotIDs := make(map[int64]struct{}, len(b.snapshotList))
+		for _, snapshot := range b.snapshotList {
+			validSnapshotIDs[snapshot.SnapshotID] = struct{}{}
+		}
+
 		newSnapsLog := make([]SnapshotLogEntry, 0, len(b.snapshotLog))
 		for _, s := range b.snapshotLog {
-			if snap, _ := b.SnapshotByID(s.SnapshotID); snap != nil {
+			if _, ok := validSnapshotIDs[s.SnapshotID]; ok {
 				if _, ok := intermediateIDs[s.SnapshotID]; !ok {
 					newSnapsLog = append(newSnapsLog, s)
 				}
 			} else if hasRemoved {
-				newSnapsLog = make([]SnapshotLogEntry, 0, len(b.snapshotLog)-len(newSnapsLog))
+				newSnapsLog = newSnapsLog[:0]
 			}
 		}
 		if b.currentSnapshotID != nil && len(newSnapsLog) != 0 {

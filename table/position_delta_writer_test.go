@@ -115,7 +115,7 @@ func TestPositionDeltaWriter_ReinsertPreservesRowID(t *testing.T) {
 		require.NoError(t, err)
 		idCol := rec.Column(rec.Schema().FieldIndices("id")[0]).(*array.Int64)
 		rowIDCol := rec.Column(rec.Schema().FieldIndices(iceberg.RowIDColumnName)[0]).(*array.Int64)
-		for i := 0; i < int(rec.NumRows()); i++ {
+		for i := range int(rec.NumRows()) {
 			rowsByID[idCol.Value(i)] = rowIDCol.Value(i)
 		}
 		rec.Release()

@@ -406,7 +406,7 @@ func (rd *RowDelta) validateRemovedDeletes(resolved, replacedLive []iceberg.Data
 // need; deltas without removals do not pay for it (nor get it — see
 // AddDeletes).
 func (rd *RowDelta) resolveRemovedDeletes(fs iceio.IO, meta *MetadataBuilder) (resolved, replacedLive []iceberg.DataFile, _ error) {
-	snap := meta.currentSnapshot()
+	snap := rd.txn.planningSnapshot(meta)
 	if snap == nil {
 		return nil, nil, errors.New("cannot remove delete files from a table without an existing snapshot")
 	}

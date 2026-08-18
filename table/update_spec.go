@@ -255,6 +255,11 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 // validateNoRedundantTimeFields rejects hour(ts) alongside day(ts).
 // Taking the assembled set is load bearing: only it knows which fields survive
 // the deletes, so AddField(month) -> RemoveField(year) works in either order.
+//
+// So a redundancy inherited from the current spec blocks every update, even
+// unrelated ones, until it is removed here: the update authors a whole new
+// spec, and passing the old fields through would carry the redundancy into it.
+// Loading such metadata still works, under the lenient equality-only rule.
 func validateNoRedundantTimeFields(fields []iceberg.PartitionField) error {
 	timeFields := make(map[int]iceberg.PartitionField, len(fields))
 	for _, field := range fields {
@@ -265,7 +270,7 @@ func validateNoRedundantTimeFields(fields []iceberg.PartitionField) error {
 		}
 		source := field.SourceID()
 		if existing, exists := timeFields[source]; exists {
-			return fmt.Errorf("%w: redundant partition field for source ID %d: %s (%s) conflicts with %s (%s)",
+			return fmt.Errorf("%w: redundant partition field for source ID %d: %s (%s) conflicts with %s (%s); remove one of them in this update",
 				iceberg.ErrInvalidPartitionSpec, source,
 				field.Name, field.Transform, existing.Name, existing.Transform)
 		}

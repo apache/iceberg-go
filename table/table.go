@@ -874,9 +874,10 @@ func validateBranchRequirement(reqs []Requirement, branch string, meta Metadata)
 
 // latestSnapshotForBranch returns the head a write targeting branch is parented
 // on: a branch that does not exist yet resolves to nil here and falls back to
-// main's head so the first write to a new branch forks from main. The two must
-// stay in sync — the replay path uses this one, and a divergence would reparent
-// a retried snapshot somewhere its first attempt never pointed.
+// main's head so the first write to a new branch forks from main. It is the
+// Metadata-side twin of currentSnapshotForRef, which the retry path cannot use
+// because it has no builder; the two must resolve a ref identically, or a
+// retried snapshot is reparented somewhere its first attempt never pointed.
 func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	if branch == "" || branch == MainBranch {
 		return meta.CurrentSnapshot()
@@ -887,6 +888,27 @@ func latestSnapshotForBranch(meta Metadata, branch string) *Snapshot {
 	}
 
 	return meta.CurrentSnapshot()
+}
+
+// stagedSnapshotStillValid reports whether a snapshot built on an earlier
+// attempt would still be accepted by AddSnapshot against fresh. Both values it
+// checks are table-wide, so a peer committing on ANOTHER branch invalidates them
+// without moving this branch's head — the case the caller's parent check misses,
+// and one AddSnapshot rejects terminally rather than retryably.
+func stagedSnapshotStillValid(snap *Snapshot, fresh Metadata) bool {
+	if snap == nil || fresh == nil {
+		return true
+	}
+
+	if fresh.Version() >= 2 && snap.SequenceNumber <= fresh.LastSequenceNumber() {
+		return false
+	}
+
+	if fresh.Version() >= 3 && (snap.FirstRowID == nil || *snap.FirstRowID < fresh.NextRowID()) {
+		return false
+	}
+
+	return true
 }
 
 // rebuildSnapshotUpdates returns a new slice of updates where any
@@ -932,10 +954,12 @@ func rebuildSnapshotUpdates(ctx context.Context, updates []Update, freshMeta Met
 		}
 
 		// Skip only when nothing upstream changed: the running head still
-		// matches this snapshot's recorded parent and no earlier snapshot in
-		// this chain was rebuilt. Saves an unnecessary S3 write.
+		// matches this snapshot's recorded parent, no earlier snapshot in this
+		// chain was rebuilt, and the table-wide values the rebuild recomputes
+		// are still acceptable. Saves an unnecessary S3 write.
 		if !chainRebuilt && freshHead != nil && su.Snapshot.ParentSnapshotID != nil &&
-			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID {
+			*su.Snapshot.ParentSnapshotID == freshHead.SnapshotID &&
+			stagedSnapshotStillValid(su.Snapshot, freshMeta) {
 			// Already parented on the running head; it becomes the parent of
 			// the next staged snapshot in the chain.
 			freshHead = su.Snapshot
@@ -1068,10 +1092,7 @@ func backoffDuration(attempt uint, minMs, maxMs uint64) time.Duration {
 	if minMs > maxRetryDurationMs>>attempt {
 		ceiling = maxMs
 	} else {
-		ceiling = minMs << attempt
-		if ceiling > maxMs {
-			ceiling = maxMs
-		}
+		ceiling = min(minMs<<attempt, maxMs)
 	}
 
 	// Jitter in [minMs, ceiling]: keeps a non-zero floor so concurrent

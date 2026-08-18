@@ -68,7 +68,7 @@ func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(10), bm.Cardinality())
-	for i := uint64(0); i < 10; i++ {
+	for i := range uint64(10) {
 		assert.True(t, bm.Contains(i), "expected position %d to be set", i)
 	}
 	assert.False(t, bm.Contains(10))
@@ -190,7 +190,7 @@ func TestKeepMaskBytes(t *testing.T) {
 		bm := NewRoaringPositionBitmap()
 		mask := bm.KeepMaskBytes(10)
 		require.Len(t, mask, 2) // ⌈10/8⌉ = 2
-		for i := int64(0); i < 10; i++ {
+		for i := range int64(10) {
 			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
 		}
 		// Bits 10..15 in the trailing byte must be cleared so callers
@@ -230,7 +230,7 @@ func TestKeepMaskBytes(t *testing.T) {
 
 		mask := bm.KeepMaskBytes(32)
 		require.Len(t, mask, 4)
-		for i := int64(0); i < 32; i++ {
+		for i := range int64(32) {
 			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
 		}
 	})
@@ -261,7 +261,7 @@ func TestKeepMaskBytes(t *testing.T) {
 		mask := bm.KeepMaskBytes(64)
 		require.Len(t, mask, 8)
 		assert.False(t, bitAt(mask, 5))
-		for i := int64(0); i < 64; i++ {
+		for i := range int64(64) {
 			if i == 5 {
 				continue
 			}
@@ -492,7 +492,7 @@ func TestKeepMaskBytesAfterSetRange(t *testing.T) {
 
 	mask := bm.KeepMaskBytes(128)
 	require.Len(t, mask, 16)
-	for i := int64(0); i < 128; i++ {
+	for i := range int64(128) {
 		deleted := (i >= 10 && i < 70) || i == 100
 		assert.Equalf(t, !deleted, bitAt(mask, i), "position %d: deleted=%v", i, deleted)
 	}
@@ -509,7 +509,7 @@ func TestRoaringBitmapRunLengthEncode(t *testing.T) {
 	const positions = 100_000
 
 	bm := NewRoaringPositionBitmap()
-	for pos := uint64(0); pos < positions; pos++ {
+	for pos := range uint64(positions) {
 		bm.Set(pos)
 	}
 

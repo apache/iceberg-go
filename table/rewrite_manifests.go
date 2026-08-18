@@ -367,7 +367,7 @@ func (t *Transaction) RewriteManifests(ctx context.Context, opts ...RewriteManif
 	// rewritten below come from prod.parentSnapshot(), which resolves the
 	// branch head. A main-only check reports NoOpNoSnapshot for a branch that
 	// has manifests to merge whenever main has no head of its own.
-	if meta.currentSnapshotForRef(t.branch) == nil {
+	if t.planningSnapshot(meta) == nil {
 		return &RewriteManifestsResult{NoOpReason: NoOpNoSnapshot}, nil
 	}
 

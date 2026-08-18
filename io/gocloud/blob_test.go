@@ -826,7 +826,7 @@ func TestBlobFileIODeleteFilesIsConcurrentAndBounded(t *testing.T) {
 		close(deletedCh)
 	}()
 
-	for i := 0; i < deleteFilesMaxConcurrency; i++ {
+	for range deleteFilesMaxConcurrency {
 		select {
 		case <-started:
 		case <-time.After(5 * time.Second):
