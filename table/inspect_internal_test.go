@@ -1851,6 +1851,18 @@ func TestInspectFilesTables(t *testing.T) {
 	}
 }
 
+func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	rr, err := tbl.Inspect().AllFiles(ctx)
+	require.NoError(t, err)
+
+	cancel()
+	require.False(t, rr.Next())
+	require.ErrorIs(t, rr.Err(), context.Canceled)
+	rr.Release()
+}
+
 func TestInspectAllFilesSchemasMatchFiles(t *testing.T) {
 	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String, Required: false},

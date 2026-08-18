@@ -38,29 +38,10 @@ import (
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
 func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
-	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
-	}
-	schema := DataFilesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
-	if err != nil {
-		return nil, fmt.Errorf("inspect data files: build arrow schema: %w", err)
-	}
-
-	appendFile := newInspectContentFileAppender(partitionType)
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
+	return i.inspectFiles(ctx, "data files", DataFilesSchema, false,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentData
-		},
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			return appendFile(bldr, entry.DataFile())
 		})
-	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
-	}
-
-	return rr, nil
 }
 
 // Files returns all live data and delete files in the current snapshot.
