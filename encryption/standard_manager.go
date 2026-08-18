@@ -74,6 +74,10 @@ var (
 	// or a nonce prefix of the wrong size). Key metadata is untrusted input
 	// on a crypto read path, so it is validated rather than trusted blindly.
 	ErrInvalidKeyMetadata = errors.New("encryption: invalid key metadata")
+
+	// ErrOutputFileClosed is returned by [standardOutputFile.Write] when
+	// called after Close, or after a previous flush has poisoned the writer.
+	ErrOutputFileClosed = errors.New("encryption: write to closed StandardEncryptionManager output file")
 )
 
 // standardKeyMetadataVersion is the current encoding version written by
@@ -156,7 +160,17 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 	if m.blockSize <= 0 {
 		return nil, fmt.Errorf("%w: got %d", ErrInvalidBlockSize, m.blockSize)
 	}
+	switch m.dekLength {
+	case 16, 24, 32:
+	default:
+		return nil, fmt.Errorf("%w: DEK length must be 16, 24, or 32 bytes; got %d", ErrInvalidKeyLength, m.dekLength)
+	}
 
+	// The (key, nonce) uniqueness this block format relies on requires a
+	// freshly generated DEK for every file: the nonce is only 4 random bytes
+	// plus a block index, so reusing a DEK across files would reuse (DEK,
+	// nonce) pairs and break AES-GCM's security guarantees. Never cache or
+	// reuse plainDEK/wrappedDEK across calls to NewEncryptedOutputFile.
 	var (
 		plainDEK, wrappedDEK []byte
 		err                  error
@@ -245,7 +259,7 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 func newStandardAEAD(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidKeyLength, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidKeyLength, err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
@@ -256,9 +270,10 @@ func newStandardAEAD(key []byte) (cipher.AEAD, error) {
 }
 
 // standardBlockNonce derives the AES-GCM nonce for blockIndex: the 4-byte
-// per-file random prefix followed by the 8-byte big-endian block index. The
-// (key, nonce) pair is unique per block since the DEK is fresh per file and
-// no two blocks in the same file share an index.
+// per-file random prefix followed by the 8-byte big-endian block index.
+// Uniqueness of the (key, nonce) pair across every block ever sealed with a
+// given DEK depends entirely on the DEK being freshly generated per file;
+// see the caution in [StandardEncryptionManager.NewEncryptedOutputFile].
 func standardBlockNonce(prefix []byte, blockIndex uint64) []byte {
 	nonce := make([]byte, 12)
 	copy(nonce, prefix)
@@ -282,6 +297,7 @@ type standardOutputFile struct {
 	blockIndex uint64
 	written    int64
 	closed     bool
+	err        error
 
 	keyMetadata EncryptionKeyMetadata
 }
@@ -289,15 +305,23 @@ type standardOutputFile struct {
 var _ EncryptedOutputFile = (*standardOutputFile)(nil)
 
 func (f *standardOutputFile) Write(p []byte) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	if f.closed {
+		return 0, ErrOutputFileClosed
+	}
+
 	total := len(p)
 	for len(p) > 0 {
 		space := f.blockSize - len(f.buf)
 		n := min(space, len(p))
 		f.buf = append(f.buf, p[:n]...)
 		p = p[n:]
-		f.written += int64(n)
 		if len(f.buf) == f.blockSize {
 			if err := f.flushBlock(); err != nil {
+				f.err = err
+
 				return total - len(p), err
 			}
 		}
@@ -306,11 +330,15 @@ func (f *standardOutputFile) Write(p []byte) (int, error) {
 	return total, nil
 }
 
+// flushBlock seals and writes the currently buffered plaintext block.
+// f.written is only advanced once the ciphertext has actually reached the
+// underlying writer, so a failed flush never overcounts PlaintextLength.
 func (f *standardOutputFile) flushBlock() error {
 	ciphertext := f.aead.Seal(nil, standardBlockNonce(f.noncePrefix, f.blockIndex), f.buf, nil)
 	if _, err := f.FileWriter.Write(ciphertext); err != nil {
 		return fmt.Errorf("encryption: failed to write encrypted block: %w", err)
 	}
+	f.written += int64(len(f.buf))
 	f.blockIndex++
 	f.buf = f.buf[:0]
 
@@ -320,7 +348,7 @@ func (f *standardOutputFile) flushBlock() error {
 // ReadFrom copies from r, encrypting as data is written, satisfying
 // io.ReaderFrom (required by [icebergio.FileWriter]).
 func (f *standardOutputFile) ReadFrom(r io.Reader) (int64, error) {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, max(32*1024, f.blockSize))
 	var total int64
 	for {
 		n, err := r.Read(buf)
@@ -342,37 +370,52 @@ func (f *standardOutputFile) ReadFrom(r io.Reader) (int64, error) {
 	return total, nil
 }
 
+// Close flushes any buffered partial block and finalizes the key metadata.
+// closed is only set once everything, including the underlying Close, has
+// succeeded; a failed Close poisons the writer (via f.err) so a retry
+// reliably reports the same error instead of masking the failure as success.
 func (f *standardOutputFile) Close() error {
+	if f.err != nil {
+		return f.err
+	}
 	if f.closed {
 		return nil
 	}
-	f.closed = true
 
 	if len(f.buf) > 0 {
 		if err := f.flushBlock(); err != nil {
+			f.err = err
 			_ = f.FileWriter.Close()
 
 			return err
 		}
 	}
 
-	meta := standardKeyMetadata{
-		Version:         standardKeyMetadataVersion,
-		KeyID:           f.keyID,
-		WrappedKey:      f.wrappedKey,
-		NoncePrefix:     f.noncePrefix,
-		BlockSize:       f.blockSize,
-		PlaintextLength: f.written,
-	}
-	encoded, err := json.Marshal(meta)
-	if err != nil {
-		_ = f.FileWriter.Close()
+	if f.keyMetadata == nil {
+		meta := standardKeyMetadata{
+			Version:         standardKeyMetadataVersion,
+			KeyID:           f.keyID,
+			WrappedKey:      f.wrappedKey,
+			NoncePrefix:     f.noncePrefix,
+			BlockSize:       f.blockSize,
+			PlaintextLength: f.written,
+		}
+		encoded, err := json.Marshal(meta)
+		if err != nil {
+			f.err = fmt.Errorf("encryption: failed to encode key metadata: %w", err)
+			_ = f.FileWriter.Close()
 
-		return fmt.Errorf("encryption: failed to encode key metadata: %w", err)
+			return f.err
+		}
+		f.keyMetadata = encoded
 	}
-	f.keyMetadata = encoded
 
-	return f.FileWriter.Close()
+	if err := f.FileWriter.Close(); err != nil {
+		return fmt.Errorf("encryption: failed to close underlying writer: %w", err)
+	}
+	f.closed = true
+
+	return nil
 }
 
 // KeyMetadata returns the finalized per-file key metadata. It is only
@@ -381,6 +424,11 @@ func (f *standardOutputFile) KeyMetadata() EncryptionKeyMetadata { return f.keyM
 
 // standardInputFile is an [EncryptedInputFile] that decrypts fixed-size
 // AES-GCM blocks on demand, supporting random access via ReadAt/Seek.
+//
+// ReadAt is stateless and safe for concurrent use, matching the io.ReaderAt
+// contract. Read and Seek mutate the shared cursor (pos) and are not
+// concurrent-safe; do not call them from multiple goroutines on the same
+// instance.
 type standardInputFile struct {
 	underlying      icebergio.File
 	aead            cipher.AEAD
@@ -414,22 +462,46 @@ func (f *standardInputFile) physicalOffset(idx int64) int64 {
 	return idx * int64(f.blockSize+f.aead.Overhead())
 }
 
+// readBlock decrypts block idx. It validates idx and the computed block
+// length before reading, since metadata (blockSize, plaintextLength) can
+// originate from untrusted, JSON-decoded key metadata. It also honors the
+// actual byte count returned by ReadAt: a short, non-EOF-explained read is
+// reported as [ErrCiphertextTooShort] (truncated storage) rather than being
+// silently zero-padded into the AEAD, which would otherwise surface as a
+// misleading [ErrAuthenticationFailed].
 func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
+	if idx < 0 || idx >= f.numBlocks() {
+		return nil, fmt.Errorf("%w: block index %d out of range [0, %d)", ErrInvalidKeyMetadata, idx, f.numBlocks())
+	}
+
 	plainLen := f.blockPlainLen(idx)
-	ciphertext := make([]byte, plainLen+int64(f.aead.Overhead()))
-	if _, err := f.underlying.ReadAt(ciphertext, f.physicalOffset(idx)); err != nil && !errors.Is(err, io.EOF) {
+	if plainLen < 0 {
+		return nil, fmt.Errorf("%w: negative computed length for block %d", ErrInvalidKeyMetadata, idx)
+	}
+
+	wantLen := plainLen + int64(f.aead.Overhead())
+	ciphertext := make([]byte, wantLen)
+	n, err := f.underlying.ReadAt(ciphertext, f.physicalOffset(idx))
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("encryption: failed to read block %d: %w", idx, err)
 	}
+	if int64(n) != wantLen {
+		return nil, fmt.Errorf("%w: block %d: read %d of %d expected ciphertext bytes", ErrCiphertextTooShort, idx, n, wantLen)
+	}
+	ciphertext = ciphertext[:n]
 
 	plaintext, err := f.aead.Open(nil, standardBlockNonce(f.noncePrefix, uint64(idx)), ciphertext, nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: block %d: %v", ErrAuthenticationFailed, idx, err)
+		return nil, fmt.Errorf("%w: block %d: %w", ErrAuthenticationFailed, idx, err)
 	}
 
 	return plaintext, nil
 }
 
 func (f *standardInputFile) ReadAt(p []byte, off int64) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if off < 0 {
 		return 0, errors.New("encryption: ReadAt: negative offset")
 	}
