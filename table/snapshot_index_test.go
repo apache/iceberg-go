@@ -25,14 +25,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSnapshotByIDRepairsStaleIndexAfterSliceReplacement(t *testing.T) {
+func TestSnapshotByIDUsesReadOnlyFallbackAfterSliceReplacement(t *testing.T) {
 	metadata := commonMetadata{
 		SnapshotList: []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}},
 	}
+	metadata.snapshotIndex = buildSnapshotIndex(metadata.SnapshotList)
+	originalIndex := metadata.snapshotIndex
 
 	snapshot := metadata.SnapshotByID(2)
 	require.NotNil(t, snapshot)
 	require.Equal(t, int64(2), snapshot.SnapshotID)
+	require.Same(t, originalIndex, metadata.snapshotIndex)
 
 	// Keep the slice length unchanged so the lookup must validate the cached
 	// position instead of relying only on ensureSnapshotIndex.
@@ -41,15 +44,15 @@ func TestSnapshotByIDRepairsStaleIndexAfterSliceReplacement(t *testing.T) {
 	snapshot = metadata.SnapshotByID(4)
 	require.NotNil(t, snapshot)
 	require.Equal(t, int64(4), snapshot.SnapshotID)
-	require.Equal(t, 1, metadata.snapshotIndex.positions[4])
+	require.Same(t, originalIndex, metadata.snapshotIndex)
 	require.Nil(t, metadata.SnapshotByID(2))
-	require.NotContains(t, metadata.snapshotIndex.positions, int64(2))
+	require.Equal(t, map[int64]int{1: 0, 2: 1}, metadata.snapshotIndex.positions)
 
 	metadata.SnapshotList = []Snapshot{{SnapshotID: 5}}
 	snapshot = metadata.SnapshotByID(5)
 	require.NotNil(t, snapshot)
 	require.Equal(t, int64(5), snapshot.SnapshotID)
-	require.Equal(t, map[int64]int{5: 0}, metadata.snapshotIndex.positions)
+	require.Same(t, originalIndex, metadata.snapshotIndex)
 }
 
 func TestMetadataBuilderSnapshotByIDRepairsStaleIndexAfterSliceReplacement(t *testing.T) {
