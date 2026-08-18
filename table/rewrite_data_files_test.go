@@ -715,7 +715,7 @@ func TestRewriteDataFiles_PartialProgressRetainsSharedPositionDeleteAfterFailure
 	assert.Greater(t, remainingPositionDeletes, 0,
 		"a shared position delete must remain while a referenced data file survives")
 
-	var expectedFiles = append([]string{}, beforeFiles...)
+	expectedFiles := append([]string{}, beforeFiles...)
 	for _, completed := range result.CompletedGroups {
 		for _, file := range completed.NewDataFiles {
 			expectedFiles = append(expectedFiles, file.FilePath())
@@ -750,6 +750,7 @@ func newPartialProgressPartitionedTable(t *testing.T) *table.Table {
 	require.NoError(t, err)
 
 	cat := &partialProgressCatalog{metadata: meta}
+
 	return table.New(
 		table.Identifier{"db", "partial_progress_branch_test"},
 		meta, location+"/metadata/v1.metadata.json",
@@ -832,6 +833,7 @@ func TestRewriteDataFiles_PartialProgressUsesTargetBranchSnapshot(t *testing.T) 
 	for _, task := range tasks {
 		if task.File.FilePath() == branchOnly[0] {
 			rewriteTask = task
+
 			break
 		}
 	}
