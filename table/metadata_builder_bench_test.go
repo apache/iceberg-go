@@ -122,6 +122,31 @@ func BenchmarkMetadataBuilderCloneAndBuild(b *testing.B) {
 	}
 }
 
+func BenchmarkMetadataBuilderFromBase(b *testing.B) {
+	for _, snapshotCount := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			source := benchmarkSnapshotBuilder(snapshotCount)
+			source.ensureSnapshotIndex()
+			metadata, err := source.Build()
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for range b.N {
+				builder, err := MetadataBuilderFromBase(metadata, "")
+				if err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(builder.snapshotIndex.positions)
+			}
+		})
+	}
+}
+
 func benchmarkSnapshotLog(snapshotCount int) []SnapshotLogEntry {
 	log := make([]SnapshotLogEntry, snapshotCount)
 	for i := range log {
