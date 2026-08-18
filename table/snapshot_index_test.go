@@ -119,6 +119,14 @@ func TestMetadataBuilderBuildIncludesSnapshotIndex(t *testing.T) {
 	found := metadata.SnapshotByID(snapshot.SnapshotID)
 	require.NotNil(t, found)
 	require.Equal(t, snapshot.SnapshotID, found.SnapshotID)
+
+	parentID := snapshot.SnapshotID
+	next := freshBuilderSnapshot(2, &parentID, 1, snapshot.TimestampMs+1)
+	require.NoError(t, builder.AddSnapshot(&next))
+	require.Nil(t, metadata.SnapshotByID(next.SnapshotID))
+	found, err = builder.SnapshotByID(next.SnapshotID)
+	require.NoError(t, err)
+	require.Equal(t, next.SnapshotID, found.SnapshotID)
 }
 
 func TestMetadataDecodeBuildsSnapshotIndex(t *testing.T) {
