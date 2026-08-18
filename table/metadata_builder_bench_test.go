@@ -23,8 +23,10 @@ import (
 	"testing"
 )
 
-var removeSnapshotsBenchmarkSink int
-var metadataBuilderBenchmarkSink int
+var (
+	removeSnapshotsBenchmarkSink int
+	metadataBuilderBenchmarkSink int
+)
 
 var removeSnapshotsBenchmarkCases = []struct {
 	snapshotCount int
