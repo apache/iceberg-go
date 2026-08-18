@@ -246,6 +246,12 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
 		if normalizeLegacyPropertyFields(base.ActionName, object) {
+			var actionWire struct {
+				Action *string `json:"action"`
+			}
+			if err := json.Unmarshal(raw, &actionWire); err != nil {
+				return err
+			}
 			if actionFieldCount > 1 {
 				for field := range object {
 					if strings.EqualFold(field, "action") {

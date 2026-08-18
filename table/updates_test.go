@@ -816,6 +816,14 @@ func TestUnmarshalUpdatesUsesJSONActionFieldSemantics(t *testing.T) {
 	})
 }
 
+func TestUnmarshalUpdatesPreservesDuplicateActionTypeError(t *testing.T) {
+	var updates Updates
+	var typeErr *json.UnmarshalTypeError
+	err := json.Unmarshal([]byte(`[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`), &updates)
+
+	require.ErrorAs(t, err, &typeErr)
+}
+
 func TestUnmarshalUpdatesAcceptsOptionalAndEmptyValues(t *testing.T) {
 	data := []byte(`[
 		{"action":"add-schema","schema":{"type":"struct","fields":[]}},
