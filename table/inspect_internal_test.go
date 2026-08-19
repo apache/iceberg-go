@@ -1262,6 +1262,41 @@ func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
 	require.Equal(t, []int64{inspectRecordBatchSize, 1}, batchSizes)
 }
 
+func TestInspectAllManifestsAllocator(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		manifestCount int
+		next          bool
+	}{
+		{name: "before first batch", manifestCount: 1},
+		{name: "after first batch", manifestCount: inspectRecordBatchSize + 1, next: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			t.Cleanup(func() { checked.AssertSize(t, 0) })
+
+			manifests := make([]iceberg.ManifestFile, tt.manifestCount)
+			for idx := range manifests {
+				manifests[idx] = iceberg.NewManifestFile(2,
+					fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
+					100, 0, 1).
+					SequenceNum(1, 1).
+					AddedFiles(1).
+					Build()
+			}
+			tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2,
+				manifests)
+
+			rr, err := tbl.Inspect(WithInspectAllocator(checked)).AllManifests(context.Background())
+			require.NoError(t, err)
+			if tt.next {
+				require.True(t, rr.Next())
+			}
+			rr.Release()
+		})
+	}
+}
+
 func TestInspectManifests(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
