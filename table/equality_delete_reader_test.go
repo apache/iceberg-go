@@ -142,6 +142,22 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 	}
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
+
+	_, itr, err = tbl.Scan(table.WithSelectedFields("data")).ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var data []string
+	for rec, err := range itr {
+		require.NoError(t, err)
+		col := rec.Column(0).(*array.String)
+		for i := range col.Len() {
+			data = append(data, col.Value(i))
+		}
+		rec.Release()
+	}
+
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, data,
+		"expected equality deletes to apply when the equality field is not projected")
 }
 
 func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.T) {
