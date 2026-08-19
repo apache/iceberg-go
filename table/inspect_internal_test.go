@@ -2985,6 +2985,32 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
+func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 1},
+		{"file_path": "`+dataPath+`", "pos": 2}
+	]`)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	rows := 0
+	keepGoing, err := appendParquetPositionDeleteRows(
+		ctx, memFS, newPosDeleteFile(t, deletePath, 2, 128),
+		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+			rows++
+			cancel()
+
+			return true, nil
+		},
+	)
+	require.False(t, keepGoing)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, rows)
+}
+
 func TestPositionDeleteRowProjection(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},

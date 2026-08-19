@@ -99,6 +99,9 @@ func (i InspectTable) currentPositionDeleteFiles(
 			if err != nil {
 				return nil, nil, fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err)
 			}
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			if entry.DataFile().ContentType() == iceberg.EntryContentPosDeletes {
 				files = append(files, entry.DataFile())
 			}
@@ -535,6 +538,9 @@ func appendParquetPositionDeleteRows(
 			rowIndex = indices[0]
 		}
 		for row := range int(record.NumRows()) {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
 			var deletedRow scalar.Scalar
 			if rowIndex >= 0 && !record.Column(rowIndex).IsNull(row) {
 				deletedRow, err = scalar.GetScalar(record.Column(rowIndex), row)
