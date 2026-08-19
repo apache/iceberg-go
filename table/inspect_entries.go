@@ -29,21 +29,33 @@ import (
 // entries marked deleted. This exposes commit history that data_files and
 // delete_files intentionally hide.
 func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectEntries(ctx, "entries", false, EntriesSchema)
+}
+
+func (i InspectTable) inspectEntries(
+	ctx context.Context,
+	name string,
+	allSnapshots bool,
+	schemaFn func(*iceberg.StructType) *iceberg.Schema,
+) (array.RecordReader, error) {
 	partitionType, err := inspectPartitionType(i.tbl.metadata)
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	schema := EntriesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: build arrow schema: %w", err)
+		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
 
 	appendEntry := newInspectEntryAppender(partitionType)
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, false, nil,
-		appendEntry)
+	var rr array.RecordReader
+	if allSnapshots {
+		rr, err = i.allManifestEntryReader(ctx, arrowSchema, false, nil, appendEntry)
+	} else {
+		rr, err = i.manifestEntryReader(ctx, arrowSchema, false, nil, appendEntry)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
 
 	return rr, nil

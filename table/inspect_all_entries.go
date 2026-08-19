@@ -18,7 +18,6 @@ package table
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
@@ -28,22 +27,7 @@ import (
 // snapshot currently tracked by the table. Shared manifests are scanned once,
 // and deleted entries remain visible.
 func (i InspectTable) AllEntries(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
-	if err != nil {
-		return nil, fmt.Errorf("inspect all entries: %w", err)
-	}
-	arrowSchema, err := SchemaToArrowSchema(AllEntriesSchema(partitionType), nil, true, false)
-	if err != nil {
-		return nil, fmt.Errorf("inspect all entries: build arrow schema: %w", err)
-	}
-
-	rr, err := i.allManifestEntryReader(ctx, arrowSchema, false, nil,
-		newInspectEntryAppender(partitionType))
-	if err != nil {
-		return nil, fmt.Errorf("inspect all entries: %w", err)
-	}
-
-	return rr, nil
+	return i.inspectEntries(ctx, "all entries", true, AllEntriesSchema)
 }
 
 // AllEntriesSchema returns the schema of the all_entries metadata table.
