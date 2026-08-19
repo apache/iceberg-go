@@ -328,6 +328,15 @@ type RollingDataWriter struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	closeRecordCh   sync.Once
+
+	// sendMu forms a barrier between Add (read lock) and stream's shutdown
+	// drain (write lock). While an Add holds the read lock its check of
+	// noMoreSends and its enqueue are atomic with respect to the drain: once
+	// the drain holds the write lock and sets noMoreSends, no Add can be
+	// mid-enqueue and none can start one, so the drain releases every record
+	// that will ever reach recordCh.
+	sendMu      sync.RWMutex
+	noMoreSends bool
 }
 
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
@@ -380,6 +389,21 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 
 // Add appends a record to the writer's buffer.
 func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
+	// Hold the read lock across the whole check-and-enqueue so it is atomic
+	// with stream's shutdown drain (which takes the write lock). Once the
+	// drain has set noMoreSends, this returns before retaining, so a record
+	// can never be enqueued into a channel that will not be drained again.
+	// The enqueue below can still block for backpressure while the writer is
+	// live, but stream's cleanup cancels ctx before it takes the write lock,
+	// so a parked send unblocks via ctx.Done() and releases the read lock
+	// rather than deadlocking the drain.
+	r.sendMu.RLock()
+	defer r.sendMu.RUnlock()
+
+	if r.noMoreSends {
+		return ErrWriterClosed
+	}
+
 	record.Retain()
 	select {
 	case r.recordCh <- record:
@@ -441,6 +465,36 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		releaseBuf()
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
+		}
+		// stream is exiting; release any records producers left buffered in
+		// recordCh. This is a hard barrier against in-flight Add calls, not
+		// just a drain: an Add that already observed noMoreSends as false
+		// could otherwise enqueue after a lockless drain saw the channel
+		// empty, leaving a retained record with no consumer. Cancel first so
+		// any send currently parked on recordCh unblocks via ctx.Done() and
+		// releases its read lock; then take the write lock, which cannot be
+		// acquired until every active Add has returned. Setting noMoreSends
+		// under that lock makes the set of records ever placed in recordCh
+		// final, so the drain below releases all of them and nothing can be
+		// enqueued afterward. recordCh is deliberately not closed here: an Add
+		// may still hold the read lock about to observe noMoreSends, and
+		// closing under a live sender could panic. This runs before the
+		// CompareAndDelete defer above, so cleanup does not depend on abortAll
+		// finding this writer in the registry.
+		r.cancel()
+		r.sendMu.Lock()
+		defer r.sendMu.Unlock()
+		r.noMoreSends = true
+		for {
+			select {
+			case record, ok := <-r.recordCh:
+				if !ok {
+					return
+				}
+				record.Release()
+			default:
+				return
+			}
 		}
 	}()
 
