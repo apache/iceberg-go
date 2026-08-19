@@ -23,11 +23,11 @@ import (
 	"io"
 	"path"
 
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
-	"github.com/DataDog/iceberg-go"
-	iceio "github.com/DataDog/iceberg-go/io"
 )
 
 // GetFile opens the given file using the provided file system.

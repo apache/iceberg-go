@@ -19,8 +19,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"log"
 	"os"
 	"strconv"

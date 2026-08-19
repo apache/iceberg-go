@@ -20,9 +20,9 @@ package internal
 import (
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"io"
 	"maps"
 	"net/url"

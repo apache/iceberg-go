@@ -27,10 +27,10 @@ import (
 
 	"cloud.google.com/go/storage"
 
-	"github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/go-cloud/blob"
 	"github.com/DataDog/iceberg-go/go-cloud/blob/gcsblob"
 	"github.com/DataDog/iceberg-go/go-cloud/gcp"
+	"github.com/DataDog/iceberg-go/io"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"

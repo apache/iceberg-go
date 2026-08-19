@@ -20,9 +20,9 @@ package sql
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"iter"
 	"log"
 	"maps"

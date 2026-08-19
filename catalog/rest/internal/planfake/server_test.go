@@ -20,8 +20,8 @@ package planfake
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"io"
 	"net"
 	"net/http"

@@ -18,8 +18,8 @@
 package table
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 )
 
 // BlobType is the type of blob in a Puffin file.

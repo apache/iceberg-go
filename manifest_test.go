@@ -20,8 +20,8 @@ package iceberg
 import (
 	"bytes"
 	"compress/flate"
-	"encoding/json"
 	"errors"
+	"github.com/goccy/go-json"
 	"io"
 	"io/fs"
 	"math"
@@ -30,9 +30,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go/internal"
 	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"

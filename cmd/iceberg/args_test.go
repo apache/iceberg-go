@@ -26,8 +26,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/alexflint/go-arg"
 	"github.com/DataDog/iceberg-go/config"
+	"github.com/alexflint/go-arg"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

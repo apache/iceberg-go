@@ -19,9 +19,9 @@ package view
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"net/url"
 	"slices"
 

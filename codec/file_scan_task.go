@@ -20,9 +20,9 @@ package codec
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"reflect"
 
 	"github.com/DataDog/iceberg-go"

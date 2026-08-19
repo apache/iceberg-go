@@ -29,11 +29,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/metrics"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"golang.org/x/sync/errgroup"
 )
 

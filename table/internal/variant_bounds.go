@@ -25,10 +25,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/DataDog/iceberg-go"
 	"github.com/google/uuid"
 )
 

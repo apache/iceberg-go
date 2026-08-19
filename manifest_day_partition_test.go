@@ -19,7 +19,7 @@ package iceberg
 
 import (
 	"bytes"
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"testing"
 
 	"github.com/DataDog/iceberg-go/internal"

@@ -29,11 +29,11 @@ import (
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/catalog"
 	sqlcat "github.com/DataDog/iceberg-go/catalog/sql"
+	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
 	"github.com/DataDog/iceberg-go/io"
 	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/stretchr/testify/suite"
 	"github.com/uptrace/bun/driver/sqliteshim"
-	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
 )
 
 const (

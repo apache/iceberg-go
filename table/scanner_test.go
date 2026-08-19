@@ -28,11 +28,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/compute"
-	"github.com/apache/arrow-go/v18/arrow/extensions"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/catalog"
 	"github.com/DataDog/iceberg-go/catalog/rest"
@@ -40,6 +35,11 @@ import (
 	"github.com/DataDog/iceberg-go/io"
 	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/DataDog/iceberg-go/table"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )

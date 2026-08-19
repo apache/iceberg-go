@@ -20,8 +20,8 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"github.com/goccy/go-json"
 	"io"
 	"io/fs"
 	"runtime"

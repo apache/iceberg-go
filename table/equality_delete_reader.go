@@ -25,15 +25,15 @@ import (
 	"math"
 	"unsafe"
 
+	"github.com/DataDog/iceberg-go"
+	iceinternal "github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table/internal"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/DataDog/iceberg-go"
-	iceinternal "github.com/DataDog/iceberg-go/internal"
-	iceio "github.com/DataDog/iceberg-go/io"
-	"github.com/DataDog/iceberg-go/table/internal"
 	"golang.org/x/sync/errgroup"
 )
 

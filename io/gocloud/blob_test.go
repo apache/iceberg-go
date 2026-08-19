@@ -27,9 +27,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	icebergio "github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/go-cloud/blob"
 	"github.com/DataDog/iceberg-go/go-cloud/blob/memblob"
+	icebergio "github.com/DataDog/iceberg-go/io"
 )
 
 func TestDefaultKeyExtractor(t *testing.T) {

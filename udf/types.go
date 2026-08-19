@@ -18,9 +18,9 @@
 package udf
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"slices"
 	"strings"
 	"unicode"

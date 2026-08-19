@@ -20,9 +20,9 @@ package table
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"iter"
 	"log/slog"
 	"runtime"
@@ -31,14 +31,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/table/dv"
 	tblutils "github.com/DataDog/iceberg-go/table/internal"
 	"github.com/DataDog/iceberg-go/table/substrait"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )

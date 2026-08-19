@@ -18,7 +18,7 @@
 package rest
 
 import (
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"testing"
 
 	"github.com/DataDog/iceberg-go"

@@ -22,10 +22,10 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/DataDog/iceberg-go"
 )
 
 // InspectTable exposes a table's metadata (snapshots, history, manifests, and

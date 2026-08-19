@@ -20,8 +20,8 @@ package table
 import (
 	"fmt"
 
-	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 )
 
 // resolveSortKeys converts an Iceberg SortOrder into Arrow compute sort keys

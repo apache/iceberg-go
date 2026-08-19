@@ -28,14 +28,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/config"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/DataDog/iceberg-go"
-	"github.com/DataDog/iceberg-go/config"
 
 	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/google/uuid"

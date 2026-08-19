@@ -18,13 +18,13 @@
 package iceberg_test
 
 import (
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"math"
 	"strings"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

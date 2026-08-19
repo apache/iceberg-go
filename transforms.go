@@ -31,8 +31,8 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go/internal"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/twmb/murmur3"
 )

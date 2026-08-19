@@ -25,9 +25,6 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/catalog"
 	"github.com/DataDog/iceberg-go/catalog/rest"
@@ -35,6 +32,9 @@ import (
 	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/DataDog/iceberg-go/table"
 	"github.com/DataDog/iceberg-go/view"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )

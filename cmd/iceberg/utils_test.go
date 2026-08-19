@@ -19,7 +19,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"maps"
 	"net/http"
 	"net/http/httptest"

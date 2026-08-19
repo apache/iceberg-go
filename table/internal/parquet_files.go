@@ -31,6 +31,9 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
@@ -42,9 +45,6 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/DataDog/iceberg-go"
-	"github.com/DataDog/iceberg-go/internal"
-	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/geoarrow/geoarrow-go"
 	"github.com/google/uuid"
 )

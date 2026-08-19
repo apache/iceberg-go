@@ -23,11 +23,11 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/config"
 	"github.com/DataDog/iceberg-go/io"
 	tblutils "github.com/DataDog/iceberg-go/table/internal"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/google/uuid"
 )
 

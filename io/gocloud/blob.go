@@ -28,9 +28,9 @@ import (
 	"strings"
 	"time"
 
-	icebergio "github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/go-cloud/blob"
 	"github.com/DataDog/iceberg-go/go-cloud/gcerrors"
+	icebergio "github.com/DataDog/iceberg-go/io"
 )
 
 // blobOpenFile describes a single open blob as a File.

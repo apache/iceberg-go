@@ -18,8 +18,8 @@
 package view_test
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"testing"
 
 	"github.com/DataDog/iceberg-go/table"

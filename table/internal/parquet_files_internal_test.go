@@ -21,8 +21,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

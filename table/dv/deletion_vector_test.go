@@ -20,8 +20,8 @@ package dv
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
+	"github.com/goccy/go-json"
 	"hash/crc32"
 	"os"
 	"path/filepath"

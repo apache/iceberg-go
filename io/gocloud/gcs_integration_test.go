@@ -22,8 +22,8 @@ package gocloud_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"net/http"
 	"net/url"
 	"testing"
