@@ -18,8 +18,8 @@
 package table
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"math"
 	"reflect"
 	"slices"

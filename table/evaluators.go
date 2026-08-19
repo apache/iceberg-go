@@ -24,10 +24,10 @@ import (
 	"math"
 	"slices"
 
-	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/DataDog/iceberg-go"
 	iceberginternal "github.com/DataDog/iceberg-go/internal"
 	"github.com/DataDog/iceberg-go/table/internal"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/google/uuid"
 )
 

@@ -18,8 +18,8 @@
 package iceberg_test
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"os"
 	"path/filepath"
 	"runtime"

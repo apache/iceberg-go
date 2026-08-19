@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/internal"
 	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

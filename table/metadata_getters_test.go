@@ -18,7 +18,7 @@
 package table
 
 import (
-	"encoding/json"
+	"github.com/goccy/go-json"
 	"slices"
 	"testing"
 

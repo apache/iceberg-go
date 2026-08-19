@@ -25,12 +25,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/catalog"
 	"github.com/DataDog/iceberg-go/table"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 // gatedReader is a RecordReader whose Next() blocks on a channel, giving

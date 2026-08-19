@@ -20,9 +20,9 @@ package iceberg
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"io"
 	"math"
 	"sort"

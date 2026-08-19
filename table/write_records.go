@@ -24,9 +24,9 @@ import (
 	"iter"
 	"strconv"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/internal"
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/google/uuid"
 )
 

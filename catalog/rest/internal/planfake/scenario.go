@@ -21,9 +21,10 @@
 package planfake
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/goccy/go-json"
 )
 
 // Scan-planning endpoint strings as advertised by GET /v1/config. These are

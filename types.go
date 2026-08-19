@@ -18,8 +18,8 @@
 package iceberg
 
 import (
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"reflect"
 	"regexp"
 	"slices"
@@ -27,8 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/DataDog/iceberg-go/internal"
+	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/geoarrow/geoarrow-go"
 )
 

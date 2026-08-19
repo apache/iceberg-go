@@ -18,9 +18,9 @@
 package view
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"maps"
 	"slices"
 	"time"

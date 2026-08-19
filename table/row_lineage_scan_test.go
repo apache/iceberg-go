@@ -22,13 +22,13 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/DataDog/iceberg-go/table"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/DataDog/iceberg-go"
-	iceio "github.com/DataDog/iceberg-go/io"
-	"github.com/DataDog/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

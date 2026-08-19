@@ -67,6 +67,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/geoarrow/geoarrow-go v0.0.0-20260403143023-f54751c3e3a1
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/goccy/go-json v0.10.6
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-replayers/grpcreplay v1.3.0
 	github.com/google/go-replayers/httpreplay v1.2.0
@@ -204,7 +205,6 @@ require (
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-zookeeper/zk v1.0.4 // indirect
-	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/goccy/go-yaml v1.17.1 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect

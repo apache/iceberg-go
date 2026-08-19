@@ -24,11 +24,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/DataDog/iceberg-go"
 )
 
 func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {

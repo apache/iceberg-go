@@ -28,9 +28,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
-	"github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/go-cloud/blob"
 	"github.com/DataDog/iceberg-go/go-cloud/blob/azureblob"
+	"github.com/DataDog/iceberg-go/io"
 )
 
 // adlsURIPattern is taken from the Java implementation:

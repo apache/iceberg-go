@@ -18,9 +18,9 @@
 package metrics
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 )
 
 // Report-type discriminator values, matching Java's ReportType wire form.

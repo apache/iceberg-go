@@ -20,8 +20,8 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/goccy/go-json"
 	"testing"
 
 	"github.com/DataDog/iceberg-go"

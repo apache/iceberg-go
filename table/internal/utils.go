@@ -32,9 +32,9 @@ import (
 	"unicode/utf8"
 	_ "unsafe"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
-	"github.com/DataDog/iceberg-go"
 	"github.com/twmb/avro/atype"
 	"golang.org/x/sync/errgroup"
 )

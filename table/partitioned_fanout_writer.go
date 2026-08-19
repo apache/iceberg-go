@@ -25,13 +25,13 @@ import (
 	"math"
 	"slices"
 
+	"github.com/DataDog/iceberg-go"
+	"github.com/DataDog/iceberg-go/internal"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
-	"github.com/DataDog/iceberg-go"
-	"github.com/DataDog/iceberg-go/internal"
 	"golang.org/x/sync/errgroup"
 )
 

@@ -24,13 +24,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/DataDog/iceberg-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -26,10 +26,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/alexflint/go-arg"
-	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/apache/arrow-go/v18/parquet/file"
-	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/catalog"
 	"github.com/DataDog/iceberg-go/catalog/glue"
@@ -39,6 +35,10 @@ import (
 	"github.com/DataDog/iceberg-go/config"
 	_ "github.com/DataDog/iceberg-go/io/gocloud"
 	"github.com/DataDog/iceberg-go/table"
+	"github.com/alexflint/go-arg"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 )

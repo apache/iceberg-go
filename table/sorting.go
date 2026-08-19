@@ -19,9 +19,9 @@ package table
 
 import (
 	"encoding"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"iter"
 	"slices"
 	"strings"

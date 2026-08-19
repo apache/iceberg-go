@@ -24,7 +24,6 @@ package rest
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -39,6 +38,7 @@ import (
 	"github.com/DataDog/iceberg-go/catalog"
 	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/DataDog/iceberg-go/table"
+	"github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"golang.org/x/sync/semaphore"
 )

@@ -29,13 +29,13 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
+	tblutils "github.com/DataDog/iceberg-go/table/internal"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/DataDog/iceberg-go"
-	iceio "github.com/DataDog/iceberg-go/io"
-	tblutils "github.com/DataDog/iceberg-go/table/internal"
 	"github.com/google/uuid"
 )
 

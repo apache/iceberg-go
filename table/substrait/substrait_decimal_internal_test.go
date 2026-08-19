@@ -20,8 +20,8 @@ package substrait
 import (
 	"testing"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/substrait-io/substrait-go/v8/types"

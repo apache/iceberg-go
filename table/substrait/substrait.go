@@ -25,8 +25,8 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/substrait-io/substrait-go/v8/expr"
 	"github.com/substrait-io/substrait-go/v8/extensions"
 	"github.com/substrait-io/substrait-go/v8/types"

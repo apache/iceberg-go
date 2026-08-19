@@ -20,8 +20,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"github.com/goccy/go-json"
 	"os"
 	"strconv"
 	"testing"

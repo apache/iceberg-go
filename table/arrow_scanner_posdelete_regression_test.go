@@ -20,14 +20,14 @@ package table
 import (
 	"testing"
 
+	"github.com/DataDog/iceberg-go"
+	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
-	"github.com/DataDog/iceberg-go"
-	iceio "github.com/DataDog/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

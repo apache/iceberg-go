@@ -25,8 +25,8 @@ import (
 	"iter"
 	"slices"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/DataDog/iceberg-go"
+	"github.com/apache/arrow-go/v18/arrow"
 )
 
 // clusteredPartitionedWrite writes records to partitioned data files,

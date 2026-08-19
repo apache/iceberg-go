@@ -20,13 +20,13 @@ package table
 import (
 	"testing"
 
+	"github.com/DataDog/iceberg-go"
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/variant"
-	"github.com/DataDog/iceberg-go"
 	"github.com/stretchr/testify/require"
 )
 

@@ -18,9 +18,9 @@
 package iceberg
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/goccy/go-json"
 	"io"
 	"iter"
 	"math"
@@ -32,9 +32,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/DataDog/iceberg-go/internal"
 	iceio "github.com/DataDog/iceberg-go/io"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/google/uuid"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"
