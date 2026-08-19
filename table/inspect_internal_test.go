@@ -3016,6 +3016,47 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 	require.Equal(t, "deleted", projected.Field(1).(*array.String).Value(0))
 }
 
+func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "ratio", Type: iceberg.PrimitiveTypes.Float64, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	sourceType := arrow.StructOf(
+		arrow.Field{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: true,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+		},
+		arrow.Field{
+			Name:     "ratio",
+			Type:     arrow.PrimitiveTypes.Float32,
+			Nullable: true,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+		},
+	)
+	row := scalar.NewStructScalar([]scalar.Scalar{
+		scalar.NewInt32Scalar(7),
+		scalar.NewFloat32Scalar(1.25),
+	}, sourceType)
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	projected := record.Column(2).(*array.Struct)
+	require.EqualValues(t, 7, projected.Field(0).(*array.Int64).Value(0))
+	require.Equal(t, 1.25, projected.Field(1).(*array.Float64).Value(0))
+}
+
 func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {
 	metadata, err := newInspectPositionDeletesMetadata(t, 2).Build()
 	require.NoError(t, err)
