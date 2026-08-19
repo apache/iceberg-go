@@ -3016,6 +3016,25 @@ func TestPositionDeleteRowProjection(t *testing.T) {
 	require.Equal(t, "deleted", projected.Field(1).(*array.String).Value(0))
 }
 
+func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {
+	metadata, err := newInspectPositionDeletesMetadata(t, 2).Build()
+	require.NoError(t, err)
+	memFS := iceio.NewMemFS()
+	tbl := New(
+		Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memFS, nil }, nil,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	require.NoError(t, err)
+	cancel()
+
+	require.False(t, rr.Next())
+	require.ErrorIs(t, rr.Err(), context.Canceled)
+	rr.Release()
+}
+
 func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

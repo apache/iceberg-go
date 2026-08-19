@@ -62,10 +62,6 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
 	}
-	if len(files) == 0 {
-		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
-	}
-
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
@@ -344,6 +340,12 @@ func (i InspectTable) positionDeleteRecordReader(
 	formatVersion int,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
+		if err := ctx.Err(); err != nil {
+			_ = yield(nil, err)
+
+			return
+		}
+
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 		defer bldr.Release()
 		appender, err := newPositionDeleteRecordAppender(bldr, partitionType, partitionIDByOld, formatVersion)
