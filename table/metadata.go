@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +33,7 @@ import (
 
 	"github.com/DataDog/iceberg-go"
 	iceinternal "github.com/DataDog/iceberg-go/internal"
+	"github.com/goccy/go-json"
 	"github.com/google/uuid"
 )
 
