@@ -93,6 +93,9 @@ jobs:
     # Race detector is opt-in per package/test.
     - name: Run race detector
       run: go test -race -v ./codec/... ./table/...
+    - name: Run Arrow ownership assertions
+      if: matrix.os == 'ubuntu-latest' && matrix.go == '1.26.1'
+      run: go test -tags=assert -v -run '^(TestInspectFilesTablesEarlyRelease|TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted|TestInspectDataFilesEmptyTableEarlyRelease)$' ./table
     - name: Save Go module and build cache
       if: github.ref == 'refs/heads/main'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
