@@ -168,9 +168,7 @@ func (a positionDeleteRecordAppender) append(
 ) error {
 	a.filePath.Append(dataFilePath)
 	a.pos.Append(pos)
-	if deletedRow == nil || !deletedRow.IsValid() {
-		a.row.AppendNull()
-	} else if err := scalar.Append(a.row, deletedRow); err != nil {
+	if err := appendProjectedPositionDeleteRow(a.row, deletedRow); err != nil {
 		return fmt.Errorf("append deleted row: %w", err)
 	}
 
@@ -193,6 +191,147 @@ func (a positionDeleteRecordAppender) append(
 	}
 
 	return nil
+}
+
+// appendPositionDeleteRow projects a row from a position-delete file onto the
+// current table schema. Position-delete row structs may contain only a subset
+// of the table fields, so matching by Arrow field position or exact type is
+// not sufficient. Field IDs are authoritative when the source schema carries
+// them; names are used only for readers that do not preserve Parquet metadata.
+func appendProjectedPositionDeleteRow(builder *array.StructBuilder, deletedRow scalar.Scalar) error {
+	if deletedRow == nil || !deletedRow.IsValid() {
+		builder.AppendNull()
+
+		return nil
+	}
+
+	row, ok := deletedRow.(*scalar.Struct)
+	if !ok {
+		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, deletedRow.DataType())
+	}
+
+	return appendPositionDeleteStruct(builder, row)
+}
+
+func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Struct) error {
+	sourceType, ok := source.DataType().(*arrow.StructType)
+	if !ok {
+		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, source.DataType())
+	}
+	if len(source.Value) != sourceType.NumFields() {
+		return fmt.Errorf("%w: row has %d values for %d fields",
+			iceberg.ErrInvalidSchema, len(source.Value), sourceType.NumFields())
+	}
+
+	sourceFields, err := newPositionDeleteFieldLookup(sourceType)
+	if err != nil {
+		return err
+	}
+	destinationType, ok := builder.Type().(*arrow.StructType)
+	if !ok {
+		return fmt.Errorf("%w: destination row has type %s, want struct", iceberg.ErrInvalidSchema, builder.Type())
+	}
+
+	if !source.IsValid() {
+		builder.AppendNull()
+
+		return nil
+	}
+	builder.Append(true)
+
+	for index, destinationField := range destinationType.Fields() {
+		sourceIndex, found := sourceFields.index(destinationField)
+		if !found {
+			builder.FieldBuilder(index).AppendNull()
+
+			continue
+		}
+
+		value := source.Value[sourceIndex]
+		if value == nil || !value.IsValid() {
+			builder.FieldBuilder(index).AppendNull()
+
+			continue
+		}
+
+		fieldBuilder := builder.FieldBuilder(index)
+		if nestedBuilder, ok := fieldBuilder.(*array.StructBuilder); ok {
+			nestedValue, ok := value.(*scalar.Struct)
+			if !ok {
+				return fmt.Errorf("%w: field %q has type %s, want struct",
+					iceberg.ErrInvalidSchema, destinationField.Name, value.DataType())
+			}
+			if err := appendPositionDeleteStruct(nestedBuilder, nestedValue); err != nil {
+				return fmt.Errorf("field %q: %w", destinationField.Name, err)
+			}
+
+			continue
+		}
+		if err := scalar.Append(fieldBuilder, value); err != nil {
+			return fmt.Errorf("field %q: %w", destinationField.Name, err)
+		}
+	}
+
+	return nil
+}
+
+type positionDeleteFieldLookup struct {
+	byID   map[int]int
+	byName map[string]int
+	byIDs  bool
+}
+
+func newPositionDeleteFieldLookup(sourceType *arrow.StructType) (positionDeleteFieldLookup, error) {
+	fields := positionDeleteFieldLookup{
+		byID:   make(map[int]int, sourceType.NumFields()),
+		byName: make(map[string]int, sourceType.NumFields()),
+	}
+	missingIDs := 0
+	for index, field := range sourceType.Fields() {
+		if _, exists := fields.byName[field.Name]; exists {
+			return fields, fmt.Errorf("%w: row contains duplicate field %q",
+				iceberg.ErrInvalidSchema, field.Name)
+		}
+		fields.byName[field.Name] = index
+
+		id := getFieldID(field)
+		if id == nil {
+			missingIDs++
+
+			continue
+		}
+		if _, exists := fields.byID[*id]; exists {
+			return fields, fmt.Errorf("%w: row contains duplicate field ID %d",
+				iceberg.ErrInvalidSchema, *id)
+		}
+		fields.byID[*id] = index
+	}
+	if len(fields.byID) > 0 {
+		if missingIDs > 0 {
+			return fields, fmt.Errorf("%w: row schema has fields with and without field IDs",
+				iceberg.ErrInvalidSchema)
+		}
+		fields.byIDs = true
+	}
+
+	return fields, nil
+}
+
+func (f positionDeleteFieldLookup) index(destination arrow.Field) (int, bool) {
+	if f.byIDs {
+		id := getFieldID(destination)
+		if id == nil {
+			return 0, false
+		}
+
+		index, ok := f.byID[*id]
+
+		return index, ok
+	}
+
+	index, ok := f.byName[destination.Name]
+
+	return index, ok
 }
 
 func (i InspectTable) positionDeleteRecordReader(

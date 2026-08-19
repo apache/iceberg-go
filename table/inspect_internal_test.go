@@ -2985,6 +2985,37 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
+func TestPositionDeleteRowProjection(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	sourceType := arrow.StructOf(arrow.Field{
+		Name:     "data",
+		Type:     arrow.BinaryTypes.String,
+		Nullable: true,
+		Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "2"}),
+	})
+	row := scalar.NewStructScalar([]scalar.Scalar{scalar.NewStringScalar("deleted")}, sourceType)
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	projected := record.Column(2).(*array.Struct)
+	require.False(t, projected.IsNull(0))
+	require.True(t, projected.Field(0).IsNull(0), "missing row fields should be null")
+	require.Equal(t, "deleted", projected.Field(1).(*array.String).Value(0))
+}
+
 func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
