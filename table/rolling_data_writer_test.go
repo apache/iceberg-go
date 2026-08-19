@@ -22,7 +22,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -904,4 +908,174 @@ func (s *RollingDataWriterTestSuite) TestStreamRecoversWriterClosePanic() {
 			s.Contains(err.Error(), "simulated NewDataFileBuilder failure")
 		})
 	}
+}
+
+// failingOpenFormat always fails to open a file writer, simulating a
+// mid-stream write error (e.g. an unwritable location) that makes stream
+// return before it ever dequeues most of what's already buffered in recordCh.
+type failingOpenFormat struct {
+	tblutils.FileFormat
+}
+
+func (failingOpenFormat) NewFileWriter(context.Context, iceio.WriteFileIO, map[int]any, tblutils.WriteFileInfo, *arrow.Schema) (tblutils.FileWriter, error) {
+	return nil, errors.New("simulated open failure")
+}
+
+// TestStreamErrorDrainsBufferedRecords reproduces the leak from #1825: when
+// stream exits early on a write error, records already sitting in recordCh —
+// queued by Add before stream's first dequeue attempt fails — must still be
+// released. Before the fix, stream's deferred CompareAndDelete deregisters the
+// writer before abortAll ever has a chance to run, so nothing drains what's
+// left in recordCh. Records are queued directly, bypassing Add and the
+// goroutine start in newRollingDataWriter, so all of them are buffered before
+// stream ever runs — otherwise Add would race stream's error exit for the
+// later records once errorCh closes.
+func (s *RollingDataWriterTestSuite) TestStreamErrorDrainsBufferedRecords() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	factory.format = failingOpenFormat{FileFormat: factory.format}
+
+	outputCh := make(chan iceberg.DataFile, 10)
+	ctx, cancel := context.WithCancel(s.ctx)
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch, 64),
+		errorCh:  make(chan error, 1),
+		factory:  factory,
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+
+	const numRecords = 5
+	for range numRecords {
+		record := s.buildRecord(arrSchema, 3)
+		record.Retain()
+		writer.recordCh <- record
+		record.Release()
+	}
+
+	writer.wg.Add(1)
+	go writer.stream(outputCh)
+	writer.wg.Wait()
+
+	checked := s.mem.(*memory.CheckedAllocator)
+	s.Require().Zero(checked.CurrentAlloc(),
+		"records still queued in recordCh when stream exited on the open error must still be released")
+}
+
+// gatedFailFormat blocks the first file open until openGate is closed, then
+// fails it. Holding stream inside openFileWriter keeps ctx live and stops it
+// consuming, so the drain can be triggered at a controlled moment. inOpen lets
+// the test observe that stream has actually parked in the open.
+type gatedFailFormat struct {
+	tblutils.FileFormat
+	openGate chan struct{}
+	inOpen   *atomic.Bool
+}
+
+func (f gatedFailFormat) NewFileWriter(context.Context, iceio.WriteFileIO, map[int]any, tblutils.WriteFileInfo, *arrow.Schema) (tblutils.FileWriter, error) {
+	f.inOpen.Store(true)
+	<-f.openGate
+
+	return nil, errors.New("simulated open failure")
+}
+
+// gatedRetainRecord blocks in Retain until retainGate is closed, signalling
+// atRetain first. Add calls Retain between its closed check and its enqueue, so
+// this parks a sender in exactly that window: past the check, not yet sent. It
+// is the interleaving the reviewer hit with an instrumented Retain, made
+// deterministic. Every other method (Release included) delegates to the
+// embedded batch, so allocator accounting is unaffected.
+type gatedRetainRecord struct {
+	arrow.RecordBatch
+	retainGate chan struct{}
+	atRetain   *sync.WaitGroup
+}
+
+func (r gatedRetainRecord) Retain() {
+	r.atRetain.Done()
+	<-r.retainGate
+	r.RecordBatch.Retain()
+}
+
+// TestConcurrentAddDuringStreamErrorLeaksNothing exercises the barrier between
+// in-flight Add calls and stream's shutdown drain. Every record handed to Add
+// must end owned by exactly one path: enqueued and released by the drain, or
+// rejected/aborted and released by Add itself. Without a real barrier a send
+// that lands in free buffer after the drain emptied the channel strands its
+// record; the checked allocator must still return to zero.
+//
+// The interleaving is forced, not left to chance. A trigger record parks stream
+// in the gated open with ctx still live. The real senders then pass their
+// closed check and block in Retain (via gatedRetainRecord) — past the check,
+// not yet enqueued. Closing openGate makes stream fail and run its drain; only
+// then does retainGate release the senders to complete their sends. On a
+// lockless drain those sends land in the drained-empty channel and strand; the
+// write-lock barrier serializes them against the drain so none can.
+func (s *RollingDataWriterTestSuite) TestConcurrentAddDuringStreamErrorLeaksNothing() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	openGate := make(chan struct{})
+	var inOpen atomic.Bool
+	factory.format = gatedFailFormat{FileFormat: factory.format, openGate: openGate, inOpen: &inOpen}
+
+	outputCh := make(chan iceberg.DataFile, 64)
+	ctx, cancel := context.WithCancel(s.ctx)
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch, 64),
+		errorCh:  make(chan error, 1),
+		factory:  factory,
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+	writer.wg.Add(1)
+	go writer.stream(outputCh)
+
+	// Trigger record: drives stream into the gated open so ctx stays live while
+	// the real senders line up. Consumed and released by stream itself.
+	trigger := s.buildRecord(arrSchema, 3)
+	trigger.Retain()
+	writer.recordCh <- trigger
+	trigger.Release()
+	for !inOpen.Load() {
+		runtime.Gosched()
+	}
+
+	const senders = 24
+	retainGate := make(chan struct{})
+	var atRetain, done sync.WaitGroup
+	atRetain.Add(senders)
+	for range senders {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			record := s.buildRecord(arrSchema, 3)
+			// Add retains (via gatedRetainRecord.Retain, which parks the sender
+			// between the closed check and the enqueue) then enqueues or aborts;
+			// the caller always drops its own reference afterward.
+			_ = writer.Add(gatedRetainRecord{RecordBatch: record, retainGate: retainGate, atRetain: &atRetain})
+			record.Release()
+		}()
+	}
+
+	atRetain.Wait() // every sender is past its closed check, parked in Retain
+	close(openGate) // stream's open fails -> cleanup runs its drain
+	time.Sleep(20 * time.Millisecond)
+	close(retainGate) // now release the parked sends into the just-drained channel
+
+	done.Wait()      // every Add call has returned
+	writer.wg.Wait() // stream has exited and finished its drain
+
+	checked := s.mem.(*memory.CheckedAllocator)
+	s.Require().Zero(checked.CurrentAlloc(),
+		"no record may be stranded when a send completes after stream's shutdown drain")
 }
