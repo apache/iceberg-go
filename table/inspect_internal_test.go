@@ -1165,6 +1165,138 @@ func TestInspectManifestsSchema(t *testing.T) {
 	require.Equal(t, 13, partitionSummary.FieldList[3].ID)
 }
 
+func TestInspectAllManifestsSchema(t *testing.T) {
+	sc := AllManifestsSchema()
+	require.Equal(t,
+		append(testFieldNames(ManifestsSchema()), "reference_snapshot_id", "key_metadata"),
+		testFieldNames(sc))
+
+	fields := sc.Fields()
+	require.Equal(t, 18, fields[12].ID)
+	require.True(t, fields[12].Required)
+	require.Equal(t, iceberg.PrimitiveTypes.Int64, fields[12].Type)
+	require.Equal(t, 19, fields[13].ID)
+	require.False(t, fields[13].Required)
+	require.Equal(t, iceberg.PrimitiveTypes.Binary, fields[13].Type)
+}
+
+func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	schema := simpleSchema()
+	const tableLocation = "mem://default/inspect-all-manifests"
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, tableLocation,
+		iceberg.Properties{PropertyFormatVersion: "2"})
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(meta, "")
+	require.NoError(t, err)
+
+	manifest := iceberg.NewManifestFile(2, tableLocation+"/metadata/shared-manifest.avro", 100, 0, 1).
+		SequenceNum(1, 1).
+		AddedFiles(1).
+		KeyMetadata([]byte{1, 2, 3}).
+		Build()
+	manifestListPath := tableLocation + "/metadata/shared-list.avro"
+	var list bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{manifest}))
+	require.NoError(t, memFS.WriteFile(manifestListPath, list.Bytes()))
+
+	schemaID := schema.ID
+	snapshotOne := int64(1)
+	timestamp := meta.LastUpdatedMillis()
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID: snapshotOne, SequenceNumber: 1, TimestampMs: timestamp + 1,
+		ManifestList: manifestListPath, SchemaID: &schemaID,
+	}))
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID: 2, ParentSnapshotID: &snapshotOne, SequenceNumber: 2, TimestampMs: timestamp + 2,
+		ManifestList: manifestListPath, SchemaID: &schemaID,
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, 2, BranchRef))
+	built, err := builder.Build()
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "all_manifests"}, built, tableLocation+"/metadata/metadata.json",
+		func(context.Context) (iceio.IO, error) { return memFS, nil }, nil)
+
+	rr, err := tbl.Inspect().AllManifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 2, record.NumRows())
+	paths := record.Column(1).(*array.String)
+	require.Equal(t, manifest.FilePath(), paths.Value(0))
+	require.Equal(t, manifest.FilePath(), paths.Value(1))
+	references := record.Column(12).(*array.Int64)
+	require.Equal(t, []int64{1, 2}, references.Int64Values())
+	keyMetadata := record.Column(13).(*array.Binary)
+	require.Equal(t, []byte{1, 2, 3}, keyMetadata.Value(0))
+	require.Equal(t, []byte{1, 2, 3}, keyMetadata.Value(1))
+}
+
+func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
+	const manifestCount = inspectRecordBatchSize + 1
+
+	manifests := make([]iceberg.ManifestFile, manifestCount)
+	for idx := range manifests {
+		manifests[idx] = iceberg.NewManifestFile(2,
+			fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
+			100, 0, 1).
+			SequenceNum(1, 1).
+			AddedFiles(1).
+			Build()
+	}
+	tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2, manifests)
+
+	rr, err := tbl.Inspect().AllManifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	var batchSizes []int64
+	for rr.Next() {
+		batchSizes = append(batchSizes, rr.RecordBatch().NumRows())
+	}
+	require.NoError(t, rr.Err())
+	require.Equal(t, []int64{inspectRecordBatchSize, 1}, batchSizes)
+}
+
+func TestInspectAllManifestsAllocator(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		manifestCount int
+		next          bool
+	}{
+		{name: "before first batch", manifestCount: 1},
+		{name: "after first batch", manifestCount: inspectRecordBatchSize + 1, next: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			t.Cleanup(func() { checked.AssertSize(t, 0) })
+
+			manifests := make([]iceberg.ManifestFile, tt.manifestCount)
+			for idx := range manifests {
+				manifests[idx] = iceberg.NewManifestFile(2,
+					fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
+					100, 0, 1).
+					SequenceNum(1, 1).
+					AddedFiles(1).
+					Build()
+			}
+			tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2,
+				manifests)
+
+			rr, err := tbl.Inspect(WithInspectAllocator(checked)).AllManifests(context.Background())
+			require.NoError(t, err)
+			if tt.next {
+				require.True(t, rr.Next())
+			}
+			rr.Release()
+		})
+	}
+}
+
 func TestInspectManifests(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
