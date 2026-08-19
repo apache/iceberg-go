@@ -1236,6 +1236,32 @@ func TestInspectAllManifestsPreservesSnapshotReferences(t *testing.T) {
 	require.Equal(t, []byte{1, 2, 3}, keyMetadata.Value(1))
 }
 
+func TestInspectAllManifestsStreamsRecordBatches(t *testing.T) {
+	const manifestCount = inspectRecordBatchSize + 1
+
+	manifests := make([]iceberg.ManifestFile, manifestCount)
+	for idx := range manifests {
+		manifests[idx] = iceberg.NewManifestFile(2,
+			fmt.Sprintf("mem://default/table-location/metadata/manifest-%04d.avro", idx),
+			100, 0, 1).
+			SequenceNum(1, 1).
+			AddedFiles(1).
+			Build()
+	}
+	tbl := inspectTableWithManifestList(t, *iceberg.UnpartitionedSpec, 2, manifests)
+
+	rr, err := tbl.Inspect().AllManifests(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	var batchSizes []int64
+	for rr.Next() {
+		batchSizes = append(batchSizes, rr.RecordBatch().NumRows())
+	}
+	require.NoError(t, rr.Err())
+	require.Equal(t, []int64{inspectRecordBatchSize, 1}, batchSizes)
+}
+
 func TestInspectManifests(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()

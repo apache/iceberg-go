@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
 )
@@ -28,16 +29,16 @@ import (
 // AllManifests returns every manifest referenced by every snapshot currently
 // tracked by the table. A manifest referenced by multiple snapshots produces
 // one row per reference, identified by reference_snapshot_id.
+// Results are streamed in bounded record batches while each snapshot's
+// manifest list is traversed.
 func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, error) {
 	arrowSchema, err := SchemaToArrowSchema(AllManifestsSchema(), nil, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("inspect all manifests: build arrow schema: %w", err)
 	}
 
-	bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
-	defer bldr.Release()
-
 	snapshots := i.tbl.metadata.Snapshots()
+	var readSnapshotManifests func(Snapshot) ([]iceberg.ManifestFile, error)
 	if len(snapshots) > 0 {
 		if i.tbl.fsF == nil {
 			return nil, errors.New("inspect all manifests: table file IO is not configured")
@@ -46,29 +47,75 @@ func (i InspectTable) AllManifests(ctx context.Context) (array.RecordReader, err
 		if err != nil {
 			return nil, fmt.Errorf("inspect all manifests: %w", err)
 		}
-
-		for _, snapshot := range snapshots {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			manifests, err := snapshot.Manifests(fs)
-			if err != nil {
-				return nil, fmt.Errorf("inspect all manifests: read snapshot %d manifests: %w",
-					snapshot.SnapshotID, err)
-			}
-			referenceSnapshotID := snapshot.SnapshotID
-			if err := i.appendManifestRows(ctx, bldr, manifests, &referenceSnapshotID); err != nil {
-				return nil, fmt.Errorf("inspect all manifests: snapshot %d: %w", snapshot.SnapshotID, err)
-			}
+		readSnapshotManifests = func(snapshot Snapshot) ([]iceberg.ManifestFile, error) {
+			return snapshot.Manifests(fs)
 		}
 	}
 
-	rr, err := singleBatchReader(arrowSchema, bldr)
-	if err != nil {
-		return nil, fmt.Errorf("inspect all manifests: %w", err)
-	}
+	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
+		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
+		defer bldr.Release()
 
-	return rr, nil
+		rows := 0
+		emitted := false
+		emit := func() bool {
+			if rows == 0 {
+				return true
+			}
+
+			batch := bldr.NewRecordBatch()
+			rows = 0
+			emitted = true
+
+			return yield(batch, nil)
+		}
+		emitEmpty := func() {
+			batch := bldr.NewRecordBatch()
+			emitted = true
+			_ = yield(batch, nil)
+		}
+		yieldError := func(err error) {
+			_ = yield(nil, err)
+		}
+
+		for _, snapshot := range snapshots {
+			if err := ctx.Err(); err != nil {
+				yieldError(err)
+
+				return
+			}
+
+			manifests, err := readSnapshotManifests(snapshot)
+			if err != nil {
+				yieldError(fmt.Errorf("inspect all manifests: read snapshot %d manifests: %w",
+					snapshot.SnapshotID, err))
+
+				return
+			}
+
+			referenceSnapshotID := snapshot.SnapshotID
+			for start := 0; start < len(manifests); {
+				end := min(start+inspectRecordBatchSize-rows, len(manifests))
+				if err := i.appendManifestRows(ctx, bldr, manifests[start:end], &referenceSnapshotID); err != nil {
+					yieldError(fmt.Errorf("inspect all manifests: snapshot %d: %w", snapshot.SnapshotID, err))
+
+					return
+				}
+				rows += end - start
+				start = end
+
+				if rows == inspectRecordBatchSize && !emit() {
+					return
+				}
+			}
+		}
+
+		if rows > 0 {
+			_ = emit()
+		} else if !emitted {
+			emitEmpty()
+		}
+	}), nil
 }
 
 // AllManifestsSchema returns the schema of the all_manifests metadata table.
