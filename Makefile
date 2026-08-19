@@ -23,7 +23,7 @@ test:
 	go test -v ./...
 
 test-assert:
-	go test -tags=assert -v -run='^(TestInspectFilesTablesEarlyRelease|TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted|TestInspectDataFilesEmptyTableEarlyRelease)$$' ./table
+	go test -tags=assert -v -run='^(TestInspectFilesTablesEarlyRelease|TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted|TestInspectDataFilesEmptyTableEarlyRelease|TestInspectPositionDeletesEarlyRelease)$$' ./table
 
 # Race detector is opt-in per package/test.
 test-race:

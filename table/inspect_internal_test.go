@@ -2985,6 +2985,59 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
+func TestInspectPositionDeletesEarlyRelease(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		populated bool
+	}{
+		{name: "populated", populated: true},
+		{name: "empty"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			t.Cleanup(func() { checked.AssertSize(t, 0) })
+
+			memFS := iceio.NewMemFS()
+			deletePath := "mem://position-deletes/table/data/delete.parquet"
+			dataPath := "mem://position-deletes/table/data/data.parquet"
+			var tbl *Table
+			if tt.populated {
+				writePosDeleteParquetToMemFS(t, memFS, deletePath,
+					`[{"file_path": "`+dataPath+`", "pos": 1}]`)
+				tbl = inspectPositionDeletesTable(
+					t, 2, newInspectPositionDeletesMetadata(t, 2), memFS,
+					[]iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
+				)
+			} else {
+				metadata, buildErr := newInspectPositionDeletesMetadata(t, 2).Build()
+				require.NoError(t, buildErr)
+				tbl = New(
+					Identifier{"db", "position_deletes"}, metadata, "metadata.json",
+					func(context.Context) (iceio.IO, error) { return memFS, nil }, nil,
+				)
+			}
+			inspect := tbl.Inspect(WithInspectAllocator(checked))
+
+			var rr array.RecordReader
+			var err error
+			if tt.populated {
+				rr, err = inspect.PositionDeletes(context.Background())
+			} else {
+				partitionType, partitionIDs, partitionErr := positionDeletesPartitionType(tbl.metadata)
+				require.NoError(t, partitionErr)
+				schema := PositionDeletesSchema(tbl.metadata.CurrentSchema(), partitionType, tbl.metadata.Version())
+				arrowSchema, schemaErr := SchemaToArrowSchema(schema, nil, true, false)
+				require.NoError(t, schemaErr)
+				rr = inspect.positionDeleteRecordReader(
+					context.Background(), arrowSchema, nil, nil, partitionType, partitionIDs, tbl.metadata.Version())
+			}
+			require.NoError(t, err)
+			require.True(t, rr.Next())
+			rr.Release()
+		})
+	}
+}
+
 func TestInspectPositionDeletesDeletionVector(t *testing.T) {
 	ctx := context.Background()
 	memFS := iceio.NewMemFS()

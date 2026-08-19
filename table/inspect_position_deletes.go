@@ -223,12 +223,8 @@ func (i InspectTable) positionDeleteRecordReader(
 			batch := bldr.NewRecordBatch()
 			rows = 0
 			emitted = true
-			if yield(batch, nil) {
-				return true
-			}
-			batch.Release()
 
-			return false
+			return yield(batch, nil)
 		}
 		yieldError := func(err error) {
 			_ = yield(nil, err)
@@ -273,9 +269,7 @@ func (i InspectTable) positionDeleteRecordReader(
 			_ = emit()
 		} else if !emitted {
 			batch := bldr.NewRecordBatch()
-			if !yield(batch, nil) {
-				batch.Release()
-			}
+			_ = yield(batch, nil)
 		}
 	})
 }
