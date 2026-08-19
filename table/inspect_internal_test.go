@@ -1992,11 +1992,26 @@ func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
 
 	rr, err := tbl.Inspect().DataFiles(context.Background())
 	require.NoError(t, err)
-	defer rr.Release()
-
-	record := collectRecord(t, rr)
-	defer record.Release()
+	require.True(t, rr.Next())
+	record := rr.RecordBatch()
 	require.EqualValues(t, 0, record.NumRows())
+	rr.Release()
+}
+
+func TestInspectDataFilesEmptyTableEarlyRelease(t *testing.T) {
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{simpleSchema()},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+	}}
+	tbl := New(Identifier{"empty-data-files"}, meta, "metadata.json", nil, nil)
+
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	require.True(t, rr.Next())
+	require.EqualValues(t, 0, rr.RecordBatch().NumRows())
+	rr.Release()
 }
 
 func TestInspectDataFilesAllocator(t *testing.T) {
