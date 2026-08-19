@@ -19,7 +19,6 @@ package table
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/iceberg-go"
@@ -29,28 +28,10 @@ import (
 // deletion-vector files in the current snapshot. It reports file metadata and
 // does not open or scan the delete-file contents.
 func (i InspectTable) DeleteFiles(ctx context.Context) (array.RecordReader, error) {
-	partitionType, err := inspectPartitionType(i.tbl.metadata)
-	if err != nil {
-		return nil, fmt.Errorf("inspect delete files: %w", err)
-	}
-	schema := DeleteFilesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
-	if err != nil {
-		return nil, fmt.Errorf("inspect delete files: build arrow schema: %w", err)
-	}
-
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
+	return i.inspectFiles(ctx, "delete files", DeleteFilesSchema, false,
 		func(manifest iceberg.ManifestFile) bool {
 			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
-		},
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			return appendContentFileRecord(bldr, partitionType, entry.DataFile())
 		})
-	if err != nil {
-		return nil, fmt.Errorf("inspect delete files: %w", err)
-	}
-
-	return rr, nil
 }
 
 // DeleteFilesSchema returns the content-file schema used by the delete_files

@@ -31,32 +31,80 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
 func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "data files", DataFilesSchema, false,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentData
+		})
+}
+
+// Files returns all live data and delete files in the current snapshot.
+// Deleted manifest entries are omitted.
+func (i InspectTable) Files(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "files", FilesSchema, false, nil)
+}
+
+// AllFiles returns the live data and delete files reachable from every
+// snapshot currently tracked by the table. Shared manifests are scanned once,
+// while duplicate file rows from different manifests are preserved.
+func (i InspectTable) AllFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all files", AllFilesSchema, true, nil)
+}
+
+// AllDataFiles returns the live data files reachable from every snapshot
+// currently tracked by the table.
+func (i InspectTable) AllDataFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all data files", AllDataFilesSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentData
+		})
+}
+
+// AllDeleteFiles returns the live delete files reachable from every snapshot
+// currently tracked by the table.
+func (i InspectTable) AllDeleteFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all delete files", AllDeleteFilesSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
+		})
+}
+
+type inspectFilesSchema func(*iceberg.StructType) *iceberg.Schema
+
+func (i InspectTable) inspectFiles(
+	ctx context.Context,
+	name string,
+	schemaFn inspectFilesSchema,
+	allSnapshots bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+) (array.RecordReader, error) {
 	partitionType, err := inspectPartitionType(i.tbl.metadata)
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	schema := DataFilesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: build arrow schema: %w", err)
+		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
 
 	appendFile := newInspectContentFileAppender(partitionType)
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
-		func(manifest iceberg.ManifestFile) bool {
-			return manifest.ManifestContent() == iceberg.ManifestContentData
-		},
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			return appendFile(bldr, entry.DataFile())
-		})
+	appendEntry := func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+		return appendFile(bldr, entry.DataFile())
+	}
+	var rr array.RecordReader
+	if allSnapshots {
+		rr, err = i.allManifestEntryReader(ctx, arrowSchema, true, includeManifest, appendEntry)
+	} else {
+		rr, err = i.manifestEntryReader(ctx, arrowSchema, true, includeManifest, appendEntry)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
 
 	return rr, nil
@@ -91,6 +139,78 @@ func (i InspectTable) manifestEntryReader(
 		return nil, err
 	}
 
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(yield func(iceberg.ManifestFile, error) bool) {
+			for _, manifest := range manifests {
+				if !yield(manifest, nil) {
+					return
+				}
+			}
+		}), nil
+}
+
+// allManifestEntryReader scans each manifest reachable from the table's
+// tracked snapshots exactly once. Manifest paths are immutable and unique, so
+// the path is the stable identity used by Java and PyIceberg's all_* tables.
+func (i InspectTable) allManifestEntryReader(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	discardDeleted bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+) (array.RecordReader, error) {
+	snapshots := i.tbl.metadata.Snapshots()
+	if len(snapshots) == 0 {
+		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
+	}
+	if i.tbl.fsF == nil {
+		return nil, errors.New("table file IO is not configured")
+	}
+
+	fs, err := i.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(yield func(iceberg.ManifestFile, error) bool) {
+			seen := make(map[string]struct{})
+			for _, snapshot := range snapshots {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+
+					return
+				}
+				snapshotManifests, err := snapshot.Manifests(fs)
+				if err != nil {
+					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
+
+					return
+				}
+				for _, manifest := range snapshotManifests {
+					if _, ok := seen[manifest.FilePath()]; ok {
+						continue
+					}
+					seen[manifest.FilePath()] = struct{}{}
+					if !yield(manifest, nil) {
+						return
+					}
+				}
+			}
+		}), nil
+}
+
+func (i InspectTable) manifestEntryReaderFromManifestSource(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	fs iceio.IO,
+	discardDeleted bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+	source iter.Seq2[iceberg.ManifestFile, error],
+) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 		defer bldr.Release()
@@ -117,7 +237,12 @@ func (i InspectTable) manifestEntryReader(
 			_ = yield(nil, err)
 		}
 
-		for _, manifest := range manifests {
+		for manifest, sourceErr := range source {
+			if sourceErr != nil {
+				yieldError(sourceErr)
+
+				return
+			}
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
 
@@ -155,7 +280,7 @@ func (i InspectTable) manifestEntryReader(
 		} else if !emitted {
 			emitEmpty()
 		}
-	}), nil
+	})
 }
 
 func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.Seq2[arrow.RecordBatch, error] {
@@ -266,11 +391,31 @@ func isInspectUnknownTransform(transform iceberg.Transform) bool {
 	}
 }
 
-// DataFilesSchema returns the common content-file schema used by the data_files
-// and delete_files metadata tables. The partition field is omitted for an
-// unpartitioned table, as required by the Iceberg metadata-table spec.
+// DataFilesSchema returns the common content-file schema used by the files
+// metadata tables. The partition field is omitted for an unpartitioned table,
+// as required by the Iceberg metadata-table spec.
 func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	return iceberg.NewSchema(0, inspectContentFileFields(partitionType)...)
+}
+
+// FilesSchema returns the schema shared by the files metadata tables.
+func FilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllFilesSchema returns the schema of the all_files metadata table.
+func AllFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllDataFilesSchema returns the schema of the all_data_files metadata table.
+func AllDataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllDeleteFilesSchema returns the schema of the all_delete_files metadata table.
+func AllDeleteFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
 }
 
 const (
