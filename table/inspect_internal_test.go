@@ -1890,6 +1890,32 @@ func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
 	rr.Release()
 }
 
+func TestInspectFilesTablesEarlyRelease(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	tbl := inspectAllFilesTable(t)
+	reads := []struct {
+		name string
+		read func(context.Context) (array.RecordReader, error)
+	}{
+		{name: "files", read: tbl.Inspect(WithInspectAllocator(checked)).Files},
+		{name: "data files", read: tbl.Inspect(WithInspectAllocator(checked)).DataFiles},
+		{name: "delete files", read: tbl.Inspect(WithInspectAllocator(checked)).DeleteFiles},
+		{name: "all files", read: tbl.Inspect(WithInspectAllocator(checked)).AllFiles},
+		{name: "all data files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDataFiles},
+		{name: "all delete files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDeleteFiles},
+	}
+
+	for _, tt := range reads {
+		t.Run(tt.name, func(t *testing.T) {
+			rr, err := tt.read(context.Background())
+			require.NoError(t, err)
+			require.True(t, rr.Next())
+			rr.Release()
+		})
+	}
+}
+
 func TestInspectAllFilesReadsManifestListsLazily(t *testing.T) {
 	tbl := historyTestTable()
 	fs := iceio.NewMemFS()

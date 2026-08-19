@@ -141,14 +141,12 @@ func (i InspectTable) manifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		func(visit func(iceberg.ManifestFile) bool) error {
+		func(yield func(iceberg.ManifestFile, error) bool) {
 			for _, manifest := range manifests {
-				if !visit(manifest) {
-					return nil
+				if !yield(manifest, nil) {
+					return
 				}
 			}
-
-			return nil
 		}), nil
 }
 
@@ -177,32 +175,32 @@ func (i InspectTable) allManifestEntryReader(
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
-		func(visit func(iceberg.ManifestFile) bool) error {
+		func(yield func(iceberg.ManifestFile, error) bool) {
 			seen := make(map[string]struct{})
 			for _, snapshot := range snapshots {
 				if err := ctx.Err(); err != nil {
-					return err
+					yield(nil, err)
+
+					return
 				}
 				snapshotManifests, err := snapshot.Manifests(fs)
 				if err != nil {
-					return fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err)
+					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
+
+					return
 				}
 				for _, manifest := range snapshotManifests {
 					if _, ok := seen[manifest.FilePath()]; ok {
 						continue
 					}
 					seen[manifest.FilePath()] = struct{}{}
-					if !visit(manifest) {
-						return nil
+					if !yield(manifest, nil) {
+						return
 					}
 				}
 			}
-
-			return nil
 		}), nil
 }
-
-type inspectManifestSource func(func(iceberg.ManifestFile) bool) error
 
 func (i InspectTable) manifestEntryReaderFromManifestSource(
 	ctx context.Context,
@@ -211,7 +209,7 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 	discardDeleted bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
-	source inspectManifestSource,
+	source iter.Seq2[iceberg.ManifestFile, error],
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
@@ -239,54 +237,42 @@ func (i InspectTable) manifestEntryReaderFromManifestSource(
 			_ = yield(nil, err)
 		}
 
-		stopped := false
-		sourceErr := source(func(manifest iceberg.ManifestFile) bool {
+		for manifest, sourceErr := range source {
+			if sourceErr != nil {
+				yieldError(sourceErr)
+
+				return
+			}
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
-				stopped = true
 
-				return false
+				return
 			}
 			if includeManifest != nil && !includeManifest(manifest) {
-				return true
+				continue
 			}
 
 			for entry, err := range manifest.Entries(fs, discardDeleted) {
 				if err != nil {
 					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
-					stopped = true
 
-					return false
+					return
 				}
 				if err := ctx.Err(); err != nil {
 					yieldError(err)
-					stopped = true
 
-					return false
+					return
 				}
 				if err := appendEntry(bldr, entry); err != nil {
 					yieldError(fmt.Errorf("append manifest entry from %s: %w", manifest.FilePath(), err))
-					stopped = true
 
-					return false
+					return
 				}
 				rows++
 				if rows == inspectRecordBatchSize && !emit() {
-					stopped = true
-
-					return false
+					return
 				}
 			}
-
-			return true
-		})
-		if stopped {
-			return
-		}
-		if sourceErr != nil {
-			yieldError(sourceErr)
-
-			return
 		}
 
 		if rows > 0 {
