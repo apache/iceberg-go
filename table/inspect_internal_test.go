@@ -1820,6 +1820,64 @@ func TestInspectAllEntriesDeduplicatesSharedManifests(t *testing.T) {
 	}, []string{paths.Value(0), paths.Value(1), paths.Value(2)})
 }
 
+func TestInspectAllEntriesIncludesDeleteManifests(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+
+	rr, err := tbl.Inspect().AllEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	record := collectRecord(t, rr)
+	defer record.Release()
+	require.EqualValues(t, 5, record.NumRows())
+
+	statuses := record.Column(0).(*array.Int32)
+	require.Equal(t, []int32{
+		int32(iceberg.EntryStatusADDED),
+		int32(iceberg.EntryStatusDELETED),
+		int32(iceberg.EntryStatusADDED),
+		int32(iceberg.EntryStatusADDED),
+		int32(iceberg.EntryStatusADDED),
+	}, statuses.Int32Values())
+
+	dataFiles := record.Column(4).(*array.Struct)
+	contents := dataFiles.Field(0).(*array.Int32)
+	paths := dataFiles.Field(1).(*array.String)
+	require.Equal(t, []int32{
+		int32(iceberg.EntryContentData),
+		int32(iceberg.EntryContentData),
+		int32(iceberg.EntryContentData),
+		int32(iceberg.EntryContentData),
+		int32(iceberg.EntryContentPosDeletes),
+	}, contents.Int32Values())
+	require.Equal(t, []string{
+		"mem://default/table-location/data/shared.parquet",
+		"mem://default/table-location/data/deleted.parquet",
+		"mem://default/table-location/data/shared.parquet",
+		"mem://default/table-location/data/new.parquet",
+		"mem://default/table-location/data/delete.parquet",
+	}, []string{
+		paths.Value(0), paths.Value(1), paths.Value(2), paths.Value(3), paths.Value(4),
+	})
+}
+
+func TestInspectAllEntriesStreamsBatches(t *testing.T) {
+	spec := *iceberg.UnpartitionedSpec
+	tbl := inspectDataFilesTable(t, spec,
+		inspectDataFileEntries(t, spec, inspectRecordBatchSize+1))
+
+	rr, err := tbl.Inspect().AllEntries(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	var batchRows []int
+	for rr.Next() {
+		batchRows = append(batchRows, int(rr.RecordBatch().NumRows()))
+	}
+	require.NoError(t, rr.Err())
+	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
@@ -2127,6 +2185,7 @@ func TestInspectFilesTablesEarlyRelease(t *testing.T) {
 		{name: "all files", read: tbl.Inspect(WithInspectAllocator(checked)).AllFiles},
 		{name: "all data files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDataFiles},
 		{name: "all delete files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDeleteFiles},
+		{name: "all entries", read: tbl.Inspect(WithInspectAllocator(checked)).AllEntries},
 	}
 
 	for _, tt := range reads {
