@@ -20,7 +20,6 @@ package rest
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/DataDog/iceberg-go"
 	"github.com/DataDog/iceberg-go/table"
+	"github.com/goccy/go-json"
 	"github.com/twmb/avro/atype"
 )
 
