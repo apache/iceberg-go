@@ -1878,6 +1878,38 @@ func TestInspectAllEntriesStreamsBatches(t *testing.T) {
 	require.Equal(t, []int{inspectRecordBatchSize, 1}, batchRows)
 }
 
+func TestInspectAllEntriesEmptyTableEarlyRelease(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{simpleSchema()},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+	}}
+	tbl := New(Identifier{"empty-all-entries"}, meta, "metadata.json", nil, nil)
+
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).AllEntries(context.Background())
+	require.NoError(t, err)
+	require.True(t, rr.Next())
+	require.EqualValues(t, 0, rr.RecordBatch().NumRows())
+	rr.Release()
+}
+
+func TestInspectAllEntriesStopsOnContextCancellation(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rr, err := tbl.Inspect().AllEntries(ctx)
+	require.NoError(t, err)
+	cancel()
+
+	require.False(t, rr.Next())
+	require.ErrorIs(t, rr.Err(), context.Canceled)
+	rr.Release()
+}
+
 func TestDataFilesSchema(t *testing.T) {
 	sc := DataFilesSchema(&iceberg.StructType{FieldList: []iceberg.NestedField{
 		{ID: 1000, Name: "bucket", Type: iceberg.PrimitiveTypes.Int32, Required: true},
