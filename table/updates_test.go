@@ -768,6 +768,88 @@ func TestUnmarshalUpdatesRejectsMissingOrNullAction(t *testing.T) {
 	}
 }
 
+func TestUnmarshalUpdatesUsesJSONActionFieldSemantics(t *testing.T) {
+	tests := []struct {
+		name           string
+		data           string
+		expectedAction string
+		assert         func(*testing.T, Update)
+	}{
+		{
+			name:           "accepts mixed-case action key",
+			data:           `[{"Action":"set-location","location":"s3://bucket/table"}]`,
+			expectedAction: UpdateSetLocation,
+			assert: func(t *testing.T, update Update) {
+				t.Helper()
+				location, ok := update.(*setLocationUpdate)
+				require.True(t, ok)
+				assert.Equal(t, "s3://bucket/table", location.Location)
+			},
+		},
+		{
+			name:           "uses the last duplicate case-variant action key",
+			data:           `[{"action":"set-location","ACTION":"assign-uuid","location":"s3://bucket/table","uuid":"550e8400-e29b-41d4-a716-446655440000"}]`,
+			expectedAction: UpdateAssignUUID,
+			assert: func(t *testing.T, update Update) {
+				t.Helper()
+				assignUUID, ok := update.(*assignUUIDUpdate)
+				require.True(t, ok)
+				assert.Equal(t, uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), assignUUID.UUID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &updates))
+			require.Len(t, updates, 1)
+			assert.Equal(t, tt.expectedAction, updates[0].Action())
+			tt.assert(t, updates[0])
+		})
+	}
+
+	t.Run("rejects unknown action from duplicate case-variant key", func(t *testing.T) {
+		var updates Updates
+		err := json.Unmarshal([]byte(`[{"action":"set-location","ACTION":"unknown","location":"s3://bucket/table"}]`), &updates)
+		require.ErrorContains(t, err, "unknown update action: unknown")
+	})
+}
+
+func TestUnmarshalUpdatesPreservesDuplicateActionTypeError(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "valid final action",
+			data: `[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`,
+		},
+		{
+			name: "valid final action with missing required field",
+			data: `[{"action":123,"action":"set-location"}]`,
+		},
+		{
+			name: "unknown final action",
+			data: `[{"action":123,"action":"unknown"}]`,
+		},
+		{
+			name: "null final action",
+			data: `[{"action":123,"action":null}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			var typeErr *json.UnmarshalTypeError
+			err := json.Unmarshal([]byte(tt.data), &updates)
+
+			require.ErrorAs(t, err, &typeErr)
+		})
+	}
+}
+
 func TestUnmarshalUpdatesAcceptsOptionalAndEmptyValues(t *testing.T) {
 	data := []byte(`[
 		{"action":"add-schema","schema":{"type":"struct","fields":[]}},

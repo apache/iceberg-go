@@ -17,10 +17,13 @@
 # golangci-lint version (keep in sync with CI and README)
 GOLANGCI_LINT_VERSION := v2.12.2
 
-.PHONY: test test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
+.PHONY: test test-assert test-race lint lint-install integration-setup integration-setup-spark4 integration-test integration-scanner integration-io integration-rest integration-spark integration-hadoop integration-down integration-logs docs-gen
 
 test:
 	go test -v ./...
+
+test-assert:
+	go test -tags=assert -v -run='^(TestInspectFilesTablesEarlyRelease|TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted|TestInspectDataFilesEmptyTableEarlyRelease)$$' ./table
 
 # Race detector is opt-in per package/test.
 test-race:

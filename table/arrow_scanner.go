@@ -742,7 +742,7 @@ func collectLeafIDs(typ iceberg.Type, fieldID int, idset set[int]) {
 	}
 }
 
-func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression) (set[int], error) {
+func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equalityDeletes []*equalityDeleteSet) (set[int], error) {
 	idset := set[int]{}
 	// Collect leaf field IDs for column pruning.
 	// For nested types (map, list, struct), we recursively descend to find
@@ -761,6 +761,11 @@ func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression) (set
 			idset[id] = struct{}{}
 		}
 	}
+	for _, deletes := range equalityDeletes {
+		for _, id := range deletes.fieldIDs {
+			idset[id] = struct{}{}
+		}
+	}
 
 	return idset, nil
 }
@@ -771,8 +776,8 @@ type enumeratedRecord struct {
 	Err    error
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, rowFilter iceberg.BooleanExpression) (*iceberg.Schema, []int, tblutils.FileReader, error) {
-	ids, err := as.projectedFieldIDs(rowFilter)
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, rowFilter iceberg.BooleanExpression, equalityDeletes []*equalityDeleteSet) (*iceberg.Schema, []int, tblutils.FileReader, error) {
+	ids, err := as.projectedFieldIDs(rowFilter, equalityDeletes)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1344,7 +1349,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, rowFilter)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, rowFilter, eqDeleteSets)
 	if err != nil {
 		return err
 	}
@@ -1472,7 +1477,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		dropFile   bool
 	)
 
-	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, as.boundRowFilter)
+	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, as.boundRowFilter, nil)
 	if err != nil {
 		return err
 	}

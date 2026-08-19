@@ -1686,6 +1686,263 @@ func inspectDataFileEntries(t *testing.T, spec iceberg.PartitionSpec, count int)
 	return entries
 }
 
+func writeInspectManifest(
+	t *testing.T,
+	fs iceio.WriteFileIO,
+	path string,
+	spec iceberg.PartitionSpec,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	content iceberg.ManifestContent,
+	entries []iceberg.ManifestEntry,
+) iceberg.ManifestFile {
+	t.Helper()
+
+	var buf bytes.Buffer
+	writer, err := iceberg.NewManifestWriter(2, &buf, spec, schema, snapshotID,
+		iceberg.WithManifestWriterContent(content))
+	require.NoError(t, err)
+	for _, entry := range entries {
+		switch entry.Status() {
+		case iceberg.EntryStatusDELETED:
+			require.NoError(t, writer.Delete(entry))
+		case iceberg.EntryStatusEXISTING:
+			require.NoError(t, writer.Existing(entry))
+		default:
+			require.NoError(t, writer.Add(entry))
+		}
+	}
+	require.NoError(t, writer.Close())
+	manifest, err := writer.ToManifestFile(path, int64(buf.Len()),
+		iceberg.WithManifestFileContent(content))
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(path, buf.Bytes()))
+
+	return manifest
+}
+
+func inspectAllFilesTable(t *testing.T) *Table {
+	t.Helper()
+
+	spec := *iceberg.UnpartitionedSpec
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	schema := simpleSchema()
+	sequenceOne, sequenceTwo := int64(1), int64(2)
+	snapshotOne, snapshotTwo := int64(1), int64(2)
+
+	entry := func(snapshotID, sequenceNumber int64, file iceberg.DataFile) iceberg.ManifestEntry {
+		return iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID,
+			&sequenceNumber, &sequenceNumber, file)
+	}
+	sharedData := newTestDataFile(t, spec, "mem://default/table-location/data/shared.parquet", nil)
+	deletedData := newTestDataFile(t, spec, "mem://default/table-location/data/deleted.parquet", nil)
+	newData := newTestDataFile(t, spec, "mem://default/table-location/data/new.parquet", nil)
+	deleteFile := newTestPosDeleteFileForSpec(t, spec,
+		"mem://default/table-location/data/delete.parquet", nil, sharedData.FilePath())
+	deletedSequence := sequenceOne
+	deletedEntry := iceberg.NewManifestEntry(iceberg.EntryStatusDELETED, &snapshotOne,
+		&deletedSequence, &deletedSequence, deletedData)
+
+	sharedManifest := writeInspectManifest(t, memIO,
+		"mem://default/table-location/metadata/shared.avro", spec, schema, snapshotOne,
+		iceberg.ManifestContentData, []iceberg.ManifestEntry{
+			entry(snapshotOne, sequenceOne, sharedData), deletedEntry,
+		})
+	// Keep a second manifest with the same file row to pin that all_* tables
+	// deduplicate shared manifests, but do not deduplicate rows across distinct
+	// manifests.
+	duplicateManifest := writeInspectManifest(t, memIO,
+		"mem://default/table-location/metadata/duplicate.avro", spec, schema, snapshotOne,
+		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotOne, sequenceOne, sharedData)})
+	newManifest := writeInspectManifest(t, memIO,
+		"mem://default/table-location/metadata/new.avro", spec, schema, snapshotTwo,
+		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotTwo, sequenceTwo, newData)})
+	deleteManifest := writeInspectManifest(t, memIO,
+		"mem://default/table-location/metadata/delete.avro", spec, schema, snapshotTwo,
+		iceberg.ManifestContentDeletes, []iceberg.ManifestEntry{entry(snapshotTwo, sequenceTwo, deleteFile)})
+
+	writeList := func(path string, snapshotID int64, parent *int64, sequenceNumber int64,
+		manifests []iceberg.ManifestFile,
+	) []iceberg.ManifestFile {
+		var buf bytes.Buffer
+		require.NoError(t, iceberg.WriteManifestList(2, &buf, snapshotID, parent,
+			&sequenceNumber, 0, manifests))
+		require.NoError(t, memIO.WriteFile(path, buf.Bytes()))
+		written, err := iceberg.ReadManifestList(bytes.NewReader(buf.Bytes()))
+		require.NoError(t, err)
+
+		return written
+	}
+	listOne := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
+	listTwo := "mem://default/table-location/metadata/snap-2-manifest-list.avro"
+	writtenOne := writeList(listOne, snapshotOne, nil, sequenceOne,
+		[]iceberg.ManifestFile{sharedManifest, duplicateManifest})
+	writeList(listTwo, snapshotTwo, &snapshotOne, sequenceTwo,
+		[]iceberg.ManifestFile{writtenOne[0], newManifest, deleteManifest})
+
+	txn.meta.snapshotList = []Snapshot{
+		{SnapshotID: snapshotOne, ManifestList: listOne, SequenceNumber: sequenceOne},
+		{SnapshotID: snapshotTwo, ParentSnapshotID: &snapshotOne, ManifestList: listTwo, SequenceNumber: sequenceTwo},
+	}
+	txn.meta.currentSnapshotID = &snapshotTwo
+	built, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "tbl"}, built, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+}
+
+func inspectFileRows(t *testing.T, rr array.RecordReader) (paths []string, contents []int32) {
+	t.Helper()
+	defer rr.Release()
+	for rr.Next() {
+		record := rr.RecordBatch()
+		content := record.Column(0).(*array.Int32)
+		filePath := record.Column(1).(*array.String)
+		for row := range int(record.NumRows()) {
+			contents = append(contents, content.Value(row))
+			paths = append(paths, filePath.Value(row))
+		}
+	}
+	require.NoError(t, rr.Err())
+
+	return paths, contents
+}
+
+func TestInspectFilesTables(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	tests := []struct {
+		name        string
+		read        func(context.Context) (array.RecordReader, error)
+		wantPaths   []string
+		wantContent []int32
+	}{
+		{
+			name: "files",
+			read: tbl.Inspect().Files,
+			wantPaths: []string{
+				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/new.parquet",
+				"mem://default/table-location/data/delete.parquet",
+			},
+			wantContent: []int32{
+				int32(iceberg.EntryContentData), int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentPosDeletes),
+			},
+		},
+		{
+			name: "all files deduplicates shared manifest and preserves duplicate rows",
+			read: tbl.Inspect().AllFiles,
+			wantPaths: []string{
+				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/new.parquet",
+				"mem://default/table-location/data/delete.parquet",
+			},
+			wantContent: []int32{
+				int32(iceberg.EntryContentData), int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentPosDeletes),
+			},
+		},
+		{
+			name: "all data files",
+			read: tbl.Inspect().AllDataFiles,
+			wantPaths: []string{
+				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/new.parquet",
+			},
+			wantContent: []int32{
+				int32(iceberg.EntryContentData), int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentData),
+			},
+		},
+		{
+			name:        "all delete files",
+			read:        tbl.Inspect().AllDeleteFiles,
+			wantPaths:   []string{"mem://default/table-location/data/delete.parquet"},
+			wantContent: []int32{int32(iceberg.EntryContentPosDeletes)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr, err := tt.read(context.Background())
+			require.NoError(t, err)
+			paths, contents := inspectFileRows(t, rr)
+			require.Equal(t, tt.wantPaths, paths)
+			require.Equal(t, tt.wantContent, contents)
+		})
+	}
+}
+
+func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rr, err := tbl.Inspect().AllFiles(ctx)
+	require.NoError(t, err)
+
+	cancel()
+	require.False(t, rr.Next())
+	require.ErrorIs(t, rr.Err(), context.Canceled)
+	rr.Release()
+}
+
+func TestInspectFilesTablesEarlyRelease(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+	tbl := inspectAllFilesTable(t)
+	reads := []struct {
+		name string
+		read func(context.Context) (array.RecordReader, error)
+	}{
+		{name: "files", read: tbl.Inspect(WithInspectAllocator(checked)).Files},
+		{name: "data files", read: tbl.Inspect(WithInspectAllocator(checked)).DataFiles},
+		{name: "delete files", read: tbl.Inspect(WithInspectAllocator(checked)).DeleteFiles},
+		{name: "all files", read: tbl.Inspect(WithInspectAllocator(checked)).AllFiles},
+		{name: "all data files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDataFiles},
+		{name: "all delete files", read: tbl.Inspect(WithInspectAllocator(checked)).AllDeleteFiles},
+	}
+
+	for _, tt := range reads {
+		t.Run(tt.name, func(t *testing.T) {
+			rr, err := tt.read(context.Background())
+			require.NoError(t, err)
+			require.True(t, rr.Next())
+			rr.Release()
+		})
+	}
+}
+
+func TestInspectAllFilesReadsManifestListsLazily(t *testing.T) {
+	tbl := historyTestTable()
+	fs := iceio.NewMemFS()
+	tbl.fsF = func(context.Context) (iceio.IO, error) { return fs, nil }
+
+	rr, err := tbl.Inspect().AllFiles(context.Background())
+	require.NoError(t, err)
+	require.False(t, rr.Next())
+	require.ErrorContains(t, rr.Err(), "read snapshot 101 manifests")
+	rr.Release()
+}
+
+func TestInspectAllFilesSchemasMatchFiles(t *testing.T) {
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "part", Type: iceberg.PrimitiveTypes.String, Required: false},
+	}}
+	want := DataFilesSchema(partitionType)
+	for _, schema := range []*iceberg.Schema{
+		FilesSchema(partitionType),
+		AllFilesSchema(partitionType),
+		AllDataFilesSchema(partitionType),
+		AllDeleteFilesSchema(partitionType),
+	} {
+		require.True(t, want.Equals(schema))
+	}
+}
+
 func TestInspectDataFilesStreamsBatchesAndSkipsDeleted(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := *iceberg.UnpartitionedSpec
@@ -1786,11 +2043,26 @@ func TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted(t *testing.T) {
 
 	rr, err := tbl.Inspect().DataFiles(context.Background())
 	require.NoError(t, err)
-	defer rr.Release()
-
-	record := collectRecord(t, rr)
-	defer record.Release()
+	require.True(t, rr.Next())
+	record := rr.RecordBatch()
 	require.EqualValues(t, 0, record.NumRows())
+	rr.Release()
+}
+
+func TestInspectDataFilesEmptyTableEarlyRelease(t *testing.T) {
+	meta := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{simpleSchema()},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{*iceberg.UnpartitionedSpec},
+		DefaultSpecID:   0,
+	}}
+	tbl := New(Identifier{"empty-data-files"}, meta, "metadata.json", nil, nil)
+
+	rr, err := tbl.Inspect().DataFiles(context.Background())
+	require.NoError(t, err)
+	require.True(t, rr.Next())
+	require.EqualValues(t, 0, rr.RecordBatch().NumRows())
+	rr.Release()
 }
 
 func TestInspectDataFilesAllocator(t *testing.T) {
