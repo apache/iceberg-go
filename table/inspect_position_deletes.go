@@ -263,12 +263,39 @@ func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Str
 
 			continue
 		}
-		if err := scalar.Append(fieldBuilder, value); err != nil {
+		if err := appendPositionDeleteValue(fieldBuilder, value); err != nil {
 			return fmt.Errorf("field %q: %w", destinationField.Name, err)
 		}
 	}
 
 	return nil
+}
+
+func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error {
+	if arrow.TypeEqual(builder.Type(), value.DataType()) {
+		return scalar.Append(builder, value)
+	}
+	if !canPromotePositionDeleteValue(value.DataType(), builder.Type()) {
+		return scalar.Append(builder, value)
+	}
+
+	casted, err := value.CastTo(builder.Type())
+	if err != nil {
+		return fmt.Errorf("promote %s to %s: %w", value.DataType(), builder.Type(), err)
+	}
+
+	return scalar.Append(builder, casted)
+}
+
+func canPromotePositionDeleteValue(source, destination arrow.DataType) bool {
+	switch source.ID() {
+	case arrow.INT32:
+		return destination.ID() == arrow.INT64
+	case arrow.FLOAT32:
+		return destination.ID() == arrow.FLOAT64
+	default:
+		return false
+	}
 }
 
 type positionDeleteFieldLookup struct {
