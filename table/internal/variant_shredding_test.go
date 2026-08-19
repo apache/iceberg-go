@@ -171,22 +171,15 @@ func TestAnalyzeCrossFamilyNotShredded(t *testing.T) {
 // TestAnalyzeMixedSiblingKeepsUniform: a mixed-type field is dropped from the
 // shredded type while its uniform sibling still shreds.
 func TestAnalyzeMixedSiblingKeepsUniform(t *testing.T) {
-	var sample []variant.Value
-	for range 8 {
-		sample = append(sample, mkVar(t, map[string]any{"good": bigI64, "bad": bigI64}))
-	}
-	for range 2 {
-		sample = append(sample, mkVar(t, map[string]any{"good": bigI64, "bad": "s"}))
-	}
+	sample := mkVars(t,
+		map[string]any{"good": bigI64, "bad": bigI64},
+		map[string]any{"good": bigI64, "bad": "s"},
+	)
 	dt, ok := AnalyzeVariantShredding(sample)
 	require.True(t, ok)
-	st := dt.(*arrow.StructType)
 
-	g, hasGood := st.FieldsByName("good")
-	require.True(t, hasGood, "uniform sibling must shred")
-	assert.Truef(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, g[0].Type), "good shreds as Int64, got %s", g[0].Type)
-	_, hasBad := st.FieldsByName("bad")
-	assert.False(t, hasBad, "mixed sibling must be dropped from the shredded type")
+	want := arrow.StructOf(arrow.Field{Name: "good", Type: arrow.PrimitiveTypes.Int64, Nullable: true})
+	assert.Truef(t, arrow.TypeEqual(want, dt), "want %s got %s", want, dt)
 }
 
 // TestAnalyzeEmptyContainerNotShredded: an object with no fields and an array with no
@@ -361,7 +354,7 @@ func TestInferredTypedScalarsShred(t *testing.T) {
 			st := extensions.NewShreddedVariantType(inner)
 			bldr := extensions.NewVariantBuilder(mem, st)
 			defer bldr.Release()
-			bldr.Append(mkBuilt(t, c.build))
+			bldr.Append(v)
 			arr := bldr.NewArray().(*extensions.VariantArray)
 			defer arr.Release()
 

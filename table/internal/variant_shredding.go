@@ -48,23 +48,25 @@ var decimalPriority = map[variant.Type]int{
 }
 
 type fieldInfo struct {
-	typeCounts          map[variant.Type]int
+	admitted            variant.Type
+	hasAdmitted         bool
+	mixed               bool
 	observationCount    int
 	maxDecimalScale     int
 	maxDecimalIntDigits int
 }
 
 func newFieldInfo() *fieldInfo {
-	return &fieldInfo{typeCounts: make(map[variant.Type]int)}
+	return &fieldInfo{}
 }
 
-// observe records one value's type at this node (per-value counting).
+// observe records one value at this node, folding its type into the admitted type.
 func (f *fieldInfo) observe(v variant.Value) {
 	f.observationCount++
 
 	t := v.Type()
 	// arrow-go has a single Bool type, so no false-folds-to-true step.
-	f.typeCounts[t]++
+	f.admit(t)
 
 	if isDecimalType(t) {
 		intDigits, scale := decimalDigits(v.Value())
@@ -77,52 +79,59 @@ func (f *fieldInfo) observe(v variant.Value) {
 	}
 }
 
-// admittedType returns the single type this node shreds to. The integer and
-// decimal families each collapse to their widest observed member; if more than one
-// family remains the field is mixed-type and not shreddable (ok=false), mirroring
-// Java VariantShreddingAnalyzer's admittedType.
-func (f *fieldInfo) admittedType() (variant.Type, bool) {
-	var widestInt, widestDec, other variant.Type
-	haveInt, haveDec := false, false
-	otherFamilies := 0
+// admit widens the admitted type with t, or marks the node mixed when t belongs to
+// a different family.
+func (f *fieldInfo) admit(t variant.Type) {
+	if f.mixed {
+		return
+	}
+	if !f.hasAdmitted {
+		f.admitted, f.hasAdmitted = t, true
 
-	for t := range f.typeCounts {
-		switch {
-		case isIntegerType(t):
-			if !haveInt || integerPriority[t] > integerPriority[widestInt] {
-				widestInt = t
-			}
-			haveInt = true
-		case isDecimalType(t):
-			if !haveDec || decimalPriority[t] > decimalPriority[widestDec] {
-				widestDec = t
-			}
-			haveDec = true
-		default:
-			other = t
-			otherFamilies++
+		return
+	}
+	merged, ok := mergeFamily(f.admitted, t)
+	if !ok {
+		f.mixed = true
+
+		return
+	}
+	f.admitted = merged
+}
+
+// mergeFamily widens current with candidate within the integer or decimal family,
+// returning ok=false when they belong to different families (mirroring Java's
+// VariantShreddingAnalyzer.mergeFamily).
+func mergeFamily(current, candidate variant.Type) (variant.Type, bool) {
+	if current == candidate {
+		return current, true
+	}
+	if isIntegerType(current) && isIntegerType(candidate) {
+		if integerPriority[candidate] > integerPriority[current] {
+			return candidate, true
 		}
+
+		return current, true
+	}
+	if isDecimalType(current) && isDecimalType(candidate) {
+		if decimalPriority[candidate] > decimalPriority[current] {
+			return candidate, true
+		}
+
+		return current, true
 	}
 
-	families := otherFamilies
-	if haveInt {
-		families++
-	}
-	if haveDec {
-		families++
-	}
-	if families != 1 {
+	return 0, false
+}
+
+// admittedType returns the single type this node shreds to, or ok=false when the
+// node saw no values or mixed more than one type family.
+func (f *fieldInfo) admittedType() (variant.Type, bool) {
+	if !f.hasAdmitted || f.mixed {
 		return 0, false
 	}
 
-	switch {
-	case haveInt:
-		return widestInt, true
-	case haveDec:
-		return widestDec, true
-	default:
-		return other, true
-	}
+	return f.admitted, true
 }
 
 func isIntegerType(t variant.Type) bool {
