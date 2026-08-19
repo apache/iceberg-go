@@ -1748,6 +1748,12 @@ func inspectAllFilesTable(t *testing.T) *Table {
 		iceberg.ManifestContentData, []iceberg.ManifestEntry{
 			entry(snapshotOne, sequenceOne, sharedData), deletedEntry,
 		})
+	// Keep a second manifest with the same file row to pin that all_* tables
+	// deduplicate shared manifests, but do not deduplicate rows across distinct
+	// manifests.
+	duplicateManifest := writeInspectManifest(t, memIO,
+		"mem://default/table-location/metadata/duplicate.avro", spec, schema, snapshotOne,
+		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotOne, sequenceOne, sharedData)})
 	newManifest := writeInspectManifest(t, memIO,
 		"mem://default/table-location/metadata/new.avro", spec, schema, snapshotTwo,
 		iceberg.ManifestContentData, []iceberg.ManifestEntry{entry(snapshotTwo, sequenceTwo, newData)})
@@ -1769,7 +1775,8 @@ func inspectAllFilesTable(t *testing.T) *Table {
 	}
 	listOne := "mem://default/table-location/metadata/snap-1-manifest-list.avro"
 	listTwo := "mem://default/table-location/metadata/snap-2-manifest-list.avro"
-	writtenOne := writeList(listOne, snapshotOne, nil, sequenceOne, []iceberg.ManifestFile{sharedManifest})
+	writtenOne := writeList(listOne, snapshotOne, nil, sequenceOne,
+		[]iceberg.ManifestFile{sharedManifest, duplicateManifest})
 	writeList(listTwo, snapshotTwo, &snapshotOne, sequenceTwo,
 		[]iceberg.ManifestFile{writtenOne[0], newManifest, deleteManifest})
 
@@ -1824,15 +1831,17 @@ func TestInspectFilesTables(t *testing.T) {
 			},
 		},
 		{
-			name: "all files deduplicates shared manifest",
+			name: "all files deduplicates shared manifest and preserves duplicate rows",
 			read: tbl.Inspect().AllFiles,
 			wantPaths: []string{
+				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/new.parquet",
 				"mem://default/table-location/data/delete.parquet",
 			},
 			wantContent: []int32{
 				int32(iceberg.EntryContentData), int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentData),
 				int32(iceberg.EntryContentPosDeletes),
 			},
 		},
@@ -1841,9 +1850,13 @@ func TestInspectFilesTables(t *testing.T) {
 			read: tbl.Inspect().AllDataFiles,
 			wantPaths: []string{
 				"mem://default/table-location/data/shared.parquet",
+				"mem://default/table-location/data/shared.parquet",
 				"mem://default/table-location/data/new.parquet",
 			},
-			wantContent: []int32{int32(iceberg.EntryContentData), int32(iceberg.EntryContentData)},
+			wantContent: []int32{
+				int32(iceberg.EntryContentData), int32(iceberg.EntryContentData),
+				int32(iceberg.EntryContentData),
+			},
 		},
 		{
 			name:        "all delete files",
@@ -1874,6 +1887,18 @@ func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
 	cancel()
 	require.False(t, rr.Next())
 	require.ErrorIs(t, rr.Err(), context.Canceled)
+	rr.Release()
+}
+
+func TestInspectAllFilesReadsManifestListsLazily(t *testing.T) {
+	tbl := historyTestTable()
+	fs := iceio.NewMemFS()
+	tbl.fsF = func(context.Context) (iceio.IO, error) { return fs, nil }
+
+	rr, err := tbl.Inspect().AllFiles(context.Background())
+	require.NoError(t, err)
+	require.False(t, rr.Next())
+	require.ErrorContains(t, rr.Err(), "read snapshot 101 manifests")
 	rr.Release()
 }
 

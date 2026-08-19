@@ -139,8 +139,17 @@ func (i InspectTable) manifestEntryReader(
 		return nil, err
 	}
 
-	return i.manifestEntryReaderFromManifests(
-		ctx, arrowSchema, fs, manifests, discardDeleted, includeManifest, appendEntry), nil
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(visit func(iceberg.ManifestFile) bool) error {
+			for _, manifest := range manifests {
+				if !visit(manifest) {
+					return nil
+				}
+			}
+
+			return nil
+		}), nil
 }
 
 // allManifestEntryReader scans each manifest reachable from the table's
@@ -165,37 +174,44 @@ func (i InspectTable) allManifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
-	manifests := make([]iceberg.ManifestFile, 0)
-	for _, snapshot := range snapshots {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		snapshotManifests, err := snapshot.Manifests(fs)
-		if err != nil {
-			return nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err)
-		}
-		for _, manifest := range snapshotManifests {
-			if _, ok := seen[manifest.FilePath()]; ok {
-				continue
-			}
-			seen[manifest.FilePath()] = struct{}{}
-			manifests = append(manifests, manifest)
-		}
-	}
 
-	return i.manifestEntryReaderFromManifests(
-		ctx, arrowSchema, fs, manifests, discardDeleted, includeManifest, appendEntry), nil
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(visit func(iceberg.ManifestFile) bool) error {
+			seen := make(map[string]struct{})
+			for _, snapshot := range snapshots {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				snapshotManifests, err := snapshot.Manifests(fs)
+				if err != nil {
+					return fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err)
+				}
+				for _, manifest := range snapshotManifests {
+					if _, ok := seen[manifest.FilePath()]; ok {
+						continue
+					}
+					seen[manifest.FilePath()] = struct{}{}
+					if !visit(manifest) {
+						return nil
+					}
+				}
+			}
+
+			return nil
+		}), nil
 }
 
-func (i InspectTable) manifestEntryReaderFromManifests(
+type inspectManifestSource func(func(iceberg.ManifestFile) bool) error
+
+func (i InspectTable) manifestEntryReaderFromManifestSource(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	fs iceio.IO,
-	manifests []iceberg.ManifestFile,
 	discardDeleted bool,
 	includeManifest func(iceberg.ManifestFile) bool,
 	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+	source inspectManifestSource,
 ) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
@@ -223,37 +239,54 @@ func (i InspectTable) manifestEntryReaderFromManifests(
 			_ = yield(nil, err)
 		}
 
-		for _, manifest := range manifests {
+		stopped := false
+		sourceErr := source(func(manifest iceberg.ManifestFile) bool {
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
+				stopped = true
 
-				return
+				return false
 			}
 			if includeManifest != nil && !includeManifest(manifest) {
-				continue
+				return true
 			}
 
 			for entry, err := range manifest.Entries(fs, discardDeleted) {
 				if err != nil {
 					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
+					stopped = true
 
-					return
+					return false
 				}
 				if err := ctx.Err(); err != nil {
 					yieldError(err)
+					stopped = true
 
-					return
+					return false
 				}
 				if err := appendEntry(bldr, entry); err != nil {
 					yieldError(fmt.Errorf("append manifest entry from %s: %w", manifest.FilePath(), err))
+					stopped = true
 
-					return
+					return false
 				}
 				rows++
 				if rows == inspectRecordBatchSize && !emit() {
-					return
+					stopped = true
+
+					return false
 				}
 			}
+
+			return true
+		})
+		if stopped {
+			return
+		}
+		if sourceErr != nil {
+			yieldError(sourceErr)
+
+			return
 		}
 
 		if rows > 0 {
@@ -372,9 +405,9 @@ func isInspectUnknownTransform(transform iceberg.Transform) bool {
 	}
 }
 
-// DataFilesSchema returns the common content-file schema used by the data_files
-// and delete_files metadata tables. The partition field is omitted for an
-// unpartitioned table, as required by the Iceberg metadata-table spec.
+// DataFilesSchema returns the common content-file schema used by the files
+// metadata tables. The partition field is omitted for an unpartitioned table,
+// as required by the Iceberg metadata-table spec.
 func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	return iceberg.NewSchema(0, inspectContentFileFields(partitionType)...)
 }
