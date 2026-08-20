@@ -167,7 +167,7 @@ func (a positionDeleteRecordAppender) append(
 ) error {
 	a.filePath.Append(dataFilePath)
 	a.pos.Append(pos)
-	if err := appendProjectedPositionDeleteRow(a.row, deletedRow); err != nil {
+	if err := appendProjectedPositionDeleteRow(a.row, deletedRow, a.formatVersion); err != nil {
 		return fmt.Errorf("append deleted row: %w", err)
 	}
 
@@ -197,7 +197,11 @@ func (a positionDeleteRecordAppender) append(
 // of the table fields, so matching by Arrow field position or exact type is
 // not sufficient. Field IDs are authoritative when the source schema carries
 // them; names are used only for readers that do not preserve Parquet metadata.
-func appendProjectedPositionDeleteRow(builder *array.StructBuilder, deletedRow scalar.Scalar) error {
+func appendProjectedPositionDeleteRow(
+	builder *array.StructBuilder,
+	deletedRow scalar.Scalar,
+	formatVersion int,
+) error {
 	if deletedRow == nil || !deletedRow.IsValid() {
 		builder.AppendNull()
 
@@ -209,10 +213,14 @@ func appendProjectedPositionDeleteRow(builder *array.StructBuilder, deletedRow s
 		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, deletedRow.DataType())
 	}
 
-	return appendPositionDeleteStruct(builder, row)
+	return appendPositionDeleteStruct(builder, row, formatVersion)
 }
 
-func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Struct) error {
+func appendPositionDeleteStruct(
+	builder *array.StructBuilder,
+	source *scalar.Struct,
+	formatVersion int,
+) error {
 	sourceType, ok := source.DataType().(*arrow.StructType)
 	if !ok {
 		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, source.DataType())
@@ -254,7 +262,7 @@ func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Str
 		}
 
 		fieldBuilder := builder.FieldBuilder(index)
-		if err := appendPositionDeleteValue(fieldBuilder, value); err != nil {
+		if err := appendPositionDeleteValue(fieldBuilder, value, formatVersion); err != nil {
 			return fmt.Errorf("field %q: %w", destinationField.Name, err)
 		}
 	}
@@ -262,7 +270,7 @@ func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Str
 	return nil
 }
 
-func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error {
+func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar, formatVersion int) error {
 	if value == nil || !value.IsValid() {
 		builder.AppendNull()
 
@@ -277,7 +285,7 @@ func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error
 				iceberg.ErrInvalidSchema, value.DataType())
 		}
 
-		return appendPositionDeleteStruct(builder, source)
+		return appendPositionDeleteStruct(builder, source, formatVersion)
 	case *array.MapBuilder:
 		source, ok := value.(*scalar.Map)
 		if !ok {
@@ -285,7 +293,7 @@ func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error
 				iceberg.ErrInvalidSchema, value.DataType())
 		}
 
-		return appendPositionDeleteMap(builder, source)
+		return appendPositionDeleteMap(builder, source, formatVersion)
 	case array.ListLikeBuilder:
 		source, ok := value.(scalar.ListScalar)
 		if !ok {
@@ -293,13 +301,13 @@ func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error
 				iceberg.ErrInvalidSchema, value.DataType())
 		}
 
-		return appendPositionDeleteList(builder, source)
+		return appendPositionDeleteList(builder, source, formatVersion)
 	}
 
 	if arrow.TypeEqual(builder.Type(), value.DataType()) {
 		return scalar.Append(builder, value)
 	}
-	if !canPromotePositionDeleteValue(value.DataType(), builder.Type()) {
+	if !canPromotePositionDeleteValue(value.DataType(), builder.Type(), formatVersion) {
 		return scalar.Append(builder, value)
 	}
 
@@ -328,6 +336,7 @@ type positionDeleteStorageBuilder interface {
 func appendPositionDeleteList(
 	builder array.ListLikeBuilder,
 	source scalar.ListScalar,
+	formatVersion int,
 ) error {
 	if !isPositionDeleteListType(source.DataType()) {
 		return fmt.Errorf("%w: value has type %s, want list",
@@ -352,7 +361,7 @@ func appendPositionDeleteList(
 		if err != nil {
 			return err
 		}
-		appendErr := appendPositionDeleteValue(valueBuilder, child)
+		appendErr := appendPositionDeleteValue(valueBuilder, child, formatVersion)
 		if releasable, ok := child.(scalar.Releasable); ok {
 			releasable.Release()
 		}
@@ -364,7 +373,11 @@ func appendPositionDeleteList(
 	return nil
 }
 
-func appendPositionDeleteMap(builder *array.MapBuilder, source *scalar.Map) error {
+func appendPositionDeleteMap(
+	builder *array.MapBuilder,
+	source *scalar.Map,
+	formatVersion int,
+) error {
 	if source.DataType().ID() != arrow.MAP {
 		return fmt.Errorf("%w: value has type %s, want map",
 			iceberg.ErrInvalidSchema, source.DataType())
@@ -430,7 +443,7 @@ func appendPositionDeleteMap(builder *array.MapBuilder, source *scalar.Map) erro
 			return fmt.Errorf("%w: map entry %d has a null key",
 				iceberg.ErrInvalidSchema, index)
 		}
-		appendErr := appendPositionDeleteValue(entryBuilder, entry)
+		appendErr := appendPositionDeleteValue(entryBuilder, entry, formatVersion)
 		if releasable, ok := entry.(scalar.Releasable); ok {
 			releasable.Release()
 		}
@@ -452,6 +465,17 @@ func isPositionDeleteListType(typ arrow.DataType) bool {
 }
 
 func castPositionDeleteValue(value scalar.Scalar, destination arrow.DataType) (scalar.Scalar, error) {
+	if date, ok := value.(*scalar.Date32); ok {
+		if timestamp, ok := destination.(*arrow.TimestampType); ok {
+			converted, ok := convertPositionDeleteDate32(date.Value, timestamp.Unit)
+			if !ok {
+				return nil, fmt.Errorf("date %d is outside %s range", date.Value, timestamp)
+			}
+
+			return scalar.NewTimestampScalar(converted, timestamp), nil
+		}
+	}
+
 	if destination.ID() == arrow.LARGE_BINARY {
 		if binary, ok := value.(scalar.BinaryScalar); ok {
 			return scalar.NewLargeBinaryScalar(binary.Buffer()), nil
@@ -466,12 +490,43 @@ func castPositionDeleteValue(value scalar.Scalar, destination arrow.DataType) (s
 	return value.CastTo(destination)
 }
 
-func canPromotePositionDeleteValue(source, destination arrow.DataType) bool {
+func convertPositionDeleteDate32(value arrow.Date32, unit arrow.TimeUnit) (arrow.Timestamp, bool) {
+	var unitsPerDay int64
+	switch unit {
+	case arrow.Second:
+		unitsPerDay = 86_400
+	case arrow.Millisecond:
+		unitsPerDay = 86_400_000
+	case arrow.Microsecond:
+		unitsPerDay = 86_400_000_000
+	case arrow.Nanosecond:
+		unitsPerDay = 86_400_000_000_000
+	default:
+		return 0, false
+	}
+
+	days := int64(value)
+	if days > math.MaxInt64/unitsPerDay || days < math.MinInt64/unitsPerDay {
+		return 0, false
+	}
+
+	return arrow.Timestamp(days * unitsPerDay), true
+}
+
+func canPromotePositionDeleteValue(source, destination arrow.DataType, formatVersion int) bool {
 	switch source.ID() {
 	case arrow.INT32:
 		return destination.ID() == arrow.INT64
 	case arrow.FLOAT32:
 		return destination.ID() == arrow.FLOAT64
+	case arrow.DATE32:
+		if formatVersion < 3 {
+			return false
+		}
+
+		timestamp, ok := destination.(*arrow.TimestampType)
+		return ok && timestamp.TimeZone == "" &&
+			(timestamp.Unit == arrow.Microsecond || timestamp.Unit == arrow.Nanosecond)
 	case arrow.DECIMAL128:
 		sourceDecimal, sourceOK := source.(*arrow.Decimal128Type)
 		destinationDecimal, destinationOK := destination.(*arrow.Decimal128Type)

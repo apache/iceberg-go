@@ -3104,6 +3104,76 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	require.Equal(t, int32(18), amount.DataType().(*arrow.Decimal128Type).Precision)
 }
 
+func TestInspectPositionDeletesParquetProjectsDateToTimestampsV3(t *testing.T) {
+	const (
+		deletePath = "mem://position-deletes/table/data/delete-date.parquet"
+		dataPath   = "mem://position-deletes/table/data/data.parquet"
+	)
+	const dateValue = arrow.Date32(20_000)
+	memFS := iceio.NewMemFS()
+
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "created_at_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
+	)
+	sourceRowType := arrow.StructOf(
+		arrow.Field{Name: "created_at", Type: arrow.FixedWidthTypes.Date32, Nullable: true, Metadata: fieldID(1)},
+		arrow.Field{Name: "created_at_ns", Type: arrow.FixedWidthTypes.Date32, Nullable: true, Metadata: fieldID(2)},
+	)
+	sourceSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "row", Type: sourceRowType, Nullable: true},
+	}, nil)
+
+	recordBuilder := array.NewRecordBuilder(memory.DefaultAllocator, sourceSchema)
+	recordBuilder.Field(0).(*array.StringBuilder).Append(dataPath)
+	recordBuilder.Field(1).(*array.Int64Builder).Append(7)
+	rowBuilder := recordBuilder.Field(2).(*array.StructBuilder)
+	rowBuilder.Append(true)
+	rowBuilder.FieldBuilder(0).(*array.Date32Builder).Append(dateValue)
+	rowBuilder.FieldBuilder(1).(*array.Date32Builder).Append(dateValue)
+	record := recordBuilder.NewRecordBatch()
+	defer record.Release()
+	defer recordBuilder.Release()
+
+	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
+	defer arrowTable.Release()
+	file, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(
+		arrowTable, file, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	require.NoError(t, file.Close())
+
+	deleteFile := newPosDeleteFile(t, deletePath, 1, 128)
+	tbl := inspectPositionDeletesTableWithSchema(
+		t, 3, newInspectPositionDeletesMetadataWithSchema(t, 3, tableSchema),
+		tableSchema, memFS, []iceberg.DataFile{deleteFile})
+	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record = collectRecord(t, rr)
+	defer record.Release()
+
+	projectedRow := record.Column(2).(*array.Struct)
+	require.False(t, projectedRow.IsNull(0))
+	micros := projectedRow.Field(0).(*array.Timestamp)
+	microsType := micros.DataType().(*arrow.TimestampType)
+	require.Equal(t, arrow.Microsecond, microsType.Unit)
+	nanos := projectedRow.Field(1).(*array.Timestamp)
+	nanosType := nanos.DataType().(*arrow.TimestampType)
+	require.Equal(t, arrow.Nanosecond, nanosType.Unit)
+
+	unitsPerDayMicros := int64(24 * time.Hour / time.Microsecond)
+	unitsPerDayNanos := int64(24 * time.Hour / time.Nanosecond)
+	require.Equal(t, arrow.Timestamp(int64(dateValue)*unitsPerDayMicros), micros.Value(0))
+	require.Equal(t, arrow.Timestamp(int64(dateValue)*unitsPerDayNanos), nanos.Value(0))
+}
+
 func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T) {
 	memFS := iceio.NewMemFS()
 	deletePath := "mem://position-deletes/table/data/delete.parquet"
@@ -3200,6 +3270,93 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 	projected := record.Column(2).(*array.Struct)
 	require.EqualValues(t, 7, projected.Field(0).(*array.Int64).Value(0))
 	require.Equal(t, 1.25, projected.Field(1).(*array.Float64).Value(0))
+}
+
+func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+		iceberg.NestedField{ID: 2, Name: "created_at_ns", Type: iceberg.PrimitiveTypes.TimestampNs, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 3), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 3)
+	require.NoError(t, err)
+
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+	dateValue := arrow.Date32(20_000)
+	sourceType := arrow.StructOf(
+		arrow.Field{Name: "created_at", Type: arrow.FixedWidthTypes.Date32, Nullable: true, Metadata: fieldID(1)},
+		arrow.Field{Name: "created_at_ns", Type: arrow.FixedWidthTypes.Date32, Nullable: true, Metadata: fieldID(2)},
+	)
+	row := scalar.NewStructScalar([]scalar.Scalar{
+		scalar.NewDate32Scalar(dateValue),
+		scalar.NewDate32Scalar(dateValue),
+	}, sourceType)
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(
+		deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	projected := record.Column(2).(*array.Struct)
+	dateMicros := projected.Field(0).(*array.Timestamp)
+	dateNanos := projected.Field(1).(*array.Timestamp)
+	require.Equal(t, arrow.Microsecond, dateMicros.DataType().(*arrow.TimestampType).Unit)
+	require.Equal(t, arrow.Nanosecond, dateNanos.DataType().(*arrow.TimestampType).Unit)
+	require.Equal(t,
+		arrow.Timestamp(int64(dateValue)*int64(24*time.Hour/time.Microsecond)), dateMicros.Value(0))
+	require.Equal(t,
+		arrow.Timestamp(int64(dateValue)*int64(24*time.Hour/time.Nanosecond)), dateNanos.Value(0))
+}
+
+func TestPositionDeleteDatePromotionRequiresV3(t *testing.T) {
+	timestamp := &arrow.TimestampType{Unit: arrow.Microsecond}
+	date := arrow.FixedWidthTypes.Date32
+
+	require.False(t, canPromotePositionDeleteValue(date, timestamp, 2))
+	require.True(t, canPromotePositionDeleteValue(date, timestamp, 3))
+	require.True(t, canPromotePositionDeleteValue(
+		date, &arrow.TimestampType{Unit: arrow.Nanosecond}, 3))
+	require.False(t, canPromotePositionDeleteValue(date, arrow.FixedWidthTypes.Timestamp_us, 3),
+		"date promotion must not target a timezone-aware timestamp")
+
+	_, ok := convertPositionDeleteDate32(arrow.Date32(20_000), arrow.Nanosecond)
+	require.True(t, ok)
+	_, ok = convertPositionDeleteDate32(arrow.Date32(math.MaxInt32), arrow.Nanosecond)
+	require.False(t, ok, "out-of-range dates must fail timestamp conversion")
+}
+
+func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	row := scalar.NewStructScalar([]scalar.Scalar{scalar.NewDate32Scalar(arrow.Date32(20_000))},
+		arrow.StructOf(arrow.Field{
+			Name:     "created_at",
+			Type:     arrow.FixedWidthTypes.Date32,
+			Nullable: true,
+			Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+		}))
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	err = appender.append(deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row)
+	require.Error(t, err)
 }
 
 func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
