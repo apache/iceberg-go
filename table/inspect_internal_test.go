@@ -32,6 +32,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
@@ -2871,11 +2873,19 @@ func TestAllEntriesSchemaMatchesEntries(t *testing.T) {
 }
 
 func newInspectPositionDeletesMetadata(t *testing.T, formatVersion int) *MetadataBuilder {
+	return newInspectPositionDeletesMetadataWithSchema(t, formatVersion, simpleSchema())
+}
+
+func newInspectPositionDeletesMetadataWithSchema(
+	t *testing.T,
+	formatVersion int,
+	tableSchema *iceberg.Schema,
+) *MetadataBuilder {
 	t.Helper()
 
 	mb, err := NewMetadataBuilder(formatVersion)
 	require.NoError(t, err)
-	require.NoError(t, mb.AddSchema(simpleSchema()))
+	require.NoError(t, mb.AddSchema(tableSchema))
 	require.NoError(t, mb.SetCurrentSchemaID(0))
 	require.NoError(t, mb.AddPartitionSpec(iceberg.UnpartitionedSpec, true))
 	require.NoError(t, mb.SetDefaultSpecID(0))
@@ -2896,6 +2906,17 @@ func inspectPositionDeletesTable(
 	fs iceio.WriteFileIO,
 	files []iceberg.DataFile,
 ) *Table {
+	return inspectPositionDeletesTableWithSchema(t, formatVersion, mb, simpleSchema(), fs, files)
+}
+
+func inspectPositionDeletesTableWithSchema(
+	t *testing.T,
+	formatVersion int,
+	mb *MetadataBuilder,
+	tableSchema *iceberg.Schema,
+	fs iceio.WriteFileIO,
+	files []iceberg.DataFile,
+) *Table {
 	t.Helper()
 
 	snapshotID := int64(1)
@@ -2904,7 +2925,7 @@ func inspectPositionDeletesTable(
 	manifestBuffer := &bytes.Buffer{}
 	writer, err := iceberg.NewManifestWriter(
 		formatVersion, manifestBuffer, *iceberg.UnpartitionedSpec,
-		simpleSchema(), snapshotID,
+		tableSchema, snapshotID,
 		iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes),
 	)
 	require.NoError(t, err)
@@ -2927,7 +2948,7 @@ func inspectPositionDeletesTable(
 	))
 	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
 
-	schemaID := 0
+	schemaID := tableSchema.ID
 	snapshot := &Snapshot{
 		SnapshotID:     snapshotID,
 		SequenceNumber: sequenceNumber,
@@ -2983,6 +3004,104 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	deleteFilePaths := rec.Column(4).(*array.String)
 	require.Equal(t, deletePath, deleteFilePaths.Value(0))
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
+}
+
+func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
+	const (
+		deletePath = "mem://position-deletes/table/data/delete-evolved.parquet"
+		dataPath   = "mem://position-deletes/table/data/data.parquet"
+	)
+	memFS := iceio.NewMemFS()
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+
+	tableListType := &iceberg.ListType{
+		ElementID:       3,
+		Element:         iceberg.PrimitiveTypes.Int64,
+		ElementRequired: true,
+	}
+	tableMapType := &iceberg.MapType{
+		KeyID:         4,
+		KeyType:       iceberg.PrimitiveTypes.String,
+		ValueID:       5,
+		ValueType:     iceberg.PrimitiveTypes.Int64,
+		ValueRequired: false,
+	}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
+		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
+		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true},
+	)
+
+	sourceListType := arrow.ListOfField(arrow.Field{
+		Name:     "element",
+		Type:     arrow.PrimitiveTypes.Int32,
+		Nullable: false,
+		Metadata: fieldID(3),
+	})
+	sourceMapType := arrow.MapOfFields(
+		arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldID(4)},
+		arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: true, Metadata: fieldID(5)},
+	)
+	sourceDecimalType := &arrow.Decimal128Type{Precision: 9, Scale: 2}
+	sourceRowType := arrow.StructOf(
+		arrow.Field{Name: "values", Type: sourceListType, Nullable: true, Metadata: fieldID(1)},
+		arrow.Field{Name: "attributes", Type: sourceMapType, Nullable: true, Metadata: fieldID(2)},
+		arrow.Field{Name: "amount", Type: sourceDecimalType, Nullable: true, Metadata: fieldID(6)},
+	)
+	sourceSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "row", Type: sourceRowType, Nullable: true},
+	}, nil)
+
+	recordBuilder := array.NewRecordBuilder(memory.DefaultAllocator, sourceSchema)
+	recordBuilder.Field(0).(*array.StringBuilder).Append(dataPath)
+	recordBuilder.Field(1).(*array.Int64Builder).Append(7)
+	rowBuilder := recordBuilder.Field(2).(*array.StructBuilder)
+	rowBuilder.Append(true)
+	valuesBuilder := rowBuilder.FieldBuilder(0).(*array.ListBuilder)
+	valuesBuilder.Append(true)
+	valuesBuilder.ValueBuilder().(*array.Int32Builder).AppendValues([]int32{7, 9}, nil)
+	attributesBuilder := rowBuilder.FieldBuilder(1).(*array.MapBuilder)
+	attributesBuilder.Append(true)
+	attributesBuilder.KeyBuilder().(*array.StringBuilder).Append("first")
+	attributesBuilder.ItemBuilder().(*array.Int32Builder).Append(11)
+	attributesBuilder.KeyBuilder().(*array.StringBuilder).Append("second")
+	attributesBuilder.ItemBuilder().(*array.Int32Builder).Append(13)
+	rowBuilder.FieldBuilder(2).(*array.Decimal128Builder).Append(decimal128.FromI64(12345))
+	record := recordBuilder.NewRecordBatch()
+	defer record.Release()
+	defer recordBuilder.Release()
+
+	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
+	defer arrowTable.Release()
+	file, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(
+		arrowTable, file, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	require.NoError(t, file.Close())
+
+	deleteFile := newPosDeleteFile(t, deletePath, 1, 128)
+	tbl := inspectPositionDeletesTableWithSchema(
+		t, 2, newInspectPositionDeletesMetadataWithSchema(t, 2, tableSchema),
+		tableSchema, memFS, []iceberg.DataFile{deleteFile})
+	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	record = collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 1, record.NumRows())
+	projectedRow := record.Column(2).(*array.Struct)
+	require.False(t, projectedRow.IsNull(0))
+	require.Equal(t, []int64{7, 9}, projectedRow.Field(0).(*array.List).ListValues().(*array.Int64).Int64Values())
+	require.Equal(t, []int64{11, 13}, projectedRow.Field(1).(*array.Map).Items().(*array.Int64).Int64Values())
+	amount := projectedRow.Field(2).(*array.Decimal128)
+	require.Equal(t, decimal128.FromI64(12345), amount.Value(0))
+	require.Equal(t, int32(18), amount.DataType().(*arrow.Decimal128Type).Precision)
 }
 
 func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T) {
@@ -3233,6 +3352,55 @@ func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
 	items := record.Column(2).(*array.Struct).Field(0).(*array.List).ListValues().(*array.Struct)
 	require.EqualValues(t, 17, items.Field(0).(*array.Int64).Value(0))
 	require.Equal(t, "nested", items.Field(1).(*array.String).Value(0))
+}
+
+func TestPositionDeleteRowProjectionRejectsNullMapKey(t *testing.T) {
+	tableMapType := &iceberg.MapType{
+		KeyID:         2,
+		KeyType:       iceberg.PrimitiveTypes.String,
+		ValueID:       3,
+		ValueType:     iceberg.PrimitiveTypes.Int64,
+		ValueRequired: false,
+	}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "attributes", Type: tableMapType, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+	sourceEntryType := arrow.StructOf(
+		arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: fieldID(2)},
+		arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: true, Metadata: fieldID(3)},
+	)
+	entryBuilder := array.NewStructBuilder(memory.DefaultAllocator, sourceEntryType)
+	entryBuilder.Append(true)
+	entryBuilder.FieldBuilder(0).(*array.StringBuilder).AppendNull()
+	entryBuilder.FieldBuilder(1).(*array.Int32Builder).Append(11)
+	entries := entryBuilder.NewArray()
+	entryBuilder.Release()
+	mapValue := scalar.NewMapScalar(entries)
+	entries.Release()
+	sourceMapType := arrow.MapOfFields(
+		arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldID(2)},
+		arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: true, Metadata: fieldID(3)},
+	)
+	row := scalar.NewStructScalar([]scalar.Scalar{mapValue}, arrow.StructOf(
+		arrow.Field{Name: "attributes", Type: sourceMapType, Nullable: true, Metadata: fieldID(1)},
+	))
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	err = appender.append(deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "null key")
 }
 
 func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {
