@@ -3019,12 +3019,58 @@ func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
 		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
 		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
 			rows++
+
 			return true, nil
 		},
 	)
 	require.False(t, keepGoing)
 	require.ErrorContains(t, err, "negative pos -1")
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.Zero(t, rows)
+}
+
+func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete-null-row.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "row", Type: arrow.StructOf(arrow.Field{
+			Name:     "id",
+			Type:     arrow.PrimitiveTypes.Int32,
+			Nullable: false,
+		}), Nullable: true},
+	}, nil)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, schema)
+	bldr.Field(0).(*array.StringBuilder).Append(dataPath)
+	bldr.Field(1).(*array.Int64Builder).Append(1)
+	bldr.Field(2).(*array.StructBuilder).Append(false)
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	defer bldr.Release()
+
+	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+	file, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(
+		tbl, file, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	require.NoError(t, file.Close())
+
+	rows := 0
+	keepGoing, err := appendParquetPositionDeleteRows(
+		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+			rows++
+
+			return true, nil
+		},
+	)
+	require.False(t, keepGoing)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "null row")
 	require.Zero(t, rows)
 }
 

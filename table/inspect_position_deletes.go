@@ -525,6 +525,7 @@ func canPromotePositionDeleteValue(source, destination arrow.DataType, formatVer
 		}
 
 		timestamp, ok := destination.(*arrow.TimestampType)
+
 		return ok && timestamp.TimeZone == "" &&
 			(timestamp.Unit == arrow.Microsecond || timestamp.Unit == arrow.Nanosecond)
 	case arrow.DECIMAL128:
@@ -781,11 +782,8 @@ func appendParquetPositionDeleteRows(
 		if positions.NullN() > 0 {
 			return false, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
 		}
-		for row := 0; row < positions.Len(); row++ {
-			if position := positions.Value(row); position < 0 {
-				return false, fmt.Errorf("%w: negative pos %d in position delete file",
-					iceberg.ErrInvalidSchema, position)
-			}
+		if err := validatePositionDeletePositions(positions); err != nil {
+			return false, err
 		}
 
 		rowIndex := -1
@@ -794,6 +792,9 @@ func appendParquetPositionDeleteRows(
 				iceberg.ErrInvalidSchema)
 		} else if len(indices) == 1 {
 			rowIndex = indices[0]
+		}
+		if rowIndex >= 0 && record.Column(rowIndex).NullN() > 0 {
+			return false, fmt.Errorf("%w: null row in position delete file", iceberg.ErrInvalidSchema)
 		}
 		for row := range int(record.NumRows()) {
 			if err := ctx.Err(); err != nil {

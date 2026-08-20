@@ -320,6 +320,17 @@ type posDeleteCursor struct {
 	offset     int
 }
 
+func validatePositionDeletePositions(positions *array.Int64) error {
+	for row := range positions.Len() {
+		if position := positions.Value(row); position < 0 {
+			return fmt.Errorf("%w: negative pos %d in position delete file",
+				iceberg.ErrInvalidSchema, position)
+		}
+	}
+
+	return nil
+}
+
 func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
 	chunks := posCol.Chunks()
 	arrays := make([]*array.Int64, len(chunks))
@@ -328,6 +339,9 @@ func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
 		if !ok {
 			return posDeleteCursor{}, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
 				iceberg.ErrInvalidSchema, chunk)
+		}
+		if err := validatePositionDeletePositions(posArr); err != nil {
+			return posDeleteCursor{}, err
 		}
 		arrays[i] = posArr
 	}
