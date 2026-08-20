@@ -3340,6 +3340,41 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 	require.Equal(t, 1.25, projected.Field(1).(*array.Float64).Value(0))
 }
 
+func TestPositionDeleteRowProjectionPromotesLargeBinaryToBinary(t *testing.T) {
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.PrimitiveTypes.Binary, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	fieldID := arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})
+	sourceType := arrow.StructOf(arrow.Field{
+		Name:     "payload",
+		Type:     arrow.BinaryTypes.LargeBinary,
+		Nullable: true,
+		Metadata: fieldID,
+	})
+	buf := memory.NewBufferBytes([]byte("deleted"))
+	value := scalar.NewLargeBinaryScalar(buf)
+	buf.Release()
+	row := scalar.NewStructScalar([]scalar.Scalar{value}, sourceType)
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(
+		deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	payload := record.Column(2).(*array.Struct).Field(0).(*array.Binary)
+	require.Equal(t, []byte("deleted"), payload.Value(0))
+}
+
 func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "created_at", Type: iceberg.PrimitiveTypes.Timestamp, Required: true},
