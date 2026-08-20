@@ -376,7 +376,12 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 }
 
 func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (mf iceberg.ManifestFile, err error) {
-	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(m.snap.spec(specID))
+	spec, err := m.snap.spec(specID)
+	if err != nil {
+		return nil, err
+	}
+
+	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(spec)
 	if err != nil {
 		return nil, err
 	}
@@ -626,12 +631,16 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 	}
 }
 
-func (sp *snapshotProducer) spec(id int) iceberg.PartitionSpec {
-	if spec, _ := sp.txn.meta.GetSpecByID(id); spec != nil {
-		return *spec
+func (sp *snapshotProducer) spec(id int) (iceberg.PartitionSpec, error) {
+	spec, err := sp.txn.meta.GetSpecByID(id)
+	if err == nil && spec == nil {
+		err = ErrPartitionSpecNotFound
+	}
+	if err != nil {
+		return iceberg.PartitionSpec{}, fmt.Errorf("unregistered partition spec id %d: %w", id, err)
 	}
 
-	return iceberg.NewPartitionSpec()
+	return *spec, nil
 }
 
 func (sp *snapshotProducer) appendDataFile(df iceberg.DataFile) *snapshotProducer {
@@ -880,6 +889,11 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 			}
 
 			writeGroup := func(key groupKey, entries []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
+				spec, err := sp.spec(key.specID)
+				if err != nil {
+					return nil, err
+				}
+
 				out, path, err := sp.newManifestOutput()
 				if err != nil {
 					return nil, err
@@ -888,7 +902,7 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 
 				counter := &internal.CountingWriter{W: out}
 				wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-					sp.spec(key.specID), sp.txn.meta.CurrentSchema(),
+					spec, sp.txn.meta.CurrentSchema(),
 					sp.snapshotID, iceberg.WithManifestWriterContent(key.content))
 				if err != nil {
 					return nil, err
@@ -964,15 +978,12 @@ func (sp *snapshotProducer) manifestProducer(content iceberg.ManifestContent, fi
 }
 
 func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, specID int, files []iceberg.DataFile) (_ iceberg.ManifestFile, retErr error) {
-	// Resolve the spec strictly: the sp.spec helper silently substitutes an
-	// empty spec on lookup failure, which here would write a manifest whose
-	// declared spec disagrees with its entries' partition tuples.
-	spec, err := sp.txn.meta.GetSpecByID(specID)
-	if err != nil || spec == nil {
-		return nil, fmt.Errorf("cannot write manifest for unregistered partition spec id %d: %w", specID, err)
+	spec, err := sp.spec(specID)
+	if err != nil {
+		return nil, err
 	}
 
-	wr, path, counter, out, err := sp.newManifestWriter(*spec, iceberg.WithManifestWriterContent(content))
+	wr, path, counter, out, err := sp.newManifestWriter(spec, iceberg.WithManifestWriterContent(content))
 	if err != nil {
 		return nil, err
 	}
@@ -1002,7 +1013,12 @@ func (sp *snapshotProducer) writeAddedManifest(content iceberg.ManifestContent, 
 }
 
 func (sp *snapshotProducer) writeAddedDeleteManifest(specID int, additions []deleteFileAddition) (_ iceberg.ManifestFile, retErr error) {
-	wr, path, counter, out, err := sp.newManifestWriter(sp.spec(specID), iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
+	spec, err := sp.spec(specID)
+	if err != nil {
+		return nil, err
+	}
+
+	wr, path, counter, out, err := sp.newManifestWriter(spec, iceberg.WithManifestWriterContent(iceberg.ManifestContentDeletes))
 	if err != nil {
 		return nil, err
 	}
@@ -1091,19 +1107,37 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 	if err != nil || partitionSpec == nil {
 		return nil, fmt.Errorf("could not get current partition spec: %w", err)
 	}
+
+	addFile := func(df iceberg.DataFile) error {
+		spec, err := sp.spec(int(df.SpecID()))
+		if err != nil {
+			return err
+		}
+
+		return ssc.addFile(df, currentSchema, spec)
+	}
+	removeFile := func(df iceberg.DataFile) error {
+		spec, err := sp.spec(int(df.SpecID()))
+		if err != nil {
+			return err
+		}
+
+		return ssc.removeFile(df, currentSchema, spec)
+	}
+
 	for _, df := range sp.addedFiles {
-		if err = ssc.addFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
+		if err = addFile(df); err != nil {
 			return nil, err
 		}
 	}
 	for _, addition := range sp.addedDeleteFiles {
-		if err = ssc.addFile(addition.file, currentSchema, sp.spec(int(addition.file.SpecID()))); err != nil {
+		if err = addFile(addition.file); err != nil {
 			return nil, err
 		}
 	}
 
 	for _, df := range sp.deletedFiles {
-		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
+		if err = removeFile(df); err != nil {
 			return nil, err
 		}
 	}
@@ -1111,7 +1145,7 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 		if countDeleteRemoval != nil && !countDeleteRemoval(df) {
 			continue
 		}
-		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
+		if err = removeFile(df); err != nil {
 			return nil, err
 		}
 	}
@@ -1119,7 +1153,7 @@ func (sp *snapshotProducer) accumulateSummaryDelta(countDeleteRemoval func(icebe
 		if countDeleteRemoval != nil && !countDeleteRemoval(df) {
 			continue
 		}
-		if err = ssc.removeFile(df, currentSchema, sp.spec(int(df.SpecID()))); err != nil {
+		if err = removeFile(df); err != nil {
 			return nil, err
 		}
 	}
