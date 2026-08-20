@@ -3006,6 +3006,28 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
+func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete-negative.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": -1}
+	]`)
+
+	rows := 0
+	keepGoing, err := appendParquetPositionDeleteRows(
+		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
+		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+			rows++
+			return true, nil
+		},
+	)
+	require.False(t, keepGoing)
+	require.ErrorContains(t, err, "negative pos -1")
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.Zero(t, rows)
+}
+
 func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	const (
 		deletePath = "mem://position-deletes/table/data/delete-evolved.parquet"

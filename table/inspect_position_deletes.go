@@ -781,6 +781,12 @@ func appendParquetPositionDeleteRows(
 		if positions.NullN() > 0 {
 			return false, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
 		}
+		for row := 0; row < positions.Len(); row++ {
+			if position := positions.Value(row); position < 0 {
+				return false, fmt.Errorf("%w: negative pos %d in position delete file",
+					iceberg.ErrInvalidSchema, position)
+			}
+		}
 
 		rowIndex := -1
 		if indices := record.Schema().FieldIndices("row"); len(indices) > 1 {
