@@ -123,6 +123,15 @@ type positionDeleteRecordAppender struct {
 	partitionType    *iceberg.StructType
 	partitionIDByOld map[int]int
 	formatVersion    int
+	projection       positionDeleteProjectionOptions
+}
+
+type positionDeleteProjectionOptions struct {
+	ctx             context.Context
+	formatVersion   int
+	tableSchema     *iceberg.Schema
+	nameMapping     iceberg.NameMapping
+	tableProperties iceberg.Properties
 }
 
 func newPositionDeleteRecordAppender(
@@ -130,8 +139,42 @@ func newPositionDeleteRecordAppender(
 	partitionType *iceberg.StructType,
 	partitionIDByOld map[int]int,
 	formatVersion int,
+	options ...positionDeleteProjectionOptions,
 ) (positionDeleteRecordAppender, error) {
 	nextField := 3
+	projection := positionDeleteProjectionOptions{
+		ctx:           context.Background(),
+		formatVersion: formatVersion,
+	}
+	if len(options) > 1 {
+		return positionDeleteRecordAppender{}, fmt.Errorf("%w: expected at most one position delete projection option", iceberg.ErrInvalidArgument)
+	}
+	if len(options) == 1 {
+		projection = options[0]
+		if projection.ctx == nil {
+			projection.ctx = context.Background()
+		}
+		if projection.formatVersion == 0 {
+			projection.formatVersion = formatVersion
+		}
+	}
+	if projection.tableSchema == nil {
+		rowType, ok := bldr.Field(2).Type().(*arrow.StructType)
+		if !ok {
+			return positionDeleteRecordAppender{}, fmt.Errorf("%w: destination row has type %s, want struct", iceberg.ErrInvalidSchema, bldr.Field(2).Type())
+		}
+		rowSchema, err := ArrowSchemaToIcebergWithOptions(
+			arrow.NewSchema(rowType.Fields(), nil),
+			ArrowToIcebergOptions{TableProperties: projection.tableProperties},
+		)
+		if err != nil {
+			return positionDeleteRecordAppender{}, fmt.Errorf("%w: resolve destination row schema: %v", iceberg.ErrInvalidSchema, err)
+		}
+		projection.tableSchema = rowSchema
+	}
+	if projection.nameMapping == nil && projection.tableSchema != nil {
+		projection.nameMapping = projection.tableSchema.NameMapping()
+	}
 	out := positionDeleteRecordAppender{
 		filePath:         bldr.Field(0).(*array.StringBuilder),
 		pos:              bldr.Field(1).(*array.Int64Builder),
@@ -139,6 +182,7 @@ func newPositionDeleteRecordAppender(
 		partitionType:    partitionType,
 		partitionIDByOld: partitionIDByOld,
 		formatVersion:    formatVersion,
+		projection:       projection,
 	}
 	if len(partitionType.FieldList) > 0 {
 		partitionBuilder, err := newInspectPartitionBuilder(
@@ -164,10 +208,21 @@ func (a positionDeleteRecordAppender) append(
 	dataFilePath string,
 	pos int64,
 	deletedRow scalar.Scalar,
+	projected ...bool,
 ) error {
 	a.filePath.Append(dataFilePath)
 	a.pos.Append(pos)
-	if err := appendProjectedPositionDeleteRow(a.row, deletedRow, a.formatVersion); err != nil {
+	var err error
+	if len(projected) > 0 && projected[0] {
+		if deletedRow == nil || !deletedRow.IsValid() {
+			a.row.AppendNull()
+		} else {
+			err = appendPositionDeleteProjectedScalar(a.row, deletedRow)
+		}
+	} else {
+		err = appendProjectedPositionDeleteRow(a.row, deletedRow, a.projection)
+	}
+	if err != nil {
 		return fmt.Errorf("append deleted row: %w", err)
 	}
 
@@ -193,24 +248,21 @@ func (a positionDeleteRecordAppender) append(
 }
 
 func positionDeleteContentSize(file iceberg.DataFile) *int64 {
-	if file.FileFormat() == iceberg.PuffinFile {
-		return file.ContentSizeInBytes()
+	if file.FileFormat() != iceberg.PuffinFile {
+		return nil
 	}
 
-	fileSize := file.FileSizeBytes()
-
-	return &fileSize
+	return file.ContentSizeInBytes()
 }
 
 // appendPositionDeleteRow projects a row from a position-delete file onto the
-// current table schema. Position-delete row structs may contain only a subset
-// of the table fields, so matching by Arrow field position or exact type is
-// not sufficient. Field IDs are authoritative when the source schema carries
-// them; names are used only for readers that do not preserve Parquet metadata.
+// current table schema. The shared Arrow projection path resolves field IDs,
+// name mappings, nested types, promotions, and initial defaults consistently
+// with normal table scans.
 func appendProjectedPositionDeleteRow(
 	builder *array.StructBuilder,
 	deletedRow scalar.Scalar,
-	formatVersion int,
+	projection positionDeleteProjectionOptions,
 ) error {
 	if deletedRow == nil || !deletedRow.IsValid() {
 		builder.AppendNull()
@@ -222,65 +274,42 @@ func appendProjectedPositionDeleteRow(
 	if !ok {
 		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, deletedRow.DataType())
 	}
-
-	return appendPositionDeleteStruct(builder, row, formatVersion)
-}
-
-func appendPositionDeleteStruct(
-	builder *array.StructBuilder,
-	source *scalar.Struct,
-	formatVersion int,
-) error {
-	sourceType, ok := source.DataType().(*arrow.StructType)
+	rowType, ok := row.DataType().(*arrow.StructType)
 	if !ok {
-		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, source.DataType())
+		return fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, row.DataType())
 	}
-	if len(source.Value) != sourceType.NumFields() {
-		return fmt.Errorf("%w: row has %d values for %d fields",
-			iceberg.ErrInvalidSchema, len(source.Value), sourceType.NumFields())
+	rowBuilder := array.NewStructBuilder(compute.GetAllocator(projection.ctx), rowType)
+	defer rowBuilder.Release()
+	if err := appendPositionDeleteProjectedScalar(rowBuilder, row); err != nil {
+		return fmt.Errorf("make row array: %w", err)
 	}
+	rowArray := rowBuilder.NewArray()
+	defer rowArray.Release()
 
-	sourceFields, err := newPositionDeleteFieldLookup(sourceType)
+	rowStruct, ok := rowArray.(*array.Struct)
+	if !ok {
+		return fmt.Errorf("%w: row array has type %s, want struct", iceberg.ErrInvalidSchema, rowArray.DataType())
+	}
+	projected, err := projectPositionDeleteRows(projection.ctx, rowStruct, projection)
 	if err != nil {
 		return err
 	}
-	destinationType, ok := builder.Type().(*arrow.StructType)
-	if !ok {
-		return fmt.Errorf("%w: destination row has type %s, want struct", iceberg.ErrInvalidSchema, builder.Type())
+	defer projected.Release()
+
+	projectedStruct := array.RecordToStructArray(projected)
+	defer projectedStruct.Release()
+	projectedRow, err := scalar.GetScalar(projectedStruct, 0)
+	if err != nil {
+		return err
+	}
+	if releasable, ok := projectedRow.(scalar.Releasable); ok {
+		defer releasable.Release()
 	}
 
-	if !source.IsValid() {
-		builder.AppendNull()
-
-		return nil
-	}
-	builder.Append(true)
-
-	for index, destinationField := range destinationType.Fields() {
-		sourceIndex, found := sourceFields.index(destinationField)
-		if !found {
-			builder.FieldBuilder(index).AppendNull()
-
-			continue
-		}
-
-		value := source.Value[sourceIndex]
-		if value == nil || !value.IsValid() {
-			builder.FieldBuilder(index).AppendNull()
-
-			continue
-		}
-
-		fieldBuilder := builder.FieldBuilder(index)
-		if err := appendPositionDeleteValue(fieldBuilder, value, formatVersion); err != nil {
-			return fmt.Errorf("field %q: %w", destinationField.Name, err)
-		}
-	}
-
-	return nil
+	return appendPositionDeleteProjectedScalar(builder, projectedRow)
 }
 
-func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar, formatVersion int) error {
+func appendPositionDeleteProjectedScalar(builder array.Builder, value scalar.Scalar) error {
 	if value == nil || !value.IsValid() {
 		builder.AppendNull()
 
@@ -290,349 +319,143 @@ func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar, forma
 	switch builder := builder.(type) {
 	case *array.StructBuilder:
 		source, ok := value.(*scalar.Struct)
-		if !ok {
-			return fmt.Errorf("%w: value has type %s, want struct",
-				iceberg.ErrInvalidSchema, value.DataType())
+		if !ok || len(source.Value) != builder.NumField() {
+			return fmt.Errorf("%w: projected struct has %d fields, want %d",
+				iceberg.ErrInvalidSchema, len(source.Value), builder.NumField())
+		}
+		builder.Append(true)
+		for index, child := range source.Value {
+			if err := appendPositionDeleteProjectedScalar(builder.FieldBuilder(index), child); err != nil {
+				return fmt.Errorf("projected struct field %d: %w", index, err)
+			}
 		}
 
-		return appendPositionDeleteStruct(builder, source, formatVersion)
+		return nil
 	case *array.MapBuilder:
 		source, ok := value.(*scalar.Map)
 		if !ok {
-			return fmt.Errorf("%w: value has type %s, want map",
-				iceberg.ErrInvalidSchema, value.DataType())
+			return fmt.Errorf("%w: projected map has type %s", iceberg.ErrInvalidSchema, value.DataType())
+		}
+		entries := source.GetList()
+		if entries == nil {
+			return fmt.Errorf("%w: projected map has no entries", iceberg.ErrInvalidSchema)
+		}
+		entryType, ok := entries.DataType().(*arrow.StructType)
+		if !ok || entryType.NumFields() != 2 {
+			return fmt.Errorf("%w: projected map entries have type %s", iceberg.ErrInvalidSchema, entries.DataType())
+		}
+		builder.Append(true)
+		for index := range entries.Len() {
+			entry, err := scalar.GetScalar(entries, index)
+			if err != nil {
+				return err
+			}
+			entryStruct, ok := entry.(*scalar.Struct)
+			if !ok || len(entryStruct.Value) != 2 {
+				if releasable, ok := entry.(scalar.Releasable); ok {
+					releasable.Release()
+				}
+
+				return fmt.Errorf("%w: projected map entry %d is not a two-field struct",
+					iceberg.ErrInvalidSchema, index)
+			}
+			if entryStruct.Value[0] == nil || !entryStruct.Value[0].IsValid() {
+				if releasable, ok := entry.(scalar.Releasable); ok {
+					releasable.Release()
+				}
+
+				return fmt.Errorf("%w: projected map entry %d has a null key",
+					iceberg.ErrInvalidSchema, index)
+			}
+			if err := appendPositionDeleteProjectedScalar(builder.KeyBuilder(), entryStruct.Value[0]); err != nil {
+				if releasable, ok := entry.(scalar.Releasable); ok {
+					releasable.Release()
+				}
+
+				return fmt.Errorf("map entry %d key: %w", index, err)
+			}
+			if err := appendPositionDeleteProjectedScalar(builder.ItemBuilder(), entryStruct.Value[1]); err != nil {
+				if releasable, ok := entry.(scalar.Releasable); ok {
+					releasable.Release()
+				}
+
+				return fmt.Errorf("map entry %d value: %w", index, err)
+			}
+			if releasable, ok := entry.(scalar.Releasable); ok {
+				releasable.Release()
+			}
 		}
 
-		return appendPositionDeleteMap(builder, source, formatVersion)
+		return nil
 	case array.ListLikeBuilder:
 		source, ok := value.(scalar.ListScalar)
 		if !ok {
-			return fmt.Errorf("%w: value has type %s, want list",
-				iceberg.ErrInvalidSchema, value.DataType())
+			return fmt.Errorf("%w: projected list has type %s", iceberg.ErrInvalidSchema, value.DataType())
+		}
+		values := source.GetList()
+		if values == nil {
+			return fmt.Errorf("%w: projected list has no values", iceberg.ErrInvalidSchema)
+		}
+		if destination, ok := builder.Type().(*arrow.FixedSizeListType); ok &&
+			values.Len() != int(destination.Len()) {
+			return fmt.Errorf("%w: projected list has %d elements, want %d",
+				iceberg.ErrInvalidSchema, values.Len(), destination.Len())
+		}
+		builder.Append(true)
+		for index := range values.Len() {
+			child, err := scalar.GetScalar(values, index)
+			if err != nil {
+				return err
+			}
+			appendErr := appendPositionDeleteProjectedScalar(builder.ValueBuilder(), child)
+			if releasable, ok := child.(scalar.Releasable); ok {
+				releasable.Release()
+			}
+			if appendErr != nil {
+				return fmt.Errorf("list element %d: %w", index, appendErr)
+			}
 		}
 
-		return appendPositionDeleteList(builder, source, formatVersion)
-	}
-
-	if arrow.TypeEqual(builder.Type(), value.DataType()) {
+		return nil
+	default:
 		return scalar.Append(builder, value)
 	}
-	if !canPromotePositionDeleteValue(value.DataType(), builder.Type(), formatVersion) {
-		return scalar.Append(builder, value)
-	}
-
-	appendBuilder := builder
-	castType := builder.Type()
-	if storageBuilder, ok := builder.(positionDeleteStorageBuilder); ok {
-		appendBuilder = storageBuilder.StorageBuilder()
-		castType = appendBuilder.Type()
-	}
-	casted, err := castPositionDeleteValue(value, castType)
-	if err != nil {
-		return fmt.Errorf("promote %s to %s: %w", value.DataType(), builder.Type(), err)
-	}
-	if releasable, ok := casted.(scalar.Releasable); ok {
-		defer releasable.Release()
-	}
-
-	return scalar.Append(appendBuilder, casted)
 }
 
-type positionDeleteStorageBuilder interface {
-	array.Builder
-	StorageBuilder() array.Builder
-}
-
-func appendPositionDeleteList(
-	builder array.ListLikeBuilder,
-	source scalar.ListScalar,
-	formatVersion int,
-) error {
-	if !isPositionDeleteListType(source.DataType()) {
-		return fmt.Errorf("%w: value has type %s, want list",
-			iceberg.ErrInvalidSchema, source.DataType())
+func projectPositionDeleteRows(
+	ctx context.Context,
+	rows *array.Struct,
+	projection positionDeleteProjectionOptions,
+) (arrow.RecordBatch, error) {
+	if projection.tableSchema == nil {
+		return nil, fmt.Errorf("%w: position delete projection has no table schema", iceberg.ErrInvalidSchema)
 	}
-	values := source.GetList()
-	if values == nil {
-		return fmt.Errorf("%w: valid list value has no child array",
-			iceberg.ErrInvalidSchema)
+	if rows == nil {
+		return nil, fmt.Errorf("%w: position delete row array is nil", iceberg.ErrInvalidSchema)
 	}
-
-	if destination, ok := builder.Type().(*arrow.FixedSizeListType); ok &&
-		values.Len() != int(destination.Len()) {
-		return fmt.Errorf("%w: list value has %d elements, want %d",
-			iceberg.ErrInvalidSchema, values.Len(), destination.Len())
-	}
-
-	builder.Append(true)
-	valueBuilder := builder.ValueBuilder()
-	for index := range values.Len() {
-		child, err := scalar.GetScalar(values, index)
-		if err != nil {
-			return err
-		}
-		appendErr := appendPositionDeleteValue(valueBuilder, child, formatVersion)
-		if releasable, ok := child.(scalar.Releasable); ok {
-			releasable.Release()
-		}
-		if appendErr != nil {
-			return fmt.Errorf("list element %d: %w", index, appendErr)
-		}
-	}
-
-	return nil
-}
-
-func appendPositionDeleteMap(
-	builder *array.MapBuilder,
-	source *scalar.Map,
-	formatVersion int,
-) error {
-	if source.DataType().ID() != arrow.MAP {
-		return fmt.Errorf("%w: value has type %s, want map",
-			iceberg.ErrInvalidSchema, source.DataType())
-	}
-	entries := source.GetList()
-	if entries == nil {
-		return fmt.Errorf("%w: valid map value has no entry array",
-			iceberg.ErrInvalidSchema)
-	}
-	entryType, ok := entries.DataType().(*arrow.StructType)
-	if !ok || entryType.NumFields() != 2 {
-		return fmt.Errorf("%w: map entries have type %s, want a two-field struct",
-			iceberg.ErrInvalidSchema, entries.DataType())
-	}
-	entryBuilder, ok := builder.ValueBuilder().(*array.StructBuilder)
+	rowType, ok := rows.DataType().(*arrow.StructType)
 	if !ok {
-		return fmt.Errorf("%w: map builder has entry builder of type %T, want struct",
-			iceberg.ErrInvalidSchema, builder.ValueBuilder())
+		return nil, fmt.Errorf("%w: row has type %s, want struct", iceberg.ErrInvalidSchema, rows.DataType())
 	}
-	destinationEntryType, ok := entryBuilder.Type().(*arrow.StructType)
-	if !ok || destinationEntryType.NumFields() != 2 {
-		return fmt.Errorf("%w: map builder has entry type %s, want a two-field struct",
-			iceberg.ErrInvalidSchema, entryBuilder.Type())
-	}
-	sourceFields, err := newPositionDeleteFieldLookup(entryType)
+
+	sourceArrowSchema := arrow.NewSchema(rowType.Fields(), nil)
+	fileSchema, err := ArrowSchemaToIcebergWithOptions(sourceArrowSchema, ArrowToIcebergOptions{
+		NameMapping:     projection.nameMapping,
+		TableSchema:     projection.tableSchema,
+		TableProperties: projection.tableProperties,
+	})
 	if err != nil {
-		return err
-	}
-	keySourceIndex, found := sourceFields.index(destinationEntryType.Field(0))
-	if !found {
-		return fmt.Errorf("%w: map entry is missing the key field",
-			iceberg.ErrInvalidSchema)
+		return nil, fmt.Errorf("resolve position delete row schema: %w", err)
 	}
 
-	builder.Append(true)
-	for index := range entries.Len() {
-		entry, err := scalar.GetScalar(entries, index)
-		if err != nil {
-			return err
-		}
-		if !entry.IsValid() {
-			if releasable, ok := entry.(scalar.Releasable); ok {
-				releasable.Release()
-			}
+	sourceBatch := array.RecordFromStructArray(rows, sourceArrowSchema)
+	defer sourceBatch.Release()
 
-			return fmt.Errorf("%w: map entry %d is null", iceberg.ErrInvalidSchema, index)
-		}
-		entryStruct, ok := entry.(*scalar.Struct)
-		if !ok || len(entryStruct.Value) != entryType.NumFields() {
-			if releasable, ok := entry.(scalar.Releasable); ok {
-				releasable.Release()
-			}
-
-			return fmt.Errorf("%w: map entry %d is not a valid struct",
-				iceberg.ErrInvalidSchema, index)
-		}
-		key := entryStruct.Value[keySourceIndex]
-		if key == nil || !key.IsValid() {
-			if releasable, ok := entry.(scalar.Releasable); ok {
-				releasable.Release()
-			}
-
-			return fmt.Errorf("%w: map entry %d has a null key",
-				iceberg.ErrInvalidSchema, index)
-		}
-		appendErr := appendPositionDeleteValue(entryBuilder, entry, formatVersion)
-		if releasable, ok := entry.(scalar.Releasable); ok {
-			releasable.Release()
-		}
-		if appendErr != nil {
-			return fmt.Errorf("map entry %d: %w", index, appendErr)
-		}
-	}
-
-	return nil
-}
-
-func isPositionDeleteListType(typ arrow.DataType) bool {
-	switch typ.ID() {
-	case arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST:
-		return true
-	default:
-		return false
-	}
-}
-
-func castPositionDeleteValue(value scalar.Scalar, destination arrow.DataType) (scalar.Scalar, error) {
-	if date, ok := value.(*scalar.Date32); ok {
-		if timestamp, ok := destination.(*arrow.TimestampType); ok {
-			converted, ok := convertPositionDeleteDate32(date.Value, timestamp.Unit)
-			if !ok {
-				return nil, fmt.Errorf("date %d is outside %s range", date.Value, timestamp)
-			}
-
-			return scalar.NewTimestampScalar(converted, timestamp), nil
-		}
-	}
-
-	if binary, ok := value.(scalar.BinaryScalar); ok {
-		switch destination.ID() {
-		case arrow.BINARY:
-			return scalar.NewBinaryScalar(binary.Buffer(), destination), nil
-		case arrow.LARGE_BINARY:
-			return scalar.NewLargeBinaryScalar(binary.Buffer()), nil
-		case arrow.STRING:
-			return scalar.NewStringScalarFromBuffer(binary.Buffer()), nil
-		case arrow.LARGE_STRING:
-			return scalar.NewLargeStringScalarFromBuffer(binary.Buffer()), nil
-		}
-	}
-
-	return value.CastTo(destination)
-}
-
-func convertPositionDeleteDate32(value arrow.Date32, unit arrow.TimeUnit) (arrow.Timestamp, bool) {
-	var unitsPerDay int64
-	switch unit {
-	case arrow.Second:
-		unitsPerDay = 86_400
-	case arrow.Millisecond:
-		unitsPerDay = 86_400_000
-	case arrow.Microsecond:
-		unitsPerDay = 86_400_000_000
-	case arrow.Nanosecond:
-		unitsPerDay = 86_400_000_000_000
-	default:
-		return 0, false
-	}
-
-	days := int64(value)
-	if days > math.MaxInt64/unitsPerDay || days < math.MinInt64/unitsPerDay {
-		return 0, false
-	}
-
-	return arrow.Timestamp(days * unitsPerDay), true
-}
-
-func canPromotePositionDeleteValue(source, destination arrow.DataType, formatVersion int) bool {
-	switch source.ID() {
-	case arrow.INT32:
-		return destination.ID() == arrow.INT64
-	case arrow.FLOAT32:
-		return destination.ID() == arrow.FLOAT64
-	case arrow.DATE32:
-		if formatVersion < 3 {
-			return false
-		}
-
-		timestamp, ok := destination.(*arrow.TimestampType)
-
-		return ok && timestamp.TimeZone == "" &&
-			(timestamp.Unit == arrow.Microsecond || timestamp.Unit == arrow.Nanosecond)
-	case arrow.DECIMAL128:
-		sourceDecimal, sourceOK := source.(*arrow.Decimal128Type)
-		destinationDecimal, destinationOK := destination.(*arrow.Decimal128Type)
-
-		return sourceOK && destinationOK &&
-			sourceDecimal.Scale == destinationDecimal.Scale &&
-			sourceDecimal.Precision <= destinationDecimal.Precision
-	case arrow.STRING, arrow.LARGE_STRING:
-		switch destination.ID() {
-		case arrow.STRING, arrow.LARGE_STRING, arrow.BINARY, arrow.LARGE_BINARY:
-			return true
-		default:
-			return false
-		}
-	case arrow.BINARY, arrow.LARGE_BINARY:
-		switch destination.ID() {
-		case arrow.BINARY, arrow.LARGE_BINARY, arrow.STRING, arrow.LARGE_STRING:
-			return true
-		default:
-			return false
-		}
-	case arrow.FIXED_SIZE_BINARY:
-		sourceFixed, sourceOK := source.(*arrow.FixedSizeBinaryType)
-		destinationExtension, destinationOK := destination.(arrow.ExtensionType)
-		if !sourceOK || !destinationOK || sourceFixed.ByteWidth != 16 ||
-			destinationExtension.ExtensionName() != "arrow.uuid" {
-			return false
-		}
-		destinationFixed, destinationOK := destinationExtension.StorageType().(*arrow.FixedSizeBinaryType)
-
-		return destinationOK && destinationFixed.ByteWidth == 16
-	default:
-		return false
-	}
-}
-
-type positionDeleteFieldLookup struct {
-	byID   map[int]int
-	byName map[string]int
-	byIDs  bool
-}
-
-func newPositionDeleteFieldLookup(sourceType *arrow.StructType) (positionDeleteFieldLookup, error) {
-	fields := positionDeleteFieldLookup{
-		byID:   make(map[int]int, sourceType.NumFields()),
-		byName: make(map[string]int, sourceType.NumFields()),
-	}
-	missingIDs := 0
-	for index, field := range sourceType.Fields() {
-		if _, exists := fields.byName[field.Name]; exists {
-			return fields, fmt.Errorf("%w: row contains duplicate field %q",
-				iceberg.ErrInvalidSchema, field.Name)
-		}
-		fields.byName[field.Name] = index
-
-		id := getFieldID(field)
-		if id == nil {
-			missingIDs++
-
-			continue
-		}
-		if _, exists := fields.byID[*id]; exists {
-			return fields, fmt.Errorf("%w: row contains duplicate field ID %d",
-				iceberg.ErrInvalidSchema, *id)
-		}
-		fields.byID[*id] = index
-	}
-	if len(fields.byID) > 0 {
-		if missingIDs > 0 {
-			return fields, fmt.Errorf("%w: row schema has fields with and without field IDs",
-				iceberg.ErrInvalidSchema)
-		}
-		fields.byIDs = true
-	}
-
-	return fields, nil
-}
-
-func (f positionDeleteFieldLookup) index(destination arrow.Field) (int, bool) {
-	if f.byIDs {
-		id := getFieldID(destination)
-		if id == nil {
-			return 0, false
-		}
-
-		index, ok := f.byID[*id]
-
-		return index, ok
-	}
-
-	index, ok := f.byName[destination.Name]
-
-	return index, ok
+	return ToRequestedSchema(ctx, projection.tableSchema, fileSchema, sourceBatch, SchemaOptions{
+		FormatVersion:   projection.formatVersion,
+		IncludeFieldIDs: true,
+		TableProperties: projection.tableProperties,
+	})
 }
 
 func (i InspectTable) positionDeleteRecordReader(
@@ -653,7 +476,16 @@ func (i InspectTable) positionDeleteRecordReader(
 
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 		defer bldr.Release()
-		appender, err := newPositionDeleteRecordAppender(bldr, partitionType, partitionIDByOld, formatVersion)
+		appender, err := newPositionDeleteRecordAppender(
+			bldr, partitionType, partitionIDByOld, formatVersion,
+			positionDeleteProjectionOptions{
+				ctx:             ctx,
+				formatVersion:   formatVersion,
+				tableSchema:     i.tbl.metadata.CurrentSchema(),
+				nameMapping:     i.tbl.metadata.NameMapping(),
+				tableProperties: i.tbl.metadata.Properties(),
+			},
+		)
 		if err != nil {
 			_ = yield(nil, err)
 
@@ -675,8 +507,8 @@ func (i InspectTable) positionDeleteRecordReader(
 		yieldError := func(err error) {
 			_ = yield(nil, err)
 		}
-		appendRow := func(file iceberg.DataFile, path string, pos int64, deletedRow scalar.Scalar) (bool, error) {
-			if err := appender.append(file, path, pos, deletedRow); err != nil {
+		appendRow := func(file iceberg.DataFile, path string, pos int64, deletedRow scalar.Scalar, projected bool) (bool, error) {
+			if err := appender.append(file, path, pos, deletedRow, projected); err != nil {
 				return false, err
 			}
 			rows++
@@ -698,8 +530,12 @@ func (i InspectTable) positionDeleteRecordReader(
 			switch file.FileFormat() {
 			case iceberg.PuffinFile:
 				keepGoing, err = appendDeletionVectorRows(ctx, fs, file, appendRow)
+			case iceberg.ParquetFile:
+				keepGoing, err = appendParquetPositionDeleteRows(ctx, fs, file, appendRow, appender.projection)
 			default:
-				keepGoing, err = appendParquetPositionDeleteRows(ctx, fs, file, appendRow)
+				keepGoing = false
+				err = fmt.Errorf("%w: unsupported position delete file format %s",
+					iceberg.ErrNotImplemented, file.FileFormat())
 			}
 			if err != nil {
 				yieldError(fmt.Errorf("read position delete file %s: %w", file.FilePath(), err))
@@ -720,7 +556,7 @@ func (i InspectTable) positionDeleteRecordReader(
 	})
 }
 
-type appendPositionDeleteRow func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error)
+type appendPositionDeleteRow func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error)
 
 func appendDeletionVectorRows(
 	ctx context.Context,
@@ -748,7 +584,7 @@ func appendDeletionVectorRows(
 		if position > math.MaxInt64 {
 			return false, fmt.Errorf("%w: deletion position %d exceeds int64", iceberg.ErrInvalidSchema, position)
 		}
-		keepGoing, err := appendRow(file, *referencedDataFile, int64(position), nil)
+		keepGoing, err := appendRow(file, *referencedDataFile, int64(position), nil, false)
 		if err != nil || !keepGoing {
 			return keepGoing, err
 		}
@@ -762,7 +598,18 @@ func appendParquetPositionDeleteRows(
 	fs iceio.IO,
 	file iceberg.DataFile,
 	appendRow appendPositionDeleteRow,
+	options ...positionDeleteProjectionOptions,
 ) (keepGoing bool, err error) {
+	projection := positionDeleteProjectionOptions{ctx: ctx}
+	if len(options) > 1 {
+		return false, fmt.Errorf("%w: expected at most one position delete projection option", iceberg.ErrInvalidArgument)
+	}
+	if len(options) == 1 {
+		projection = options[0]
+		if projection.ctx == nil {
+			projection.ctx = ctx
+		}
+	}
 	source, err := tblutils.GetFile(ctx, fs, file, true)
 	if err != nil {
 		return false, err
@@ -784,63 +631,102 @@ func appendParquetPositionDeleteRows(
 	defer records.Release()
 
 	for records.Next() {
-		record := records.RecordBatch()
-		filePathIndex, posIndex, err := positionDeleteColumnIndices(record.Schema())
-		if err != nil {
-			return false, err
-		}
-		filePaths, err := filePathValues(record.Column(filePathIndex))
-		if err != nil {
-			return false, err
-		}
-		if err := validatePositionDeleteFilePathValues(filePaths, record.Column(filePathIndex)); err != nil {
-			return false, err
-		}
-		positions, ok := record.Column(posIndex).(*array.Int64)
-		if !ok {
-			return false, fmt.Errorf("%w: pos column has type %s, want int64",
-				iceberg.ErrInvalidSchema, record.Column(posIndex).DataType())
-		}
-		if positions.NullN() > 0 {
-			return false, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
-		}
-		if err := validatePositionDeletePositions(positions); err != nil {
-			return false, err
-		}
-
-		rowIndex := -1
-		if indices := record.Schema().FieldIndices("row"); len(indices) > 1 {
-			return false, fmt.Errorf("%w: position delete file contains multiple row columns",
-				iceberg.ErrInvalidSchema)
-		} else if len(indices) == 1 {
-			rowIndex = indices[0]
-		}
-		if rowIndex >= 0 && record.Column(rowIndex).NullN() > 0 {
-			return false, fmt.Errorf("%w: null row in position delete file", iceberg.ErrInvalidSchema)
-		}
-		for row := range int(record.NumRows()) {
-			if err := ctx.Err(); err != nil {
-				return false, err
-			}
-			var deletedRow scalar.Scalar
-			if rowIndex >= 0 && !record.Column(rowIndex).IsNull(row) {
-				deletedRow, err = scalar.GetScalar(record.Column(rowIndex), row)
-				if err != nil {
-					return false, err
-				}
-			}
-			continueReading, appendErr := appendRow(
-				file, filePaths.Value(row), positions.Value(row), deletedRow)
-			if releasable, ok := deletedRow.(scalar.Releasable); ok {
-				releasable.Release()
-			}
-			if appendErr != nil || !continueReading {
-				return continueReading, appendErr
-			}
+		continueReading, appendErr := appendPositionDeleteRecord(
+			ctx, file, records.RecordBatch(), appendRow, projection)
+		if appendErr != nil || !continueReading {
+			return continueReading, appendErr
 		}
 	}
 	if err := records.Err(); err != nil {
 		return false, err
+	}
+
+	return true, nil
+}
+
+func appendPositionDeleteRecord(
+	ctx context.Context,
+	file iceberg.DataFile,
+	record arrow.RecordBatch,
+	appendRow appendPositionDeleteRow,
+	projection positionDeleteProjectionOptions,
+) (bool, error) {
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(record.Schema())
+	if err != nil {
+		return false, err
+	}
+	filePaths, err := filePathValues(record.Column(filePathIndex))
+	if err != nil {
+		return false, err
+	}
+	if err := validatePositionDeleteFilePathValues(filePaths, record.Column(filePathIndex)); err != nil {
+		return false, err
+	}
+	positions, ok := record.Column(posIndex).(*array.Int64)
+	if !ok {
+		return false, fmt.Errorf("%w: pos column has type %s, want int64",
+			iceberg.ErrInvalidSchema, record.Column(posIndex).DataType())
+	}
+	if positions.NullN() > 0 {
+		return false, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if err := validatePositionDeletePositions(positions); err != nil {
+		return false, err
+	}
+
+	rowIndex := -1
+	if indices := record.Schema().FieldIndices("row"); len(indices) > 1 {
+		return false, fmt.Errorf("%w: position delete file contains multiple row columns",
+			iceberg.ErrInvalidSchema)
+	} else if len(indices) == 1 {
+		rowIndex = indices[0]
+	}
+	if rowIndex >= 0 && record.Column(rowIndex).NullN() > 0 {
+		return false, fmt.Errorf("%w: null row in position delete file", iceberg.ErrInvalidSchema)
+	}
+
+	var projectedRecord arrow.RecordBatch
+	var projectedRows *array.Struct
+	if rowIndex >= 0 && projection.tableSchema != nil {
+		rowArray, ok := record.Column(rowIndex).(*array.Struct)
+		if !ok {
+			return false, fmt.Errorf("%w: row column has type %s, want struct",
+				iceberg.ErrInvalidSchema, record.Column(rowIndex).DataType())
+		}
+		projectedRecord, err = projectPositionDeleteRows(ctx, rowArray, projection)
+		if err != nil {
+			return false, err
+		}
+		projectedRows = array.RecordToStructArray(projectedRecord)
+		defer projectedRecord.Release()
+		defer projectedRows.Release()
+	}
+
+	for row := range int(record.NumRows()) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var deletedRow scalar.Scalar
+		projected := false
+		if rowIndex >= 0 {
+			if projectedRows != nil {
+				deletedRow, err = scalar.GetScalar(projectedRows, row)
+				projected = true
+			} else if !record.Column(rowIndex).IsNull(row) {
+				deletedRow, err = scalar.GetScalar(record.Column(rowIndex), row)
+			}
+			if err != nil {
+				return false, err
+			}
+		}
+		continueReading, appendErr := appendRow(
+			file, filePaths.Value(row), positions.Value(row), deletedRow, projected)
+		if releasable, ok := deletedRow.(scalar.Releasable); ok {
+			releasable.Release()
+		}
+		if appendErr != nil || !continueReading {
+			return continueReading, appendErr
+		}
 	}
 
 	return true, nil
