@@ -476,13 +476,15 @@ func castPositionDeleteValue(value scalar.Scalar, destination arrow.DataType) (s
 		}
 	}
 
-	if destination.ID() == arrow.LARGE_BINARY {
-		if binary, ok := value.(scalar.BinaryScalar); ok {
+	if binary, ok := value.(scalar.BinaryScalar); ok {
+		switch destination.ID() {
+		case arrow.BINARY:
+			return scalar.NewBinaryScalar(binary.Buffer(), destination), nil
+		case arrow.LARGE_BINARY:
 			return scalar.NewLargeBinaryScalar(binary.Buffer()), nil
-		}
-	}
-	if destination.ID() == arrow.LARGE_STRING {
-		if binary, ok := value.(scalar.BinaryScalar); ok {
+		case arrow.STRING:
+			return scalar.NewStringScalarFromBuffer(binary.Buffer()), nil
+		case arrow.LARGE_STRING:
 			return scalar.NewLargeStringScalarFromBuffer(binary.Buffer()), nil
 		}
 	}
@@ -536,9 +538,19 @@ func canPromotePositionDeleteValue(source, destination arrow.DataType, formatVer
 			sourceDecimal.Scale == destinationDecimal.Scale &&
 			sourceDecimal.Precision <= destinationDecimal.Precision
 	case arrow.STRING, arrow.LARGE_STRING:
-		return destination.ID() == arrow.BINARY || destination.ID() == arrow.LARGE_BINARY
+		switch destination.ID() {
+		case arrow.STRING, arrow.LARGE_STRING, arrow.BINARY, arrow.LARGE_BINARY:
+			return true
+		default:
+			return false
+		}
 	case arrow.BINARY, arrow.LARGE_BINARY:
-		return destination.ID() == arrow.STRING || destination.ID() == arrow.LARGE_STRING
+		switch destination.ID() {
+		case arrow.BINARY, arrow.LARGE_BINARY, arrow.STRING, arrow.LARGE_STRING:
+			return true
+		default:
+			return false
+		}
 	case arrow.FIXED_SIZE_BINARY:
 		sourceFixed, sourceOK := source.(*arrow.FixedSizeBinaryType)
 		destinationExtension, destinationOK := destination.(arrow.ExtensionType)
