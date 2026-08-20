@@ -19,11 +19,13 @@ package table
 
 import (
 	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/apache/iceberg-go/metrics"
 )
 
@@ -87,7 +89,8 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 		}
 		for _, df := range t.DeletionVectorFiles {
 			acc.dvs++
-			if csb := df.ContentSizeInBytes(); csb != nil {
+			_, _, _, _, csb := iceberginternal.BorrowedDataFilePointers(df)
+			if csb != nil {
 				acc.totalDeleteFileSize += *csb
 			}
 		}
@@ -106,6 +109,11 @@ func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask
 // are left unset and omitted.
 func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected *iceberg.Schema, planning time.Duration) metrics.ScanReport {
 	ids, names := projectedFields(projected)
+	envCtx := iceberg.EnvironmentContext()
+	metadata := make(map[string]string, len(scan.options)+len(envCtx))
+	maps.Copy(metadata, scan.options)
+	// Match Java's precedence: process-wide context overrides scan options.
+	maps.Copy(metadata, envCtx)
 
 	var snapshotID int64
 	if snap := scan.Snapshot(); snap != nil {
@@ -133,6 +141,7 @@ func (scan *Scan) buildScanReport(acc *scanMetricsAccumulator, schema, projected
 		ProjectedFieldIDs:   ids,
 		ProjectedFieldNames: names,
 		Filter:              filter,
+		Metadata:            metadata,
 		Metrics: metrics.ScanMetricsResult{
 			TotalPlanningDuration:      metrics.NewNanosTimerResult(1, planning.Nanoseconds()),
 			ResultDataFiles:            counterCount(acc.resultDataFiles),

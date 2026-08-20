@@ -25,6 +25,7 @@ import (
 	"slices"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
 // RewriteResult summarizes a completed compaction.
@@ -47,7 +48,7 @@ type RewriteResult struct {
 	// RemovedEqualityDeleteFiles is the count of equality delete files
 	// removed via [RewriteDataFilesOptions.ExtraDeleteFilesToRemove].
 	// The caller computes which eq-deletes are dead — typically via
-	// [compaction.CollectDeadEqualityDeletes] — and passes the list in.
+	// [compaction.CollectDeadEqualityDeletesWithSpecs] — and passes the list in.
 	RemovedEqualityDeleteFiles int
 
 	// RemovedDeletionVectorFiles is the count of deletion vectors removed
@@ -151,7 +152,7 @@ type RewriteDataFilesOptions struct {
 	// the rewrite and that the caller wants expunged in the same
 	// snapshot. Honored only when PartialProgress is false.
 	//
-	// Use [compaction.CollectDeadEqualityDeletes] and
+	// Use [compaction.CollectDeadEqualityDeletesWithSpecs] and
 	// [compaction.CollectDeadPositionDeletes] to compute this list
 	// from the current snapshot. Position deletes attached to
 	// rewritten tasks are already removed by the per-group staging;
@@ -207,7 +208,7 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 //
 // Cleanup beyond that per-group staging is the caller's
 // responsibility: compute the dead sets with
-// [compaction.CollectDeadEqualityDeletes] and
+// [compaction.CollectDeadEqualityDeletesWithSpecs] and
 // [compaction.CollectDeadPositionDeletes] (against the same snapshot
 // the rewrite is staged on) and pass them via
 // [RewriteDataFilesOptions.ExtraDeleteFilesToRemove]. The executor
@@ -502,9 +503,24 @@ func accumulateGroupMetrics(r *RewriteResult, gr CompactionGroupResult) {
 // Always runs — no isolation gating, because rewrite is a structural
 // operation, not a user-facing isolation choice.
 func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
+	return rewriteValidatorWithReferencedDataFiles(rewrittenFiles, nil)
+}
+
+// rewriteValidatorWithReferencedDataFiles extends rewrite validation to data
+// files targeted by deletion vectors added by the rewrite. Existing targets
+// must remain live, and no concurrent delete may be added for them before the
+// rewrite commits; otherwise the rewrite could create a duplicate DV or leave
+// a position delete surviving beside the new DV.
+func rewriteValidatorWithReferencedDataFiles(
+	rewrittenFiles []iceberg.DataFile,
+	referencedDataFilePaths []string,
+) conflictValidatorFunc {
 	return func(cc *conflictContext) error {
 		if cc == nil {
 			return nil
+		}
+		if err := validateDataFilesExist(cc, referencedDataFilePaths); err != nil {
+			return err
 		}
 
 		return validateNoNewDeletesForRewrittenFiles(cc, rewrittenFiles)
@@ -520,7 +536,7 @@ func rewriteValidator(rewrittenFiles []iceberg.DataFile) conflictValidatorFunc {
 // reading, the new output files will not contain the deleted rows.
 //
 // Only position deletes (EntryContentPosDeletes) are considered.
-// Equality deletes are decided by [compaction.DecideDeadEqualityDeletes]
+// Equality deletes are decided by [compaction.DecideDeadEqualityDeletesWithSpecs]
 // (which needs partition-wide visibility, not just the task scope).
 // Deletion vectors will be handled when DV read support lands.
 //
@@ -577,7 +593,7 @@ func CollectSafeDeletionVectors(tasks []FileScanTask) []iceberg.DataFile {
 
 	for _, task := range tasks {
 		for _, dv := range task.DeletionVectorFiles {
-			ref := dv.ReferencedDataFile()
+			ref := iceberginternal.BorrowedDataFileReferencedDataFile(dv)
 			if ref == nil {
 				continue
 			}

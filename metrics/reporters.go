@@ -40,7 +40,7 @@ func isNilReport(report MetricsReport) bool {
 	}
 	v := reflect.ValueOf(report)
 
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // NopReporter is a [Reporter] that discards every report. It is the default

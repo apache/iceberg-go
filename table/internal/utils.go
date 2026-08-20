@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"regexp"
 	"runtime"
 	"slices"
@@ -322,12 +323,8 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	// Variant bounds are serialized objects keyed by the parent variant field id.
-	for fieldID, b := range d.VariantLowerBounds {
-		lowerBounds[fieldID] = b
-	}
-	for fieldID, b := range d.VariantUpperBounds {
-		upperBounds[fieldID] = b
-	}
+	maps.Copy(lowerBounds, d.VariantLowerBounds)
+	maps.Copy(upperBounds, d.VariantUpperBounds)
 
 	if len(lowerBounds) > 0 {
 		bldr.LowerBoundValues(lowerBounds)

@@ -139,9 +139,7 @@ func constructHiveViewTable(dbName, viewName, location, metadataLocation string,
 func constructHiveTable(dbName, tableName, location, metadataLocation string, schema *iceberg.Schema, props map[string]string) *hive_metastore.Table {
 	parameters := make(map[string]string)
 
-	for k, v := range props {
-		parameters[k] = v
-	}
+	maps.Copy(parameters, props)
 	setTranslatedIcebergProperties(parameters, props)
 	delete(parameters, PreviousMetadataLocationKey)
 
@@ -210,9 +208,7 @@ func updateHiveTableForCommit(
 	if _, ok := current.Properties()[GCEnabledKey]; ok {
 		delete(updated.Parameters, ExternalTablePurgeKey)
 	}
-	for key, value := range staged.Properties() {
-		updated.Parameters[key] = value
-	}
+	maps.Copy(updated.Parameters, staged.Properties())
 	setTranslatedIcebergProperties(updated.Parameters, staged.Properties())
 	delete(updated.Parameters, PreviousMetadataLocationKey)
 

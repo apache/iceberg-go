@@ -32,6 +32,7 @@ import (
 
 func TestSqlCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
+		SupportsNamespaceProperties: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			warehouse := t.TempDir()
 

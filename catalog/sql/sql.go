@@ -322,7 +322,7 @@ func withSerializableWriteTx(ctx context.Context, db *bun.DB, fn func(context.Co
 
 func retrySerializableWriteTx(ctx context.Context, run func() error) error {
 	var err error
-	for attempt := 0; attempt < serializableWriteMaxAttempts; attempt++ {
+	for attempt := range serializableWriteMaxAttempts {
 		err = run()
 		if err == nil || !isRetryableSerializableError(err) {
 			return err
@@ -455,8 +455,12 @@ func (c *Catalog) CatalogType() catalog.Type {
 func (c *Catalog) Close() error {
 	err := c.reporter.Close()
 	if c.ownsDB {
-		if dbErr := c.db.Close(); dbErr != nil && err == nil {
-			err = dbErr
+		if dbErr := c.db.Close(); dbErr != nil {
+			if err == nil {
+				err = dbErr
+			} else {
+				err = errors.Join(err, dbErr)
+			}
 		}
 	}
 
@@ -1585,6 +1589,10 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, s
 		return errViewsUnsupportedOnV0
 	}
 
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return err
+	}
+
 	nsIdent := catalog.NamespaceFromIdent(identifier)
 	viewIdent := catalog.TableNameFromIdent(identifier)
 	ns, exists, err := c.resolveNamespaceKey(ctx, nsIdent)
@@ -1792,6 +1800,10 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 		return false, nil
 	}
 
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return false, err
+	}
+
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))
 	if err != nil {
 		return false, err
@@ -1816,6 +1828,10 @@ func (c *Catalog) CheckViewExists(ctx context.Context, identifier table.Identifi
 func (c *Catalog) LoadView(ctx context.Context, identifier table.Identifier) (view.Metadata, error) {
 	if c.isV0() {
 		return nil, errViewsUnsupportedOnV0
+	}
+
+	if err := catalog.ValidateViewIdentifier(identifier); err != nil {
+		return nil, err
 	}
 
 	ns, err := c.namespaceKey(ctx, catalog.NamespaceFromIdent(identifier))

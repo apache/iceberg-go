@@ -1445,7 +1445,6 @@ func (buildPosAccessors) Struct(st StructType, fieldResults []map[int]accessor) 
 	for pos, f := range st.FieldList {
 		if innerMap := fieldResults[pos]; len(innerMap) != 0 {
 			for inner, acc := range innerMap {
-				acc := acc
 				result[inner] = accessor{pos: pos, inner: &acc}
 			}
 		} else {

@@ -20,6 +20,8 @@ package dv
 import (
 	"bytes"
 	"encoding/binary"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -66,7 +68,7 @@ func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, int64(10), bm.Cardinality())
-	for i := uint64(0); i < 10; i++ {
+	for i := range uint64(10) {
 		assert.True(t, bm.Contains(i), "expected position %d to be set", i)
 	}
 	assert.False(t, bm.Contains(10))
@@ -188,7 +190,7 @@ func TestKeepMaskBytes(t *testing.T) {
 		bm := NewRoaringPositionBitmap()
 		mask := bm.KeepMaskBytes(10)
 		require.Len(t, mask, 2) // ⌈10/8⌉ = 2
-		for i := int64(0); i < 10; i++ {
+		for i := range int64(10) {
 			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
 		}
 		// Bits 10..15 in the trailing byte must be cleared so callers
@@ -228,7 +230,7 @@ func TestKeepMaskBytes(t *testing.T) {
 
 		mask := bm.KeepMaskBytes(32)
 		require.Len(t, mask, 4)
-		for i := int64(0); i < 32; i++ {
+		for i := range int64(32) {
 			assert.True(t, bitAt(mask, i), "bit %d should be kept", i)
 		}
 	})
@@ -259,7 +261,7 @@ func TestKeepMaskBytes(t *testing.T) {
 		mask := bm.KeepMaskBytes(64)
 		require.Len(t, mask, 8)
 		assert.False(t, bitAt(mask, 5))
-		for i := int64(0); i < 64; i++ {
+		for i := range int64(64) {
 			if i == 5 {
 				continue
 			}
@@ -351,6 +353,225 @@ func TestRoaringBitmapSetContainsAndCardinality(t *testing.T) {
 	assert.False(t, bm.Contains(uint64(100)<<32))
 }
 
+// Why: SetRange has to split a 64-bit range across 32-bit buckets, and every
+// boundary in that split is a place an off-by-one silently deletes the wrong
+// rows. Condition: ranges wholly inside a bucket, ending and starting exactly
+// on a bucket boundary, spanning two and three buckets, plus the degenerate
+// empty and inverted cases. Assertion: exactly the in-range positions are set,
+// the neighbours on both sides are not, and no bucket is allocated for a range
+// that does not reach it.
+func TestRoaringBitmapSetRange(t *testing.T) {
+	const bucket = uint64(1) << 32
+
+	for _, tt := range []struct {
+		name        string
+		start, end  uint64
+		cardinality int64
+		set         []uint64
+		unset       []uint64
+		buckets     []uint32
+	}{
+		{
+			name: "within one bucket", start: 10, end: 15, cardinality: 5,
+			set: []uint64{10, 11, 14}, unset: []uint64{9, 15}, buckets: []uint32{0},
+		},
+		{
+			name: "single position", start: 7, end: 8, cardinality: 1,
+			set: []uint64{7}, unset: []uint64{6, 8}, buckets: []uint32{0},
+		},
+		{
+			name: "crossing a roaring container boundary", start: 65530, end: 65540, cardinality: 10,
+			set: []uint64{65530, 65535, 65536, 65539}, unset: []uint64{65529, 65540}, buckets: []uint32{0},
+		},
+		{
+			// The last included position is bucket 0's highest, so bucket 1
+			// must not be allocated at all — bucketing endExclusive instead of
+			// endExclusive-1 would create an empty bucket 1 and change the
+			// serialized bitmap count.
+			name: "ending exactly on a bucket boundary", start: bucket - 4, end: bucket, cardinality: 4,
+			set: []uint64{bucket - 4, bucket - 1}, unset: []uint64{bucket - 5, bucket}, buckets: []uint32{0},
+		},
+		{
+			name: "starting exactly on a bucket boundary", start: bucket, end: bucket + 3, cardinality: 3,
+			set: []uint64{bucket, bucket + 2}, unset: []uint64{bucket - 1, bucket + 3}, buckets: []uint32{1},
+		},
+		{
+			name: "spanning a bucket boundary", start: bucket - 3, end: bucket + 4, cardinality: 7,
+			set:   []uint64{bucket - 3, bucket - 1, bucket, bucket + 3},
+			unset: []uint64{bucket - 4, bucket + 4}, buckets: []uint32{0, 1},
+		},
+		{
+			// Three buckets exercises the middle-bucket loop, where every
+			// position of bucket 1 must be set without any range arithmetic
+			// derived from the caller's start or end.
+			name: "spanning three buckets", start: 2*bucket - 1, end: 3*bucket + 1,
+			cardinality: int64(bucket) + 2,
+			set:         []uint64{2*bucket - 1, 2 * bucket, 3*bucket - 1, 3 * bucket},
+			unset:       []uint64{2*bucket - 2, 3*bucket + 1}, buckets: []uint32{1, 2, 3},
+		},
+		{
+			name: "empty range", start: 5, end: 5,
+			unset: []uint64{4, 5, 6},
+		},
+		{
+			// Java's setRange throws on an inverted range; the Go port has no
+			// error channel here, so the documented behaviour is a no-op.
+			name: "inverted range", start: 9, end: 5,
+			unset: []uint64{4, 5, 8, 9, 10},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bm := NewRoaringPositionBitmap()
+			bm.SetRange(tt.start, tt.end)
+
+			assert.Equal(t, tt.cardinality, bm.Cardinality())
+			for _, pos := range tt.set {
+				assert.Truef(t, bm.Contains(pos), "position %d should be set", pos)
+			}
+			for _, pos := range tt.unset {
+				assert.Falsef(t, bm.Contains(pos), "position %d should not be set", pos)
+			}
+			assert.ElementsMatch(t, tt.buckets, slices.Collect(maps.Keys(bm.bitmaps)),
+				"allocated buckets")
+		})
+	}
+}
+
+// Why: SetRange is only a shortcut if it produces exactly what the per-position
+// Set loop it replaces would have produced; a divergence would delete or spare
+// rows depending on which API the writer happened to use.
+// Condition: ranges inside one bucket, across a bucket boundary, and appended to
+// an already-populated bitmap, each mirrored by a Set loop over every position.
+// Assertion: identical membership and cardinality (container encoding may
+// differ — SetRange yields runs where Set yields arrays).
+func TestRoaringBitmapSetRangeMatchesPerPositionSet(t *testing.T) {
+	const bucket = uint64(1) << 32
+
+	for _, tt := range []struct {
+		name       string
+		seed       []uint64
+		start, end uint64
+	}{
+		{name: "within one bucket", start: 1000, end: 5000},
+		{name: "spanning a bucket boundary", start: bucket - 100, end: bucket + 100},
+		{name: "merged into existing positions", seed: []uint64{0, 2500, 999999}, start: 1000, end: 5000},
+		{name: "overlapping itself", seed: []uint64{1000, 1001, 1002}, start: 1000, end: 1003},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ranged, looped := NewRoaringPositionBitmap(), NewRoaringPositionBitmap()
+			for _, pos := range tt.seed {
+				ranged.Set(pos)
+				looped.Set(pos)
+			}
+
+			ranged.SetRange(tt.start, tt.end)
+			for pos := tt.start; pos < tt.end; pos++ {
+				looped.Set(pos)
+			}
+
+			assertSamePositions(t, looped, ranged)
+		})
+	}
+}
+
+// Why: KeepMaskBytes reads each bucket through roaring's dense conversion, a
+// path that until SetRange existed only ever saw array and bitmap containers in
+// Go-built bitmaps. A range write installs run containers instead, so the mask
+// has to be correct for those too — otherwise a reader would keep rows the
+// writer deleted.
+// Condition: a range that stops mid-word, alongside a scattered position.
+// Assertion: exactly the in-range positions are dropped from the keep mask.
+func TestKeepMaskBytesAfterSetRange(t *testing.T) {
+	bitAt := func(mask []byte, i int64) bool {
+		return mask[i>>3]&(1<<uint(i&7)) != 0
+	}
+
+	bm := NewRoaringPositionBitmap()
+	bm.SetRange(10, 70)
+	bm.Set(100)
+
+	mask := bm.KeepMaskBytes(128)
+	require.Len(t, mask, 16)
+	for i := range int64(128) {
+		deleted := (i >= 10 && i < 70) || i == 100
+		assert.Equalf(t, !deleted, bitAt(mask, i), "position %d: deleted=%v", i, deleted)
+	}
+}
+
+// Why: run-length encoding is the whole reason a range-shaped deletion set is
+// cheap on the wire, and it must not disturb the positions it re-encodes.
+// Condition: a bitmap built one position at a time over a 100,000-position
+// contiguous stretch — two dense bitmap containers — serialized before and
+// after RunLengthEncode.
+// Assertion: the encoded bitmap shrinks, membership and cardinality survive,
+// and the shrunken bytes still round-trip through the deserializer.
+func TestRoaringBitmapRunLengthEncode(t *testing.T) {
+	const positions = 100_000
+
+	bm := NewRoaringPositionBitmap()
+	for pos := range uint64(positions) {
+		bm.Set(pos)
+	}
+
+	var before bytes.Buffer
+	require.NoError(t, bm.Serialize(&before))
+
+	bm.RunLengthEncode()
+
+	var after bytes.Buffer
+	require.NoError(t, bm.Serialize(&after))
+	t.Logf("bare bitmap serialization: %d bytes before RunLengthEncode, %d after", before.Len(), after.Len())
+
+	assert.Less(t, after.Len(), before.Len(), "run encoding must shrink a contiguous stretch")
+	assert.Equal(t, int64(positions), bm.Cardinality())
+
+	got, err := DeserializeRoaringPositionBitmap(after.Bytes())
+	require.NoError(t, err)
+	assertSamePositions(t, bm, got)
+	assert.False(t, got.Contains(positions))
+}
+
+// Why: run encoding must be a no-op, not a corruption, for the scattered
+// low-cardinality bitmaps that make up most deletion vectors.
+// Condition: alternating positions that roaring keeps as an array container.
+// Assertion: membership and cardinality are unchanged and the bitmap still
+// serializes and round-trips.
+func TestRoaringBitmapRunLengthEncodeScatteredPositions(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	positions := []uint64{1, 3, 5, 7, 9, (uint64(1) << 32) | 11}
+	for _, pos := range positions {
+		bm.Set(pos)
+	}
+
+	bm.RunLengthEncode()
+
+	assert.Equal(t, int64(len(positions)), bm.Cardinality())
+	for _, pos := range positions {
+		assert.Truef(t, bm.Contains(pos), "position %d should survive run encoding", pos)
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, bm.Serialize(&buf))
+	got, err := DeserializeRoaringPositionBitmap(buf.Bytes())
+	require.NoError(t, err)
+	assertSamePositions(t, bm, got)
+}
+
+// assertSamePositions asserts two bitmaps hold the same positions. It compares
+// buckets with roaring's Equals, which tests membership rather than container
+// encoding, so a run-encoded bucket matches an array-encoded bucket holding the
+// same positions.
+func assertSamePositions(t *testing.T, want, got *RoaringPositionBitmap) {
+	t.Helper()
+
+	require.Equal(t, want.Cardinality(), got.Cardinality(), "cardinality")
+	require.ElementsMatch(t, slices.Collect(maps.Keys(want.bitmaps)), slices.Collect(maps.Keys(got.bitmaps)),
+		"allocated buckets")
+	for key, wantBucket := range want.bitmaps {
+		assert.Truef(t, wantBucket.Equals(got.bitmaps[key]), "bucket %d holds different positions", key)
+	}
+}
+
 // Why: Serialize and DeserializeRoaringPositionBitmap together define the Go encoding contract for non-empty bitmaps.
 // Condition: round-trip a bitmap with positions spread across multiple keys and an internal key gap.
 // Assertion: serialization succeeds, deserialization succeeds, cardinality is preserved, and all original positions remain present.
@@ -396,4 +617,84 @@ func TestRoaringBitmapEmptyRoundTrip(t *testing.T) {
 
 	assert.True(t, got.IsEmpty())
 	assert.Equal(t, int64(0), got.Cardinality())
+}
+
+// Why: Positions is the supported way to enumerate a deletion vector's
+// contents; without it consumers must round-trip the serialized format.
+// Condition: iterate an empty bitmap.
+// Assertion: no positions are yielded.
+func TestRoaringBitmapPositionsEmpty(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+
+	for pos := range bm.Positions() {
+		t.Fatalf("empty bitmap yielded position %d", pos)
+	}
+}
+
+// Why: the single-position case pins down that Positions yields exactly what Set stored.
+// Condition: set one position above the 32-bit boundary and iterate.
+// Assertion: exactly that position is yielded.
+func TestRoaringBitmapPositionsSingle(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	want := (uint64(7) << 32) | 123
+	bm.Set(want)
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+	}
+
+	assert.Equal(t, []uint64{want}, got)
+}
+
+// Why: positions spanning multiple 32-bit keys must come back in ascending
+// 64-bit order, with the count agreeing with Cardinality.
+// Condition: set positions across keys 0, 1, and 5 (crossing the 32-bit
+// boundary) in shuffled insertion order, then iterate.
+// Assertion: yielded positions are the sorted originals and their count
+// equals Cardinality.
+func TestRoaringBitmapPositionsAscendingAcrossKeys(t *testing.T) {
+	positions := []uint64{
+		(uint64(5) << 32) | 1,
+		0,
+		(uint64(1) << 32) | 42,
+		65535,
+		uint64(5) << 32,
+		(uint64(1) << 32) | 9999,
+		1,
+	}
+
+	bm := NewRoaringPositionBitmap()
+	for _, pos := range positions {
+		bm.Set(pos)
+	}
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+	}
+
+	want := slices.Clone(positions)
+	slices.Sort(want)
+	assert.Equal(t, want, got)
+	assert.Equal(t, bm.Cardinality(), int64(len(got)))
+}
+
+// Why: iter.Seq consumers may stop early (e.g. range-over-func with break);
+// the iterator must honor that instead of continuing to yield.
+// Condition: set positions in two keys and break after the first yield.
+// Assertion: exactly one position (the smallest) is observed.
+func TestRoaringBitmapPositionsEarlyBreak(t *testing.T) {
+	bm := NewRoaringPositionBitmap()
+	bm.Set(10)
+	bm.Set((uint64(2) << 32) | 3)
+
+	var got []uint64
+	for pos := range bm.Positions() {
+		got = append(got, pos)
+
+		break
+	}
+
+	assert.Equal(t, []uint64{10}, got)
 }

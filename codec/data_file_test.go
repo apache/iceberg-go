@@ -277,9 +277,9 @@ var expectedDataFileMethods = []string{
 // changes; the round-trip test then enforces it is covered by an
 // explicit assertion above.
 func dataFileInterfaceMethods() []string {
-	t := reflect.TypeOf((*iceberg.DataFile)(nil)).Elem()
+	t := reflect.TypeFor[iceberg.DataFile]()
 	out := make([]string, 0, t.NumMethod())
-	for i := 0; i < t.NumMethod(); i++ {
+	for i := range t.NumMethod() {
 		out = append(out, t.Method(i).Name)
 	}
 	sort.Strings(out)

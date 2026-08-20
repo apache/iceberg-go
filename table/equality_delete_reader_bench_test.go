@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/iceberg-go"
 )
 
 func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {
@@ -49,7 +50,11 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				defer rec.Release()
 
 				delSet := buildDel(nDel)
-				filterFn, err := processEqualityDeletes(ctx, []*equalityDeleteSet{delSet})
+				fileSchema := iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int64},
+					iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int64},
+				)
+				filterFn, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{delSet}, fileSchema, "data.parquet")
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -57,7 +62,7 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				b.ResetTimer()
 				b.ReportAllocs()
 
-				for i := 0; i < b.N; i++ {
+				for range b.N {
 					rec.Retain()
 					result, err := filterFn(rec)
 					if err != nil {
@@ -83,7 +88,7 @@ func buildBenchRecordInt(mem memory.Allocator, numRows int) arrow.RecordBatch {
 	idBldr := bldr.Field(0).(*array.Int64Builder)
 	catBldr := bldr.Field(1).(*array.Int64Builder)
 
-	for i := 0; i < numRows; i++ {
+	for i := range numRows {
 		idBldr.Append(int64(i))
 		catBldr.Append(int64(i % 100))
 	}
@@ -95,7 +100,7 @@ func buildBenchDeleteSetInt(numDeletes int) *equalityDeleteSet {
 	keys := make(set[string])
 	var buf bytes.Buffer
 
-	for i := 0; i < numDeletes; i++ {
+	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
 		binary.Write(&buf, binary.BigEndian, int64(i*3))
@@ -123,7 +128,7 @@ func buildBenchRecordString(mem memory.Allocator, numRows int) arrow.RecordBatch
 	idBldr := bldr.Field(0).(*array.Int64Builder)
 	nameBldr := bldr.Field(1).(*array.StringBuilder)
 
-	for i := 0; i < numRows; i++ {
+	for i := range numRows {
 		idBldr.Append(int64(i))
 		nameBldr.Append(fmt.Sprintf("user-%08d", i))
 	}
@@ -135,7 +140,7 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	keys := make(set[string])
 	var buf bytes.Buffer
 
-	for i := 0; i < numDeletes; i++ {
+	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
 		binary.Write(&buf, binary.BigEndian, int64(i*3))
