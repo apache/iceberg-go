@@ -3006,6 +3006,35 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
+func TestInspectPositionDeletesV3ParquetUsesFileSize(t *testing.T) {
+	ctx := context.Background()
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete-v3.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, `[
+		{"file_path": "`+dataPath+`", "pos": 1},
+		{"file_path": "`+dataPath+`", "pos": 3}
+	]`)
+	const fileSize int64 = 128
+	deleteFile := newPosDeleteFile(t, deletePath, 2, fileSize)
+	tbl := inspectPositionDeletesTable(
+		t, 3, newInspectPositionDeletesMetadata(t, 3), memFS,
+		[]iceberg.DataFile{deleteFile},
+	)
+
+	rr, err := tbl.Inspect().PositionDeletes(ctx)
+	require.NoError(t, err)
+	defer rr.Release()
+	record := collectRecord(t, rr)
+	defer record.Release()
+
+	require.EqualValues(t, 2, record.NumRows())
+	require.EqualValues(t, 7, record.NumCols())
+	require.EqualValues(t, 2, record.Column(5).NullN())
+	require.Equal(t, []int64{fileSize, fileSize},
+		record.Column(6).(*array.Int64).Int64Values())
+}
+
 func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
 	memFS := iceio.NewMemFS()
 	deletePath := "mem://position-deletes/table/data/delete-negative.parquet"

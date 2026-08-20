@@ -186,10 +186,20 @@ func (a positionDeleteRecordAppender) append(
 	a.deleteFilePath.Append(file.FilePath())
 	if a.formatVersion >= 3 {
 		appendInspectOptionalInt64(a.contentOffset, file.ContentOffset())
-		appendInspectOptionalInt64(a.contentSize, file.ContentSizeInBytes())
+		appendInspectOptionalInt64(a.contentSize, positionDeleteContentSize(file))
 	}
 
 	return nil
+}
+
+func positionDeleteContentSize(file iceberg.DataFile) *int64 {
+	if file.FileFormat() == iceberg.PuffinFile {
+		return file.ContentSizeInBytes()
+	}
+
+	fileSize := file.FileSizeBytes()
+
+	return &fileSize
 }
 
 // appendPositionDeleteRow projects a row from a position-delete file onto the
