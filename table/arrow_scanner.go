@@ -479,6 +479,13 @@ func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], e
 				return nil, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
 					iceberg.ErrInvalidSchema, arr)
 			}
+			if posArr.NullN() > 0 {
+				return nil, fmt.Errorf("%w: null pos in position delete file",
+					iceberg.ErrInvalidSchema)
+			}
+			if err := validatePositionDeletePositions(posArr); err != nil {
+				return nil, err
+			}
 			for _, v := range posArr.Int64Values() {
 				deletes[v] = struct{}{}
 			}
