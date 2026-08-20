@@ -549,6 +549,77 @@ func TestUnmarshalAddSpecWithoutIDUsesInitialSpecID(t *testing.T) {
 	assert.Equal(t, iceberg.InitialPartitionSpecID, update.Spec.ID())
 }
 
+func TestUnmarshalUpdatesAcceptsLegacyPropertyFields(t *testing.T) {
+	data := []byte(`[
+		{"action":"set-properties","updated":{"key":"legacy"}},
+		{"action":"remove-properties","removed":["key"]},
+		{"action":"set-properties","updated":{}},
+		{"action":"remove-properties","removed":[]},
+		{"action":"set-properties","updated":{"key":"legacy"},"updates":{"key":"modern"}},
+		{"action":"remove-properties","removed":["legacy"],"removals":["modern"]}
+	]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	assert.Equal(t, Updates{
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "legacy"}),
+		NewRemovePropertiesUpdate([]string{"key"}),
+		NewSetPropertiesUpdate(iceberg.Properties{}),
+		NewRemovePropertiesUpdate([]string{}),
+		NewSetPropertiesUpdate(iceberg.Properties{"key": "modern"}),
+		NewRemovePropertiesUpdate([]string{"modern"}),
+	}, updates)
+
+	encoded, err := json.Marshal(updates)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[
+		{"action":"set-properties","updates":{"key":"legacy"}},
+		{"action":"remove-properties","removals":["key"]},
+		{"action":"set-properties","updates":{}},
+		{"action":"remove-properties","removals":[]},
+		{"action":"set-properties","updates":{"key":"modern"}},
+		{"action":"remove-properties","removals":["modern"]}
+	]`, string(encoded))
+}
+
+func TestUnmarshalUpdatesRejectsNullLegacyPropertyFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  string
+		field string
+	}{
+		{
+			name:  "set-properties legacy field",
+			data:  `{"action":"set-properties","updated":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties legacy field",
+			data:  `{"action":"remove-properties","removed":null}`,
+			field: "removals",
+		},
+		{
+			name:  "set-properties canonical field takes precedence",
+			data:  `{"action":"set-properties","updated":{"key":"legacy"},"updates":null}`,
+			field: "updates",
+		},
+		{
+			name:  "remove-properties canonical field takes precedence",
+			data:  `{"action":"remove-properties","removed":["legacy"],"removals":null}`,
+			field: "removals",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			err := json.Unmarshal([]byte("["+tt.data+"]"), &updates)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.field)
+		})
+	}
+}
+
 func TestUnmarshalUpdatesReplacesExistingSlice(t *testing.T) {
 	var updates Updates
 	require.NoError(t, json.Unmarshal([]byte(`[
@@ -693,6 +764,88 @@ func TestUnmarshalUpdatesRejectsMissingOrNullAction(t *testing.T) {
 			err := json.Unmarshal([]byte("["+data+"]"), &updates)
 			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 			require.ErrorContains(t, err, "action")
+		})
+	}
+}
+
+func TestUnmarshalUpdatesUsesJSONActionFieldSemantics(t *testing.T) {
+	tests := []struct {
+		name           string
+		data           string
+		expectedAction string
+		assert         func(*testing.T, Update)
+	}{
+		{
+			name:           "accepts mixed-case action key",
+			data:           `[{"Action":"set-location","location":"s3://bucket/table"}]`,
+			expectedAction: UpdateSetLocation,
+			assert: func(t *testing.T, update Update) {
+				t.Helper()
+				location, ok := update.(*setLocationUpdate)
+				require.True(t, ok)
+				assert.Equal(t, "s3://bucket/table", location.Location)
+			},
+		},
+		{
+			name:           "uses the last duplicate case-variant action key",
+			data:           `[{"action":"set-location","ACTION":"assign-uuid","location":"s3://bucket/table","uuid":"550e8400-e29b-41d4-a716-446655440000"}]`,
+			expectedAction: UpdateAssignUUID,
+			assert: func(t *testing.T, update Update) {
+				t.Helper()
+				assignUUID, ok := update.(*assignUUIDUpdate)
+				require.True(t, ok)
+				assert.Equal(t, uuid.MustParse("550e8400-e29b-41d4-a716-446655440000"), assignUUID.UUID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			require.NoError(t, json.Unmarshal([]byte(tt.data), &updates))
+			require.Len(t, updates, 1)
+			assert.Equal(t, tt.expectedAction, updates[0].Action())
+			tt.assert(t, updates[0])
+		})
+	}
+
+	t.Run("rejects unknown action from duplicate case-variant key", func(t *testing.T) {
+		var updates Updates
+		err := json.Unmarshal([]byte(`[{"action":"set-location","ACTION":"unknown","location":"s3://bucket/table"}]`), &updates)
+		require.ErrorContains(t, err, "unknown update action: unknown")
+	})
+}
+
+func TestUnmarshalUpdatesPreservesDuplicateActionTypeError(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "valid final action",
+			data: `[{"action":123,"action":"set-properties","updated":{"k":"v"}}]`,
+		},
+		{
+			name: "valid final action with missing required field",
+			data: `[{"action":123,"action":"set-location"}]`,
+		},
+		{
+			name: "unknown final action",
+			data: `[{"action":123,"action":"unknown"}]`,
+		},
+		{
+			name: "null final action",
+			data: `[{"action":123,"action":null}]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updates Updates
+			var typeErr *json.UnmarshalTypeError
+			err := json.Unmarshal([]byte(tt.data), &updates)
+
+			require.ErrorAs(t, err, &typeErr)
 		})
 	}
 }

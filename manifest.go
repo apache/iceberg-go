@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"math"
 	"math/big"
 	"reflect"
@@ -468,17 +469,12 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	decimalScales := make(map[int]int)
 	unknownFieldIDs := make(map[int]struct{})
 
-	entryField := getField(root, "data_file")
+	entryField := getField(*root, "data_file")
 	partitionField := getField(entryField.Type, "partition")
 
 	for _, field := range partitionField.Type.Fields {
-		var fid int
-		switch v := field.Props["field-id"].(type) {
-		case int:
-			fid = v
-		case float64:
-			fid = int(v)
-		default:
+		fid, ok := schemaFieldID(field)
+		if !ok {
 			continue
 		}
 
@@ -999,17 +995,75 @@ func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestE
 	return results, nil
 }
 
+// Manifest-list entry field IDs used to infer the format version from an
+// embedded writer schema. Per the Iceberg spec, content and sequence_number
+// are required fields for v2+ manifest lists and first_row_id is a v3 field;
+// none of them exist in v1.
+const (
+	fieldIDManifestSequenceNumber = 515
+	fieldIDManifestContent        = 517
+	fieldIDManifestFirstRowID     = 520
+)
+
+// schemaFieldID returns the Iceberg "field-id" property of an Avro schema
+// field, if present. Schemas parsed from JSON (e.g. an OCF header's embedded
+// writer schema) carry numbers as float64, while schemas built in memory
+// carry int.
+func schemaFieldID(f avro.SchemaField) (int, bool) {
+	switch v := f.Props["field-id"].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	}
+
+	return 0, false
+}
+
+// inferManifestListVersion infers the format version of a manifest list from
+// the fields of its embedded writer schema: first_row_id (field-id 520)
+// implies v3, content (517) or sequence_number (515) imply v2, and a schema
+// with none of them is v1. Fields are identified by their field-id property —
+// the stable contract per the spec — with the spec field names as a fallback
+// for writers that don't annotate IDs.
+func inferManifestListVersion(sc *avro.Schema) int {
+	version := 1
+	for _, f := range sc.Root().Fields {
+		id, ok := schemaFieldID(f)
+		switch {
+		case ok && id == fieldIDManifestFirstRowID,
+			!ok && f.Name == "first_row_id":
+			return 3
+		case ok && (id == fieldIDManifestContent || id == fieldIDManifestSequenceNumber),
+			!ok && (f.Name == "content" || f.Name == "sequence_number"):
+			version = 2
+		}
+	}
+
+	return version
+}
+
 // ReadManifestList reads in an avro manifest list file and returns a slice
 // of manifest files or an error if one is encountered.
 //
 // Per the Iceberg spec, manifest list files are not required to carry a
 // "format-version" metadata key (only manifest files are). When the key is
-// absent, version 1 is assumed.
+// absent, the version is inferred from the embedded writer schema, so lists
+// from writers that omit the key (e.g. DuckDB's iceberg extension) decode
+// with their real content types and sequence numbers instead of falling back
+// to v1. When the key is present but claims a lower version than the schema
+// carries fields for, an error is returned rather than silently dropping
+// those fields on decode (or on a later rewrite through the older writer
+// schema).
 func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 	var version int
 
 	rd, err := ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(rd *ocf.Reader) (*avro.Schema, error) {
-		version = 1
+		inferred := inferManifestListVersion(rd.Schema())
+
+		version = inferred
 		if raw := rd.Metadata()["format-version"]; len(raw) > 0 {
 			v, err := strconv.Atoi(string(raw))
 			if err != nil {
@@ -1020,6 +1074,10 @@ func ReadManifestList(in io.Reader) ([]ManifestFile, error) {
 		}
 		if err := validateManifestFormatVersion(version); err != nil {
 			return nil, err
+		}
+
+		if version < inferred {
+			return nil, fmt.Errorf("manifest list's 'format-version' metadata says %d, but the embedded writer schema carries v%d fields; reading it as v%d would silently drop them", version, inferred, version)
 		}
 
 		if version == 1 {
@@ -1210,6 +1268,9 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	}
 
 	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
+	if data, ok := any(actualVal).([]byte); ok {
+		actualVal = any(slices.Clone(data)).(T)
+	}
 
 	switch f := any(actualVal).(type) {
 	case float32:
@@ -1242,36 +1303,47 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	return nil
 }
 
-func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[int]any) ([]FieldSummary, error) {
-	partType := spec.PartitionType(schema)
-	fieldStats := make([]fieldStats, len(partType.FieldList))
+type partitionSummaryStats struct {
+	fields []NestedField
+	stats  []fieldStats
+}
+
+func newPartitionSummaryStats(spec PartitionSpec, schema *Schema) (*partitionSummaryStats, error) {
+	fields := spec.PartitionType(schema).FieldList
+	stats := make([]fieldStats, len(fields))
 	var err error
-	for i, field := range partType.FieldList {
+	for i, field := range fields {
 		pt, ok := field.Type.(PrimitiveType)
 		if !ok {
 			return nil, fmt.Errorf("expected primitive type for partition field, got %s", field.Type)
 		}
 
-		fieldStats[i], err = newPartitionFieldStat(pt)
+		stats[i], err = newPartitionFieldStat(pt)
 		if err != nil {
 			return nil, fmt.Errorf("error constructing field stats for partition %d: %s: %s", i, field.Name, err)
 		}
 	}
 
-	for _, part := range partitions {
-		for i, field := range partType.FieldList {
-			if err := fieldStats[i].update(part[field.ID]); err != nil {
-				return nil, fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
-			}
+	return &partitionSummaryStats{fields: fields, stats: stats}, nil
+}
+
+func (p *partitionSummaryStats) update(partition map[int]any) error {
+	for i, field := range p.fields {
+		if err := p.stats[i].update(partition[field.ID]); err != nil {
+			return fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
 		}
 	}
 
-	summaries := make([]FieldSummary, len(fieldStats))
-	for i, stat := range fieldStats {
+	return nil
+}
+
+func (p *partitionSummaryStats) summaries() []FieldSummary {
+	summaries := make([]FieldSummary, len(p.stats))
+	for i, stat := range p.stats {
 		summaries[i] = stat.toSummary()
 	}
 
-	return summaries, nil
+	return summaries
 }
 
 type ManifestWriter struct {
@@ -1297,9 +1369,10 @@ type ManifestWriter struct {
 	deletedFiles  int32
 	deletedRows   int64
 
-	partitions  []map[int]any
-	minSeqNum   int64
-	reusedEntry manifestEntry
+	partitionStats    *partitionSummaryStats
+	partitionStatsErr error
+	minSeqNum         int64
+	reusedEntry       manifestEntry
 }
 
 type ManifestWriterOption func(w *ManifestWriter)
@@ -1335,18 +1408,20 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	}
 
 	fieldMaps := getFieldIDMap(fileSchema)
+	partitionStats, partitionStatsErr := newPartitionSummaryStats(spec, schema)
 
 	w := &ManifestWriter{
-		impl:          impl,
-		version:       version,
-		output:        out,
-		spec:          spec,
-		content:       ManifestContentData,
-		schema:        schema,
-		partFieldMaps: fieldMaps,
-		snapshotID:    snapshotID,
-		minSeqNum:     -1,
-		partitions:    make([]map[int]any, 0),
+		impl:              impl,
+		version:           version,
+		output:            out,
+		spec:              spec,
+		content:           ManifestContentData,
+		schema:            schema,
+		partFieldMaps:     fieldMaps,
+		snapshotID:        snapshotID,
+		partitionStats:    partitionStats,
+		partitionStatsErr: partitionStatsErr,
+		minSeqNum:         -1,
 	}
 
 	for _, apply := range opts {
@@ -1414,10 +1489,10 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		return nil, err
 	}
 
-	partitions, err := constructPartitionSummaries(w.spec, w.schema, w.partitions)
-	if err != nil {
-		return nil, err
+	if w.partitionStatsErr != nil {
+		return nil, w.partitionStatsErr
 	}
+	partitions := w.partitionStats.summaries()
 
 	mf := manifestFile{
 		version:            w.version,
@@ -1487,17 +1562,21 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		return fmt.Errorf("unknown entry status: %v", status)
 	}
 	count := entry.DataFile().Count()
-	partition := entry.Data.Partition()
 
+	var partition map[int]any
 	entryToEncode := *entry
 	if dataFile, ok := entry.DataFile().(*dataFile); ok {
+		partition = dataFile.DataFilePartitionRef(internal.DataFileRef{})
 		encodeDataFile := cloneDataFileAvroFields(dataFile)
-		encodePartition, err := avroEncodePartitionData(partition, w.partFieldMaps)
+		encodePartition, err := avroEncodePartitionData(
+			partition, w.partFieldMaps)
 		if err != nil {
 			return err
 		}
 		encodeDataFile.PartitionData = encodePartition
 		entryToEncode.Data = encodeDataFile
+	} else {
+		partition = entry.Data.Partition()
 	}
 
 	toEncode, err := w.impl.prepareEntry(&entryToEncode, w.snapshotID)
@@ -1521,7 +1600,9 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 		w.deletedRows += count
 	}
 
-	w.partitions = append(w.partitions, partition)
+	if w.partitionStatsErr == nil {
+		w.partitionStatsErr = w.partitionStats.update(partition)
+	}
 
 	if status == EntryStatusADDED || status == EntryStatusEXISTING {
 		if seq := entry.SequenceNum(); seq >= 0 && (w.minSeqNum < 0 || seq < w.minSeqNum) {
@@ -2288,7 +2369,61 @@ func (d *dataFile) FileFormat() FileFormat            { return d.Format }
 func (d *dataFile) Partition() map[int]any {
 	d.initPartitionData()
 
-	return d.fieldIDToPartitionData
+	return clonePartitionMap(d.fieldIDToPartitionData)
+}
+
+func clonePartitionMap(src map[int]any) map[int]any {
+	if src == nil {
+		return nil
+	}
+
+	// Manifest decoding produces immutable scalar/literal values and []byte
+	// for binary and fixed values. Clone the latter explicitly; arbitrary
+	// caller-defined mutable values are not recursively copied.
+	out := maps.Clone(src)
+	for id, value := range out {
+		if bytes, ok := value.([]byte); ok {
+			out[id] = slices.Clone(bytes)
+		}
+	}
+
+	return out
+}
+
+func cloneByteMap(src map[int][]byte) map[int][]byte {
+	if src == nil {
+		return nil
+	}
+
+	out := make(map[int][]byte, len(src))
+	for id, value := range src {
+		out[id] = slices.Clone(value)
+	}
+
+	return out
+}
+
+func mapToAvroColMapClonedBytes(m map[int][]byte) *[]colMap[int, []byte] {
+	if m == nil {
+		return nil
+	}
+
+	out := make([]colMap[int, []byte], 0, len(m))
+	for k, v := range m {
+		out = append(out, colMap[int, []byte]{Key: k, Value: slices.Clone(v)})
+	}
+
+	return &out
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+
+	cloned := *value
+
+	return &cloned
 }
 
 func (d *dataFile) Count() int64         { return d.RecordCount }
@@ -2298,43 +2433,43 @@ func (d *dataFile) SpecID() int32        { return d.specID }
 func (d *dataFile) ColumnSizes() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.colSizeMap
+	return maps.Clone(d.colSizeMap)
 }
 
 func (d *dataFile) ValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.valCntMap
+	return maps.Clone(d.valCntMap)
 }
 
 func (d *dataFile) NullValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.nullCntMap
+	return maps.Clone(d.nullCntMap)
 }
 
 func (d *dataFile) NaNValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.nanCntMap
+	return maps.Clone(d.nanCntMap)
 }
 
 func (d *dataFile) DistinctValueCounts() map[int]int64 {
 	d.initColumnStatsData()
 
-	return d.distinctCntMap
+	return maps.Clone(d.distinctCntMap)
 }
 
 func (d *dataFile) LowerBoundValues() map[int][]byte {
 	d.initColumnStatsData()
 
-	return d.lowerBoundMap
+	return cloneByteMap(d.lowerBoundMap)
 }
 
 func (d *dataFile) UpperBoundValues() map[int][]byte {
 	d.initColumnStatsData()
 
-	return d.upperBoundMap
+	return cloneByteMap(d.upperBoundMap)
 }
 
 func (d *dataFile) KeyMetadata() []byte {
@@ -2342,7 +2477,7 @@ func (d *dataFile) KeyMetadata() []byte {
 		return nil
 	}
 
-	return *d.Key
+	return slices.Clone(*d.Key)
 }
 
 func (d *dataFile) SplitOffsets() []int64 {
@@ -2350,7 +2485,7 @@ func (d *dataFile) SplitOffsets() []int64 {
 		return nil
 	}
 
-	return *d.Splits
+	return slices.Clone(*d.Splits)
 }
 
 func (d *dataFile) EqualityFieldIDs() []int {
@@ -2358,15 +2493,15 @@ func (d *dataFile) EqualityFieldIDs() []int {
 		return nil
 	}
 
-	return *d.EqualityIDs
+	return slices.Clone(*d.EqualityIDs)
 }
 
-func (d *dataFile) SortOrderID() *int { return d.SortOrder }
+func (d *dataFile) SortOrderID() *int { return clonePointer(d.SortOrder) }
 
-func (d *dataFile) FirstRowID() *int64          { return d.FirstRowIDField }
-func (d *dataFile) ReferencedDataFile() *string { return d.ReferencedDataFileField }
-func (d *dataFile) ContentSizeInBytes() *int64  { return d.ContentSizeInBytesField }
-func (d *dataFile) ContentOffset() *int64       { return d.ContentOffsetField }
+func (d *dataFile) FirstRowID() *int64          { return clonePointer(d.FirstRowIDField) }
+func (d *dataFile) ReferencedDataFile() *string { return clonePointer(d.ReferencedDataFileField) }
+func (d *dataFile) ContentSizeInBytes() *int64  { return clonePointer(d.ContentSizeInBytesField) }
+func (d *dataFile) ContentOffset() *int64       { return clonePointer(d.ContentOffsetField) }
 
 type ManifestEntryBuilder struct {
 	m *manifestEntry
@@ -2501,6 +2636,9 @@ type DataFileBuilder struct {
 // before calling [DataFileBuilder.Build] to construct the object.
 // The fieldIDToFixedSize argument is retained for source compatibility and is
 // ignored; manifest schemas determine decimal fixed widths during encoding.
+// Byte-slice partition values are cloned. Other partition values must be the
+// immutable scalar or literal values produced by Iceberg's manifest decoder;
+// mutable caller-defined values are retained by reference.
 func NewDataFileBuilder(
 	spec PartitionSpec,
 	content ManifestEntryContent,
@@ -2549,6 +2687,9 @@ func NewDataFileBuilder(
 	fieldNameToID := make(map[string]int)
 	for _, p := range spec.fields {
 		if pData, ok := fieldIDToPartitionData[p.FieldID]; ok {
+			if bytes, ok := pData.([]byte); ok {
+				pData = slices.Clone(bytes)
+			}
 			partitionData[p.Name] = pData
 			fieldNameToID[p.Name] = p.FieldID
 		}
@@ -2563,9 +2704,9 @@ func NewDataFileBuilder(
 			RecordCount:            recordCount,
 			FileSize:               fileSize,
 			specID:                 int32(spec.id),
-			fieldIDToPartitionData: fieldIDToPartitionData,
+			fieldIDToPartitionData: clonePartitionMap(fieldIDToPartitionData),
 			fieldNameToID:          fieldNameToID,
-			fieldIDToLogicalType:   fieldIDToLogicalType,
+			fieldIDToLogicalType:   maps.Clone(fieldIDToLogicalType),
 		},
 	}, nil
 }
@@ -2621,35 +2762,38 @@ func (b *DataFileBuilder) DistinctValueCounts(counts map[int]int64) *DataFileBui
 
 // LowerBoundValues sets the lower bound values for the data file.
 func (b *DataFileBuilder) LowerBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.LowerBounds = mapToAvroColMap(bounds)
+	b.d.LowerBounds = mapToAvroColMapClonedBytes(bounds)
 
 	return b
 }
 
 // UpperBoundValues sets the upper bound values for the data file.
 func (b *DataFileBuilder) UpperBoundValues(bounds map[int][]byte) *DataFileBuilder {
-	b.d.UpperBounds = mapToAvroColMap(bounds)
+	b.d.UpperBounds = mapToAvroColMapClonedBytes(bounds)
 
 	return b
 }
 
 // KeyMetadata sets the key metadata for the data file.
 func (b *DataFileBuilder) KeyMetadata(key []byte) *DataFileBuilder {
-	b.d.Key = &key
+	cloned := slices.Clone(key)
+	b.d.Key = &cloned
 
 	return b
 }
 
 // SplitOffsets sets the split offsets for the data file.
 func (b *DataFileBuilder) SplitOffsets(offsets []int64) *DataFileBuilder {
-	b.d.Splits = &offsets
+	cloned := slices.Clone(offsets)
+	b.d.Splits = &cloned
 
 	return b
 }
 
 // EqualityFieldIDs sets the equality field ids for the data file.
 func (b *DataFileBuilder) EqualityFieldIDs(ids []int) *DataFileBuilder {
-	b.d.EqualityIDs = &ids
+	cloned := slices.Clone(ids)
+	b.d.EqualityIDs = &cloned
 
 	return b
 }

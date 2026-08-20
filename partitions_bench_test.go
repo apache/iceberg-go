@@ -63,7 +63,7 @@ func BenchmarkPartitionToPath(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = spec.PartitionToPath(record, schema)
 	}
 }
@@ -94,7 +94,7 @@ func BenchmarkPartitionToPathManyFields(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = spec.PartitionToPath(record, schema)
 	}
 }
@@ -126,7 +126,7 @@ func BenchmarkPartitionType(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = spec.PartitionType(schema)
 	}
 }
@@ -155,7 +155,7 @@ func BenchmarkPartitionTypeMultipleSchemas(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		schema := schemas[i%len(schemas)]
 		_ = spec.PartitionType(schema)
 	}
@@ -197,7 +197,7 @@ func BenchmarkPartitionToPathRepeated(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		record := records[i%len(records)]
 		_ = spec.PartitionToPath(record, schema)
 	}
@@ -216,7 +216,7 @@ func BenchmarkPartitionSpecInitialize(b *testing.B) {
 
 	b.ResetTimer()
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = iceberg.NewPartitionSpecID(1, fields...)
 	}
 }

@@ -53,6 +53,18 @@ func mkVars(t *testing.T, raws ...any) []variant.Value {
 	return out
 }
 
+// mkBuilt builds a variant.Value via a builder callback, for leaf types (decimal,
+// timestamp) that the reflection-based mkVar cannot express directly.
+func mkBuilt(t *testing.T, build func(*variant.Builder) error) variant.Value {
+	t.Helper()
+	var b variant.Builder
+	require.NoError(t, build(&b))
+	v, err := b.Build()
+	require.NoError(t, err)
+
+	return v
+}
+
 // bigI64 is large enough to force Int64 encoding (> 2^32).
 const bigI64 = int64(5_000_000_000)
 
@@ -82,10 +94,10 @@ func TestAnalyzeUniformObject(t *testing.T) {
 
 func TestAnalyzeRareFieldDropped(t *testing.T) {
 	var sample []variant.Value
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		sample = append(sample, mkVar(t, map[string]any{"common": bigI64}))
 	}
-	for i := 0; i < 5; i++ { // 5/105 = 4.8% < 10% floor
+	for range 5 { // 5/105 = 4.8% < 10% floor
 		sample = append(sample, mkVar(t, map[string]any{"common": bigI64, "rare": "z"}))
 	}
 	dt, ok := AnalyzeVariantShredding(sample)
@@ -115,22 +127,89 @@ func TestAnalyzeIntegerWidening(t *testing.T) {
 		"widening must pick Int64, got %s", f[0].Type)
 }
 
-func TestAnalyzeMixedTypeMajority(t *testing.T) {
-	// "v" is an int in 7 rows, a string in 3 -> majority int wins.
+// TestAnalyzeMixedTypeNotShredded: a field mixing type families (int in 7 rows,
+// string in 3) is not uniform and must not shred - it is this object's only
+// field, so nothing shreds at all.
+func TestAnalyzeMixedTypeNotShredded(t *testing.T) {
 	var sample []variant.Value
-	for i := 0; i < 7; i++ {
+	for range 7 {
 		sample = append(sample, mkVar(t, map[string]any{"v": bigI64}))
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sample = append(sample, mkVar(t, map[string]any{"v": "s"}))
 	}
+	_, ok := AnalyzeVariantShredding(sample)
+	assert.False(t, ok, "mixed int+string field must not shred")
+}
+
+// TestAnalyzeCrossFamilyNotShredded: distinct scalar families that do not widen
+// into each other are not uniform and must not shred.
+func TestAnalyzeCrossFamilyNotShredded(t *testing.T) {
+	microsTS := func(b *variant.Builder) error {
+		return b.AppendTimestamp(arrow.Timestamp(1_700_000_000_000_000), true, true)
+	}
+	nanosTS := func(b *variant.Builder) error {
+		return b.AppendTimestamp(arrow.Timestamp(1_700_000_000_000_000), false, true)
+	}
+	dec := func(b *variant.Builder) error { return b.AppendDecimal8(2, decimal.Decimal64(12345)) }
+
+	for _, c := range []struct {
+		name   string
+		sample []variant.Value
+	}{
+		{"float+double", mkVars(t, float32(1.5), float64(2.5))},
+		{"timestamp micros+nanos", []variant.Value{mkBuilt(t, microsTS), mkBuilt(t, nanosTS)}},
+		{"int+decimal", []variant.Value{mkVar(t, bigI64), mkBuilt(t, dec)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := AnalyzeVariantShredding(c.sample)
+			assert.Falsef(t, ok, "%s must not shred", c.name)
+		})
+	}
+}
+
+// TestAnalyzeMixedSiblingKeepsUniform: a mixed-type field is dropped from the
+// shredded type while its uniform sibling still shreds.
+func TestAnalyzeMixedSiblingKeepsUniform(t *testing.T) {
+	sample := mkVars(t,
+		map[string]any{"good": bigI64, "bad": bigI64},
+		map[string]any{"good": bigI64, "bad": "s"},
+	)
 	dt, ok := AnalyzeVariantShredding(sample)
 	require.True(t, ok)
-	st := dt.(*arrow.StructType)
-	f, _ := st.FieldsByName("v")
-	require.Len(t, f, 1)
-	assert.Truef(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, f[0].Type),
-		"majority int must win, got %s", f[0].Type)
+
+	want := arrow.StructOf(arrow.Field{Name: "good", Type: arrow.PrimitiveTypes.Int64, Nullable: true})
+	assert.Truef(t, arrow.TypeEqual(want, dt), "want %s got %s", want, dt)
+}
+
+// TestAnalyzeEmptyContainerNotShredded: an object with no fields and an array with no
+// elements have nothing to shred, so inference must decline.
+func TestAnalyzeEmptyContainerNotShredded(t *testing.T) {
+	_, ok := AnalyzeVariantShredding(mkVars(t, map[string]any{}, map[string]any{}))
+	assert.False(t, ok, "empty object must not shred")
+
+	_, ok = AnalyzeVariantShredding(mkVars(t, []any{}, []any{}))
+	assert.False(t, ok, "empty array must not shred")
+}
+
+// TestAnalyzeDecimalWidening: the decimal family widens to a single leaf and still
+// shreds; only cross-family mixing blocks shredding.
+func TestAnalyzeDecimalWidening(t *testing.T) {
+	dec4 := func(b *variant.Builder) error { return b.AppendDecimal4(2, decimal.Decimal32(12345)) }
+	dec8 := func(b *variant.Builder) error { return b.AppendDecimal8(2, decimal.Decimal64(1234567890)) }
+	dt, ok := AnalyzeVariantShredding([]variant.Value{mkBuilt(t, dec4), mkBuilt(t, dec8)})
+	require.True(t, ok, "decimal family must still shred after widening")
+	_, isDec := dt.(*arrow.Decimal128Type)
+	assert.Truef(t, isDec, "decimal widening must produce a decimal leaf, got %s", dt)
+}
+
+// TestAnalyzeNullsPlusOneType: variant-null values are not observed, so a field
+// null in some rows and one type in the rest still shreds as that type.
+func TestAnalyzeNullsPlusOneType(t *testing.T) {
+	dt, ok := AnalyzeVariantShredding(mkVars(t, nil, bigI64, nil, bigI64))
+	require.True(t, ok)
+	assert.Truef(t, arrow.TypeEqual(arrow.PrimitiveTypes.Int64, dt),
+		"nulls + int must shred as Int64, got %s", dt)
 }
 
 func TestAnalyzeScalarRoot(t *testing.T) {
@@ -268,22 +347,14 @@ func TestInferredTypedScalarsShred(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			mk := func() variant.Value {
-				var b variant.Builder
-				require.NoError(t, c.build(&b))
-				v, err := b.Build()
-				require.NoError(t, err)
-
-				return v
-			}
-			v := mk()
+			v := mkBuilt(t, c.build)
 			inner, ok := AnalyzeVariantShredding([]variant.Value{v})
 			require.Truef(t, ok, "%s should infer a shredded type", c.name)
 
 			st := extensions.NewShreddedVariantType(inner)
 			bldr := extensions.NewVariantBuilder(mem, st)
 			defer bldr.Release()
-			bldr.Append(mk())
+			bldr.Append(v)
 			arr := bldr.NewArray().(*extensions.VariantArray)
 			defer arr.Release()
 
@@ -353,7 +424,7 @@ func TestAnalyzeNestedHighCardinality(t *testing.T) {
 // nothing shreds. Fails (ok=true) if the recursion depth guard is removed or raised.
 func TestAnalyzeDepthCap(t *testing.T) {
 	var nested any = bigI64
-	for i := 0; i < maxShreddingDepth+50; i++ {
+	for range maxShreddingDepth + 50 {
 		nested = map[string]any{"n": nested}
 	}
 	_, ok := AnalyzeVariantShredding(mkVars(t, nested, nested))

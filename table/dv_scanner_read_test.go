@@ -343,7 +343,7 @@ func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
 
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
-	for i := int64(0); i < 3; i++ {
+	for i := range int64(3) {
 		bldr.Append(i)
 	}
 	col := bldr.NewArray()

@@ -94,8 +94,8 @@ func runRewriteWithCleanup(t *testing.T, tbl *table.Table, groups []table.Compac
 					rewrittenSet[task.File.FilePath()] = struct{}{}
 				}
 			}
-			deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(
-				t.Context(), iceio.LocalFS{}, snap, rewrittenSet)
+			deadEqDeletes, err := compaction.CollectDeadEqualityDeletesWithSpecs(
+				t.Context(), iceio.LocalFS{}, tbl.Metadata(), snap, rewrittenSet)
 			require.NoError(t, err)
 			rewriteOpts.ExtraDeleteFilesToRemove = deadEqDeletes
 		}
@@ -517,7 +517,7 @@ func TestRewriteDataFiles_DeadEqualityDeletesDropped(t *testing.T) {
 	for rec, err := range itr {
 		require.NoError(t, err)
 		col := rec.Column(0).(*array.Int64)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			ids = append(ids, col.Value(i))
 		}
 		rec.Release()

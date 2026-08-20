@@ -48,12 +48,14 @@ catalog:
 |---|---|
 | `default-catalog` | Name used when `--catalog-name` is not passed on the CLI. |
 | `max-workers` | Worker pool size for concurrent operations. Default `5`. |
-| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. |
+| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. `dynamodb` is recognized by the CLI but not implemented yet. |
 | `catalog.<name>.uri` | Catalog endpoint or DSN. |
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
 | `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
+| `catalog.<name>.sql-driver` | `database/sql` driver name for the SQL catalog. Maps to the `sql.driver` property. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
+| `catalog.<name>.sql-dialect` | SQL dialect for the SQL catalog (`postgres`, `mysql`, `sqlite`, `mssql`, `oracle`). Maps to the `sql.dialect` property. The default CLI binary only ships `sqlite` via `sqliteshim`; other dialects need a custom build with their drivers. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. |
 | `catalog.<name>.rest.signing-name` | SigV4 service name. |
 | `catalog.<name>.rest.signing-region` | SigV4 region. |
@@ -74,6 +76,30 @@ The most option-rich surface. Source: [`catalog/rest/options.go`](https://github
 | Catalog routing | `WithPrefix`, `WithWarehouseLocation`, `WithMetadataLocation` |
 | Pass-through | `WithAdditionalProps` |
 
+#### Metrics reporting
+
+The REST catalog can POST scan and commit metrics to the catalog's
+`.../tables/{table}/metrics` endpoint. These properties are passed as
+client-supplied catalog properties.
+
+| Property | Description |
+|---|---|
+| `rest-metrics-reporting-enabled` | Opt into POSTing metrics reports. **Off by default.** |
+| `rest.metrics-reporting-enabled` | Legacy dotted alias; consulted only when the canonical key above is absent. |
+| `rest-metrics-reporting-timeout-ms` | Per-report request/response deadline in milliseconds. Default `10000`. |
+
+> **Note on cross-client parity.** Iceberg Java defaults metrics reporting to
+> *on* (`METRICS_REPORTING_ENABLED_DEFAULT=true`); iceberg-go deliberately
+> defaults it *off*, so no client emits new outbound telemetry unless it
+> explicitly opts in. A Java client that never set the flag will therefore stop
+> reporting when ported here until `rest-metrics-reporting-enabled=true` is set.
+> Enablement is read from client properties only — a server cannot turn on
+> reporting the client never asked for — but an explicit server override setting
+> the flag to `false` *is* honored (disabling is always safe), so an operator can
+> suppress reporting fleet-wide. `rest-metrics-reporting-timeout-ms` is a
+> Go-specific extension with no Java, PyIceberg, or Rust equivalent; do not
+> assume parity on it in multi-client deployments.
+
 ### Hive (`catalog/hive`)
 
 Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/main/catalog/hive/options.go).
@@ -81,6 +107,17 @@ Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/ma
 - `WithURI(uri string)` - Thrift URI for the Hive Metastore (e.g. `thrift://127.0.0.1:9083`).
 - `WithWarehouse(warehouse string)`
 - `WithProperties(props iceberg.Properties)`
+
+Lock-check catalog properties (passed via `WithProperties` / `catalog.Load` props):
+
+| Property | Default | Description |
+|---|---|---|
+| `iceberg.hive.lock-check-min-wait-ms` | `50` | Minimum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
+| `iceberg.hive.lock-check-max-wait-ms` | `5000` | Maximum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
+| `lock-check-min-wait-time` / `lock-check-max-wait-time` | same defaults | Legacy Go aliases that accept Go duration strings (e.g. `100ms`, `5s`). Ignored when the corresponding Java key is set. |
+| `lock-check-retries` | `4` | Go-specific upper bound on check attempts. Java instead uses `iceberg.hive.lock-timeout-ms` (not wired in Go yet). |
+
+Invalid values (non-positive waits/retries, or min ≥ max) are ignored and the previous/default settings are kept.
 
 ### Glue (`catalog/glue`)
 
@@ -295,10 +332,12 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 
 | Key | Description |
 |---|---|
-| `min-snapshots-to-keep` | Minimum snapshots to retain when expiring. |
-| `max-snapshot-age-ms` | Maximum age of retained snapshots. |
-| `max-ref-age-ms` | Maximum age of branch/tag refs that are not the main branch. |
+| `history.expire.min-snapshots-to-keep` | Minimum snapshots to retain when expiring. Default `1`. |
+| `history.expire.max-snapshot-age-ms` | Maximum age of retained snapshots. Default `432000000` (5 days). |
+| `history.expire.max-ref-age-ms` | Maximum age of branch/tag refs that are not the main branch. Default `Long.MAX_VALUE` (forever). |
 | `gc.enabled` | Gate for orphan-file cleanup. |
+
+The unprefixed retention property names are accepted as compatibility fallbacks. The `history.expire.*` properties take precedence when both forms are set.
 
 ### Delete mode
 

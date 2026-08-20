@@ -18,6 +18,7 @@
 package table
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -94,7 +95,6 @@ func TestIsDeletionVector(t *testing.T) {
 }
 
 func TestManifestEntries_DVClassification(t *testing.T) {
-	entries := newManifestEntries()
 	snapshotID := int64(1)
 
 	// Data entry
@@ -102,16 +102,12 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 		path:        "s3://bucket/data/data-001.parquet",
 		contentType: iceberg.EntryContentData,
 	}
-	entries.addDataEntry(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, &snapshotID, nil, nil, dataFile))
 
 	// Regular position delete entry
 	posDelFile := &mockDataFile{
 		path:        "s3://bucket/data/pos-del-001.parquet",
 		contentType: iceberg.EntryContentPosDeletes,
 	}
-	entries.addPositionalDeleteEntry(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, &snapshotID, nil, nil, posDelFile))
 
 	// DV entry
 	dvFile := &dvMockDataFile{
@@ -124,21 +120,70 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 		contentOffset:      int64Ptr(0),
 		contentSizeInBytes: int64Ptr(128),
 	}
-	entries.addDVEntry(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, &snapshotID, nil, nil, dvFile))
 
 	// Equality delete entry
 	eqDelFile := &mockDataFile{
 		path:        "s3://bucket/data/eq-del-001.parquet",
 		contentType: iceberg.EntryContentEqDeletes,
 	}
-	entries.addEqualityDeleteEntry(iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, &snapshotID, nil, nil, eqDelFile))
+
+	entries := newManifestEntries()
+	assert.NoError(t, entries.merge([]iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dataFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, posDelFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, dvFile),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, eqDelFile),
+	}))
 
 	assert.Len(t, entries.dataEntries, 1)
 	assert.Len(t, entries.positionalDeleteEntries, 1)
 	assert.Len(t, entries.dvEntries, 1)
 	assert.Len(t, entries.equalityDeleteEntries, 1)
+}
+
+func TestManifestEntries_ConcurrentMerge(t *testing.T) {
+	snapshotID := int64(1)
+	batch := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+			path:        "s3://bucket/data/data-001.parquet",
+			contentType: iceberg.EntryContentData,
+		}),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+			path:        "s3://bucket/data/pos-del-001.parquet",
+			contentType: iceberg.EntryContentPosDeletes,
+		}),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+			path:        "s3://bucket/data/eq-del-001.parquet",
+			contentType: iceberg.EntryContentEqDeletes,
+		}),
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &dvMockDataFile{
+			mockDataFile: mockDataFile{
+				path:        "s3://bucket/data/dv-001.puffin",
+				contentType: iceberg.EntryContentPosDeletes,
+				format:      iceberg.PuffinFile,
+			},
+			referencedDataFile: strPtr("s3://bucket/data/data-001.parquet"),
+			contentOffset:      int64Ptr(0),
+			contentSizeInBytes: int64Ptr(128),
+		}),
+	}
+
+	const manifestCount = 64
+	entries := newManifestEntries()
+	var wg sync.WaitGroup
+	for range manifestCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			assert.NoError(t, entries.merge(batch))
+		}()
+	}
+	wg.Wait()
+
+	assert.Len(t, entries.dataEntries, manifestCount)
+	assert.Len(t, entries.positionalDeleteEntries, manifestCount)
+	assert.Len(t, entries.equalityDeleteEntries, manifestCount)
+	assert.Len(t, entries.dvEntries, manifestCount)
 }
 
 func TestDVMatchingToDataFiles(t *testing.T) {

@@ -945,13 +945,13 @@ type BoundSetPredicate interface {
 func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (BooleanExpression, error) {
 	boundType := term.Type()
 
-	typedSet := newLiteralSet()
+	typedSet := make(literalSet, lits.Len())
 	for _, v := range lits.Members() {
 		casted, err := v.To(boundType)
 		if err != nil {
 			return nil, err
 		}
-		typedSet.Add(casted)
+		typedSet.Add(cloneBoundLiteral(casted))
 	}
 
 	switch typedSet.Len() {
@@ -1052,7 +1052,7 @@ func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundP
 }
 
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
-	return bsp.lits
+	return cloneBoundLiteralSet(bsp.lits)
 }
 
 type BoundTransform struct {
