@@ -200,6 +200,7 @@ func TestCommonMetadataSnapshotLookupsConcurrent(t *testing.T) {
 
 				if snapshot == nil || snapshot.SnapshotID != expectedID {
 					t.Errorf("expected snapshot %d, got %v", expectedID, snapshot)
+
 					return
 				}
 			}
