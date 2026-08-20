@@ -122,6 +122,16 @@ const (
 	// during leader election) and genuine OCC conflicts from concurrent
 	// writers. It stays opt-in by default because a retry rebuilds the
 	// snapshot's manifest list and adds latency.
+	//
+	// Commits that carry delete-file removals (e.g. the
+	// deleteFilesToRemove argument of [Transaction.ReplaceFiles], or a
+	// v3 merge-on-read delete superseding an existing deletion vector)
+	// never replay regardless of this setting: removal identity is
+	// snapshot-relative, so those commits fail with ErrCommitFailed on
+	// the first conflict. The caller must reload the table and
+	// re-resolve the removals against the current snapshot in a new
+	// transaction; the failed transaction's staged removals cannot be
+	// rebased.
 	CommitNumRetriesKey     = "commit.retry.num-retries"
 	CommitNumRetriesDefault = 0
 

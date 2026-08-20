@@ -380,8 +380,13 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		return fmt.Errorf("field that has additions cannot be deleted: %s", fullName)
 	}
 
-	if _, ok := u.updates[field.ID]; ok {
-		return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+	// u.updates is keyed by parent ID, then by the field's own ID, so a
+	// field's own pending update lives under its parent's map
+	parentID := u.findParentID(field.ID)
+	if upds, ok := u.updates[parentID]; ok {
+		if _, ok := upds[field.ID]; ok {
+			return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+		}
 	}
 
 	delete(u.identifierFieldNames, fullName)
@@ -488,6 +493,15 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 			if field.Required && !u.allowIncompatibleChanges {
 				return fmt.Errorf("cannot change default value of required column to nil: %s", fullName)
 			}
+		} else {
+			// Validate the new write-default against the column's (possibly promoted) type.
+			effectiveType := field.Type
+			if update.FieldType.Valid {
+				effectiveType = update.FieldType.Val
+			}
+			if err := validateDefaultValue(effectiveType, update.WriteDefault.Val.Any()); err != nil {
+				return fmt.Errorf("invalid write-default for %s: %w", fullName, err)
+			}
 		}
 	}
 
@@ -509,7 +523,13 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		updatedField.Required = update.Required.Val
 	}
 	if update.WriteDefault.Valid {
-		updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		// A nil literal clears the write-default;
+		// Calling Any() on it would dereference a nil interface and panic.
+		if update.WriteDefault.Val == nil {
+			updatedField.WriteDefault = nil
+		} else {
+			updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		}
 	}
 	if update.Doc.Valid {
 		updatedField.Doc = update.Doc.Val
@@ -1135,6 +1155,12 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		}
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
+
+	// u.identifierFieldNames is a map, so the iteration above yields the ids in a
+	// non-deterministic order. Thus, sorting them to produce a canonical ordering:
+	// Schema.Equals compares IdentifierFieldIDs positionally, so,
+	// an unsorted slice would make otherwise-identical schemas compare unequal at random.
+	slices.Sort(identifierFieldIDs)
 
 	meta, err := u.txn.txnMeta()
 	if err != nil {

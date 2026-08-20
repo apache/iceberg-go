@@ -26,6 +26,7 @@ package table
 import (
 	"context"
 	"errors"
+	"maps"
 	"sync/atomic"
 	"testing"
 
@@ -62,9 +63,7 @@ func newValidationTestTable(t *testing.T, props iceberg.Properties) (*Table, *co
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	merged := iceberg.Properties{PropertyFormatVersion: "2"}
-	for k, v := range props {
-		merged[k] = v
-	}
+	maps.Copy(merged, props)
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/validation-test", merged)
 	require.NoError(t, err)
 

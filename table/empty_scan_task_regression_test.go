@@ -169,7 +169,7 @@ func TestScanSurvivesFullyPrunedTask(t *testing.T) {
 		}
 		require.NoError(t, err)
 		col := rec.Column(0).(*array.Int32)
-		for i := 0; i < col.Len(); i++ {
+		for i := range col.Len() {
 			got = append(got, col.Value(i))
 		}
 		rec.Release()

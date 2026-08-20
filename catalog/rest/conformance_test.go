@@ -32,6 +32,7 @@ import (
 
 func TestRestCatalogConformance(t *testing.T) {
 	catalogtest.RunCatalogTests(t, catalogtest.Config{
+		SupportsNamespaceProperties: true,
 		NewCatalog: func(t *testing.T) catalog.Catalog {
 			cat, err := catalog.Load(context.Background(), "local", iceberg.Properties{
 				"type":               "rest",

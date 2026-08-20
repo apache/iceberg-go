@@ -20,7 +20,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"time"
 
@@ -35,16 +37,32 @@ func runSnapshots(ctx context.Context, output Output, cat catalog.Catalog, cmd *
 }
 
 func runRefs(ctx context.Context, output Output, cat catalog.Catalog, cmd *RefsCmd) {
+	if err := validateRefType(cmd.Type); err != nil {
+		output.Error(err)
+		osExit(1)
+
+		return
+	}
+
 	tbl := loadTable(ctx, output, cat, cmd.TableID)
 	output.Refs(tbl, cmd.Type)
+}
+
+func validateRefType(refType string) error {
+	switch refType {
+	case "", string(table.BranchRef), string(table.TagRef):
+		return nil
+	default:
+		return fmt.Errorf("invalid --type %q: expected %q or %q",
+			refType, table.BranchRef, table.TagRef)
+	}
 }
 
 func buildSnapshotEntries(tbl *table.Table) []SnapshotEntry {
 	snapshots := tbl.Metadata().Snapshots()
 	entries := make([]SnapshotEntry, 0, len(snapshots))
 
-	for i := len(snapshots) - 1; i >= 0; i-- {
-		s := snapshots[i]
+	for _, s := range slices.Backward(snapshots) {
 
 		op := ""
 		addedFiles := "-"

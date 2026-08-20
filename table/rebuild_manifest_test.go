@@ -155,6 +155,38 @@ func TestRebuildSnapshotUpdates_CallsClosureWithFreshParent(t *testing.T) {
 	assert.Equal(t, oldManifest, orphaned[0])
 }
 
+func TestStagedSnapshotStillValid(t *testing.T) {
+	v1, err := NewMetadata(
+		iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true}),
+		iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/staged-valid",
+		iceberg.Properties{PropertyFormatVersion: "1"})
+	require.NoError(t, err)
+
+	v2 := newMetadataWithLastSeqNum(t, 3)
+	v3 := newV3MetadataWithNextRowID(t, 50)
+
+	tests := []struct {
+		name  string
+		fresh Metadata
+		snap  *Snapshot
+		want  bool
+	}{
+		{"v1 ignores sequence numbers", v1, &Snapshot{}, true},
+		{"v2 sequence number ahead", v2, &Snapshot{SequenceNumber: v2.LastSequenceNumber() + 1}, true},
+		{"v2 sequence number equal", v2, &Snapshot{SequenceNumber: v2.LastSequenceNumber()}, false},
+		{"v3 first-row-id at the cursor", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: ptr(v3.NextRowID())}, true},
+		{"v3 first-row-id behind", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1, FirstRowID: ptr(v3.NextRowID() - 1)}, false},
+		{"v3 first-row-id missing", v3, &Snapshot{SequenceNumber: v3.LastSequenceNumber() + 1}, false},
+		{"nil fresh metadata", nil, &Snapshot{}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, stagedSnapshotStillValid(tt.snap, tt.fresh))
+		})
+	}
+}
+
 // TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged verifies that
 // rebuildSnapshotUpdates skips the rebuild when the update's snapshot
 // already has the fresh branch head as its parent (no-op retry).
@@ -164,10 +196,13 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 	freshHead := int64(42)
 	freshMeta := newConflictTestMetadata(t, &freshHead)
 
-	// Parent already equals the fresh head — rebuild must be skipped.
+	// Parent already equals the fresh head and the sequence number still
+	// outranks the fresh last-sequence-number, as a snapshot built on this head would -
+	// rebuild must be skipped.
 	snap := &Snapshot{
 		SnapshotID:       99,
-		ParentSnapshotID: &freshHead, // same as fresh head
+		ParentSnapshotID: &freshHead,
+		SequenceNumber:   freshMeta.LastSequenceNumber() + 1,
 		ManifestList:     manifest,
 		Summary:          &Summary{Operation: OpAppend},
 	}
@@ -195,6 +230,44 @@ func TestRebuildSnapshotUpdates_SkipsWhenParentUnchanged(t *testing.T) {
 	assert.False(t, called, "rebuild closure must not be called when parent is already up-to-date")
 	assert.Empty(t, orphaned, "no orphans when rebuild is skipped")
 	assert.Same(t, upd, rebuilt[0].(*addSnapshotUpdate), "original update must pass through unchanged")
+}
+
+// The parent is unchanged but table-wide state moved, so the staged snapshot is
+// one AddSnapshot now rejects: skipping its rebuild fails the commit terminally.
+func TestRebuildSnapshotUpdates_RebuildsWhenTableStateMoved(t *testing.T) {
+	const oldManifest = "s3://bucket/manifest-list.avro"
+	const newManifest = "s3://bucket/rebuilt-manifest-list.avro"
+
+	freshHead := int64(42)
+	freshMeta := newConflictTestMetadata(t, &freshHead)
+
+	snap := &Snapshot{
+		SnapshotID:       99,
+		ParentSnapshotID: &freshHead,
+		SequenceNumber:   freshMeta.LastSequenceNumber(),
+		ManifestList:     oldManifest,
+		Summary:          &Summary{Operation: OpAppend},
+	}
+
+	var receivedParent *Snapshot
+	upd := rebuildUpdate(snap, newManifest, &receivedParent)
+
+	rebuilt, orphaned, err := rebuildSnapshotUpdates(
+		t.Context(),
+		[]Update{upd},
+		freshMeta,
+		MainBranch,
+		iceio.LocalFS{},
+		1,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, receivedParent, "the rebuild must run even though the parent is unchanged")
+	assert.Equal(t, freshHead, receivedParent.SnapshotID, "the rebuild must keep the branch head as parent")
+
+	addUpd, ok := rebuilt[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	assert.Equal(t, newManifest, addUpd.Snapshot.ManifestList)
+	assert.Equal(t, []string{oldManifest}, orphaned)
 }
 
 // TestRebuildSnapshotUpdates_PassesThroughNonRebuildUpdates verifies that
@@ -446,17 +519,21 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	freshParentID := int64(77)
 	freshParent := &Snapshot{
 		SnapshotID: freshParentID,
-		// Set a SequenceNumber that DIFFERS from freshMeta.LastSequenceNumber()
-		// so the assertion below can distinguish "newSeq derived from
-		// freshMeta.LastSequenceNumber()" (correct) from "newSeq derived from
-		// freshParent.SequenceNumber" (regression). Using freshParentSeq = 99
-		// versus freshMeta.LastSequenceNumber() = 1 makes the two paths
-		// disagree by 98.
-		SequenceNumber: 99,
+		// a concurrent writer on a DIFFERENT branch bumped the table-wide last-sequence-number (to 99)
+		// without advancing THIS branch's parent (seq 1). newSeq must track the
+		// fresh table-wide counter (100), not freshParent.SequenceNumber+1 (2),
+		// or MetadataBuilder.AddSnapshot rejects seq <= lastSequenceNumber.
+		//
+		// newSeq = max(freshMeta.LastSequenceNumber(), freshParent.SequenceNumber)
+		// + 1: for a real external parent the table last-seq always dominates
+		// (the parent is part of freshMeta), so this reduces to the fresh
+		// table-wide counter. It only diverges for an in-transaction chained
+		// sibling whose seq already equals lastSequenceNumber+1 — covered by TestMultipleStagedSnapshots*
+		SequenceNumber: 1,
 		ManifestList:   parentManifestListPath,
 		Summary:        &Summary{Operation: OpAppend, Properties: freshParentSummary},
 	}
-	freshMeta := newMetadataWithLastSeqNum(t, 1)
+	freshMeta := newMetadataWithLastSeqNum(t, 99)
 	require.NotEqual(t, freshParent.SequenceNumber, freshMeta.LastSequenceNumber(),
 		"test fixture must keep these distinct so the seq-num source is observable")
 
@@ -465,8 +542,8 @@ func TestRebuildFn_SummaryRebasedAgainstFreshParent(t *testing.T) {
 	require.NotNil(t, rebuilt.Summary)
 
 	// R2: pin the seq-num source. Must equal freshMeta.LastSequenceNumber()+1
-	// (=2) and must NOT equal freshParent.SequenceNumber+1 (=100). A regression
-	// that derives newSeq from freshParent would fail this assertion.
+	// (=100) and must NOT equal freshParent.SequenceNumber+1 (=2). A regression
+	// that derives newSeq from freshParent alone would fail this assertion.
 	require.Equal(t, freshMeta.LastSequenceNumber()+1, rebuilt.SequenceNumber,
 		"newSeq must derive from freshMeta.LastSequenceNumber(), not freshParent.SequenceNumber")
 

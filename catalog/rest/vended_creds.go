@@ -194,10 +194,7 @@ func (v *vendedCredentialRefresher) refreshBuffer() time.Duration {
 		return buffer
 	}
 
-	half := v.expiresAt.Sub(v.issuedAt) / 2
-	if half < 0 {
-		half = 0
-	}
+	half := max(v.expiresAt.Sub(v.issuedAt)/2, 0)
 	if half < buffer {
 		buffer = half
 	}

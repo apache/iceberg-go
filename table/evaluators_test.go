@@ -3111,9 +3111,7 @@ func TestBloomPredicateCollector(t *testing.T) {
 	)
 
 	bind := func(expr iceberg.BooleanExpression) iceberg.BooleanExpression {
-		rewritten, err := iceberg.RewriteNotExpr(expr)
-		require.NoError(t, err)
-		bound, err := iceberg.BindExpr(sc, rewritten, true)
+		bound, err := iceberg.BindExpr(sc, expr, true)
 		require.NoError(t, err)
 
 		return bound
@@ -3152,6 +3150,34 @@ func TestBloomPredicateCollector(t *testing.T) {
 			iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
 			iceberg.EqualTo(iceberg.Reference("name"), "alice"),
 		))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("NOT(NotEqual) is normalized to Equal", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotEqualTo(iceberg.Reference("id"), int64(42))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 1)
+	})
+
+	t.Run("NOT(NotIn) is normalized to In", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotIn(iceberg.Reference("id"), int64(1), int64(2))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 2)
+	})
+
+	t.Run("NOT(Equal) remains unsupported", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(42))))
 		preds, err := newBloomFilterPredicates(expr)
 		require.NoError(t, err)
 		assert.Empty(t, preds)

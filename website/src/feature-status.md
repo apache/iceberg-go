@@ -36,7 +36,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Sequence numbers | Supported |
 | Manifest entry status (added / existing / deleted) | Supported |
 | Positional deletes | Supported (read + write) |
-| Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta` |
+| Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta`; delete-only CDC via `Transaction.CommitEqualityDeletes` |
 | Partition spec evolution | Supported |
 | Sort order enforcement on write | Supported (PR [#1157](https://github.com/apache/iceberg-go/pull/1157), closes [#833](https://github.com/apache/iceberg-go/issues/833)) |
 | `ReplaceDataFiles` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |

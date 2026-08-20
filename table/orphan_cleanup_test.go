@@ -86,6 +86,78 @@ func TestOrphanCleanupOptions(t *testing.T) {
 	assert.Equal(t, authorities, cfg.equalAuthorities)
 }
 
+func TestFlattenURIEquivalences(t *testing.T) {
+	equivalences := map[string]string{
+		"s3,s3a,s3n": "s3",
+		"s3a,gs":     "gs",
+		"single":     "canonical",
+	}
+
+	assert.Equal(t, map[string]string{
+		"s3":     "s3",
+		"s3a":    "gs",
+		"s3n":    "s3",
+		"gs":     "gs",
+		"single": "canonical",
+	}, flattenURIEquivalences(equivalences))
+}
+
+func TestFlattenURIEquivalencesUsesLexicographicallyLastGroup(t *testing.T) {
+	equivalences := map[string]string{
+		"s3, s3a": "s3",
+		"s3a,s3n": "s3n",
+	}
+
+	assert.Equal(t, map[string]string{
+		"s3":  "s3",
+		"s3a": "s3n",
+		"s3n": "s3n",
+	}, flattenURIEquivalences(equivalences))
+}
+
+func TestFlattenURIEquivalencesPreservesExactMappingPrecedence(t *testing.T) {
+	equivalences := map[string]string{
+		"host1":       "canonical",
+		"host1,host2": "other",
+		"host2":       "canonical",
+	}
+
+	flattened := flattenURIEquivalences(equivalences)
+	assert.Equal(t, "canonical", flattened["host1"])
+	assert.Equal(t, "canonical", flattened["host2"])
+}
+
+func TestEqualAuthoritiesPreservesExactMappingAcrossOptions(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"host1": "canonical",
+		}),
+		WithEqualAuthorities(map[string]string{
+			"host1,host2": "other",
+			"host2":       "canonical",
+		}),
+	)
+
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host1", cfg.equalAuthorities))
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host2", cfg.equalAuthorities))
+}
+
+func TestNewOrphanCleanupConfigFlattensURIEquivalences(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualSchemes(map[string]string{
+			"s3,s3a": "s3",
+		}),
+		WithEqualAuthorities(map[string]string{
+			"host1,host2": "canonical",
+		}),
+	)
+
+	assert.Equal(t, "s3", applySchemeEquivalence("s3a", cfg.equalSchemes))
+	assert.Equal(t, "canonical", applyAuthorityEquivalence("host2", cfg.equalAuthorities))
+	assert.NotContains(t, cfg.equalSchemes, "s3,s3a")
+	assert.NotContains(t, cfg.equalAuthorities, "host1,host2")
+}
+
 func TestOrphanCleanupPlanDoesNotExpandAfterPlanning(t *testing.T) {
 	ctx := context.Background()
 	fs := io.NewMemFS()
@@ -184,8 +256,8 @@ func TestPlanOrphanFilesHonorsModificationTimes(t *testing.T) {
 
 func TestNormalizeFilePath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
-		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities: map[string]string{"endpoint1,endpoint2": "canonical"},
+		equalSchemes:     map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities: map[string]string{"endpoint1": "canonical", "endpoint2": "canonical"},
 	}
 
 	tests := []struct {
@@ -301,8 +373,10 @@ func TestVersionHintLocation(t *testing.T) {
 
 func TestApplySchemeEquivalence(t *testing.T) {
 	equalSchemes := map[string]string{
-		"s3,s3a,s3n": "s3",
-		"gs":         "gs",
+		"s3":  "s3",
+		"s3a": "s3",
+		"s3n": "s3",
+		"gs":  "gs",
 	}
 
 	tests := []struct {
@@ -347,8 +421,9 @@ func TestApplySchemeEquivalence(t *testing.T) {
 
 func TestApplyAuthorityEquivalence(t *testing.T) {
 	equalAuthorities := map[string]string{
-		"host1,host2": "canonical",
-		"single":      "single",
+		"host1":  "canonical",
+		"host2":  "canonical",
+		"single": "single",
 	}
 
 	tests := []struct {
@@ -389,8 +464,8 @@ func TestApplyAuthorityEquivalence(t *testing.T) {
 func TestCheckPrefixMismatch(t *testing.T) {
 	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchError,
-		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities:   map[string]string{"host1,host2": "canonical"},
+		equalSchemes:       map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities:   map[string]string{"host1": "canonical", "host2": "canonical"},
 	}
 
 	tests := []struct {
@@ -470,6 +545,41 @@ func TestCheckPrefixMismatch(t *testing.T) {
 	}
 }
 
+func TestCheckPrefixMismatchPreservesExactEquivalencePrecedence(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithPrefixMismatchMode(PrefixMismatchDelete),
+		WithEqualAuthorities(map[string]string{
+			"host1":       "canonical",
+			"host1,host2": "other",
+			"host2":       "canonical",
+		}),
+	)
+
+	decision, err := checkPrefixMismatch(
+		"s3://host1/path/file.txt",
+		"s3://host2/path/file.txt",
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, prefixMismatchKeep, decision)
+}
+
+func TestCheckPrefixMismatchUsesCompleteAuthority(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"container@account-a.dfs.core.windows.net,container@account-b.dfs.core.windows.net": "container@canonical.dfs.core.windows.net",
+		}),
+	)
+
+	decision, err := checkPrefixMismatch(
+		"abfs://container@account-a.dfs.core.windows.net/data/file.parquet",
+		"abfs://container@account-b.dfs.core.windows.net/data/file.parquet",
+		cfg,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, prefixMismatchKeep, decision)
+}
+
 func TestIsFileOrphan(t *testing.T) {
 	// PrefixMismatchError ensures that metadata files (value=false) found via
 	// normalized lookup don't accidentally fall through to the prefix-mismatch
@@ -477,8 +587,8 @@ func TestIsFileOrphan(t *testing.T) {
 	// instead of the existence check (_, ok).
 	cfg := &orphanCleanupConfig{
 		prefixMismatchMode: PrefixMismatchError,
-		equalSchemes:       map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities:   map[string]string{"host-a,host-b": "host-a"},
+		equalSchemes:       map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities:   map[string]string{"host-a": "host-a", "host-b": "host-a"},
 	}
 
 	referencedFiles := map[string]bool{
@@ -552,8 +662,8 @@ func TestIsFileOrphan(t *testing.T) {
 
 func TestNormalizeURLPath(t *testing.T) {
 	cfg := &orphanCleanupConfig{
-		equalSchemes:     map[string]string{"s3,s3a,s3n": "s3"},
-		equalAuthorities: map[string]string{"host1,host2": "canonical"},
+		equalSchemes:     map[string]string{"s3": "s3", "s3a": "s3", "s3n": "s3"},
+		equalAuthorities: map[string]string{"host1": "canonical", "host2": "canonical"},
 	}
 
 	tests := []struct {
@@ -587,6 +697,37 @@ func TestNormalizeURLPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := normalizeURLPath(tt.input, cfg)
 			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestNormalizeURLPathUsesCompleteAuthority(t *testing.T) {
+	cfg := newOrphanCleanupConfig(
+		WithEqualAuthorities(map[string]string{
+			"container@account-a.dfs.core.windows.net,container@account-b.dfs.core.windows.net": "container@canonical.dfs.core.windows.net",
+		}),
+	)
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "account_a",
+			input:    "abfs://container@account-a.dfs.core.windows.net/data/../file.parquet",
+			expected: "abfs://container@canonical.dfs.core.windows.net/file.parquet",
+		},
+		{
+			name:     "account_b",
+			input:    "abfs://container@account-b.dfs.core.windows.net/data/file.parquet",
+			expected: "abfs://container@canonical.dfs.core.windows.net/data/file.parquet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, normalizeURLPath(tt.input, cfg))
 		})
 	}
 }

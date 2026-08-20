@@ -26,23 +26,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDecideDeadEqualityDeletes_PredicateMatchesScanner exercises the
-// pure decision logic against the scenarios that earlier code reviews
-// flagged as silent-data-loss risks. The scanner predicate
-// (table/scanner.go matchEqualityDeletesToData) is:
+// TestDecideDeadEqualityDeletesWithSpecs_Predicate exercises the pure decision logic.
+// The cleanup predicate is:
 //
 //	E applies to D iff E.seq > D.seq AND (
-//	    len(E.partition) == 0 ||
-//	    len(D.partition) == 0 ||
-//	    partitionsMatch(E.partition, D.partition)
+//	    E.spec.isUnpartitioned() ||
+//	    (E.specID == D.specID && E.partition == D.partition)
 //	)
-//
-// Critically: SpecID is NOT part of the predicate, and either-side
-// empty-partition makes it apply globally. The cleanup must agree.
-func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
+func TestDecideDeadEqualityDeletesWithSpecs_Predicate(t *testing.T) {
 	type tc struct {
 		name        string
 		survivors   []survivor
+		eqSpecID    int32
 		eqPart      map[int]any
 		eqSeq       int64
 		expectsDead bool
@@ -52,6 +47,7 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name:        "fully-rewritten-bucket: empty survey ⇒ dead",
 			survivors:   nil,
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
 			expectsDead: true,
@@ -59,8 +55,9 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name: "partition match, surviving D has lower seq ⇒ alive",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "us"}, seq: 3},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 3},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
 			expectsDead: false,
@@ -68,8 +65,9 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name: "partition match, surviving D has higher seq ⇒ dead",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "us"}, seq: 9},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 9},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
 			expectsDead: true,
@@ -77,27 +75,40 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name: "untouched partition does NOT protect us-eq-delete",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "eu"}, seq: 1},
+				{specID: 1, partition: map[int]any{1000: "eu"}, seq: 1},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
 			expectsDead: true,
 		},
 		{
-			name: "unpartitioned survivor protects partitioned eq-delete (cross-spec / global rule)",
+			name: "unpartitioned survivor does not protect partitioned eq-delete",
 			survivors: []survivor{
-				{partition: nil, seq: 1},
-				{partition: map[int]any{1000: "us"}, seq: 999},
+				{specID: 0, partition: nil, seq: 1},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 999},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
-			expectsDead: false, // empty-part D with seq=1 < 5 keeps E alive
+			expectsDead: true,
+		},
+		{
+			name: "same partition in a different spec does not protect partitioned eq-delete",
+			survivors: []survivor{
+				{specID: 3, partition: map[int]any{1000: "us"}, seq: 1},
+			},
+			eqSpecID:    1,
+			eqPart:      map[int]any{1000: "us"},
+			eqSeq:       5,
+			expectsDead: true,
 		},
 		{
 			name: "unpartitioned eq-delete: any partitioned survivor with low seq keeps it alive",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "eu"}, seq: 2},
+				{specID: 1, partition: map[int]any{1000: "eu"}, seq: 2},
 			},
+			eqSpecID:    0,
 			eqPart:      nil, // unpartitioned eq-delete
 			eqSeq:       5,
 			expectsDead: false,
@@ -105,18 +116,30 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name: "unpartitioned eq-delete: every survivor has higher seq ⇒ dead",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "us"}, seq: 7},
-				{partition: map[int]any{1000: "eu"}, seq: 8},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 7},
+				{specID: 1, partition: map[int]any{1000: "eu"}, seq: 8},
 			},
+			eqSpecID:    0,
 			eqPart:      nil,
 			eqSeq:       5,
 			expectsDead: true,
 		},
 		{
+			name: "void-only eq-delete spec: differently partitioned survivor keeps it alive",
+			survivors: []survivor{
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 1},
+			},
+			eqSpecID:    2,
+			eqPart:      map[int]any{1000: nil},
+			eqSeq:       5,
+			expectsDead: false,
+		},
+		{
 			name: "boundary: D.seq == E.seq ⇒ dead (strict-greater rule from scanner)",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "us"}, seq: 5},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 5},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       5,
 			expectsDead: true,
@@ -124,8 +147,9 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 		{
 			name: "defensive: candidate with seq < 0 is preserved (sentinel for unset)",
 			survivors: []survivor{
-				{partition: map[int]any{1000: "us"}, seq: 100},
+				{specID: 1, partition: map[int]any{1000: "us"}, seq: 100},
 			},
+			eqSpecID:    1,
 			eqPart:      map[int]any{1000: "us"},
 			eqSeq:       -1,
 			expectsDead: false,
@@ -134,13 +158,17 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			specs := compactionTestSpecs()
 			survey := compaction.NewSurvivorSurvey()
 			for _, s := range c.survivors {
-				survey.AddSurvivor(s.partition, s.seq)
+				survey.AddSurvivorWithSpec(s.specID, s.partition, s.seq)
 			}
-			candidate := makeEqDeleteEntry(t, c.eqPart, c.eqSeq, "/path/eq.parquet")
+			candidate := makeEqDeleteEntry(
+				t, specs[c.eqSpecID], c.eqPart, c.eqSeq, "/path/eq.parquet")
 
-			got := compaction.DecideDeadEqualityDeletes(survey, []iceberg.ManifestEntry{candidate})
+			got, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+				survey, []iceberg.ManifestEntry{candidate}, specs)
+			require.NoError(t, err)
 
 			if c.expectsDead {
 				assert.Len(t, got, 1, "expected eq-delete to be classified dead")
@@ -151,18 +179,21 @@ func TestDecideDeadEqualityDeletes_PredicateMatchesScanner(t *testing.T) {
 	}
 }
 
-// TestDecideDeadEqualityDeletes_DedupesByPath verifies the executor
+// TestDecideDeadEqualityDeletesWithSpecs_DedupesByPath verifies the executor
 // only emits each dead eq-delete file once even if the same path
 // appears in multiple manifest entries (post manifest-merging this
 // can happen).
-func TestDecideDeadEqualityDeletes_DedupesByPath(t *testing.T) {
+func TestDecideDeadEqualityDeletesWithSpecs_DedupesByPath(t *testing.T) {
+	specs := compactionTestSpecs()
 	survey := compaction.NewSurvivorSurvey()
 
-	a1 := makeEqDeleteEntry(t, nil, 5, "/eq-a.parquet")
-	a2 := makeEqDeleteEntry(t, nil, 5, "/eq-a.parquet")
-	b := makeEqDeleteEntry(t, nil, 5, "/eq-b.parquet")
+	a1 := makeEqDeleteEntry(t, specs[0], nil, 5, "/eq-a.parquet")
+	a2 := makeEqDeleteEntry(t, specs[0], nil, 5, "/eq-a.parquet")
+	b := makeEqDeleteEntry(t, specs[0], nil, 5, "/eq-b.parquet")
 
-	got := compaction.DecideDeadEqualityDeletes(survey, []iceberg.ManifestEntry{a1, a2, b})
+	got, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		survey, []iceberg.ManifestEntry{a1, a2, b}, specs)
+	require.NoError(t, err)
 	require.Len(t, got, 2)
 
 	paths := []string{got[0].FilePath(), got[1].FilePath()}
@@ -170,50 +201,184 @@ func TestDecideDeadEqualityDeletes_DedupesByPath(t *testing.T) {
 	assert.Contains(t, paths, "/eq-b.parquet")
 }
 
+func TestDecideDeadEqualityDeletesWithSpecs_RejectsUnknownPartitionSpec(t *testing.T) {
+	specs := compactionTestSpecs()
+	candidate := makeEqDeleteEntry(
+		t, specs[1], map[int]any{1000: "us"}, 5, "/eq.parquet")
+
+	_, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		compaction.NewSurvivorSurvey(),
+		[]iceberg.ManifestEntry{candidate},
+		compactionTestSpecLookup{},
+	)
+
+	assert.ErrorContains(t, err, "partition spec ID 1 not found")
+}
+
+func TestDecideDeadEqualityDeletesConservativelyMatchesAcrossSpecs(t *testing.T) {
+	specs := compactionTestSpecs()
+	partition := map[int]any{1000: "us"}
+	survey := compaction.NewSurvivorSurvey()
+	survey.AddSurvivor(partition, 1)
+
+	// The compatibility API has no survivor spec ID, so it must preserve a
+	// delete whose partition tuple may match even when its spec differs.
+	candidate := makeEqDeleteEntry(t, specs[3], partition, 5, "/eq.parquet")
+
+	assert.Empty(t, compaction.DecideDeadEqualityDeletes(
+		survey, []iceberg.ManifestEntry{candidate}))
+
+	// Without a lookup, the compatibility API must also allow for a void-only
+	// candidate spec, whose non-empty partition tuple still applies globally.
+	voidCandidate := makeEqDeleteEntry(t, specs[2], map[int]any{1000: nil}, 5, "/void-eq.parquet")
+	assert.Empty(t, compaction.DecideDeadEqualityDeletes(
+		survey, []iceberg.ManifestEntry{voidCandidate}))
+}
+
+func TestDecideDeadEqualityDeletesUsesConservativeMinimum(t *testing.T) {
+	type candidate struct {
+		path string
+		seq  int64
+	}
+
+	tests := []struct {
+		name       string
+		survivors  []survivor
+		candidates []candidate
+		wantPaths  []string
+	}{
+		{
+			name: "minimum across partition buckets",
+			survivors: []survivor{
+				{partition: map[int]any{1000: "us"}, seq: 3},
+				{partition: map[int]any{1000: "eu"}, seq: 9},
+			},
+			candidates: []candidate{
+				{path: "/dead-before-min.parquet", seq: 2},
+				{path: "/dead-at-min.parquet", seq: 3},
+				{path: "/alive-after-min.parquet", seq: 4},
+				{path: "/unknown-seq.parquet", seq: -1},
+			},
+			wantPaths: []string{
+				"/dead-before-min.parquet",
+				"/dead-at-min.parquet",
+			},
+		},
+		{
+			name: "includes empty-partition bucket",
+			survivors: []survivor{
+				{partition: nil, seq: 7},
+				{partition: map[int]any{1000: "us"}, seq: 10},
+			},
+			candidates: []candidate{
+				{path: "/dead-at-empty-min.parquet", seq: 7},
+				{path: "/alive-after-empty-min.parquet", seq: 8},
+			},
+			wantPaths: []string{"/dead-at-empty-min.parquet"},
+		},
+		{
+			name: "deduplicates paths",
+			survivors: []survivor{
+				{partition: map[int]any{1000: "us"}, seq: 5},
+			},
+			candidates: []candidate{
+				{path: "/duplicate.parquet", seq: 5},
+				{path: "/duplicate.parquet", seq: 5},
+				{path: "/unknown-seq.parquet", seq: -1},
+			},
+			wantPaths: []string{"/duplicate.parquet"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			specs := compactionTestSpecs()
+			survey := compaction.NewSurvivorSurvey()
+			for _, s := range tt.survivors {
+				survey.AddSurvivor(s.partition, s.seq)
+			}
+
+			candidates := make([]iceberg.ManifestEntry, 0, len(tt.candidates))
+			for _, c := range tt.candidates {
+				candidates = append(candidates,
+					makeEqDeleteEntry(t, specs[0], nil, c.seq, c.path))
+			}
+
+			got := compaction.DecideDeadEqualityDeletes(survey, candidates)
+			gotPaths := make([]string, len(got))
+			for i, file := range got {
+				gotPaths[i] = file.FilePath()
+			}
+			assert.Equal(t, tt.wantPaths, gotPaths)
+		})
+	}
+}
+
 // TestSurvivorSurvey_AddSurvivor_DefensiveSeq asserts that a survivor
 // with sequence number < 0 is recorded as if seq=0 — guaranteeing it
 // stays "alive" against every eq-delete.
 func TestSurvivorSurvey_AddSurvivor_DefensiveSeq(t *testing.T) {
+	specs := compactionTestSpecs()
 	survey := compaction.NewSurvivorSurvey()
-	survey.AddSurvivor(nil, -1) // unset seq sentinel
+	survey.AddSurvivorWithSpec(0, nil, -1) // unset seq sentinel
 
 	// An eq-delete with seq=1 should still be considered alive against
 	// the seq=0-effective survivor.
-	candidate := makeEqDeleteEntry(t, nil, 1, "/eq.parquet")
-	got := compaction.DecideDeadEqualityDeletes(survey, []iceberg.ManifestEntry{candidate})
+	candidate := makeEqDeleteEntry(t, specs[0], nil, 1, "/eq.parquet")
+	got, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		survey, []iceberg.ManifestEntry{candidate}, specs)
+	require.NoError(t, err)
 	assert.Empty(t, got, "negative-seq survivor must keep eq-delete alive")
 }
 
 type survivor struct {
+	specID    int32
 	partition map[int]any
 	seq       int64
+}
+
+type compactionTestSpecLookup map[int32]iceberg.PartitionSpec
+
+func (s compactionTestSpecLookup) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	spec, ok := s[int32(id)]
+	if !ok {
+		return nil
+	}
+
+	return &spec
+}
+
+func compactionTestSpecs() compactionTestSpecLookup {
+	partitionedField := func() iceberg.PartitionField {
+		return iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "partition",
+			Transform: iceberg.IdentityTransform{},
+		}
+	}
+
+	return compactionTestSpecLookup{
+		0: iceberg.NewPartitionSpecID(0),
+		1: iceberg.NewPartitionSpecID(1, partitionedField()),
+		2: iceberg.NewPartitionSpecID(2, iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000, Name: "void",
+			Transform: iceberg.VoidTransform{},
+		}),
+		3: iceberg.NewPartitionSpecID(3, partitionedField()),
+	}
 }
 
 // makeEqDeleteEntry constructs a real iceberg.ManifestEntry containing
 // a real DataFile (built via NewDataFileBuilder). The pure predicate
 // reads only path, partition, content type, and seq, so a minimal
 // builder configuration is enough.
-func makeEqDeleteEntry(t *testing.T, part map[int]any, seq int64, path string) iceberg.ManifestEntry {
+func makeEqDeleteEntry(
+	t testing.TB,
+	spec iceberg.PartitionSpec,
+	part map[int]any,
+	seq int64,
+	path string,
+) iceberg.ManifestEntry {
 	t.Helper()
-
-	// Build a partition spec that matches the partition map's keys so
-	// NewDataFileBuilder accepts the partition data. Partition values
-	// are passed through to DataFile.Partition() unchanged.
-	fields := make([]iceberg.PartitionField, 0, len(part))
-	for id := range part {
-		fields = append(fields, iceberg.PartitionField{
-			SourceIDs: []int{id},
-			FieldID:   id,
-			Name:      "p" + intToStr(id),
-			Transform: iceberg.IdentityTransform{},
-		})
-	}
-	var spec iceberg.PartitionSpec
-	if len(fields) == 0 {
-		spec = *iceberg.UnpartitionedSpec
-	} else {
-		spec = iceberg.NewPartitionSpec(fields...)
-	}
 
 	builder, err := iceberg.NewDataFileBuilder(
 		spec, iceberg.EntryContentEqDeletes, path, iceberg.ParquetFile,
@@ -226,24 +391,4 @@ func makeEqDeleteEntry(t *testing.T, part map[int]any, seq int64, path string) i
 	entryBuilder.SequenceNum(seq)
 
 	return entryBuilder.Build()
-}
-
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := []byte{}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	if neg {
-		digits = append([]byte{'-'}, digits...)
-	}
-
-	return string(digits)
 }

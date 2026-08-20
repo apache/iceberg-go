@@ -382,9 +382,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 
 	viewProps := make(map[string]string)
 	if cfg.Properties != nil {
-		for k, v := range cfg.Properties {
-			viewProps[k] = v
-		}
+		maps.Copy(viewProps, cfg.Properties)
 	}
 
 	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, viewSQL, viewProps)
