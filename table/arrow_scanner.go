@@ -340,9 +340,6 @@ func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
 			return posDeleteCursor{}, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
 				iceberg.ErrInvalidSchema, chunk)
 		}
-		if err := validatePositionDeletePositions(posArr); err != nil {
-			return posDeleteCursor{}, err
-		}
 		arrays[i] = posArr
 	}
 
@@ -431,6 +428,10 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 				return nil, fmt.Errorf("%w: position delete columns ended before file_path column",
 					iceberg.ErrInvalidSchema)
 			}
+			if pos < 0 {
+				return nil, fmt.Errorf("%w: negative pos %d in position delete file",
+					iceberg.ErrInvalidSchema, pos)
+			}
 			if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
 				return nil, fmt.Errorf("%w: null file_path dictionary value in position delete file",
 					iceberg.ErrInvalidSchema)
@@ -483,10 +484,11 @@ func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], e
 				return nil, fmt.Errorf("%w: null pos in position delete file",
 					iceberg.ErrInvalidSchema)
 			}
-			if err := validatePositionDeletePositions(posArr); err != nil {
-				return nil, err
-			}
 			for _, v := range posArr.Int64Values() {
+				if v < 0 {
+					return nil, fmt.Errorf("%w: negative pos %d in position delete file",
+						iceberg.ErrInvalidSchema, v)
+				}
 				deletes[v] = struct{}{}
 			}
 		}

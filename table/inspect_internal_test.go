@@ -2941,11 +2941,27 @@ func inspectPositionDeletesTableWithSchema(
 	require.NoError(t, err)
 	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
 
+	return inspectPositionDeletesTableWithManifests(
+		t, formatVersion, mb, tableSchema, fs, []iceberg.ManifestFile{manifest})
+}
+
+func inspectPositionDeletesTableWithManifests(
+	t *testing.T,
+	formatVersion int,
+	mb *MetadataBuilder,
+	tableSchema *iceberg.Schema,
+	fs iceio.WriteFileIO,
+	manifests []iceberg.ManifestFile,
+) *Table {
+	t.Helper()
+
+	snapshotID := int64(1)
+	sequenceNumber := int64(1)
 	manifestListPath := "mem://position-deletes/table/metadata/snap.avro"
 	manifestListBuffer := &bytes.Buffer{}
 	require.NoError(t, iceberg.WriteManifestList(
 		formatVersion, manifestListBuffer, snapshotID, nil, &sequenceNumber, 0,
-		[]iceberg.ManifestFile{manifest},
+		manifests,
 	))
 	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
 
@@ -3060,6 +3076,47 @@ func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
 	require.ErrorContains(t, err, "negative pos -1")
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	require.Zero(t, rows)
+}
+
+func TestInspectPositionDeletesDefersLaterManifestReads(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	tableSchema := simpleSchema()
+	deletePath := "mem://position-deletes/table/data/delete-first.parquet"
+	dataPath := "mem://position-deletes/table/data/data.parquet"
+	var deleteRows bytes.Buffer
+	deleteRows.WriteByte('[')
+	for pos := range inspectRecordBatchSize {
+		if pos > 0 {
+			deleteRows.WriteByte(',')
+		}
+		fmt.Fprintf(&deleteRows, `{"file_path": %q, "pos": %d}`, dataPath, pos)
+	}
+	deleteRows.WriteByte(']')
+	writePosDeleteParquetToMemFS(t, memFS, deletePath, deleteRows.String())
+
+	snapshotID := int64(1)
+	sequenceNumber := int64(1)
+	firstManifest := writeInspectManifest(
+		t, memFS, "mem://position-deletes/table/metadata/first-deletes.avro",
+		*iceberg.UnpartitionedSpec, tableSchema, snapshotID, iceberg.ManifestContentDeletes,
+		[]iceberg.ManifestEntry{iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, &sequenceNumber,
+			newPosDeleteFile(t, deletePath, inspectRecordBatchSize, 128),
+		)},
+	)
+	missingManifest := iceberg.NewManifestFile(
+		2, "mem://position-deletes/table/metadata/not-opened.avro", 1, 0, snapshotID,
+	).Content(iceberg.ManifestContentDeletes).AddedFiles(1).ExistingFiles(0).DeletedFiles(0).Build()
+	tbl := inspectPositionDeletesTableWithManifests(
+		t, 2, newInspectPositionDeletesMetadataWithSchema(t, 2, tableSchema), tableSchema,
+		memFS, []iceberg.ManifestFile{firstManifest, missingManifest},
+	)
+
+	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	require.True(t, rr.Next(), "reader error: %v", rr.Err())
+	require.EqualValues(t, inspectRecordBatchSize, rr.RecordBatch().NumRows())
 }
 
 func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
@@ -3788,6 +3845,17 @@ func TestPositionDeleteRowProjectionRejectsNullMapKey(t *testing.T) {
 	err = appender.append(deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row)
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	require.ErrorContains(t, err, "null key")
+}
+
+func TestAppendPositionDeleteProjectedScalarRejectsNonStruct(t *testing.T) {
+	builder := array.NewStructBuilder(memory.DefaultAllocator, arrow.StructOf(
+		arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+	))
+	defer builder.Release()
+
+	err := appendPositionDeleteProjectedScalar(builder, scalar.NewInt32Scalar(7))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	require.ErrorContains(t, err, "want struct")
 }
 
 func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {

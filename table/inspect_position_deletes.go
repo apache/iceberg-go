@@ -58,19 +58,19 @@ func (i InspectTable) PositionDeletes(ctx context.Context) (array.RecordReader, 
 		return nil, fmt.Errorf("inspect position deletes: build arrow schema: %w", err)
 	}
 
-	fs, files, err := i.currentPositionDeleteFiles(ctx)
+	fs, manifests, err := i.currentPositionDeleteManifests(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("inspect position deletes: %w", err)
 	}
 	ctx = compute.WithAllocator(ctx, i.alloc)
 
 	return i.positionDeleteRecordReader(
-		ctx, arrowSchema, fs, files, partitionType, partitionIDs, i.tbl.metadata.Version()), nil
+		ctx, arrowSchema, fs, manifests, partitionType, partitionIDs, i.tbl.metadata.Version()), nil
 }
 
-func (i InspectTable) currentPositionDeleteFiles(
+func (i InspectTable) currentPositionDeleteManifests(
 	ctx context.Context,
-) (iceio.IO, []iceberg.DataFile, error) {
+) (iceio.IO, []iceberg.ManifestFile, error) {
 	snapshot := i.tbl.metadata.CurrentSnapshot()
 	if snapshot == nil {
 		return nil, nil, nil
@@ -87,28 +87,7 @@ func (i InspectTable) currentPositionDeleteFiles(
 		return nil, nil, err
 	}
 
-	files := make([]iceberg.DataFile, 0)
-	for _, manifest := range manifests {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, err
-		}
-		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
-			continue
-		}
-		for entry, err := range manifest.Entries(fs, true) {
-			if err != nil {
-				return nil, nil, fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err)
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, nil, err
-			}
-			if entry.DataFile().ContentType() == iceberg.EntryContentPosDeletes {
-				files = append(files, entry.DataFile())
-			}
-		}
-	}
-
-	return fs, files, nil
+	return fs, manifests, nil
 }
 
 type positionDeleteRecordAppender struct {
@@ -319,7 +298,11 @@ func appendPositionDeleteProjectedScalar(builder array.Builder, value scalar.Sca
 	switch builder := builder.(type) {
 	case *array.StructBuilder:
 		source, ok := value.(*scalar.Struct)
-		if !ok || len(source.Value) != builder.NumField() {
+		if !ok {
+			return fmt.Errorf("%w: projected struct has type %s, want struct",
+				iceberg.ErrInvalidSchema, value.DataType())
+		}
+		if len(source.Value) != builder.NumField() {
 			return fmt.Errorf("%w: projected struct has %d fields, want %d",
 				iceberg.ErrInvalidSchema, len(source.Value), builder.NumField())
 		}
@@ -462,7 +445,7 @@ func (i InspectTable) positionDeleteRecordReader(
 	ctx context.Context,
 	arrowSchema *arrow.Schema,
 	fs iceio.IO,
-	files []iceberg.DataFile,
+	manifests []iceberg.ManifestFile,
 	partitionType *iceberg.StructType,
 	partitionIDByOld map[int]int,
 	formatVersion int,
@@ -519,31 +502,51 @@ func (i InspectTable) positionDeleteRecordReader(
 			return true, nil
 		}
 
-		for _, file := range files {
+		for _, manifest := range manifests {
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
 
 				return
 			}
-			var keepGoing bool
-			var err error
-			switch file.FileFormat() {
-			case iceberg.PuffinFile:
-				keepGoing, err = appendDeletionVectorRows(ctx, fs, file, appendRow)
-			case iceberg.ParquetFile:
-				keepGoing, err = appendParquetPositionDeleteRows(ctx, fs, file, appendRow, appender.projection)
-			default:
-				keepGoing = false
-				err = fmt.Errorf("%w: unsupported position delete file format %s",
-					iceberg.ErrNotImplemented, file.FileFormat())
+			if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+				continue
 			}
-			if err != nil {
-				yieldError(fmt.Errorf("read position delete file %s: %w", file.FilePath(), err))
 
-				return
-			}
-			if !keepGoing {
-				return
+			for entry, err := range manifest.Entries(fs, true) {
+				if err != nil {
+					yieldError(fmt.Errorf("read manifest %s: %w", manifest.FilePath(), err))
+
+					return
+				}
+				if err := ctx.Err(); err != nil {
+					yieldError(err)
+
+					return
+				}
+				file := entry.DataFile()
+				if file.ContentType() != iceberg.EntryContentPosDeletes {
+					continue
+				}
+
+				var keepGoing bool
+				switch file.FileFormat() {
+				case iceberg.PuffinFile:
+					keepGoing, err = appendDeletionVectorRows(ctx, fs, file, appendRow)
+				case iceberg.ParquetFile:
+					keepGoing, err = appendParquetPositionDeleteRows(ctx, fs, file, appendRow, appender.projection)
+				default:
+					keepGoing = false
+					err = fmt.Errorf("%w: unsupported position delete file format %s",
+						iceberg.ErrNotImplemented, file.FileFormat())
+				}
+				if err != nil {
+					yieldError(fmt.Errorf("read position delete file %s: %w", file.FilePath(), err))
+
+					return
+				}
+				if !keepGoing {
+					return
+				}
 			}
 		}
 
