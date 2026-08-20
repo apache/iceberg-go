@@ -2249,8 +2249,8 @@ func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, 
 	if testTable != nil {
 		s3Client := s3.NewFromConfig(awsCfg)
 		metadataLoc := testTable.MetadataLocation()
-		if strings.HasPrefix(metadataLoc, "s3://") {
-			parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
+		if after, ok := strings.CutPrefix(metadataLoc, "s3://"); ok {
+			parts := strings.SplitN(after, "/", 2)
 			if len(parts) == 2 {
 				bucket := parts[0]
 				key := parts[1]

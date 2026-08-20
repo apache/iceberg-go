@@ -332,12 +332,45 @@ func (n *NestedField) Equals(other NestedField) bool {
 }
 
 func (n NestedField) MarshalJSON() ([]byte, error) {
-	type Alias NestedField
+	var initialDefault, writeDefault *any
+	if n.InitialDefault != nil {
+		value := defaultValueToJSON(n.Type, n.InitialDefault)
+		initialDefault = &value
+	}
+	if n.WriteDefault != nil {
+		value := defaultValueToJSON(n.Type, n.WriteDefault)
+		writeDefault = &value
+	}
 
 	return json.Marshal(struct {
-		Type *typeIFace `json:"type"`
-		*Alias
-	}{Type: &typeIFace{n.Type}, Alias: (*Alias)(&n)})
+		Type           *typeIFace `json:"type"`
+		ID             int        `json:"id"`
+		Name           string     `json:"name"`
+		Required       bool       `json:"required"`
+		Doc            string     `json:"doc,omitempty"`
+		InitialDefault *any       `json:"initial-default,omitempty"`
+		WriteDefault   *any       `json:"write-default,omitempty"`
+	}{
+		Type: &typeIFace{n.Type},
+		ID:   n.ID, Name: n.Name, Required: n.Required, Doc: n.Doc,
+		InitialDefault: initialDefault, WriteDefault: writeDefault,
+	})
+}
+
+func defaultValueToJSON(typ Type, value any) any {
+	switch typ.(type) {
+	case BinaryType, FixedType:
+		switch value := value.(type) {
+		case []byte:
+			return internal.EncodeDefaultBytes(value)
+		case BinaryLiteral:
+			return internal.EncodeDefaultBytes(value)
+		case FixedLiteral:
+			return internal.EncodeDefaultBytes(value)
+		}
+	}
+
+	return value
 }
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
@@ -576,6 +609,9 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 
 	if aux.ValueID == nil {
 		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
+	}
+	if aux.Value.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'value' key in JSON", ErrInvalidSchema)
 	}
 
 	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type

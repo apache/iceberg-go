@@ -71,10 +71,15 @@ func BenchmarkPartitionRowCapacity(b *testing.B) {
 			column.Release()
 			defer record.Release()
 
+			plan, err := newPartitionExtractionPlan(spec, icebergSchema, record.Schema())
+			if err != nil {
+				b.Fatal(err)
+			}
+
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := getRecordPartitions(spec, icebergSchema, record); err != nil {
+				if _, err := plan.getRecordPartitions(record); err != nil {
 					b.Fatal(err)
 				}
 			}

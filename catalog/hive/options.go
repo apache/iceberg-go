@@ -46,15 +46,30 @@ const (
 	GCEnabledKey                = "gc.enabled"
 	ExternalTablePurgeKey       = "external.table.purge"
 
-	// Lock configuration property keys
+	// Lock configuration property keys.
+	//
+	// Primary names match the Java Hive catalog properties (integer milliseconds).
+	// Legacy Go keys remain accepted as aliases so existing configs keep working;
+	// when both forms are set, the Java key wins.
+	// Ref: https://iceberg.apache.org/docs/nightly/catalog-properties/#hive-metastore-configuration
+	LockCheckMinWaitMs = "iceberg.hive.lock-check-min-wait-ms"
+	LockCheckMaxWaitMs = "iceberg.hive.lock-check-max-wait-ms"
+
+	// Legacy Go-specific aliases (Go duration strings, e.g. "100ms", "5s").
 	LockCheckMinWaitTime = "lock-check-min-wait-time"
 	LockCheckMaxWaitTime = "lock-check-max-wait-time"
-	LockCheckRetries     = "lock-check-retries"
+	// LockCheckRetries is Go-specific. Java bounds acquisition with
+	// iceberg.hive.lock-timeout-ms instead of a retry count.
+	LockCheckRetries = "lock-check-retries"
 
-	// Default lock configuration values
-	DefaultLockCheckMinWaitTime = 100 * time.Millisecond // 100ms
-	DefaultLockCheckMaxWaitTime = 60 * time.Second       // 1 minute
+	// Default lock configuration values match the Java Hive catalog.
+	DefaultLockCheckMinWaitTime = 50 * time.Millisecond // Java: 50ms
+	DefaultLockCheckMaxWaitTime = 5 * time.Second       // Java: 5000ms
 	DefaultLockCheckRetries     = 4
+
+	// lockCheckBackoffScale matches the Java MetastoreLock lock-check path, which
+	// passes 1.5 to Tasks.exponentialBackoff (not the Tasks default of 2.0).
+	lockCheckBackoffScale = 1.5
 )
 
 type HiveOptions struct {
@@ -87,22 +102,47 @@ func (o *HiveOptions) ApplyProperties(props iceberg.Properties) {
 		o.Warehouse = warehouse
 	}
 
-	// Parse lock configuration
-	if val, ok := props[LockCheckMinWaitTime]; ok {
-		if d, err := time.ParseDuration(val); err == nil {
-			o.LockMinWaitTime = d
-		}
+	minWait := o.LockMinWaitTime
+	maxWait := o.LockMaxWaitTime
+
+	if d, ok := durationFromProps(props, LockCheckMinWaitMs, LockCheckMinWaitTime); ok {
+		minWait = d
 	}
-	if val, ok := props[LockCheckMaxWaitTime]; ok {
-		if d, err := time.ParseDuration(val); err == nil {
-			o.LockMaxWaitTime = d
-		}
+	if d, ok := durationFromProps(props, LockCheckMaxWaitMs, LockCheckMaxWaitTime); ok {
+		maxWait = d
 	}
+
+	// Only apply a consistent positive wait window. Invalid values (non-positive
+	// or min >= max) are ignored so callers keep the previous/default settings
+	// instead of relying on calculateBackoff/applyJitter to paper over bad config.
+	if minWait > 0 && maxWait > 0 && minWait < maxWait {
+		o.LockMinWaitTime = minWait
+		o.LockMaxWaitTime = maxWait
+	}
+
 	if val, ok := props[LockCheckRetries]; ok {
-		if i, err := strconv.Atoi(val); err == nil {
+		if i, err := strconv.Atoi(val); err == nil && i > 0 {
 			o.LockRetries = i
 		}
 	}
+}
+
+// durationFromProps resolves a lock wait duration from properties. The Java
+// millisecond key is preferred when present and valid; otherwise the legacy Go
+// duration-string alias is used.
+func durationFromProps(props iceberg.Properties, javaMsKey, legacyDurationKey string) (time.Duration, bool) {
+	if val, ok := props[javaMsKey]; ok {
+		if ms, err := strconv.ParseInt(val, 10, 64); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond, true
+		}
+	}
+	if val, ok := props[legacyDurationKey]; ok {
+		if d, err := time.ParseDuration(val); err == nil && d > 0 {
+			return d, true
+		}
+	}
+
+	return 0, false
 }
 
 type Option func(*HiveOptions)

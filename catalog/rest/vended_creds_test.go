@@ -139,12 +139,10 @@ func TestVendedCredsConcurrentAccess(t *testing.T) {
 	// No cached IO — concurrent initial loads should only create IO once.
 	var wg sync.WaitGroup
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, err := r.loadFS(context.Background())
 			assert.NoError(t, err)
-		}()
+		})
 	}
 	wg.Wait()
 

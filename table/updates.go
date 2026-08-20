@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/io"
@@ -100,7 +101,7 @@ var requiredUpdateFields = map[string][]string{
 	UpdateRemoveEncryptionKey:       {"key-id"},
 }
 
-func normalizeLegacyPropertyFields(action string, raw json.RawMessage) (json.RawMessage, error) {
+func normalizeLegacyPropertyFields(action string, object map[string]json.RawMessage) bool {
 	var modern, legacy string
 	switch action {
 	case UpdateSetProperties:
@@ -108,33 +109,28 @@ func normalizeLegacyPropertyFields(action string, raw json.RawMessage) (json.Raw
 	case UpdateRemoveProperties:
 		modern, legacy = "removals", "removed"
 	default:
-		return raw, nil
+		return false
 	}
 
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return nil, err
-	}
-
+	normalized := false
 	if _, ok := object[modern]; !ok {
 		if value, ok := object[legacy]; ok {
 			object[modern] = value
+			normalized = true
 		}
 	}
-	delete(object, legacy)
+	if _, ok := object[legacy]; ok {
+		delete(object, legacy)
+		normalized = true
+	}
 
-	return json.Marshal(object)
+	return normalized
 }
 
-func validateRequiredUpdateFields(action string, raw json.RawMessage) error {
+func validateRequiredUpdateFields(action string, object map[string]json.RawMessage) error {
 	fields := requiredUpdateFields[action]
 	if len(fields) == 0 {
 		return nil
-	}
-
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &object); err != nil {
-		return err
 	}
 
 	for _, field := range fields {
@@ -145,6 +141,14 @@ func validateRequiredUpdateFields(action string, raw json.RawMessage) error {
 	}
 
 	return nil
+}
+
+func validateUpdateActionDecode(raw json.RawMessage) error {
+	var actionWire struct {
+		Action *string `json:"action"`
+	}
+
+	return json.Unmarshal(raw, &actionWire)
 }
 
 func (u *Updates) UnmarshalJSON(data []byte) error {
@@ -158,17 +162,49 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		updates = make(Updates, 0, len(rawUpdates))
 	}
 	for _, raw := range rawUpdates {
-		var baseWire struct {
-			Action *string `json:"action"`
-		}
-		if err := json.Unmarshal(raw, &baseWire); err != nil {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &object); err != nil {
 			return err
 		}
-		if baseWire.Action == nil {
-			return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+
+		actionValue, exactAction := object["action"]
+		actionFieldCount := 0
+		caseVariantAction := false
+		for field := range object {
+			if strings.EqualFold(field, "action") {
+				actionFieldCount++
+				if field != "action" {
+					caseVariantAction = true
+				}
+			}
 		}
 
-		base := baseUpdate{ActionName: *baseWire.Action}
+		var action string
+		if exactAction && !caseVariantAction {
+			if bytes.Equal(bytes.TrimSpace(actionValue), []byte("null")) {
+				if err := validateUpdateActionDecode(raw); err != nil {
+					return err
+				}
+
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			if err := json.Unmarshal(actionValue, &action); err != nil {
+				return err
+			}
+		} else {
+			var baseWire struct {
+				Action *string `json:"action"`
+			}
+			if err := json.Unmarshal(raw, &baseWire); err != nil {
+				return err
+			}
+			if baseWire.Action == nil {
+				return fmt.Errorf("%w: update requires field %q", iceberg.ErrInvalidArgument, "action")
+			}
+			action = *baseWire.Action
+		}
+
+		base := baseUpdate{ActionName: action}
 
 		var upd Update
 		switch base.ActionName {
@@ -219,14 +255,39 @@ func (u *Updates) UnmarshalJSON(data []byte) error {
 		case UpdateRemoveEncryptionKey:
 			upd = &removeEncryptionKeyUpdate{}
 		default:
+			if err := validateUpdateActionDecode(raw); err != nil {
+				return err
+			}
+
 			return fmt.Errorf("%w: unknown update action: %s", iceberg.ErrInvalidArgument, base.ActionName)
 		}
-		normalized, err := normalizeLegacyPropertyFields(base.ActionName, raw)
-		if err != nil {
-			return err
+		if normalizeLegacyPropertyFields(base.ActionName, object) {
+			if err := validateUpdateActionDecode(raw); err != nil {
+				return err
+			}
+			if actionFieldCount > 1 {
+				for field := range object {
+					if strings.EqualFold(field, "action") {
+						delete(object, field)
+					}
+				}
+				actionJSON, err := json.Marshal(base.ActionName)
+				if err != nil {
+					return err
+				}
+				object["action"] = actionJSON
+			}
+			normalized, err := json.Marshal(object)
+			if err != nil {
+				return err
+			}
+			raw = normalized
 		}
-		raw = normalized
-		if err := validateRequiredUpdateFields(base.ActionName, raw); err != nil {
+		if err := validateRequiredUpdateFields(base.ActionName, object); err != nil {
+			if actionErr := validateUpdateActionDecode(raw); actionErr != nil {
+				return actionErr
+			}
+
 			return err
 		}
 

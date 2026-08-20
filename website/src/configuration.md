@@ -48,12 +48,14 @@ catalog:
 |---|---|
 | `default-catalog` | Name used when `--catalog-name` is not passed on the CLI. |
 | `max-workers` | Worker pool size for concurrent operations. Default `5`. |
-| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. |
+| `catalog.<name>.type` | One of `rest`, `hive`, `glue`, `sql`, `hadoop`. `dynamodb` is recognized by the CLI but not implemented yet. |
 | `catalog.<name>.uri` | Catalog endpoint or DSN. |
 | `catalog.<name>.warehouse` | Warehouse identifier (REST/Glue) or location (Hive/SQL). |
 | `catalog.<name>.credential` | Credential string passed through to the catalog's auth handler. |
 | `catalog.<name>.output` | CLI output format (e.g. `text`, `json`). |
 | `catalog.<name>.aws-profile` | AWS named profile for the Glue catalog. When unset, the AWS SDK default credential chain is used. |
+| `catalog.<name>.sql-driver` | `database/sql` driver name for the SQL catalog. Maps to the `sql.driver` property. The default CLI binary only compiles in `sqliteshim`; other drivers require a custom build. |
+| `catalog.<name>.sql-dialect` | SQL dialect for the SQL catalog (`postgres`, `mysql`, `sqlite`, `mssql`, `oracle`). Maps to the `sql.dialect` property. The default CLI binary only ships `sqlite` via `sqliteshim`; other dialects need a custom build with their drivers. |
 | `catalog.<name>.rest.sigv4-enabled` | Enable AWS SigV4 signing for REST. |
 | `catalog.<name>.rest.signing-name` | SigV4 service name. |
 | `catalog.<name>.rest.signing-region` | SigV4 region. |
@@ -105,6 +107,17 @@ Source: [`catalog/hive/options.go`](https://github.com/apache/iceberg-go/blob/ma
 - `WithURI(uri string)` - Thrift URI for the Hive Metastore (e.g. `thrift://127.0.0.1:9083`).
 - `WithWarehouse(warehouse string)`
 - `WithProperties(props iceberg.Properties)`
+
+Lock-check catalog properties (passed via `WithProperties` / `catalog.Load` props):
+
+| Property | Default | Description |
+|---|---|---|
+| `iceberg.hive.lock-check-min-wait-ms` | `50` | Minimum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
+| `iceberg.hive.lock-check-max-wait-ms` | `5000` | Maximum wait between lock-status checks, in milliseconds. Matches the Java Hive catalog key. |
+| `lock-check-min-wait-time` / `lock-check-max-wait-time` | same defaults | Legacy Go aliases that accept Go duration strings (e.g. `100ms`, `5s`). Ignored when the corresponding Java key is set. |
+| `lock-check-retries` | `4` | Go-specific upper bound on check attempts. Java instead uses `iceberg.hive.lock-timeout-ms` (not wired in Go yet). |
+
+Invalid values (non-positive waits/retries, or min ≥ max) are ignored and the previous/default settings are kept.
 
 ### Glue (`catalog/glue`)
 

@@ -24,6 +24,7 @@ import (
 	"iter"
 	"math"
 	"slices"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -43,6 +44,11 @@ type partitionedFanoutWriter struct {
 	schema        *iceberg.Schema
 	itr           iter.Seq2[arrow.RecordBatch, error]
 	writerFactory *writerFactory
+	// Equality-delete inputs may contain partition columns omitted from the output schema,
+	// so compile from the first actual batch and share the immutable plan across workers.
+	planOnce sync.Once
+	plan     *partitionExtractionPlan
+	planErr  error
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -58,6 +64,14 @@ type partitionFieldInfo struct {
 	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
+	columnIndex int
+}
+
+type partitionExtractionPlan struct {
+	spec         iceberg.PartitionSpec
+	schema       *iceberg.Schema
+	recordSchema *arrow.Schema
+	fields       []partitionFieldInfo
 }
 
 type binaryPartitionKey string
@@ -295,15 +309,27 @@ func yieldDataFiles(
 }
 
 func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
-	return getRecordPartitions(p.partitionSpec, p.schema, record)
+	p.planOnce.Do(func() {
+		p.plan, p.planErr = newPartitionExtractionPlan(p.partitionSpec, p.schema, record.Schema())
+	})
+	if p.planErr != nil {
+		return nil, p.planErr
+	}
+
+	return p.plan.getRecordPartitions(record)
 }
 
 func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, record arrow.RecordBatch) ([]*partitionInfo, error) {
-	partitionMap := newPartitionMapNode()
-	partitionFields := spec.PartitionType(schema).FieldList
-	partitionRec := make(partitionRecord, len(partitionFields))
+	plan, err := newPartitionExtractionPlan(spec, schema, record.Schema())
+	if err != nil {
+		return nil, err
+	}
 
-	partitionColumns := make([]arrow.Array, len(partitionFields))
+	return plan.getRecordPartitions(record)
+}
+
+func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Schema, recordSchema *arrow.Schema) (*partitionExtractionPlan, error) {
+	partitionFields := spec.PartitionType(schema).FieldList
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
 	for _, field := range spec.Fields() {
@@ -311,6 +337,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 	}
 
 	for i, partitionField := range partitionFields {
+		partitionFieldsInfo[i].columnIndex = -1
 		sourceField, ok := specFieldsByID[partitionField.ID]
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
@@ -320,7 +347,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		if !ok {
 			continue
 		}
-		colIndices := record.Schema().FieldIndices(colName)
+		colIndices := recordSchema.FieldIndices(colName)
 		if len(colIndices) == 0 {
 			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
 		}
@@ -328,20 +355,48 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		if !ok {
 			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.SourceID())
 		}
-		partitionColumns[i] = record.Column(colIndices[0])
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
 			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
+			columnIndex: colIndices[0],
+		}
+	}
+
+	return &partitionExtractionPlan{
+		spec:         spec,
+		schema:       schema,
+		recordSchema: recordSchema,
+		fields:       partitionFieldsInfo,
+	}, nil
+}
+
+func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
+	// Preserve support for iterators whose batch schema changes. The usual path compares
+	// schema pointers; equivalent independently-built schemas also reuse the plan.
+	if !p.matchesSchema(record.Schema()) {
+		plan, err := newPartitionExtractionPlan(p.spec, p.schema, record.Schema())
+		if err != nil {
+			return nil, err
+		}
+
+		return plan.getRecordPartitions(record)
+	}
+
+	partitionMap := newPartitionMapNode()
+	partitionRec := make(partitionRecord, len(p.fields))
+	partitionColumns := make([]arrow.Array, len(p.fields))
+	for i, fieldInfo := range p.fields {
+		if fieldInfo.columnIndex >= 0 {
+			partitionColumns[i] = record.Column(fieldInfo.columnIndex)
 		}
 	}
 
 	for row := range record.NumRows() {
-		for i := range partitionFields {
+		for i, fieldInfo := range p.fields {
 			col := partitionColumns[i]
 			if col != nil && !col.IsNull(int(row)) {
-				fieldInfo := partitionFieldsInfo[i]
 				sourceField := fieldInfo.sourceField
 				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
 				if err != nil {
@@ -367,11 +422,15 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		}
 
 		// Get or create partition info for this partition key
-		partVal := partitionMap.getOrCreate(partitionRec, partitionFieldsInfo, record.NumRows())
+		partVal := partitionMap.getOrCreate(partitionRec, p.fields, record.NumRows())
 		partVal.rows = append(partVal.rows, row)
 	}
 
 	return partitionMap.collectPartitions(), nil
+}
+
+func (p *partitionExtractionPlan) matchesSchema(recordSchema *arrow.Schema) bool {
+	return recordSchema == p.recordSchema || recordSchema.Equal(p.recordSchema)
 }
 
 // partitionMapNode represents a simple tree structure for storing partitionInfo.
@@ -380,8 +439,9 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 // is in the order of the partition spec.
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
-	children       map[any]any
-	leafCount      int
+	children  map[any]any
+	leafCount int
+	// partitionCount is maintained by the root node for the current batch.
 	partitionCount int
 }
 
@@ -441,6 +501,10 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 const maxInitialPartitionRowCapacity = 128
 
 func initialPartitionRowCapacity(numRows int64, partitionCount int) int {
+	if numRows <= 0 || partitionCount < 0 || int64(partitionCount) >= numRows {
+		return 1
+	}
+
 	estimatedRows := numRows / int64(partitionCount+1)
 	if estimatedRows < 1 {
 		return 1

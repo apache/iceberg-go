@@ -414,6 +414,11 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 
 	hadoopWarehouse := t.TempDir()
 
+	sqlWarehouse := t.TempDir()
+	sqlDB := filepath.Join(t.TempDir(), "catalog.db")
+	sqlURI := "file:" + sqlDB
+	sqlWarehouseURI := "file://" + sqlWarehouse
+
 	// A raw TCP listener stands in for a Hive metastore: the CLI only needs to
 	// get far enough to open a connection to prove "HIVE"/"Hive" were recognized
 	// as the Hive catalog type. It has no Thrift handshake, so the command still
@@ -444,6 +449,9 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 		// rejected outright, to keep that failure mode distinguishable from
 		// wantErr above.
 		wantUnrecognized bool
+		// wantContains, when set with wantErr, asserts a substring of stderr/stdout
+		// so "not implemented" failures stay distinguishable from other errors.
+		wantContains string
 	}{
 		{
 			name: "rest lowercase",
@@ -496,6 +504,61 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "sql lowercase",
+			args: []string{
+				"list", "--catalog", "sql",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			name: "sql uppercase",
+			args: []string{
+				"list", "--catalog", "SQL",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			name: "sql mixed case",
+			args: []string{
+				"list", "--catalog", "Sql",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			// Missing --sql-driver must reach the SQL registrar (catalog.Load),
+			// not fail as an unrecognized catalog type.
+			name: "sql without sql-driver reaches registrar",
+			args: []string{
+				"list", "--catalog", "sql",
+				"--uri", sqlURI,
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+			wantErr:      true,
+			wantContains: "must provide driver",
+		},
+		{
+			name:         "dynamodb is recognized but not implemented",
+			args:         []string{"list", "--catalog", "dynamodb"},
+			wantErr:      true,
+			wantContains: "dynamodb catalog is not implemented",
+		},
+		{
+			name:         "dynamodb uppercase is recognized but not implemented",
+			args:         []string{"list", "--catalog", "DYNAMODB"},
+			wantErr:      true,
+			wantContains: "dynamodb catalog is not implemented",
+		},
+		{
 			name:             "unknown catalog type is still rejected",
 			args:             []string{"list", "--catalog", "RESTX", "--uri", restSrv.URL},
 			wantUnrecognized: true,
@@ -519,6 +582,9 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 			if tt.wantErr {
 				require.Error(t, err, "output: %s", out)
 				require.NotContains(t, string(out), "unrecognized catalog type")
+				if tt.wantContains != "" {
+					require.Contains(t, string(out), tt.wantContains)
+				}
 
 				return
 			}
@@ -526,6 +592,49 @@ func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
 			require.NoError(t, err, "output: %s", out)
 		})
 	}
+}
+
+func TestMergeConfSQLOptions(t *testing.T) {
+	fileCfg := &config.CatalogConfig{
+		CatalogType: "sql",
+		URI:         "file:from-config.db",
+		Warehouse:   "file:///tmp/from-config-wh",
+		Credential:  "config-credential",
+		SQLDriver:   "sqliteshim",
+		SQLDialect:  "sqlite",
+	}
+
+	t.Run("file values applied when flags absent", func(t *testing.T) {
+		var a Args
+		mergeConf(fileCfg, &a, map[string]bool{})
+		assert.Equal(t, "sql", a.Catalog)
+		assert.Equal(t, "file:from-config.db", a.URI)
+		assert.Equal(t, "file:///tmp/from-config-wh", a.Warehouse)
+		assert.Equal(t, "config-credential", a.Credential)
+		assert.Equal(t, "sqliteshim", a.SQLDriver)
+		assert.Equal(t, "sqlite", a.SQLDialect)
+	})
+
+	t.Run("explicit flags win over file", func(t *testing.T) {
+		a := Args{
+			Catalog:    "rest",
+			URI:        "file:cli.db",
+			Warehouse:  "file:///tmp/cli-wh",
+			Credential: "cli-credential",
+			SQLDriver:  "mysql",
+			SQLDialect: "mysql",
+		}
+		mergeConf(fileCfg, &a, map[string]bool{
+			"catalog": true, "uri": true, "warehouse": true, "credential": true,
+			"sql-driver": true, "sql-dialect": true,
+		})
+		assert.Equal(t, "rest", a.Catalog)
+		assert.Equal(t, "file:cli.db", a.URI)
+		assert.Equal(t, "file:///tmp/cli-wh", a.Warehouse)
+		assert.Equal(t, "cli-credential", a.Credential)
+		assert.Equal(t, "mysql", a.SQLDriver)
+		assert.Equal(t, "mysql", a.SQLDialect)
+	})
 }
 
 func TestMergeConfAwsProfile(t *testing.T) {
