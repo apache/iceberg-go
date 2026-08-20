@@ -384,6 +384,20 @@ func appendPositionDeleteMap(builder *array.MapBuilder, source *scalar.Map) erro
 		return fmt.Errorf("%w: map builder has entry builder of type %T, want struct",
 			iceberg.ErrInvalidSchema, builder.ValueBuilder())
 	}
+	destinationEntryType, ok := entryBuilder.Type().(*arrow.StructType)
+	if !ok || destinationEntryType.NumFields() != 2 {
+		return fmt.Errorf("%w: map builder has entry type %s, want a two-field struct",
+			iceberg.ErrInvalidSchema, entryBuilder.Type())
+	}
+	sourceFields, err := newPositionDeleteFieldLookup(entryType)
+	if err != nil {
+		return err
+	}
+	keySourceIndex, found := sourceFields.index(destinationEntryType.Field(0))
+	if !found {
+		return fmt.Errorf("%w: map entry is missing the key field",
+			iceberg.ErrInvalidSchema)
+	}
 
 	builder.Append(true)
 	for index := range entries.Len() {
@@ -397,6 +411,24 @@ func appendPositionDeleteMap(builder *array.MapBuilder, source *scalar.Map) erro
 			}
 
 			return fmt.Errorf("%w: map entry %d is null", iceberg.ErrInvalidSchema, index)
+		}
+		entryStruct, ok := entry.(*scalar.Struct)
+		if !ok || len(entryStruct.Value) != entryType.NumFields() {
+			if releasable, ok := entry.(scalar.Releasable); ok {
+				releasable.Release()
+			}
+
+			return fmt.Errorf("%w: map entry %d is not a valid struct",
+				iceberg.ErrInvalidSchema, index)
+		}
+		key := entryStruct.Value[keySourceIndex]
+		if key == nil || !key.IsValid() {
+			if releasable, ok := entry.(scalar.Releasable); ok {
+				releasable.Release()
+			}
+
+			return fmt.Errorf("%w: map entry %d has a null key",
+				iceberg.ErrInvalidSchema, index)
 		}
 		appendErr := appendPositionDeleteValue(entryBuilder, entry)
 		if releasable, ok := entry.(scalar.Releasable); ok {
