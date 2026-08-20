@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -3006,7 +3007,7 @@ func TestInspectPositionDeletesParquet(t *testing.T) {
 	require.Equal(t, deletePath, deleteFilePaths.Value(1))
 }
 
-func TestInspectPositionDeletesV3ParquetUsesFileSize(t *testing.T) {
+func TestInspectPositionDeletesV3ParquetLeavesDVMetadataNull(t *testing.T) {
 	ctx := context.Background()
 	memFS := iceio.NewMemFS()
 	deletePath := "mem://position-deletes/table/data/delete-v3.parquet"
@@ -3035,8 +3036,7 @@ func TestInspectPositionDeletesV3ParquetUsesFileSize(t *testing.T) {
 	require.EqualValues(t, 2, record.NumRows())
 	require.EqualValues(t, 7, record.NumCols())
 	require.EqualValues(t, 2, record.Column(5).NullN())
-	require.Equal(t, []int64{fileSize, fileSize},
-		record.Column(6).(*array.Int64).Int64Values())
+	require.EqualValues(t, 2, record.Column(6).NullN())
 }
 
 func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
@@ -3050,7 +3050,7 @@ func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 
 			return true, nil
@@ -3095,7 +3095,7 @@ func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 
 			return true, nil
@@ -3205,6 +3205,107 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	require.Equal(t, int32(18), amount.DataType().(*arrow.Decimal128Type).Precision)
 }
 
+func TestInspectPositionDeletesParquetUsesNameMappingAndInitialDefault(t *testing.T) {
+	const (
+		deletePath = "mem://position-deletes/table/data/delete-renamed.parquet"
+		dataPath   = "mem://position-deletes/table/data/data.parquet"
+	)
+	memFS := iceio.NewMemFS()
+	intPtr := func(value int) *int { return &value }
+
+	tablePayloadType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 2, Name: "new_name", Type: iceberg.PrimitiveTypes.String, Required: true},
+	}}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "payload", Type: tablePayloadType, Required: true},
+		iceberg.NestedField{ID: 4, Name: "status", Type: iceberg.PrimitiveTypes.String, Required: false, InitialDefault: "active"},
+	)
+	mapping := iceberg.NameMapping{
+		{FieldID: intPtr(1), Names: []string{"payload", "old_payload"}, Fields: []iceberg.MappedField{
+			{FieldID: intPtr(2), Names: []string{"new_name", "old_name"}},
+		}},
+		{FieldID: intPtr(4), Names: []string{"status"}},
+	}
+	metadata := newInspectPositionDeletesMetadataWithSchema(t, 3, tableSchema)
+	mappingJSON, err := json.Marshal(mapping)
+	require.NoError(t, err)
+	require.NoError(t, metadata.SetProperties(iceberg.Properties{
+		DefaultNameMappingKey: string(mappingJSON),
+	}))
+
+	sourcePayloadType := arrow.StructOf(arrow.Field{
+		Name:     "old_name",
+		Type:     arrow.BinaryTypes.String,
+		Nullable: false,
+	})
+	sourceRowType := arrow.StructOf(arrow.Field{
+		Name:     "old_payload",
+		Type:     sourcePayloadType,
+		Nullable: false,
+	})
+	sourceSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "row", Type: sourceRowType, Nullable: false},
+	}, nil)
+	recordBuilder := array.NewRecordBuilder(memory.DefaultAllocator, sourceSchema)
+	recordBuilder.Field(0).(*array.StringBuilder).Append(dataPath)
+	recordBuilder.Field(1).(*array.Int64Builder).Append(7)
+	rowBuilder := recordBuilder.Field(2).(*array.StructBuilder)
+	rowBuilder.Append(true)
+	payloadBuilder := rowBuilder.FieldBuilder(0).(*array.StructBuilder)
+	payloadBuilder.Append(true)
+	payloadBuilder.FieldBuilder(0).(*array.StringBuilder).Append("deleted")
+	record := recordBuilder.NewRecordBatch()
+	defer record.Release()
+	defer recordBuilder.Release()
+
+	arrowTable := array.NewTableFromRecords(sourceSchema, []arrow.RecordBatch{record})
+	defer arrowTable.Release()
+	file, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(
+		arrowTable, file, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	require.NoError(t, file.Close())
+
+	tbl := inspectPositionDeletesTableWithSchema(
+		t, 3, metadata, tableSchema, memFS,
+		[]iceberg.DataFile{newPosDeleteFile(t, deletePath, 1, 128)},
+	)
+	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+	result := collectRecord(t, rr)
+	defer result.Release()
+
+	projectedRow := result.Column(2).(*array.Struct)
+	payload := projectedRow.Field(0).(*array.Struct)
+	require.Equal(t, "deleted", payload.Field(0).(*array.String).Value(0))
+	require.Equal(t, "active", projectedRow.Field(1).(*array.String).Value(0))
+}
+
+func TestInspectPositionDeletesRejectsUnsupportedFileFormat(t *testing.T) {
+	memFS := iceio.NewMemFS()
+	deletePath := "mem://position-deletes/table/data/delete.avro"
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.AvroFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	tbl := inspectPositionDeletesTable(
+		t, 2, newInspectPositionDeletesMetadata(t, 2), memFS,
+		[]iceberg.DataFile{builder.Build()},
+	)
+	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	require.NoError(t, err)
+	defer rr.Release()
+
+	require.False(t, rr.Next())
+	require.ErrorIs(t, rr.Err(), iceberg.ErrNotImplemented)
+	require.ErrorContains(t, rr.Err(), "unsupported position delete file format AVRO")
+}
+
 func TestInspectPositionDeletesParquetProjectsDateToTimestampsV3(t *testing.T) {
 	const (
 		deletePath = "mem://position-deletes/table/data/delete-date.parquet"
@@ -3289,7 +3390,7 @@ func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T)
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		ctx, memFS, newPosDeleteFile(t, deletePath, 2, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar) (bool, error) {
+		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 			cancel()
 
@@ -3303,7 +3404,7 @@ func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T)
 
 func TestPositionDeleteRowProjection(t *testing.T) {
 	tableSchema := iceberg.NewSchema(0,
-		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String, Required: true},
 	)
 	outputSchema, err := SchemaToArrowSchema(
@@ -3452,21 +3553,14 @@ func TestPositionDeleteRowProjectionPromotesDateInV3(t *testing.T) {
 		arrow.Timestamp(int64(dateValue)*int64(24*time.Hour/time.Nanosecond)), dateNanos.Value(0))
 }
 
-func TestPositionDeleteDatePromotionRequiresV3(t *testing.T) {
-	timestamp := &arrow.TimestampType{Unit: arrow.Microsecond}
-	date := arrow.FixedWidthTypes.Date32
-
-	require.False(t, canPromotePositionDeleteValue(date, timestamp, 2))
-	require.True(t, canPromotePositionDeleteValue(date, timestamp, 3))
-	require.True(t, canPromotePositionDeleteValue(
-		date, &arrow.TimestampType{Unit: arrow.Nanosecond}, 3))
-	require.False(t, canPromotePositionDeleteValue(date, arrow.FixedWidthTypes.Timestamp_us, 3),
+func TestPositionDeleteDatePromotion(t *testing.T) {
+	require.True(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.Timestamp))
+	require.True(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampNs))
+	require.False(t, canPromoteDateToTimestamp(
+		iceberg.PrimitiveTypes.Date, iceberg.PrimitiveTypes.TimestampTz),
 		"date promotion must not target a timezone-aware timestamp")
-
-	_, ok := convertPositionDeleteDate32(arrow.Date32(20_000), arrow.Nanosecond)
-	require.True(t, ok)
-	_, ok = convertPositionDeleteDate32(arrow.Date32(math.MaxInt32), arrow.Nanosecond)
-	require.False(t, ok, "out-of-range dates must fail timestamp conversion")
 }
 
 func TestPositionDeleteRowProjectionRejectsDatePromotionBeforeV3(t *testing.T) {

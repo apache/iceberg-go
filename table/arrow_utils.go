@@ -1050,6 +1050,7 @@ type arrowProjectionVisitor struct {
 	ctx                 context.Context
 	fileSchema          *iceberg.Schema
 	tableProperties     iceberg.Properties
+	formatVersion       int
 	includeFieldIDs     bool
 	downcastNsTimestamp bool
 	useLargeTypes       bool
@@ -1079,8 +1080,13 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	if !field.Type.Equals(typ) {
 		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
-			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-			targetType := a.typeToArrowType(promoted)
+			var targetType arrow.DataType
+			if a.formatVersion >= 3 && canPromoteDateToTimestamp(fileField.Type, field.Type) {
+				targetType = a.typeToArrowType(field.Type)
+			} else {
+				promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+				targetType = a.typeToArrowType(promoted)
+			}
 			if !a.useLargeTypes {
 				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 			}
@@ -1184,6 +1190,19 @@ func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool
 		_, ok := readType.(iceberg.TimestampTzType)
 
 		return ok
+	default:
+		return false
+	}
+}
+
+func canPromoteDateToTimestamp(fileType, readType iceberg.Type) bool {
+	if _, ok := fileType.(iceberg.DateType); !ok {
+		return false
+	}
+
+	switch readType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampNsType:
+		return true
 	default:
 		return false
 	}
@@ -1425,10 +1444,12 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
-	IncludeFieldIDs   bool
-	UseLargeTypes     bool
-	UseWriteDefault   bool
-	TableProperties   iceberg.Properties
+	// FormatVersion enables format-version-specific read promotions.
+	FormatVersion   int
+	IncludeFieldIDs bool
+	UseLargeTypes   bool
+	UseWriteDefault bool
+	TableProperties iceberg.Properties
 }
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
@@ -1442,6 +1463,7 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 			ctx:                 ctx,
 			fileSchema:          fileSchema,
 			tableProperties:     opts.TableProperties,
+			formatVersion:       opts.FormatVersion,
 			includeFieldIDs:     opts.IncludeFieldIDs,
 			downcastNsTimestamp: opts.DowncastTimestamp,
 			useLargeTypes:       opts.UseLargeTypes,
