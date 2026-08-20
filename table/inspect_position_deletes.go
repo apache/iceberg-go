@@ -254,18 +254,6 @@ func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Str
 		}
 
 		fieldBuilder := builder.FieldBuilder(index)
-		if nestedBuilder, ok := fieldBuilder.(*array.StructBuilder); ok {
-			nestedValue, ok := value.(*scalar.Struct)
-			if !ok {
-				return fmt.Errorf("%w: field %q has type %s, want struct",
-					iceberg.ErrInvalidSchema, destinationField.Name, value.DataType())
-			}
-			if err := appendPositionDeleteStruct(nestedBuilder, nestedValue); err != nil {
-				return fmt.Errorf("field %q: %w", destinationField.Name, err)
-			}
-
-			continue
-		}
 		if err := appendPositionDeleteValue(fieldBuilder, value); err != nil {
 			return fmt.Errorf("field %q: %w", destinationField.Name, err)
 		}
@@ -275,6 +263,39 @@ func appendPositionDeleteStruct(builder *array.StructBuilder, source *scalar.Str
 }
 
 func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error {
+	if value == nil || !value.IsValid() {
+		builder.AppendNull()
+
+		return nil
+	}
+
+	switch builder := builder.(type) {
+	case *array.StructBuilder:
+		source, ok := value.(*scalar.Struct)
+		if !ok {
+			return fmt.Errorf("%w: value has type %s, want struct",
+				iceberg.ErrInvalidSchema, value.DataType())
+		}
+
+		return appendPositionDeleteStruct(builder, source)
+	case *array.MapBuilder:
+		source, ok := value.(*scalar.Map)
+		if !ok {
+			return fmt.Errorf("%w: value has type %s, want map",
+				iceberg.ErrInvalidSchema, value.DataType())
+		}
+
+		return appendPositionDeleteMap(builder, source)
+	case array.ListLikeBuilder:
+		source, ok := value.(scalar.ListScalar)
+		if !ok {
+			return fmt.Errorf("%w: value has type %s, want list",
+				iceberg.ErrInvalidSchema, value.DataType())
+		}
+
+		return appendPositionDeleteList(builder, source)
+	}
+
 	if arrow.TypeEqual(builder.Type(), value.DataType()) {
 		return scalar.Append(builder, value)
 	}
@@ -282,12 +303,135 @@ func appendPositionDeleteValue(builder array.Builder, value scalar.Scalar) error
 		return scalar.Append(builder, value)
 	}
 
-	casted, err := value.CastTo(builder.Type())
+	appendBuilder := builder
+	castType := builder.Type()
+	if storageBuilder, ok := builder.(positionDeleteStorageBuilder); ok {
+		appendBuilder = storageBuilder.StorageBuilder()
+		castType = appendBuilder.Type()
+	}
+	casted, err := castPositionDeleteValue(value, castType)
 	if err != nil {
 		return fmt.Errorf("promote %s to %s: %w", value.DataType(), builder.Type(), err)
 	}
+	if releasable, ok := casted.(scalar.Releasable); ok {
+		defer releasable.Release()
+	}
 
-	return scalar.Append(builder, casted)
+	return scalar.Append(appendBuilder, casted)
+}
+
+type positionDeleteStorageBuilder interface {
+	array.Builder
+	StorageBuilder() array.Builder
+}
+
+func appendPositionDeleteList(
+	builder array.ListLikeBuilder,
+	source scalar.ListScalar,
+) error {
+	if !isPositionDeleteListType(source.DataType()) {
+		return fmt.Errorf("%w: value has type %s, want list",
+			iceberg.ErrInvalidSchema, source.DataType())
+	}
+	values := source.GetList()
+	if values == nil {
+		return fmt.Errorf("%w: valid list value has no child array",
+			iceberg.ErrInvalidSchema)
+	}
+
+	if destination, ok := builder.Type().(*arrow.FixedSizeListType); ok &&
+		values.Len() != int(destination.Len()) {
+		return fmt.Errorf("%w: list value has %d elements, want %d",
+			iceberg.ErrInvalidSchema, values.Len(), destination.Len())
+	}
+
+	builder.Append(true)
+	valueBuilder := builder.ValueBuilder()
+	for index := range values.Len() {
+		child, err := scalar.GetScalar(values, index)
+		if err != nil {
+			return err
+		}
+		appendErr := appendPositionDeleteValue(valueBuilder, child)
+		if releasable, ok := child.(scalar.Releasable); ok {
+			releasable.Release()
+		}
+		if appendErr != nil {
+			return fmt.Errorf("list element %d: %w", index, appendErr)
+		}
+	}
+
+	return nil
+}
+
+func appendPositionDeleteMap(builder *array.MapBuilder, source *scalar.Map) error {
+	if source.DataType().ID() != arrow.MAP {
+		return fmt.Errorf("%w: value has type %s, want map",
+			iceberg.ErrInvalidSchema, source.DataType())
+	}
+	entries := source.GetList()
+	if entries == nil {
+		return fmt.Errorf("%w: valid map value has no entry array",
+			iceberg.ErrInvalidSchema)
+	}
+	entryType, ok := entries.DataType().(*arrow.StructType)
+	if !ok || entryType.NumFields() != 2 {
+		return fmt.Errorf("%w: map entries have type %s, want a two-field struct",
+			iceberg.ErrInvalidSchema, entries.DataType())
+	}
+	entryBuilder, ok := builder.ValueBuilder().(*array.StructBuilder)
+	if !ok {
+		return fmt.Errorf("%w: map builder has entry builder of type %T, want struct",
+			iceberg.ErrInvalidSchema, builder.ValueBuilder())
+	}
+
+	builder.Append(true)
+	for index := range entries.Len() {
+		entry, err := scalar.GetScalar(entries, index)
+		if err != nil {
+			return err
+		}
+		if !entry.IsValid() {
+			if releasable, ok := entry.(scalar.Releasable); ok {
+				releasable.Release()
+			}
+
+			return fmt.Errorf("%w: map entry %d is null", iceberg.ErrInvalidSchema, index)
+		}
+		appendErr := appendPositionDeleteValue(entryBuilder, entry)
+		if releasable, ok := entry.(scalar.Releasable); ok {
+			releasable.Release()
+		}
+		if appendErr != nil {
+			return fmt.Errorf("map entry %d: %w", index, appendErr)
+		}
+	}
+
+	return nil
+}
+
+func isPositionDeleteListType(typ arrow.DataType) bool {
+	switch typ.ID() {
+	case arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST:
+		return true
+	default:
+		return false
+	}
+}
+
+func castPositionDeleteValue(value scalar.Scalar, destination arrow.DataType) (scalar.Scalar, error) {
+	if destination.ID() == arrow.LARGE_BINARY {
+		if binary, ok := value.(scalar.BinaryScalar); ok {
+			return scalar.NewLargeBinaryScalar(binary.Buffer()), nil
+		}
+	}
+	if destination.ID() == arrow.LARGE_STRING {
+		if binary, ok := value.(scalar.BinaryScalar); ok {
+			return scalar.NewLargeStringScalarFromBuffer(binary.Buffer()), nil
+		}
+	}
+
+	return value.CastTo(destination)
 }
 
 func canPromotePositionDeleteValue(source, destination arrow.DataType) bool {
@@ -296,6 +440,27 @@ func canPromotePositionDeleteValue(source, destination arrow.DataType) bool {
 		return destination.ID() == arrow.INT64
 	case arrow.FLOAT32:
 		return destination.ID() == arrow.FLOAT64
+	case arrow.DECIMAL128:
+		sourceDecimal, sourceOK := source.(*arrow.Decimal128Type)
+		destinationDecimal, destinationOK := destination.(*arrow.Decimal128Type)
+
+		return sourceOK && destinationOK &&
+			sourceDecimal.Scale == destinationDecimal.Scale &&
+			sourceDecimal.Precision <= destinationDecimal.Precision
+	case arrow.STRING, arrow.LARGE_STRING:
+		return destination.ID() == arrow.BINARY || destination.ID() == arrow.LARGE_BINARY
+	case arrow.BINARY, arrow.LARGE_BINARY:
+		return destination.ID() == arrow.STRING || destination.ID() == arrow.LARGE_STRING
+	case arrow.FIXED_SIZE_BINARY:
+		sourceFixed, sourceOK := source.(*arrow.FixedSizeBinaryType)
+		destinationExtension, destinationOK := destination.(arrow.ExtensionType)
+		if !sourceOK || !destinationOK || sourceFixed.ByteWidth != 16 ||
+			destinationExtension.ExtensionName() != "arrow.uuid" {
+			return false
+		}
+		destinationFixed, destinationOK := destinationExtension.StorageType().(*arrow.FixedSizeBinaryType)
+
+		return destinationOK && destinationFixed.ByteWidth == 16
 	default:
 		return false
 	}

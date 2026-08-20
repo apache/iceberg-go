@@ -3083,6 +3083,158 @@ func TestPositionDeleteRowProjectionPromotesTypes(t *testing.T) {
 	require.Equal(t, 1.25, projected.Field(1).(*array.Float64).Value(0))
 }
 
+func TestPositionDeleteRowProjectionPromotesNestedValues(t *testing.T) {
+	tableListType := &iceberg.ListType{
+		ElementID:       3,
+		Element:         iceberg.PrimitiveTypes.Int64,
+		ElementRequired: true,
+	}
+	tableMapType := &iceberg.MapType{
+		KeyID:         4,
+		KeyType:       iceberg.PrimitiveTypes.String,
+		ValueID:       5,
+		ValueType:     iceberg.PrimitiveTypes.Int64,
+		ValueRequired: false,
+	}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "values", Type: tableListType, Required: true},
+		iceberg.NestedField{ID: 2, Name: "attributes", Type: tableMapType, Required: true},
+		iceberg.NestedField{ID: 6, Name: "amount", Type: iceberg.DecimalTypeOf(18, 2), Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+	sourceListType := arrow.ListOfField(arrow.Field{
+		Name:     "element",
+		Type:     arrow.PrimitiveTypes.Int32,
+		Nullable: false,
+		Metadata: fieldID(3),
+	})
+	listBuilder := array.NewListBuilderWithField(memory.DefaultAllocator, sourceListType.ElemField())
+	defer listBuilder.Release()
+	listBuilder.Append(true)
+	listValues := listBuilder.ValueBuilder().(*array.Int32Builder)
+	listValues.Append(7)
+	listValues.Append(9)
+	listArray := listBuilder.NewListArray()
+	defer listArray.Release()
+	listValue := scalar.NewListScalar(listArray.ListValues())
+	defer listValue.Release()
+
+	sourceMapType := arrow.MapOfFields(
+		arrow.Field{Name: "key", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldID(4)},
+		arrow.Field{Name: "value", Type: arrow.PrimitiveTypes.Int32, Nullable: true, Metadata: fieldID(5)},
+	)
+	mapBuilder := array.NewMapBuilderWithType(memory.DefaultAllocator, sourceMapType)
+	defer mapBuilder.Release()
+	mapBuilder.Append(true)
+	mapBuilder.KeyBuilder().(*array.StringBuilder).Append("first")
+	mapBuilder.ItemBuilder().(*array.Int32Builder).Append(11)
+	mapBuilder.KeyBuilder().(*array.StringBuilder).Append("second")
+	mapBuilder.ItemBuilder().(*array.Int32Builder).Append(13)
+	mapArray := mapBuilder.NewMapArray()
+	defer mapArray.Release()
+	mapValue := scalar.NewMapScalar(mapArray.ListValues())
+	defer mapValue.Release()
+
+	sourceDecimalType := &arrow.Decimal128Type{Precision: 9, Scale: 2}
+	row := scalar.NewStructScalar([]scalar.Scalar{
+		listValue,
+		mapValue,
+		scalar.NewDecimal128Scalar(decimal128.FromI64(12345), sourceDecimalType),
+	}, arrow.StructOf(
+		arrow.Field{Name: "values", Type: sourceListType, Nullable: true, Metadata: fieldID(1)},
+		arrow.Field{Name: "attributes", Type: sourceMapType, Nullable: true, Metadata: fieldID(2)},
+		arrow.Field{Name: "amount", Type: sourceDecimalType, Nullable: true, Metadata: fieldID(6)},
+	))
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(
+		deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	projected := record.Column(2).(*array.Struct)
+	values := projected.Field(0).(*array.List)
+	require.Equal(t, []int64{7, 9}, values.ListValues().(*array.Int64).Int64Values())
+	attributes := projected.Field(1).(*array.Map)
+	require.Equal(t, []int64{11, 13}, attributes.Items().(*array.Int64).Int64Values())
+	amount := projected.Field(2).(*array.Decimal128)
+	require.Equal(t, decimal128.FromI64(12345), amount.Value(0))
+	require.Equal(t, int32(18), amount.DataType().(*arrow.Decimal128Type).Precision)
+}
+
+func TestPositionDeleteRowProjectionPromotesNestedStructValues(t *testing.T) {
+	tableElementType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 8, Name: "count", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		{ID: 9, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: true},
+	}}
+	tableListType := &iceberg.ListType{
+		ElementID:       7,
+		Element:         tableElementType,
+		ElementRequired: true,
+	}
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "items", Type: tableListType, Required: true},
+	)
+	outputSchema, err := SchemaToArrowSchema(
+		PositionDeletesSchema(tableSchema, &iceberg.StructType{}, 2), nil, true, false)
+	require.NoError(t, err)
+	bldr := array.NewRecordBuilder(memory.DefaultAllocator, outputSchema)
+	defer bldr.Release()
+	appender, err := newPositionDeleteRecordAppender(bldr, &iceberg.StructType{}, nil, 2)
+	require.NoError(t, err)
+
+	fieldID := func(id int) arrow.Metadata {
+		return arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: strconv.Itoa(id)})
+	}
+	sourceElementType := arrow.StructOf(
+		arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true, Metadata: fieldID(9)},
+		arrow.Field{Name: "count", Type: arrow.PrimitiveTypes.Int32, Nullable: true, Metadata: fieldID(8)},
+	)
+	sourceListType := arrow.ListOfField(arrow.Field{
+		Name:     "element",
+		Type:     sourceElementType,
+		Nullable: false,
+		Metadata: fieldID(7),
+	})
+	listBuilder := array.NewListBuilderWithField(memory.DefaultAllocator, sourceListType.ElemField())
+	defer listBuilder.Release()
+	listBuilder.Append(true)
+	elementBuilder := listBuilder.ValueBuilder().(*array.StructBuilder)
+	elementBuilder.Append(true)
+	elementBuilder.FieldBuilder(0).(*array.StringBuilder).Append("nested")
+	elementBuilder.FieldBuilder(1).(*array.Int32Builder).Append(17)
+	listArray := listBuilder.NewListArray()
+	defer listArray.Release()
+	listValue := scalar.NewListScalar(listArray.ListValues())
+	defer listValue.Release()
+
+	row := scalar.NewStructScalar([]scalar.Scalar{listValue}, arrow.StructOf(
+		arrow.Field{Name: "items", Type: sourceListType, Nullable: true, Metadata: fieldID(1)},
+	))
+	defer row.Release()
+
+	deleteFile := newPosDeleteFile(t, "mem://position-deletes/table/data/delete.parquet", 1, 128)
+	require.NoError(t, appender.append(
+		deleteFile, "mem://position-deletes/table/data/data.parquet", 7, row))
+
+	record := bldr.NewRecordBatch()
+	defer record.Release()
+	items := record.Column(2).(*array.Struct).Field(0).(*array.List).ListValues().(*array.Struct)
+	require.EqualValues(t, 17, items.Field(0).(*array.Int64).Value(0))
+	require.Equal(t, "nested", items.Field(1).(*array.String).Value(0))
+}
+
 func TestInspectPositionDeletesStopsOnContextCancellation(t *testing.T) {
 	metadata, err := newInspectPositionDeletesMetadata(t, 2).Build()
 	require.NoError(t, err)
