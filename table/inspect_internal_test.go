@@ -3016,7 +3016,11 @@ func TestInspectPositionDeletesV3ParquetUsesFileSize(t *testing.T) {
 		{"file_path": "`+dataPath+`", "pos": 3}
 	]`)
 	const fileSize int64 = 128
-	deleteFile := newPosDeleteFile(t, deletePath, 2, fileSize)
+	deleteFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, 2, fileSize)
+	require.NoError(t, err)
+	deleteFile := deleteFileBuilder.ContentSizeInBytes(fileSize / 2).Build()
 	tbl := inspectPositionDeletesTable(
 		t, 3, newInspectPositionDeletesMetadata(t, 3), memFS,
 		[]iceberg.DataFile{deleteFile},
