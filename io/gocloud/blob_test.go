@@ -19,17 +19,23 @@ package gocloud
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/url"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	icebergio "github.com/apache/iceberg-go/io"
 	"gocloud.dev/blob"
+	"gocloud.dev/blob/driver"
 	"gocloud.dev/blob/memblob"
+	"gocloud.dev/gcerrors"
 )
 
 func TestDefaultKeyExtractor(t *testing.T) {
@@ -723,6 +729,131 @@ func TestBlobFileIODeleteFilesEmpty(t *testing.T) {
 	deleted, err := bulk.DeleteFiles(ctx, nil)
 	require.NoError(t, err)
 	assert.Nil(t, deleted)
+}
+
+type trackingDeleteBucket struct {
+	started chan<- struct{}
+	release chan struct{}
+
+	mu          sync.Mutex
+	inFlight    int
+	maxInFlight int
+}
+
+var errTrackingDeleteUnsupported = errors.New("unsupported test operation")
+
+func (b *trackingDeleteBucket) ErrorCode(error) gcerrors.ErrorCode { return gcerrors.Unknown }
+func (b *trackingDeleteBucket) As(any) bool                        { return false }
+func (b *trackingDeleteBucket) ErrorAs(error, any) bool            { return false }
+func (b *trackingDeleteBucket) Attributes(context.Context, string) (*driver.Attributes, error) {
+	return nil, errTrackingDeleteUnsupported
+}
+
+func (b *trackingDeleteBucket) ListPaged(context.Context, *driver.ListOptions) (*driver.ListPage, error) {
+	return nil, errTrackingDeleteUnsupported
+}
+
+func (b *trackingDeleteBucket) NewRangeReader(context.Context, string, int64, int64, *driver.ReaderOptions) (driver.Reader, error) {
+	return nil, errTrackingDeleteUnsupported
+}
+
+func (b *trackingDeleteBucket) NewTypedWriter(context.Context, string, string, *driver.WriterOptions) (driver.Writer, error) {
+	return nil, errTrackingDeleteUnsupported
+}
+
+func (b *trackingDeleteBucket) Copy(context.Context, string, string, *driver.CopyOptions) error {
+	return errTrackingDeleteUnsupported
+}
+
+func (b *trackingDeleteBucket) Delete(ctx context.Context, _ string) error {
+	b.mu.Lock()
+	b.inFlight++
+	if b.inFlight > b.maxInFlight {
+		b.maxInFlight = b.inFlight
+	}
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		b.inFlight--
+		b.mu.Unlock()
+	}()
+
+	select {
+	case b.started <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *trackingDeleteBucket) SignedURL(context.Context, string, *driver.SignedURLOptions) (string, error) {
+	return "", errTrackingDeleteUnsupported
+}
+func (b *trackingDeleteBucket) Close() error { return nil }
+
+func TestBlobFileIODeleteFilesIsConcurrentAndBounded(t *testing.T) {
+	const pathCount = deleteFilesMaxConcurrency * 2
+
+	started := make(chan struct{}, pathCount)
+	tracker := &trackingDeleteBucket{
+		started: started,
+		release: make(chan struct{}),
+	}
+	bucket := blob.NewBucket(tracker)
+	defer bucket.Close()
+
+	bfs := &BlobFileIO{
+		Bucket:        bucket,
+		extractObject: defaultObjectLocationExtractor("test-bucket"),
+		ctx:           context.Background(),
+	}
+	paths := make([]string, pathCount)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("s3://test-bucket/data/file%d.parquet", i)
+	}
+
+	deletedCh := make(chan struct{})
+	var deleted []string
+	var deleteErr error
+	go func() {
+		deleted, deleteErr = bfs.DeleteFiles(context.Background(), paths)
+		close(deletedCh)
+	}()
+
+	for range deleteFilesMaxConcurrency {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("DeleteFiles did not start the expected concurrent deletes")
+		}
+	}
+
+	tracker.mu.Lock()
+	maxInFlight := tracker.maxInFlight
+	tracker.mu.Unlock()
+	assert.Equal(t, deleteFilesMaxConcurrency, maxInFlight)
+
+	select {
+	case <-started:
+		t.Fatal("DeleteFiles exceeded its concurrency limit")
+	default:
+	}
+
+	close(tracker.release)
+	select {
+	case <-deletedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DeleteFiles did not finish after deletes were released")
+	}
+
+	require.NoError(t, deleteErr)
+	assert.Equal(t, paths, deleted)
 }
 
 func TestBlobFileIOStat(t *testing.T) {

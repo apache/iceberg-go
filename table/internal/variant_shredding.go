@@ -26,10 +26,11 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/variant"
 )
 
-// Variant shredding inference: most-common-type selection with explicit
-// tie-break, integer/decimal widening, and frequency/depth/field-count bounds.
-// Field caps are per-object-node (matching Java); no global budget - total is
-// bounded by the sample, maxShreddingDepth, and the per-node caps.
+// Variant shredding inference: a field shreds only when all its non-null values
+// share one type family (the integer and decimal families widen to their widest
+// observed member); a field mixing more than one family is not shreddable and
+// stays in the residual value. Frequency/depth/field-count bounds and per-object-
+// node caps match Java; no global budget.
 const (
 	minFieldFrequency     = 0.10
 	maxShreddedFields     = 300
@@ -46,35 +47,26 @@ var decimalPriority = map[variant.Type]int{
 	variant.Decimal4: 0, variant.Decimal8: 1, variant.Decimal16: 2,
 }
 
-// tieBreakPriority breaks count ties in most-common-type selection; higher wins.
-// Types absent here (Null, Array, Object) resolve to -1.
-var tieBreakPriority = map[variant.Type]int{
-	variant.Bool: 0, variant.Int8: 1, variant.Int16: 2, variant.Int32: 3,
-	variant.Int64: 4, variant.Float: 5, variant.Double: 6, variant.Decimal4: 7,
-	variant.Decimal8: 8, variant.Decimal16: 9, variant.Date: 10, variant.Time: 11,
-	variant.TimestampMicros: 12, variant.TimestampMicrosNTZ: 13, variant.Binary: 14,
-	variant.String: 15, variant.TimestampNanos: 16, variant.TimestampNanosNTZ: 17,
-	variant.UUID: 18,
-}
-
 type fieldInfo struct {
-	typeCounts          map[variant.Type]int
+	admitted            variant.Type
+	hasAdmitted         bool
+	mixed               bool
 	observationCount    int
 	maxDecimalScale     int
 	maxDecimalIntDigits int
 }
 
 func newFieldInfo() *fieldInfo {
-	return &fieldInfo{typeCounts: make(map[variant.Type]int)}
+	return &fieldInfo{}
 }
 
-// observe records one value's type at this node (per-value counting).
+// observe records one value at this node, folding its type into the admitted type.
 func (f *fieldInfo) observe(v variant.Value) {
 	f.observationCount++
 
 	t := v.Type()
 	// arrow-go has a single Bool type, so no false-folds-to-true step.
-	f.typeCounts[t]++
+	f.admit(t)
 
 	if isDecimalType(t) {
 		intDigits, scale := decimalDigits(v.Value())
@@ -87,67 +79,59 @@ func (f *fieldInfo) observe(v variant.Value) {
 	}
 }
 
-// mostCommonType collapses int/decimal families to the widest, then picks max by count.
-func (f *fieldInfo) mostCommonType() (variant.Type, bool) {
-	combined := make(map[variant.Type]int)
+// admit widens the admitted type with t, or marks the node mixed when t belongs to
+// a different family.
+func (f *fieldInfo) admit(t variant.Type) {
+	if f.mixed {
+		return
+	}
+	if !f.hasAdmitted {
+		f.admitted, f.hasAdmitted = t, true
 
-	intTotal, decTotal := 0, 0
-	var widestInt, widestDec variant.Type
-	haveInt, haveDec := false, false
+		return
+	}
+	merged, ok := mergeFamily(f.admitted, t)
+	if !ok {
+		f.mixed = true
 
-	for t, c := range f.typeCounts {
-		switch {
-		case isIntegerType(t):
-			intTotal += c
-			if !haveInt || integerPriority[t] > integerPriority[widestInt] {
-				widestInt, haveInt = t, true
-			}
-		case isDecimalType(t):
-			decTotal += c
-			if !haveDec || decimalPriority[t] > decimalPriority[widestDec] {
-				widestDec, haveDec = t, true
-			}
-		default:
-			combined[t] = c
+		return
+	}
+	f.admitted = merged
+}
+
+// mergeFamily widens current with candidate within the integer or decimal family,
+// returning ok=false when they belong to different families (mirroring Java's
+// VariantShreddingAnalyzer.mergeFamily).
+func mergeFamily(current, candidate variant.Type) (variant.Type, bool) {
+	if current == candidate {
+		return current, true
+	}
+	if isIntegerType(current) && isIntegerType(candidate) {
+		if integerPriority[candidate] > integerPriority[current] {
+			return candidate, true
 		}
+
+		return current, true
 	}
-	if haveInt {
-		combined[widestInt] = intTotal
-	}
-	if haveDec {
-		combined[widestDec] = decTotal
+	if isDecimalType(current) && isDecimalType(candidate) {
+		if decimalPriority[candidate] > decimalPriority[current] {
+			return candidate, true
+		}
+
+		return current, true
 	}
 
-	if len(combined) == 0 {
+	return 0, false
+}
+
+// admittedType returns the single type this node shreds to, or ok=false when the
+// node saw no values or mixed more than one type family.
+func (f *fieldInfo) admittedType() (variant.Type, bool) {
+	if !f.hasAdmitted || f.mixed {
 		return 0, false
 	}
 
-	// Max by count, then tieBreakPriority, then type value (stable, sorted keys).
-	var best variant.Type
-	bestCount, bestPrio := -1, -2
-	first := true
-	keys := make([]variant.Type, 0, len(combined))
-	for t := range combined {
-		keys = append(keys, t)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	for _, t := range keys {
-		c := combined[t]
-		p := tiePriority(t)
-		if first || c > bestCount || (c == bestCount && p > bestPrio) {
-			best, bestCount, bestPrio, first = t, c, p, false
-		}
-	}
-
-	return best, true
-}
-
-func tiePriority(t variant.Type) int {
-	if p, ok := tieBreakPriority[t]; ok {
-		return p
-	}
-
-	return -1
+	return f.admitted, true
 }
 
 func isIntegerType(t variant.Type) bool {
@@ -212,7 +196,7 @@ func AnalyzeVariantShredding(sample []variant.Value) (arrow.DataType, bool) {
 		traverseVariant(root, v, 0)
 	}
 
-	rootType, ok := root.info.mostCommonType()
+	rootType, ok := root.info.admittedType()
 	if !ok {
 		return nil, false
 	}
@@ -323,7 +307,7 @@ func buildInnerType(node *pathNode, t variant.Type) arrow.DataType {
 		fields := make([]arrow.Field, 0, len(names))
 		for _, name := range names {
 			child := node.objectChildren[name]
-			ct, ok := child.info.mostCommonType()
+			ct, ok := child.info.admittedType()
 			if !ok {
 				continue
 			}
@@ -342,7 +326,7 @@ func buildInnerType(node *pathNode, t variant.Type) arrow.DataType {
 		if node.arrayElement == nil {
 			return nil
 		}
-		et, ok := node.arrayElement.info.mostCommonType()
+		et, ok := node.arrayElement.info.admittedType()
 		if !ok {
 			return nil
 		}
@@ -404,10 +388,7 @@ func decimalArrowType(info *fieldInfo) arrow.DataType {
 	// Always Decimal128: arrow-go's pqarrow maps it to INT32/INT64/FLBA by
 	// precision and cannot serialize Decimal32/Decimal64.
 	intDigits := max(info.maxDecimalIntDigits, 0)
-	prec := intDigits + info.maxDecimalScale
-	if prec > 38 {
-		prec = 38
-	}
+	prec := min(intDigits+info.maxDecimalScale, 38)
 	if prec < 1 {
 		prec = 1
 	}

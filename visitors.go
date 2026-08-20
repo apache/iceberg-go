@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -99,6 +100,26 @@ func VisitExpr[T any](expr BooleanExpression, visitor BooleanExprVisitor[T]) (re
 	return visitBoolExpr(expr, visitor), err
 }
 
+// VisitExprEvaluator traverses a boolean expression for a visitor whose
+// boolean results represent expression truth. Unlike VisitExpr, it only visits
+// the nodes required to determine the result: it skips the right side of an
+// AND when the left side is false and the right side of an OR when the left
+// side is true.
+func VisitExprEvaluator(expr BooleanExpression, visitor BooleanExprVisitor[bool]) (res bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case string:
+				err = fmt.Errorf("error encountered during visitExpr: %s", e)
+			case error:
+				err = e
+			}
+		}
+	}()
+
+	return visitEvaluator(expr, visitor), err
+}
+
 func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T {
 	switch e := e.(type) {
 	case AlwaysFalse:
@@ -117,6 +138,36 @@ func visitBoolExpr[T any](e BooleanExpression, visitor BooleanExprVisitor[T]) T 
 		child := visitBoolExpr(e.child, visitor)
 
 		return visitor.VisitNot(child)
+	case UnboundPredicate:
+		return visitor.VisitUnbound(e)
+	case BoundPredicate:
+		return visitor.VisitBound(e)
+	}
+	panic(fmt.Errorf("%w: VisitBooleanExpression type %s", ErrNotImplemented, e))
+}
+
+func visitEvaluator(e BooleanExpression, visitor BooleanExprVisitor[bool]) bool {
+	switch e := e.(type) {
+	case AlwaysFalse:
+		return visitor.VisitFalse()
+	case AlwaysTrue:
+		return visitor.VisitTrue()
+	case AndExpr:
+		left := visitEvaluator(e.left, visitor)
+		if !left {
+			return visitor.VisitFalse()
+		}
+
+		return visitor.VisitAnd(left, visitEvaluator(e.right, visitor))
+	case OrExpr:
+		left := visitEvaluator(e.left, visitor)
+		if left {
+			return visitor.VisitTrue()
+		}
+
+		return visitor.VisitOr(left, visitEvaluator(e.right, visitor))
+	case NotExpr:
+		return visitor.VisitNot(visitEvaluator(e.child, visitor))
 	case UnboundPredicate:
 		return visitor.VisitUnbound(e)
 	case BoundPredicate:
@@ -275,7 +326,7 @@ func (e *exprEvaluator) Eval(st StructLike) (bool, error) {
 	// from #445.
 	ev := exprEvaluator{bound: e.bound, st: st}
 
-	return VisitExpr(ev.bound, &ev)
+	return VisitExprEvaluator(ev.bound, &ev)
 }
 
 func (e *exprEvaluator) VisitUnbound(UnboundPredicate) bool {
@@ -569,6 +620,12 @@ type columnNameTranslator struct {
 	fileSchema *Schema
 }
 
+type defaultValueStruct []any
+
+func (s defaultValueStruct) Size() int            { return len(s) }
+func (s defaultValueStruct) Get(pos int) any      { return s[pos] }
+func (s defaultValueStruct) Set(pos int, val any) { s[pos] = val }
+
 func (columnNameTranslator) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
 func (columnNameTranslator) VisitFalse() BooleanExpression { return AlwaysFalse{} }
 func (columnNameTranslator) VisitNot(child BooleanExpression) BooleanExpression {
@@ -587,33 +644,7 @@ func (columnNameTranslator) VisitUnbound(pred UnboundPredicate) BooleanExpressio
 	panic(fmt.Errorf("%w: expected bound predicate, got: %s", ErrInvalidArgument, pred.Term()))
 }
 
-func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
-	// A bbox predicate has no substrait/record-filter form; it is evaluated only
-	// during metrics-based file pruning, so the record filter must conservatively
-	// keep every row. It must be matched before the column-not-found early return,
-	// which would otherwise return AlwaysFalse and silently drop every row of a
-	// file that predates the geo column, and before the switch below, whose
-	// default panics on an unhandled predicate. Collapse it to always-true
-	// (mirrors exprEvaluator and sanitizeVisitor); this also keeps it out of
-	// substrait, where it would otherwise error. Match the exported
-	// BoundBBoxPredicate interface, not just the concrete type, so a future
-	// implementation is covered too.
-	if _, ok := pred.(BoundBBoxPredicate); ok {
-		return AlwaysTrue{}
-	}
-
-	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
-	if !found {
-		// in the case of schema evolution, the column might not be present
-		// in the file schema when reading older data
-		if pred.Op() == OpIsNull {
-			return AlwaysTrue{}
-		}
-
-		return AlwaysFalse{}
-	}
-
-	ref := Reference(fileColName)
+func unbindPredicate(pred BoundPredicate, ref Reference) UnboundPredicate {
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
 		return p.AsUnbound(ref)
@@ -624,6 +655,99 @@ func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression 
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
+}
+
+func initialDefaultLiteral(field NestedField) (Literal, error) {
+	switch typ := field.Type.(type) {
+	case BinaryType, FixedType:
+		if val, ok := field.InitialDefault.([]byte); ok {
+			return BinaryLiteral(val).To(field.Type)
+		}
+		// Metadata defaults are spec hex strings. The shared decoder also accepts
+		// legacy base64 written by iceberg-go v0.6.0.
+		if val, ok := field.InitialDefault.(string); ok {
+			fixedLen := -1
+			if fixed, ok := typ.(FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			decoded, err := internal.DecodeDefaultBytes(val, fixedLen)
+			if err != nil {
+				return nil, err
+			}
+
+			return BinaryLiteral(decoded).To(field.Type)
+		}
+	case DecimalType:
+		if val, ok := field.InitialDefault.(Decimal); ok {
+			return DecimalLiteral(val).To(field.Type)
+		}
+	}
+
+	data, err := json.Marshal(field.InitialDefault)
+	if err != nil {
+		return nil, err
+	}
+
+	return decodeValue(data, field.Type)
+}
+
+func (c columnNameTranslator) VisitBound(pred BoundPredicate) BooleanExpression {
+	// A bbox predicate has no substrait/record-filter form; it is evaluated only
+	// during metrics-based file pruning, so the record filter must conservatively
+	// keep every row.
+	if _, ok := pred.(BoundBBoxPredicate); ok {
+		return AlwaysTrue{}
+	}
+
+	fileColName, found := c.fileSchema.FindColumnName(pred.Term().Ref().Field().ID)
+	if !found {
+		// in the case of schema evolution, the column might not be present
+		// in the file schema when reading older data
+		field := pred.Ref().Field()
+		// A nested field can still be null when an optional parent is null, so
+		// its default is not a file-wide constant. Preserve the existing
+		// missing-column behavior until translation has row-level parent state.
+		if field.InitialDefault == nil || len(pred.Ref().PosPath()) > 1 {
+			if pred.Op() == OpIsNull {
+				return AlwaysTrue{}
+			}
+
+			return AlwaysFalse{}
+		}
+		// The spec requires geo defaults to be null, but fail open for metadata
+		// written by non-conforming V3 writers rather than aborting the scan.
+		switch field.Type.(type) {
+		case GeometryType, GeographyType:
+			return AlwaysTrue{}
+		}
+
+		withContext := func(err error) error {
+			return fmt.Errorf("initial-default for column %q (id %d): %w",
+				field.Name, field.ID, err)
+		}
+		eval, err := ExpressionEvaluator(NewSchema(0, field),
+			unbindPredicate(pred, Reference(field.Name)), true)
+		if err != nil {
+			panic(withContext(err))
+		}
+
+		lit, err := initialDefaultLiteral(field)
+		if err != nil {
+			panic(withContext(err))
+		}
+
+		matches, err := eval(defaultValueStruct{lit.Any()})
+		if err != nil {
+			panic(withContext(err))
+		}
+		if matches {
+			return AlwaysTrue{}
+		}
+
+		return AlwaysFalse{}
+	}
+
+	return unbindPredicate(pred, Reference(fileColName))
 }
 
 // sanitizedLiteralMask is the placeholder substituted for every literal value in

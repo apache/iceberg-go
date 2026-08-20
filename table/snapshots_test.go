@@ -18,10 +18,12 @@
 package table_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -91,6 +93,138 @@ func TestSerializeSnapshotWithProps(t *testing.T) {
 		"manifest-list": "s3:/a/b/c.avro",
 		"summary": {"operation": "append", "foo": "bar"},
 		"schema-id": 3
+	}`, string(data))
+}
+
+func TestSerializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestLocations: []string{"s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"]
+	}`, string(data))
+}
+
+func TestSerializeSnapshotWithEmptyEmbeddedManifestLocations(t *testing.T) {
+	var snapshot table.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": []
+	}`), &snapshot))
+	require.NotNil(t, snapshot.ManifestLocations)
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": []
+	}`, string(data))
+}
+
+func TestDeserializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	paths := []string{"mem://bucket/manifest-1.avro", "mem://bucket/manifest-2.avro"}
+	var snapshot table.Snapshot
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["mem://bucket/manifest-1.avro", "mem://bucket/manifest-2.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+
+	assert.Equal(t, paths, snapshot.ManifestLocations)
+	fs := iceio.NewMemFS()
+	require.NoError(t, fs.WriteFile(paths[0], []byte("manifest-one")))
+	require.NoError(t, fs.WriteFile(paths[1], []byte("manifest-two-longer")))
+
+	manifests, err := snapshot.Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, manifests, 2)
+	assert.Equal(t, paths[0], manifests[0].FilePath())
+	assert.Equal(t, paths[1], manifests[1].FilePath())
+	assert.Equal(t, 1, manifests[0].Version())
+	assert.Equal(t, int32(0), manifests[0].PartitionSpecID())
+	assert.Equal(t, int64(25), manifests[0].SnapshotID())
+	assert.Equal(t, int32(-1), manifests[0].AddedDataFiles())
+	assert.Equal(t, int64(len("manifest-one")), manifests[0].Length())
+	assert.Equal(t, int64(len("manifest-two-longer")), manifests[1].Length())
+
+	var manifestList bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(1, &manifestList, snapshot.SnapshotID, nil, nil, 0, manifests))
+	writtenManifests, err := iceberg.ReadManifestList(bytes.NewReader(manifestList.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, writtenManifests, 2)
+	assert.Equal(t, manifests[0].Length(), writtenManifests[0].Length())
+	assert.Equal(t, manifests[1].Length(), writtenManifests[1].Length())
+}
+
+func TestSnapshotUnmarshalEmbeddedManifestsReplacesManifestList(t *testing.T) {
+	snapshot := table.Snapshot{ManifestList: "old-manifest-list.avro"}
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["new-manifest.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.ManifestList)
+	assert.Equal(t, []string{"new-manifest.avro"}, snapshot.ManifestLocations)
+}
+
+func TestSnapshotUnmarshalManifestListReplacesEmbeddedManifests(t *testing.T) {
+	snapshot := table.Snapshot{ManifestLocations: []string{"old-manifest.avro"}}
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"sequence-number": 1,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "new-manifest-list.avro"
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "new-manifest-list.avro", snapshot.ManifestList)
+	assert.Nil(t, snapshot.ManifestLocations)
+}
+
+func TestSnapshotUnmarshalPrefersManifestListOverEmbeddedManifests(t *testing.T) {
+	var snapshot table.Snapshot
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "new-manifest-list.avro",
+		"manifests": ["old-manifest.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "new-manifest-list.avro", snapshot.ManifestList)
+	assert.Nil(t, snapshot.ManifestLocations)
+}
+
+func TestSerializeSnapshotPrefersManifestListOverEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestList:      "s3:/a/b/manifest-list.avro",
+		ManifestLocations: []string{"s3:/a/b/manifest.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"sequence-number": 0,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "s3:/a/b/manifest-list.avro"
 	}`, string(data))
 }
 

@@ -19,6 +19,8 @@ package internal
 
 import (
 	"cmp"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +30,37 @@ import (
 
 	"golang.org/x/exp/constraints"
 )
+
+// EncodeDefaultBytes returns the Iceberg JSON single-value representation for
+// binary and fixed defaults.
+func EncodeDefaultBytes(value []byte) string {
+	return hex.EncodeToString(value)
+}
+
+// DecodeDefaultBytes decodes the Iceberg hex representation for binary and
+// fixed defaults. Base64 is accepted only for compatibility with metadata
+// written by iceberg-go v0.6.0. Hex wins when both encodings are valid.
+// fixedLen is -1 for binary and the required width for fixed values.
+func DecodeDefaultBytes(value string, fixedLen int) ([]byte, error) {
+	hexValue, hexErr := hex.DecodeString(value)
+	if hexErr == nil && (fixedLen < 0 || len(hexValue) == fixedLen) {
+		return hexValue, nil
+	}
+
+	base64Value, base64Err := base64.StdEncoding.DecodeString(value)
+	if base64Err == nil && (fixedLen < 0 || len(base64Value) == fixedLen) {
+		return base64Value, nil
+	}
+
+	if hexErr == nil {
+		return nil, fmt.Errorf("hex value has %d bytes, expected %d", len(hexValue), fixedLen)
+	}
+	if base64Err == nil {
+		return nil, fmt.Errorf("legacy base64 value has %d bytes, expected %d", len(base64Value), fixedLen)
+	}
+
+	return nil, fmt.Errorf("invalid hex or legacy base64 value: hex: %v; base64: %v", hexErr, base64Err)
+}
 
 // SchemaRef marks schema access that may return references to internal state.
 // It is restricted to packages within this module by Go's internal package rules.

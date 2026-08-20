@@ -48,6 +48,22 @@ type partialFailWriter struct {
 	err      error
 }
 
+type countingReaderAtSeeker struct {
+	*bytes.Reader
+	reads []readCall
+}
+
+type readCall struct {
+	offset int64
+	length int
+}
+
+func (r *countingReaderAtSeeker) ReadAt(p []byte, offset int64) (int, error) {
+	r.reads = append(r.reads, readCall{offset: offset, length: len(p)})
+
+	return r.Reader.ReadAt(p, offset)
+}
+
 func (w *partialFailWriter) Write(data []byte) (int, error) {
 	w.calls++
 	if w.calls == w.failCall {
@@ -331,6 +347,42 @@ func TestLargeFooter(t *testing.T) {
 
 	r := newReader(t, buf)
 	assert.Len(t, r.Blobs(), numBlobs)
+}
+
+func TestReaderReusesPrefetchedFooterPayload(t *testing.T) {
+	w, buf := newWriter()
+	require.NoError(t, w.Finish())
+
+	reader := &countingReaderAtSeeker{Reader: bytes.NewReader(buf.Bytes())}
+	_, err := puffin.NewReader(reader)
+	require.NoError(t, err)
+
+	require.Len(t, reader.reads, 2)
+}
+
+func TestReaderReadsLargeFooterPayloadFromUnderlyingReader(t *testing.T) {
+	w, buf := newWriter()
+	for i := range 200 {
+		_, err := w.AddBlob(puffin.BlobMetadataInput{
+			Type:       puffin.BlobTypeDataSketchesTheta,
+			SnapshotID: int64(i),
+			Fields:     []int32{1, 2, 3, 4, 5},
+			Properties: map[string]string{"key": "value-to-increase-footer-size"},
+		}, []byte("blob"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, w.Finish())
+
+	reader := &countingReaderAtSeeker{Reader: bytes.NewReader(buf.Bytes())}
+	_, err := puffin.NewReader(reader)
+	require.NoError(t, err)
+
+	require.GreaterOrEqual(t, len(reader.reads), 4)
+
+	footerMagicRead := reader.reads[2]
+	payloadRead := reader.reads[3]
+	require.Equal(t, puffin.MagicSize, footerMagicRead.length)
+	require.Equal(t, footerMagicRead.offset+int64(puffin.MagicSize), payloadRead.offset)
 }
 
 // TestWriterValidation verifies that Writer rejects invalid input.

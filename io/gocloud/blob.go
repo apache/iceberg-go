@@ -26,6 +26,7 @@ import (
 	pathpkg "path"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	icebergio "github.com/apache/iceberg-go/io"
@@ -187,6 +188,10 @@ type BlobFileIO struct {
 }
 
 var _ icebergio.ListableIO = (*BlobFileIO)(nil)
+
+// deleteFilesMaxConcurrency bounds the number of in-flight object-store
+// deletes without creating one goroutine per path for large cleanup jobs.
+const deleteFilesMaxConcurrency = 16
 
 type blobFileInfo struct {
 	name    string
@@ -372,8 +377,8 @@ func walkedURIPath(location objectLocation, walked string) string {
 	return location.uriPrefix + walked
 }
 
-// isDirectoryMarker reports whether dirEntry is the marker object for
-// the path passed to WalkDir
+// isDirectoryMarker reports whether dirEntry is the marker object for the
+// path passed to WalkDir
 func isDirectoryMarker(walkRootKey string, dirEntry fs.DirEntry) bool {
 	// Directory entries and nil entries are never the marker object itself.
 	if dirEntry == nil || dirEntry.IsDir() {
@@ -420,37 +425,70 @@ func (bfs *BlobFileIO) WalkDir(root string, fn fs.WalkDirFunc) error {
 	})
 }
 
+func (bfs *BlobFileIO) deleteFile(ctx context.Context, p string) (bool, error) {
+	key, err := bfs.preprocess(p)
+	if err != nil {
+		return false, fmt.Errorf("failed to delete %s: %w", p, err)
+	}
+
+	if err := bfs.Delete(ctx, key); err != nil {
+		// Missing files are not errors per the interface contract.
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			return true, nil
+		}
+
+		return false, fmt.Errorf("failed to delete %s: %w", p, err)
+	}
+
+	return true, nil
+}
+
 func (bfs *BlobFileIO) DeleteFiles(ctx context.Context, paths []string) ([]string, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
 
-	deleted := make([]string, 0, len(paths))
+	type result struct {
+		deleted bool
+		err     error
+	}
 
-	var errs error
+	results := make([]result, len(paths))
+	workers := len(paths)
+	if workers > deleteFilesMaxConcurrency {
+		workers = deleteFilesMaxConcurrency
+	}
 
-	for _, p := range paths {
-		key, err := bfs.preprocess(p)
-		if err != nil {
-			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", p, err))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workers)
 
-			continue
-		}
+	for range workers {
+		go func() {
+			defer wg.Done()
 
-		if err := bfs.Delete(ctx, key); err != nil {
-			// Missing files are not errors per the interface contract.
-			if gcerrors.Code(err) == gcerrors.NotFound {
-				deleted = append(deleted, p)
-
-				continue
+			for idx := range jobs {
+				results[idx].deleted, results[idx].err = bfs.deleteFile(ctx, paths[idx])
 			}
+		}()
+	}
 
-			errs = errors.Join(errs, fmt.Errorf("failed to delete %s: %w", p, err))
+	for idx := range paths {
+		jobs <- idx
+	}
+	close(jobs)
+	wg.Wait()
 
-			continue
+	deleted := make([]string, 0, len(paths))
+	var errs error
+	for idx, result := range results {
+		if result.deleted {
+			deleted = append(deleted, paths[idx])
 		}
 
-		deleted = append(deleted, p)
+		if result.err != nil {
+			errs = errors.Join(errs, result.err)
+		}
 	}
 
 	return deleted, errs

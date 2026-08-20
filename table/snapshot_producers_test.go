@@ -26,6 +26,7 @@ import (
 	"io/fs"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1062,6 +1063,61 @@ func TestAddedDeleteManifestsUseDeleteFileSpecID(t *testing.T) {
 	require.ElementsMatch(t, []int32{0, 1}, deleteManifestSpecIDs)
 }
 
+// changedPartitionPaths returns the partition paths named by a snapshot
+// summary's changed-partition entries.
+func changedPartitionPaths(summary iceberg.Properties) map[string]bool {
+	paths := make(map[string]bool)
+	for key := range summary {
+		if path, ok := strings.CutPrefix(key, changedPartitionPrefix); ok {
+			paths[path] = true
+		}
+	}
+
+	return paths
+}
+
+// TestAccumulateSummaryDeltaResolvesRemovedFileSpecByID checks that removed
+// files resolve their partition spec by ID, the way added files already do.
+// Removing a non-default spec that precedes the default one leaves a specs
+// slice whose positions no longer line up with spec IDs, so treating a spec ID
+// as a slice index reads the wrong spec or runs off the end of the slice.
+func TestAccumulateSummaryDeltaResolvesRemovedFileSpecByID(t *testing.T) {
+	txn, wfs := createTestTransactionWithMemIO(t, iceberg.NewPartitionSpec())
+	require.NoError(t, txn.meta.SetProperties(iceberg.Properties{WritePartitionSummaryLimitKey: "10"}))
+
+	bucketSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_bucket", Transform: iceberg.BucketTransform{NumBuckets: 4},
+	})
+	require.NoError(t, txn.meta.AddPartitionSpec(&bucketSpec, false))
+	truncSpec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1001, Name: "id_trunc", Transform: iceberg.TruncateTransform{Width: 8},
+	})
+	require.NoError(t, txn.meta.AddPartitionSpec(&truncSpec, false))
+	require.NoError(t, txn.meta.SetDefaultSpecID(-1))
+	require.NoError(t, txn.meta.RemovePartitionSpecs([]int{1}))
+
+	currentSpec, err := txn.meta.CurrentSpec()
+	require.NoError(t, err)
+	require.Equal(t, 2, currentSpec.ID(), "test setup should leave spec 2 as the default")
+	require.Len(t, txn.meta.specs, 2, "removing spec 1 should decouple slice positions from spec IDs")
+
+	df := newTestDataFile(t, *currentSpec, "mem://default/table-location/data/spec-2.parquet",
+		map[int]any{currentSpec.Field(0).FieldID: int32(0)})
+
+	appended := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	appended.appendDataFile(df)
+	addedSummary, err := appended.accumulateSummaryDelta(nil)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"id_trunc=0": true}, changedPartitionPaths(addedSummary))
+
+	deleted := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	deleted.deleteDataFile(df)
+	removedSummary, err := deleted.accumulateSummaryDelta(nil)
+	require.NoError(t, err)
+	require.Equal(t, changedPartitionPaths(addedSummary), changedPartitionPaths(removedSummary),
+		"adding and removing the same file must report the same changed partition")
+}
+
 // TestCreateManifestClosesUnderlyingFile tests that createManifest properly
 // closes the underlying file writer. This is related to issue #644 and #681.
 func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
@@ -1126,7 +1182,7 @@ func TestManifestMergeGroupLimitsConcurrentBins(t *testing.T) {
 	sp := newFastAppendFilesProducer(OpAppend, txn, blockingIO, nil, nil)
 
 	manifests := make([]iceberg.ManifestFile, 0, 8)
-	for i := 0; i < cap(manifests); i++ {
+	for i := range cap(manifests) {
 		manifests = append(manifests, writeTestManifestFile(t, blockingIO, spec, schema, sp.snapshotID, i))
 	}
 
@@ -1280,8 +1336,7 @@ func (b *blockingTrackingIO) Create(name string) (iceio.FileWriter, error) {
 // This test verifies that NO writerFactory are created when deletedEntries() fails,
 // because the error should be returned before any goroutines start.
 func TestManifestsClosesWriterWhenDeletedEntriesFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	blockingIO := newBlockingTrackingIO()
 	spec := iceberg.NewPartitionSpec()
@@ -1472,6 +1527,38 @@ func TestSummary_InheritsPreviousSnapshotTotals(t *testing.T) {
 	require.Equal(t, "6", sum.Properties[totalDataFilesKey],
 		"total-data-files must inherit parent total (5) plus one added file")
 	require.Equal(t, "1", sum.Properties[addedDataFilesKey])
+}
+
+func TestCommitPersistsEnvironmentContextInSnapshotSummary(t *testing.T) {
+	keys := []string{
+		iceberg.EnvironmentEngineNameKey,
+		iceberg.EnvironmentEngineVersionKey,
+	}
+	preserveEnvironmentProperties(t, keys...)
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineNameKey, "iceberg-go-test")
+	iceberg.SetEnvironmentProperty(iceberg.EnvironmentEngineVersionKey, "1.0")
+
+	spec := iceberg.NewPartitionSpec()
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, iceberg.Properties{
+		iceberg.EnvironmentEngineNameKey: "snapshot-property",
+		"user-summary":                   "present",
+	})
+	sp.appendDataFile(newTestDataFile(t, spec, "file://data.parquet", nil))
+
+	updates, requirements, err := sp.commit(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(updates, requirements))
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	snapshot := meta.CurrentSnapshot()
+	require.NotNil(t, snapshot)
+	require.NotNil(t, snapshot.Summary)
+	require.Equal(t, "Apache Iceberg Go "+iceberg.Version(), snapshot.Summary.Properties["iceberg-version"])
+	require.Equal(t, "iceberg-go-test", snapshot.Summary.Properties[iceberg.EnvironmentEngineNameKey])
+	require.Equal(t, "1.0", snapshot.Summary.Properties[iceberg.EnvironmentEngineVersionKey])
+	require.Equal(t, "present", snapshot.Summary.Properties["user-summary"])
 }
 
 // TestSummary_ParentSnapshotWithoutSummary verifies that summary computation
