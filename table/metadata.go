@@ -91,33 +91,32 @@ func snapshotIndexNeedsRebuild(index *snapshotIndexData, snapshots []Snapshot) b
 	return index == nil || len(index.positions) != len(snapshots)
 }
 
-// snapshotIndexPosition returns the position for id and an updated index when
-// callers replace the snapshot slice in an in-package fixture. Metadata loaded
-// or built through the normal paths always has a current index, so the linear
-// scan is only a compatibility fallback.
-func snapshotIndexPosition(index *snapshotIndexData, snapshots []Snapshot, id int64) (int, bool, *snapshotIndexData) {
+// snapshotIndexPosition returns the position for id. Metadata loaded or built
+// through the normal paths always has a current index, so the linear scan is
+// only a compatibility fallback for in-package fixtures that replace the slice.
+func snapshotIndexPosition(index *snapshotIndexData, snapshots []Snapshot, id int64) (int, bool) {
 	if index != nil {
 		if i, ok := index.positions[id]; ok {
 			if i >= 0 && i < len(snapshots) && snapshots[i].SnapshotID == id {
-				return i, true, index
+				return i, true
 			}
 
 			index = buildSnapshotIndex(snapshots)
 			if i, ok := index.positions[id]; ok {
-				return i, true, index
+				return i, true
 			}
 
-			return 0, false, index
+			return 0, false
 		}
 	}
 
 	for i := range snapshots {
 		if snapshots[i].SnapshotID == id {
-			return i, true, buildSnapshotIndex(snapshots)
+			return i, true
 		}
 	}
 
-	return 0, false, index
+	return 0, false
 }
 
 // Metadata for an iceberg table as specified in the Iceberg spec
@@ -1304,9 +1303,12 @@ func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
 }
 
 func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
-	b.ensureSnapshotIndex()
-	i, ok, index := snapshotIndexPosition(b.snapshotIndex, b.snapshotList, id)
-	b.snapshotIndex = index
+	index := b.snapshotIndex
+	if snapshotIndexNeedsRebuild(index, b.snapshotList) {
+		index = buildSnapshotIndex(b.snapshotList)
+	}
+
+	i, ok := snapshotIndexPosition(index, b.snapshotList, id)
 	if ok {
 		snapshot := b.snapshotList[i]
 
@@ -2067,7 +2069,7 @@ func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 		index = buildSnapshotIndex(c.SnapshotList)
 	}
 
-	i, ok, _ := snapshotIndexPosition(index, c.SnapshotList, id)
+	i, ok := snapshotIndexPosition(index, c.SnapshotList, id)
 	if ok {
 		return cloneSnapshotPtr(&c.SnapshotList[i])
 	}
