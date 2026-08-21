@@ -1188,7 +1188,7 @@ func TestPlanFilesCancelsAfterFanoutFailure(t *testing.T) {
 			var body FetchScanTasksRequest
 			require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
 			if body.PlanTask == "h1" {
-				_, err := w.Write([]byte(`{}`))
+				_, err := w.Write([]byte(`{"plan-tasks":[]}`))
 				require.NoError(t, err)
 
 				return
