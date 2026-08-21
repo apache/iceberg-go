@@ -557,7 +557,7 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 				return record, nil
 			}
 
-			if recordHasRowBoundedStorage(record) {
+			if recordHasRowBoundedStorage(record) && contiguousSliceHasBoundedRetention(start, end, record.NumRows()) {
 				return record.NewSlice(start, end), nil
 			}
 		}
@@ -599,6 +599,15 @@ func recordHasRowBoundedStorage(record arrow.RecordBatch) bool {
 	}
 
 	return true
+}
+
+// contiguousSliceHasBoundedRetention reports whether a partial zero-copy slice
+// retains no more than twice as many input rows as it returns. This bound is
+// meaningful only for records whose storage is row-bounded.
+func contiguousSliceHasBoundedRetention(start, end, numRows int64) bool {
+	selectedRows := end - start
+
+	return selectedRows >= numRows-selectedRows
 }
 
 func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {
