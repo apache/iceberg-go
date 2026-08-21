@@ -3045,6 +3045,59 @@ func TestEvaluators(t *testing.T) {
 	suite.Run(t, &StrictMetricsTestSuite{})
 }
 
+func TestMetricsEvaluatorsKeepTransformedTerms(t *testing.T) {
+	categoryMin, err := iceberg.StringLiteral("books").MarshalBinary()
+	require.NoError(t, err)
+	categoryMax := append([]byte(nil), categoryMin...)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	file := &mockDataFile{
+		count:       1,
+		valueCounts: map[int]int64{1: 1},
+		nullCounts:  map[int]int64{1: 0},
+		lowerBounds: map[int][]byte{1: categoryMin},
+		upperBounds: map[int][]byte{1: categoryMax},
+	}
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+
+	inclusive, err := newInclusiveMetricsEvaluator(schema, iceberg.EqualTo(term, "boo"), true, true)
+	require.NoError(t, err)
+	keep, err := inclusive(file)
+	require.NoError(t, err)
+	assert.True(t, keep)
+
+	strict, err := newStrictMetricsEvaluator(schema, iceberg.NotEqualTo(term, "boo"), true, true)
+	require.NoError(t, err)
+	mustMatch, err := strict(file)
+	require.NoError(t, err)
+	assert.False(t, mustMatch)
+}
+
+func TestManifestEvaluatorKeepsTransformedTerms(t *testing.T) {
+	lower, err := iceberg.StringLiteral("books").MarshalBinary()
+	require.NoError(t, err)
+	upper := append([]byte(nil), lower...)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+	bound, err := iceberg.BindExpr(schema, iceberg.EqualTo(term, "boo"), true)
+	require.NoError(t, err)
+
+	visitor := &manifestEvalVisitor{
+		partitionFields: []iceberg.FieldSummary{{
+			LowerBound: &lower,
+			UpperBound: &upper,
+		}},
+	}
+	keep, err := iceberg.VisitExprEvaluator(bound, visitor)
+	require.NoError(t, err)
+	assert.True(t, keep)
+}
+
 func TestGetCmpLiteralRejectsGeo(t *testing.T) {
 	// Little-endian float64 X,Y - a valid geospatial single-value bound that
 	// must never be routed into an ordering comparison.
@@ -3191,6 +3244,14 @@ func TestBloomPredicateCollector(t *testing.T) {
 
 	t.Run("range predicate returns nil", func(t *testing.T) {
 		expr := bind(iceberg.GreaterThan(iceberg.Reference("id"), int64(5)))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("transform predicate returns nil", func(t *testing.T) {
+		term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("name"))
+		expr := bind(iceberg.EqualTo(term, "ali"))
 		preds, err := newBloomFilterPredicates(expr)
 		require.NoError(t, err)
 		assert.Empty(t, preds)

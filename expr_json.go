@@ -116,8 +116,8 @@ type transformNode struct {
 //
 // Transform terms (e.g. {"type":"transform","transform":"bucket[16]","term":"id"})
 // parse into an UnboundTransform. The term resolves its result type against the
-// schema; binding a full predicate over a transform term to the typed bound
-// machinery is not yet supported.
+// schema, and a full predicate over a transform term can be bound and evaluated
+// against rows.
 func ParseExpr(data []byte, schema *Schema) (BooleanExpression, error) {
 	return parseExpr(json.RawMessage(data), schema, true)
 }

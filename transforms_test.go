@@ -252,7 +252,7 @@ func TestToHumanStrType(t *testing.T) {
 		{"identity_nil", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, nil, "null"},
 		{"year", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(47), "2017"},
 		{"month", iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(575), "2017-12"},
-		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(17501), "2017-12-01"},
+		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, iceberg.Date(17501), "2017-12-01"},
 		{"hour", iceberg.HourTransform{}, iceberg.PrimitiveTypes.TimestampTz, int32(420042), "2017-12-01-18"},
 		{"year_nil", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
 		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, int32(7), "7"},
@@ -331,7 +331,7 @@ func TestManifestPartitionVals(t *testing.T) {
 		{
 			transform:    iceberg.DayTransform{},
 			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
-			expectResult: iceberg.Int32Literal(365 + 40),
+			expectResult: iceberg.DateLiteral(365 + 40),
 		},
 		{
 			transform:    iceberg.MonthTransform{},
@@ -981,7 +981,7 @@ func TestDayTransformPreEpoch(t *testing.T) {
 					Val:   iceberg.TimestampLiteral(tt.micros),
 				})
 				require.True(t, result.Valid)
-				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+				assert.Equal(t, iceberg.DateLiteral(tt.expected), result.Val)
 			})
 		}
 	})
@@ -1087,7 +1087,7 @@ func TestDayTransformNanoseconds(t *testing.T) {
 					Val:   iceberg.TimestampNsLiteral(tt.nanos),
 				})
 				require.True(t, result.Valid)
-				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+				assert.Equal(t, iceberg.DateLiteral(tt.expected), result.Val)
 			})
 		}
 	})
