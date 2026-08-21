@@ -349,6 +349,98 @@ func (s *FanoutWriterTestSuite) TestNaNPartitionValuesUseStableKeys() {
 	s.True(math.IsNaN(partitions[0].partitionRec[0].(float64)))
 }
 
+func (s *FanoutWriterTestSuite) TestFloatPartitionValuesUseIcebergKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Copysign(0, -1)},
+		{0.0},
+		{math.Float64frombits(0x7ff8000000000001)},
+		{math.Float64frombits(0x7ff8000000000002)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float64})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByBits := make(map[uint64]int)
+	for _, partition := range partitions {
+		value := partition.partitionRec[0].(float64)
+		rowsByBits[math.Float64bits(value)] = len(partition.rows)
+	}
+	s.Equal(1, rowsByBits[math.Float64bits(math.Copysign(0, -1))])
+	s.Equal(1, rowsByBits[math.Float64bits(0)])
+	s.Equal(2, rowsByBits[math.Float64bits(math.Float64frombits(0x7ff8000000000001))])
+}
+
+func (s *FanoutWriterTestSuite) TestFloat32PartitionValuesUseIcebergKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float32}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Float32frombits(0x80000000)},
+		{float32(0)},
+		{math.Float32frombits(0xffc00001)},
+		{math.Float32frombits(0x7fc00002)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float32})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByBits := make(map[uint32]int)
+	for _, partition := range partitions {
+		value := partition.partitionRec[0].(float32)
+		rowsByBits[math.Float32bits(value)] = len(partition.rows)
+	}
+	s.Equal(1, rowsByBits[0x80000000])
+	s.Equal(1, rowsByBits[0])
+	s.Equal(2, rowsByBits[0xffc00001])
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionMapUsesComparableKeysAtEveryLevel() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "first", Type: arrow.PrimitiveTypes.Float64},
+		{Name: "second", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Float64frombits(0x7ff8000000000001), math.Copysign(0, -1)},
+		{math.Float64frombits(0xfff8000000000001), math.Copysign(0, -1)},
+		{math.Float64frombits(0x7ff8000000000001), float64(0)},
+		{float64(0), math.Float64frombits(0x7ff8000000000001)},
+		{float64(0), math.Float64frombits(0xfff8000000000001)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByPartition := make([][]int64, 0, len(partitions))
+	for _, partition := range partitions {
+		rowsByPartition = append(rowsByPartition, partition.rows)
+	}
+	s.ElementsMatch([][]int64{{0, 1}, {2}, {3, 4}}, rowsByPartition)
+}
+
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},

@@ -45,6 +45,7 @@ func TestClusteredPartitionTrackingUsesComparableKeys(t *testing.T) {
 	records := []partitionRecord{
 		{[]byte{1, 2, 3}},
 		{math.NaN()},
+		{math.Float64frombits(0x7ff8000000000001)},
 	}
 	completed := make(closedPartitionSet)
 	for _, record := range records {
@@ -55,8 +56,26 @@ func TestClusteredPartitionTrackingUsesComparableKeys(t *testing.T) {
 
 	require.True(t, completed.contains(partitionRecord{[]byte{1, 2, 3}}))
 	require.True(t, completed.contains(partitionRecord{math.NaN()}))
+	require.True(t, completed.contains(partitionRecord{math.Float64frombits(0x7ff8000000000002)}))
+	signedZeros := make(closedPartitionSet)
+	signedZeros.add(partitionRecord{math.Copysign(0, -1)})
+	require.True(t, signedZeros.contains(partitionRecord{math.Copysign(0, -1)}))
+	require.False(t, signedZeros.contains(partitionRecord{float64(0)}))
 	require.True(t, partitionRecordsEqual(partitionRecord{[]byte{1, 2, 3}}, partitionRecord{[]byte{1, 2, 3}}))
 	require.True(t, partitionRecordsEqual(partitionRecord{math.NaN()}, partitionRecord{math.NaN()}))
+	require.True(t, partitionRecordsEqual(
+		partitionRecord{math.Float64frombits(0x7ff8000000000001)},
+		partitionRecord{math.Float64frombits(0x7ff8000000000002)},
+	))
+	require.True(t, partitionRecordsEqual(
+		partitionRecord{math.Float32frombits(0xffc00001)},
+		partitionRecord{math.Float32frombits(0x7fc00002)},
+	))
+	require.False(t, partitionRecordsEqual(
+		partitionRecord{math.Float32frombits(0x7fc00001)},
+		partitionRecord{math.Float64frombits(0x7ff8000000000001)},
+	))
+	require.False(t, partitionRecordsEqual(partitionRecord{math.Copysign(0, -1)}, partitionRecord{float64(0)}))
 }
 
 type ClusteredWriterTestSuite struct {
