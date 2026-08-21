@@ -57,7 +57,7 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 			nameBuilder := builder.Field(1).(*array.StringBuilder)
 			payloadBuilder := builder.Field(2).(*array.StringBuilder)
 			payload := strings.Repeat("payload-", 64)
-			for i := 0; i < numRows; i++ {
+			for i := range numRows {
 				idBuilder.Append(int64(i))
 				nameBuilder.Append(fmt.Sprintf("user-%08d", i))
 				payloadBuilder.Append(payload)
