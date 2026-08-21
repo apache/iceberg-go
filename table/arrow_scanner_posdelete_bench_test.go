@@ -213,6 +213,8 @@ func benchmarkChunkBoundaries(length, numChunks int) []int {
 
 func BenchmarkProcessPositionalDeletes(b *testing.B) {
 	const numRows = 64 * 1024
+	deleteHeavy := benchmarkPositionalDeleteSet(numRows, numRows-1)
+	allDeleted := benchmarkPositionalDeleteSet(numRows)
 
 	for _, tc := range []struct {
 		name    string
@@ -220,6 +222,8 @@ func BenchmarkProcessPositionalDeletes(b *testing.B) {
 	}{
 		{name: "clean", deletes: set[int64]{numRows: {}}},
 		{name: "partial", deletes: set[int64]{numRows / 2: {}}},
+		{name: "delete-heavy", deletes: deleteHeavy},
+		{name: "all-deleted", deletes: allDeleted},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			batch := benchmarkPositionalDeleteBatch(memory.DefaultAllocator, numRows)
@@ -240,6 +244,18 @@ func BenchmarkProcessPositionalDeletes(b *testing.B) {
 			}
 		})
 	}
+}
+
+func benchmarkPositionalDeleteSet(numRows int64, survivors ...int64) set[int64] {
+	deletes := make(set[int64], int(numRows))
+	for i := range numRows {
+		deletes[i] = struct{}{}
+	}
+	for _, pos := range survivors {
+		delete(deletes, pos)
+	}
+
+	return deletes
 }
 
 func benchmarkPositionalDeleteBatch(mem memory.Allocator, numRows int64) arrow.RecordBatch {
