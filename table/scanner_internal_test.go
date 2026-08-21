@@ -178,7 +178,7 @@ type expiringManifestIO struct {
 
 func (fs *expiringManifestIO) Open(name string) (iceio.File, error) {
 	if name != fs.manifestList && fs.expired.Load() {
-		return nil, fmt.Errorf("credentials expired")
+		return nil, errors.New("credentials expired")
 	}
 
 	file, err := fs.base.Open(name)
