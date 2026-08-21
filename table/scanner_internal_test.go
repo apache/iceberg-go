@@ -439,30 +439,54 @@ func TestMatchEqualityDeletesToDataHandlesBinaryPartitions(t *testing.T) {
 }
 
 func TestMatchEqualityDeletesToDataHandlesFloatPartitions(t *testing.T) {
-	dataSeqNum := int64(1)
-	deleteSeqNum := int64(2)
-	dataFile := &mockDataFile{
-		path:      "data.parquet",
-		partition: map[int]any{1000: math.Float64frombits(0x7ff8000000000001)},
-	}
-	matchingDelete := &mockDataFile{
-		path:      "matching-delete.parquet",
-		partition: map[int]any{1000: math.Float64frombits(0x7ff8000000000002)},
-	}
-	nonMatchingDelete := &mockDataFile{
-		path:      "non-matching-delete.parquet",
-		partition: map[int]any{1000: math.Copysign(0, -1)},
-	}
-
-	dataEntry := iceberg.NewManifestEntry(
-		iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
-	deleteEntries := []iceberg.ManifestEntry{
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
-		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+	tests := []struct {
+		name                    string
+		dataPartition           any
+		matchingDeletePartition any
+		nonMatchingPartition    any
+	}{
+		{
+			name:                    "float32",
+			dataPartition:           math.Float32frombits(0xffc00001),
+			matchingDeletePartition: math.Float32frombits(0x7fc00002),
+			nonMatchingPartition:    float32(math.Copysign(0, -1)),
+		},
+		{
+			name:                    "float64",
+			dataPartition:           math.Float64frombits(0xfff8000000000001),
+			matchingDeletePartition: math.Float64frombits(0x7ff8000000000002),
+			nonMatchingPartition:    math.Copysign(0, -1),
+		},
 	}
 
-	assert.Equal(t, []iceberg.DataFile{matchingDelete},
-		matchEqualityDeletesToData(dataEntry, deleteEntries))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dataSeqNum := int64(1)
+			deleteSeqNum := int64(2)
+			dataFile := &mockDataFile{
+				path:      "data.parquet",
+				partition: map[int]any{1000: tt.dataPartition},
+			}
+			matchingDelete := &mockDataFile{
+				path:      "matching-delete.parquet",
+				partition: map[int]any{1000: tt.matchingDeletePartition},
+			}
+			nonMatchingDelete := &mockDataFile{
+				path:      "non-matching-delete.parquet",
+				partition: map[int]any{1000: tt.nonMatchingPartition},
+			}
+
+			dataEntry := iceberg.NewManifestEntry(
+				iceberg.EntryStatusADDED, nil, &dataSeqNum, nil, dataFile)
+			deleteEntries := []iceberg.ManifestEntry{
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, nonMatchingDelete),
+				iceberg.NewManifestEntry(iceberg.EntryStatusADDED, nil, &deleteSeqNum, nil, matchingDelete),
+			}
+
+			assert.Equal(t, []iceberg.DataFile{matchingDelete},
+				matchEqualityDeletesToData(dataEntry, deleteEntries))
+		})
+	}
 }
 
 func TestMinSequenceNum(t *testing.T) {
