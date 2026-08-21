@@ -1227,6 +1227,7 @@ func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, 
 
 	return &BoundTransform{transform: u.transform, term: bound}, nil
 }
+
 func isNilTransform(transform Transform) bool {
 	if transform == nil {
 		return true
