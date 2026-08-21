@@ -31,7 +31,7 @@ import (
 func TestScanPlanningRemoteRequiresPlanner(t *testing.T) {
 	t.Parallel()
 
-	scan := &Scan{planningMode: ScanPlanningRemote}
+	scan := &Scan{metadata: scanTestMetadata(t), planningMode: ScanPlanningRemote}
 
 	_, err := scan.PlanFiles(context.Background())
 	require.ErrorIs(t, err, ErrInvalidOperation)
@@ -46,6 +46,7 @@ func TestScanPlanningRemoteStoresPlanIO(t *testing.T) {
 		supports: true,
 	}
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      planner,
 		planningMode: ScanPlanningRemote,
 	}
@@ -65,6 +66,7 @@ func TestScanPlanningRemoteClosesPreviousPlanIO(t *testing.T) {
 		results: []ScanPlanningResult{{IO: first}, {IO: second}},
 	}
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      planner,
 		planningMode: ScanPlanningRemote,
 	}
@@ -99,6 +101,7 @@ func TestRefinedScanRetainsPlanIOOwnership(t *testing.T) {
 				results: []ScanPlanningResult{{IO: first}, {IO: second}},
 			}
 			scan := &Scan{
+				metadata:     scanTestMetadata(t),
 				planner:      planner,
 				planningMode: ScanPlanningRemote,
 			}
@@ -134,6 +137,7 @@ func TestScanPlanningRemoteFailurePreservesPreviousPlanIO(t *testing.T) {
 		errors:  []error{nil, want},
 	}
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      planner,
 		planningMode: ScanPlanningRemote,
 	}
@@ -154,7 +158,7 @@ func TestScanPlanningRemoteKeepsSamePlanIO(t *testing.T) {
 	planner := &sequenceScanPlanner{
 		results: []ScanPlanningResult{{IO: pio}, {IO: pio}},
 	}
-	scan := &Scan{planner: planner, planningMode: ScanPlanningRemote}
+	scan := &Scan{metadata: scanTestMetadata(t), planner: planner, planningMode: ScanPlanningRemote}
 
 	_, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
@@ -173,7 +177,7 @@ func TestScanPlanningRemoteRejectsNonComparablePlanIO(t *testing.T) {
 	planner := &sequenceScanPlanner{
 		results: []ScanPlanningResult{{IO: pio}, {IO: slicePlanIO{1, 2, 3}}},
 	}
-	scan := &Scan{planner: planner, planningMode: ScanPlanningRemote}
+	scan := &Scan{metadata: scanTestMetadata(t), planner: planner, planningMode: ScanPlanningRemote}
 
 	_, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
@@ -283,6 +287,7 @@ func TestScanPlanningRemoteRejectsIncapablePlanner(t *testing.T) {
 	t.Parallel()
 
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      &fakeScanPlanner{supports: false},
 		planningMode: ScanPlanningRemote,
 	}
@@ -296,6 +301,7 @@ func TestScanPlanningRemotePropagatesPlannerError(t *testing.T) {
 
 	want := errors.New("planner boom")
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      &fakeScanPlanner{supports: true, err: want},
 		planningMode: ScanPlanningRemote,
 	}
@@ -309,6 +315,7 @@ func TestScanPlanningRemoteRejectsConflictingSnapshotSelectors(t *testing.T) {
 
 	planner := &fakeScanPlanner{supports: true}
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      planner,
 		planningMode: ScanPlanningRemote,
 	}
@@ -324,6 +331,7 @@ func TestScanPlanningAutoUsesCapablePlanner(t *testing.T) {
 	t.Parallel()
 
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      &fakeScanPlanner{result: ScanPlanningResult{Tasks: []FileScanTask{{}}}, supports: true},
 		planningMode: ScanPlanningAuto,
 	}
@@ -337,6 +345,7 @@ func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	t.Parallel()
 
 	scan := &Scan{
+		metadata: scanTestMetadata(t),
 		planner: &fakeScanPlanner{
 			result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
 			supports: true,
@@ -351,7 +360,7 @@ func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	assert.Len(t, tasks, 1)
 
 	planReq := scan.planner.(*fakeScanPlanner)
-	planReq.receivedIdentifier[0] = "corrupt"
+	planReq.receivedRequest.Identifier[0] = "corrupt"
 	assert.Equal(t, Identifier{"db", "scan-copy-test"}, scan.identifier)
 }
 
@@ -379,6 +388,133 @@ func TestTransactionScanRejectsConflictingSnapshotSelectors(t *testing.T) {
 	assert.Nil(t, scan)
 }
 
+func TestScanPlanningRemoteSendsCurrentSchema(t *testing.T) {
+	t.Parallel()
+
+	meta := scanTestMetadata(t)
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		metadata:     meta,
+		planner:      planner,
+		planningMode: ScanPlanningRemote,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	got := planner.receivedRequest
+	require.NotNil(t, got.Schema)
+	assert.Equal(t, meta.CurrentSchema().ID, got.Schema.ID)
+	require.NotNil(t, got.UseSnapshotSchema)
+	assert.False(t, *got.UseSnapshotSchema)
+}
+
+func TestScanPlanningRemoteSendsSnapshotSchema(t *testing.T) {
+	t.Parallel()
+
+	meta := scanTestMetadata(t)
+	old := iceberg.NewSchema(9,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	snapshotID := int64(42)
+	schemaID := 9
+	pinned := &planningSnapshotMetadata{
+		Metadata: meta,
+		extra:    old,
+		snapshot: &Snapshot{SnapshotID: snapshotID, SchemaID: &schemaID},
+	}
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		metadata:     pinned,
+		planner:      planner,
+		planningMode: ScanPlanningRemote,
+		snapshotID:   &snapshotID,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+
+	got := planner.receivedRequest
+	require.NotNil(t, got.Schema)
+	assert.Equal(t, schemaID, got.Schema.ID)
+	require.NotNil(t, got.UseSnapshotSchema)
+	assert.True(t, *got.UseSnapshotSchema)
+}
+
+// planningSnapshotMetadata pins one snapshot to an older schema, so a scan can
+// resolve a schema other than the current one.
+type planningSnapshotMetadata struct {
+	Metadata
+	extra    *iceberg.Schema
+	snapshot *Snapshot
+}
+
+func (m *planningSnapshotMetadata) Schemas() []*iceberg.Schema {
+	return append(m.Metadata.Schemas(), m.extra)
+}
+
+func (m *planningSnapshotMetadata) SnapshotByID(id int64) *Snapshot {
+	if m.snapshot != nil && m.snapshot.SnapshotID == id {
+		return m.snapshot
+	}
+
+	return m.Metadata.SnapshotByID(id)
+}
+
+func TestScanPlanningRemoteRejectsLineageSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	// The REST FileScanTask schema carries no data sequence number, so a remote
+	// plan cannot supply _last_updated_sequence_number. Rejecting beats handing
+	// back nulls where a local scan returns values.
+
+	for name, opt := range map[string]ScanOption{
+		"explicit column": func(scan *Scan) {
+			scan.selectedFields = []string{"id", iceberg.LastUpdatedSequenceNumberColumnName}
+		},
+		"row lineage option": WithRowLineage(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			planner := &fakeScanPlanner{supports: true}
+			scan := &Scan{
+				metadata:      scanTestMetadata(t),
+				planner:       planner,
+				planningMode:  ScanPlanningRemote,
+				caseSensitive: true,
+			}
+			opt(scan)
+
+			_, err := scan.PlanFiles(context.Background())
+			require.ErrorIs(t, err, ErrInvalidOperation)
+			assert.Contains(t, err.Error(), iceberg.LastUpdatedSequenceNumberColumnName)
+			assert.False(t, planner.called, "must fail before reaching the planner")
+		})
+	}
+}
+
+func TestScanPlanningRemoteAllowsRowID(t *testing.T) {
+	t.Parallel()
+
+	// _row_id is unaffected: first_row_id rides on the data file, so it survives
+	// the wire.
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		metadata:       scanTestMetadata(t),
+		planner:        planner,
+		planningMode:   ScanPlanningRemote,
+		caseSensitive:  true,
+		selectedFields: []string{"id", iceberg.RowIDColumnName},
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.True(t, planner.called)
+}
+
 func TestScanPlanningUnknownModeErrors(t *testing.T) {
 	t.Parallel()
 
@@ -394,14 +530,14 @@ type fakeScanPlanner struct {
 	err      error
 	called   bool
 	// captured after PlanFiles receives it
-	receivedIdentifier Identifier
+	receivedRequest ScanPlanningRequest
 }
 
 func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports }
 
 func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
 	f.called = true
-	f.receivedIdentifier = req.Identifier
+	f.receivedRequest = req
 
 	return f.result, f.err
 }
