@@ -864,7 +864,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
-		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() &&
+		if supportsAutomaticRemotePlanning(scan.planner) &&
 			!scan.requiresLastUpdatedSequenceNumber() {
 			return scan.planFilesRemote(ctx)
 		}
@@ -1028,6 +1028,11 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		}
 	}
 
+	selectedFields, err := remotePlanningSelectedFields(scan, schema)
+	if err != nil {
+		return nil, err
+	}
+
 	caseSensitive := scan.caseSensitive
 	useSnapshotSchema := scan.snapshotSchemaEnabled()
 	var minRowsRequested *int64
@@ -1043,7 +1048,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		MetadataLocation:  scan.metadataLocation,
 		FileIOProperties:  maps.Clone(scan.scanPlanningIOProps),
 		SnapshotID:        scan.snapshotID,
-		SelectedFields:    scan.remoteSelectedFields(schema),
+		SelectedFields:    selectedFields,
 		RowFilter:         scan.rowFilter,
 		MinRowsRequested:  minRowsRequested,
 		CaseSensitive:     &caseSensitive,
