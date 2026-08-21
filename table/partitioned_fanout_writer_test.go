@@ -724,6 +724,15 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
 		contiguousValues.Value(0), contiguousValues.Value(1), contiguousValues.Value(2),
 	})
 
+	narrow, err := partitionBatch(record, []int64{1})
+	s.Require().NoError(err)
+	defer narrow.Release()
+	s.NotSame(record.Column(0).Data().Buffers()[1], narrow.Column(0).Data().Buffers()[1])
+
+	s.Equal(int64(1), narrow.NumRows())
+	narrowValues := narrow.Column(0).(*array.Int64)
+	s.Equal(int64(1), narrowValues.Value(0))
+
 	scattered, err := partitionBatch(record, []int64{0, 2, 4})
 	s.Require().NoError(err)
 	defer scattered.Release()
@@ -829,6 +838,27 @@ func (s *FanoutWriterTestSuite) TestRecordHasRowBoundedStorage() {
 	stringRecord := s.createCustomTestRecord(stringSchema, [][]any{{"value"}})
 	defer stringRecord.Release()
 	s.False(recordHasRowBoundedStorage(stringRecord))
+}
+
+func (s *FanoutWriterTestSuite) TestContiguousSliceHasBoundedRetention() {
+	tests := []struct {
+		name        string
+		start       int64
+		end         int64
+		numRows     int64
+		wantBounded bool
+	}{
+		{name: "small partial range", start: 1, end: 2, numRows: 5},
+		{name: "just below half", start: 1, end: 3, numRows: 5},
+		{name: "half", start: 1, end: 3, numRows: 4, wantBounded: true},
+		{name: "more than half", start: 1, end: 4, numRows: 5, wantBounded: true},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			s.Equal(test.wantBounded, contiguousSliceHasBoundedRetention(test.start, test.end, test.numRows))
+		})
+	}
 }
 
 func (s *FanoutWriterTestSuite) TestContiguousRowRangeRejectsInvalidRanges() {
