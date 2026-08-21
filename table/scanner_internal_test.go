@@ -152,7 +152,7 @@ func scanWithManifestCount(tb testing.TB, manifestCount int) (*Scan, *iceio.MemF
 	}, fs
 }
 
-func TestPlanFilesReusesFileIO(t *testing.T) {
+func TestPlanFilesChecksFileIOForEachManifestWorker(t *testing.T) {
 	const manifestCount = 8
 
 	scan, fs := scanWithManifestCount(t, manifestCount)
@@ -166,10 +166,54 @@ func TestPlanFilesReusesFileIO(t *testing.T) {
 	tasks, err := scan.PlanFiles(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, tasks, manifestCount)
-	assert.Equal(t, int64(1), calls.Load())
+	assert.Equal(t, int64(manifestCount+1), calls.Load(),
+		"the manifest list and each manifest worker need a FileIO renewal checkpoint")
 }
 
-func BenchmarkPlanFilesFileIOReuse(b *testing.B) {
+type expiringManifestIO struct {
+	base         *iceio.MemFS
+	manifestList string
+	expired      atomic.Bool
+}
+
+func (fs *expiringManifestIO) Open(name string) (iceio.File, error) {
+	if name != fs.manifestList && fs.expired.Load() {
+		return nil, fmt.Errorf("credentials expired")
+	}
+
+	file, err := fs.base.Open(name)
+	if err == nil && name == fs.manifestList {
+		fs.expired.Store(true)
+	}
+
+	return file, err
+}
+
+func (fs *expiringManifestIO) Remove(name string) error {
+	return fs.base.Remove(name)
+}
+
+func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {
+	scan, fs := scanWithManifestCount(t, 1)
+	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
+
+	expiring := &expiringManifestIO{base: fs, manifestList: manifestListPath}
+	var calls atomic.Int64
+	scan.ioF = func(context.Context) (iceio.IO, error) {
+		if calls.Add(1) == 1 {
+			return expiring, nil
+		}
+
+		return fs, nil
+	}
+
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1)
+	assert.Equal(t, int64(2), calls.Load(), "manifest workers must reacquire FileIO after the manifest list read")
+}
+
+func BenchmarkPlanFilesFileIOFactory(b *testing.B) {
 	for _, manifestCount := range []int{1, 10, 100} {
 		b.Run(fmt.Sprintf("manifests_%d", manifestCount), func(b *testing.B) {
 			scan, fs := scanWithManifestCount(b, manifestCount)
@@ -191,7 +235,7 @@ func BenchmarkPlanFilesFileIOReuse(b *testing.B) {
 					b.Fatalf("unexpected task count: %d", len(tasks))
 				}
 			}
-			b.ReportMetric(float64(calls.Load())/float64(b.N), "fileio-loads/op")
+			b.ReportMetric(float64(calls.Load())/float64(b.N), "fileio-factory-calls/op")
 		})
 	}
 }

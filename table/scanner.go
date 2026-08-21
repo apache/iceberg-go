@@ -771,24 +771,6 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 ) (*manifestEntries, error) {
-	var fs io.IO
-	var err error
-	if len(manifestList) > 0 {
-		fs, err = scan.ioF(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return scan.collectManifestEntriesWithSchemaUsingIO(ctx, fs, manifestList, schema)
-}
-
-func (scan *Scan) collectManifestEntriesWithSchemaUsingIO(
-	ctx context.Context,
-	fs io.IO,
-	manifestList []iceberg.ManifestFile,
-	schema *iceberg.Schema,
-) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
 		scan.rowFilter,
@@ -817,6 +799,13 @@ func (scan *Scan) collectManifestEntriesWithSchemaUsingIO(
 		}
 
 		g.Go(func() error {
+			// FileIO factories may renew credentials between manifest reads. Keep
+			// this load at the worker boundary instead of retaining the IO used for
+			// the manifest list across the whole plan.
+			fs, err := scan.ioF(ctx)
+			if err != nil {
+				return err
+			}
 			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -940,7 +929,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchemaUsingIO(ctx, fs, manifestList, schema)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}
