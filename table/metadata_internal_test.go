@@ -2261,7 +2261,12 @@ func TestDefaultSortOrder(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
 	require.NoError(t, err)
 	meta.(*metadataV2).DefaultSortOrderID = orderID
-	sortOrder, err := NewSortOrder(orderID, nil)
+	sortOrder, err := NewSortOrder(orderID, []SortField{{
+		SourceIDs: []int{2},
+		Transform: iceberg.IdentityTransform{},
+		Direction: SortASC,
+		NullOrder: NullsFirst,
+	}})
 	require.NoError(t, err)
 
 	meta.(*metadataV2).SortOrderList = append(meta.(*metadataV2).SortOrderList, sortOrder)

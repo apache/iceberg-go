@@ -278,25 +278,24 @@ func (s SortOrder) MarshalJSON() ([]byte, error) {
 
 func (s *SortOrder) UnmarshalJSON(b []byte) error {
 	type Alias struct {
-		OrderID int         `json:"order-id"`
-		Fields  []SortField `json:"fields"`
+		OrderID *int         `json:"order-id"`
+		Fields  *[]SortField `json:"fields"`
 	}
-	aux := Alias{-1, nil}
+	var aux Alias
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	if len(aux.Fields) == 0 && aux.OrderID == -1 {
-		aux.Fields = []SortField{}
-		aux.OrderID = 0
+	if aux.OrderID == nil {
+		return fmt.Errorf("%w: sort order is missing required 'order-id' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	if aux.OrderID == -1 {
-		aux.OrderID = InitialSortOrderID
+	if aux.Fields == nil {
+		return fmt.Errorf("%w: sort order is missing required 'fields' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	newOrder, err := newSortOrder(aux.OrderID, aux.Fields, false)
+	newOrder, err := newSortOrder(*aux.OrderID, *aux.Fields, false)
 	if err != nil {
 		return err
 	}
@@ -310,6 +309,7 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 //
 // The orderID must be greater than or equal to 0.
 // If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
+// If fields is empty, orderID must be 0.
 // Fields need to have non-nil Transform, valid Direction and NullOrder values,
 // and non-empty source IDs.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
@@ -324,6 +324,10 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 
 	if orderID == 0 && len(fields) != 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
+	}
+
+	if orderID != UnsortedSortOrderID && len(fields) == 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID %d requires at least one sort field", ErrInvalidSortOrderID, orderID)
 	}
 
 	if fields == nil {
