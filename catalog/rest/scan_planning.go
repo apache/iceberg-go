@@ -1133,6 +1133,21 @@ type FetchScanTasksResponse struct {
 	ScanTasks
 }
 
+func (r *FetchScanTasksResponse) UnmarshalJSON(data []byte) error {
+	type alias FetchScanTasksResponse
+	var decoded *alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded == nil {
+		return fmt.Errorf("%w: fetchScanTasks response must be an object", ErrRESTError)
+	}
+
+	*r = FetchScanTasksResponse(*decoded)
+
+	return nil
+}
+
 // DefaultWaitForPlanOptions is the conservative polling backoff, cancel grace,
 // and retry budget used when callers pass the zero-value WaitForPlanOptions.
 // MaxRetries mirrors Java's maxRetries=10, but it applies only when the caller
