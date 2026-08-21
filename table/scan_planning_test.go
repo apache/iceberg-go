@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	icebergio "github.com/apache/iceberg-go/io"
@@ -333,6 +334,196 @@ func TestScanPlanningAutoUsesCapablePlanner(t *testing.T) {
 	assert.Len(t, tasks, 1)
 }
 
+func TestScanPlanningRemoteResolvesDefaultProjectionAndSchema(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	planner := &fakeScanPlanner{supports: true}
+	scan := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningRemote),
+	)
+	scan.planner = planner
+
+	_, err = scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id"}, planner.receivedRequest.SelectedFields)
+	assert.True(t, planner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	require.NotNil(t, planner.receivedRequest.UseSnapshotSchema)
+	assert.False(t, *planner.receivedRequest.UseSnapshotSchema)
+	assert.Nil(t, planner.receivedRequest.MinRowsRequested)
+}
+
+func TestScanPlanningRemoteOmitsNegativeRowLimit(t *testing.T) {
+	t.Parallel()
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		planner:        planner,
+		planningMode:   ScanPlanningRemote,
+		selectedFields: []string{"*"},
+		limit:          -2,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Nil(t, planner.receivedRequest.MinRowsRequested)
+}
+
+func TestScanPlanningRemotePropagatesSnapshotSchemaSemantics(t *testing.T) {
+	t.Parallel()
+
+	snapshotTime := time.Now().UnixMilli()
+	schemaID := 0
+	metadata, err := createTestMetadata([]Snapshot{{
+		SnapshotID:  10,
+		TimestampMs: snapshotTime,
+		SchemaID:    &schemaID,
+	}}, []SnapshotLogEntry{{SnapshotID: 10, TimestampMs: snapshotTime}})
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	currentSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	require.NoError(t, builder.AddSchema(currentSchema))
+	require.NoError(t, builder.SetCurrentSchemaID(-1))
+	require.NoError(t, builder.SetSnapshotRef("branch", 10, BranchRef))
+	require.NoError(t, builder.SetSnapshotRef("tag", 10, TagRef))
+	metadata, err = builder.Build()
+	require.NoError(t, err)
+
+	var snapshotSchema *iceberg.Schema
+	for _, schema := range metadata.Schemas() {
+		if schema.ID == schemaID {
+			snapshotSchema = schema
+
+			break
+		}
+	}
+	require.NotNil(t, snapshotSchema)
+	require.False(t, snapshotSchema.Equals(metadata.CurrentSchema()))
+
+	base := (&Table{metadata: metadata}).Scan(WithScanPlanningMode(ScanPlanningRemote))
+	livePlanner := &fakeScanPlanner{supports: true}
+	base.planner = livePlanner
+	_, err = base.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.True(t, livePlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	assert.Equal(t, []string{"id", "category"}, livePlanner.receivedRequest.SelectedFields)
+
+	branch, err := base.UseRef("branch")
+	require.NoError(t, err)
+	branchPlanner := &fakeScanPlanner{supports: true}
+	branch.planner = branchPlanner
+	_, err = branch.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, branchPlanner.receivedRequest.UseSnapshotSchema)
+	assert.False(t, *branchPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, branchPlanner.receivedRequest.Schema.Equals(metadata.CurrentSchema()))
+	assert.Equal(t, []string{"id", "category"}, branchPlanner.receivedRequest.SelectedFields)
+
+	tag, err := base.UseRef("tag")
+	require.NoError(t, err)
+	tagPlanner := &fakeScanPlanner{supports: true}
+	tag.planner = tagPlanner
+	_, err = tag.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, tagPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, *tagPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, tagPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, tagPlanner.receivedRequest.SelectedFields)
+
+	historical := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningRemote),
+		WithSnapshotID(10),
+		WithLimit(25),
+	)
+	historicalPlanner := &fakeScanPlanner{supports: true}
+	historical.planner = historicalPlanner
+	_, err = historical.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, historicalPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, *historicalPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, historicalPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, historicalPlanner.receivedRequest.SelectedFields)
+	require.NotNil(t, historicalPlanner.receivedRequest.MinRowsRequested)
+	assert.Equal(t, int64(25), *historicalPlanner.receivedRequest.MinRowsRequested)
+
+	asOf := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningRemote),
+		WithSnapshotAsOf(snapshotTime),
+	)
+	asOfPlanner := &fakeScanPlanner{supports: true}
+	asOf.planner = asOfPlanner
+	_, err = asOf.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, asOfPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, *asOfPlanner.receivedRequest.UseSnapshotSchema)
+	assert.True(t, asOfPlanner.receivedRequest.Schema.Equals(snapshotSchema))
+	assert.Equal(t, []string{"id"}, asOfPlanner.receivedRequest.SelectedFields)
+}
+
+func TestScanPlanningRemoteRejectsLastUpdatedSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	planner := &fakeScanPlanner{supports: true}
+	scan := &Scan{
+		planner:        planner,
+		planningMode:   ScanPlanningRemote,
+		selectedFields: []string{iceberg.LastUpdatedSequenceNumberColumnName},
+		caseSensitive:  true,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+	assert.Empty(t, planner.receivedIdentifier)
+}
+
+func TestScanPlanningAutoFallsBackForLastUpdatedSequenceNumber(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	planner := &fakeScanPlanner{supports: true}
+	scan := (&Table{metadata: metadata}).Scan(
+		WithScanPlanningMode(ScanPlanningAuto),
+		WithRowLineage(),
+	)
+	scan.planner = planner
+
+	tasks, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Empty(t, planner.receivedIdentifier)
+}
+
+func TestScanPlanningRemotePassesFileIOProperties(t *testing.T) {
+	t.Parallel()
+
+	metadata, err := createTestMetadata(nil, nil)
+	require.NoError(t, err)
+	props := iceberg.Properties{"s3.endpoint": "https://table.local"}
+	planner := &fakeScanPlanner{supports: true}
+	tbl := New(
+		Identifier{"db", "tbl"},
+		metadata,
+		"s3://bucket/db/tbl/metadata/v1.json",
+		nil,
+		nil,
+		WithScanPlanningIOProperties(props),
+	)
+	tbl.planner = planner
+
+	_, err = tbl.Scan(WithScanPlanningMode(ScanPlanningRemote)).PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, props, planner.receivedRequest.FileIOProperties)
+
+	planner.receivedRequest.FileIOProperties["s3.endpoint"] = "https://mutated.local"
+	assert.Equal(t, "https://table.local", props["s3.endpoint"])
+}
+
 func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 	t.Parallel()
 
@@ -357,18 +548,40 @@ func TestScanPlanningPassesIdentifierCopy(t *testing.T) {
 
 func TestTransactionScanCopiesIdentifier(t *testing.T) {
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
-	txn.tbl.planner = &fakeScanPlanner{
+
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.identifier[0] = "corrupt"
+	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+}
+
+func TestTransactionScanKeepsStagedMetadataLocal(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	planner := &fakeScanPlanner{
 		result:   ScanPlanningResult{Tasks: []FileScanTask{{}}},
 		supports: true,
 	}
+	txn.tbl.planner = planner
+	dataFile := newTestDataFile(
+		t,
+		*iceberg.UnpartitionedSpec,
+		"mem://default/table-location/data.parquet",
+		nil,
+	)
+	require.NoError(t, txn.AddDataFiles(context.Background(), []iceberg.DataFile{dataFile}, nil))
 
 	scan, err := txn.Scan(WithScanPlanningMode(ScanPlanningAuto))
 	require.NoError(t, err)
-	_, err = scan.PlanFiles(context.Background())
+	tasks, err := scan.PlanFiles(context.Background())
 	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, dataFile.FilePath(), tasks[0].File.FilePath())
+	assert.Empty(t, planner.receivedIdentifier)
 
-	scan.identifier[0] = "corrupt"
-	assert.Equal(t, Identifier{"db", "tbl"}, txn.tbl.identifier)
+	remote, err := txn.Scan(WithScanPlanningMode(ScanPlanningRemote))
+	require.NoError(t, err)
+	_, err = remote.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
 }
 
 func TestTransactionScanRejectsConflictingSnapshotSelectors(t *testing.T) {
@@ -395,6 +608,7 @@ type fakeScanPlanner struct {
 	called   bool
 	// captured after PlanFiles receives it
 	receivedIdentifier Identifier
+	receivedRequest    ScanPlanningRequest
 }
 
 func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports }
@@ -402,6 +616,7 @@ func (f *fakeScanPlanner) SupportsRemoteScanPlanning() bool { return f.supports 
 func (f *fakeScanPlanner) PlanFiles(_ context.Context, req ScanPlanningRequest) (ScanPlanningResult, error) {
 	f.called = true
 	f.receivedIdentifier = req.Identifier
+	f.receivedRequest = req
 
 	return f.result, f.err
 }
