@@ -55,10 +55,11 @@ func TestSnapshotByIDUsesReadOnlyFallbackAfterSliceReplacement(t *testing.T) {
 	require.Same(t, originalIndex, metadata.snapshotIndex)
 }
 
-func TestMetadataBuilderSnapshotByIDRepairsStaleIndexAfterSliceReplacement(t *testing.T) {
+func TestMetadataBuilderSnapshotByIDUsesReadOnlyFallbackAfterSliceReplacement(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	builder.snapshotList = []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}}
 	builder.snapshotIndex = buildSnapshotIndex(builder.snapshotList)
+	originalIndex := builder.snapshotIndex
 
 	// Package-level fixtures can replace the snapshot slice directly. The
 	// cached index still has the same length, so the lookup must fall back.
@@ -67,10 +68,12 @@ func TestMetadataBuilderSnapshotByIDRepairsStaleIndexAfterSliceReplacement(t *te
 	snapshot, err := builder.SnapshotByID(4)
 	require.NoError(t, err)
 	require.Equal(t, int64(4), snapshot.SnapshotID)
-	require.Equal(t, 1, builder.snapshotIndex.positions[4])
+	require.Same(t, originalIndex, builder.snapshotIndex)
+	require.Equal(t, map[int64]int{1: 0, 2: 1}, builder.snapshotIndex.positions)
 	_, err = builder.SnapshotByID(2)
 	require.ErrorIs(t, err, ErrSnapshotNotFound)
-	require.NotContains(t, builder.snapshotIndex.positions, int64(2))
+	require.Same(t, originalIndex, builder.snapshotIndex)
+	require.Equal(t, map[int64]int{1: 0, 2: 1}, builder.snapshotIndex.positions)
 }
 
 func TestMetadataBuilderSnapshotIndexFollowsUpdates(t *testing.T) {
@@ -205,6 +208,35 @@ func TestCommonMetadataSnapshotLookupsConcurrent(t *testing.T) {
 				}
 			}
 		}(i)
+	}
+	wg.Wait()
+}
+
+func TestMetadataBuilderSnapshotByIDConcurrent(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	builder.snapshotList = []Snapshot{{SnapshotID: 1}, {SnapshotID: 2}}
+	builder.snapshotIndex = buildSnapshotIndex(builder.snapshotList)
+
+	const (
+		goroutineCount = 8
+		lookupCount    = 100
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(goroutineCount)
+	for range goroutineCount {
+		go func() {
+			defer wg.Done()
+
+			for range lookupCount {
+				snapshot, err := builder.SnapshotByID(2)
+				if err != nil || snapshot == nil || snapshot.SnapshotID != 2 {
+					t.Errorf("expected snapshot 2, got snapshot=%v err=%v", snapshot, err)
+
+					return
+				}
+			}
+		}()
 	}
 	wg.Wait()
 }
