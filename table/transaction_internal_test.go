@@ -26,6 +26,7 @@ import (
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1784,4 +1785,259 @@ func TestRollbackToSnapshotCommitRejectsBranchTurnedTag(t *testing.T) {
 	require.Error(t, err, "a branch replaced by a tag must fail the commit, not be rolled back")
 	require.ErrorContains(t, err, "tags cannot be transaction targets")
 	require.Equal(t, int32(1), cat.attempts.Load(), "a type conflict must not be retried")
+}
+
+type reqCapturingCatalog struct {
+	metadata Metadata
+	reqs     [][]Requirement
+}
+
+func (c *reqCapturingCatalog) LoadTable(_ context.Context, ident Identifier) (*Table, error) {
+	return New(ident, c.metadata, "",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, c), nil
+}
+
+func (c *reqCapturingCatalog) CommitTable(_ context.Context, _ Identifier, reqs []Requirement, updates []Update) (Metadata, string, error) {
+	c.reqs = append(c.reqs, reqs)
+	meta, err := UpdateTableMetadata(c.metadata, updates, "")
+	if err != nil {
+		return nil, "", err
+	}
+	c.metadata = meta
+
+	return meta, "", nil
+}
+
+func refRequirements(t *testing.T, reqs []Requirement, ref string) []*assertRefSnapshotID {
+	t.Helper()
+
+	var out []*assertRefSnapshotID
+	for _, r := range reqs {
+		if r.GetType() != reqAssertRefSnapshotID {
+			continue
+		}
+		req, ok := r.(*assertRefSnapshotID)
+		require.True(t, ok, "requirement of type %s must be an *assertRefSnapshotID", r.GetType())
+		if req.Ref == ref {
+			out = append(out, req)
+		}
+	}
+
+	return out
+}
+
+func soleRefRequirement(t *testing.T, reqs []Requirement, ref string) *assertRefSnapshotID {
+	t.Helper()
+
+	found := refRequirements(t, reqs, ref)
+	require.Len(t, found, 1, "expected exactly one snapshot-id assertion for ref %q", ref)
+
+	return found[0]
+}
+
+func metadataWithRef(t *testing.T, base Metadata, name string, refType RefType) Metadata {
+	t.Helper()
+
+	head := base.SnapshotByName(MainBranch)
+	require.NotNil(t, head, "base must have a main branch head")
+
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.SetSnapshotRef(name, head.SnapshotID, refType))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
+func multiTableTestTable(t *testing.T, meta Metadata) *Table {
+	t.Helper()
+
+	return New(Identifier{"db", "multi-table"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		&headTrackingCatalog{metadata: meta})
+}
+
+// Why: TableCommit copied the staged requirements verbatim, and metadata-only transactions
+// stage no ref requirement of their own.
+func TestTableCommitFencesTargetBranch(t *testing.T) {
+	head := int64(100)
+
+	t.Run("metadata-only transaction pins the base branch head", func(t *testing.T) {
+		base := newConflictTestMetadata(t, &head)
+		tx := multiTableTestTable(t, base).NewTransaction()
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		tc, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		req := soleRefRequirement(t, tc.Requirements, MainBranch)
+		require.NotNil(t, req.SnapshotID)
+		assert.Equal(t, head, *req.SnapshotID)
+		assert.True(t, req.requireBranch, "the target ref must be asserted as a branch")
+
+		assert.NoError(t, req.Validate(base))
+		err = req.Validate(graftSnapshotOnto(t, base, MainBranch, 200))
+		require.Error(t, err, "a concurrent snapshot on main must fail the assertion")
+		assert.ErrorContains(t, err, "has changed")
+	})
+
+	t.Run("explicit ref assertion is kept without duplication", func(t *testing.T) {
+		base := newConflictTestMetadata(t, &head)
+		tx := multiTableTestTable(t, base).NewTransaction()
+		require.NoError(t, tx.AssertRefSnapshotID(MainBranch))
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		tc, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		req := soleRefRequirement(t, tc.Requirements, MainBranch)
+		require.NotNil(t, req.SnapshotID)
+		assert.Equal(t, head, *req.SnapshotID)
+	})
+
+	t.Run("branch transaction pins only that branch", func(t *testing.T) {
+		base := metadataWithRef(t, newConflictTestMetadata(t, &head), "audit", BranchRef)
+		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		tc, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		req := soleRefRequirement(t, tc.Requirements, "audit")
+		require.NotNil(t, req.SnapshotID)
+		assert.Equal(t, head, *req.SnapshotID)
+		assert.Empty(t, refRequirements(t, tc.Requirements, MainBranch),
+			"a branch transaction must not fence main")
+	})
+
+	t.Run("absent target branch requires absence", func(t *testing.T) {
+		base := newConflictTestMetadata(t, &head)
+		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		tc, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		req := soleRefRequirement(t, tc.Requirements, "audit")
+		assert.Nil(t, req.SnapshotID, "a branch absent on the base must be required to stay absent")
+
+		assert.NoError(t, req.Validate(base))
+		err = req.Validate(metadataWithRef(t, base, "audit", BranchRef))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "created concurrently")
+	})
+
+	t.Run("target name created as a tag is rejected", func(t *testing.T) {
+		base := newConflictTestMetadata(t, &head)
+		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		tc, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		req := soleRefRequirement(t, tc.Requirements, "audit")
+		err = req.Validate(metadataWithRef(t, base, "audit", TagRef))
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "tags cannot be transaction targets")
+	})
+
+	t.Run("repeated calls are stable and leave the transaction unchanged", func(t *testing.T) {
+		base := newConflictTestMetadata(t, &head)
+		tx := multiTableTestTable(t, base).NewTransaction()
+		require.NoError(t, tx.AssertRefSnapshotID(MainBranch))
+		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
+
+		staged := soleRefRequirement(t, tx.reqs, MainBranch)
+		require.False(t, staged.requireBranch,
+			"the staged requirement starts untyped; the payload upgrade must not happen in place")
+
+		first, err := tx.TableCommit()
+		require.NoError(t, err)
+		second, err := tx.TableCommit()
+		require.NoError(t, err)
+
+		assert.Equal(t, first.Requirements, second.Requirements)
+		assert.Len(t, tx.reqs, 1)
+		assert.False(t, staged.requireBranch,
+			"building the payload must not mutate the transaction's own requirements")
+	})
+}
+
+// Why: whole-list equality, so any future divergence between the two paths fails here
+// rather than only when a ref requirement goes missing.
+func TestTableCommitRequirementsMatchCommit(t *testing.T) {
+	head := int64(100)
+
+	for _, branch := range []string{MainBranch, "audit"} {
+		t.Run(branch, func(t *testing.T) {
+			base := metadataWithRef(t, newConflictTestMetadata(t, &head), "audit", BranchRef)
+
+			cat := &reqCapturingCatalog{metadata: base}
+			committed := New(Identifier{"db", "multi-table"}, base, "metadata.json",
+				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+			txCommit := committed.NewTransactionOnBranch(branch)
+			require.NoError(t, txCommit.SetProperties(iceberg.Properties{"offsets": "42"}))
+			_, err := txCommit.Commit(t.Context())
+			require.NoError(t, err)
+			require.Len(t, cat.reqs, 1)
+
+			txPayload := multiTableTestTable(t, base).NewTransactionOnBranch(branch)
+			require.NoError(t, txPayload.SetProperties(iceberg.Properties{"offsets": "42"}))
+			tc, err := txPayload.TableCommit()
+			require.NoError(t, err)
+
+			assert.Equal(t, cat.reqs[0], tc.Requirements,
+				"a multi-table payload must carry the same fencing as Commit")
+		})
+	}
+}
+
+// Why: a producer stages its own ref assertion, which must be reused rather than duplicated.
+func TestTableCommitWithSnapshotProducerPinsBaseHead(t *testing.T) {
+	tbl, _, _ := newProducerAssertRefTable(t)
+
+	seed := tbl.NewTransaction()
+	require.NoError(t, seed.AddFiles(t.Context(), nil, nil, false))
+	tbl, err := seed.Commit(t.Context())
+	require.NoError(t, err)
+
+	baseHead := tbl.CurrentSnapshot()
+	require.NotNil(t, baseHead)
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), nil, nil, false))
+
+	tc, err := tx.TableCommit()
+	require.NoError(t, err)
+
+	req := soleRefRequirement(t, tc.Requirements, MainBranch)
+	require.NotNil(t, req.SnapshotID)
+	assert.Equal(t, baseHead.SnapshotID, *req.SnapshotID)
+	assert.True(t, req.requireBranch, "the target ref must be asserted as a branch")
+
+	staged, err := tx.StagedTable()
+	require.NoError(t, err)
+	stagedHead := staged.CurrentSnapshot()
+	require.NotNil(t, stagedHead)
+	assert.NotEqual(t, stagedHead.SnapshotID, *req.SnapshotID,
+		"the assertion must not name a snapshot the catalog has never seen")
+}
+
+// Why: a transaction with nothing to commit enforces nothing on the single-table path either.
+func TestTableCommitWithoutUpdatesStaysEmpty(t *testing.T) {
+	head := int64(100)
+	base := newConflictTestMetadata(t, &head)
+
+	tx := multiTableTestTable(t, base).NewTransaction()
+	require.NoError(t, tx.AssertRefSnapshotID(MainBranch))
+
+	tc, err := tx.TableCommit()
+	require.NoError(t, err)
+
+	assert.Empty(t, tc.Requirements)
+	assert.Empty(t, tc.Updates)
+	assert.NotNil(t, tc.Requirements, "an empty payload must still serialize as []")
+	assert.NotNil(t, tc.Updates, "an empty payload must still serialize as []")
 }

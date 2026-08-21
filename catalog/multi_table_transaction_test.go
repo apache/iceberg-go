@@ -277,3 +277,78 @@ func TestCommitAndReloadPartialFailure(t *testing.T) {
 	// First table was loaded successfully before the second failed.
 	assert.Len(t, tables, 1)
 }
+
+func mtxTableWithHead(t *testing.T, name string, headID, childID int64) (*table.Table, table.Metadata) {
+	t.Helper()
+
+	base := mtxTestTable(t, "db", name).Metadata()
+	withHead := mtxGraftSnapshot(t, base, headID, nil)
+	advanced := mtxGraftSnapshot(t, withHead, childID, &headID)
+
+	return table.New(table.Identifier{"db", name}, withHead, "", nil, nil), advanced
+}
+
+func mtxGraftSnapshot(t *testing.T, base table.Metadata, id int64, parent *int64) table.Metadata {
+	t.Helper()
+
+	builder, err := table.MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
+		SnapshotID:       id,
+		ParentSnapshotID: parent,
+		SequenceNumber:   base.LastSequenceNumber() + 1,
+		TimestampMs:      base.LastUpdatedMillis() + 1,
+		Summary:          &table.Summary{Operation: table.OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, id, table.BranchRef))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
+// Why: with a distinct head per table, a shared or missing assertion would still let one table's concurrent writer through.
+func TestMultiTableTransactionFencesEachBranchHead(t *testing.T) {
+	tbl1, advanced1 := mtxTableWithHead(t, "t1", 100, 101)
+	tbl2, advanced2 := mtxTableWithHead(t, "t2", 200, 201)
+
+	stub := &stubCatalog{}
+	mtx := &MultiTableTransaction{cat: stub}
+
+	for _, tbl := range []*table.Table{tbl1, tbl2} {
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(map[string]string{"offsets": "42"}))
+		require.NoError(t, mtx.AddTransaction(tx))
+	}
+
+	require.NoError(t, mtx.Commit(context.Background()))
+	require.Len(t, stub.commits, 1)
+	require.Len(t, stub.commits[0], 2)
+
+	cases := []struct {
+		commit   table.TableCommit
+		base     table.Metadata
+		advanced table.Metadata
+	}{
+		{stub.commits[0][0], tbl1.Metadata(), advanced1},
+		{stub.commits[0][1], tbl2.Metadata(), advanced2},
+	}
+
+	for _, tc := range cases {
+		name := tc.commit.Identifier[len(tc.commit.Identifier)-1]
+		t.Run(name, func(t *testing.T) {
+			var refReqs int
+			for _, req := range tc.commit.Requirements {
+				if req.GetType() != "assert-ref-snapshot-id" {
+					continue
+				}
+				refReqs++
+				assert.NoError(t, req.Validate(tc.base),
+					"the assertion must hold against the state the writer read")
+				assert.Error(t, req.Validate(tc.advanced),
+					"a concurrent commit on main must fail the assertion")
+			}
+			assert.Equal(t, 1, refReqs, "expected exactly one snapshot-id assertion for main")
+		})
+	}
+}
