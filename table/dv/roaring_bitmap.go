@@ -299,6 +299,7 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 				globalPos := bucketBitBase + pos
 				out[globalPos>>3] &^= byte(1 << (globalPos & 7))
 			}
+
 			continue
 		}
 
