@@ -435,9 +435,10 @@ func projectPositionDeleteRows(
 	defer sourceBatch.Release()
 
 	return ToRequestedSchema(ctx, projection.tableSchema, fileSchema, sourceBatch, SchemaOptions{
-		FormatVersion:   projection.formatVersion,
-		IncludeFieldIDs: true,
-		TableProperties: projection.tableProperties,
+		FormatVersion:        projection.formatVersion,
+		IncludeFieldIDs:      true,
+		AllowMissingRequired: true,
+		TableProperties:      projection.tableProperties,
 	})
 }
 
