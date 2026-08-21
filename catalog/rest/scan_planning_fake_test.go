@@ -89,7 +89,7 @@ func TestPlanFakeCapabilityDiscovery(t *testing.T) {
 				planfake.FetchScanTasksEndpoint,
 			},
 			wantPlan:         true,
-			wantFullPlanning: false,
+			wantFullPlanning: true,
 		},
 		{
 			name: "missing task fetch",
@@ -121,6 +121,7 @@ func TestPlanFakeCapabilityDiscovery(t *testing.T) {
 
 			assert.Equal(t, test.wantPlan, catalog.SupportsPlanTableScan())
 			assert.Equal(t, test.wantFullPlanning, catalog.SupportsFullRemoteScanPlanning())
+			assert.Equal(t, test.wantPlan, catalog.SupportsRemoteScanPlanning())
 
 			requests := srv.Requests()
 			require.Len(t, requests, 1)
