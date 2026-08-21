@@ -711,6 +711,12 @@ func TestProcessPositionalDeletes(t *testing.T) {
 			expecteds: [][]int64{{0, 1, 2}},
 		},
 		{
+			name:      "all but last row deleted",
+			deletes:   set[int64]{0: {}, 1: {}, 2: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{3}},
+		},
+		{
 			name:      "batch boundary deletion",
 			deletes:   set[int64]{4: {}},
 			batches:   [][]int64{{0, 1, 2, 3}, {4, 5, 6}},
