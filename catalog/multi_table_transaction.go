@@ -102,8 +102,10 @@ func (m *MultiTableTransaction) AddTransaction(tx *table.Transaction) error {
 
 // Commit extracts pending changes from all added transactions and
 // commits them atomically. On success, all transactions are marked
-// as committed. On failure, no transactions are marked committed
-// and the caller may retry.
+// as committed. On failure, no transactions are marked committed.
+//
+// A retry must be rebuilt from freshly loaded tables:
+// each payload asserts the branch head its transaction read.
 //
 // PostCommit hooks are not executed. Because the multi-table commit
 // endpoint returns 204 No Content, callers must LoadTable individually

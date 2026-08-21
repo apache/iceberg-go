@@ -41,8 +41,9 @@ type TableCommit struct {
 // this method directly — it handles extraction, commit, and lifecycle
 // management automatically.
 //
-// The method automatically includes an AssertTableUUID requirement, matching
-// the behavior of [Transaction.Commit].
+// The returned requirements are the ones [Transaction.Commit] would send,
+// so the multi-table path is fenced by the target branch's base head.
+// A transaction with no updates yields an empty payload and enforces none.
 //
 // TableCommit does not mark the transaction as committed — the caller is
 // responsible for either calling Commit (single-table) or submitting the
@@ -77,9 +78,9 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 		}, nil
 	}
 
-	reqs := make([]Requirement, len(t.reqs), len(t.reqs)+1)
-	copy(reqs, t.reqs)
-	reqs = append(reqs, AssertTableUUID(meta.uuid))
+	// Same derivation as Commit. Copying t.reqs alone leaves metadata-only transactions unfenced:
+	// their updates stage no ref requirement.
+	reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
 
 	updates := make([]Update, len(meta.updates))
 	copy(updates, meta.updates)
