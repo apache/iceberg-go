@@ -61,6 +61,16 @@ type manifestEvalVisitor struct {
 	partitionFilter iceberg.BooleanExpression
 }
 
+// transformedTerm reports whether a predicate operates on a derived value.
+// The source-column bounds and bloom filters used by these evaluators describe
+// the untransformed field, so comparing them with a transformed literal is not
+// conservative.
+func transformedTerm(pred iceberg.BoundPredicate) bool {
+	_, ok := pred.Term().(*iceberg.BoundTransform)
+
+	return ok
+}
+
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
 	parts := manifest.Partitions()
 	if len(parts) == 0 {
@@ -575,6 +585,10 @@ func (m *manifestEvalVisitor) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
+	if transformedTerm(pred) {
+		return rowsMightMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -836,6 +850,10 @@ func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	if transformedTerm(pred) {
+		return rowsMightMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -1337,6 +1355,10 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	if transformedTerm(pred) {
+		return rowsMightNotMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -1759,6 +1781,10 @@ func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []int
 }
 
 func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
+	if transformedTerm(pred) {
+		return nil
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
 }
 

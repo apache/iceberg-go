@@ -3045,6 +3045,44 @@ func TestEvaluators(t *testing.T) {
 	suite.Run(t, &StrictMetricsTestSuite{})
 }
 
+func TestTransformedTermsAreConservativeForSourceEvaluators(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	file := &mockDataFile{
+		path:        "file.parquet",
+		format:      iceberg.ParquetFile,
+		count:       1,
+		valueCounts: map[int]int64{1: 1},
+		nullCounts:  map[int]int64{1: 0},
+		lowerBounds: map[int][]byte{1: []byte("books")},
+		upperBounds: map[int][]byte{1: []byte("books")},
+	}
+	term := iceberg.NewUnboundTransform(
+		iceberg.TruncateTransform{Width: 3},
+		iceberg.Reference("category"),
+	)
+	expr := iceberg.EqualTo(term, "boo")
+
+	inclusive, err := newInclusiveMetricsEvaluator(schema, expr, true, true)
+	require.NoError(t, err)
+	read, err := inclusive(file)
+	require.NoError(t, err)
+	assert.True(t, read, "source bounds cannot prune a transformed predicate")
+
+	strict, err := newStrictMetricsEvaluator(schema, expr, true, true)
+	require.NoError(t, err)
+	mustMatch, err := strict(file)
+	require.NoError(t, err)
+	assert.False(t, mustMatch, "source bounds cannot prove a transformed predicate")
+
+	bound, err := iceberg.BindExpr(schema, expr, true)
+	require.NoError(t, err)
+	bloomPreds, err := newBloomFilterPredicates(bound)
+	require.NoError(t, err)
+	assert.Empty(t, bloomPreds, "source bloom filters cannot evaluate a transformed predicate")
+}
+
 func TestGetCmpLiteralRejectsGeo(t *testing.T) {
 	// Little-endian float64 X,Y - a valid geospatial single-value bound that
 	// must never be routed into an ordering comparison.
