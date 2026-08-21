@@ -533,11 +533,7 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 				return record, nil
 			}
 
-			// A partial slice retains the complete input buffers. Keep it only
-			// when those buffers are no more than twice the selected range;
-			// smaller partitions must be copied before they enter a writer queue.
-			selectedRows := end - start
-			if selectedRows >= record.NumRows()-selectedRows {
+			if contiguousSliceHasBoundedRetention(start, end, record.NumRows()) {
 				return record.NewSlice(start, end), nil
 			}
 		}
@@ -561,6 +557,15 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 
 		return partitionedRecord.(*compute.RecordDatum).Value, nil
 	}
+}
+
+// contiguousSliceHasBoundedRetention reports whether a partial zero-copy slice
+// retains no more than twice as many input rows as it returns. The range must
+// already have been validated by contiguousRowRange.
+func contiguousSliceHasBoundedRetention(start, end, numRows int64) bool {
+	selectedRows := end - start
+
+	return selectedRows >= numRows-selectedRows
 }
 
 func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {
