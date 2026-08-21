@@ -2116,7 +2116,7 @@ func getFieldID(f arrow.Field) *int {
 	}
 
 	id, err := strconv.Atoi(fieldIDStr)
-	if err != nil {
+	if err != nil || id <= 0 {
 		return nil
 	}
 
@@ -2132,14 +2132,16 @@ type pruneParquetSchema struct {
 }
 
 func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedField) int {
+	// Embedded Parquet field IDs are authoritative. Name mappings are only a
+	// fallback for files and fields that do not carry their own IDs.
+	if id := getFieldID(field); id != nil {
+		return *id
+	}
+
 	if mapping != nil {
 		if mapping.FieldID != nil {
 			return *mapping.FieldID
 		}
-	}
-
-	if id := getFieldID(field); id != nil {
-		return *id
 	}
 
 	panic(fmt.Errorf("%w: cannot convert %s to Iceberg field, missing field_id",

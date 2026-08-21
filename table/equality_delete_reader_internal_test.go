@@ -300,6 +300,59 @@ func TestReadEqualityDeleteFileMatchesMaterializedRead(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestReadEqualityDeleteFilePreservesEmbeddedFieldIDsWhenNamesAreReused(t *testing.T) {
+	t.Parallel()
+
+	oldSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "old_name", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "new_name", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "old_name", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	arrowSchema, err := SchemaToArrowSchema(oldSchema, nil, true, false)
+	require.NoError(t, err)
+
+	path := filepath.Join(t.TempDir(), "equality-delete-rename-reuse.parquet")
+	rec, _, err := array.RecordFromJSON(memory.DefaultAllocator, arrowSchema, strings.NewReader(`[
+		{"old_name": 7}
+	]`))
+	require.NoError(t, err)
+	defer rec.Release()
+
+	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	f, err := (iceio.LocalFS{}).Create(path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, f, 1,
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentEqDeletes,
+		path, iceberg.ParquetFile, nil, nil, nil, 1, info.Size())
+	require.NoError(t, err)
+	builder.EqualityFieldIDs([]int{1})
+	dataFile := builder.Build()
+
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	wantKeys, wantNames, err := readEqualityDeleteFileMaterialized(
+		ctx, iceio.LocalFS{}, tableSchema, tableSchema.NameMapping(), dataFile, []int{1})
+	require.NoError(t, err)
+
+	gotKeys, gotNames, err := readEqualityDeleteFile(
+		ctx, iceio.LocalFS{}, tableSchema, tableSchema.NameMapping(), dataFile, []int{1})
+	require.NoError(t, err)
+
+	assert.Equal(t, wantNames, gotNames)
+	assert.Equal(t, wantKeys, gotKeys)
+}
+
 func readEqualityDeleteFileMaterialized(
 	ctx context.Context,
 	fs iceio.IO,
