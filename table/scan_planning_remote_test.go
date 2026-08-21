@@ -32,9 +32,11 @@ type splitCapabilityPlanner struct {
 }
 
 func (p *splitCapabilityPlanner) SupportsRemoteScanPlanning() bool { return p.remote }
+
 func (p *splitCapabilityPlanner) SupportsFullRemoteScanPlanning() bool {
 	return p.full
 }
+
 func (p *splitCapabilityPlanner) PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error) {
 	return ScanPlanningResult{}, nil
 }
@@ -44,6 +46,7 @@ type basicCapabilityPlanner struct {
 }
 
 func (p *basicCapabilityPlanner) SupportsRemoteScanPlanning() bool { return p.remote }
+
 func (p *basicCapabilityPlanner) PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error) {
 	return ScanPlanningResult{}, nil
 }
