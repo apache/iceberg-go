@@ -227,6 +227,7 @@ func unmarshalJSONField(data json.RawMessage, field string, value any) error {
 
 		return err
 	}
+
 	return nil
 }
 
