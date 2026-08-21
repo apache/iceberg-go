@@ -692,7 +692,9 @@ func (s *FanoutWriterTestSuite) TestInitialPartitionRowCapacity() {
 	}{
 		{name: "first low cardinality partition", rows: 32_768, expected: 128},
 		{name: "keep cap for 256 partitions", rows: 32_768, partitionCount: 255, expected: 128},
-		{name: "reduce after 256 partitions", rows: 32_768, partitionCount: 256, expected: 127},
+		{name: "round up near max capacity", rows: 32_768, partitionCount: 256, expected: 128},
+		{name: "keep growth-safe capacity at boundary", rows: 32_768, partitionCount: 511, expected: 64},
+		{name: "round up below boundary", rows: 32_768, partitionCount: 512, expected: 64},
 		{name: "estimate 32 rows per partition", rows: 32_768, partitionCount: 1023, expected: 32},
 		{name: "one row per partition", rows: 32_768, partitionCount: 32_767, expected: 1},
 		{name: "more partitions than rows", rows: 10, partitionCount: 100, expected: 1},

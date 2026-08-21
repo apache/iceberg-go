@@ -28,6 +28,13 @@ import (
 
 func BenchmarkPartitionRowCapacity(b *testing.B) {
 	const rows = 32_768
+	const (
+		firstDiscoveredPartitions = 300
+		latePartitionStart        = 256
+		latePartitionRows         = 128
+		latePartitionCount        = firstDiscoveredPartitions - latePartitionStart
+		lateRows                  = latePartitionCount * (latePartitionRows - 1)
+	)
 
 	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Int32}}, nil)
 	icebergSchema := iceberg.NewSchema(0,
@@ -53,6 +60,19 @@ func BenchmarkPartitionRowCapacity(b *testing.B) {
 				}
 
 				return int32(row)
+			},
+		},
+		{
+			name: "late_discovered_skew",
+			value: func(row int) int32 {
+				switch {
+				case row < firstDiscoveredPartitions:
+					return int32(row)
+				case row < firstDiscoveredPartitions+lateRows:
+					return int32(latePartitionStart + (row-firstDiscoveredPartitions)%latePartitionCount)
+				default:
+					return 0
+				}
 			},
 		},
 	}

@@ -513,7 +513,15 @@ func initialPartitionRowCapacity(numRows int64, partitionCount int) int {
 		return maxInitialPartitionRowCapacity
 	}
 
-	return int(estimatedRows)
+	// Use power-of-two capacities so a late-discovered partition grows through
+	// the old 128-row allocation instead of jumping past it from a capacity
+	// such as 127.
+	capacity := 1
+	for int64(capacity) < estimatedRows {
+		capacity <<= 1
+	}
+
+	return capacity
 }
 
 // collectPartitions returns every partitionInfo in the tree in
