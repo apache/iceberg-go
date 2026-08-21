@@ -30,7 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func metricsTestMetadata(t *testing.T) Metadata {
+// scanTestMetadata is a minimal two-column unpartitioned table, shared by the
+// scan tests in this package.
+func scanTestMetadata(t *testing.T) Metadata {
 	t.Helper()
 	schema := iceberg.NewSchema(7,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -44,7 +46,7 @@ func metricsTestMetadata(t *testing.T) Metadata {
 }
 
 func TestBuildScanReport(t *testing.T) {
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	scan := &Scan{
 		metadata:       meta,
 		identifier:     Identifier{"db", "tbl"},
@@ -103,7 +105,7 @@ func TestBuildScanReport(t *testing.T) {
 }
 
 func TestBuildScanReportIncludesEnvironmentContext(t *testing.T) {
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	key := iceberg.EnvironmentEngineNameKey
 	preserveEnvironmentProperties(t, key)
 
@@ -130,7 +132,7 @@ func TestBuildScanReportIncludesEnvironmentContext(t *testing.T) {
 }
 
 func TestProjectedFieldsSelectedSubset(t *testing.T) {
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	scan := &Scan{metadata: meta, selectedFields: []string{"data"}, caseSensitive: true}
 
 	projected, err := scan.Projection()
@@ -238,7 +240,7 @@ func TestApplyResultDeleteMetricsDVsShareOnePuffin(t *testing.T) {
 }
 
 func TestBuildScanReportSetsFilter(t *testing.T) {
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	scan := &Scan{
 		metadata:       meta,
 		identifier:     Identifier{"db", "tbl"},
@@ -254,7 +256,7 @@ func TestBuildScanReportSetsFilter(t *testing.T) {
 func TestBuildScanReportSanitizesFilter(t *testing.T) {
 	// Predicate literals can be user data, so the emitted filter must be
 	// sanitized (Java's ExpressionUtil.sanitize) before it reaches a reporter.
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	scan := &Scan{
 		metadata:       meta,
 		identifier:     Identifier{"db", "tbl"},
@@ -274,7 +276,7 @@ func TestPlanFilesNoSnapshotEmitsNoReport(t *testing.T) {
 	// A table with no snapshot plans zero files and has no real snapshot id, so
 	// no ScanReport is emitted (matching Java, which skips the report entirely).
 	rep := &metrics.InMemoryReporter{}
-	meta := metricsTestMetadata(t)
+	meta := scanTestMetadata(t)
 	tbl := New(Identifier{"db", "tbl"}, meta, "metadata.json", nil, nil,
 		WithMetricsReporter(rep))
 
@@ -353,7 +355,7 @@ func TestPlanFilesEmitsReportForRealSnapshot(t *testing.T) {
 
 func TestPlanFilesNopReporterDoesNotPanic(t *testing.T) {
 	// Default (no reporter configured) must plan without panicking.
-	tbl := New(Identifier{"db", "tbl"}, metricsTestMetadata(t), "metadata.json", nil, nil)
+	tbl := New(Identifier{"db", "tbl"}, scanTestMetadata(t), "metadata.json", nil, nil)
 	assert.NotPanics(t, func() {
 		_, _ = tbl.Scan().PlanFiles(context.Background())
 	})
@@ -364,6 +366,7 @@ func TestPlanFilesRemoteDoesNotEmitScanReport(t *testing.T) {
 	// emit a local ScanReport (which would carry only zeroed counters).
 	rep := &metrics.InMemoryReporter{}
 	scan := &Scan{
+		metadata:     scanTestMetadata(t),
 		planner:      &fakeScanPlanner{result: ScanPlanningResult{Tasks: []FileScanTask{{}}}, supports: true},
 		planningMode: ScanPlanningRemote,
 		reporter:     rep,

@@ -985,15 +985,26 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
 
+	if err := scan.rejectRemoteRowLineage(); err != nil {
+		return nil, err
+	}
+
+	schema, useSnapshotSchema, err := scan.remotePlanSchema()
+	if err != nil {
+		return nil, err
+	}
+
 	caseSensitive := scan.caseSensitive
 	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       slices.Clone(scan.identifier),
-		Metadata:         scan.metadata,
-		MetadataLocation: scan.metadataLocation,
-		SnapshotID:       scan.snapshotID,
-		SelectedFields:   scan.selectedFields,
-		RowFilter:        scan.rowFilter,
-		CaseSensitive:    &caseSensitive,
+		Identifier:        slices.Clone(scan.identifier),
+		Metadata:          scan.metadata,
+		MetadataLocation:  scan.metadataLocation,
+		Schema:            schema,
+		SnapshotID:        scan.snapshotID,
+		SelectedFields:    scan.selectedFields,
+		RowFilter:         scan.rowFilter,
+		CaseSensitive:     &caseSensitive,
+		UseSnapshotSchema: &useSnapshotSchema,
 	})
 	if err != nil {
 		return nil, err
@@ -1017,6 +1028,37 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	}
 
 	return result.Tasks, nil
+}
+
+// remotePlanSchema resolves the schema a remote plan binds against and reports
+// whether it came from the scan's snapshot rather than the table's current
+// schema, which rides the wire as use-snapshot-schema. Compares by schema id,
+// not pointer: CurrentSchema returns a clone.
+func (scan *Scan) remotePlanSchema() (*iceberg.Schema, bool, error) {
+	schema, err := scan.effectiveSchema()
+	if err != nil {
+		return nil, false, err
+	}
+
+	return schema, schema.ID != scan.metadata.CurrentSchema().ID, nil
+}
+
+// rejectRemoteRowLineage fails a remote scan that projects
+// _last_updated_sequence_number: the REST FileScanTask schema carries no
+// manifest data sequence number, so the reader would emit nulls where a local
+// scan emits real values. _row_id is unaffected, its first_row_id lives on the
+// data file and survives the wire.
+func (scan *Scan) rejectRemoteRowLineage() error {
+	_, lineage := splitLineageMetadataFields(scan.selectedFields, scan.caseSensitive)
+	selectsSeqNum := slices.ContainsFunc(lineage, func(f iceberg.NestedField) bool {
+		return f.ID == iceberg.LastUpdatedSequenceNumberFieldID
+	})
+	if !scan.includeRowLineage && !selectsSeqNum {
+		return nil
+	}
+
+	return fmt.Errorf("%w: remote scan planning cannot project %s: the REST FileScanTask schema carries no data sequence number",
+		ErrInvalidOperation, iceberg.LastUpdatedSequenceNumberColumnName)
 }
 
 type planIOState struct {
