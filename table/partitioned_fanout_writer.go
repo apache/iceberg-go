@@ -533,7 +533,13 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 				return record, nil
 			}
 
-			return record.NewSlice(start, end), nil
+			// A partial slice retains the complete input buffers. Keep it only
+			// when those buffers are no more than twice the selected range;
+			// smaller partitions must be copied before they enter a writer queue.
+			selectedRows := end - start
+			if selectedRows >= record.NumRows()-selectedRows {
+				return record.NewSlice(start, end), nil
+			}
 		}
 
 		bldr := array.NewInt64Builder(mem)

@@ -731,6 +731,47 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
 	s.Error(err)
 }
 
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory() {
+	const inputRows = 4096
+	const payloadSize = 128
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+
+	probe := s.createLargeTestRecord(arrSchema, inputRows, 0, payloadSize)
+	fullBatchBytes := s.mem.CurrentAlloc()
+	probe.Release()
+
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
+		errorCh:  make(chan error, 1),
+		ctx:      s.ctx,
+	}
+	defer func() {
+		for len(writer.recordCh) > 0 {
+			(<-writer.recordCh).Release()
+		}
+	}()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	peakBytes := 0
+	for batch := range rollingDataWriterQueueCapacity {
+		record := s.createLargeTestRecord(arrSchema, inputRows, int64(batch*inputRows), payloadSize)
+		partitioned, err := partitionBatch(record, []int64{inputRows / 2})
+		s.Require().NoError(err)
+
+		s.Require().NoError(writer.Add(partitioned))
+		partitioned.Release()
+		record.Release()
+
+		peakBytes = max(peakBytes, s.mem.CurrentAlloc())
+	}
+
+	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
+}
+
 func (s *FanoutWriterTestSuite) TestContiguousRowRangeRejectsInvalidRanges() {
 	tests := []struct {
 		name    string
