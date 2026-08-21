@@ -823,6 +823,148 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPar
 	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
 }
 
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesNestedDictionaryPartialSlices() {
+	largeValue := strings.Repeat("l", 16*1024)
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append(largeValue)
+	dictBuilder.Append("small nested dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+	originalValuesBuffer := dictionary.Data().Buffers()[2]
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+
+	structFields := []arrow.Field{{Name: "value", Type: dictType}}
+	nested, err := array.NewStructArrayWithFields([]arrow.Array{dict}, structFields)
+	s.Require().NoError(err)
+	dict.Release()
+
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "nested", Type: nested.DataType()}}, nil)
+	record := array.NewRecordBatch(arrSchema, []arrow.Array{nested}, 4)
+	nested.Release()
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	partitioned, err := partitionBatch(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	values := partitioned.Column(0).(*array.Struct).Field(0).(*array.String)
+	s.Equal(arrow.STRING, values.DataType().ID())
+	s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+	s.Equal([]string{"small nested dictionary value", "small nested dictionary value"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesNestedDictionaryContainers() {
+	const rowCount = 4
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	newDictionary := func() (*array.Dictionary, *memory.Buffer) {
+		indexBuilder := array.NewInt8Builder(s.mem)
+		indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+		indices := indexBuilder.NewInt8Array()
+		indexBuilder.Release()
+
+		dictBuilder := array.NewStringBuilder(s.mem)
+		dictBuilder.Append(strings.Repeat("l", 16*1024))
+		dictBuilder.Append("small container dictionary value")
+		dictionary := dictBuilder.NewStringArray()
+		dictBuilder.Release()
+		originalValuesBuffer := dictionary.Data().Buffers()[2]
+
+		dict := array.NewDictionaryArray(dictType, indices, dictionary)
+		indices.Release()
+		dictionary.Release()
+
+		return dict, originalValuesBuffer
+	}
+	newOffsets := func() *array.Int32 {
+		offsetBuilder := array.NewInt32Builder(s.mem)
+		offsetBuilder.AppendValues([]int32{0, 1, 2, 3, 4}, nil)
+		offsets := offsetBuilder.NewInt32Array()
+		offsetBuilder.Release()
+
+		return offsets
+	}
+
+	s.Run("list", func() {
+		dict, originalValuesBuffer := newDictionary()
+		offsets := newOffsets()
+		listType := arrow.ListOf(dictType)
+		listData := array.NewData(listType, rowCount, []*memory.Buffer{nil, offsets.Data().Buffers()[1]}, []arrow.ArrayData{dict.Data()}, 0, 0)
+		list := array.NewListData(listData)
+		listData.Release()
+		offsets.Release()
+		dict.Release()
+
+		record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: listType}}, nil), []arrow.Array{list}, rowCount)
+		list.Release()
+		defer record.Release()
+
+		partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+		s.Require().NoError(err)
+		defer partitioned.Release()
+
+		values := partitioned.Column(0).(*array.List).ListValues().(*array.String)
+		s.Equal(arrow.STRING, values.DataType().ID())
+		s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+		s.Equal([]string{"small container dictionary value", "small container dictionary value"}, []string{values.Value(0), values.Value(1)})
+	})
+
+	s.Run("map", func() {
+		dict, originalValuesBuffer := newDictionary()
+		keysBuilder := array.NewStringBuilder(s.mem)
+		keysBuilder.AppendValues([]string{"a", "b", "c", "d"}, nil)
+		keys := keysBuilder.NewStringArray()
+		keysBuilder.Release()
+
+		entryFields := []arrow.Field{
+			{Name: "key", Type: arrow.BinaryTypes.String},
+			{Name: "value", Type: dictType, Nullable: true},
+		}
+		entries, err := array.NewStructArrayWithFields([]arrow.Array{keys, dict}, entryFields)
+		s.Require().NoError(err)
+		keys.Release()
+		dict.Release()
+
+		offsets := newOffsets()
+		mapType := arrow.MapOfFields(entryFields[0], entryFields[1])
+		mapData := array.NewData(mapType, rowCount, []*memory.Buffer{nil, offsets.Data().Buffers()[1]}, []arrow.ArrayData{entries.Data()}, 0, 0)
+		mapArray := array.NewMapData(mapData)
+		mapData.Release()
+		offsets.Release()
+		entries.Release()
+
+		record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: mapType}}, nil), []arrow.Array{mapArray}, rowCount)
+		mapArray.Release()
+		defer record.Release()
+
+		partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+		s.Require().NoError(err)
+		defer partitioned.Release()
+
+		values := partitioned.Column(0).(*array.Map).Items().(*array.String)
+		s.Equal(arrow.STRING, values.DataType().ID())
+		s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+		s.Equal([]string{"small container dictionary value", "small container dictionary value"}, []string{values.Value(0), values.Value(1)})
+	})
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemoryForSkewedPayload() {
 	const (
 		inputRows         = 256
