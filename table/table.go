@@ -105,7 +105,12 @@ type Table struct {
 	cat              CatalogIO
 	fsF              FSysF
 	planner          ScanPlanner
-	reporter         metrics.Reporter
+	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
+	// catalog load response. They are separate from metadata properties because
+	// REST catalogs can return FileIO configuration in the response's config
+	// block.
+	scanPlanningIOProps iceberg.Properties
+	reporter            metrics.Reporter
 	// reporterSet records whether a caller injected a reporter via
 	// WithMetricsReporter. It distinguishes an explicit reporter (including an
 	// explicit NopReporter opt-out) from the construction-time default, so
@@ -231,6 +236,7 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
 	t.planner = fresh.planner
+	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
 	// of their own. Refresh runs inside commit retry loops, so unconditionally
 	// copying fresh.reporter would silently revert a WithMetricsReporter-injected
@@ -785,7 +791,15 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 		}
 	}
 
-	return New(t.identifier, newMeta, newLoc, t.fsF, t.cat, withReporterState(t.reporter, t.reporterSet)), nil
+	return New(
+		t.identifier,
+		newMeta,
+		newLoc,
+		t.fsF,
+		t.cat,
+		withReporterState(t.reporter, t.reporterSet),
+		WithScanPlanningIOProperties(t.scanPlanningIOProps),
+	), nil
 }
 
 // rewriteRefSnapshotRequirements returns a copy of reqs with every
@@ -1186,6 +1200,9 @@ func WithSnapshotID(n int64) ScanOption {
 			return
 		}
 		scan.snapshotID = &n
+		scan.asOfTimestamp = nil
+		useSnapshotSchema := true
+		scan.useSnapshotSchema = &useSnapshotSchema
 	}
 }
 
@@ -1198,6 +1215,9 @@ func WithSnapshotAsOf(timeStampMs int64) ScanOption {
 			return
 		}
 		scan.asOfTimestamp = &timeStampMs
+		scan.snapshotID = nil
+		useSnapshotSchema := true
+		scan.useSnapshotSchema = &useSnapshotSchema
 	}
 }
 
@@ -1273,11 +1293,12 @@ func WithRowLineage() ScanOption {
 
 func (t Table) Scan(opts ...ScanOption) *Scan {
 	s := &Scan{
-		identifier:       slices.Clone(t.identifier),
-		metadata:         t.metadata,
-		metadataLocation: t.metadataLocation,
-		ioF:              t.fsF,
-		planner:          t.planner,
+		identifier:          slices.Clone(t.identifier),
+		metadata:            t.metadata,
+		metadataLocation:    t.metadataLocation,
+		ioF:                 t.fsF,
+		planner:             t.planner,
+		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
@@ -1315,6 +1336,20 @@ func WithMetricsReporter(r metrics.Reporter) Option {
 	return func(t *Table) {
 		t.reporter = r
 		t.reporterSet = true
+	}
+}
+
+// WithScanPlanningIOProperties supplies the table-scoped FileIO properties
+// that a remote scan planner needs when it builds a plan-scoped FileIO. This
+// is intended for catalog implementations whose table-load response carries
+// FileIO configuration separately from table metadata properties.
+func WithScanPlanningIOProperties(props iceberg.Properties) Option {
+	if props == nil {
+		return noopTableOption
+	}
+
+	return func(t *Table) {
+		t.scanPlanningIOProps = maps.Clone(props)
 	}
 }
 

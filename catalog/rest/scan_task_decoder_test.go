@@ -208,6 +208,41 @@ func TestDecodeScanTasksKeepsDeleteReferencesEnvelopeLocal(t *testing.T) {
 	assert.Equal(t, "s3://bucket/table/second-delete.parquet", secondTasks[0].DeleteFiles[0].FilePath())
 }
 
+func TestDecodeScanTasksReusesPartitionDecodePlan(t *testing.T) {
+	t.Parallel()
+
+	baseMetadata := newScanTaskDecoderMetadata()
+	metadata := &countingScanTaskDecoderMetadata{scanTaskDecoderMetadata: baseMetadata}
+	wire := validScanTasksWire()
+	secondDataFile := *wire.FileScanTasks[0].DataFile
+	secondDataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	wire.FileScanTasks = append(wire.FileScanTasks, RESTFileScanTask{DataFile: &secondDataFile})
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	assert.Len(t, tasks, 2)
+	assert.Equal(t, 1, metadata.specLookups)
+}
+
+func TestRemoteScanTasksReusesPartitionDecodePlanAcrossEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	baseMetadata := newScanTaskDecoderMetadata()
+	metadata := &countingScanTaskDecoderMetadata{scanTaskDecoderMetadata: baseMetadata}
+	first := validScanTasksWire()
+	second := validScanTasksWire()
+	second.FileScanTasks[0].DataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	second.DeleteFiles[0].FilePath = "s3://bucket/table/second-delete.parquet"
+
+	tasks, err := remoteScanTasks([]ScanTasks{first, second}, table.ScanPlanningRequest{
+		Metadata: metadata,
+		Schema:   metadata.schema,
+	})
+	require.NoError(t, err)
+	assert.Len(t, tasks, 2)
+	assert.Equal(t, 1, metadata.specLookups)
+}
+
 func TestDecodeScanTasksDerivesDeletionVectorTargetWhenOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -599,6 +634,17 @@ func validScanTasksWire() ScanTasks {
 type scanTaskDecoderMetadata struct {
 	schema *iceberg.Schema
 	spec   iceberg.PartitionSpec
+}
+
+type countingScanTaskDecoderMetadata struct {
+	*scanTaskDecoderMetadata
+	specLookups int
+}
+
+func (m *countingScanTaskDecoderMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	m.specLookups++
+
+	return m.scanTaskDecoderMetadata.PartitionSpecByID(id)
 }
 
 func newScanTaskDecoderMetadata() *scanTaskDecoderMetadata {

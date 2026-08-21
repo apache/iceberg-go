@@ -19,10 +19,14 @@ package rest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -48,40 +52,55 @@ const (
 // resolveStorageCredentials finds the best-matching credential for the given
 // location using longest-prefix match, mirroring the Java and Python implementations.
 func resolveStorageCredentials(creds []StorageCredential, location string) iceberg.Properties {
-	var best *StorageCredential
-	for i := range creds {
-		c := &creds[i]
-		if strings.HasPrefix(location, c.Prefix) {
-			if best == nil || len(c.Prefix) > len(best.Prefix) {
-				best = c
-			}
-		}
-	}
-	if best == nil {
+	index := matchingStorageCredentialIndex(creds, location)
+	if index < 0 {
 		return nil
 	}
 
-	return best.Config
+	return creds[index].Config
+}
+
+func matchingStorageCredentialIndex(creds []StorageCredential, location string) int {
+	best := -1
+	for i := range creds {
+		if !strings.HasPrefix(location, creds[i].Prefix) {
+			continue
+		}
+		if best == -1 || len(creds[i].Prefix) > len(creds[best].Prefix) {
+			best = i
+		}
+	}
+
+	return best
 }
 
 var credentialExpiryKeys = []string{
 	keyS3TokenExpiresAtMs,
-	keyAdlsSasExpiresAtMs,
 	keyGcsOAuthExpiresAt,
 	keyExpirationTime,
 }
 
 func parseCredentialExpiry(config iceberg.Properties) (time.Time, bool) {
-	for _, key := range credentialExpiryKeys {
-		if v, ok := config[key]; ok {
-			ms, err := strconv.ParseInt(v, 10, 64)
-			if err == nil && ms > 0 {
-				return time.UnixMilli(ms), true
+	var earliest time.Time
+	found := false
+	for key, value := range config {
+		if !slices.Contains(credentialExpiryKeys, key) &&
+			key != keyAdlsSasExpiresAtMs &&
+			!strings.HasPrefix(key, keyAdlsSasExpiresAtMs+".") {
+			continue
+		}
+
+		ms, err := strconv.ParseInt(value, 10, 64)
+		if err == nil && ms > 0 {
+			expiresAt := time.UnixMilli(ms)
+			if !found || expiresAt.Before(earliest) {
+				earliest = expiresAt
+				found = true
 			}
 		}
 	}
 
-	return time.Time{}, false
+	return earliest, found
 }
 
 type vendedCredentialRefresher struct {
@@ -96,6 +115,10 @@ type vendedCredentialRefresher struct {
 	identifier []string
 	location   string
 	props      iceberg.Properties
+	// credentials is populated only for scan-plan IO. Unlike table-load
+	// credentials, which are already resolved against the metadata location,
+	// plan credentials must be selected against every file path opened later.
+	credentials []StorageCredential
 
 	fetchCreds func(ctx context.Context, ident []string) (iceberg.Properties, error)
 
@@ -124,11 +147,14 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 	switch {
 	case v.cachedIO == nil:
 		config = v.props
-		// Plan creds can already be past their expiry by the time we first use
-		// them, so check before building an IO we'd only hand back 403s from.
-		if v.fetchCreds == nil {
-			if exp, ok := parseCredentialExpiry(config); ok && v.now().After(exp) {
-				return nil, v.expiredError(exp)
+		// A single resolved credential can already be past its expiry by the
+		// time we first use it, so check before building an IO we'd only hand
+		// back 403s from. Plan credentials are resolved later, per location, by
+		// prefixScopedIO and must not be rejected as one global credential set.
+		if v.fetchCreds == nil && len(v.credentials) == 0 {
+			expiresAt, ok := parseCredentialExpiry(config)
+			if ok && v.now().After(expiresAt) {
+				return nil, v.expiredError(expiresAt)
 			}
 		}
 	case v.fetchCreds == nil:
@@ -143,6 +169,17 @@ func (v *vendedCredentialRefresher) loadFS(ctx context.Context) (iceio.IO, error
 
 		config = maps.Clone(v.props)
 		maps.Copy(config, freshCreds)
+	}
+
+	if len(v.credentials) > 0 {
+		prefixIO := newPrefixScopedIO(ctx, v.props, v.credentials)
+		prefixIO.nowFunc = v.now
+		v.cachedIO = prefixIO
+		// Expiry is enforced by prefixScopedIO against only the credential
+		// selected for each object location.
+		v.expiresAt = time.Time{}
+
+		return v.cachedIO, nil
 	}
 
 	newIO, err := iceio.LoadFS(ctx, config, v.location)
@@ -203,6 +240,10 @@ func (v *vendedCredentialRefresher) refreshBuffer() time.Duration {
 }
 
 func (v *vendedCredentialRefresher) expiresAtFromConfig(config iceberg.Properties) time.Time {
+	if len(v.credentials) > 0 {
+		return time.Time{}
+	}
+
 	if exp, ok := parseCredentialExpiry(config); ok {
 		return exp
 	}
@@ -229,4 +270,166 @@ func (v *vendedCredentialRefresher) close() error {
 	}
 
 	return nil
+}
+
+// prefixScopedIO selects a plan credential using the actual object location
+// passed to Open/Remove. A single plan may cover metadata, data, and delete
+// files in different storage prefixes, so resolving credentials once at plan
+// creation would be incorrect.
+type prefixScopedIO struct {
+	ctx         context.Context
+	baseProps   iceberg.Properties
+	credentials []StorageCredential
+
+	mu          sync.Mutex
+	filesystems map[string]iceio.IO
+	closed      bool
+	nowFunc     func() time.Time
+}
+
+func newPrefixScopedIO(ctx context.Context, baseProps iceberg.Properties, credentials []StorageCredential) *prefixScopedIO {
+	return &prefixScopedIO{
+		ctx:         ctx,
+		baseProps:   maps.Clone(baseProps),
+		credentials: slices.Clone(credentials),
+		filesystems: make(map[string]iceio.IO),
+	}
+}
+
+func (p *prefixScopedIO) Open(name string) (iceio.File, error) {
+	fs, err := p.filesystemFor(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return fs.Open(name)
+}
+
+func (p *prefixScopedIO) Remove(name string) error {
+	fs, err := p.filesystemFor(name)
+	if err != nil {
+		return err
+	}
+
+	return fs.Remove(name)
+}
+
+func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
+	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	if credentialIndex >= 0 {
+		if expiresAt, ok := parseCredentialExpiry(p.credentials[credentialIndex].Config); ok &&
+			p.now().After(expiresAt) {
+			return nil, fmt.Errorf("%w: %s expired at %s",
+				ErrVendedCredentialsExpired, name, expiresAt.Format(time.RFC3339))
+		}
+	}
+
+	key := scopedFilesystemKey(credentialIndex, name)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil, errors.New("prefix-scoped IO is closed")
+	}
+	if fs, ok := p.filesystems[key]; ok {
+		return fs, nil
+	}
+
+	props := p.propertiesForLocation(name)
+
+	fs, err := iceio.LoadFS(p.ctx, props, name)
+	if err != nil {
+		return nil, err
+	}
+
+	p.filesystems[key] = fs
+
+	return fs, nil
+}
+
+func (p *prefixScopedIO) now() time.Time {
+	if p.nowFunc != nil {
+		return p.nowFunc()
+	}
+
+	return time.Now()
+}
+
+func (p *prefixScopedIO) propertiesForLocation(name string) iceberg.Properties {
+	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	props := make(iceberg.Properties, len(p.baseProps))
+	maps.Copy(props, p.baseProps)
+	if credentialIndex >= 0 {
+		credentialConfig := p.credentials[credentialIndex].Config
+		clearOverriddenCredentialProperties(props, credentialConfig)
+		maps.Copy(props, credentialConfig)
+	}
+
+	return props
+}
+
+// clearOverriddenCredentialProperties prevents a matched credential from being
+// combined with optional fields from another credential. In particular, an S3
+// access/secret pair without a session token must not inherit a stale token
+// from the table or catalog configuration.
+func clearOverriddenCredentialProperties(props, credentialConfig iceberg.Properties) {
+	_, hasS3AccessKey := credentialConfig[iceio.S3AccessKeyID]
+	_, hasS3SecretKey := credentialConfig[iceio.S3SecretAccessKey]
+	_, hasS3SessionToken := credentialConfig[iceio.S3SessionToken]
+	if hasS3AccessKey || hasS3SecretKey || hasS3SessionToken {
+		delete(props, iceio.S3AccessKeyID)
+		delete(props, iceio.S3SecretAccessKey)
+		delete(props, iceio.S3SessionToken)
+		delete(props, keyS3TokenExpiresAtMs)
+	}
+
+	_, hasGCSOAuthToken := credentialConfig[iceio.GCSOAuthToken]
+	_, hasGCSOAuthExpiry := credentialConfig[iceio.GCSOAuthExpiresAt]
+	if hasGCSOAuthToken || hasGCSOAuthExpiry {
+		delete(props, iceio.GCSOAuthToken)
+		delete(props, iceio.GCSOAuthExpiresAt)
+	}
+
+	for key := range credentialConfig {
+		switch {
+		case strings.HasPrefix(key, iceio.ADLSSasTokenPrefix):
+			suffix := strings.TrimPrefix(key, iceio.ADLSSasTokenPrefix)
+			delete(props, iceio.ADLSSasTokenPrefix+suffix)
+			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
+		case strings.HasPrefix(key, keyAdlsSasExpiresAtMs+"."):
+			suffix := strings.TrimPrefix(key, keyAdlsSasExpiresAtMs+".")
+			delete(props, iceio.ADLSSasTokenPrefix+suffix)
+			delete(props, keyAdlsSasExpiresAtMs+"."+suffix)
+		}
+	}
+}
+
+func scopedFilesystemKey(credentialIndex int, location string) string {
+	parsed, err := url.Parse(location)
+	if err != nil {
+		return fmt.Sprintf("%d:%s", credentialIndex, location)
+	}
+
+	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, parsed.Host)
+}
+
+func (p *prefixScopedIO) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+
+	var closeErr error
+	for _, fs := range p.filesystems {
+		if closer, ok := fs.(interface{ Close() error }); ok {
+			closeErr = errors.Join(closeErr, closer.Close())
+		}
+	}
+	p.filesystems = nil
+
+	return closeErr
 }
