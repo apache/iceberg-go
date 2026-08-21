@@ -2715,12 +2715,12 @@ func NewDataFileBuilder(
 		)
 	}
 
-	if recordCount <= 0 {
-		return nil, fmt.Errorf("%w: record count must be greater than 0", ErrInvalidArgument)
+	if recordCount < 0 {
+		return nil, fmt.Errorf("%w: record count must be non-negative", ErrInvalidArgument)
 	}
 
-	if fileSize <= 0 {
-		return nil, fmt.Errorf("%w: file size must be greater than 0", ErrInvalidArgument)
+	if fileSize < 0 {
+		return nil, fmt.Errorf("%w: file size must be non-negative", ErrInvalidArgument)
 	}
 	partitionData := make(map[string]any)
 	fieldNameToID := make(map[string]int)

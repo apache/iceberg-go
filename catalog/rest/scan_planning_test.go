@@ -208,6 +208,20 @@ func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
 	assert.Equal(t, "position-deletes", resp.DeleteFiles[0].Content)
 }
 
+func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
+	t.Parallel()
+
+	for _, payload := range []string{
+		`{"status":"submitted","plan-id":"abc","file-scan-tasks":[]}`,
+		`{"status":"failed","plan-tasks":[]}`,
+		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
+		`{"status":"failed","plan-id":"abc"}`,
+	} {
+		var resp PlanTableScanResponse
+		require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+	}
+}
+
 func TestPlanTableScanResponseAcceptsFailedWithoutUsableError(t *testing.T) {
 	t.Parallel()
 
@@ -265,6 +279,19 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 		var resp FetchPlanningResultResponse
 		err := json.Unmarshal([]byte(`{"status":"bogus"}`), &resp)
 		require.ErrorIs(t, err, ErrRESTError)
+	})
+
+	t.Run("rejects task fields before completion", func(t *testing.T) {
+		t.Parallel()
+
+		for _, payload := range []string{
+			`{"status":"submitted","plan-tasks":[]}`,
+			`{"status":"cancelled","file-scan-tasks":[]}`,
+			`{"status":"completed","delete-files":[{}]}`,
+		} {
+			var resp FetchPlanningResultResponse
+			require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+		}
 	})
 }
 

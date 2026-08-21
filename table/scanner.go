@@ -1058,15 +1058,15 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
-	planIO, err := newPlanIOState(result.IO)
-	if err != nil {
-		return nil, err
-	}
-
 	// Replace the current plan only after the new plan is available. A planner
 	// failure or invalid PlanIO must not destroy a previously usable plan.
 	if scan.planIO != nil && scan.planIO.matches(result.IO) {
 		return result.Tasks, nil
+	}
+
+	planIO, err := newPlanIOState(result.IO)
+	if err != nil {
+		return nil, err
 	}
 
 	oldPlanIO := scan.planIO
