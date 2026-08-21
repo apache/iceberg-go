@@ -569,6 +569,11 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 		rowIndicesArr := bldr.NewInt64Array()
 		defer rowIndicesArr.Release()
 
+		recordMetadata := arrow.Metadata{}
+		if recordWithMetadata, ok := record.(arrow.RecordBatchWithMetadata); ok {
+			recordMetadata = recordWithMetadata.Metadata()
+		}
+
 		partitionedRecord, err := compute.Take(
 			ctx,
 			*compute.DefaultTakeOptions(),
@@ -579,8 +584,52 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 			return nil, err
 		}
 
-		return partitionedRecord.(*compute.RecordDatum).Value, nil
+		return materializeDictionaryColumns(ctx, partitionedRecord.(*compute.RecordDatum).Value, recordMetadata)
 	}
+}
+
+// materializeDictionaryColumns removes dictionary values that are not referenced
+// by a partial result. Arrow's Take kernel copies dictionary indices but reuses
+// the complete dictionary, which can otherwise retain a large variable-width
+// buffer in a rolling writer queue.
+func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch, recordMetadata arrow.Metadata) (arrow.RecordBatch, error) {
+	columns := slices.Clone(record.Columns())
+	fields := record.Schema().Fields()
+	materialized := make([]arrow.Array, 0)
+
+	for i, column := range columns {
+		dictionary, ok := column.(*array.Dictionary)
+		if !ok {
+			continue
+		}
+
+		values, err := compute.TakeArray(ctx, dictionary.Dictionary(), dictionary.Indices())
+		if err != nil {
+			for _, materializedColumn := range materialized {
+				materializedColumn.Release()
+			}
+			record.Release()
+
+			return nil, err
+		}
+
+		columns[i] = values
+		fields[i].Type = values.DataType()
+		materialized = append(materialized, values)
+	}
+
+	if len(materialized) == 0 {
+		return record, nil
+	}
+
+	metadata := record.Schema().Metadata()
+	result := array.NewRecordBatchWithMetadata(arrow.NewSchema(fields, &metadata), columns, record.NumRows(), recordMetadata)
+	for _, materializedColumn := range materialized {
+		materializedColumn.Release()
+	}
+	record.Release()
+
+	return result, nil
 }
 
 // recordHasRowBoundedStorage reports whether a partial zero-copy slice retains
