@@ -1038,6 +1038,27 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory(
 	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
 }
 
+func (s *FanoutWriterTestSuite) TestContiguousSliceHasBoundedRetention() {
+	tests := []struct {
+		name        string
+		start       int64
+		end         int64
+		numRows     int64
+		wantBounded bool
+	}{
+		{name: "small partial range", start: 1, end: 2, numRows: 5},
+		{name: "just below half", start: 1, end: 3, numRows: 5},
+		{name: "half", start: 1, end: 3, numRows: 4, wantBounded: true},
+		{name: "more than half", start: 1, end: 4, numRows: 5, wantBounded: true},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			s.Equal(test.wantBounded, contiguousSliceHasBoundedRetention(test.start, test.end, test.numRows))
+		})
+	}
+}
+
 func (s *FanoutWriterTestSuite) TestVoidTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
