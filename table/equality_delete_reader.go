@@ -368,7 +368,7 @@ func equalityDeleteSetForFiles(
 
 // readEqualityDeleteFile reads a single equality delete file and returns
 // the set of encoded delete keys and the column names used.
-func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *iceberg.Schema, nameMapping iceberg.NameMapping, dataFile iceberg.DataFile, fieldIDs []int) (set[string], []string, error) {
+func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *iceberg.Schema, nameMapping iceberg.NameMapping, dataFile iceberg.DataFile, fieldIDs []int) (keys set[string], colNames []string, err error) {
 	src, err := internal.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, nil, err
@@ -380,24 +380,28 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
 
-	tbl, err := rdr.ReadTable(ctx)
+	if nameMapping == nil {
+		nameMapping = tableSchema.NameMapping()
+	}
+
+	projectedIDs := make(map[int]struct{}, len(fieldIDs))
+	for _, fieldID := range fieldIDs {
+		projectedIDs[fieldID] = struct{}{}
+	}
+
+	projectedSchema, colIndices, err := rdr.PrunedSchema(projectedIDs, nameMapping)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer tbl.Release()
 
-	hasFieldIDs, err := VisitArrowSchema(tbl.Schema(), hasIDs{})
+	hasFieldIDs, err := VisitArrowSchema(projectedSchema, hasIDs{})
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var fileSchema *iceberg.Schema
 	if !hasFieldIDs {
-		if nameMapping == nil {
-			nameMapping = tableSchema.NameMapping()
-		}
-
-		fileSchema, err = ArrowSchemaToIcebergWithOptions(tbl.Schema(), ArrowToIcebergOptions{
+		fileSchema, err = ArrowSchemaToIcebergWithOptions(projectedSchema, ArrowToIcebergOptions{
 			NameMapping: nameMapping,
 			TableSchema: tableSchema,
 		})
@@ -408,13 +412,13 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 	var fieldRefsByID arrowFieldRefsByID
 	if hasFieldIDs {
-		fieldRefsByID = indexArrowFieldsByMetadata(tbl.Schema())
+		fieldRefsByID = indexArrowFieldsByMetadata(projectedSchema)
 	} else {
 		fieldRefsByID = indexArrowFields(fileSchema)
 	}
 
-	// Resolve column names from field IDs.
-	colNames := make([]string, len(fieldIDs))
+	// Resolve projected field paths from field IDs.
+	colNames = make([]string, len(fieldIDs))
 	fieldRefs := make([]arrowFieldRef, len(fieldIDs))
 
 	for i, fid := range fieldIDs {
@@ -432,16 +436,23 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 		fieldRefs[i] = ref
 	}
 
-	// Build the set of encoded delete keys by iterating aligned batches.
-	keys := make(set[string])
+	// Stream projected batches directly into the encoded key set. The reader
+	// owns the current record and releases it before producing the next one.
+	recRdr, err := rdr.GetRecords(ctx, colIndices, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer recRdr.Release()
 
+	keys = make(set[string])
 	var keyBuf bytes.Buffer
 
-	tr := array.NewTableReader(tbl, tbl.NumRows())
-	defer tr.Release()
+	for recRdr.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 
-	for tr.Next() {
-		rec := tr.RecordBatch()
+		rec := recRdr.RecordBatch()
 		encoders := make([]colEncoder, len(fieldRefs))
 		for i, ref := range fieldRefs {
 			encoders[i], err = makeArrowFieldEncoder(rec, ref, fieldIDs[i], colNames[i], dataFile.FilePath())
@@ -452,6 +463,12 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 		numRows := int(rec.NumRows())
 		for row := range numRows {
+			if row&1023 == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, nil, err
+				}
+			}
+
 			keyBuf.Reset()
 			for _, enc := range encoders {
 				enc(&keyBuf, row)
@@ -459,6 +476,12 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 			keys[keyBuf.String()] = struct{}{}
 		}
+	}
+	if err := recRdr.Err(); err != nil {
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 
 	return keys, colNames, nil
