@@ -825,6 +825,30 @@ func (s *FanoutWriterTestSuite) TestRecordHasRowBoundedStorage() {
 	stringRecord := s.createCustomTestRecord(stringSchema, [][]any{{"value"}})
 	defer stringRecord.Release()
 	s.False(recordHasRowBoundedStorage(stringRecord))
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.Append(0)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append("dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+	defer dict.Release()
+
+	dictSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: dictType}}, nil)
+	dictRecord := array.NewRecordBatch(dictSchema, []arrow.Array{dict}, 1)
+	defer dictRecord.Release()
+	s.False(recordHasRowBoundedStorage(dictRecord))
 }
 
 func (s *FanoutWriterTestSuite) TestContiguousSliceHasBoundedRetention() {
@@ -861,6 +885,7 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyCopiesVariableWidthPartia
 	s.Require().NoError(err)
 	defer partitioned.Release()
 
+	s.NotSame(record.Column(0).Data().Buffers()[1], partitioned.Column(0).Data().Buffers()[1])
 	s.NotSame(record.Column(1).Data().Buffers()[2], partitioned.Column(1).Data().Buffers()[2])
 	values := partitioned.Column(1).(*array.String)
 	s.Equal([]string{"s", "s"}, []string{values.Value(0), values.Value(1)})
