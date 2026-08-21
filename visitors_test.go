@@ -1095,6 +1095,54 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 	}
 }
 
+func TestEvaluatorTransformTerms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	transform := iceberg.BucketTransform{NumBuckets: 100}
+	term := iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))
+	bucketed := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.Int32Literal(7),
+	})
+	bucket := bucketed.Val.(iceberg.TypedLiteral[int32]).Value()
+
+	tests := []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want bool
+	}{
+		{name: "is null", expr: iceberg.IsNull(term), want: false},
+		{name: "not null", expr: iceberg.NotNull(term), want: true},
+		{name: "equal", expr: iceberg.EqualTo(term, bucket), want: true},
+		{name: "in", expr: iceberg.IsIn(term, bucket, bucket+1), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := iceberg.ExpressionEvaluator(schema, tt.expr, true)
+			require.NoError(t, err)
+
+			got, err := eval(rowOf(int32(7)))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEvaluatorDayTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.DayTransform{}, iceberg.Reference("ts"))
+	eval, err := iceberg.ExpressionEvaluator(schema, iceberg.EqualTo(term, iceberg.Date(0)), true)
+	require.NoError(t, err)
+
+	matched, err := eval(rowOf(iceberg.Timestamp(0)))
+	require.NoError(t, err)
+	assert.True(t, matched)
+}
+
 func TestRewriteNot(t *testing.T) {
 	tests := []struct {
 		expr, expected iceberg.BooleanExpression

@@ -191,6 +191,27 @@ func TestExprs(t *testing.T) {
 	}
 }
 
+func TestTransformPredicatesAreRejected(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+	predicates := []iceberg.UnboundPredicate{
+		iceberg.IsNull(term),
+		iceberg.EqualTo(term, "boo"),
+		iceberg.IsIn(term, "boo", "bar").(iceberg.UnboundPredicate),
+	}
+
+	for _, predicate := range predicates {
+		bound, err := predicate.Bind(sc, true)
+		require.NoError(t, err)
+
+		_, _, err = substrait.ConvertExpr(sc, bound, true)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+		assert.ErrorContains(t, err, "transformed terms")
+	}
+}
+
 func TestNanosecondTimestampLiterals(t *testing.T) {
 	tests := []struct {
 		name      string
