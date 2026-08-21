@@ -159,7 +159,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if s.scan.ioF == nil {
 		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
 	}
-	fs, err := s.scan.ioF(ctx)
+	manifestListFS, err := s.scan.ioF(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifests, err := snapshot.Manifests(fs)
+		manifests, err := snapshot.Manifests(manifestListFS)
 		if err != nil {
 			return nil, err
 		}
@@ -204,7 +204,10 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if len(manifestList) == 0 {
 		return finish(nil)
 	}
-	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
+	// The IO above is scoped to reading manifest lists. Manifest workers must
+	// reacquire through the factory so long-running incremental plans can renew
+	// vended credentials between reads.
+	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}

@@ -941,20 +941,11 @@ func (scan *Scan) collectManifestEntries(
 	if err != nil {
 		return nil, err
 	}
-	var fs io.IO
-	if len(manifestList) > 0 {
-		fs, err = scan.ioF(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return scan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
+	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 }
 
 func (scan *Scan) collectManifestEntriesWithSchema(
 	ctx context.Context,
-	fs io.IO,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 ) (*manifestEntries, error) {
@@ -986,6 +977,13 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
+			// FileIO factories may renew credentials between manifest reads. Keep
+			// this load at the worker boundary instead of retaining the IO used for
+			// the manifest list across the whole plan.
+			fs, err := scan.ioF(ctx)
+			if err != nil {
+				return err
+			}
 			partEval, err := partitionEvaluators.Get(int(mf.PartitionSpecID()))
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
@@ -1124,7 +1122,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchema(ctx, fs, manifestList, schema)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err
 	}
