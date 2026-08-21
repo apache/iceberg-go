@@ -78,5 +78,5 @@ func TestRemotePlanningSelectedFieldsExpandsWildcardNestedProjection(t *testing.
 	scan := &Scan{selectedFields: []string{"*"}, caseSensitive: true}
 	got, err := remotePlanningSelectedFields(scan, schema)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"id", "address.city", "address.zip"}, got)
+	assert.Equal(t, []string{"id", "address", "address.city", "address.zip"}, got)
 }

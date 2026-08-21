@@ -23,6 +23,39 @@ import (
 	"fmt"
 )
 
+// validatePlanningTaskEnvelope mirrors the Java response validation for the
+// status-discriminated planning responses. Empty arrays are still present on
+// the wire, so inspect the raw JSON instead of relying only on decoded slice
+// lengths when rejecting task fields before planning completes.
+func validatePlanningTaskEnvelope(data []byte, status PlanStatus, tasks ScanTasks, endpoint string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	if status != PlanStatusCompleted {
+		for _, name := range []string{"plan-tasks", "file-scan-tasks"} {
+			raw, ok := fields[name]
+			if ok && !isJSONNull(raw) {
+				return fmt.Errorf("%w: %s response includes %s for status %q", ErrRESTError, endpoint, name, status)
+			}
+		}
+		if len(tasks.DeleteFiles) > 0 {
+			return fmt.Errorf("%w: %s response includes delete-files for status %q", ErrRESTError, endpoint, status)
+		}
+	}
+
+	if len(tasks.DeleteFiles) > 0 && len(tasks.FileScanTasks) == 0 {
+		return fmt.Errorf(
+			"%w: %s response has delete-files without file-scan-tasks",
+			ErrRESTError,
+			endpoint,
+		)
+	}
+
+	return nil
+}
+
 func (r *FetchScanTasksResponse) UnmarshalJSON(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {

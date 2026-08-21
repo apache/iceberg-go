@@ -45,9 +45,10 @@ func supportsAutomaticRemotePlanning(planner ScanPlanner) bool {
 
 // remotePlanningSelectedFields returns the fully qualified physical field names
 // sent for a wildcard REST scan projection. It mirrors Java's
-// TypeUtil.getProjectedIds + Schema.findColumnName behavior by sending nested
-// leaf paths rather than only top-level struct names. Explicit projections keep
-// their user-provided names unchanged.
+// TypeUtil.getProjectedIds + Schema.findColumnName behavior. Java includes
+// struct field IDs as well as primitive/variant field IDs, while list/map field
+// IDs are represented by their nested element/key/value fields. Explicit
+// projections keep their user-provided names unchanged.
 func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string, error) {
 	if schema == nil || !slices.Contains(scan.selectedFields, "*") {
 		return scan.remoteSelectedFields(schema), nil
@@ -61,7 +62,7 @@ func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string,
 	ids := make([]int, 0, len(idToField))
 	for id, field := range idToField {
 		switch field.Type.(type) {
-		case *iceberg.StructType, *iceberg.ListType, *iceberg.MapType:
+		case *iceberg.ListType, *iceberg.MapType:
 			continue
 		}
 		ids = append(ids, id)
