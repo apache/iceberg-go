@@ -1130,6 +1130,19 @@ func TestEvaluatorTransformTerms(t *testing.T) {
 	}
 }
 
+func TestEvaluatorDayTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.DayTransform{}, iceberg.Reference("ts"))
+	eval, err := iceberg.ExpressionEvaluator(schema, iceberg.EqualTo(term, iceberg.Date(0)), true)
+	require.NoError(t, err)
+
+	matched, err := eval(rowOf(iceberg.Timestamp(0)))
+	require.NoError(t, err)
+	assert.True(t, matched)
+}
+
 func TestRewriteNot(t *testing.T) {
 	tests := []struct {
 		expr, expected iceberg.BooleanExpression

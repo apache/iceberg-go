@@ -1114,25 +1114,30 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		out.Valid, out.Val = true, Int32Literal(v)
+		out.Valid, out.Val = true, v
 	case TimestampLiteral:
-		out.Valid, out.Val = true, Int32Literal(Timestamp(v).ToDate())
+		out.Valid, out.Val = true, DateLiteral(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		out.Valid, out.Val = true, Int32Literal(TimestampNano(v).ToDate())
+		out.Valid, out.Val = true, DateLiteral(TimestampNano(v).ToDate())
 	}
 
 	return out
 }
 
 func (DayTransform) ToHumanStr(val any) string {
+	var days int32
 	switch v := val.(type) {
+	case Date:
+		days = int32(v)
 	case int32:
-		tm := epochTM.AddDate(0, 0, int(v))
-
-		return tm.Format("2006-01-02")
+		days = v
 	default:
 		return "null"
 	}
+
+	tm := epochTM.AddDate(0, 0, int(days))
+
+	return tm.Format("2006-01-02")
 }
 
 func (t DayTransform) ToHumanStrType(_ Type, val any) string {
