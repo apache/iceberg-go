@@ -565,7 +565,7 @@ func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], cursor *
 			if bldr == nil {
 				bldr = array.NewInt64Builder(mem)
 				bldr.Reserve(int(nrows))
-				for j := int64(0); j < i; j++ {
+				for j := range i {
 					bldr.Append(j)
 				}
 			}
