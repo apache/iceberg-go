@@ -797,6 +797,135 @@ func TestPartitionFieldUnmarshalJSON(t *testing.T) {
 	})
 }
 
+func TestPartitionFieldUnmarshalPreservesJSONFieldPresence(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr error
+		message string
+	}{
+		{
+			name:    "null source-id is present",
+			data:    `{"source-id":null,"field-id":1000,"transform":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidPartitionSpec,
+			message: "partition source ID must be positive: 0",
+		},
+		{
+			name:    "null source-ids is present",
+			data:    `{"source-ids":null,"field-id":1000,"transform":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidPartitionSpec,
+			message: "partition source-ids cannot be empty",
+		},
+		{
+			name:    "both null source fields are present",
+			data:    `{"source-id":null,"source-ids":null,"field-id":1000,"transform":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidPartitionSpec,
+			message: "partition field cannot contain both source-id and source-ids",
+		},
+		{
+			name:    "null transform is present",
+			data:    `{"source-id":1,"field-id":1000,"transform":null,"name":"part"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "partition field requires a transform",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field iceberg.PartitionField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestPartitionFieldUnmarshalPreservesValidationPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr error
+		message string
+	}{
+		{
+			name:    "mixed-case source ID is not recognized",
+			data:    `{"Source-Id":1,"field-id":1000,"transform":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidPartitionSpec,
+			message: "partition field requires source-id or source-ids",
+		},
+		{
+			name:    "mixed-case transform is not recognized",
+			data:    `{"source-id":1,"field-id":1000,"TRANSFORM":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "partition field requires a transform",
+		},
+		{
+			name:    "both source fields precede an invalid field ID",
+			data:    `{"source-id":1,"source-ids":[2],"field-id":"x","transform":"identity","name":"part"}`,
+			wantErr: iceberg.ErrInvalidPartitionSpec,
+			message: "partition field cannot contain both source-id and source-ids",
+		},
+		{
+			name:    "missing transform precedes an invalid field ID",
+			data:    `{"source-id":1,"field-id":"x","transform":null,"name":"part"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "partition field requires a transform",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field iceberg.PartitionField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestPartitionFieldUnmarshalIncludesJSONFieldInTypeErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  string
+		field string
+	}{
+		{
+			name:  "source ID",
+			data:  `{"source-id":"x","field-id":1000,"transform":"identity","name":"part"}`,
+			field: "source-id",
+		},
+		{
+			name:  "source IDs",
+			data:  `{"source-ids":["x"],"field-id":1000,"transform":"identity","name":"part"}`,
+			field: "source-ids",
+		},
+		{
+			name:  "transform",
+			data:  `{"source-id":1,"field-id":1000,"transform":1,"name":"part"}`,
+			field: "transform",
+		},
+		{
+			name:  "field ID",
+			data:  `{"source-id":1,"field-id":"x","transform":"identity","name":"part"}`,
+			field: "field-id",
+		},
+		{
+			name:  "name",
+			data:  `{"source-id":1,"field-id":1000,"transform":"identity","name":1}`,
+			field: "name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field iceberg.PartitionField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "."+tt.field)
+		})
+	}
+}
+
 func TestPartitionFieldUnmarshalPreservesStateOnError(t *testing.T) {
 	for _, test := range []struct {
 		name string
