@@ -25,7 +25,7 @@
 
 ### Prerequisites
 
-* Go 1.25 or later
+* Go 1.25.9 or later
 
 ### Build
 
@@ -73,7 +73,7 @@ make lint-install
    export AWS_S3_ENDPOINT=http://$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' minio):9000
    export AWS_REGION=us-east-1
    export SPARK_CONTAINER_ID=$(docker ps -qf 'name=spark-iceberg')
-   export DOCKER_API_VER=$(docker version -f '{{.Server.APIVersion}}')
+   export DOCKER_API_VERSION=$(docker version -f '{{.Server.APIVersion}}')
    ```
 
 3. Run the integration tests:
@@ -82,7 +82,7 @@ make lint-install
    make integration-test
    ```
 
-   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`.
+   Or run a single suite: `make integration-scanner`, `make integration-io`, `make integration-rest`, `make integration-spark`, `make integration-hive`, `make integration-hadoop`.
 
 #### Running against Spark 4.0
 
@@ -141,7 +141,7 @@ Tests requiring Spark 4 (currently the variant and unknown-type tests) automatic
 | Drop Namespace              |  X   |  X   |   X    |  X   |   X    |
 | Update Namespace Properties |  X   |  X   |   X    |  X   |        |
 | Create View                 |  X   |  X   |        |  X   |        |
-| Load View                   |      |  X   |        |  X   |        |
+| Load View                   |  X   |  X   |        |  X   |        |
 | List View                   |  X   |  X   |        |  X   |        |
 | Drop View                   |  X   |  X   |        |  X   |        |
 | Rename View                 |  X   |      |        |      |        |
@@ -161,7 +161,7 @@ the table, the following tracks the current write support:
 | Append Stream        |     X     |
 | Append Data Files    |     X     |
 | Rewrite Files        |     X     |
-| Rewrite manifests    |           |
+| Rewrite manifests    |     X     |
 | Overwrite Files      |     X     |
 | Copy-On-Write Delete |     X     |
 | Write Pos Delete     |     X     |
