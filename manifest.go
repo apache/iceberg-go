@@ -1476,8 +1476,10 @@ func (w *ManifestWriter) Close() error {
 
 type ManifestFileOption func(mf *manifestFile)
 
-// WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
-// Default: ManifestContentData
+// WithManifestFileContent sets the ManifestContent of a new manifest file.
+// The default is the content the ManifestWriter was created with, so this is
+// only needed to state that content explicitly. Passing a value that disagrees
+// with the writer makes ToManifestFile fail.
 func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 	return func(mf *manifestFile) {
 		mf.Content = content
@@ -1499,7 +1501,7 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		Path:               location,
 		Len:                length,
 		SpecID:             int32(w.spec.id),
-		Content:            ManifestContentData,
+		Content:            w.content,
 		SeqNumber:          -1,
 		MinSeqNumber:       w.minSeqNum,
 		AddedSnapshotID:    w.snapshotID,
@@ -1514,6 +1516,13 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 	}
 	for _, apply := range opts {
 		apply(&mf)
+	}
+
+	// The writer already stamped w.content into the manifest's own avro metadata,
+	// so a different content here would contradict the file it describes.
+	if mf.Content != w.content {
+		return nil, fmt.Errorf("%w: manifest file content '%s' does not match writer content '%s'",
+			ErrInvalidArgument, mf.Content, w.content)
 	}
 
 	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
