@@ -281,11 +281,15 @@ func appendProjectedPositionDeleteRow(
 	if err != nil {
 		return err
 	}
-	if releasable, ok := projectedRow.(scalar.Releasable); ok {
-		defer releasable.Release()
-	}
+	defer releasePositionDeleteScalar(projectedRow)
 
 	return appendPositionDeleteProjectedScalar(builder, projectedRow)
+}
+
+func releasePositionDeleteScalar(value scalar.Scalar) {
+	if releasable, ok := value.(interface{ Release() }); ok {
+		releasable.Release()
+	}
 }
 
 func appendPositionDeleteProjectedScalar(builder array.Builder, value scalar.Scalar) error {
@@ -333,39 +337,28 @@ func appendPositionDeleteProjectedScalar(builder array.Builder, value scalar.Sca
 			if err != nil {
 				return err
 			}
-			entryStruct, ok := entry.(*scalar.Struct)
-			if !ok || len(entryStruct.Value) != 2 {
-				if releasable, ok := entry.(scalar.Releasable); ok {
-					releasable.Release()
+			appendErr := func() error {
+				defer releasePositionDeleteScalar(entry)
+				entryStruct, ok := entry.(*scalar.Struct)
+				if !ok || len(entryStruct.Value) != 2 {
+					return fmt.Errorf("%w: projected map entry %d is not a two-field struct",
+						iceberg.ErrInvalidSchema, index)
+				}
+				if entryStruct.Value[0] == nil || !entryStruct.Value[0].IsValid() {
+					return fmt.Errorf("%w: projected map entry %d has a null key",
+						iceberg.ErrInvalidSchema, index)
+				}
+				if err := appendPositionDeleteProjectedScalar(builder.KeyBuilder(), entryStruct.Value[0]); err != nil {
+					return fmt.Errorf("map entry %d key: %w", index, err)
+				}
+				if err := appendPositionDeleteProjectedScalar(builder.ItemBuilder(), entryStruct.Value[1]); err != nil {
+					return fmt.Errorf("map entry %d value: %w", index, err)
 				}
 
-				return fmt.Errorf("%w: projected map entry %d is not a two-field struct",
-					iceberg.ErrInvalidSchema, index)
-			}
-			if entryStruct.Value[0] == nil || !entryStruct.Value[0].IsValid() {
-				if releasable, ok := entry.(scalar.Releasable); ok {
-					releasable.Release()
-				}
-
-				return fmt.Errorf("%w: projected map entry %d has a null key",
-					iceberg.ErrInvalidSchema, index)
-			}
-			if err := appendPositionDeleteProjectedScalar(builder.KeyBuilder(), entryStruct.Value[0]); err != nil {
-				if releasable, ok := entry.(scalar.Releasable); ok {
-					releasable.Release()
-				}
-
-				return fmt.Errorf("map entry %d key: %w", index, err)
-			}
-			if err := appendPositionDeleteProjectedScalar(builder.ItemBuilder(), entryStruct.Value[1]); err != nil {
-				if releasable, ok := entry.(scalar.Releasable); ok {
-					releasable.Release()
-				}
-
-				return fmt.Errorf("map entry %d value: %w", index, err)
-			}
-			if releasable, ok := entry.(scalar.Releasable); ok {
-				releasable.Release()
+				return nil
+			}()
+			if appendErr != nil {
+				return appendErr
 			}
 		}
 
@@ -391,9 +384,7 @@ func appendPositionDeleteProjectedScalar(builder array.Builder, value scalar.Sca
 				return err
 			}
 			appendErr := appendPositionDeleteProjectedScalar(builder.ValueBuilder(), child)
-			if releasable, ok := child.(scalar.Releasable); ok {
-				releasable.Release()
-			}
+			releasePositionDeleteScalar(child)
 			if appendErr != nil {
 				return fmt.Errorf("list element %d: %w", index, appendErr)
 			}
@@ -725,9 +716,7 @@ func appendPositionDeleteRecord(
 		}
 		continueReading, appendErr := appendRow(
 			file, filePaths.Value(row), positions.Value(row), deletedRow, projected)
-		if releasable, ok := deletedRow.(scalar.Releasable); ok {
-			releasable.Release()
-		}
+		releasePositionDeleteScalar(deletedRow)
 		if appendErr != nil || !continueReading {
 			return continueReading, appendErr
 		}
