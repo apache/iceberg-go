@@ -557,7 +557,7 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 				return record, nil
 			}
 
-			if recordHasRowBoundedStorage(record) && contiguousSliceHasBoundedRetention(start, end, record.NumRows()) {
+			if contiguousSliceHasBoundedRetention(start, end, record.NumRows()) && recordHasRowBoundedStorage(record) {
 				return record.NewSlice(start, end), nil
 			}
 		}
