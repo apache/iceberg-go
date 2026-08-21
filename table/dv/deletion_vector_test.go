@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
@@ -464,6 +465,70 @@ func TestReadDV(t *testing.T) {
 	assert.True(t, bm.Contains(1))
 	assert.True(t, bm.Contains(9))
 	assert.False(t, bm.Contains(2))
+}
+
+func TestReadDVs(t *testing.T) {
+	dvBlobBytes := readDVTestData(t, "small-alternating-values-position-index.bin")
+	dir := t.TempDir()
+	path, metas := writePuffinWithDVBlobs(t, dir,
+		testPuffinBlobInput{
+			data: dvBlobBytes,
+			props: map[string]string{
+				dvReferencedDataFileProperty: "s3://bucket/data/data-001.parquet",
+				dvCardinalityProperty:        "5",
+			},
+		},
+		testPuffinBlobInput{
+			data: dvBlobBytes,
+			props: map[string]string{
+				dvReferencedDataFileProperty: "s3://bucket/data/data-002.parquet",
+				dvCardinalityProperty:        "5",
+			},
+		},
+	)
+
+	files := make([]iceberg.DataFile, len(metas))
+	for i, meta := range metas {
+		offset, size := meta.Offset, meta.Length
+		file := newDVTestFile(path, 5, &offset, &size)
+		file.referencedDataFile = strPtr(fmt.Sprintf("s3://bucket/data/data-%03d.parquet", i+1))
+		files[i] = file
+	}
+
+	bitmaps, err := ReadDVs(iceio.LocalFS{}, files)
+	require.NoError(t, err)
+	require.Len(t, bitmaps, 2)
+	for _, bitmap := range bitmaps {
+		assert.Equal(t, int64(5), bitmap.Cardinality())
+		assert.True(t, bitmap.Contains(1))
+		assert.True(t, bitmap.Contains(9))
+	}
+
+	t.Run("empty batch", func(t *testing.T) {
+		bitmaps, err := ReadDVs(iceio.LocalFS{}, nil)
+		require.NoError(t, err)
+		assert.Nil(t, bitmaps)
+	})
+
+	t.Run("different Puffin files", func(t *testing.T) {
+		first := files[0].(*mockDVFile)
+		second := *files[1].(*mockDVFile)
+		second.path = filepath.Join(t.TempDir(), "other.puffin")
+
+		_, err := ReadDVs(iceio.LocalFS{}, []iceberg.DataFile{first, &second})
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		assert.ErrorContains(t, err, "uses Puffin file")
+	})
+
+	t.Run("invalid blob identity", func(t *testing.T) {
+		first := files[0].(*mockDVFile)
+		second := *files[1].(*mockDVFile)
+		second.referencedDataFile = strPtr("s3://bucket/data/wrong.parquet")
+
+		_, err := ReadDVs(iceio.LocalFS{}, []iceberg.DataFile{first, &second})
+		require.ErrorIs(t, err, ErrInvalidDeletionVector)
+		assert.ErrorContains(t, err, "manifest referenced_data_file")
+	})
 }
 
 // Why: ReadDV should reject callers that pass the wrong file type before doing any I/O.

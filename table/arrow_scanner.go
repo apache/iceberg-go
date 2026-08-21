@@ -191,10 +191,39 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 	if len(uniqueDVs) == 0 {
 		return out, nil
 	}
+	if len(uniqueDVs) == 1 {
+		for ref, dvFile := range uniqueDVs {
+			bitmap, err := dv.ReadDV(fs, dvFile)
+			if err != nil {
+				return nil, fmt.Errorf("read deletion vector %s: %w", dvFile.FilePath(), err)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			out[ref] = bitmap
+		}
+
+		return out, nil
+	}
+
+	type dvGroup struct {
+		referencedDataFiles []string
+		files               []iceberg.DataFile
+	}
+	groups := make(map[string]*dvGroup)
+	for ref, dvFile := range uniqueDVs {
+		group := groups[dvFile.FilePath()]
+		if group == nil {
+			group = &dvGroup{}
+			groups[dvFile.FilePath()] = group
+		}
+		group.referencedDataFiles = append(group.referencedDataFiles, ref)
+		group.files = append(group.files, dvFile)
+	}
 
 	type dvResult struct {
-		referencedDataFile string
-		bitmap             *dv.RoaringPositionBitmap
+		referencedDataFiles []string
+		bitmaps             []*dv.RoaringPositionBitmap
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -207,14 +236,14 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 		// panic on send to a closed channel. The error is collected via
 		// the outer g.Wait() below, not stored on a shared variable.
 		defer close(resultsChan)
-		for ref, dvFile := range uniqueDVs {
+		for puffinPath, group := range groups {
 			g.Go(func() error {
-				bitmap, err := dv.ReadDV(fs, dvFile)
+				bitmaps, err := dv.ReadDVs(fs, group.files)
 				if err != nil {
-					return fmt.Errorf("read deletion vector %s: %w", dvFile.FilePath(), err)
+					return fmt.Errorf("read deletion vectors from %s: %w", puffinPath, err)
 				}
 				select {
-				case resultsChan <- dvResult{referencedDataFile: ref, bitmap: bitmap}:
+				case resultsChan <- dvResult{referencedDataFiles: group.referencedDataFiles, bitmaps: bitmaps}:
 					return nil
 				case <-gctx.Done():
 					return gctx.Err()
@@ -225,7 +254,9 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 	}()
 
 	for r := range resultsChan {
-		out[r.referencedDataFile] = r.bitmap
+		for i, ref := range r.referencedDataFiles {
+			out[ref] = r.bitmaps[i]
+		}
 	}
 
 	if err := g.Wait(); err != nil {
