@@ -286,3 +286,39 @@ func TestBBoxPredicateConvertsToTypedError(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
 }
+
+func TestTransformedTermsAreRejected(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+		value     iceberg.Literal
+	}{
+		{
+			name:      "truncate",
+			transform: iceberg.TruncateTransform{Width: 3},
+			value:     iceberg.StringLiteral("boo"),
+		},
+		{
+			name:      "bucket",
+			transform: iceberg.BucketTransform{NumBuckets: 16},
+			value:     iceberg.Int32Literal(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := iceberg.NewUnboundTransform(tt.transform, iceberg.Reference("category"))
+			pred := iceberg.LiteralPredicate(iceberg.OpEQ, term, tt.value)
+			bound, err := iceberg.BindExpr(sc, pred, true)
+			require.NoError(t, err)
+
+			_, _, err = substrait.ConvertExpr(sc, bound, true)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrNotImplemented)
+			assert.Contains(t, err.Error(), "transformed terms")
+		})
+	}
+}

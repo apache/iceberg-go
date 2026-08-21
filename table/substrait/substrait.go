@@ -242,6 +242,10 @@ func (t *toSubstraitExpr) VisitUnbound(iceberg.UnboundPredicate) expr.Builder {
 }
 
 func (t *toSubstraitExpr) VisitBound(pred iceberg.BoundPredicate) expr.Builder {
+	if _, ok := pred.Term().(*iceberg.BoundTransform); ok {
+		panic(fmt.Errorf("%w: transformed terms cannot be converted to substrait row filters", iceberg.ErrNotImplemented))
+	}
+
 	return iceberg.VisitBoundPredicate(pred, t)
 }
 

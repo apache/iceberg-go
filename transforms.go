@@ -1241,13 +1241,14 @@ func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredica
 }
 
 func removeTransform(partName string, pred BoundPredicate) (UnboundPredicate, error) {
+	ref := Reference(partName)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
-		return p.AsUnbound(Reference(partName)), nil
+		return UnaryPredicate(p.Op(), ref), nil
 	case BoundLiteralPredicate:
-		return p.AsUnbound(Reference(partName), p.Literal()), nil
+		return LiteralPredicate(p.Op(), ref, p.Literal()), nil
 	case BoundSetPredicate:
-		return p.AsUnbound(Reference(partName), boundSetLiteralsForVisit(p).Members()), nil
+		return SetPredicate(p.Op(), ref, boundSetLiteralsForVisit(p).Members()).(UnboundPredicate), nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot replace transform in unknown predicate: %s",

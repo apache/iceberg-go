@@ -596,7 +596,7 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 		}
 		// Unknown transforms are tolerated in partition/sort metadata, but a
 		// filter expression referencing one can't be evaluated.
-		if _, ok := tf.(UnknownTransform); ok {
+		if isUnknownTransform(tf) {
 			return nil, fmt.Errorf("%w: unknown transform in expression term: %s", ErrInvalidArgument, t.Transform)
 		}
 

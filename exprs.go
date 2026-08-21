@@ -587,18 +587,26 @@ func (up *unboundUnaryPredicate) Bind(schema *Schema, caseSensitive bool) (Boole
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectTransformTerm(bound); err != nil {
-		return nil, err
-	}
-
 	// fast case optimizations
 	switch up.op {
 	case OpIsNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if transform, ok := bound.(*BoundTransform); ok {
+			if _, alwaysNull := transform.transform.(VoidTransform); alwaysNull {
+				return AlwaysTrue{}, nil
+			}
+		}
+		if ref, ok := bound.(BoundReference); ok &&
+			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysFalse{}, nil
 		}
 	case OpNotNull:
-		if bound.Ref().Field().Required && !schema.FieldHasOptionalParent(bound.Ref().Field().ID) {
+		if transform, ok := bound.(*BoundTransform); ok {
+			if _, alwaysNull := transform.transform.(VoidTransform); alwaysNull {
+				return AlwaysFalse{}, nil
+			}
+		}
+		if ref, ok := bound.(BoundReference); ok &&
+			ref.Field().Required && !schema.FieldHasOptionalParent(ref.Field().ID) {
 			return AlwaysTrue{}, nil
 		}
 	case OpIsNan:
@@ -621,14 +629,8 @@ type BoundUnaryPredicate interface {
 	AsUnbound(Reference) UnboundPredicate
 }
 
-type bound[T LiteralType] interface {
-	BoundTerm
-
-	eval(StructLike) Optional[T]
-}
-
 func newBoundUnaryPred[T LiteralType](op Operation, term BoundTerm) BoundUnaryPredicate {
-	return &boundUnaryPredicate[T]{op: op, term: term.(bound[T])}
+	return &boundUnaryPredicate[T]{op: op, term: term}
 }
 
 func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate {
@@ -667,11 +669,11 @@ func createBoundUnaryPredicate(op Operation, term BoundTerm) BoundUnaryPredicate
 
 type boundUnaryPredicate[T LiteralType] struct {
 	op   Operation
-	term bound[T]
+	term BoundTerm
 }
 
 func (bp *boundUnaryPredicate[T]) AsUnbound(r Reference) UnboundPredicate {
-	return &unboundUnaryPredicate{op: bp.op, term: r}
+	return &unboundUnaryPredicate{op: bp.op, term: unboundTermForBound(bp.term, r)}
 }
 
 func (bp *boundUnaryPredicate[T]) Equals(other BooleanExpression) bool {
@@ -744,10 +746,6 @@ func (ul *unboundLiteralPredicate) Bind(schema *Schema, caseSensitive bool) (Boo
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectTransformTerm(bound); err != nil {
-		return nil, err
-	}
-
 	if (ul.op == OpStartsWith || ul.op == OpNotStartsWith) &&
 		(!bound.Type().Equals(PrimitiveTypes.String) && !bound.Type().Equals(PrimitiveTypes.Binary)) {
 		return nil, fmt.Errorf("%w: StartsWith and NotStartsWith must bind to String type, not %s",
@@ -790,7 +788,7 @@ type BoundLiteralPredicate interface {
 
 func newBoundLiteralPredicate[T LiteralType](op Operation, term BoundTerm, lit Literal) BoundPredicate {
 	return &boundLiteralPredicate[T]{
-		op: op, term: term.(bound[T]),
+		op: op, term: term,
 		lit: lit.(TypedLiteral[T]),
 	}
 }
@@ -838,7 +836,7 @@ func createBoundLiteralPredicate(op Operation, term BoundTerm, lit Literal) (Bou
 
 type boundLiteralPredicate[T LiteralType] struct {
 	op   Operation
-	term bound[T]
+	term BoundTerm
 	lit  TypedLiteral[T]
 }
 
@@ -862,7 +860,7 @@ func (blp *boundLiteralPredicate[T]) String() string {
 }
 func (blp *boundLiteralPredicate[T]) Literal() Literal { return blp.lit }
 func (blp *boundLiteralPredicate[T]) AsUnbound(r Reference, l Literal) UnboundPredicate {
-	return &unboundLiteralPredicate{op: blp.op, term: r, lit: l}
+	return &unboundLiteralPredicate{op: blp.op, term: unboundTermForBound(blp.term, r), lit: l}
 }
 
 // SetPredicate creates a boolean expression representing a predicate that uses a set
@@ -930,9 +928,6 @@ func (usp *unboundSetPredicate) Term() UnboundTerm { return usp.term }
 func (usp *unboundSetPredicate) Bind(schema *Schema, caseSensitive bool) (BooleanExpression, error) {
 	bound, err := usp.term.Bind(schema, caseSensitive)
 	if err != nil {
-		return nil, err
-	}
-	if err := rejectTransformTerm(bound); err != nil {
 		return nil, err
 	}
 
@@ -1010,12 +1005,12 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 }
 
 func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits Set[Literal]) *boundSetPredicate[T] {
-	return &boundSetPredicate[T]{op: op, term: term.(bound[T]), lits: lits}
+	return &boundSetPredicate[T]{op: op, term: term, lits: lits}
 }
 
 type boundSetPredicate[T LiteralType] struct {
 	op   Operation
-	term bound[T]
+	term BoundTerm
 	lits Set[Literal]
 }
 
@@ -1047,13 +1042,13 @@ func (bsp *boundSetPredicate[T]) AsUnbound(r Reference, lits []Literal) UnboundP
 	if litSet.Len() == 1 {
 		switch bsp.op {
 		case OpIn:
-			return LiteralPredicate(OpEQ, r, lits[0])
+			return LiteralPredicate(OpEQ, unboundTermForBound(bsp.term, r), lits[0])
 		case OpNotIn:
-			return LiteralPredicate(OpNEQ, r, lits[0])
+			return LiteralPredicate(OpNEQ, unboundTermForBound(bsp.term, r), lits[0])
 		}
 	}
 
-	return &unboundSetPredicate{op: bsp.op, term: r, lits: litSet}
+	return &unboundSetPredicate{op: bsp.op, term: unboundTermForBound(bsp.term, r), lits: litSet}
 }
 
 func (bsp *boundSetPredicate[T]) Literals() Set[Literal] {
@@ -1091,6 +1086,14 @@ func (b *BoundTransform) evalIsNull(st StructLike) bool {
 	return !b.evalToLiteral(st).Valid
 }
 
+func unboundTermForBound(term BoundTerm, ref Reference) UnboundTerm {
+	if transform, ok := term.(*BoundTransform); ok {
+		return NewUnboundTransform(transform.transform, ref)
+	}
+
+	return ref
+}
+
 // UnboundTransform is a transform applied to a term, not yet bound to a schema;
 // the unbound counterpart of BoundTransform. It's what a transform term in a
 // REST expression (e.g. bucket[16](id)) parses into.
@@ -1121,7 +1124,17 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 }
 
 func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
-	bound, err := u.term.Bind(schema, caseSensitive)
+	if isUnknownTransform(u.transform) {
+		return nil, fmt.Errorf("%w: unknown transform %s cannot be evaluated", ErrNotImplemented, u.transform)
+	}
+
+	ref, ok := u.term.(Reference)
+	if !ok {
+		return nil, fmt.Errorf("%w: transform terms must wrap a direct reference, got %T",
+			ErrInvalidArgument, u.term)
+	}
+
+	bound, err := ref.Bind(schema, caseSensitive)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,9 +1146,17 @@ func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, 
 	return &BoundTransform{transform: u.transform, term: bound}, nil
 }
 
-// rejectTransformTerm guards the typed bound-predicate machinery, which only
-// accepts bound[T] terms (references). Binding a predicate over a transform term
-// isn't supported yet; without this it would panic in newBound*Predicate.
+func isUnknownTransform(transform Transform) bool {
+	switch transform.(type) {
+	case UnknownTransform, *UnknownTransform:
+		return true
+	default:
+		return false
+	}
+}
+
+// rejectTransformTerm guards predicates that still do not support transform
+// terms, such as bounding-box predicates.
 func rejectTransformTerm(term BoundTerm) error {
 	if _, ok := term.(*BoundTransform); ok {
 		return fmt.Errorf("%w: binding a predicate over a transform term is not supported", ErrNotImplemented)
