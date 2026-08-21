@@ -59,5 +59,6 @@ func (r *FetchScanTasksResponse) UnmarshalJSON(data []byte) error {
 	}
 
 	*r = FetchScanTasksResponse(decoded)
+
 	return nil
 }
