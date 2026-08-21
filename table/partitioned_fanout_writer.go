@@ -598,12 +598,7 @@ func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch,
 	materialized := make([]arrow.Array, 0)
 
 	for i, column := range columns {
-		dictionary, ok := column.(*array.Dictionary)
-		if !ok {
-			continue
-		}
-
-		values, err := compute.TakeArray(ctx, dictionary.Dictionary(), dictionary.Indices())
+		values, changed, err := materializeDictionaryArray(ctx, column)
 		if err != nil {
 			for _, materializedColumn := range materialized {
 				materializedColumn.Release()
@@ -611,6 +606,9 @@ func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch,
 			record.Release()
 
 			return nil, err
+		}
+		if !changed {
+			continue
 		}
 
 		columns[i] = values
@@ -630,6 +628,149 @@ func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch,
 	record.Release()
 
 	return result, nil
+}
+
+// materializeDictionaryArray removes dictionaries recursively from the nested
+// array types used by Iceberg schemas. A dictionary array is decoded by taking
+// its selected logical values, while nested arrays are rebuilt only when one of
+// their children changes.
+func materializeDictionaryArray(ctx context.Context, input arrow.Array) (arrow.Array, bool, error) {
+	if input.DataType().ID() == arrow.DICTIONARY {
+		dictionary := input.(*array.Dictionary)
+		values, err := compute.TakeArray(ctx, dictionary.Dictionary(), dictionary.Indices())
+		if err != nil {
+			return nil, false, err
+		}
+
+		materializedValues, _, err := materializeDictionaryArray(ctx, values)
+		if err != nil {
+			values.Release()
+
+			return nil, false, err
+		}
+		if materializedValues != values {
+			values.Release()
+			values = materializedValues
+		}
+
+		return values, true, nil
+	}
+
+	dataType := input.DataType()
+	switch dataType.ID() {
+	case arrow.STRUCT, arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST, arrow.MAP:
+	default:
+		return input, false, nil
+	}
+
+	data := input.Data()
+	children := make([]arrow.Array, len(data.Children()))
+	changed := false
+	for i, childData := range data.Children() {
+		child := array.MakeFromData(childData)
+		materializedChild, childChanged, err := materializeDictionaryArray(ctx, child)
+		if err != nil {
+			child.Release()
+			for _, materializedChild := range children {
+				if materializedChild != nil {
+					materializedChild.Release()
+				}
+			}
+
+			return nil, false, err
+		}
+
+		if childChanged {
+			child.Release()
+			child = materializedChild
+			changed = true
+		}
+		children[i] = child
+	}
+
+	if !changed {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return input, false, nil
+	}
+
+	newType, err := nestedArrayTypeWithChildren(dataType, children)
+	if err != nil {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return nil, false, err
+	}
+
+	childData := make([]arrow.ArrayData, len(children))
+	for i, child := range children {
+		childData[i] = child.Data()
+	}
+	newData := array.NewData(newType, data.Len(), data.Buffers(), childData, data.NullN(), data.Offset())
+	result := array.MakeFromData(newData)
+	newData.Release()
+	for _, child := range children {
+		child.Release()
+	}
+
+	return result, true, nil
+}
+
+func nestedArrayTypeWithChildren(dataType arrow.DataType, children []arrow.Array) (arrow.DataType, error) {
+	switch dataType := dataType.(type) {
+	case *arrow.StructType:
+		fields := dataType.Fields()
+		if len(fields) != len(children) {
+			return nil, fmt.Errorf("struct has %d fields but %d children", len(fields), len(children))
+		}
+		for i, child := range children {
+			fields[i].Type = child.DataType()
+		}
+
+		return arrow.StructOf(fields...), nil
+	case *arrow.ListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.ListOfField(field), nil
+	case *arrow.LargeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("large list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.LargeListOfField(field), nil
+	case *arrow.FixedSizeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("fixed-size list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.FixedSizeListOfField(dataType.Len(), field), nil
+	case *arrow.MapType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("map has %d children", len(children))
+		}
+		entryType, ok := children[0].DataType().(*arrow.StructType)
+		if !ok || entryType.NumFields() != 2 {
+			return nil, fmt.Errorf("map child has type %s, want a two-field struct", children[0].DataType())
+		}
+
+		result := arrow.MapOfFields(entryType.Field(0), entryType.Field(1))
+		result.KeysSorted = dataType.KeysSorted
+
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unsupported nested array type %s", dataType)
+	}
 }
 
 // recordHasRowBoundedStorage reports whether a partial zero-copy slice retains
