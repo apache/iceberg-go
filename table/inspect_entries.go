@@ -29,44 +29,63 @@ import (
 // entries marked deleted. This exposes commit history that data_files and
 // delete_files intentionally hide.
 func (i InspectTable) Entries(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectEntries(ctx, "entries", false, EntriesSchema)
+}
+
+func (i InspectTable) inspectEntries(
+	ctx context.Context,
+	name string,
+	allSnapshots bool,
+	schemaFn func(*iceberg.StructType) *iceberg.Schema,
+) (array.RecordReader, error) {
 	partitionType, err := inspectPartitionType(i.tbl.metadata)
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	schema := EntriesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: build arrow schema: %w", err)
+		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
 
-	var current *array.RecordBuilder
-	var contentFileBuilder inspectContentFileBuilder
-	var bindErr error
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, false, nil,
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			dataFileBuilder := bldr.Field(4).(*array.StructBuilder)
-			if bldr != current {
-				contentFileBuilder, bindErr = newInspectContentFileStructBuilder(dataFileBuilder, partitionType)
-				current = bldr
-			}
-			if bindErr != nil {
-				return bindErr
-			}
-
-			bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
-			appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
-			appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
-			appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
-
-			dataFileBuilder.Append(true)
-
-			return contentFileBuilder.append(entry.DataFile())
-		})
+	appendEntry := newInspectEntryAppender(partitionType)
+	var rr array.RecordReader
+	if allSnapshots {
+		rr, err = i.allManifestEntryReader(ctx, arrowSchema, false, nil, appendEntry)
+	} else {
+		rr, err = i.manifestEntryReader(ctx, arrowSchema, false, nil, appendEntry)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect entries: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
 
 	return rr, nil
+}
+
+func newInspectEntryAppender(
+	partitionType *iceberg.StructType,
+) func(*array.RecordBuilder, iceberg.ManifestEntry) error {
+	var current *array.RecordBuilder
+	var contentFileBuilder inspectContentFileBuilder
+	var bindErr error
+
+	return func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+		dataFileBuilder := bldr.Field(4).(*array.StructBuilder)
+		if bldr != current {
+			contentFileBuilder, bindErr = newInspectContentFileStructBuilder(dataFileBuilder, partitionType)
+			current = bldr
+		}
+		if bindErr != nil {
+			return bindErr
+		}
+
+		bldr.Field(0).(*array.Int32Builder).Append(int32(entry.Status()))
+		appendEntriesOptionalInt64(bldr.Field(1).(*array.Int64Builder), entry.SnapshotID())
+		appendEntriesOptionalInt64(bldr.Field(2).(*array.Int64Builder), entry.SequenceNum())
+		appendInspectOptionalInt64(bldr.Field(3).(*array.Int64Builder), entry.FileSequenceNum())
+		dataFileBuilder.Append(true)
+
+		return contentFileBuilder.append(entry.DataFile())
+	}
 }
 
 // EntriesSchema returns the schema of the entries metadata table.
