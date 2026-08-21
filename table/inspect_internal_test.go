@@ -3165,6 +3165,9 @@ func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
 }
 
 func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
+	checked := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	t.Cleanup(func() { checked.AssertSize(t, 0) })
+
 	const (
 		deletePath = "mem://position-deletes/table/data/delete-evolved.parquet"
 		dataPath   = "mem://position-deletes/table/data/data.parquet"
@@ -3246,7 +3249,7 @@ func TestInspectPositionDeletesParquetProjectsEvolvedNestedRow(t *testing.T) {
 	tbl := inspectPositionDeletesTableWithSchema(
 		t, 2, newInspectPositionDeletesMetadataWithSchema(t, 2, tableSchema),
 		tableSchema, memFS, []iceberg.DataFile{deleteFile})
-	rr, err := tbl.Inspect().PositionDeletes(context.Background())
+	rr, err := tbl.Inspect(WithInspectAllocator(checked)).PositionDeletes(context.Background())
 	require.NoError(t, err)
 	defer rr.Release()
 	record = collectRecord(t, rr)
