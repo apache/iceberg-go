@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"math/bits"
 	"reflect"
 	"slices"
 	"sync"
@@ -438,7 +439,7 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 		}
 
 		// Get or create partition info for this partition key
-		partVal := partitionMap.getOrCreate(partitionRec, p.fields)
+		partVal := partitionMap.getOrCreate(partitionRec, p.fields, record.NumRows())
 		partVal.rows = append(partVal.rows, row)
 	}
 
@@ -457,18 +458,19 @@ func (p *partitionExtractionPlan) matchesSchema(recordSchema *arrow.Schema) bool
 type partitionMapNode struct {
 	children  map[any]any
 	leafCount int
+	// partitionCount is maintained by the root node for the current batch.
+	partitionCount int
 }
 
 func newPartitionMapNode() *partitionMapNode {
 	return &partitionMapNode{
-		children:  make(map[any]any),
-		leafCount: 0,
+		children: make(map[any]any),
 	}
 }
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
-func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo) *partitionInfo {
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo, numRows int64) *partitionInfo {
 	// Navigate through all but the last partition field
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
@@ -502,14 +504,36 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	}
 
 	partVal = &partitionInfo{
-		rows:            make([]int64, 0, 128), // modest starting capacity
+		rows:            make([]int64, 0, initialPartitionRowCapacity(numRows, n.partitionCount)),
 		partitionValues: partitionValues,
 		partitionRec:    partRecCopy,
 	}
 	node.children[lastKey] = partVal
 	node.leafCount++
+	n.partitionCount++
 
 	return partVal
+}
+
+const maxInitialPartitionRowCapacity = 128
+
+func initialPartitionRowCapacity(numRows int64, partitionCount int) int {
+	if numRows <= 0 || partitionCount < 0 || int64(partitionCount) >= numRows {
+		return 1
+	}
+
+	estimatedRows := numRows / int64(partitionCount+1)
+	if estimatedRows < 1 {
+		return 1
+	}
+	if estimatedRows > maxInitialPartitionRowCapacity {
+		return maxInitialPartitionRowCapacity
+	}
+
+	// Use power-of-two capacities so a late-discovered partition grows through
+	// the old 128-row allocation instead of jumping past it from a capacity
+	// such as 127.
+	return 1 << bits.Len64(uint64(estimatedRows-1))
 }
 
 // collectPartitions returns every partitionInfo in the tree in
