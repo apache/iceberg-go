@@ -533,7 +533,7 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 				return record, nil
 			}
 
-			if contiguousSliceHasBoundedRetention(start, end, record.NumRows()) {
+			if recordHasRowBoundedStorage(record) {
 				return record.NewSlice(start, end), nil
 			}
 		}
@@ -559,13 +559,22 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	}
 }
 
-// contiguousSliceHasBoundedRetention reports whether a partial zero-copy slice
-// retains no more than twice as many input rows as it returns. The range must
-// already have been validated by contiguousRowRange.
-func contiguousSliceHasBoundedRetention(start, end, numRows int64) bool {
-	selectedRows := end - start
+// recordHasRowBoundedStorage reports whether a partial zero-copy slice retains
+// buffers whose size is bounded by the number of rows. Fixed-width arrays have
+// row-bounded value and validity buffers. Dictionary arrays are excluded even
+// though their indices are fixed-width because their dictionary values are not.
+func recordHasRowBoundedStorage(record arrow.RecordBatch) bool {
+	for _, column := range record.Columns() {
+		dataType := column.Data().DataType()
+		if dataType.ID() == arrow.DICTIONARY {
+			return false
+		}
+		if _, ok := dataType.(arrow.FixedWidthDataType); !ok {
+			return false
+		}
+	}
 
-	return selectedRows >= numRows-selectedRows
+	return true
 }
 
 func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {

@@ -113,6 +113,24 @@ func (s *FanoutWriterTestSuite) createLargeTestRecord(arrSchema *arrow.Schema, r
 	return bldr.NewRecordBatch()
 }
 
+func (s *FanoutWriterTestSuite) createSkewedTestRecord(arrSchema *arrow.Schema, rows int, idOffset int64, largePayloadRows, largePayloadSize, smallPayloadSize int) arrow.RecordBatch {
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+
+	largePayload := strings.Repeat("l", largePayloadSize)
+	smallPayload := strings.Repeat("s", smallPayloadSize)
+	for i := range rows {
+		bldr.Field(0).(*array.Int64Builder).Append(idOffset + int64(i))
+		payload := smallPayload
+		if i < largePayloadRows {
+			payload = largePayload
+		}
+		bldr.Field(1).(*array.StringBuilder).Append(payload)
+	}
+
+	return bldr.NewRecordBatch()
+}
+
 func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCancel() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
@@ -699,6 +717,7 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
 	s.Require().NoError(err)
 	defer contiguous.Release()
 	s.NotSame(record, contiguous)
+	s.Same(record.Column(0).Data().Buffers()[1], contiguous.Column(0).Data().Buffers()[1])
 	s.Equal(int64(3), contiguous.NumRows())
 	contiguousValues := contiguous.Column(0).(*array.Int64)
 	s.Equal([]int64{1, 2, 3}, []int64{
@@ -731,16 +750,39 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
 	s.Error(err)
 }
 
-func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory() {
-	const inputRows = 4096
-	const payloadSize = 128
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyCopiesVariableWidthPartialSlices() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+	record := s.createSkewedTestRecord(arrSchema, 4, 0, 2, 1024, 1)
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	partitioned, err := partitionBatch(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	s.NotSame(record.Column(1).Data().Buffers()[2], partitioned.Column(1).Data().Buffers()[2])
+	values := partitioned.Column(1).(*array.String)
+	s.Equal([]string{"s", "s"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemoryForSkewedPayload() {
+	const (
+		inputRows         = 256
+		largePayloadRows  = inputRows / 2
+		largePayloadSize  = 16 * 1024
+		smallPayloadSize  = 1
+		selectedRowsCount = inputRows / 2
+	)
 
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "payload", Type: arrow.BinaryTypes.String},
 	}, nil)
 
-	probe := s.createLargeTestRecord(arrSchema, inputRows, 0, payloadSize)
+	probe := s.createSkewedTestRecord(arrSchema, inputRows, 0, largePayloadRows, largePayloadSize, smallPayloadSize)
 	fullBatchBytes := s.mem.CurrentAlloc()
 	probe.Release()
 
@@ -756,10 +798,15 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory(
 	}()
 
 	partitionBatch := partitionBatchByKey(s.ctx)
+	selectedRows := make([]int64, selectedRowsCount)
+	for i := range selectedRows {
+		selectedRows[i] = int64(largePayloadRows + i)
+	}
+
 	peakBytes := 0
 	for batch := range rollingDataWriterQueueCapacity {
-		record := s.createLargeTestRecord(arrSchema, inputRows, int64(batch*inputRows), payloadSize)
-		partitioned, err := partitionBatch(record, []int64{inputRows / 2})
+		record := s.createSkewedTestRecord(arrSchema, inputRows, int64(batch*inputRows), largePayloadRows, largePayloadSize, smallPayloadSize)
+		partitioned, err := partitionBatch(record, selectedRows)
 		s.Require().NoError(err)
 
 		s.Require().NoError(writer.Add(partitioned))
@@ -772,25 +819,16 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory(
 	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
 }
 
-func (s *FanoutWriterTestSuite) TestContiguousSliceHasBoundedRetention() {
-	tests := []struct {
-		name        string
-		start       int64
-		end         int64
-		numRows     int64
-		wantBounded bool
-	}{
-		{name: "small partial range", start: 1, end: 2, numRows: 5},
-		{name: "just below half", start: 1, end: 3, numRows: 5},
-		{name: "half", start: 1, end: 3, numRows: 4, wantBounded: true},
-		{name: "more than half", start: 1, end: 4, numRows: 5, wantBounded: true},
-	}
+func (s *FanoutWriterTestSuite) TestRecordHasRowBoundedStorage() {
+	intSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	intRecord := s.createCustomTestRecord(intSchema, [][]any{{int64(1)}})
+	defer intRecord.Release()
+	s.True(recordHasRowBoundedStorage(intRecord))
 
-	for _, test := range tests {
-		s.Run(test.name, func() {
-			s.Equal(test.wantBounded, contiguousSliceHasBoundedRetention(test.start, test.end, test.numRows))
-		})
-	}
+	stringSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.BinaryTypes.String}}, nil)
+	stringRecord := s.createCustomTestRecord(stringSchema, [][]any{{"value"}})
+	defer stringRecord.Release()
+	s.False(recordHasRowBoundedStorage(stringRecord))
 }
 
 func (s *FanoutWriterTestSuite) TestContiguousRowRangeRejectsInvalidRanges() {
