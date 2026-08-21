@@ -937,6 +937,38 @@ func (m mockFileInfo) ModTime() time.Time   { return m.modTime }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
 
+func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
+	const orphanDataPath = "s3://bucket/table/data/orphan.parquet"
+
+	for _, gcValue := range []string{"1", "garbage", "false ", "true "} {
+		t.Run(gcValue, func(t *testing.T) {
+			meta, err := NewMetadata(
+				iceberg.NewSchema(0),
+				iceberg.UnpartitionedSpec,
+				UnsortedSortOrder,
+				"s3://bucket/table",
+				iceberg.Properties{GCEnabledKey: gcValue},
+			)
+			require.NoError(t, err)
+
+			fsys := &mockListableIO{entries: []mockWalkEntry{{
+				path: orphanDataPath,
+				info: mockFileInfo{name: "orphan.parquet"},
+			}}}
+			tbl := New(
+				Identifier{"db", "tbl"},
+				meta,
+				"s3://bucket/table/metadata/v1.metadata.json",
+				func(context.Context) (io.IO, error) { return fsys, nil },
+				nil,
+			)
+
+			require.NoError(t, tbl.PurgeFiles(context.Background()))
+			assert.NotContains(t, fsys.removed, orphanDataPath)
+		})
+	}
+}
+
 func TestDeleteOrphanFilesPrefixMismatchModes(t *testing.T) {
 	tests := []struct {
 		name           string
