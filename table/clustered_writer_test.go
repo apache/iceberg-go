@@ -67,6 +67,14 @@ func TestClusteredPartitionTrackingUsesComparableKeys(t *testing.T) {
 		partitionRecord{math.Float64frombits(0x7ff8000000000001)},
 		partitionRecord{math.Float64frombits(0x7ff8000000000002)},
 	))
+	require.True(t, partitionRecordsEqual(
+		partitionRecord{math.Float32frombits(0xffc00001)},
+		partitionRecord{math.Float32frombits(0x7fc00002)},
+	))
+	require.False(t, partitionRecordsEqual(
+		partitionRecord{math.Float32frombits(0x7fc00001)},
+		partitionRecord{math.Float64frombits(0x7ff8000000000001)},
+	))
 	require.False(t, partitionRecordsEqual(partitionRecord{math.Copysign(0, -1)}, partitionRecord{float64(0)}))
 }
 

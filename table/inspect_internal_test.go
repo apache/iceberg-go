@@ -2612,6 +2612,21 @@ func TestInspectPartitionAggregateTreeHandlesBinaryAndNaNValues(t *testing.T) {
 	require.Nil(t, tree.lookup(partitionRecord{[]byte{1, 2, 4}, math.NaN()}))
 }
 
+func TestInspectPartitionAggregateTreeDistinguishesFloatWidthsAndSignedZero(t *testing.T) {
+	tree := newInspectPartitionAggregateTree()
+	float32Aggregate := &inspectPartitionAggregate{specID: 1}
+	float32Record := partitionRecord{math.Float32frombits(0xffc00001)}
+	tree.insert(float32Record, float32Aggregate)
+
+	require.Same(t, float32Aggregate, tree.lookup(partitionRecord{math.Float32frombits(0x7fc00002)}))
+	require.Nil(t, tree.lookup(partitionRecord{math.Float64frombits(0x7ff8000000000001)}))
+
+	negativeZeroAggregate := &inspectPartitionAggregate{specID: 2}
+	tree.insert(partitionRecord{math.Copysign(0, -1)}, negativeZeroAggregate)
+	require.Same(t, negativeZeroAggregate, tree.lookup(partitionRecord{math.Copysign(0, -1)}))
+	require.Nil(t, tree.lookup(partitionRecord{float64(0)}))
+}
+
 func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
