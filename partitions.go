@@ -135,47 +135,55 @@ func (p *PartitionField) UnmarshalJSON(b []byte) error {
 }
 
 func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
-	var aux struct {
-		SourceID  json.RawMessage `json:"source-id"`
-		SourceIDs json.RawMessage `json:"source-ids"`
-		FieldID   int             `json:"field-id"`
-		Name      string          `json:"name"`
-		Transform json.RawMessage `json:"transform"`
-	}
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("%w: failed to unmarshal partition field", err)
 	}
 
-	hasSourceID := aux.SourceID != nil
-	hasSourceIDs := aux.SourceIDs != nil
+	_, hasSourceID := raw["source-id"]
+	_, hasSourceIDs := raw["source-ids"]
 	if hasSourceID && hasSourceIDs {
 		return fmt.Errorf("%w: partition field cannot contain both source-id and source-ids", ErrInvalidPartitionSpec)
 	}
 
-	if aux.Transform == nil || string(aux.Transform) == "null" {
+	transformJSON, hasTransform := raw["transform"]
+	if !hasTransform || string(transformJSON) == "null" {
 		return fmt.Errorf("%w: partition field requires a transform", ErrInvalidTransform)
 	}
 
 	var sourceID int
 	if hasSourceID {
-		if err := json.Unmarshal(aux.SourceID, &sourceID); err != nil {
+		if err := unmarshalJSONField(raw["source-id"], "source-id", &sourceID); err != nil {
 			return err
 		}
 	}
 	var sourceIDs []int
 	if hasSourceIDs {
-		if err := json.Unmarshal(aux.SourceIDs, &sourceIDs); err != nil {
+		if err := unmarshalJSONField(raw["source-ids"], "source-ids", &sourceIDs); err != nil {
 			return err
 		}
 	}
 	var transformString string
-	if err := json.Unmarshal(aux.Transform, &transformString); err != nil {
+	if err := unmarshalJSONField(transformJSON, "transform", &transformString); err != nil {
 		return err
 	}
 
+	var fieldID int
+	if fieldIDJSON, ok := raw["field-id"]; ok {
+		if err := unmarshalJSONField(fieldIDJSON, "field-id", &fieldID); err != nil {
+			return err
+		}
+	}
+	var name string
+	if nameJSON, ok := raw["name"]; ok {
+		if err := unmarshalJSONField(nameJSON, "name", &name); err != nil {
+			return err
+		}
+	}
+
 	next := PartitionField{
-		FieldID: aux.FieldID,
-		Name:    aux.Name,
+		FieldID: fieldID,
+		Name:    name,
 	}
 
 	var err error
@@ -191,7 +199,7 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 	}
 	switch {
 	case hasSourceIDs:
-		next.SourceIDs = aux.SourceIDs
+		next.SourceIDs = sourceIDs
 	case hasSourceID:
 		next.SourceIDs = []int{sourceID}
 	default:
@@ -215,6 +223,19 @@ func (p *PartitionField) unmarshal(b []byte, binding specBinding) error {
 
 	*p = next
 
+	return nil
+}
+
+func unmarshalJSONField(data json.RawMessage, field string, value any) error {
+	if err := json.Unmarshal(data, value); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			typeErr.Struct = ""
+			typeErr.Field = field
+		}
+
+		return err
+	}
 	return nil
 }
 
