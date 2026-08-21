@@ -2014,3 +2014,99 @@ func TestAddDataFilesV2SucceedsWithoutFirstRowID(t *testing.T) {
 	err := txn.AddDataFiles(context.Background(), []iceberg.DataFile{df}, nil)
 	require.NoError(t, err)
 }
+
+func unregisteredSpec() iceberg.PartitionSpec {
+	return iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+}
+
+func TestSnapshotProducerSpecFailsClosed(t *testing.T) {
+	registered := partitionedSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, registered)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	got, err := sp.spec(registered.ID())
+	require.NoError(t, err)
+	assert.True(t, got.Equals(registered), "registered id must resolve to the table's spec")
+
+	_, err = sp.spec(99)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+}
+
+func TestWriteAddedDeleteManifestRejectsUnregisteredSpec(t *testing.T) {
+	spec := partitionedSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+
+	posDel := newTestPosDeleteFileForSpec(t, unregisteredSpec(),
+		"mem://default/table-location/data/pos-del.parquet", map[int]any{1000: int32(7)},
+		"mem://default/table-location/data/data.parquet")
+
+	_, err := sp.writeAddedDeleteManifest(99, []deleteFileAddition{{file: posDel}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+}
+
+func TestCreateManifestRejectsUnregisteredSpec(t *testing.T) {
+	registered := partitionedSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, registered)
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	mgr := manifestMergeManager{snap: sp}
+
+	orphan := writeTestManifestFile(t, wfs, unregisteredSpec(), simpleSchema(), sp.snapshotID, 1)
+	require.Equal(t, int32(99), orphan.PartitionSpecID())
+
+	_, err := mgr.createManifest(99, []iceberg.ManifestFile{orphan})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+
+	merged, err := mgr.createManifest(registered.ID(),
+		[]iceberg.ManifestFile{writeTestManifestFile(t, wfs, registered, simpleSchema(), sp.snapshotID, 2)})
+	require.NoError(t, err, "a registered spec id must still merge")
+	assert.Equal(t, int32(registered.ID()), merged.PartitionSpecID())
+}
+
+func TestParentDependentManifestsRejectsUnregisteredSpec(t *testing.T) {
+	txn, wfs := createTestTransactionWithMemIO(t, partitionedSpec())
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	staleDV := newTestDeletionVectorForRef(t, unregisteredSpec(),
+		"mem://default/table-location/data/dv-old.puffin",
+		"mem://default/table-location/data/d.parquet")
+	sp.removeDeletionVector(staleDV)
+
+	parent := writeParentSnapshotWithDeletesManifest(t, wfs, unregisteredSpec(), 95, "unregistered", staleDV)
+
+	tombstones, err := sp.deletedEntries(context.Background(), parent)
+	require.NoError(t, err)
+	require.Len(t, tombstones, 1, "the removed DV must be tombstoned under the parent manifest's spec")
+	require.Equal(t, int32(99), tombstones[0].DataFile().SpecID())
+
+	_, err = sp.parentDependentManifests(context.Background(), parent)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+}
+
+func TestAccumulateSummaryDeltaRejectsUnregisteredSpec(t *testing.T) {
+	registered := partitionedSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, registered)
+
+	sp := newFastAppendFilesProducer(OpAppend, txn, wfs, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, registered,
+		"mem://default/table-location/data/ok.parquet", map[int]any{1000: int32(7)}))
+	_, err := sp.accumulateSummaryDelta(nil)
+	require.NoError(t, err, "a registered spec must still be summarized")
+
+	sp.appendDataFile(newTestDataFile(t, unregisteredSpec(),
+		"mem://default/table-location/data/orphan.parquet", map[int]any{1000: int32(7)}))
+	_, err = sp.accumulateSummaryDelta(nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+}
