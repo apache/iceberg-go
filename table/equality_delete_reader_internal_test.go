@@ -381,7 +381,7 @@ func readEqualityDeleteFileMaterialized(
 			}
 		}
 
-		for row := 0; row < int(rec.NumRows()); row++ {
+		for row := range int(rec.NumRows()) {
 			keyBuf.Reset()
 			for _, enc := range encoders {
 				enc(&keyBuf, row)
