@@ -686,8 +686,18 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Cont
 	if err != nil {
 		return nil, err
 	}
+
+	return scan.fetchPartitionSpecFilteredManifestsWithSchemaUsingIO(snap, afs, schema, acc)
+}
+
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchemaUsingIO(
+	snap *Snapshot,
+	fs io.IO,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(afs)
+	manifestList, err := snap.Manifests(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -789,6 +799,9 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
+			// FileIO factories may renew credentials between manifest reads. Keep
+			// this load at the worker boundary instead of retaining the IO used for
+			// the manifest list across the whole plan.
 			fs, err := scan.ioF(ctx)
 			if err != nil {
 				return err
@@ -900,8 +913,17 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		}
 	}()
 
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchemaUsingIO(snap, fs, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
