@@ -497,7 +497,7 @@ func TestApplyJitterBelowCapNeverShorterThanInput(t *testing.T) {
 		100 * time.Millisecond,
 		time.Second,
 	} {
-		for i := 0; i < 500; i++ {
+		for range 500 {
 			got := applyJitter(d, minWait, maxWait)
 			assert.GreaterOrEqual(t, got, d,
 				"jitter must never wait less than the configured interval")
@@ -519,7 +519,7 @@ func TestApplyJitterAtCapStaysWithinBoundsAndVaries(t *testing.T) {
 	// would pass a regression that let the spread dip below that interval.
 	lastUncapped := 759375 * time.Microsecond
 	seen := make(map[time.Duration]struct{})
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		got := applyJitter(maxWait, minWait, maxWait)
 		assert.GreaterOrEqual(t, got, lastUncapped,
 			"the spread at the cap must be at least the last uncapped interval")
@@ -538,7 +538,7 @@ func TestApplyJitterAtCapNeverPollsSoonerThanMinWait(t *testing.T) {
 	minWait := 40 * time.Second
 	maxWait := time.Minute
 
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), minWait,
 			"a caller who configures a minimum wait must never poll sooner than it")
 	}
@@ -566,10 +566,10 @@ func TestApplyJitterMinimumIsMonotonicAcrossTheCap(t *testing.T) {
 	// Sampling both sides instead would compare two noisy minima that sit a hair
 	// above the same true floor, and which of them lands lower is chance.
 	var floor time.Duration
-	for attempt := 0; attempt < 10; attempt++ {
+	for attempt := range 10 {
 		d := calculateBackoff(attempt, minWait, maxWait)
 
-		for i := 0; i < 2000; i++ {
+		for range 2000 {
 			assert.GreaterOrEqual(t, applyJitter(d, minWait, maxWait), floor,
 				"attempt %d may not be allowed to wait less than an earlier attempt", attempt)
 		}
@@ -592,7 +592,7 @@ func TestApplyJitterAtCapFloorsAtTheLastUncappedInterval(t *testing.T) {
 	assert.Equal(t, maxWait, calculateBackoff(6, minWait, maxWait),
 		"the first interval at the cap")
 
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		assert.GreaterOrEqual(t, applyJitter(maxWait, minWait, maxWait), lastUncapped,
 			"the spread at the cap must not reach below the last uncapped interval")
 	}
@@ -616,7 +616,7 @@ func TestApplyJitterAtCapFloorsCorrectlyVersusFlatScaleFloor(t *testing.T) {
 	require.Less(t, flatScaleFloor, lastUncapped,
 		"precondition: the flat floor must sit below the last uncapped interval")
 
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		got := applyJitter(maxWait, minWait, maxWait)
 		assert.GreaterOrEqual(t, got, lastUncapped,
 			"a flat d/1.5 floor would allow ~666ms here, below what the previous attempt guaranteed")
@@ -637,7 +637,7 @@ func TestApplyJitterHonoursMinWaitAboveMaxWait(t *testing.T) {
 	d := calculateBackoff(0, minWait, maxWait)
 	require.Equal(t, maxWait, d, "calculateBackoff resolves this configuration to the cap")
 
-	for i := 0; i < 2000; i++ {
+	for range 2000 {
 		got := applyJitter(d, minWait, maxWait)
 		assert.Equal(t, maxWait, got,
 			"with minWait past the cap the wait cannot be spread at all without breaking it")
@@ -687,7 +687,7 @@ func TestApplyJitterRespectsMaxWait(t *testing.T) {
 	minWait := 100 * time.Millisecond
 	maxWait := 1 * time.Second
 
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		// d above the cap should not be inflated further.
 		assert.Equal(t, 2*time.Second, applyJitter(2*time.Second, minWait, maxWait))
 	}
@@ -695,7 +695,7 @@ func TestApplyJitterRespectsMaxWait(t *testing.T) {
 
 func TestApplyJitterVaries(t *testing.T) {
 	seen := make(map[time.Duration]struct{})
-	for i := 0; i < 500; i++ {
+	for range 500 {
 		seen[applyJitter(time.Second, time.Millisecond, time.Minute)] = struct{}{}
 	}
 

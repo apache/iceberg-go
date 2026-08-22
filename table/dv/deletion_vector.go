@@ -173,39 +173,115 @@ func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 // than rejected — the Go writer always emits the property, but third-party
 // writers may not, and the per-byte CRC check in DeserializeDV still applies.
 func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error) {
-	if dvFile.FileFormat() != iceberg.PuffinFile {
-		return nil, fmt.Errorf("expected PUFFIN format for deletion vector, got %s", dvFile.FileFormat())
+	if err := validateDVFile(dvFile); err != nil {
+		return nil, err
 	}
 
-	_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
-	if contentOffset == nil || contentSize == nil {
-		return nil, fmt.Errorf("DV file %s missing ContentOffset/ContentSizeInBytes", dvFile.FilePath())
-	}
-	if manifestReferencedDataFile == nil || *manifestReferencedDataFile == "" {
-		return nil, fmt.Errorf("%w: DV file %s missing or empty %s property", ErrInvalidDeletionVector, dvFile.FilePath(), dvReferencedDataFileProperty)
-	}
-
-	size := *contentSize
-	if size < 0 || size > int64(puffin.DefaultMaxBlobSize) {
-		return nil, fmt.Errorf("DV blob size %d out of valid range [0, %d]", size, puffin.DefaultMaxBlobSize)
-	}
-
-	f, err := fs.Open(dvFile.FilePath())
+	reader, f, err := openDVReader(fs, dvFile.FilePath())
 	if err != nil {
-		return nil, fmt.Errorf("open DV file %s: %w", dvFile.FilePath(), err)
+		return nil, err
 	}
 	defer f.Close()
 
-	reader, err := puffin.NewReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("create puffin reader for %s: %w", dvFile.FilePath(), err)
-	}
-
-	offset := *contentOffset
+	_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
+	offset, size := *contentOffset, *contentSize
 	blob, err := findBlobMetadataByRange(reader.Blobs(), offset, size)
 	if err != nil {
 		return nil, fmt.Errorf("%w: DV file %s: %w", ErrInvalidDeletionVector, dvFile.FilePath(), err)
 	}
+
+	return readDV(reader, blob, dvFile, offset, manifestReferencedDataFile)
+}
+
+// ReadDVs reads multiple deletion vectors stored in the same Puffin file.
+// The returned bitmaps have the same order as dvFiles. The Puffin file is
+// opened and its footer is decoded once for the complete batch.
+func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap, error) {
+	if len(dvFiles) == 0 {
+		return nil, nil
+	}
+	if len(dvFiles) == 1 {
+		bitmap, err := ReadDV(fs, dvFiles[0])
+		if err != nil {
+			return nil, err
+		}
+
+		return []*RoaringPositionBitmap{bitmap}, nil
+	}
+
+	filePath := dvFiles[0].FilePath()
+	for i, dvFile := range dvFiles {
+		if dvFile.FilePath() != filePath {
+			return nil, fmt.Errorf("%w: deletion vector at index %d uses Puffin file %q, expected %q",
+				iceberg.ErrInvalidArgument, i, dvFile.FilePath(), filePath)
+		}
+		if err := validateDVFile(dvFile); err != nil {
+			return nil, err
+		}
+	}
+
+	reader, f, err := openDVReader(fs, filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	blobsByOffset := indexBlobMetadataByOffset(reader.Blobs())
+	bitmaps := make([]*RoaringPositionBitmap, len(dvFiles))
+	for i, dvFile := range dvFiles {
+		_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
+		offset, size := *contentOffset, *contentSize
+		blob, err := findIndexedBlobMetadataByRange(blobsByOffset, offset, size)
+		if err != nil {
+			return nil, fmt.Errorf("%w: DV file %s: %w", ErrInvalidDeletionVector, dvFile.FilePath(), err)
+		}
+		bitmaps[i], err = readDV(reader, blob, dvFile, offset, manifestReferencedDataFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return bitmaps, nil
+}
+
+func validateDVFile(dvFile iceberg.DataFile) error {
+	if dvFile.FileFormat() != iceberg.PuffinFile {
+		return fmt.Errorf("expected PUFFIN format for deletion vector, got %s", dvFile.FileFormat())
+	}
+
+	_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
+	if contentOffset == nil || contentSize == nil {
+		return fmt.Errorf("DV file %s missing ContentOffset/ContentSizeInBytes", dvFile.FilePath())
+	}
+	if manifestReferencedDataFile == nil || *manifestReferencedDataFile == "" {
+		return fmt.Errorf("%w: DV file %s missing or empty %s property", ErrInvalidDeletionVector, dvFile.FilePath(), dvReferencedDataFileProperty)
+	}
+
+	size := *contentSize
+	if size < 0 || size > int64(puffin.DefaultMaxBlobSize) {
+		return fmt.Errorf("DV blob size %d out of valid range [0, %d]", size, puffin.DefaultMaxBlobSize)
+	}
+
+	return nil
+}
+
+func openDVReader(fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, error) {
+	f, err := fs.Open(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open DV file %s: %w", filePath, err)
+	}
+
+	reader, err := puffin.NewReader(f)
+	if err != nil {
+		_ = f.Close()
+
+		return nil, nil, fmt.Errorf("create puffin reader for %s: %w", filePath, err)
+	}
+
+	return reader, f, nil
+}
+
+func readDV(reader *puffin.Reader, blob puffin.BlobMetadata, dvFile iceberg.DataFile, offset int64, manifestReferencedDataFile *string) (*RoaringPositionBitmap, error) {
 	if blob.Type != puffin.BlobTypeDeletionVector {
 		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d has type %q, expected %q", ErrInvalidDeletionVector,
 			dvFile.FilePath(), offset, blob.Type, puffin.BlobTypeDeletionVector)
@@ -255,7 +331,7 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 			"dv_file", dvFile.FilePath(), "offset", offset)
 	}
 
-	blobData := make([]byte, size)
+	blobData := make([]byte, blob.Length)
 	if _, err := reader.ReadAt(blobData, offset); err != nil {
 		return nil, fmt.Errorf("read DV blob at offset %d: %w", offset, err)
 	}
@@ -266,26 +342,51 @@ func ReadDV(fs iceio.IO, dvFile iceberg.DataFile) (*RoaringPositionBitmap, error
 	return DeserializeDV(blobData, manifestCardinality)
 }
 
+func indexBlobMetadataByOffset(blobs []puffin.BlobMetadata) map[int64]puffin.BlobMetadata {
+	indexed := make(map[int64]puffin.BlobMetadata, len(blobs))
+	for _, blob := range blobs {
+		if _, exists := indexed[blob.Offset]; !exists {
+			indexed[blob.Offset] = blob
+		}
+	}
+
+	return indexed
+}
+
 // findBlobMetadataByRange returns the footer entry identified by the
 // manifest's content offset and size. On error it returns a zero-value
 // puffin.BlobMetadata; callers must check the error before reading the value.
 func findBlobMetadataByRange(blobs []puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
-	for _, b := range blobs {
-		if b.Offset != offset {
+	for _, blob := range blobs {
+		if blob.Offset != offset {
 			continue
 		}
-		if b.Length != size {
-			// Same starting offset, different length: the manifest entry
-			// disagrees with the puffin footer on how big this blob is.
-			// Surface that distinct condition rather than rolling it into
-			// "no blob at offset" — different writer bug, different fix.
-			return puffin.BlobMetadata{}, fmt.Errorf("blob at offset %d has length %d, manifest says %d", offset, b.Length, size)
-		}
 
-		return b, nil
+		return validateBlobMetadataSize(blob, offset, size)
 	}
 
 	return puffin.BlobMetadata{}, fmt.Errorf("no blob in puffin footer at offset %d, size %d", offset, size)
+}
+
+func findIndexedBlobMetadataByRange(blobsByOffset map[int64]puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
+	blob, ok := blobsByOffset[offset]
+	if !ok {
+		return puffin.BlobMetadata{}, fmt.Errorf("no blob in puffin footer at offset %d, size %d", offset, size)
+	}
+
+	return validateBlobMetadataSize(blob, offset, size)
+}
+
+func validateBlobMetadataSize(blob puffin.BlobMetadata, offset, size int64) (puffin.BlobMetadata, error) {
+	if blob.Length != size {
+		// Same starting offset, different length: the manifest entry
+		// disagrees with the puffin footer on how big this blob is.
+		// Surface that distinct condition rather than rolling it into
+		// "no blob at offset" — different writer bug, different fix.
+		return puffin.BlobMetadata{}, fmt.Errorf("blob at offset %d has length %d, manifest says %d", offset, blob.Length, size)
+	}
+
+	return blob, nil
 }
 
 // blobCardinality returns the cardinality declared by a Puffin blob. The bool

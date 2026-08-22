@@ -1414,7 +1414,7 @@ func TestPruneColumnsStructInMapFull(t *testing.T) {
 func TestPruneColumnsSelectOriginalSchema(t *testing.T) {
 	id := tableSchemaNested.HighestFieldID()
 	selected := make(map[int]iceberg.Void)
-	for i := 0; i < id; i++ {
+	for i := range id {
 		selected[i] = iceberg.Void{}
 	}
 

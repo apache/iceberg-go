@@ -228,19 +228,29 @@ func getDefaultWarehouseLocation(namespaceKey, tablename string, nsprops, catpro
 // -                -> separator
 // ([\w-]{36})      -> UUID (36 characters, including hyphens)
 // (?:\.\w+)?       -> optional codec name
-// \.metadata\.json -> file extension
-var tableMetadataFileNameRegex = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json`)
+// \.metadata\.json -> file extension at the end of the filename
+var (
+	tableMetadataFileNameRegex       = regexp.MustCompile(`^(\d+)-([\w-]{36})(?:\.\w+)?\.metadata\.json$`)
+	legacyTableMetadataFileNameRegex = regexp.MustCompile(`^v(\d+)(?:\.gz)?\.metadata\.json$`)
+)
 
 func ParseMetadataVersion(location string) int {
-	fileName := path.Base(location)
-	matches := tableMetadataFileNameRegex.FindStringSubmatch(fileName)
-
-	if len(matches) != 3 {
+	if strings.HasSuffix(location, "/") {
 		return -1
 	}
 
-	if _, err := uuid.Parse(matches[2]); err != nil {
-		return -1
+	fileName := path.Base(location)
+	matches := tableMetadataFileNameRegex.FindStringSubmatch(fileName)
+
+	if len(matches) == 3 {
+		if _, err := uuid.Parse(matches[2]); err != nil {
+			return -1
+		}
+	} else {
+		matches = legacyTableMetadataFileNameRegex.FindStringSubmatch(fileName)
+		if len(matches) != 2 {
+			return -1
+		}
 	}
 
 	v, err := strconv.Atoi(matches[1])
@@ -269,6 +279,14 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 			return nil, err
 		}
 	}
+	newVersion := 0
+	if current != nil {
+		metadataVersion := ParseMetadataVersion(metadataLoc)
+		if metadataVersion < 0 {
+			return nil, fmt.Errorf("invalid metadata location: %s", metadataLoc)
+		}
+		newVersion = metadataVersion + 1
+	}
 	for _, r := range reqs {
 		if err := r.Validate(currentMetadata); err != nil {
 			return nil, err
@@ -285,7 +303,6 @@ func UpdateAndStageTable(ctx context.Context, catprops iceberg.Properties, curre
 		return nil, err
 	}
 
-	newVersion := ParseMetadataVersion(metadataLoc) + 1
 	newLocation, err := provider.NewTableMetadataFileLocation(newVersion)
 	if err != nil {
 		return nil, err

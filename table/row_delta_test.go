@@ -621,7 +621,7 @@ func TestRowDeltaIntegrationPosDeleteRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		idCol := rec.Column(0).(*array.Int64)
 		dataCol := rec.Column(1).(*array.String)
-		for i := 0; i < idCol.Len(); i++ {
+		for i := range idCol.Len() {
 			ids = append(ids, idCol.Value(i))
 			data = append(data, dataCol.Value(i))
 		}

@@ -35,6 +35,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
@@ -53,6 +54,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twpayne/go-geom/encoding/wkb"
+	"github.com/twpayne/go-geom/encoding/wkt"
 )
 
 type abortTestFile struct {
@@ -435,6 +438,63 @@ func getCollector() map[int]internal.StatisticsCollector {
 			IcebergTyp: iceberg.DecimalTypeOf(24, 2),
 		},
 	}
+}
+
+// TestMetricsSkipColumnOutsidePlan: only a reserved row-lineage
+// metadata column (e.g. a writer-materialized _row_id, which is never
+// part of the table schema) may appear in a file without a
+// metrics-plan entry; it must be skipped entirely, not aggregated
+// through a zero-value collector (whose nil Iceberg type panics inside
+// the stats aggregator). Any other field id missing from the plan is a
+// plan/file mismatch and must fail loudly.
+func TestMetricsSkipColumnOutsidePlan(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	t.Run("reserved lineage column is skipped", func(t *testing.T) {
+		meta, tblMeta := constructTestTablePrimitiveTypes(t)
+		mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+		require.NoError(t, err)
+
+		// Simulate a writer-materialized lineage column: the file column
+		// "binaries" resolves to the reserved _row_id field id, which has
+		// no entry in the metrics plan.
+		mapping["binaries"] = iceberg.RowIDFieldID
+		collector := getCollector()
+		delete(collector, 12)
+
+		stats := format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+		df := stats.ToDataFile(internal.DataFileOpts{
+			Schema:   tblMeta.CurrentSchema(),
+			Spec:     tblMeta.PartitionSpec(),
+			Path:     "fake-path.parquet",
+			Format:   iceberg.ParquetFile,
+			Content:  iceberg.EntryContentData,
+			FileSize: meta.GetSourceFileSize(),
+		})
+
+		for _, id := range []int{12, iceberg.RowIDFieldID} {
+			assert.NotContains(t, df.ValueCounts(), id)
+			assert.NotContains(t, df.NullValueCounts(), id)
+			assert.NotContains(t, df.ColumnSizes(), id)
+			assert.NotContains(t, df.LowerBoundValues(), id)
+			assert.NotContains(t, df.UpperBoundValues(), id)
+		}
+		assert.Len(t, df.ValueCounts(), 14)
+		assert.Len(t, df.LowerBoundValues(), 14)
+	})
+
+	t.Run("non-reserved column missing from plan fails", func(t *testing.T) {
+		meta, tblMeta := constructTestTablePrimitiveTypes(t)
+		mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+		require.NoError(t, err)
+
+		collector := getCollector()
+		delete(collector, 12) // "binaries" is a schema column: mismatch
+
+		assert.PanicsWithError(t, `field id 12 (column "binaries") not found in the metrics plan`, func() {
+			format.DataFileStatsFromMeta(internal.Metadata(meta), collector, mapping, nil, nil)
+		})
+	})
 }
 
 func TestMetricsPrimitiveTypes(t *testing.T) {
@@ -1056,6 +1116,91 @@ func TestParquetGeoArrowExtensionMetadataRoundTrip(t *testing.T) {
 	assertWKBValues(t, batch.Column(4), defaultGeogWKB, nil)
 }
 
+func TestWriteDataFileNormalizesEWKBOnDisk(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	geomType, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "geom", Type: geomType, Required: false},
+	)
+	arrowSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	isoWKB := pointWKB(t, 1, 2)
+	builder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	builder.Append(ewkbWithSRID(isoWKB, 4326))
+	builder.AppendNull()
+	storage := builder.NewArray()
+	builder.Release()
+	ext := array.NewExtensionArrayWithStorage(
+		arrowSchema.Field(0).Type.(arrow.ExtensionType), storage,
+	).(array.ExtensionArray)
+	storage.Release()
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{ext}, 2)
+	ext.Release()
+	defer record.Release()
+
+	fs := iceio.NewMemFS()
+	fm := internal.GetFileFormat(iceberg.ParquetFile)
+	_, err = fm.WriteDataFile(ctx, fs, nil, internal.WriteFileInfo{
+		FileSchema: iceSchema,
+		Spec:       *iceberg.UnpartitionedSpec,
+		FileName:   "geo.parquet",
+		StatsCols: map[int]internal.StatisticsCollector{
+			1: {FieldID: 1, IcebergTyp: geomType, ColName: "geom", Mode: internal.MetricsMode{Typ: internal.MetricModeFull}},
+		},
+		WriteProps: fm.GetWriteProperties(iceberg.Properties{}),
+		Content:    iceberg.EntryContentData,
+	}, []arrow.RecordBatch{record})
+	require.NoError(t, err)
+
+	output, err := fs.Open("geo.parquet")
+	require.NoError(t, err)
+	data, err := io.ReadAll(output)
+	closeErr := output.Close()
+	require.NoError(t, err)
+	require.NoError(t, closeErr)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	arrowReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, mem)
+	require.NoError(t, err)
+	reader := internal.WrapParquetFileReader(arrowReader)
+	records, err := reader.GetRecords(ctx, nil, nil)
+	require.NoError(t, err)
+	defer records.Release()
+	require.True(t, records.Next())
+
+	batch := records.RecordBatch()
+	defer batch.Release()
+	assertWKBValues(t, batch.Column(0), geoarrow.WKBBytes(isoWKB), nil)
+}
+
+func pointWKB(t *testing.T, x, y float64) []byte {
+	t.Helper()
+	geom, err := wkt.Unmarshal(fmt.Sprintf("POINT (%g %g)", x, y))
+	require.NoError(t, err)
+	wkbBytes, err := wkb.Marshal(geom, wkb.NDR)
+	require.NoError(t, err)
+
+	return wkbBytes
+}
+
+func ewkbWithSRID(isoWKB []byte, srid uint32) []byte {
+	result := make([]byte, len(isoWKB)+4)
+	copy(result[:5], isoWKB[:5])
+	binary.LittleEndian.PutUint32(result[1:5], binary.LittleEndian.Uint32(isoWKB[1:5])|0x20000000)
+	binary.LittleEndian.PutUint32(result[5:9], srid)
+	copy(result[9:], isoWKB[5:])
+
+	return result
+}
+
 func TestWriteDataFileErrOnClose(t *testing.T) {
 	ctx := context.Background()
 	fm := internal.GetFileFormat(iceberg.ParquetFile)
@@ -1090,11 +1235,22 @@ func TestWriteDataFileErrOnClose(t *testing.T) {
 	icesc, err := table.ArrowSchemaToIceberg(schema, false, nil)
 	require.NoError(t, err)
 
+	// The stats plan must cover every non-lineage file column: the list
+	// element (field id 2) is the only parquet leaf column here.
+	statsCols := map[int]internal.StatisticsCollector{
+		2: {
+			FieldID:    2,
+			Mode:       internal.MetricsMode{Typ: internal.MetricModeFull},
+			ColName:    "nested.element",
+			IcebergTyp: iceberg.PrimitiveTypes.Int32,
+		},
+	}
+
 	_, err = fm.WriteDataFile(ctx, &mockfs, nil, internal.WriteFileInfo{
 		FileSchema: icesc,
 		Spec:       iceberg.PartitionSpec{},
 		FileName:   "f",
-		StatsCols:  nil,
+		StatsCols:  statsCols,
 		WriteProps: []parquet.WriterProperty{},
 	}, []arrow.RecordBatch{rec})
 	require.ErrorContains(t, err, "error on close")
@@ -2065,7 +2221,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	defer bldr.Release()
 
 	const nRows = 5
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
 		v, err := b.Build()
@@ -2130,7 +2286,7 @@ func TestShreddedVariantReadRoundTrip(t *testing.T) {
 	chunk := tbl.Column(0).Data().Chunk(0)
 	varArr, ok := chunk.(*extensions.VariantArray)
 	require.True(t, ok, "expected VariantArray, got %T", chunk)
-	for i := 0; i < varArr.Len(); i++ {
+	for i := range varArr.Len() {
 		val, err := varArr.Value(i)
 		require.NoError(t, err, "row %d", i)
 		obj, ok := val.Value().(variant.ObjectValue)

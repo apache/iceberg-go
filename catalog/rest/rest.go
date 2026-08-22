@@ -33,6 +33,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -222,6 +223,12 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
+// createTableRequest is the create-table wire format. This client only encodes
+// it, from a spec and order already bound to the schema being sent. Source IDs
+// a server decodes refer to the schema in the same request, under whatever
+// numbering the client chose, so they need not be positive: decode into
+// iceberg.UnboundPartitionSpec and table.UnboundSortOrder, then bind through
+// table.NewMetadata (see #1664).
 type createTableRequest struct {
 	Name          string                 `json:"name"`
 	Schema        *iceberg.Schema        `json:"schema"`
@@ -597,9 +604,13 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 		if decErr != nil && decErr != io.EOF {
 			// Preserve the HTTP metadata even when the server returned a non-JSON
 			// error page. Callers such as WaitForPlan still need the status to apply
-			// transport-level retry policy; the wrapping sentinel retains the prior
-			// ErrRESTError classification for malformed error payloads.
+			// transport-level retry policy. A status the caller mapped keeps that
+			// classification (e.g. an ambiguous commit 5xx stays ErrCommitStateUnknown)
+			// even when a proxy garbled the body; unmapped statuses keep ErrRESTError.
 			e.wrapping = ErrRESTError
+			if statusErr, ok := override[rsp.StatusCode]; ok {
+				e.wrapping = statusErr
+			}
 
 			return fmt.Errorf("%w: failed to decode error response: %s", e, decErr.Error())
 		}
@@ -1032,8 +1043,8 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
 	}
 	cleanup := func() {
-		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
-			cleanupFuncs[i]()
+		for _, cleanupFunc := range slices.Backward(cleanupFuncs) {
+			cleanupFunc()
 		}
 	}
 

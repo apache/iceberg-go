@@ -19,11 +19,13 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,6 +44,508 @@ func TestTransactionApplyKeepsDistinctRequirementsOfSameType(t *testing.T) {
 	require.Len(t, txn.reqs, 2)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, &mainSnapshotID)
 	requireContainsRefSnapshotRequirement(t, txn.reqs, "feature", &featureSnapshotID)
+}
+
+func TestCurrentSnapshotForRefResolvesBranchHead(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+
+	main := txn.meta.currentSnapshotForRef(MainBranch)
+	require.NotNil(t, main)
+	require.Equal(t, int64(10), main.SnapshotID)
+
+	empty := txn.meta.currentSnapshotForRef("")
+	require.NotNil(t, empty)
+	require.Equal(t, int64(10), empty.SnapshotID, "empty ref must resolve like main")
+
+	feature := txn.meta.currentSnapshotForRef("feature")
+	require.NotNil(t, feature)
+	require.Equal(t, int64(20), feature.SnapshotID, "feature branch must resolve to its own head (20), not main (10)")
+
+	missing := txn.meta.currentSnapshotForRef("does-not-exist")
+	require.NotNil(t, missing)
+	require.Equal(t, int64(10), missing.SnapshotID, "a not-yet-created branch falls back to main's head")
+}
+
+func TestCreateSnapshotProducerParentsOnBranchHead(t *testing.T) {
+	t.Run("feature branch parents on feature head", func(t *testing.T) {
+		txn := newTransactionWithSnapshotRefs(t)
+		txn.branch = "feature"
+		sp := createSnapshotProducer(OpAppend, txn, nil, nil, nil)
+		require.Equal(t, int64(20), sp.parentSnapshotID,
+			"append on feature must layer on the feature head (20), not main head (10)")
+	})
+
+	t.Run("main branch still parents on main head", func(t *testing.T) {
+		txn := newTransactionWithSnapshotRefs(t)
+		txn.branch = ""
+		sp := createSnapshotProducer(OpAppend, txn, nil, nil, nil)
+		require.Equal(t, int64(10), sp.parentSnapshotID)
+	})
+}
+
+func TestBranchWriteCommitsThroughCatalogPath(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+
+	producers := []struct {
+		name    string
+		op      Operation
+		newProd func(Operation, *Transaction, iceio.WriteFileIO, *uuid.UUID, iceberg.Properties) *snapshotProducer
+	}{
+		{"fast append", OpAppend, newFastAppendFilesProducer},
+		{"merge append", OpAppend, newMergeAppendFilesProducer},
+		{"overwrite", OpOverwrite, newOverwriteFilesProducer},
+	}
+
+	for _, tc := range producers {
+		t.Run(tc.name, func(t *testing.T) {
+			txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+			// 1. Create the "feature" branch on a fresh table. The branch does
+			// not exist yet, so the snapshot has no parent and the requirement
+			// asserts the branch is absent (nil).
+			txn.branch = "feature"
+			sp1 := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+			sp1.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+			up1, rq1, err := sp1.commit(ctx)
+			require.NoError(t, err)
+			addSnap1, ok := up1[0].(*addSnapshotUpdate)
+			require.True(t, ok)
+			require.Nil(t, addSnap1.Snapshot.ParentSnapshotID, "first feature snapshot has no parent")
+			requireContainsRefSnapshotRequirement(t, rq1, "feature", nil)
+			featureHead := addSnap1.Snapshot.SnapshotID
+			require.NoError(t, txn.apply(up1, rq1))
+			meta1, err := txn.meta.Build()
+			require.NoError(t, err)
+
+			// 2. Advance main independently so feature and main diverge.
+			tblMain := New(ident, meta1, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+			txnMain := tblMain.NewTransaction()
+			spMain := newFastAppendFilesProducer(OpAppend, txnMain, memIO, nil, nil)
+			spMain.appendDataFile(newTestDataFile(t, spec, "file://main-1.parquet", nil))
+			upM, rqM, err := spMain.commit(ctx)
+			require.NoError(t, err)
+			addSnapM, ok := upM[0].(*addSnapshotUpdate)
+			require.True(t, ok)
+			mainHead := addSnapM.Snapshot.SnapshotID
+			require.NoError(t, txnMain.apply(upM, rqM))
+			divergedMeta, err := txnMain.meta.Build()
+			require.NoError(t, err)
+			require.NotEqual(t, featureHead, mainHead)
+
+			// 3. Write to feature again with the producer under test and commit
+			// through the public path. Staging mirrors what the high-level op
+			// (Append/Overwrite/Delete) does internally; Commit runs doCommit ->
+			// CommitTable where the branch requirement is validated.
+			cat := &headTrackingCatalog{metadata: divergedMeta}
+			tbl := New(ident, divergedMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+			txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+			require.NoError(t, err)
+
+			spFeat := tc.newProd(tc.op, txnFeat, memIO, nil, nil)
+			spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+			upF, rqF, err := spFeat.commit(ctx)
+			require.NoError(t, err)
+			require.NoError(t, txnFeat.apply(upF, rqF))
+
+			committed, err := txnFeat.Commit(ctx)
+			require.NoError(t, err, "%s: catalog must accept the branch commit; a main-head AssertRefSnapshotID would be rejected", tc.name)
+			require.Equal(t, int32(1), cat.attempts.Load(), "no retry expected: the branch assertion matches on the first attempt")
+
+			newFeatureHead := committed.Metadata().SnapshotByName("feature")
+			require.NotNil(t, newFeatureHead)
+			require.NotNil(t, newFeatureHead.ParentSnapshotID)
+			require.Equal(t, featureHead, *newFeatureHead.ParentSnapshotID,
+				"%s on feature must be parented on the feature head, not main", tc.name)
+			require.NotEqual(t, mainHead, *newFeatureHead.ParentSnapshotID)
+
+			// The feature commit must leave main untouched.
+			mainRef := committed.Metadata().SnapshotByName(MainBranch)
+			require.NotNil(t, mainRef)
+			require.Equal(t, mainHead, mainRef.SnapshotID, "committing to feature must not move main")
+		})
+	}
+}
+
+func liveDataFilePathsForSnapshot(t *testing.T, snap *Snapshot, fs iceio.IO) []string {
+	t.Helper()
+	require.NotNil(t, snap)
+	var paths []string
+	for e, err := range snap.entries(fs, iceberg.ManifestContentData) {
+		require.NoError(t, err)
+		if e.Status() == iceberg.EntryStatusDELETED {
+			continue
+		}
+		if e.DataFile().ContentType() == iceberg.EntryContentData {
+			paths = append(paths, e.DataFile().FilePath())
+		}
+	}
+
+	return paths
+}
+
+func TestBranchCreateForksFromMainHead(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// main -> [main.parquet]
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// First write to the new "feature" branch.
+	cat := &headTrackingCatalog{metadata: mainMeta}
+	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+
+	// The new-branch requirement must assert absence (nil), while the parent must
+	// be main's head — the two halves of the split that the fallback drives.
+	requireContainsRefSnapshotRequirement(t, rqF, "feature", nil)
+	addSnapF, ok := upF[0].(*addSnapshotUpdate)
+	require.True(t, ok)
+	require.NotNil(t, addSnapF.Snapshot.ParentSnapshotID)
+	require.Equal(t, mainHead, *addSnapF.Snapshot.ParentSnapshotID,
+		"first write to a new branch must fork from main's head")
+
+	require.NoError(t, txnFeat.apply(upF, rqF))
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature.parquet"},
+		liveDataFilePathsForSnapshot(t, committed.Metadata().SnapshotByName("feature"), memIO),
+		"a new branch must inherit main's data files, plus its own")
+}
+
+func TestBranchCreateForksFromMainHeadAcrossRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// Fail attempt 0 (forcing a retry through rebuildSnapshotUpdates), apply on 1.
+	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json", func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), cat.attempts.Load(), "commit must fail once then succeed on retry (exercising the rebuild path)")
+
+	feat := committed.Metadata().SnapshotByName("feature")
+	require.NotNil(t, feat)
+	require.NotNil(t, feat.ParentSnapshotID)
+	require.Equal(t, mainHead, *feat.ParentSnapshotID, "retry must keep main's head as the new branch's parent")
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature.parquet"},
+		liveDataFilePathsForSnapshot(t, feat, memIO),
+		"a new branch must inherit main's data even when the commit retries and rebuilds")
+}
+
+// TestBranchRetryParentsOnPeerAdvancedBranchHead covers the retry path that
+// TestBranchCreateForksFromMainHeadAcrossRetry does not: the target branch
+// already exists and a concurrent peer advances THAT branch (not main)
+// between attempts. On retry latestSnapshotForBranch must resolve the branch's
+// own fresh head via SnapshotByName and reparent the staged snapshot onto it,
+// rather than falling back to main's head.
+func TestBranchRetryParentsOnPeerAdvancedBranchHead(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	wfs, meta := newMemIOWithRetryMeta(t, spec)
+
+	// Seed main -> S0.
+	seedTbl := New(ident, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil }, nil)
+	seedTxn := seedTbl.NewTransaction()
+	seedSp := newFastAppendFilesProducer(OpAppend, seedTxn, wfs, nil, nil)
+	seedSp.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/seed.parquet", nil))
+	upS, rqS, err := seedSp.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, seedTxn.apply(upS, rqS))
+	baseMeta, err := seedTxn.meta.Build()
+	require.NoError(t, err)
+	s0 := baseMeta.CurrentSnapshot().SnapshotID
+
+	// Create a "feature" branch pointing at S0 (same head as main for now).
+	fb, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, fb.SetSnapshotRef("feature", s0, BranchRef))
+	baseMeta, err = fb.Build()
+	require.NoError(t, err)
+
+	// A concurrent peer advances the FEATURE branch (not main) between attempts.
+	cat := &progressingRebuildCatalog{
+		metadata:  baseMeta,
+		wfs:       wfs,
+		location:  "mem://default/table-location",
+		branch:    "feature",
+		failTimes: 1, // 1 conflict (peer graft) + 1 success
+	}
+	tbl := New(ident, baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return wfs, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, wfs, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "mem://default/table-location/data/feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	_, err = txnFeat.Commit(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), cat.commitTableCalls.Load(),
+		"commit must fail once (peer advances feature) then succeed on retry")
+
+	// graftPeer assigns the peer feature head id 9000 + peerCount(1) = 9001.
+	const peerFeatureHead = int64(9_001)
+	committed := cat.committedSnapshot
+	require.NotNil(t, committed)
+	require.NotNil(t, committed.ParentSnapshotID)
+	require.Equal(t, peerFeatureHead, *committed.ParentSnapshotID,
+		"retry must reparent onto the peer-advanced feature head, not main")
+	require.NotEqual(t, s0, *committed.ParentSnapshotID,
+		"a fallback to main's head would (wrongly) parent on S0")
+}
+
+// TestBranchCommitRejectsNameThatBecomesATagOnRetry covers the absent-branch to
+// tag race. "feature" does not exist when the transaction is constructed, so
+// the ref-type guard in NewTransactionOnBranchWithError has nothing to reject
+// and the commit carries an "assert this ref is absent" requirement
+// (baseRefSnapshotID returns nil for a branch absent from the base). If a peer
+// creates that name as a TAG before the retry, the replay must fail: without
+// the check, commitManifests emits a BranchRef update that would advance the
+// tag onto a new snapshot and strip its immutability.
+func TestBranchCommitRejectsNameThatBecomesATagOnRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	// The peer's view: same table, "feature" created as a TAG.
+	tagBuilder, err := MetadataBuilderFromBase(mainMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.SetSnapshotRef("feature", mainHead, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	// The table's base is mainMeta (feature absent), while the catalog serves
+	// the post-race tagMeta on refresh: attempt 0 fails with a retryable
+	// conflict, and the retry reloads the tag before the replay runs.
+	cat := &flakyCatalog{metadata: tagMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err, "the name is still absent here, so construction cannot reject it")
+	spFeat := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	spFeat.appendDataFile(newTestDataFile(t, spec, "file://feature.parquet", nil))
+	upF, rqF, err := spFeat.commit(ctx)
+	require.NoError(t, err)
+	requireContainsRefSnapshotRequirement(t, rqF, "feature", nil)
+	require.NoError(t, txnFeat.apply(upF, rqF))
+
+	_, err = txnFeat.Commit(ctx)
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load(),
+		"the replay must be rejected before a second CommitTable call")
+
+	var featureRef SnapshotRef
+	for name, ref := range tagMeta.Refs() {
+		if name == "feature" {
+			featureRef = ref
+		}
+	}
+	require.Equal(t, TagRef, featureRef.SnapshotRefType, "the tag must not be converted into a branch")
+	require.Equal(t, mainHead, featureRef.SnapshotID, "the tag must not advance")
+}
+
+// TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics pins the branch-aware
+// lookup in mergeOverwrite. A table whose only writes went to a branch has a
+// branch head but no main head, so the old currentSnapshot() lookup returned
+// nil and silently downgraded an overwrite to an append: the branch's existing
+// files were never marked deleted.
+func TestOverwriteOnBranchOnlyTableKeepsOverwriteSemantics(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	// The first write on a fresh table goes to "feature": the branch gets a
+	// head while main has none — the state that separates the two lookups.
+	txn.branch = "feature"
+	sp := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	sp.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+	up, rq, err := sp.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(up, rq))
+	branchOnlyMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	require.Nil(t, branchOnlyMeta.CurrentSnapshot(), "fixture must leave main empty")
+	require.NotNil(t, branchOnlyMeta.SnapshotByName("feature"))
+
+	t.Run("branch with a head overwrites", func(t *testing.T) {
+		tbl := New(ident, branchOnlyMeta, "metadata.json",
+			func(context.Context) (iceio.IO, error) { return memIO, nil }, nil)
+		txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		prod := txnFeat.updateSnapshot(memIO, nil, OpOverwrite).mergeOverwrite(nil, nil)
+		prod.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+		ups, _, err := prod.commit(ctx)
+		require.NoError(t, err)
+		add, ok := ups[0].(*addSnapshotUpdate)
+		require.True(t, ok)
+		require.NotNil(t, add.Snapshot.Summary)
+		require.Equal(t, OpOverwrite, add.Snapshot.Summary.Operation,
+			"the branch has files to overwrite, so the operation must stay an overwrite")
+	})
+
+	t.Run("branch with no head still degrades to append", func(t *testing.T) {
+		emptyTxn, emptyIO := createTestTransactionWithMemIO(t, spec)
+		emptyTxn.branch = "feature"
+
+		prod := emptyTxn.updateSnapshot(emptyIO, nil, OpOverwrite).mergeOverwrite(nil, nil)
+		prod.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+		ups, _, err := prod.commit(ctx)
+		require.NoError(t, err)
+		add, ok := ups[0].(*addSnapshotUpdate)
+		require.True(t, ok)
+		require.NotNil(t, add.Snapshot.Summary)
+		require.Equal(t, OpAppend, add.Snapshot.Summary.Operation,
+			"an overwrite with nothing to overwrite must still be recorded as an append")
+	})
+}
+
+func TestPlanningSnapshotMatchesProducerParent(t *testing.T) {
+	for _, branch := range []string{"", MainBranch, "feature", "does-not-exist"} {
+		t.Run("branch="+branch, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.branch = branch
+
+			planned := txn.planningSnapshot(txn.meta)
+			require.NotNil(t, planned)
+			require.Equal(t, planned.SnapshotID,
+				createSnapshotProducer(OpAppend, txn, nil, nil, nil).parentSnapshotID,
+				"planning must inspect the snapshot the write is parented on")
+		})
+	}
+}
+
+// TestBranchMultipleStagedSnapshotsChainOnRetry is the branch counterpart of
+// OCCScenarioTestSuite.TestMultipleStagedSnapshotsChainOnRetry: it combines the
+// two fixes. Two snapshots are staged on a not-yet-created branch (both fork
+// from main's head) and a forced retry replays them. The replay must keep them
+// chained A1 <- A2; rebuilding both against the same fresh head makes them
+// siblings, and the branch ref then advances only to A2, dropping A1's file.
+func TestBranchMultipleStagedSnapshotsChainOnRetry(t *testing.T) {
+	ctx := context.Background()
+	spec := iceberg.NewPartitionSpec()
+	ident := Identifier{"db", "tbl"}
+	txn, memIO := createTestTransactionWithMemIO(t, spec)
+
+	spMain := newFastAppendFilesProducer(OpAppend, txn, memIO, nil, nil)
+	spMain.appendDataFile(newTestDataFile(t, spec, "file://main.parquet", nil))
+	upM, rqM, err := spMain.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txn.apply(upM, rqM))
+	require.NoError(t, txn.SetProperties(iceberg.Properties{
+		CommitNumRetriesKey:     "2",
+		CommitMinRetryWaitMsKey: "1",
+		CommitMaxRetryWaitMsKey: "2",
+	}))
+	mainMeta, err := txn.meta.Build()
+	require.NoError(t, err)
+	mainHead := mainMeta.CurrentSnapshot().SnapshotID
+
+	cat := &flakyCatalog{metadata: mainMeta, failUntilAttempt: 1, failWith: fmt.Errorf("REST: %w", ErrCommitFailed)}
+	tbl := New(ident, mainMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return memIO, nil }, cat)
+
+	txnFeat, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+
+	// A1 forks from main's head; A2 is staged on top of A1.
+	sp1 := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	sp1.appendDataFile(newTestDataFile(t, spec, "file://feature-1.parquet", nil))
+	up1, rq1, err := sp1.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(up1, rq1))
+
+	sp2 := newFastAppendFilesProducer(OpAppend, txnFeat, memIO, nil, nil)
+	sp2.appendDataFile(newTestDataFile(t, spec, "file://feature-2.parquet", nil))
+	up2, rq2, err := sp2.commit(ctx)
+	require.NoError(t, err)
+	require.NoError(t, txnFeat.apply(up2, rq2))
+
+	committed, err := txnFeat.Commit(ctx)
+	require.NoError(t, err,
+		"both staged snapshots must survive the retry; siblings share a sequence number and AddSnapshot rejects the second")
+	require.Equal(t, int32(2), cat.attempts.Load(), "commit must fail once then succeed on retry")
+
+	head := committed.Metadata().SnapshotByName("feature")
+	require.NotNil(t, head)
+	require.NotNil(t, head.ParentSnapshotID, "the branch head (A2) must have a parent")
+	a1 := committed.Metadata().SnapshotByID(*head.ParentSnapshotID)
+	require.NotNil(t, a1, "A2's parent (A1) must stay reachable, not be orphaned by a sibling rebuild")
+	require.NotNil(t, a1.ParentSnapshotID)
+	require.Equal(t, mainHead, *a1.ParentSnapshotID, "A1 must fork from main's head")
+	require.Greater(t, head.SequenceNumber, a1.SequenceNumber,
+		"the chained snapshot must have a strictly greater sequence number")
+
+	require.ElementsMatch(t,
+		[]string{"file://main.parquet", "file://feature-1.parquet", "file://feature-2.parquet"},
+		liveDataFilePathsForSnapshot(t, head, memIO),
+		"the branch head must inherit main's file plus both staged files")
 }
 
 func TestExpireSnapshotsWithOlderThanDoesNotExpireSnapshotRefs(t *testing.T) {
@@ -235,6 +739,117 @@ func TestExpireSnapshotsRetainsYoungUnreferencedSnapshots(t *testing.T) {
 			}
 		})
 	}
+}
+
+// min-snapshots-to-keep=0 is only reachable through the table property:
+// WithRetainLast and SnapshotRef.validate both reject values below 1.
+func TestExpireSnapshotsRetainsRefHeads(t *testing.T) {
+	tests := []struct {
+		name         string
+		refName      string
+		refType      RefType
+		minSnapshots string
+	}{
+		{name: "non-main branch with no minimum", refName: "feature", refType: BranchRef, minSnapshots: "0"},
+		{name: "non-main branch with default minimum", refName: "feature", refType: BranchRef, minSnapshots: "1"},
+		{name: "main branch with no minimum", refName: MainBranch, refType: BranchRef, minSnapshots: "0"},
+		{name: "tag with no minimum", refName: "release", refType: TagRef, minSnapshots: "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			require.NoError(t, txn.meta.SetSnapshotRef(tt.refName, 20, tt.refType))
+			txn.meta.props = iceberg.Properties{
+				MinSnapshotsToKeepKey: tt.minSnapshots,
+				MaxSnapshotAgeMsKey:   "0",
+			}
+			expireSnapshotsSnapshot(t, txn, 20).TimestampMs = time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+			require.NoError(t, txn.ExpireSnapshots())
+
+			ref, refExists := txn.meta.refs[tt.refName]
+			require.True(t, refExists, "ref %q must survive expiry", tt.refName)
+			require.Equal(t, int64(20), ref.SnapshotID, "ref %q must still point at its head", tt.refName)
+			require.Equal(t, tt.refType, ref.SnapshotRefType, "ref %q must keep its type", tt.refName)
+
+			_, err := txn.meta.SnapshotByID(20)
+			require.NoError(t, err, "head snapshot of ref %q must not be expired", tt.refName)
+		})
+	}
+}
+
+// Protecting a ref's head must not spill over into retaining that branch's expired ancestors.
+func TestExpireSnapshotsRetainsOnlyRefHeadsWhenMinSnapshotsToKeepIsZero(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	old := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+
+	// Chain 30 -> 20 -> 10 with main on 10 and feature on 30 leaves 20 as an
+	// interior ancestor held by no ref head.
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: transactionTestPtr(int64(20)),
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      time.Now().UnixMilli(),
+	}))
+	require.NoError(t, txn.meta.SetSnapshotRef("feature", 30, BranchRef))
+	txn.meta.props = iceberg.Properties{
+		MinSnapshotsToKeepKey: "0",
+		MaxSnapshotAgeMsKey:   "0",
+	}
+	for _, id := range []int64{10, 20, 30} {
+		expireSnapshotsSnapshot(t, txn, id).TimestampMs = old
+	}
+
+	require.NoError(t, txn.ExpireSnapshots())
+
+	_, err := txn.meta.SnapshotByID(30)
+	require.NoError(t, err, "feature head must be retained")
+	_, err = txn.meta.SnapshotByID(10)
+	require.NoError(t, err, "main head must be retained")
+	_, err = txn.meta.SnapshotByID(20)
+	require.Error(t, err, "expired interior ancestor must not be retained by the head-retention fix")
+}
+
+// Both ancestor walks in ExpireSnapshots must terminate on a parent cycle in
+// malformed metadata. Snapshots are left young so the age cutoff cannot end
+// the retention walk, leaving AncestorsOf's cycle guard as the only exit.
+func TestExpireSnapshotsTerminatesOnParentCycle(t *testing.T) {
+	txn := newTransactionWithSnapshotRefs(t)
+	expireSnapshotsSnapshot(t, txn, 10).ParentSnapshotID = transactionTestPtr(int64(20))
+
+	done := make(chan error, 1)
+	go func() { done <- txn.ExpireSnapshots() }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("ExpireSnapshots did not terminate on a snapshot parent cycle")
+	}
+
+	for _, id := range []int64{10, 20} {
+		_, err := txn.meta.SnapshotByID(id)
+		require.NoError(t, err, "snapshot %d is referenced by a ref and must be retained", id)
+	}
+}
+
+// expireSnapshotsSnapshot returns the builder's own copy of a fixture snapshot
+// so tests can set fields that AddSnapshot validates against.
+func expireSnapshotsSnapshot(t *testing.T, txn *Transaction, snapshotID int64) *Snapshot {
+	t.Helper()
+
+	for i := range txn.meta.snapshotList {
+		if txn.meta.snapshotList[i].SnapshotID == snapshotID {
+			return &txn.meta.snapshotList[i]
+		}
+	}
+
+	t.Fatalf("snapshot %d not found in test fixture", snapshotID)
+
+	return nil
 }
 
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
@@ -874,4 +1489,299 @@ func transactionTestInt64PtrEqual(left, right *int64) bool {
 	}
 
 	return *left == *right
+}
+
+// Builds one canonical fixture shared by the branch-rollback tests.
+// Snapshot graph (parent -> child):
+//
+//	10 -> 20 -> 30      (main's lineage; "feature" extends it to 30)
+//	10 -> 40            ("diverged" forks at 10 and never sees 20)
+//
+// Refs: main -> 20 (branch), feature -> 30 (branch), diverged -> 40 (branch), v1 -> 10 (tag).
+// The tag and the extra branches exist so every test can assert
+// that a rollback leaves the refs it does not target completely alone.
+func newRollbackBranchTable(t *testing.T) *Table {
+	t.Helper()
+
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	now := time.Now().UnixMilli()
+
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:     10,
+		SequenceNumber: 1,
+		ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+		Summary:        &Summary{Operation: OpAppend},
+		TimestampMs:    now,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       20,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   2,
+		ManifestList:     "mem://default/table-location/metadata/manifest-20.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 1,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       30,
+		ParentSnapshotID: transactionTestPtr(int64(20)),
+		SequenceNumber:   3,
+		ManifestList:     "mem://default/table-location/metadata/manifest-30.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 2,
+	}))
+	require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+		SnapshotID:       40,
+		ParentSnapshotID: transactionTestPtr(int64(10)),
+		SequenceNumber:   4,
+		ManifestList:     "mem://default/table-location/metadata/manifest-40.avro",
+		Summary:          &Summary{Operation: OpAppend},
+		TimestampMs:      now + 3,
+	}))
+
+	require.NoError(t, txn.meta.SetSnapshotRef(MainBranch, 20, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("feature", 30, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("diverged", 40, BranchRef))
+	require.NoError(t, txn.meta.SetSnapshotRef("v1", 10, TagRef))
+
+	meta, err := txn.meta.Build()
+	require.NoError(t, err)
+
+	return New(Identifier{"db", "table"}, meta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil)
+}
+
+// requireUntouchedRollbackRefs asserts every ref other than except still holds its fixture snapshot id and ref type,
+// so a rollback cannot quietly move a second ref.
+func requireUntouchedRollbackRefs(t *testing.T, txn *Transaction, except string) {
+	t.Helper()
+
+	want := map[string]SnapshotRef{
+		MainBranch: {SnapshotID: 20, SnapshotRefType: BranchRef},
+		"feature":  {SnapshotID: 30, SnapshotRefType: BranchRef},
+		"diverged": {SnapshotID: 40, SnapshotRefType: BranchRef},
+		"v1":       {SnapshotID: 10, SnapshotRefType: TagRef},
+	}
+	for name, expected := range want {
+		if name == except {
+			continue
+		}
+		actual, ok := txn.meta.refs[name]
+		require.True(t, ok, "ref %q must still exist after a rollback of %q", name, except)
+		require.Equal(t, expected.SnapshotID, actual.SnapshotID,
+			"rollback of %q must not move ref %q", except, name)
+		require.Equal(t, expected.SnapshotRefType, actual.SnapshotRefType,
+			"rollback of %q must not change the type of ref %q", except, name)
+	}
+
+	// main's head pointer is tracked separately from its ref, so pin it too.
+	if except != MainBranch {
+		require.NotNil(t, txn.meta.currentSnapshotID)
+		require.Equal(t, int64(20), *txn.meta.currentSnapshotID,
+			"rollback of %q must not move the table's current-snapshot pointer", except)
+	}
+}
+
+// TestRollbackToSnapshotOnBranchDoesNotCorruptMain asserts a rollback on a branch transaction moves that branch
+// and leaves main's ref and head pointer untouched.
+func TestRollbackToSnapshotOnBranchDoesNotCorruptMain(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+
+	require.NoError(t, branchTxn.RollbackToSnapshot(10))
+
+	featureRef := branchTxn.meta.refs["feature"]
+	require.Equal(t, int64(10), featureRef.SnapshotID, "rollback must move the targeted branch")
+	require.Equal(t, BranchRef, featureRef.SnapshotRefType, "the rolled-back ref must stay a branch")
+	requireUntouchedRollbackRefs(t, branchTxn, "feature")
+
+	requireContainsRefSnapshotRequirement(t, branchTxn.reqs, "feature", transactionTestPtr(int64(30)))
+}
+
+// TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch rejects snapshot 20:
+// it is main's head but absent from "diverged"'s lineage, so validating against main accepts it.
+func TestRollbackToSnapshotValidatesAncestryAgainstTargetBranch(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("diverged")
+	require.NoError(t, err)
+
+	err = branchTxn.RollbackToSnapshot(20)
+	require.Error(t, err, "snapshot 20 is only on main's lineage, not diverged's")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"every caller-input rejection must be matchable with errors.Is, not just the tag-type one")
+	require.ErrorContains(t, err, "not an ancestor")
+	require.ErrorContains(t, err, `"diverged"`,
+		"the error must name the branch whose lineage rejected the snapshot")
+
+	require.Equal(t, int64(40), branchTxn.meta.refs["diverged"].SnapshotID,
+		"failed rollback must leave the branch untouched")
+	requireUntouchedRollbackRefs(t, branchTxn, "")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsUnknownBranch pins the refusal to fall back to main:
+// reusing the write-parent resolver here would rewind main for a missing branch.
+func TestRollbackToSnapshotRejectsUnknownBranch(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("ghost")
+	require.NoError(t, err)
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err, "an unknown branch must fail rather than fall back to main")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"every caller-input rejection must be matchable with errors.Is, not just the tag-type one")
+	require.ErrorContains(t, err, `branch "ghost" does not exist`)
+
+	require.NotContains(t, branchTxn.meta.refs, "ghost", "a failed rollback must not create the branch")
+	requireUntouchedRollbackRefs(t, branchTxn, "")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsDanglingBranchRef separates "absent" from "present but invalid":
+// a ref pointing at an unknown snapshot must fail loudly, not read as empty.
+func TestRollbackToSnapshotRejectsDanglingBranchRef(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 9999, SnapshotRefType: BranchRef}
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err)
+	require.ErrorContains(t, err, `branch "feature" references unknown snapshot 9999`,
+		"a dangling ref must be reported as inconsistent, not as a missing snapshot")
+	require.ErrorIs(t, err, ErrSnapshotNotFound)
+	require.NotErrorIs(t, err, iceberg.ErrInvalidArgument,
+		"inconsistent table state is not a caller-input error and must stay distinguishable from one")
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotRejectsTagRef guards the ref type at the operation:
+// a tag must not be rewritten as a branch, dropping its retention.
+func TestRollbackToSnapshotRejectsTagRef(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+
+	branchTxn, err := tbl.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	branchTxn.meta.refs["feature"] = SnapshotRef{SnapshotID: 30, SnapshotRefType: TagRef}
+
+	err = branchTxn.RollbackToSnapshot(10)
+	require.Error(t, err, "a ref that is a tag must not be rolled back as a branch")
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, `ref "feature" is a tag, not a branch`)
+
+	require.Equal(t, TagRef, branchTxn.meta.refs["feature"].SnapshotRefType,
+		"the rejected ref must keep its tag type")
+	require.Equal(t, int64(30), branchTxn.meta.refs["feature"].SnapshotID)
+	require.Empty(t, refAssertions(branchTxn), "a rejected rollback must stage no requirement")
+}
+
+// TestRollbackToSnapshotOnMainIsUnchanged is the steady-state case:
+// a default transaction still rolls main back, and still refuses when only a branch has a head.
+func TestRollbackToSnapshotOnMainIsUnchanged(t *testing.T) {
+	t.Run("rolls main back", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn := tbl.NewTransaction()
+
+		require.NoError(t, txn.RollbackToSnapshot(10))
+		require.Equal(t, int64(10), txn.meta.refs[MainBranch].SnapshotID)
+		require.Equal(t, BranchRef, txn.meta.refs[MainBranch].SnapshotRefType)
+		require.NotNil(t, txn.meta.currentSnapshotID)
+		require.Equal(t, int64(10), *txn.meta.currentSnapshotID,
+			"rolling main back must also move the current-snapshot pointer")
+		requireUntouchedRollbackRefs(t, txn, MainBranch)
+		requireContainsRefSnapshotRequirement(t, txn.reqs, MainBranch, transactionTestPtr(int64(20)))
+	})
+
+	t.Run("refuses when only a branch has a head", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		require.NoError(t, txn.meta.AddSnapshot(&Snapshot{
+			SnapshotID:     10,
+			SequenceNumber: 1,
+			ManifestList:   "mem://default/table-location/metadata/manifest-10.avro",
+			Summary:        &Summary{Operation: OpAppend},
+			TimestampMs:    time.Now().UnixMilli(),
+		}))
+		require.NoError(t, txn.meta.SetSnapshotRef("feature", 10, BranchRef))
+
+		err := txn.RollbackToSnapshot(10)
+		require.Error(t, err, "main has no head, so a main transaction cannot roll back")
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID,
+			"a failed main rollback must not touch the branch that does have a head")
+	})
+}
+
+// TestRollbackToSnapshotSharesOneBaseAssertionWithProducer covers an interaction branch scoping enables:
+// both now assert one ref, so either order must keep the base head pinned.
+func TestRollbackToSnapshotSharesOneBaseAssertionWithProducer(t *testing.T) {
+	producerAssertion := func(txn *Transaction) error {
+		return txn.apply(nil, []Requirement{
+			AssertRefSnapshotID("feature", transactionTestPtr(int64(30))),
+		})
+	}
+
+	requireSingleBaseFeatureAssertion := func(t *testing.T, txn *Transaction) {
+		t.Helper()
+
+		asserts := refAssertions(txn)
+		require.Len(t, asserts, 1, "the producer and rollback assertions must collapse to one")
+		require.Equal(t, "feature", asserts[0].Ref)
+		require.NotNil(t, asserts[0].SnapshotID)
+		require.Equal(t, int64(30), *asserts[0].SnapshotID,
+			"the surviving assertion must pin the base head, not the rolled-back id")
+	}
+
+	t.Run("producer then rollback", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		require.NoError(t, producerAssertion(txn))
+		require.NoError(t, txn.RollbackToSnapshot(10))
+
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID)
+		requireSingleBaseFeatureAssertion(t, txn)
+	})
+
+	t.Run("rollback then producer", func(t *testing.T) {
+		tbl := newRollbackBranchTable(t)
+		txn, err := tbl.NewTransactionOnBranchWithError("feature")
+		require.NoError(t, err)
+
+		require.NoError(t, txn.RollbackToSnapshot(10))
+		require.NoError(t, producerAssertion(txn))
+
+		require.Equal(t, int64(10), txn.meta.refs["feature"].SnapshotID)
+		requireSingleBaseFeatureAssertion(t, txn)
+	})
+}
+
+// TestRollbackToSnapshotCommitRejectsBranchTurnedTag covers the type-changing race:
+// a branch replaced by a same-id tag before commit must fail, since the id assertion alone still holds.
+func TestRollbackToSnapshotCommitRejectsBranchTurnedTag(t *testing.T) {
+	tbl := newRollbackBranchTable(t)
+	baseMeta := tbl.Metadata()
+
+	tagBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	require.NoError(t, err)
+	require.NoError(t, tagBuilder.RemoveSnapshotRef("feature"))
+	require.NoError(t, tagBuilder.SetSnapshotRef("feature", 30, TagRef))
+	tagMeta, err := tagBuilder.Build()
+	require.NoError(t, err)
+
+	cat := &headTrackingCatalog{metadata: tagMeta}
+	raced := New(tbl.Identifier(), baseMeta, "metadata.json",
+		func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+
+	txn, err := raced.NewTransactionOnBranchWithError("feature")
+	require.NoError(t, err)
+	require.NoError(t, txn.RollbackToSnapshot(10))
+
+	_, err = txn.Commit(t.Context())
+	require.Error(t, err, "a branch replaced by a tag must fail the commit, not be rolled back")
+	require.ErrorContains(t, err, "tags cannot be transaction targets")
+	require.Equal(t, int32(1), cat.attempts.Load(), "a type conflict must not be retried")
 }

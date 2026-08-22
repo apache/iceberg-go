@@ -33,6 +33,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"
@@ -486,10 +488,14 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	})
 	schema := NewSchema(0)
 
-	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
+	stats, err := newPartitionSummaryStats(spec, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := stats.update(map[int]any{1000: "historical-value"}); err != nil {
+		t.Fatal(err)
+	}
+	summaries := stats.summaries()
 	if len(summaries) != 1 {
 		t.Fatalf("expected one partition summary, got %d", len(summaries))
 	}
@@ -498,6 +504,169 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	}
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
+func TestManifestWriterUpdatesPartitionSummariesIncrementally(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "region", Type: PrimitiveTypes.String},
+		NestedField{ID: 2, Name: "temperature", Type: PrimitiveTypes.Float64},
+		NestedField{ID: 3, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "temperature", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+
+	newEntry := func(path string, partition map[int]any) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []ManifestEntry{
+		newEntry("east.parquet", map[int]any{1000: "east", 1001: 1.0, 1002: []byte{2}}),
+		newEntry("null.parquet", map[int]any{1000: nil, 1001: math.NaN(), 1002: []byte{1}}),
+		newEntry("west.parquet", map[int]any{1000: "west", 1001: 3.0, 1002: []byte{3}}),
+	}
+	if err := writer.Add(entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Existing(entries[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Delete(entries[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 3 {
+		t.Fatalf("expected three partition summaries, got %d", len(summaries))
+	}
+
+	assertSummary := func(index int, containsNull, containsNaN bool, lower, upper Literal) {
+		t.Helper()
+		lowerBytes, err := lower.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upperBytes, err := upper.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		summary := summaries[index]
+		if summary.ContainsNull != containsNull || summary.ContainsNaN == nil || *summary.ContainsNaN != containsNaN {
+			t.Fatalf("summary %d flags = (%v, %v), want (%v, %v)", index, summary.ContainsNull, summary.ContainsNaN, containsNull, containsNaN)
+		}
+		if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, lowerBytes) {
+			t.Fatalf("summary %d lower bound = %v, want %v", index, summary.LowerBound, lowerBytes)
+		}
+		if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, upperBytes) {
+			t.Fatalf("summary %d upper bound = %v, want %v", index, summary.UpperBound, upperBytes)
+		}
+	}
+
+	assertSummary(0, true, false, NewLiteral("east"), NewLiteral("west"))
+	assertSummary(1, false, true, NewLiteral(1.0), NewLiteral(3.0))
+	assertSummary(2, false, false, NewLiteral([]byte{1}), NewLiteral([]byte{3}))
+}
+
+func TestManifestWriterCopiesBinaryPartitionSummaryBounds(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+	low := []byte{1}
+	high := []byte{2}
+
+	newEntry := func(path string, partition []byte) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			map[int]any{1000: partition},
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("low.parquet", low)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("high.parquet", high)); err != nil {
+		t.Fatal(err)
+	}
+
+	low[0] = 3
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 1 {
+		t.Fatalf("expected one partition summary, got %d", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, []byte{1}) {
+		t.Fatalf("lower bound = %v, want [1]", summary.LowerBound)
+	}
+	if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, []byte{2}) {
+		t.Fatalf("upper bound = %v, want [2]", summary.UpperBound)
 	}
 }
 
@@ -3015,12 +3184,13 @@ func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() 
 	m.Zero(writer.existingRows)
 	m.Zero(writer.deletedFiles)
 	m.Zero(writer.deletedRows)
-	m.Empty(writer.partitions)
+	m.NoError(writer.partitionStatsErr)
+	m.Equal([]FieldSummary{{ContainsNaN: &falseBool}}, writer.partitionStats.summaries())
 	m.Equal(int64(-1), writer.minSeqNum)
 	m.Equal(originalPartitionData, dataFile.PartitionData)
 }
 
-func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionBeforeRetaining() {
+func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionSummaryBounds() {
 	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
 	partitionSpec := NewPartitionSpecID(
 		1,
@@ -3050,7 +3220,14 @@ func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionBeforeRetai
 	borrowed[1000].([]byte)[0] = 0xff
 	borrowed[1000] = []byte{0xff, 0xff}
 
-	m.Equal([]byte{0x01, 0x02}, writer.partitions[0][1000])
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	m.Require().NoError(err)
+	summaries := manifest.Partitions()
+	m.Require().Len(summaries, 1)
+	m.Require().NotNil(summaries[0].LowerBound)
+	m.Require().NotNil(summaries[0].UpperBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].LowerBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].UpperBound)
 }
 
 func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
@@ -4154,4 +4331,168 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 	m.ErrorIs(errs[0], errCloseFinalPair,
 		"terminal error must equal or wrap the simulated close error")
 	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
+}
+
+func contentTestSpec() PartitionSpec { return NewPartitionSpecID(1) }
+
+func contentTestSchema() *Schema {
+	return NewSchema(0, NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true})
+}
+
+func contentTestEntry(t *testing.T, spec PartitionSpec, content ManifestEntryContent, path string) ManifestEntry {
+	t.Helper()
+
+	builder, err := NewDataFileBuilder(spec, content, path, ParquetFile, map[int]any{}, nil, nil, 1, 1024)
+	require.NoError(t, err)
+
+	snapshotID, seqNum := int64(1234), int64(1)
+
+	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+}
+
+func writeContentManifest(t *testing.T, version int, entryContent ManifestEntryContent,
+	writerOpts []ManifestWriterOption, fileOpts []ManifestFileOption,
+) ([]byte, ManifestFile, error) {
+	t.Helper()
+
+	schema, spec := contentTestSchema(), contentTestSpec()
+
+	var buf bytes.Buffer
+	cnt := &internal.CountingWriter{W: &buf}
+	writer, err := NewManifestWriter(version, cnt, spec, schema, 1234, writerOpts...)
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Add(contentTestEntry(t, spec, entryContent, "s3://bucket/ns/tbl/data/f.parquet")))
+	require.NoError(t, writer.Close())
+
+	mf, err := writer.ToManifestFile("s3://bucket/ns/tbl/metadata/m.avro", cnt.Count, fileOpts...)
+
+	return buf.Bytes(), mf, err
+}
+
+func TestToManifestFileInheritsWriterContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+		want         ManifestContent
+	}{
+		{
+			name:         "defaults to data",
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+		{
+			name:         "inherits deletes without redundant option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching deletes option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching data option",
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, mf, err := writeContentManifest(t, 2, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, mf.ManifestContent())
+
+			// remaining fields must keep the values ToManifestFile derives from the writer
+			assert.Equal(t, 2, mf.Version())
+			assert.Equal(t, "s3://bucket/ns/tbl/metadata/m.avro", mf.FilePath())
+			assert.Equal(t, int64(len(data)), mf.Length())
+			assert.Equal(t, int32(1), mf.PartitionSpecID())
+			assert.Equal(t, int64(1234), mf.SnapshotID())
+			assert.Equal(t, int64(-1), mf.SequenceNum())
+			assert.Equal(t, int64(1), mf.MinSequenceNum())
+			assert.Equal(t, int32(1), mf.AddedDataFiles())
+			assert.Zero(t, mf.ExistingDataFiles())
+			assert.Zero(t, mf.DeletedDataFiles())
+			assert.Equal(t, int64(1), mf.AddedRows())
+			assert.Zero(t, mf.ExistingRows())
+			assert.Zero(t, mf.DeletedRows())
+			assert.Empty(t, mf.Partitions())
+			assert.Nil(t, mf.KeyMetadata())
+			assert.Nil(t, mf.FirstRowID())
+
+			entries, err := ReadManifest(mf, bytes.NewReader(data), false)
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, tt.entryContent, entries[0].DataFile().ContentType())
+		})
+	}
+}
+
+func TestToManifestFileRejectsContentMismatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		version      int
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+	}{
+		{
+			name:         "data writer with deletes option",
+			version:      2,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+		{
+			name:         "deletes writer with data option",
+			version:      2,
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentPosDeletes,
+		},
+		{
+			// v1 has no delete manifests; NewManifestWriter rejects a deletes
+			// writer, and the file option must not smuggle one past that.
+			name:         "v1 writer with deletes option",
+			version:      1,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, mf, err := writeContentManifest(t, tt.version, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			assert.ErrorContains(t, err, "does not match writer content")
+			assert.Nil(t, mf)
+		})
+	}
+}
+
+func TestManifestListRoundTripsDeleteManifestContent(t *testing.T) {
+	manifestData, mf, err := writeContentManifest(t, 2, EntryContentPosDeletes,
+		[]ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)}, nil)
+	require.NoError(t, err)
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, WriteManifestList(2, &listBuf, 1234, nil, &seqNum, 0, []ManifestFile{mf}))
+
+	files, err := ReadManifestList(bytes.NewReader(listBuf.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, ManifestContentDeletes, files[0].ManifestContent())
+
+	entries, err := ReadManifest(files[0], bytes.NewReader(manifestData), false)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, EntryContentPosDeletes, entries[0].DataFile().ContentType())
 }

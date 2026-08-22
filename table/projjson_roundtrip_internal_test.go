@@ -85,13 +85,16 @@ func TestWriteRecordsRecoversExactProjJSONCRSOnRead(t *testing.T) {
 	fs, err := tbl.fsF(ctx)
 	require.NoError(t, err)
 
-	readSchema, _, rdr, err := (&arrowScan{
+	scanner := &arrowScan{
 		metadata:        tbl.Metadata(),
 		fs:              fs,
+		scanSchema:      tbl.Schema(),
 		projectedSchema: tbl.Schema(),
 		concurrency:     1,
-		nameMapping:     tbl.Metadata().NameMapping(),
-	}).prepareToRead(ctx, dataFiles[0], nil)
+	}
+	invariants, err := scanner.scanInvariants(tbl.Metadata().Properties())
+	require.NoError(t, err)
+	readSchema, _, rdr, err := scanner.prepareToRead(ctx, dataFiles[0], invariants)
 	require.NoError(t, err)
 	defer rdr.Close()
 

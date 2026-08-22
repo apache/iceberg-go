@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -101,6 +102,42 @@ func newDVMockDataFile(puffinPath, referencedDataFile string, offset, contentSiz
 	}
 }
 
+func writeSharedDVPuffinFixture(t testing.TB, count int) []iceberg.DataFile {
+	t.Helper()
+
+	location := filepath.Join(t.TempDir(), "shared-dv.puffin")
+	w := dv.NewDVWriter(iceio.LocalFS{}, func(specID int32) *iceberg.PartitionSpec {
+		if specID == 0 {
+			return iceberg.UnpartitionedSpec
+		}
+
+		return nil
+	})
+	for i := range count {
+		path := "file:///table/data/data-" + strconv.Itoa(i) + ".parquet"
+		require.NoError(t, w.Add(path, []int64{int64(i), int64(i + count)}, 0, nil))
+	}
+
+	files, err := w.Flush(context.Background(), location)
+	require.NoError(t, err)
+
+	return files
+}
+
+type countingDVOpenIO struct {
+	iceio.LocalFS
+	opens atomic.Int64
+}
+
+func (c *countingDVOpenIO) Open(name string) (iceio.File, error) {
+	f, err := c.LocalFS.Open(name)
+	if err == nil {
+		c.opens.Add(1)
+	}
+
+	return f, err
+}
+
 // Compile-time assertion of readAllDeletionVectors' signature — pins the
 // `perFileDVBitmaps` return type so GetRecords' downstream wiring through
 // recordBatchesFromTasksAndDeletes can't silently shift to a different shape
@@ -166,6 +203,40 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		// single map entry stays a single bitmap (not a list of two).
 		require.NotNil(t, got[dataFilePath])
 		assert.Equal(t, int64(2), got[dataFilePath].Cardinality())
+	})
+
+	t.Run("opens a shared Puffin file once", func(t *testing.T) {
+		const count = 100
+		files := writeSharedDVPuffinFixture(t, count)
+		fs := &countingDVOpenIO{}
+
+		got, err := readAllDeletionVectors(ctx, fs,
+			[]FileScanTask{{DeletionVectorFiles: files}}, 8)
+		require.NoError(t, err)
+		require.Len(t, got, count)
+		assert.Equal(t, int64(1), fs.opens.Load())
+		for i := range count {
+			path := "file:///table/data/data-" + strconv.Itoa(i) + ".parquet"
+			bitmap := got[path]
+			require.NotNil(t, bitmap)
+			assert.True(t, bitmap.Contains(uint64(i)))
+			assert.True(t, bitmap.Contains(uint64(i+count)))
+		}
+	})
+
+	t.Run("canceled singleton read returns the context error", func(t *testing.T) {
+		const dataFilePath = "file:///table/data/data-canceled.parquet"
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1}, dataFilePath)
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		got, err := readAllDeletionVectors(canceledCtx, fs, []FileScanTask{{
+			DeletionVectorFiles: []iceberg.DataFile{
+				newDVMockDataFile(puffinPath, dataFilePath, offset, length, card),
+			},
+		}}, 1)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, got)
 	})
 
 	t.Run("no tasks -> empty map, no error", func(t *testing.T) {
@@ -278,6 +349,28 @@ func TestReadAllDeletionVectors(t *testing.T) {
 	})
 }
 
+func BenchmarkReadAllDeletionVectorsSharedPuffin(b *testing.B) {
+	for _, count := range []int{1, 10, 100} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			files := writeSharedDVPuffinFixture(b, count)
+			tasks := []FileScanTask{{DeletionVectorFiles: files}}
+			fs := iceio.LocalFS{}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				bitmaps, err := readAllDeletionVectors(context.Background(), fs, tasks, 8)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(bitmaps) != count {
+					b.Fatalf("got %d bitmaps, expected %d", len(bitmaps), count)
+				}
+			}
+		})
+	}
+}
+
 // TestFilterByDeletionVector pins the per-batch pipeline step that applies
 // a RoaringPositionBitmap to a record batch via Boolean keep-mask +
 // compute.Filter — the load-bearing optimization over materializing the
@@ -343,7 +436,7 @@ func TestFilterByDeletionVectorOutOfBoundsPosition(t *testing.T) {
 
 	bldr := array.NewInt64Builder(mem)
 	defer bldr.Release()
-	for i := int64(0); i < 3; i++ {
+	for i := range int64(3) {
 		bldr.Append(i)
 	}
 	col := bldr.NewArray()

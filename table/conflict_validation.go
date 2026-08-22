@@ -653,7 +653,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
 	for _, df := range rewrittenFiles {
 		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 		if err != nil {
 			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
 				df.FilePath(), df.SpecID(), err)
@@ -674,7 +674,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 				return nil
 			}
 
-			key, err := partitionConflictKey(df.SpecID(), dataFilePartition(df))
+			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
 					df.FilePath(), df.SpecID(), err)
@@ -733,24 +733,23 @@ var filePathFieldID = func() int {
 	return f.ID
 }()
 
-// partitionConflictKey returns a deterministic, injective string key
-// for a (specID, partition) tuple, used to detect overlap between a
-// partition-scoped delete and a rewritten data file. Partition values
-// are compared post-transform (direct equality), matching Java's
-// DeleteFileIndex — no transform-aware logic is needed because both
-// sides store the same post-transform representation.
+// canonicalPartitionKey returns a deterministic, injective string key for a
+// (specID, partition) tuple. Partition values are compared post-transform
+// (direct equality), matching Java's DeleteFileIndex — no transform-aware
+// logic is needed because both sides store the same post-transform
+// representation.
 //
 // Values are encoded type-normalized across the known Avro-decode and
-// write-side representations (see appendPartitionConflictValue):
+// write-side representations (see appendCanonicalPartitionValue):
 // integer-backed types are unified per field, so e.g. an int32 and an
-// iceberg.Date carrying the same day match. An unknown value type
-// fails the key build — and thereby the validation — rather than
-// falling back to a lossy formatting that could silently mismatch.
+// iceberg.Date carrying the same day match. An unknown value type fails the
+// key build rather than falling back to lossy formatting that could silently
+// mismatch.
 //
 // Different spec IDs never match, even with identical-looking tuples:
 // Java's DeleteFileIndex keys its PartitionMap by specId, and field IDs
 // are only meaningful within a single spec.
-func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
+func canonicalPartitionKey(specID int32, partition map[int]any) (string, error) {
 	ids := make([]int, 0, len(partition))
 	for id := range partition {
 		ids = append(ids, id)
@@ -763,7 +762,7 @@ func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
 		buf = strconv.AppendInt(buf, int64(id), 10)
 		buf = append(buf, ':')
 		var err error
-		buf, err = appendPartitionConflictValue(buf, partition[id])
+		buf, err = appendCanonicalPartitionValue(buf, partition[id])
 		if err != nil {
 			return "", fmt.Errorf("partition field %d: %w", id, err)
 		}
@@ -773,7 +772,7 @@ func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
 	return string(buf), nil
 }
 
-// appendPartitionConflictValue encodes one partition value into dst by
+// appendCanonicalPartitionValue encodes one partition value into dst by
 // semantic class, so different Go representations of the same logical
 // value produce the same bytes:
 //
@@ -787,7 +786,7 @@ func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
 //
 // String values are length-prefixed so keys stay injective for inputs
 // containing the field separators. Unknown types return an error.
-func appendPartitionConflictValue(dst []byte, v any) ([]byte, error) {
+func appendCanonicalPartitionValue(dst []byte, v any) ([]byte, error) {
 	switch v := v.(type) {
 	case nil:
 		return append(dst, 'z'), nil
@@ -820,15 +819,15 @@ func appendPartitionConflictValue(dst []byte, v any) ([]byte, error) {
 	case uuid.UUID:
 		return hex.AppendEncode(append(dst, 'B', ':'), v[:]), nil
 	case iceberg.Decimal:
-		return appendDecimalConflictValue(dst, v), nil
+		return appendCanonicalPartitionDecimal(dst, v), nil
 	case iceberg.DecimalLiteral:
-		return appendDecimalConflictValue(dst, iceberg.Decimal(v)), nil
+		return appendCanonicalPartitionDecimal(dst, iceberg.Decimal(v)), nil
 	default:
-		return nil, fmt.Errorf("unsupported partition value type %T in conflict key", v)
+		return nil, fmt.Errorf("unsupported partition value type %T in canonical key", v)
 	}
 }
 
-func appendDecimalConflictValue(dst []byte, v iceberg.Decimal) []byte {
+func appendCanonicalPartitionDecimal(dst []byte, v iceberg.Decimal) []byte {
 	dst = strconv.AppendInt(append(dst, 'd', ':'), int64(v.Scale), 10)
 
 	return append(append(dst, ':'), v.Val.BigInt().String()...)

@@ -978,7 +978,7 @@ func dropColFromTable(idx int, tbl arrow.Table) arrow.Table {
 	fields = append(fields[:idx], fields[idx+1:]...)
 
 	cols := make([]arrow.Column, 0, tbl.NumCols()-1)
-	for i := 0; i < int(tbl.NumCols()); i++ {
+	for i := range int(tbl.NumCols()) {
 		if i == idx {
 			continue
 		}
@@ -1216,6 +1216,146 @@ func (t *TableWritingTestSuite) TestAddDataFiles() {
 	t.Equal("1", staged.CurrentSnapshot().Summary.Properties["added-data-files"])
 }
 
+// TestAddDataFilesMultipleSpecs pins that a single commit may add data files
+// targeting any partition spec registered in the table metadata, with one
+// manifest written per spec — the shape of Java's MergingSnapshotProducer.
+// This is what allows writers to keep producing under a previous spec after a
+// partition evolution, and rewrites to migrate files between specs.
+func (t *TableWritingTestSuite) TestAddDataFilesMultipleSpecs() {
+	ident := table.Identifier{"default", "add_data_files_multispec_v" + strconv.Itoa(t.formatVersion)}
+	oldSpec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+	)
+	tbl := t.createTable(ident, t.formatVersion, oldSpec, t.tableSchema)
+
+	// Evolve the default spec; the identity(baz) spec 0 stays registered.
+	// Partition summaries are off by default, so opt in for the summary
+	// assertions below.
+	tx := tbl.NewTransaction()
+	t.Require().NoError(tx.SetProperties(iceberg.Properties{table.WritePartitionSummaryLimitKey: "10"}))
+	t.Require().NoError(tx.UpdateSpec(false).AddField("bar", iceberg.IdentityTransform{}, "").Commit())
+	tbl, err := tx.Commit(t.ctx)
+	t.Require().NoError(err)
+	newSpec := tbl.Spec()
+	t.Require().Equal(1, newSpec.ID())
+	t.Require().Len(tbl.Metadata().PartitionSpecs(), 2)
+
+	fs := mustFS(t.T(), tbl).(iceio.WriteFileIO)
+	oldPath := fmt.Sprintf("%s/%s/old-spec.parquet", t.location, ident[1])
+	newPath := fmt.Sprintf("%s/%s/new-spec.parquet", t.location, ident[1])
+	t.writeParquet(fs, oldPath, t.arrTbl)
+	t.writeParquet(fs, newPath, t.arrTbl)
+
+	// One file per spec, each with its partition tuple encoded under its own
+	// spec, committed in a single transaction. The row data is
+	// {baz: 123, bar: "bar_string"} in both files. v3 files must carry
+	// caller-supplied first-row-ids; make them disjoint (one row each).
+	newDataFile := func(spec iceberg.PartitionSpec, path string, partition map[int]any, firstRowID int64) iceberg.DataFile {
+		builder, err := iceberg.NewDataFileBuilder(spec, iceberg.EntryContentData,
+			path, iceberg.ParquetFile, partition, nil, nil, 1, mustFileSize(t.T(), path))
+		t.Require().NoError(err)
+		if t.formatVersion >= 3 {
+			builder = builder.FirstRowID(firstRowID)
+		}
+
+		return builder.Build()
+	}
+	fileOld := newDataFile(oldSpec, oldPath, map[int]any{1000: int32(123)}, 0)
+	fileNew := newDataFile(newSpec, newPath,
+		map[int]any{1000: int32(123), 1001: "bar_string"}, 1)
+
+	tx = tbl.NewTransaction()
+	t.Require().NoError(tx.AddDataFiles(t.ctx, []iceberg.DataFile{fileOld, fileNew}, nil))
+	tbl, err = tx.Commit(t.ctx)
+	t.Require().NoError(err)
+
+	// One manifest per spec, each declaring its own spec id and carrying
+	// entries whose spec ids and partition tuples round-trip.
+	snap := tbl.CurrentSnapshot()
+	manifests, err := snap.Manifests(fs)
+	t.Require().NoError(err)
+	t.Require().Len(manifests, 2)
+
+	filesBySpec := map[int32]iceberg.DataFile{}
+	for _, m := range manifests {
+		numEntries := 0
+		for entry, err := range m.Entries(fs, false) {
+			t.Require().NoError(err)
+			numEntries++
+			df := entry.DataFile()
+			t.Equal(m.PartitionSpecID(), df.SpecID())
+			filesBySpec[m.PartitionSpecID()] = df
+		}
+		t.Equal(1, numEntries)
+	}
+	t.Require().Contains(filesBySpec, int32(0))
+	t.Require().Contains(filesBySpec, int32(1))
+	t.Equal(oldPath, filesBySpec[0].FilePath())
+	t.Equal(newPath, filesBySpec[1].FilePath())
+	t.Equal(int32(123), filesBySpec[0].Partition()[1000])
+	t.Equal(int32(123), filesBySpec[1].Partition()[1000])
+	t.Equal("bar_string", filesBySpec[1].Partition()[1001])
+
+	// The mixed-spec commit's summary renders each partition path with the
+	// file's own spec, not the default.
+	t.Equal("2", snap.Summary.Properties["added-data-files"])
+	t.Equal("2", snap.Summary.Properties["changed-partition-count"])
+	t.Contains(snap.Summary.Properties, "partitions.baz=123")
+	t.Contains(snap.Summary.Properties, "partitions.baz=123/bar=bar_string")
+
+	// Read back: a full scan returns the rows of both specs' files.
+	full, err := tbl.Scan().ToArrowTable(t.ctx)
+	t.Require().NoError(err)
+	defer full.Release()
+	t.EqualValues(2, full.NumRows())
+
+	// Partition pruning evaluates each manifest with its own spec. Neither
+	// file carries column stats, so only partition pruning can drop files.
+	planned := func(filter iceberg.BooleanExpression) []string {
+		tasks, err := tbl.Scan(table.WithRowFilter(filter)).PlanFiles(t.ctx)
+		t.Require().NoError(err)
+		paths := make([]string, 0, len(tasks))
+		for _, task := range tasks {
+			paths = append(paths, task.File.FilePath())
+		}
+
+		return paths
+	}
+	t.ElementsMatch([]string{oldPath, newPath},
+		planned(iceberg.EqualTo(iceberg.Reference("baz"), int32(123))))
+	// bar is a partition column only in the new spec: the new-spec manifest is
+	// pruned via its own spec while the old-spec file cannot be.
+	t.ElementsMatch([]string{oldPath},
+		planned(iceberg.EqualTo(iceberg.Reference("bar"), "nope")))
+	// baz prunes both manifests, each evaluated with its own spec.
+	t.Empty(planned(iceberg.EqualTo(iceberg.Reference("baz"), int32(456))))
+
+	// Row-id assignment (v3) is indifferent to the multi-spec grouping: the
+	// snapshot covers both groups' rows from a single first-row-id and the
+	// caller-supplied per-file ids round-trip unchanged.
+	if t.formatVersion >= 3 {
+		t.Require().NotNil(snap.FirstRowID)
+		t.EqualValues(0, *snap.FirstRowID)
+		t.Require().NotNil(snap.AddedRows)
+		t.EqualValues(2, *snap.AddedRows)
+		t.EqualValues(2, tbl.Metadata().NextRowID())
+		t.Require().NotNil(filesBySpec[0].FirstRowID())
+		t.EqualValues(0, *filesBySpec[0].FirstRowID())
+		t.Require().NotNil(filesBySpec[1].FirstRowID())
+		t.EqualValues(1, *filesBySpec[1].FirstRowID())
+	}
+
+	// A spec id that is not registered in the table metadata is rejected.
+	ghost := iceberg.NewPartitionSpecID(99,
+		iceberg.PartitionField{SourceIDs: []int{4}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "baz"},
+	)
+	fileGhost := t.mustDataFile(ghost, fmt.Sprintf("%s/%s/ghost.parquet", t.location, ident[1]),
+		map[int]any{1000: int32(123)}, 1, 1)
+	tx = tbl.NewTransaction()
+	err = tx.AddDataFiles(t.ctx, []iceberg.DataFile{fileGhost}, nil)
+	t.ErrorContains(err, "unregistered partition spec id 99")
+}
+
 func (t *TableWritingTestSuite) TestAddDataFilesAutoNameMapping() {
 	for _, tc := range []struct {
 		name      string
@@ -1401,7 +1541,7 @@ func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartit
 	tx = tbl.NewTransaction()
 	err = tx.ReplaceDataFilesWithDataFiles(t.ctx, []iceberg.DataFile{deleteFile}, []iceberg.DataFile{addFile}, nil)
 	t.Error(err)
-	t.ErrorContains(err, "invalid partition spec id")
+	t.ErrorContains(err, "unregistered partition spec id 999")
 }
 
 func (t *TableWritingTestSuite) TestReplaceDataFilesWithDataFilesValidatesPartitionData() {

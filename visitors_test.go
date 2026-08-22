@@ -216,6 +216,105 @@ func TestBooleanExprVisitor(t *testing.T) {
 	}, result)
 }
 
+type evaluatorVisitor struct {
+	values  map[string]bool
+	visited []string
+}
+
+func (e *evaluatorVisitor) VisitTrue() bool {
+	e.visited = append(e.visited, "true")
+
+	return true
+}
+
+func (e *evaluatorVisitor) VisitFalse() bool {
+	e.visited = append(e.visited, "false")
+
+	return false
+}
+
+func (e *evaluatorVisitor) VisitNot(child bool) bool { return !child }
+
+func (e *evaluatorVisitor) VisitAnd(left, right bool) bool {
+	e.visited = append(e.visited, "and")
+
+	return left && right
+}
+
+func (e *evaluatorVisitor) VisitOr(left, right bool) bool {
+	e.visited = append(e.visited, "or")
+
+	return left || right
+}
+
+func (e *evaluatorVisitor) VisitUnbound(pred iceberg.UnboundPredicate) bool {
+	ref := pred.Term().(iceberg.Reference)
+	e.visited = append(e.visited, string(ref))
+
+	return e.values[string(ref)]
+}
+
+func (*evaluatorVisitor) VisitBound(iceberg.BoundPredicate) bool {
+	panic("unexpected bound predicate")
+}
+
+func TestVisitExprEvaluatorShortCircuits(t *testing.T) {
+	tests := []struct {
+		name    string
+		expr    iceberg.BooleanExpression
+		values  map[string]bool
+		result  bool
+		visited []string
+	}{
+		{
+			name: "and when left is false",
+			expr: iceberg.NewAnd(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": false, "right": true},
+			result:  false,
+			visited: []string{"left", "false"},
+		},
+		{
+			name: "or when left is true",
+			expr: iceberg.NewOr(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": true, "right": false},
+			result:  true,
+			visited: []string{"left", "true"},
+		},
+		{
+			name: "and when left is true",
+			expr: iceberg.NewAnd(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": true, "right": false},
+			result:  false,
+			visited: []string{"left", "right", "and"},
+		},
+		{
+			name: "or when left is false",
+			expr: iceberg.NewOr(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": false, "right": true},
+			result:  true,
+			visited: []string{"left", "right", "or"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			visitor := &evaluatorVisitor{values: tt.values}
+			result, err := iceberg.VisitExprEvaluator(tt.expr, visitor)
+			require.NoError(t, err)
+			assert.Equal(t, tt.result, result)
+			assert.Equal(t, tt.visited, visitor.visited)
+		})
+	}
+}
+
 func TestBindVisitorAlready(t *testing.T) {
 	bound, err := iceberg.EqualTo(iceberg.Reference("foo"), "hello").
 		Bind(tableSchemaSimple, false)

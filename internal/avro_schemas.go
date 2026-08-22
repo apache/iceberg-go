@@ -39,7 +39,7 @@ func mustSchema(n avro.SchemaNode) *avro.Schema {
 }
 
 func NullableSchema(schema *avro.Schema) *avro.Schema {
-	return mustSchema(NullableNode(schema.Root()))
+	return mustSchema(NullableNode(*schema.Root()))
 }
 
 var requiredLength = [...]int{
@@ -423,7 +423,7 @@ func newDataFileSchema(partitionType *avro.Schema, version int) (*avro.Schema, e
 	node := schema.Root()
 	node.Fields = append(slices.Clone(node.Fields), avro.SchemaField{
 		Name:  "partition",
-		Type:  partitionType.Root(),
+		Type:  *partitionType.Root(),
 		Props: map[string]any{"field-id": 102},
 	})
 
@@ -460,7 +460,7 @@ func NewManifestEntrySchema(partitionType *avro.Schema, version int) (*avro.Sche
 	node := schema.Root()
 	node.Fields = append(slices.Clone(node.Fields), avro.SchemaField{
 		Name:  "data_file",
-		Type:  dfschema.Root(),
+		Type:  *dfschema.Root(),
 		Props: map[string]any{"field-id": 2},
 	})
 

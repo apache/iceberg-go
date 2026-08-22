@@ -31,32 +31,80 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
 )
 
 // DataFiles returns the live data files in the current snapshot. Deleted
 // manifest entries are omitted, matching the data_files metadata table.
 func (i InspectTable) DataFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "data files", DataFilesSchema, false,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentData
+		})
+}
+
+// Files returns all live data and delete files in the current snapshot.
+// Deleted manifest entries are omitted.
+func (i InspectTable) Files(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "files", FilesSchema, false, nil)
+}
+
+// AllFiles returns the live data and delete files reachable from every
+// snapshot currently tracked by the table. Shared manifests are scanned once,
+// while duplicate file rows from different manifests are preserved.
+func (i InspectTable) AllFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all files", AllFilesSchema, true, nil)
+}
+
+// AllDataFiles returns the live data files reachable from every snapshot
+// currently tracked by the table.
+func (i InspectTable) AllDataFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all data files", AllDataFilesSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentData
+		})
+}
+
+// AllDeleteFiles returns the live delete files reachable from every snapshot
+// currently tracked by the table.
+func (i InspectTable) AllDeleteFiles(ctx context.Context) (array.RecordReader, error) {
+	return i.inspectFiles(ctx, "all delete files", AllDeleteFilesSchema, true,
+		func(manifest iceberg.ManifestFile) bool {
+			return manifest.ManifestContent() == iceberg.ManifestContentDeletes
+		})
+}
+
+type inspectFilesSchema func(*iceberg.StructType) *iceberg.Schema
+
+func (i InspectTable) inspectFiles(
+	ctx context.Context,
+	name string,
+	schemaFn inspectFilesSchema,
+	allSnapshots bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+) (array.RecordReader, error) {
 	partitionType, err := inspectPartitionType(i.tbl.metadata)
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
-	schema := DataFilesSchema(partitionType)
-	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	arrowSchema, err := SchemaToArrowSchema(schemaFn(partitionType), nil, true, false)
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: build arrow schema: %w", err)
+		return nil, fmt.Errorf("inspect %s: build arrow schema: %w", name, err)
 	}
 
 	appendFile := newInspectContentFileAppender(partitionType)
-	rr, err := i.manifestEntryReader(ctx, arrowSchema, true,
-		func(manifest iceberg.ManifestFile) bool {
-			return manifest.ManifestContent() == iceberg.ManifestContentData
-		},
-		func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
-			return appendFile(bldr, entry.DataFile())
-		})
+	appendEntry := func(bldr *array.RecordBuilder, entry iceberg.ManifestEntry) error {
+		return appendFile(bldr, entry.DataFile())
+	}
+	var rr array.RecordReader
+	if allSnapshots {
+		rr, err = i.allManifestEntryReader(ctx, arrowSchema, true, includeManifest, appendEntry)
+	} else {
+		rr, err = i.manifestEntryReader(ctx, arrowSchema, true, includeManifest, appendEntry)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect data files: %w", err)
+		return nil, fmt.Errorf("inspect %s: %w", name, err)
 	}
 
 	return rr, nil
@@ -91,6 +139,78 @@ func (i InspectTable) manifestEntryReader(
 		return nil, err
 	}
 
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(yield func(iceberg.ManifestFile, error) bool) {
+			for _, manifest := range manifests {
+				if !yield(manifest, nil) {
+					return
+				}
+			}
+		}), nil
+}
+
+// allManifestEntryReader scans each manifest reachable from the table's
+// tracked snapshots exactly once. Manifest paths are immutable and unique, so
+// the path is the stable identity used by Java and PyIceberg's all_* tables.
+func (i InspectTable) allManifestEntryReader(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	discardDeleted bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+) (array.RecordReader, error) {
+	snapshots := i.tbl.metadata.Snapshots()
+	if len(snapshots) == 0 {
+		return array.ReaderFromIter(arrowSchema, emptyInspectRecordBatch(i.alloc, arrowSchema)), nil
+	}
+	if i.tbl.fsF == nil {
+		return nil, errors.New("table file IO is not configured")
+	}
+
+	fs, err := i.tbl.fsF(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return i.manifestEntryReaderFromManifestSource(
+		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
+		func(yield func(iceberg.ManifestFile, error) bool) {
+			seen := make(map[string]struct{})
+			for _, snapshot := range snapshots {
+				if err := ctx.Err(); err != nil {
+					yield(nil, err)
+
+					return
+				}
+				snapshotManifests, err := snapshot.Manifests(fs)
+				if err != nil {
+					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
+
+					return
+				}
+				for _, manifest := range snapshotManifests {
+					if _, ok := seen[manifest.FilePath()]; ok {
+						continue
+					}
+					seen[manifest.FilePath()] = struct{}{}
+					if !yield(manifest, nil) {
+						return
+					}
+				}
+			}
+		}), nil
+}
+
+func (i InspectTable) manifestEntryReaderFromManifestSource(
+	ctx context.Context,
+	arrowSchema *arrow.Schema,
+	fs iceio.IO,
+	discardDeleted bool,
+	includeManifest func(iceberg.ManifestFile) bool,
+	appendEntry func(*array.RecordBuilder, iceberg.ManifestEntry) error,
+	source iter.Seq2[iceberg.ManifestFile, error],
+) array.RecordReader {
 	return array.ReaderFromIter(arrowSchema, func(yield func(arrow.RecordBatch, error) bool) {
 		bldr := array.NewRecordBuilder(i.alloc, arrowSchema)
 		defer bldr.Release()
@@ -117,7 +237,12 @@ func (i InspectTable) manifestEntryReader(
 			_ = yield(nil, err)
 		}
 
-		for _, manifest := range manifests {
+		for manifest, sourceErr := range source {
+			if sourceErr != nil {
+				yieldError(sourceErr)
+
+				return
+			}
 			if err := ctx.Err(); err != nil {
 				yieldError(err)
 
@@ -155,7 +280,7 @@ func (i InspectTable) manifestEntryReader(
 		} else if !emitted {
 			emitEmpty()
 		}
-	}), nil
+	})
 }
 
 func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.Seq2[arrow.RecordBatch, error] {
@@ -266,11 +391,31 @@ func isInspectUnknownTransform(transform iceberg.Transform) bool {
 	}
 }
 
-// DataFilesSchema returns the common content-file schema used by the data_files
-// and delete_files metadata tables. The partition field is omitted for an
-// unpartitioned table, as required by the Iceberg metadata-table spec.
+// DataFilesSchema returns the common content-file schema used by the files
+// metadata tables. The partition field is omitted for an unpartitioned table,
+// as required by the Iceberg metadata-table spec.
 func DataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
 	return iceberg.NewSchema(0, inspectContentFileFields(partitionType)...)
+}
+
+// FilesSchema returns the schema shared by the files metadata tables.
+func FilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllFilesSchema returns the schema of the all_files metadata table.
+func AllFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllDataFilesSchema returns the schema of the all_data_files metadata table.
+func AllDataFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
+}
+
+// AllDeleteFilesSchema returns the schema of the all_delete_files metadata table.
+func AllDeleteFilesSchema(partitionType *iceberg.StructType) *iceberg.Schema {
+	return DataFilesSchema(partitionType)
 }
 
 const (
@@ -345,7 +490,7 @@ func appendContentFileRecord(bldr *array.RecordBuilder, partitionType *iceberg.S
 		return err
 	}
 
-	return contentFileBuilder.append(partitionType, file)
+	return contentFileBuilder.append(file)
 }
 
 func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*array.RecordBuilder, iceberg.DataFile) error {
@@ -362,7 +507,7 @@ func newInspectContentFileAppender(partitionType *iceberg.StructType) func(*arra
 			return bindErr
 		}
 
-		return contentFileBuilder.append(partitionType, file)
+		return contentFileBuilder.append(file)
 	}
 }
 
@@ -371,7 +516,7 @@ type inspectContentFileBuilder struct {
 	filePath           *array.StringBuilder
 	fileFormat         *array.StringBuilder
 	specID             *array.Int32Builder
-	partition          *array.StructBuilder
+	partition          *inspectPartitionBuilder
 	recordCount        *array.Int64Builder
 	fileSize           *array.Int64Builder
 	columnSizes        *array.MapBuilder
@@ -390,8 +535,38 @@ type inspectContentFileBuilder struct {
 	contentSize        *array.Int64Builder
 }
 
+type inspectPartitionBuilder struct {
+	builder *array.StructBuilder
+	fields  []inspectPartitionFieldBuilder
+}
+
+type inspectPartitionFieldBuilder struct {
+	id        int
+	name      string
+	typ       iceberg.Type
+	arrowType arrow.DataType
+	builder   array.Builder
+}
+
 func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
-	lookup, err := newInspectBuilderLookup("content-file", bldr.Schema().Fields(), bldr.Field)
+	return newInspectContentFileBuilderFromFields(bldr.Schema().Fields(), bldr.Field, partitionType)
+}
+
+func newInspectContentFileStructBuilder(bldr *array.StructBuilder, partitionType *iceberg.StructType) (inspectContentFileBuilder, error) {
+	structType, ok := bldr.Type().(*arrow.StructType)
+	if !ok {
+		return inspectContentFileBuilder{}, fmt.Errorf("content-file builder has type %T, want struct", bldr.Type())
+	}
+
+	return newInspectContentFileBuilderFromFields(structType.Fields(), bldr.FieldBuilder, partitionType)
+}
+
+func newInspectContentFileBuilderFromFields(
+	fields []arrow.Field,
+	builder func(int) array.Builder,
+	partitionType *iceberg.StructType,
+) (inspectContentFileBuilder, error) {
+	lookup, err := newInspectBuilderLookup("content-file", fields, builder)
 	if err != nil {
 		return inspectContentFileBuilder{}, err
 	}
@@ -413,7 +588,11 @@ func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceb
 		return out, err
 	}
 	if partitionType != nil && len(partitionType.FieldList) > 0 {
-		if out.partition, err = inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition"); err != nil {
+		partitionBuilder, bindErr := inspectBuilderAs[*array.StructBuilder](lookup, inspectContentFieldIDPartition, "partition")
+		if bindErr != nil {
+			return out, bindErr
+		}
+		if out.partition, err = newInspectPartitionBuilder(partitionBuilder, partitionType); err != nil {
 			return out, err
 		}
 	}
@@ -469,14 +648,14 @@ func newInspectContentFileBuilder(bldr *array.RecordBuilder, partitionType *iceb
 	return out, nil
 }
 
-func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, file iceberg.DataFile) error {
+func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.content.Append(int32(file.ContentType()))
 	b.filePath.Append(file.FilePath())
 	b.fileFormat.Append(string(file.FileFormat()))
 	b.specID.Append(file.SpecID())
 
 	if b.partition != nil {
-		if err := appendInspectPartition(b.partition, partitionType, file.Partition()); err != nil {
+		if err := b.partition.append(file.Partition()); err != nil {
 			return err
 		}
 	}
@@ -519,37 +698,55 @@ func (b inspectContentFileBuilder) append(partitionType *iceberg.StructType, fil
 	return nil
 }
 
-func appendInspectPartition(builder *array.StructBuilder, partitionType *iceberg.StructType, values map[int]any) error {
+func newInspectPartitionBuilder(
+	builder *array.StructBuilder,
+	partitionType *iceberg.StructType,
+) (*inspectPartitionBuilder, error) {
 	arrowType, ok := builder.Type().(*arrow.StructType)
 	if !ok {
-		return fmt.Errorf("partition builder has type %T, want struct", builder.Type())
+		return nil, fmt.Errorf("partition builder has type %T, want struct", builder.Type())
 	}
 	lookup, err := newInspectBuilderLookup("partition", arrowType.Fields(), builder.FieldBuilder)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	expected := make(map[int]struct{}, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
 		expected[field.ID] = struct{}{}
 	}
 	if err := validateInspectBuilderLookup("partition", lookup, expected); err != nil {
-		return err
+		return nil, err
 	}
 
-	builder.Append(true)
+	fields := make([]inspectPartitionFieldBuilder, 0, len(partitionType.FieldList))
 	for _, field := range partitionType.FieldList {
-		value := values[field.ID]
 		fieldBuilder := lookup[field.ID]
+		fields = append(fields, inspectPartitionFieldBuilder{
+			id:        field.ID,
+			name:      field.Name,
+			typ:       field.Type,
+			arrowType: fieldBuilder.Type(),
+			builder:   fieldBuilder,
+		})
+	}
+
+	return &inspectPartitionBuilder{builder: builder, fields: fields}, nil
+}
+
+func (b *inspectPartitionBuilder) append(values map[int]any) error {
+	b.builder.Append(true)
+	for _, field := range b.fields {
+		value := values[field.id]
 		if value == nil {
-			fieldBuilder.AppendNull()
+			field.builder.AppendNull()
 
 			continue
 		}
-		sc, err := inspectValueScalar(value, field.Type, fieldBuilder.Type())
+		sc, err := inspectValueScalar(value, field.typ, field.arrowType)
 		if err != nil {
-			return fmt.Errorf("partition field %q: %w", field.Name, err)
+			return fmt.Errorf("partition field %q: %w", field.name, err)
 		}
-		if err := scalar.Append(fieldBuilder, sc); err != nil {
+		if err := scalar.Append(field.builder, sc); err != nil {
 			return err
 		}
 	}

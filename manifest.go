@@ -469,7 +469,7 @@ func getFieldIDMap(sc *avro.Schema) dataFileFieldMaps {
 	decimalScales := make(map[int]int)
 	unknownFieldIDs := make(map[int]struct{})
 
-	entryField := getField(root, "data_file")
+	entryField := getField(*root, "data_file")
 	partitionField := getField(entryField.Type, "partition")
 
 	for _, field := range partitionField.Type.Fields {
@@ -1013,6 +1013,8 @@ func schemaFieldID(f avro.SchemaField) (int, bool) {
 	switch v := f.Props["field-id"].(type) {
 	case int:
 		return v, true
+	case int64:
+		return int(v), true
 	case float64:
 		return int(v), true
 	}
@@ -1266,6 +1268,9 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	}
 
 	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
+	if data, ok := any(actualVal).([]byte); ok {
+		actualVal = any(slices.Clone(data)).(T)
+	}
 
 	switch f := any(actualVal).(type) {
 	case float32:
@@ -1298,36 +1303,47 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	return nil
 }
 
-func constructPartitionSummaries(spec PartitionSpec, schema *Schema, partitions []map[int]any) ([]FieldSummary, error) {
-	partType := spec.PartitionType(schema)
-	fieldStats := make([]fieldStats, len(partType.FieldList))
+type partitionSummaryStats struct {
+	fields []NestedField
+	stats  []fieldStats
+}
+
+func newPartitionSummaryStats(spec PartitionSpec, schema *Schema) (*partitionSummaryStats, error) {
+	fields := spec.PartitionType(schema).FieldList
+	stats := make([]fieldStats, len(fields))
 	var err error
-	for i, field := range partType.FieldList {
+	for i, field := range fields {
 		pt, ok := field.Type.(PrimitiveType)
 		if !ok {
 			return nil, fmt.Errorf("expected primitive type for partition field, got %s", field.Type)
 		}
 
-		fieldStats[i], err = newPartitionFieldStat(pt)
+		stats[i], err = newPartitionFieldStat(pt)
 		if err != nil {
 			return nil, fmt.Errorf("error constructing field stats for partition %d: %s: %s", i, field.Name, err)
 		}
 	}
 
-	for _, part := range partitions {
-		for i, field := range partType.FieldList {
-			if err := fieldStats[i].update(part[field.ID]); err != nil {
-				return nil, fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
-			}
+	return &partitionSummaryStats{fields: fields, stats: stats}, nil
+}
+
+func (p *partitionSummaryStats) update(partition map[int]any) error {
+	for i, field := range p.fields {
+		if err := p.stats[i].update(partition[field.ID]); err != nil {
+			return fmt.Errorf("error updating field stats for partition %d: %s: %s", i, field.Name, err)
 		}
 	}
 
-	summaries := make([]FieldSummary, len(fieldStats))
-	for i, stat := range fieldStats {
+	return nil
+}
+
+func (p *partitionSummaryStats) summaries() []FieldSummary {
+	summaries := make([]FieldSummary, len(p.stats))
+	for i, stat := range p.stats {
 		summaries[i] = stat.toSummary()
 	}
 
-	return summaries, nil
+	return summaries
 }
 
 type ManifestWriter struct {
@@ -1353,9 +1369,10 @@ type ManifestWriter struct {
 	deletedFiles  int32
 	deletedRows   int64
 
-	partitions  []map[int]any
-	minSeqNum   int64
-	reusedEntry manifestEntry
+	partitionStats    *partitionSummaryStats
+	partitionStatsErr error
+	minSeqNum         int64
+	reusedEntry       manifestEntry
 }
 
 type ManifestWriterOption func(w *ManifestWriter)
@@ -1391,18 +1408,20 @@ func NewManifestWriter(version int, out io.Writer, spec PartitionSpec, schema *S
 	}
 
 	fieldMaps := getFieldIDMap(fileSchema)
+	partitionStats, partitionStatsErr := newPartitionSummaryStats(spec, schema)
 
 	w := &ManifestWriter{
-		impl:          impl,
-		version:       version,
-		output:        out,
-		spec:          spec,
-		content:       ManifestContentData,
-		schema:        schema,
-		partFieldMaps: fieldMaps,
-		snapshotID:    snapshotID,
-		minSeqNum:     -1,
-		partitions:    make([]map[int]any, 0),
+		impl:              impl,
+		version:           version,
+		output:            out,
+		spec:              spec,
+		content:           ManifestContentData,
+		schema:            schema,
+		partFieldMaps:     fieldMaps,
+		snapshotID:        snapshotID,
+		partitionStats:    partitionStats,
+		partitionStatsErr: partitionStatsErr,
+		minSeqNum:         -1,
 	}
 
 	for _, apply := range opts {
@@ -1457,8 +1476,10 @@ func (w *ManifestWriter) Close() error {
 
 type ManifestFileOption func(mf *manifestFile)
 
-// WithManifestFileContent overrides the ManifestContent of a new manifest file with the provided value
-// Default: ManifestContentData
+// WithManifestFileContent sets the ManifestContent of a new manifest file.
+// The default is the content the ManifestWriter was created with, so this is
+// only needed to state that content explicitly. Passing a value that disagrees
+// with the writer makes ToManifestFile fail.
 func WithManifestFileContent(content ManifestContent) ManifestFileOption {
 	return func(mf *manifestFile) {
 		mf.Content = content
@@ -1470,17 +1491,17 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 		return nil, err
 	}
 
-	partitions, err := constructPartitionSummaries(w.spec, w.schema, w.partitions)
-	if err != nil {
-		return nil, err
+	if w.partitionStatsErr != nil {
+		return nil, w.partitionStatsErr
 	}
+	partitions := w.partitionStats.summaries()
 
 	mf := manifestFile{
 		version:            w.version,
 		Path:               location,
 		Len:                length,
 		SpecID:             int32(w.spec.id),
-		Content:            ManifestContentData,
+		Content:            w.content,
 		SeqNumber:          -1,
 		MinSeqNumber:       w.minSeqNum,
 		AddedSnapshotID:    w.snapshotID,
@@ -1495,6 +1516,13 @@ func (w *ManifestWriter) ToManifestFile(location string, length int64, opts ...M
 	}
 	for _, apply := range opts {
 		apply(&mf)
+	}
+
+	// The writer already stamped w.content into the manifest's own avro metadata,
+	// so a different content here would contradict the file it describes.
+	if mf.Content != w.content {
+		return nil, fmt.Errorf("%w: manifest file content '%s' does not match writer content '%s'",
+			ErrInvalidArgument, mf.Content, w.content)
 	}
 
 	if mf.Content == ManifestContentDeletes && mf.FirstRowIDValue != nil {
@@ -1568,7 +1596,6 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	if err := w.writer.Encode(toEncode); err != nil {
 		return err
 	}
-	w.partitions = append(w.partitions, clonePartitionMap(partition))
 
 	switch status {
 	case EntryStatusADDED:
@@ -1580,6 +1607,10 @@ func (w *ManifestWriter) addEntry(entry *manifestEntry) error {
 	case EntryStatusDELETED:
 		w.deletedFiles++
 		w.deletedRows += count
+	}
+
+	if w.partitionStatsErr == nil {
+		w.partitionStatsErr = w.partitionStats.update(partition)
 	}
 
 	if status == EntryStatusADDED || status == EntryStatusEXISTING {

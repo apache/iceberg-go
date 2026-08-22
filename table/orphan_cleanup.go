@@ -23,8 +23,10 @@ import (
 	"fmt"
 	stdfs "io/fs"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -34,6 +36,7 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
+	"github.com/apache/iceberg-go/internal/fileuri"
 	iceio "github.com/apache/iceberg-go/io"
 	"golang.org/x/sync/errgroup"
 )
@@ -150,9 +153,7 @@ func WithEqualSchemes(schemes map[string]string) OrphanCleanupOption {
 		if cfg.equalSchemes == nil {
 			cfg.equalSchemes = make(map[string]string)
 		}
-		for k, v := range schemes {
-			cfg.equalSchemes[k] = v
-		}
+		maps.Copy(cfg.equalSchemes, schemes)
 	}
 }
 
@@ -165,10 +166,48 @@ func WithEqualAuthorities(authorities map[string]string) OrphanCleanupOption {
 		if cfg.equalAuthorities == nil {
 			cfg.equalAuthorities = make(map[string]string)
 		}
-		for k, v := range authorities {
-			cfg.equalAuthorities[k] = v
+		maps.Copy(cfg.equalAuthorities, authorities)
+	}
+}
+
+// flattenURIEquivalences expands comma-separated URI equivalence groups into
+// direct lookups. This intentionally differs from Java's flattenMap (lines
+// 392-403), which uses input iteration order for conflicts. Go map iteration is
+// unordered, so groups are processed in sorted order and the lexicographically
+// last overlapping group wins. Exact mappings are overlaid afterward so they
+// retain precedence over groups.
+// https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L392-L403
+func flattenURIEquivalences(equivalences map[string]string) map[string]string {
+	if len(equivalences) == 0 {
+		return nil
+	}
+
+	groups := make([]string, 0, len(equivalences))
+	for group := range equivalences {
+		groups = append(groups, group)
+	}
+	slices.Sort(groups)
+
+	flattened := make(map[string]string, len(equivalences))
+	for _, group := range groups {
+		if !strings.Contains(group, ",") {
+			continue
+		}
+
+		for _, value := range strings.Split(group, ",") {
+			flattened[strings.TrimSpace(value)] = equivalences[group]
 		}
 	}
+
+	for _, group := range groups {
+		// Group declarations are configuration syntax, not URI lookup keys.
+		if strings.Contains(group, ",") {
+			continue
+		}
+		flattened[group] = equivalences[group]
+	}
+
+	return flattened
 }
 
 type OrphanCleanupResult struct {
@@ -250,6 +289,9 @@ func newOrphanCleanupConfigWithMode(executingPlan bool, opts ...OrphanCleanupOpt
 	for _, opt := range opts {
 		opt(cfg)
 	}
+
+	cfg.equalSchemes = flattenURIEquivalences(cfg.equalSchemes)
+	cfg.equalAuthorities = flattenURIEquivalences(cfg.equalAuthorities)
 
 	return cfg
 }
@@ -422,33 +464,37 @@ func (t Table) executeOrphanCleanup(ctx context.Context, plan OrphanCleanupPlan,
 // otherwise grow as O(snapshots × manifests-per-snapshot).
 //
 // If the table has snapshots, fs must not be nil, otherwise an error is returned.
-// All returned paths are normalized using the package-level normalizeFilePath function.
-// The bool value distinguishes data files (true) from metadata files (false), which
-// is used by PurgeFiles to respect gc.enabled.
+// Paths retain their original spelling so consumers can derive every applicable
+// comparison identity before normalization discards information. The bool value
+// distinguishes data files (true) from metadata files (false), which is used by
+// PurgeFiles to respect gc.enabled.
 func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurrency int, discardDeleted bool) (map[string]bool, error) {
 	referenced := make(map[string]bool)
 	metadata := t.metadata
 
 	for entry := range metadata.PreviousFiles() {
-		referenced[normalizeFilePath(entry.MetadataFile)] = false
+		referenced[entry.MetadataFile] = false
 	}
-	referenced[normalizeFilePath(t.metadataLocation)] = false
+	referenced[t.metadataLocation] = false
 
 	// Add version hint file (for Hadoop-style tables)
 	// Following Java's ReachableFileUtil.versionHintLocation() logic:
-	versionHintPath := versionHintLocation(metadata.Location())
-	referenced[normalizeFilePath(versionHintPath)] = false
+	versionHintPath, err := versionHintLocation(metadata.Location())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build version hint path: %w", err)
+	}
+	referenced[versionHintPath] = false
 
 	for sf := range metadata.Statistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if sf.StatisticsPath != "" {
-			referenced[normalizeFilePath(sf.StatisticsPath)] = false
+			referenced[sf.StatisticsPath] = false
 		}
 	}
 	for psf := range metadata.PartitionStatistics() {
 		// Guard against malformed metadata; statistics-path is required per spec.
 		if psf.StatisticsPath != "" {
-			referenced[normalizeFilePath(psf.StatisticsPath)] = false
+			referenced[psf.StatisticsPath] = false
 		}
 	}
 
@@ -460,7 +506,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 	uniqueManifests := make(map[string]iceberg.ManifestFile)
 	for _, snapshot := range metadata.Snapshots() {
 		if snapshot.ManifestList != "" {
-			referenced[normalizeFilePath(snapshot.ManifestList)] = false
+			referenced[snapshot.ManifestList] = false
 		}
 
 		manifestFiles, err := snapshot.Manifests(fs)
@@ -472,7 +518,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 			path := manifest.FilePath()
 			if _, ok := uniqueManifests[path]; !ok {
 				uniqueManifests[path] = manifest
-				referenced[normalizeFilePath(path)] = false
+				referenced[path] = false
 			}
 		}
 	}
@@ -508,7 +554,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 				// All files tracked within a manifest (data files, equality deletes, position deletes)
 				// are considered "data files" for the purposes of gc.enabled.
 				entries = append(entries, refEntry{
-					path:   normalizeFilePath(entry.DataFile().FilePath()),
+					path:   entry.DataFile().FilePath(),
 					isData: true,
 				})
 				if ref := iceberginternal.BorrowedDataFileReferencedDataFile(entry.DataFile()); ref != nil {
@@ -516,7 +562,7 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 					// Its FilePath() is the deletion vector (.dv) file itself (added above).
 					// We must also mark the referenced data file as referenced.
 					entries = append(entries, refEntry{
-						path:   normalizeFilePath(*ref),
+						path:   *ref,
 						isData: true,
 					})
 				}
@@ -568,7 +614,8 @@ func isFileOrphan(
 	referencedIndex referencedFileIndex,
 	cfg *orphanCleanupConfig,
 ) (bool, error) {
-	normalizedFile := normalizeFilePathWithConfig(file, cfg)
+	normalizedFiles := normalizedFilePathAliases(file, cfg)
+	normalizedFile := normalizedFiles[0]
 
 	// Any presence in referencedFiles means referenced;
 	// the bool distinguishes data vs metadata for gc.enabled, not membership"
@@ -579,8 +626,10 @@ func isFileOrphan(
 		return false, nil
 	}
 
-	if _, exists := referencedIndex.normalized[normalizedFile]; exists {
-		return false, nil
+	for _, candidate := range normalizedFiles {
+		if _, exists := referencedIndex.normalized[candidate]; exists {
+			return false, nil
+		}
 	}
 
 	references := referencedIndex.byPath[filePathKey(normalizedFile)]
@@ -592,6 +641,11 @@ func isFileOrphan(
 		decision, err := checkPrefixMismatch(referencedPath, file, cfg)
 		if err != nil {
 			return false, err
+		}
+		if decision == prefixMatch {
+			// Matching prefixes with different normalized URLs are distinct
+			// object keys, for example key%2Fpart and key/part.
+			continue
 		}
 		if decision == prefixMismatchKeep {
 			return false, nil
@@ -607,10 +661,12 @@ func newReferencedFileIndex(referencedFiles map[string]bool, cfg *orphanCleanupC
 		byPath:     make(map[string][]string, len(referencedFiles)),
 	}
 	for referencedPath := range referencedFiles {
-		normalizedPath := normalizeFilePathWithConfig(referencedPath, cfg)
-		index.normalized[normalizedPath] = struct{}{}
+		normalizedPaths := normalizedFilePathAliases(referencedPath, cfg)
+		for _, normalizedPath := range normalizedPaths {
+			index.normalized[normalizedPath] = struct{}{}
+		}
 		index.normalized[referencedPath] = struct{}{}
-		pathKey := filePathKey(normalizedPath)
+		pathKey := filePathKey(normalizedPaths[0])
 		index.byPath[pathKey] = append(index.byPath[pathKey], referencedPath)
 	}
 	for pathKey := range index.byPath {
@@ -679,7 +735,7 @@ func deleteFilesParallel(fs iceio.IO, orphanFiles []string, cfg *orphanCleanupCo
 
 	var wg sync.WaitGroup
 	wg.Add(cfg.maxConcurrency)
-	for i := 0; i < cfg.maxConcurrency; i++ {
+	for i := range cfg.maxConcurrency {
 		go func(workerID int) {
 			defer wg.Done()
 			for file := range in {
@@ -738,20 +794,24 @@ func normalizeFilePath(path string) string {
 }
 
 func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
-	if strings.HasPrefix(path, "file:") {
-		if u, err := url.Parse(path); err == nil {
-			host := strings.ToLower(u.Host)
-			if host == "" || host == "localhost" {
-				pathStr := u.Path
-				// Intercept Windows drive letters (e.g., /C:/) and strip the leading slash
-				if len(pathStr) >= 3 && pathStr[0] == '/' && pathStr[2] == ':' {
-					pathStr = pathStr[1:]
-				}
+	normalizedSeparators := strings.ReplaceAll(path, "\\", "/")
+	// Native Windows volumes take precedence over URI parsing, matching LocalFS.
+	// A path such as C://warehouse is drive-shaped even though it contains ://.
+	if fileuri.HasWindowsDrivePrefix(normalizedSeparators) {
+		return normalizeNonURLPath(path)
+	}
 
-				return filepath.Clean(pathStr)
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		if fileURI, err := fileuri.Parse(path); err == nil {
+			host := strings.ToLower(fileURI.Host())
+			if host == "" || host == "localhost" {
+				return normalizeNonURLPath(fileURI.LocalPathForOS())
+			}
+			if fileuri.IsWindowsDriveHost(fileURI.Host()) {
+				return normalizeNonURLPath(fileURI.LocalPath(true))
 			}
 			// Remote authority – keep it as //host/path
-			return filepath.Clean("//" + u.Host + u.Path)
+			return normalizeNonURLPath("//" + fileURI.Host() + fileURI.LocalPath(false))
 		}
 	}
 
@@ -763,14 +823,95 @@ func normalizeFilePathWithConfig(path string, cfg *orphanCleanupConfig) string {
 	return normalizeNonURLPath(path)
 }
 
-func versionHintLocation(tableLocation string) string {
-	if strings.Contains(tableLocation, "://") || strings.HasPrefix(tableLocation, "file:") {
-		if joined, err := url.JoinPath(tableLocation, "metadata", "version-hint.text"); err == nil {
-			return joined
+func normalizedFilePathAliases(path string, cfg *orphanCleanupConfig) []string {
+	normalized := normalizeFilePathWithConfig(path, cfg)
+	aliases := []string{normalized}
+	appendAlias := func(alias string) {
+		if !slices.Contains(aliases, alias) {
+			aliases = append(aliases, alias)
 		}
 	}
 
-	return filepath.Join(tableLocation, "metadata", "version-hint.text")
+	appendWindowsAliases := func(windowsPath string, collapseUNC bool) {
+		appendAlias(windowsPath)
+		appendAlias(strings.ToLower(windowsPath))
+		if collapseUNC {
+			collapsed := pathpkg.Clean(windowsPath)
+			appendAlias(collapsed)
+			appendAlias(strings.ToLower(collapsed))
+		}
+	}
+
+	// Local file URIs use the same host interpretation as LocalFS. A portable
+	// Windows interpretation is retained only as a conservative comparison
+	// alias when it differs from the native path.
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		if fileURI, err := fileuri.Parse(path); err == nil {
+			host := strings.ToLower(fileURI.Host())
+			if host == "" || host == "localhost" {
+				appendWindowsAliases(normalizeNonURLPath(fileURI.LocalPath(true)), false)
+
+				return aliases
+			}
+		}
+	}
+
+	// A path originally written as //server/share is ambiguous on non-Windows:
+	// derive its POSIX and UNC identities independently before either cleaner
+	// can discard dot segments or separator evidence. filepath.WalkDir may also
+	// collapse the UNC identity's leading // for child paths.
+	if runtime.GOOS != "windows" && isForwardSlashUNCPath(path) {
+		posixPath := pathpkg.Clean(path)
+		aliases = []string{posixPath}
+		appendWindowsAliases(normalizeNonURLPath(path), true)
+
+		return aliases
+	}
+
+	if isWindowsLocalPath(normalized) {
+		appendWindowsAliases(normalized, false)
+	}
+
+	return aliases
+}
+
+func isForwardSlashUNCPath(path string) bool {
+	if strings.Contains(path, `\`) {
+		return false
+	}
+
+	volume, _, rooted := splitPortableVolume(path)
+
+	return rooted && strings.HasPrefix(volume, "//")
+}
+
+func versionHintLocation(tableLocation string) (string, error) {
+	if strings.HasPrefix(strings.ToLower(tableLocation), "file:") {
+		fileURI, err := fileuri.Parse(tableLocation)
+		if err != nil {
+			return "", err
+		}
+
+		return fileURI.JoinPath("metadata", "version-hint.text"), nil
+	}
+
+	if strings.Contains(tableLocation, "://") {
+		if _, ok := splitURLPath(tableLocation); !ok {
+			return "", fmt.Errorf("invalid table location: %s", tableLocation)
+		}
+
+		// Remote object keys are opaque. Append the suffix without URL or path
+		// joining, which would escape characters or clean duplicate slashes and
+		// dot segments that may be meaningful parts of the key.
+		separator := "/"
+		if strings.HasSuffix(tableLocation, separator) {
+			separator = ""
+		}
+
+		return tableLocation + separator + "metadata/version-hint.text", nil
+	}
+
+	return filepath.Join(tableLocation, "metadata", "version-hint.text"), nil
 }
 
 // normalizeURLPath normalizes URL-based file paths with scheme/authority equivalence.
@@ -789,8 +930,8 @@ func versionHintLocation(tableLocation string) string {
 // Based on Apache Iceberg Java's DeleteOrphanFilesSparkAction.toFileURI() normalization (lines 542-548).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
-	parsedURL, err := url.Parse(path)
-	if err != nil {
+	parts, ok := splitURLPath(path)
+	if !ok {
 		return normalizeNonURLPath(path)
 	}
 
@@ -801,44 +942,177 @@ func normalizeURLPath(path string, cfg *orphanCleanupConfig) string {
 		equalAuthorities = cfg.equalAuthorities
 	}
 
-	normalizedScheme := applySchemeEquivalence(parsedURL.Scheme, equalSchemes)
-	normalizedAuthority := applyAuthorityEquivalence(parsedURL.Host, equalAuthorities)
-	normalizedURL := &url.URL{
-		Scheme: normalizedScheme,
-		Host:   normalizedAuthority,
-		Path:   filepath.Clean(parsedURL.Path),
+	normalizedScheme := applySchemeEquivalence(parts.scheme, equalSchemes)
+	normalizedAuthority := applyAuthorityEquivalence(parts.rawAuthority, equalAuthorities)
+
+	// Object-store paths are opaque keys. Keep their spelling exactly as
+	// supplied: escaped separators, duplicate slashes, dot segments, queries,
+	// and fragments can all be meaningful parts of a key. Only the explicitly
+	// configured scheme and authority equivalences are normalized here.
+	//
+	// This intentionally differs from iceberg-java's Hadoop Path-based
+	// normalization, which resolves dot segments. The Go object-store FileIO
+	// preserves raw keys, so resolving them here would conflate distinct files.
+	return normalizedScheme + "://" + normalizedAuthority + parts.rawSuffix
+}
+
+type urlPathParts struct {
+	scheme       string
+	rawAuthority string
+	rawSuffix    string
+}
+
+// splitURLPath parses only a URL's scheme and authority. The remaining suffix
+// is returned unchanged because object-store FileIO implementations treat it as
+// an opaque object key, including invalid URL escapes such as %zz.
+func splitURLPath(path string) (urlPathParts, bool) {
+	schemeEnd := strings.Index(path, "://")
+	if schemeEnd <= 0 {
+		return urlPathParts{}, false
 	}
 
-	return normalizedURL.String()
+	remainder := path[schemeEnd+3:]
+	authorityEnd := strings.IndexAny(remainder, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(remainder)
+	}
+	rawAuthority := remainder[:authorityEnd]
+
+	parsedPrefix, err := url.Parse(path[:schemeEnd+3+authorityEnd])
+	if err != nil || parsedPrefix.Scheme == "" {
+		return urlPathParts{}, false
+	}
+
+	return urlPathParts{
+		scheme:       parsedPrefix.Scheme,
+		rawAuthority: rawAuthority,
+		rawSuffix:    remainder[authorityEnd:],
+	}, true
 }
 
 // normalizeNonURLPath provides basic path normalization for non-URL paths.
 //
 // Handles file system paths by:
-// 1. Applying filepath.Clean() to resolve "..", ".", and redundant separators
-// 2. Converting Windows-style backslashes to forward slashes for consistency
+// 1. Converting Windows-style backslashes to forward slashes for consistency
+// 2. Applying slash-based path cleaning to resolve "..", ".", and redundant separators
 //
 // This ensures that paths like "dir/./file", "dir//file", and "dir\file" (on Windows)
 // all normalize to "dir/file" for consistent comparison.
-//
-// Uses filepath.ToSlash() equivalent logic to match Go's standard library approach.
 func normalizeNonURLPath(path string) string {
-	normalized := filepath.Clean(path)
-	// We use this because to handle Windows paths
-	// on all platforms.filepath.ToSlash() only convert the current OS separator, and
-	// we need cross-platform support.
-	return strings.ReplaceAll(normalized, "\\", "/")
+	normalized := strings.ReplaceAll(path, "\\", "/")
+	volume, remainder, rooted := splitPortableVolume(normalized)
+	if volume == "" {
+		return normalizeWindowsLocalPathCase(pathpkg.Clean(normalized))
+	}
+	if remainder == "" {
+		if rooted && isWindowsDriveVolume(volume) {
+			return normalizeWindowsLocalPathCase(volume + "/")
+		}
+
+		return normalizeWindowsLocalPathCase(volume)
+	}
+
+	if rooted {
+		cleaned := pathpkg.Clean("/" + remainder)
+		cleaned = strings.TrimPrefix(cleaned, "/")
+		if cleaned == "" {
+			if isWindowsDriveVolume(volume) {
+				return normalizeWindowsLocalPathCase(volume + "/")
+			}
+
+			return normalizeWindowsLocalPathCase(volume)
+		}
+
+		return normalizeWindowsLocalPathCase(volume + "/" + cleaned)
+	}
+
+	return normalizeWindowsLocalPathCase(volume + pathpkg.Clean(remainder))
+}
+
+func normalizeWindowsLocalPathCase(path string) string {
+	if !isWindowsLocalPath(path) {
+		return path
+	}
+
+	// A slash-normalized UNC path can also name a case-sensitive POSIX path.
+	// Keep its exact spelling on non-Windows hosts; comparison aliases provide
+	// conservative Windows case folding without losing the POSIX identity.
+	volume, _, rooted := splitPortableVolume(path)
+	if runtime.GOOS != "windows" && rooted && strings.HasPrefix(volume, "//") {
+		return path
+	}
+
+	return strings.ToLower(path)
+}
+
+func isWindowsLocalPath(path string) bool {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		return true
+	}
+
+	volume, _, rooted := splitPortableVolume(path)
+
+	return rooted && strings.HasPrefix(volume, "//")
+}
+
+func splitPortableVolume(path string) (volume, remainder string, rooted bool) {
+	if len(path) >= 2 && isDriveLetter(path[0]) && path[1] == ':' {
+		if len(path) >= 3 && path[2] == '/' {
+			return path[:2], path[3:], true
+		}
+
+		return path[:2], path[2:], false
+	}
+
+	if !strings.HasPrefix(path, "//") {
+		return "", path, false
+	}
+
+	unc := strings.TrimPrefix(path, "//")
+	serverEnd := strings.IndexByte(unc, '/')
+	if serverEnd <= 0 || serverEnd+1 >= len(unc) {
+		return "", path, false
+	}
+
+	shareStart := serverEnd + 1
+	shareEnd := strings.IndexByte(unc[shareStart:], '/')
+	if shareEnd < 0 {
+		return "//" + unc, "", true
+	}
+	if shareEnd == 0 {
+		return "", path, false
+	}
+
+	shareEnd += shareStart
+
+	return "//" + unc[:shareEnd], unc[shareEnd+1:], true
+}
+
+func isDriveLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isWindowsDriveVolume(volume string) bool {
+	return len(volume) == 2 && isDriveLetter(volume[0]) && volume[1] == ':'
 }
 
 // filePathKey returns the path component used to compare listed files with
 // references before applying scheme and authority mismatch policy.
 func filePathKey(file string) string {
-	// A bare Windows path such as C:/data/file.parquet is parsed as a URL
-	// with scheme "c". Only parse URL-shaped values here so drive letters
-	// remain part of the comparison key.
-	if strings.Contains(file, "://") || strings.HasPrefix(strings.ToLower(file), "file:") {
-		if parsedURL, err := url.Parse(file); err == nil {
-			return normalizeNonURLPath(parsedURL.Path)
+	// Local file URIs use decoded path semantics. Handle them separately so
+	// remote object-store suffixes can retain their raw spelling below.
+	if strings.HasPrefix(strings.ToLower(file), "file:") {
+		if _, err := fileuri.Parse(file); err == nil {
+			return normalizeFilePath(file)
+		}
+	}
+
+	if strings.Contains(file, "://") {
+		if parts, ok := splitURLPath(file); ok {
+			// Prefix-mismatch policy applies only when the object key itself is
+			// identical. Keep the raw suffix so escaped separators, duplicate
+			// slashes, and dot segments remain distinct object keys.
+			return parts.rawSuffix
 		}
 	}
 
@@ -855,22 +1129,8 @@ func filePathKey(file string) string {
 // Based on Apache Iceberg Java's flattenMap() (lines 392-403) and EQUAL_SCHEMES_DEFAULT (line 102).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applySchemeEquivalence(scheme string, equalSchemes map[string]string) string {
-	if equalSchemes == nil {
-		return scheme
-	}
 	if canonical, exists := equalSchemes[scheme]; exists {
 		return canonical
-	}
-
-	// Check comma-separated lists (e.g., "s3,s3a,s3n" -> "s3")
-	for schemes, canonical := range equalSchemes {
-		if strings.Contains(schemes, ",") {
-			for _, s := range strings.Split(schemes, ",") {
-				if strings.TrimSpace(s) == scheme {
-					return canonical
-				}
-			}
-		}
 	}
 
 	return scheme
@@ -891,21 +1151,17 @@ func applySchemeEquivalence(scheme string, equalSchemes map[string]string) strin
 // Based on Apache Iceberg Java's equalAuthorities logic (lines 546, 161-165, 392-403).
 // https://github.com/apache/iceberg/blob/07c088fce9c54369864dcb6da16006e78206048b/spark/v3.5/spark/src/main/java/org/apache/iceberg/spark/actions/DeleteOrphanFilesSparkAction.java#L1
 func applyAuthorityEquivalence(authority string, equalAuthorities map[string]string) string {
-	if equalAuthorities == nil {
-		return authority
-	}
-
 	if canonical, exists := equalAuthorities[authority]; exists {
 		return canonical
 	}
 
-	for authorities, canonical := range equalAuthorities {
-		if strings.Contains(authorities, ",") {
-			for _, a := range strings.Split(authorities, ",") {
-				if strings.TrimSpace(a) == authority {
-					return canonical
-				}
-			}
+	// ADLS authorities use container@host. Preserve the container while still
+	// allowing endpoint-only equivalence mappings to normalize the host.
+	if userInfoEnd := strings.LastIndexByte(authority, '@'); userInfoEnd >= 0 {
+		host := authority[userInfoEnd+1:]
+		normalizedHost := applyAuthorityEquivalence(host, equalAuthorities)
+		if normalizedHost != host {
+			return authority[:userInfoEnd+1] + normalizedHost
 		}
 	}
 
@@ -915,31 +1171,30 @@ func applyAuthorityEquivalence(authority string, equalAuthorities map[string]str
 type prefixMismatchDecision int
 
 const (
-	prefixMismatchKeep prefixMismatchDecision = iota
+	prefixMatch prefixMismatchDecision = iota
+	prefixMismatchKeep
 	prefixMismatchDeleteCandidate
 )
 
 // checkPrefixMismatch decides how to handle prefix mismatches between referenced files and filesystem files.
 func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanCleanupConfig) (prefixMismatchDecision, error) {
-	// Parse both paths as URLs to compare schemes and authorities
-	refURL, refErr := url.Parse(referencedPath)
-	fsURL, fsErr := url.Parse(filesystemPath)
-
-	if refErr != nil || fsErr != nil {
+	refScheme, refAuth, refOK := pathPrefix(referencedPath)
+	fsScheme, fsAuth, fsOK := pathPrefix(filesystemPath)
+	if !refOK || !fsOK {
 		return prefixMismatchKeep, nil
 	}
 
-	refScheme := applySchemeEquivalence(refURL.Scheme, cfg.equalSchemes)
-	fsScheme := applySchemeEquivalence(fsURL.Scheme, cfg.equalSchemes)
-	refAuth := applyAuthorityEquivalence(refURL.Host, cfg.equalAuthorities)
-	fsAuth := applyAuthorityEquivalence(fsURL.Host, cfg.equalAuthorities)
+	refScheme = applySchemeEquivalence(refScheme, cfg.equalSchemes)
+	fsScheme = applySchemeEquivalence(fsScheme, cfg.equalSchemes)
+	refAuth = applyAuthorityEquivalence(refAuth, cfg.equalAuthorities)
+	fsAuth = applyAuthorityEquivalence(fsAuth, cfg.equalAuthorities)
 
 	// Check for mismatches
 	schemeMismatch := refScheme != fsScheme
 	authMismatch := refAuth != fsAuth
 
 	if !schemeMismatch && !authMismatch {
-		return prefixMismatchKeep, nil
+		return prefixMatch, nil
 	}
 
 	switch cfg.prefixMismatchMode {
@@ -953,6 +1208,24 @@ func checkPrefixMismatch(referencedPath, filesystemPath string, cfg *orphanClean
 	default:
 		return prefixMismatchKeep, fmt.Errorf("unknown prefix mismatch mode: %d", cfg.prefixMismatchMode)
 	}
+}
+
+func pathPrefix(path string) (scheme, authority string, ok bool) {
+	if strings.Contains(path, "://") {
+		parts, ok := splitURLPath(path)
+		if !ok {
+			return "", "", false
+		}
+
+		return parts.scheme, parts.rawAuthority, true
+	}
+
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return "", "", false
+	}
+
+	return parsed.Scheme, parsed.Host, true
 }
 
 // PurgeFiles physically deletes all files under the table's warehouse location
@@ -993,7 +1266,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 					return err
 				}
 				if !d.IsDir() {
-					fileSet[normalizeFilePath(path)] = path
+					fileSet[normalizedFilePathAliases(path, nil)[0]] = path
 				}
 
 				return nil
@@ -1017,7 +1290,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 			continue
 		}
 
-		norm := normalizeFilePath(path)
+		norm := normalizedFilePathAliases(path, nil)[0]
 		if _, ok := fileSet[norm]; !ok {
 			fileSet[norm] = path
 		}

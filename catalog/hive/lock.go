@@ -99,7 +99,7 @@ func acquireLocks(ctx context.Context, client HiveClient, identifiers []tableLoc
 	}()
 
 	// If not acquired immediately, wait and retry
-	for attempt := 0; attempt < opts.LockRetries; attempt++ {
+	for attempt := range opts.LockRetries {
 		// Wait before checking again
 		waitTime := applyJitter(
 			calculateBackoff(attempt, opts.LockMinWaitTime, opts.LockMaxWaitTime),
@@ -163,7 +163,7 @@ func calculateBackoff(attempt int, minWait, maxWait time.Duration) time.Duration
 	// (MetastoreLock uses scaleFactor 1.5 for checkLock retries; the lock-create
 	// path still uses 2.0, and is not mirrored here.)
 	wait := float64(minWait)
-	for i := 0; i < attempt; i++ {
+	for range attempt {
 		next := wait * lockCheckBackoffScale
 		// next <= wait catches +Inf / non-advancing overflow on extreme inputs.
 		if next >= float64(maxWait) || next <= wait {
@@ -213,10 +213,7 @@ func applyJitter(d, minWait, maxWait time.Duration) time.Duration {
 	}
 
 	// Add up to another full interval, without exceeding the configured maximum.
-	extra := d
-	if headroom < extra {
-		extra = headroom
-	}
+	extra := min(headroom, d)
 	if extra > 0 {
 		return d + time.Duration(rand.Int64N(int64(extra)+1))
 	}

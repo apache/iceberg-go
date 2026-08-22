@@ -93,7 +93,7 @@ func runBenchmark(b *testing.B, icebergSchema *iceberg.Schema, arrSchema *arrow.
 			b.ReportAllocs()
 
 			totalRecords := int64(0)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				reader, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{testBatch})
 				if err != nil {
 					b.Fatalf("Failed to create reader: %v", err)
@@ -165,7 +165,7 @@ func BenchmarkPartitionedWriteThroughput_Simple(b *testing.B) {
 		hosts := []string{"example.com", "foo.test.org", "demo.net"}
 		userAgents := []string{"Mozilla/5.0", "curl/7.68.0", "python-requests/2.25.1"}
 
-		for i := 0; i < numRecords; i++ {
+		for i := range numRecords {
 			idB.Append(int64(i))
 			ts := baseTime.Add(time.Duration(i%10) * 24 * time.Hour)
 			tsB.Append(arrow.Timestamp(ts.UnixMicro()))
@@ -242,7 +242,7 @@ func BenchmarkPartitionedWriteThroughput_ListPrimitive(b *testing.B) {
 		userAgents := []string{"Mozilla/5.0", "curl/7.68.0", "python-requests/2.25.1"}
 		tagsList := []string{"tag_0", "tag_1", "tag_2", "tag_3", "tag_4"}
 
-		for i := 0; i < numRecords; i++ {
+		for i := range numRecords {
 			idB.Append(int64(i))
 			ts := baseTime.Add(time.Duration(i%10) * 24 * time.Hour)
 			tsB.Append(arrow.Timestamp(ts.UnixMicro()))
@@ -254,7 +254,7 @@ func BenchmarkPartitionedWriteThroughput_ListPrimitive(b *testing.B) {
 			// Add 2-5 tags per record
 			numTags := 2 + (i % 4)
 			tagsB.Append(true)
-			for j := 0; j < numTags; j++ {
+			for j := range numTags {
 				tagsValueB.Append(tagsList[j%len(tagsList)])
 			}
 		}
@@ -353,7 +353,7 @@ func BenchmarkPartitionedWriteThroughput_ListStruct(b *testing.B) {
 		userAgents := []string{"Mozilla/5.0", "curl/7.68.0", "python-requests/2.25.1"}
 		resourceTypes := []string{"dataset", "station", "network"}
 
-		for i := 0; i < numRecords; i++ {
+		for i := range numRecords {
 			idB.Append(int64(i))
 			ts := baseTime.Add(time.Duration(i%10) * 24 * time.Hour)
 			tsB.Append(arrow.Timestamp(ts.UnixMicro()))
@@ -365,14 +365,14 @@ func BenchmarkPartitionedWriteThroughput_ListStruct(b *testing.B) {
 			// Add resources - vary between 1-3 resources per record
 			numResources := 1 + (i % 3)
 			resourcesB.Append(true)
-			for j := 0; j < numResources; j++ {
+			for j := range numResources {
 				resourceStructB.Append(true)
 				resourceTypeB.Append(resourceTypes[j%len(resourceTypes)])
 
 				// Add 2-4 IDs per resource
 				numIds := 2 + (j % 3)
 				resourceIdListB.Append(true)
-				for k := 0; k < numIds; k++ {
+				for k := range numIds {
 					resourceIdB.Append("id_" + string(rune('A'+k)))
 				}
 			}
@@ -452,7 +452,7 @@ func BenchmarkPartitionedWriteThroughput_MapPrimitive(b *testing.B) {
 		tagsKeys := []string{"tag_0", "tag_1", "tag_2", "tag_3", "tag_4"}
 		tagsItems := []string{"item_0", "item_1", "item_2", "item_3", "item_4", "item_5", "item_6", "item_7", "item_8", "item_9"}
 
-		for i := 0; i < numRecords; i++ {
+		for i := range numRecords {
 			idB.Append(int64(i))
 			ts := baseTime.Add(time.Duration(i%10) * 24 * time.Hour)
 			tsB.Append(arrow.Timestamp(ts.UnixMicro()))
@@ -464,7 +464,7 @@ func BenchmarkPartitionedWriteThroughput_MapPrimitive(b *testing.B) {
 			// Add 2-5 tags per record
 			numTags := 2 + (i % 4)
 			tagsB.Append(true)
-			for j := 0; j < numTags; j++ {
+			for j := range numTags {
 				tagsKeyB.Append(tagsKeys[j%len(tagsKeys)])
 				tagsItemB.Append(tagsItems[j%len(tagsItems)])
 			}
@@ -538,7 +538,7 @@ func BenchmarkPartitionedWriteThroughput_PartitionCount(b *testing.B) {
 
 				baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 
-				for i := 0; i < numRecords; i++ {
+				for i := range numRecords {
 					idB.Append(int64(i))
 					tsB.Append(arrow.Timestamp(baseTime.Add(time.Duration(i) * time.Second).UnixMicro()))
 					partKeyB.Append(int32(i % numPartitions))
@@ -590,7 +590,7 @@ func BenchmarkPartitionedWriteThroughput_PartitionCount(b *testing.B) {
 			b.ReportAllocs()
 
 			totalRecords := int64(0)
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				reader, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{testBatch})
 				if err != nil {
 					b.Fatalf("Failed to create reader: %v", err)
