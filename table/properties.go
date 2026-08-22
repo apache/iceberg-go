@@ -19,7 +19,9 @@ package table
 
 import (
 	"math"
+	"strings"
 
+	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table/internal"
 )
 
@@ -99,6 +101,9 @@ const (
 	ParquetVariantBufferSizeKey     = internal.ParquetVariantBufferSizeKey
 	ParquetVariantBufferSizeDefault = internal.ParquetVariantBufferSizeDefault
 
+	GCEnabledKey     = "gc.enabled"
+	GCEnabledDefault = true
+
 	MinSnapshotsToKeepKey     = "history.expire.min-snapshots-to-keep"
 	MinSnapshotsToKeepDefault = 1
 
@@ -150,6 +155,15 @@ const (
 	CommitTotalRetryTimeoutMsKey     = "commit.retry.total-timeout-ms"
 	CommitTotalRetryTimeoutMsDefault = 30 * 60 * 1000
 )
+
+func isGCEnabled(props iceberg.Properties) bool {
+	value, ok := props[GCEnabledKey]
+	if !ok {
+		return GCEnabledDefault
+	}
+
+	return strings.EqualFold(value, "true")
+}
 
 // Reserved properties
 const (

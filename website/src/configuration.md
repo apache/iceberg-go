@@ -335,7 +335,7 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | `history.expire.min-snapshots-to-keep` | Minimum snapshots to retain when expiring. Default `1`. |
 | `history.expire.max-snapshot-age-ms` | Maximum age of retained snapshots. Default `432000000` (5 days). |
 | `history.expire.max-ref-age-ms` | Maximum age of branch/tag refs that are not the main branch. Default `Long.MAX_VALUE` (forever). |
-| `gc.enabled` | Gate for orphan-file cleanup. |
+| `gc.enabled` | Controls physical garbage collection. Snapshot expiration is rejected when `false`, and data-file cleanup skips deletion. |
 
 The unprefixed retention property names are accepted as compatibility fallbacks. The `history.expire.*` properties take precedence when both forms are set.
 
