@@ -938,10 +938,12 @@ func (s *RollingDataWriterTestSuite) TestStreamErrorDrainsBufferedRecords() {
 
 	loc := filepath.ToSlash(s.T().TempDir())
 	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	defer factory.closeAll() // stops the iter.Pull counter goroutine
 	factory.format = failingOpenFormat{FileFormat: factory.format}
 
 	outputCh := make(chan iceberg.DataFile, 10)
 	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
 	writer := &RollingDataWriter{
 		recordCh: make(chan arrow.RecordBatch, 64),
 		errorCh:  make(chan error, 1),
@@ -1024,12 +1026,14 @@ func (s *RollingDataWriterTestSuite) TestConcurrentAddDuringStreamErrorLeaksNoth
 
 	loc := filepath.ToSlash(s.T().TempDir())
 	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	defer factory.closeAll() // stops the iter.Pull counter goroutine
 	openGate := make(chan struct{})
 	var inOpen atomic.Bool
 	factory.format = gatedFailFormat{FileFormat: factory.format, openGate: openGate, inOpen: &inOpen}
 
 	outputCh := make(chan iceberg.DataFile, 64)
 	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
 	writer := &RollingDataWriter{
 		recordCh: make(chan arrow.RecordBatch, 64),
 		errorCh:  make(chan error, 1),

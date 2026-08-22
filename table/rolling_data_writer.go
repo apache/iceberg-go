@@ -377,14 +377,9 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 
 // Add appends a record to the writer's buffer.
 func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
-	// Hold the read lock across the whole check-and-enqueue so it is atomic
-	// with stream's shutdown drain (which takes the write lock). Once the
-	// drain has set noMoreSends, this returns before retaining, so a record
-	// can never be enqueued into a channel that will not be drained again.
-	// The enqueue below can still block for backpressure while the writer is
-	// live, but stream's cleanup cancels ctx before it takes the write lock,
-	// so a parked send unblocks via ctx.Done() and releases the read lock
-	// rather than deadlocking the drain.
+	// Read lock held across the whole check-and-enqueue so it is atomic with
+	// stream's shutdown (which takes the write lock): once noMoreSends is set
+	// this returns before retaining, so nothing is enqueued into a dead channel.
 	r.sendMu.RLock()
 	defer r.sendMu.RUnlock()
 
@@ -420,6 +415,13 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	var currentWriter tblutils.FileWriter
 	var fileArrowSchema *arrow.Schema // per-file shredded schema; nil => factory default
 
+	// Set only when stream reaches the end of its input and finalizes without
+	// error. The cleanup defer uses it to skip cancelling ctx on the success
+	// path — cancellation is an error-exit signal that unblocks parked senders,
+	// and on the clean path there are none (input is closed after all senders
+	// finish), so the barrier's write lock is uncontended anyway.
+	exitedCleanly := false
+
 	// bootstrap buffer of converted batches, held until inference runs.
 	var buf []arrow.RecordBatch
 	var bufRows int64
@@ -454,22 +456,19 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
 		}
-		// stream is exiting; release any records producers left buffered in
-		// recordCh. This is a hard barrier against in-flight Add calls, not
-		// just a drain: an Add that already observed noMoreSends as false
-		// could otherwise enqueue after a lockless drain saw the channel
-		// empty, leaving a retained record with no consumer. Cancel first so
-		// any send currently parked on recordCh unblocks via ctx.Done() and
-		// releases its read lock; then take the write lock, which cannot be
-		// acquired until every active Add has returned. Setting noMoreSends
-		// under that lock makes the set of records ever placed in recordCh
-		// final, so the drain below releases all of them and nothing can be
-		// enqueued afterward. recordCh is deliberately not closed here: an Add
-		// may still hold the read lock about to observe noMoreSends, and
-		// closing under a live sender could panic. This runs before the
-		// CompareAndDelete defer above, so cleanup does not depend on abortAll
-		// finding this writer in the registry.
-		r.cancel()
+		// Release anything producers left buffered in recordCh, behind a hard
+		// barrier with in-flight Add calls (see sendMu). On the error exit,
+		// cancel first so a send parked on a full channel unblocks via
+		// ctx.Done() and drops its read lock; the clean exit has no parked
+		// senders (closeInput ran after all senders finished), so skip the
+		// cancel. Then the write lock — which waits out every active Add — plus
+		// noMoreSends makes the buffered set final, and the drain releases it.
+		// recordCh is not closed here: another goroutine may close it via
+		// closeInput (the drain's !ok case ends the loop then), and closing
+		// under a live sender could panic.
+		if !exitedCleanly {
+			r.cancel()
+		}
 		r.sendMu.Lock()
 		defer r.sendMu.Unlock()
 		r.noMoreSends = true
@@ -685,7 +684,10 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	}
 	if err := closeWriter(); err != nil {
 		r.sendError(err)
+
+		return
 	}
+	exitedCleanly = true
 }
 
 // inferShreddingFromBatches infers the inner type per top-level variant column, keyed
