@@ -1268,6 +1268,36 @@ func TestPlanFilesCancelsAfterSuccessfulMaterialization(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load())
 }
 
+func TestPlanFilesDefersCancelWithVendedCredentials(t *testing.T) {
+	t.Parallel()
+
+	var cancels atomic.Int32
+	cat := newScanPlanningTestCatalog(t, []endpoint{
+		endpointPlanTableScan,
+		endpointCancelPlanning,
+	}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","storage-credentials":[{"prefix":"s3://bucket/","config":{"s3.access-key-id":"vended"}}]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan/plan-1", func(w http.ResponseWriter, req *http.Request) {
+			require.Equal(t, http.MethodDelete, req.Method)
+			cancels.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		})
+	})
+
+	result, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.NoError(t, err)
+	require.NotNil(t, result.IO)
+	assert.Equal(t, int32(0), cancels.Load())
+
+	require.NoError(t, result.IO.Close())
+	assert.Equal(t, int32(1), cancels.Load())
+	require.NoError(t, result.IO.Close())
+	assert.Equal(t, int32(1), cancels.Load())
+}
+
 func TestPlanFilesCancelsAfterTaskDecodeFailure(t *testing.T) {
 	t.Parallel()
 
@@ -1441,12 +1471,15 @@ func TestPlanFilesSurfacesVendedCredentials(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.IO)
 
-	planIO, ok := result.IO.(*planScopedIO)
+	wrapped, ok := result.IO.(*planIOWithCleanup)
+	require.True(t, ok)
+	planIO, ok := wrapped.io.(*planScopedIO)
 	require.True(t, ok)
 	assert.Equal(t, "https://table.local", planIO.refresher.props["s3.endpoint"])
 	assert.Equal(t, "table-static", planIO.refresher.props["s3.access-key-id"])
 	require.Len(t, planIO.refresher.credentials, 1)
 	assert.Equal(t, "vended", planIO.refresher.credentials[0].Config["s3.access-key-id"])
+	require.NoError(t, result.IO.Close())
 }
 
 // TestPlanScopedIOExpiredCredentials checks a plan whose creds state an expiry

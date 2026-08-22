@@ -33,6 +33,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -259,7 +260,15 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 		Tasks: tasks,
 		IO:    planIOFromCredentials(completed.StorageCredentials, req.MetadataLocation, r.planIOBaseProps(req)),
 	}
-	cleanup()
+	if result.IO == nil {
+		// Without plan-scoped credentials, all task materialization is complete
+		// and the plan can be released before the caller reads the files.
+		cleanup()
+	} else {
+		// Keep the plan alive while the lazy plan-scoped IO may still be used.
+		// table.Scan closes this IO after its active readers release their lease.
+		result.IO = &planIOWithCleanup{io: result.IO, cleanup: cleanup}
+	}
 
 	return result, nil
 }
@@ -362,6 +371,26 @@ func (p *planScopedIO) Load(ctx context.Context) (iceio.IO, error) {
 
 func (p *planScopedIO) Close() error {
 	return p.refresher.close()
+}
+
+// planIOWithCleanup keeps the remote plan alive for the lifetime of the
+// plan-scoped IO. Scan owns the IO through its PlanIO state and closes it only
+// after replacing the plan and releasing active readers, so cancellation cannot
+// invalidate credentials before ReadTasks opens the files.
+type planIOWithCleanup struct {
+	io      table.PlanIO
+	cleanup func()
+	once    sync.Once
+}
+
+func (p *planIOWithCleanup) Load(ctx context.Context) (iceio.IO, error) {
+	return p.io.Load(ctx)
+}
+
+func (p *planIOWithCleanup) Close() error {
+	defer p.once.Do(p.cleanup)
+
+	return p.io.Close()
 }
 
 // planTableScanRequestFrom builds the planTableScan request body from the
