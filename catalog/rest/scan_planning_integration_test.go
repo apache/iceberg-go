@@ -64,7 +64,8 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability()
 	ident := catalog.ToIdentifier(TestNamespaceIdent, "scan-planning-java-wire")
 	tbl, dataPath := s.createScanPlanningTable(planningCatalog, ident)
 
-	filter, err := json.Marshal(iceberg.EqualTo(iceberg.Reference("foo"), "hello"))
+	filterExpr := iceberg.EqualTo(iceberg.Reference("foo"), "hello")
+	filter, err := json.Marshal(filterExpr)
 	s.Require().NoError(err)
 	snapshotID := tbl.CurrentSnapshot().SnapshotID
 	caseSensitive := true
@@ -98,6 +99,19 @@ func (s *RestIntegrationSuite) TestScanPlanningJavaSynchronousInteroperability()
 	s.Require().Len(response.FileScanTasks, 1)
 	s.Empty(response.DeleteFiles)
 	s.assertJavaPlanningCredentials(response.StorageCredentials)
+
+	decodedTasks, err := rest.DecodeScanTasks(response.ScanTasks, tbl.Metadata(), tbl.Schema(), filterExpr)
+	s.Require().NoError(err)
+	s.Require().Len(decodedTasks, 1)
+	decodedTask := decodedTasks[0]
+	s.Equal(dataPath, decodedTask.File.FilePath())
+	s.Equal(iceberg.ParquetFile, decodedTask.File.FileFormat())
+	s.Equal(int64(1), decodedTask.File.Count())
+	s.Equal(map[int]any{1000: int32(17)}, decodedTask.File.Partition())
+	s.True(decodedTask.Residual.Equals(filterExpr))
+	s.Empty(decodedTask.DeleteFiles)
+	s.Empty(decodedTask.EqualityDeleteFiles)
+	s.Empty(decodedTask.DeletionVectorFiles)
 
 	rawResponses := transport.PlanResponses()
 	s.Require().Len(rawResponses, 1)
@@ -214,7 +228,7 @@ func (s *RestIntegrationSuite) ensureNamespaceIn(cat *rest.Catalog) {
 		s.Require().NoError(cat.DropNamespace(s.ctx, catalog.ToIdentifier(TestNamespaceIdent)))
 	}
 
-	s.NoError(cat.CreateNamespace(s.ctx, catalog.ToIdentifier(TestNamespaceIdent),
+	s.Require().NoError(cat.CreateNamespace(s.ctx, catalog.ToIdentifier(TestNamespaceIdent),
 		iceberg.Properties{"foo": "bar", "prop": "yes"}))
 }
 
@@ -242,7 +256,9 @@ func (s *RestIntegrationSuite) createScanPlanningTable(cat *rest.Catalog, ident 
 
 	dataPath, err := url.JoinPath(tbl.Location(), "data", "bar=17", "data.parquet")
 	s.Require().NoError(err)
-	file, err := mustFS(s.T(), tbl).(iceio.WriteFileIO).Create(dataPath)
+	writeFS, ok := mustFS(s.T(), tbl).(iceio.WriteFileIO)
+	s.Require().True(ok, "table filesystem must implement WriteFileIO")
+	file, err := writeFS.Create(dataPath)
 	s.Require().NoError(err)
 	s.Require().NoError(pqarrow.WriteTable(arrowTable, file, arrowTable.NumRows(),
 		nil, pqarrow.DefaultWriterProps()))

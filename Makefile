@@ -61,6 +61,8 @@ integration-env:
 	@echo "export SPARK_CONTAINER_ID=$$(docker ps -qf 'name=spark-iceberg')"
 	@echo "export DOCKER_API_VERSION=$$(docker version -f '{{.Server.APIVersion}}')"
 
+# Keep the isolated Java scan-planning suite in umbrella CI so its wire
+# compatibility coverage runs alongside the other integration tests.
 integration-test: integration-scanner integration-io integration-rest integration-rest-scan-planning integration-spark integration-hive integration-hadoop
 
 integration-scanner:
