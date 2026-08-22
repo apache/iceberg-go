@@ -15,13 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). It defines the table-side seam — the
-// option, request/result types, and the ScanPlanner interface (implemented by
-// catalog/rest) — so it can be reviewed as Go rather than prose.
-// WithScanPlanningMode records the requested mode on the Scan; the delegation
-// skeleton rejects unavailable remote planning so the exported option is not a
-// silent no-op if this surface is released before the full implementation lands.
+// This file contains the table-side seam for REST server-side scan planning
+// (apache/iceberg-go#1178): the scan option, request/result types, and the
+// ScanPlanner interface implemented by catalog/rest.
 
 package table
 
@@ -51,13 +47,13 @@ const (
 	// ScanPlanningRemote requires a planner that advertises remote capability
 	// and fails loudly if remote planning is unavailable.
 	ScanPlanningRemote ScanPlanningMode = "remote"
-	// ScanPlanningAuto uses remote planning when available and allowed by the
-	// table config, otherwise falls back to local.
+	// ScanPlanningAuto uses remote planning when available, otherwise it falls
+	// back to local.
 	ScanPlanningAuto ScanPlanningMode = "auto"
 )
 
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
-// ScanPlanningLocal unless the REST table config requires server planning.
+// ScanPlanningLocal.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
 	return func(scan *Scan) { scan.planningMode = mode }
 }
@@ -84,17 +80,22 @@ var _ ScanPlanningMetadata = (Metadata)(nil)
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
-// Open question (epic OQ4): when the table has evolved, UseSnapshotSchema must
-// pin which schema binds a returned residual and the partition decode: the
-// snapshot's schema (via schema-id), kept separate from each file's partition
-// spec-id. Incremental scans (start/end snapshot) are deferred to a later
-// phase; point-in-time SnapshotID lands first.
+// Schema is the schema resolved for this scan. It is kept separate from
+// Metadata.CurrentSchema because a historical/tag scan may use a snapshot
+// schema while a branch scan uses the table schema. Planners should use this
+// same schema for filter binding and returned residual decoding.
 type ScanPlanningRequest struct {
 	Identifier Identifier
 	// Metadata is the narrowed planner view of table metadata (see
 	// ScanPlanningMetadata); MetadataLocation is kept separate.
 	Metadata         ScanPlanningMetadata
+	Schema           *iceberg.Schema
 	MetadataLocation string
+	// FileIOProperties are the table-scoped properties used to build the
+	// table's normal FileIO. A remote planner can overlay plan-scoped
+	// credentials on these properties without serializing them into the plan
+	// request.
+	FileIOProperties iceberg.Properties
 	SnapshotID       *int64
 	SelectedFields   []string
 	RowFilter        iceberg.BooleanExpression
@@ -144,8 +145,7 @@ type ScanPlanner interface {
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
 
-// Scan integration, added here as a delegation skeleton and completed in the
-// scanner-delegation phase:
+// Scan integration:
 //
 //	type Scan struct {
 //		// ...existing fields...

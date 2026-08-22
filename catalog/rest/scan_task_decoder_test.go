@@ -185,6 +185,32 @@ func TestDecodeScanTasksUsesFallbackAndAcceptsSpecConstants(t *testing.T) {
 	assert.True(t, tasks[0].Residual.Equals(iceberg.AlwaysFalse{}))
 }
 
+func TestDecodeScanTasksRejectsExplicitNullResidual(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	wire.FileScanTasks[0].ResidualFilter = json.RawMessage(`null`)
+
+	_, err := DecodeScanTasks(wire, metadata, metadata.schema, iceberg.AlwaysTrue{})
+	require.ErrorContains(t, err, "explicit null residual-filter is invalid")
+}
+
+func TestDecodeScanTasksAcceptsEmptyDataFile(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	wire := validScanTasksWire()
+	wire.FileScanTasks[0].DataFile.RecordCount = 0
+	wire.FileScanTasks[0].DataFile.FileSizeInBytes = 0
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Zero(t, tasks[0].File.Count())
+	assert.Zero(t, tasks[0].File.FileSizeBytes())
+}
+
 func TestDecodeScanTasksKeepsDeleteReferencesEnvelopeLocal(t *testing.T) {
 	t.Parallel()
 
@@ -436,28 +462,14 @@ func TestDecodeScanTasksRejectsMalformedPayloads(t *testing.T) {
 			mutate: func(w *ScanTasks) {
 				w.FileScanTasks[0].DataFile.RecordCount = -1
 			},
-			want: "record-count must be positive",
-		},
-		{
-			name: "zero record count",
-			mutate: func(w *ScanTasks) {
-				w.FileScanTasks[0].DataFile.RecordCount = 0
-			},
-			want: "record-count must be positive",
+			want: "record-count must be non-negative",
 		},
 		{
 			name: "negative file size",
 			mutate: func(w *ScanTasks) {
 				w.FileScanTasks[0].DataFile.FileSizeInBytes = -1
 			},
-			want: "file-size-in-bytes must be positive",
-		},
-		{
-			name: "zero file size",
-			mutate: func(w *ScanTasks) {
-				w.FileScanTasks[0].DataFile.FileSizeInBytes = 0
-			},
-			want: "file-size-in-bytes must be positive",
+			want: "file-size-in-bytes must be non-negative",
 		},
 		{
 			name: "referenced data file disagrees with task",

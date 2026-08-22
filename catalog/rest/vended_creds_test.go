@@ -360,6 +360,18 @@ func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
 	assert.Equal(t, serverExpiry.UnixMilli(), r.expiresAt.UnixMilli())
 }
 
+func TestParseCredentialExpirySupportsAccountScopedADLSKey(t *testing.T) {
+	t.Parallel()
+
+	want := time.Now().Add(time.Hour).Truncate(time.Millisecond)
+	got, ok := parseCredentialExpiry(iceberg.Properties{
+		keyAdlsSasExpiresAtMs + ".account.dfs.core.windows.net": strconv.FormatInt(want.UnixMilli(), 10),
+	})
+
+	require.True(t, ok)
+	assert.Equal(t, want, got)
+}
+
 func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
 	t.Parallel()
 
@@ -635,4 +647,73 @@ func TestResolveStorageCredentials(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestPrefixScopedIOUsesLongestCredentialPerLocation(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{"base": "yes"}, []StorageCredential{
+		{Prefix: "s3://metadata/table/", Config: iceberg.Properties{"credential": "metadata"}},
+		{Prefix: "s3://data/table/", Config: iceberg.Properties{"credential": "data"}},
+		{Prefix: "s3://data/table/private/", Config: iceberg.Properties{"credential": "private"}},
+	})
+
+	assert.Equal(t, "metadata", p.propertiesForLocation("s3://metadata/table/metadata.json")["credential"])
+	assert.Equal(t, "data", p.propertiesForLocation("s3://data/table/file.parquet")["credential"])
+	assert.Equal(t, "private", p.propertiesForLocation("s3://data/table/private/file.parquet")["credential"])
+	assert.Equal(t, "yes", p.propertiesForLocation("s3://other/table/file.parquet")["base"])
+}
+
+func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.S3EndpointURL:     "https://s3.local",
+		iceio.S3AccessKeyID:     "load-access",
+		iceio.S3SecretAccessKey: "load-secret",
+		iceio.S3SessionToken:    "load-token",
+		keyS3TokenExpiresAtMs:   "1000",
+	}, []StorageCredential{{
+		Prefix: "s3://bucket/data/",
+		Config: iceberg.Properties{
+			iceio.S3AccessKeyID:     "plan-access",
+			iceio.S3SecretAccessKey: "plan-secret",
+		},
+	}})
+
+	props := p.propertiesForLocation("s3://bucket/data/file.parquet")
+	assert.Equal(t, "https://s3.local", props[iceio.S3EndpointURL])
+	assert.Equal(t, "plan-access", props[iceio.S3AccessKeyID])
+	assert.Equal(t, "plan-secret", props[iceio.S3SecretAccessKey])
+	assert.NotContains(t, props, iceio.S3SessionToken)
+	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
+}
+
+func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.S3EndpointURL: "https://s3.local",
+	}, []StorageCredential{{
+		Prefix: "s3://bucket/data/",
+		Config: iceberg.Properties{
+			iceio.S3AccessKeyID:     "plan-access",
+			iceio.S3SecretAccessKey: "plan-secret",
+		},
+	}})
+
+	props := p.propertiesForLocation("s3://other-bucket/data/file.parquet")
+	assert.Equal(t, "https://s3.local", props[iceio.S3EndpointURL])
+	assert.NotContains(t, props, iceio.S3AccessKeyID)
+	assert.NotContains(t, props, iceio.S3SecretAccessKey)
+}
+
+func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := newPrefixScopedIO(ctx, nil, nil)
+
+	cancel()
+	require.ErrorIs(t, p.ctx.Err(), context.Canceled)
 }
