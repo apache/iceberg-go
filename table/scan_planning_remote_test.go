@@ -73,10 +73,57 @@ func TestRemotePlanningSelectedFieldsExpandsWildcardNestedProjection(t *testing.
 				{ID: 4, Name: "zip", Type: iceberg.PrimitiveTypes.String},
 			}},
 		},
+		iceberg.NestedField{
+			ID:   5,
+			Name: "list_struct",
+			Type: &iceberg.ListType{
+				ElementID: 6,
+				Element: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 7, Name: "a", Type: iceberg.PrimitiveTypes.String},
+					{ID: 8, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+				}},
+			},
+		},
+		iceberg.NestedField{
+			ID:   9,
+			Name: "map_struct",
+			Type: &iceberg.MapType{
+				KeyID: 10, KeyType: iceberg.PrimitiveTypes.String,
+				ValueID: 11, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 12, Name: "a", Type: iceberg.PrimitiveTypes.String},
+					{ID: 13, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+				}},
+			},
+		},
+		iceberg.NestedField{
+			ID:   14,
+			Name: "list_primitive",
+			Type: &iceberg.ListType{ElementID: 15, Element: iceberg.PrimitiveTypes.String},
+		},
+		iceberg.NestedField{
+			ID:   16,
+			Name: "map_primitive",
+			Type: &iceberg.MapType{
+				KeyID: 17, KeyType: iceberg.PrimitiveTypes.String,
+				ValueID: 18, ValueType: iceberg.PrimitiveTypes.Int32,
+			},
+		},
 	)
 
 	scan := &Scan{selectedFields: []string{"*"}, caseSensitive: true}
 	got, err := remotePlanningSelectedFields(scan, schema)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"id", "address", "address.city", "address.zip"}, got)
+	assert.Equal(t, []string{
+		"id",
+		"address",
+		"address.city",
+		"address.zip",
+		"list_struct.element.a",
+		"list_struct.element.b",
+		"map_struct.value.a",
+		"map_struct.value.b",
+		"list_primitive.element",
+		"map_primitive.key",
+		"map_primitive.value",
+	}, got)
 }

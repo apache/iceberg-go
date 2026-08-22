@@ -46,26 +46,18 @@ func supportsAutomaticRemotePlanning(planner ScanPlanner) bool {
 // remotePlanningSelectedFields returns the fully qualified physical field names
 // sent for a wildcard REST scan projection. It mirrors Java's
 // TypeUtil.getProjectedIds + Schema.findColumnName behavior. Java includes
-// struct field IDs as well as primitive/variant field IDs, while list/map field
-// IDs are represented by their nested element/key/value fields. Explicit
-// projections keep their user-provided names unchanged.
+// struct field IDs as well as primitive/variant field IDs. List element IDs are
+// included only for primitive elements, and map key/value IDs are included only
+// when the value is primitive. Explicit projections keep their user-provided
+// names unchanged.
 func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string, error) {
 	if schema == nil || !slices.Contains(scan.selectedFields, "*") {
 		return scan.remoteSelectedFields(schema), nil
 	}
 
-	idToField, err := iceberg.IndexByID(schema)
-	if err != nil {
-		return nil, err
-	}
-
-	ids := make([]int, 0, len(idToField))
-	for id, field := range idToField {
-		switch field.Type.(type) {
-		case *iceberg.ListType, *iceberg.MapType:
-			continue
-		}
-		ids = append(ids, id)
+	ids := make([]int, 0, len(schema.Fields()))
+	for _, field := range schema.Fields() {
+		appendRemoteProjectedFieldIDs(&ids, field)
 	}
 	slices.Sort(ids)
 
@@ -77,4 +69,46 @@ func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string,
 	}
 
 	return selected, nil
+}
+
+func appendRemoteProjectedFieldIDs(ids *[]int, field iceberg.NestedField) {
+	appendRemoteProjectedTypeIDs(ids, field.Type, field.ID, true)
+}
+
+func appendRemoteProjectedTypeIDs(ids *[]int, typ iceberg.Type, fieldID int, includeFieldID bool) {
+	switch typ := typ.(type) {
+	case *iceberg.StructType:
+		if includeFieldID {
+			*ids = append(*ids, fieldID)
+		}
+		for _, field := range typ.Fields() {
+			appendRemoteProjectedFieldIDs(ids, field)
+		}
+	case *iceberg.ListType:
+		if remoteProjectedLeaf(typ.Element) {
+			*ids = append(*ids, typ.ElementID)
+		} else {
+			appendRemoteProjectedTypeIDs(ids, typ.Element, typ.ElementID, false)
+		}
+	case *iceberg.MapType:
+		if remoteProjectedLeaf(typ.ValueType) {
+			*ids = append(*ids, typ.KeyID, typ.ValueID)
+		} else {
+			appendRemoteProjectedTypeIDs(ids, typ.ValueType, typ.ValueID, false)
+		}
+	default:
+		if includeFieldID {
+			*ids = append(*ids, fieldID)
+		}
+	}
+}
+
+func remoteProjectedLeaf(typ iceberg.Type) bool {
+	switch typ.(type) {
+	case *iceberg.StructType, *iceberg.ListType, *iceberg.MapType:
+		return false
+	default:
+		// Variant types are leaves for TypeUtil.getProjectedIds as well.
+		return true
+	}
 }
