@@ -18,6 +18,7 @@
 package table
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -797,6 +798,10 @@ func (sp *snapshotProducer) buildManifests(ctx context.Context, parent *Snapshot
 // written once and reused verbatim across OCC retries (rewriting them would
 // churn manifest paths and orphan object-store files on every attempt).
 func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, error) {
+	if err := sp.validateAddedSpecs(); err != nil {
+		return nil, err
+	}
+
 	var g errgroup.Group
 
 	addedManifests := make([]iceberg.ManifestFile, 0)
@@ -815,6 +820,22 @@ func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, err
 	}
 
 	return slices.Concat(addedManifests, positionDeleteManifests), nil
+}
+
+func (sp *snapshotProducer) validateAddedSpecs() error {
+	for _, df := range sp.addedFiles {
+		if _, err := sp.spec(int(df.SpecID())); err != nil {
+			return err
+		}
+	}
+
+	for _, addition := range sp.addedDeleteFiles {
+		if _, err := sp.spec(int(addition.file.SpecID())); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (sp *snapshotProducer) deleteManifestProducer(output *[]iceberg.ManifestFile) func() error {
@@ -862,6 +883,15 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 	deleted, err := sp.deletedEntries(ctx, parent)
 	if err != nil {
 		return nil, err
+	}
+
+	// existingManifests only resolves the spec of a manifest that lost an entry,
+	// so these are the same ids both goroutines below need. Rejecting them here
+	// keeps a later group's failure from orphaning the manifests already written.
+	for _, entry := range deleted {
+		if _, err := sp.spec(int(entry.DataFile().SpecID())); err != nil {
+			return nil, err
+		}
 	}
 
 	var g errgroup.Group
@@ -928,8 +958,16 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 				return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(key.content))
 			}
 
-			for key, entries := range groups {
-				mf, err := writeGroup(key, entries)
+			keys := slices.SortedFunc(maps.Keys(groups), func(a, b groupKey) int {
+				if c := cmp.Compare(a.specID, b.specID); c != 0 {
+					return c
+				}
+
+				return cmp.Compare(a.content, b.content)
+			})
+
+			for _, key := range keys {
+				mf, err := writeGroup(key, groups[key])
 				if err != nil {
 					return err
 				}

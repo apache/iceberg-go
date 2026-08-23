@@ -1534,3 +1534,57 @@ func TestRowDeltaWritesRegisteredNonDefaultSpec(t *testing.T) {
 		assert.Equal(t, 1, entries)
 	}
 }
+
+func TestRowDeltaMixedSpecCommitLeavesNoManifests(t *testing.T) {
+	validData := func() iceberg.DataFile { return buildDataFile(t, "s3://bucket/data/insert.parquet") }
+	validDelete := func() iceberg.DataFile { return buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet") }
+	orphanData := func() iceberg.DataFile {
+		return buildDataFileForSpec(t, unregisteredSpec(), "s3://bucket/data/orphan.parquet", map[int]any{1000: int64(7)})
+	}
+	orphanDelete := func() iceberg.DataFile {
+		return buildPosDeleteFileForSpec(t, unregisteredSpec(), "s3://bucket/data/orphan-del.parquet", map[int]any{1000: int64(7)})
+	}
+
+	tests := []struct {
+		name    string
+		rows    []iceberg.DataFile
+		deletes []iceberg.DataFile
+	}{
+		{"valid data with unregistered delete", []iceberg.DataFile{validData()}, []iceberg.DataFile{orphanDelete()}},
+		{"valid delete with unregistered data", []iceberg.DataFile{orphanData()}, []iceberg.DataFile{validDelete()}},
+		{"valid data group before unregistered one", []iceberg.DataFile{validData(), orphanData()}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := newRowDeltaCommitTestTable(t)
+
+			tx := tbl.NewTransaction()
+			rd := tx.NewRowDelta(nil)
+			rd.AddRows(tt.rows...)
+			rd.AddDeletes(tt.deletes...)
+
+			err := rd.Commit(t.Context())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, table.ErrPartitionSpecNotFound)
+			assert.Empty(t, writtenManifests(t, tbl.Location()),
+				"a rejected row delta must not leave manifests behind")
+
+			validTx := tbl.NewTransaction()
+			validRd := validTx.NewRowDelta(nil)
+			validRd.AddRows(validData())
+			require.NoError(t, validRd.Commit(t.Context()))
+			assert.NotEmpty(t, writtenManifests(t, tbl.Location()),
+				"the same probe must observe the manifests a successful commit writes")
+		})
+	}
+}
+
+func writtenManifests(t *testing.T, location string) []string {
+	t.Helper()
+
+	paths, err := filepath.Glob(filepath.Join(location, "metadata", "*.avro"))
+	require.NoError(t, err)
+
+	return paths
+}

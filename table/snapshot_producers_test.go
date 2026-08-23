@@ -25,6 +25,7 @@ import (
 	"io"
 	"io/fs"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1930,6 +1931,14 @@ func TestExistingManifests_ExactDVStillExpunged(t *testing.T) {
 func writeParentSnapshotWithDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) *Snapshot {
 	t.Helper()
 
+	mf := writeTestDeletesManifest(t, fs, spec, snapshotID, tag, deleteFiles...)
+
+	return writeParentSnapshotFromManifests(t, fs, snapshotID, tag, mf)
+}
+
+func writeTestDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) iceberg.ManifestFile {
+	t.Helper()
+
 	manifestPath := "mem://default/table-location/metadata/deletes-" + tag + ".avro"
 	var buf bytes.Buffer
 	wr, err := iceberg.NewManifestWriter(3, &buf, spec, simpleSchema(), snapshotID,
@@ -1949,11 +1958,17 @@ func writeParentSnapshotWithDeletesManifest(t *testing.T, fs iceio.WriteFileIO, 
 	require.NoError(t, err)
 	require.NoError(t, out.Close())
 
+	return mf
+}
+
+func writeParentSnapshotFromManifests(t *testing.T, fs iceio.WriteFileIO, snapshotID int64, tag string, manifests ...iceberg.ManifestFile) *Snapshot {
+	t.Helper()
+
 	listPath := "mem://default/table-location/metadata/snap-" + tag + ".avro"
 	lout, err := fs.Create(listPath)
 	require.NoError(t, err)
 	seq := int64(1)
-	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, []iceberg.ManifestFile{mf}))
+	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, manifests))
 	require.NoError(t, lout.Close())
 
 	return &Snapshot{
@@ -2109,4 +2124,58 @@ func TestAccumulateSummaryDeltaRejectsUnregisteredSpec(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "99")
+}
+
+func TestParentDependentManifestsMixedSpecWritesNoManifests(t *testing.T) {
+	registered := partitionedSpec()
+	txn, wfs := createTestTransactionWithMemIO(t, registered)
+	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+
+	validDV := newTestDeletionVectorForRef(t, registered,
+		"mem://default/table-location/data/dv-valid.puffin",
+		"mem://default/table-location/data/valid.parquet")
+	orphanDV := newTestDeletionVectorForRef(t, unregisteredSpec(),
+		"mem://default/table-location/data/dv-orphan.puffin",
+		"mem://default/table-location/data/orphan.parquet")
+	sp.removeDeletionVector(validDV)
+	sp.removeDeletionVector(orphanDV)
+
+	parent := writeParentSnapshotFromManifests(t, wfs, 96, "mixed",
+		writeTestDeletesManifest(t, wfs, registered, 96, "mixed-valid", validDV),
+		writeTestDeletesManifest(t, wfs, unregisteredSpec(), 96, "mixed-orphan", orphanDV))
+
+	before := metadataFiles(t, wfs)
+	_, err := sp.parentDependentManifests(context.Background(), parent)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+	assert.Equal(t, before, metadataFiles(t, wfs),
+		"a rejected operation must not leave manifests behind")
+
+	valid := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	valid.removeDeletionVector(validDV)
+	_, err = valid.parentDependentManifests(context.Background(), parent)
+	require.NoError(t, err)
+	assert.Greater(t, len(metadataFiles(t, wfs)), len(before),
+		"the same probe must observe the manifests a successful run writes")
+}
+
+func metadataFiles(t *testing.T, wfs iceio.WriteFileIO) []string {
+	t.Helper()
+
+	listable, ok := wfs.(iceio.ListableIO)
+	require.True(t, ok, "test IO must support listing")
+
+	var paths []string
+	require.NoError(t, listable.WalkDir("mem://default/table-location/metadata",
+		func(path string, d fs.DirEntry, err error) error {
+			require.NoError(t, err)
+			if !d.IsDir() {
+				paths = append(paths, path)
+			}
+
+			return nil
+		}))
+	slices.Sort(paths)
+
+	return paths
 }
