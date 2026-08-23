@@ -1801,6 +1801,21 @@ func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
 	return nil
 }
 
+// checkRequiredFields validates fields required when reading persisted table
+// metadata. Keep this at the JSON boundary: catalog create-via-commit paths use
+// builders with an empty staging location. Location becomes optional in format
+// v4, so the location check must be version-gated when v4 support is added.
+func (c *commonMetadata) checkRequiredFields() error {
+	if c.UUID == uuid.Nil && c.FormatVersion > 1 {
+		return fmt.Errorf("%w: table-uuid is required for format version %d", ErrInvalidMetadata, c.FormatVersion)
+	}
+	if c.Loc == "" {
+		return fmt.Errorf("%w: location is required", ErrInvalidMetadata)
+	}
+
+	return nil
+}
+
 func (c *commonMetadata) Ref() SnapshotRef {
 	return cloneSnapshotRef(c.SnapshotRefs[MainBranch])
 }
@@ -2624,6 +2639,9 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	}
 
 	next.preValidate()
+	if err := next.checkRequiredFields(); err != nil {
+		return err
+	}
 
 	if err := next.validate(); err != nil {
 		return err
@@ -2637,7 +2655,7 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 func (m *metadataV1) ToV2() metadataV2 {
 	commonOut := m.commonMetadata
 	commonOut.FormatVersion = 2
-	if commonOut.UUID.String() == "" {
+	if commonOut.UUID == uuid.Nil {
 		commonOut.UUID = uuid.New()
 	}
 
@@ -2692,6 +2710,9 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	}
 
 	next.preValidate()
+	if err := next.checkRequiredFields(); err != nil {
+		return err
+	}
 
 	if err := next.validate(); err != nil {
 		return err
@@ -2768,6 +2789,9 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	}
 
 	next.preValidate()
+	if err := next.checkRequiredFields(); err != nil {
+		return err
+	}
 
 	if err := next.validate(); err != nil {
 		return err
@@ -2876,6 +2900,11 @@ const DefaultFormatVersion = 2
 // the new table metadata. By default, this will generate a V2 table metadata, but this can be modified
 // by adding a "format-version" property to the props map. An error will be returned if the "format-version"
 // property exists and is not a valid version number.
+//
+// location should be non-empty: [ParseMetadata] rejects persisted metadata
+// without one, so metadata built with an empty location cannot be read back.
+// The constructor stays permissive because catalog create-via-commit paths seed
+// a location-less base and supply the location as a set-location update.
 func NewMetadata(sc *iceberg.Schema, partitions *iceberg.PartitionSpec, sortOrder SortOrder, location string, props iceberg.Properties) (Metadata, error) {
 	return NewMetadataWithUUID(sc, partitions, sortOrder, location, props, uuid.Nil)
 }
