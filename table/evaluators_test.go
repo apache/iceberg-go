@@ -1929,6 +1929,7 @@ func (suite *InclusiveMetricsTestSuite) TestInMetrics() {
 		{iceberg.IsIn(ref, IntMinValue-1, IntMinValue), true, "should read: id equal to lower bound"},
 		{iceberg.IsIn(ref, IntMaxValue-4, IntMaxValue-3), true, "should read: id between upper and lower bounds"},
 		{iceberg.IsIn(ref, IntMaxValue, IntMaxValue+1), true, "should read: id equal to upper bound"},
+		{iceberg.IsIn(ref, int64(IntMaxValue), int64(math.MaxInt32)+1), true, "should read: ignore value outside int32 range"},
 		{iceberg.IsIn(ref, IntMaxValue+1, IntMaxValue+2), false, "should skip: id above upper bound"},
 		{iceberg.IsIn(ref, IntMaxValue+6, IntMaxValue+7), false, "should skip: id above upper bound"},
 		{iceberg.IsIn(iceberg.Reference("all_nulls"), "abc", "def"), false, "should skip: in on all nulls column"},

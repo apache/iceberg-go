@@ -956,6 +956,10 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		if err != nil {
 			return nil, err
 		}
+		switch casted.(type) {
+		case AboveMaxLiteral, BelowMinLiteral:
+			continue
+		}
 		typedSet.Add(cloneBoundLiteral(casted))
 	}
 
