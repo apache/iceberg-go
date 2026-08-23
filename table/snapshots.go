@@ -272,9 +272,27 @@ type Snapshot struct {
 func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	type Alias Snapshot
 	var next Alias
-	if err := json.Unmarshal(data, &next); err != nil {
+	// snapshot-id and timestamp-ms are required by the spec for every format
+	// version. Decode them through pointers so an absent or null field stays
+	// distinguishable from an explicit zero, which would otherwise be accepted
+	// as a valid identity or as the Unix epoch.
+	aux := struct {
+		SnapshotID  *int64 `json:"snapshot-id"`
+		TimestampMs *int64 `json:"timestamp-ms"`
+		*Alias
+	}{Alias: &next}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
 	}
+	if aux.SnapshotID == nil {
+		return fmt.Errorf("%w: snapshot-id is absent or null", ErrInvalidMetadata)
+	}
+	if aux.TimestampMs == nil {
+		return fmt.Errorf("%w: timestamp-ms is absent or null", ErrInvalidMetadata)
+	}
+	next.SnapshotID, next.TimestampMs = *aux.SnapshotID, *aux.TimestampMs
+
 	if next.ManifestList != "" {
 		next.ManifestLocations = nil
 	}
