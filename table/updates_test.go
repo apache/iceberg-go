@@ -524,12 +524,12 @@ func TestUnmarshalUpdates(t *testing.T) {
 					case "add-partition-spec":
 						expectedAddPartitionSpec := u.(*addPartitionSpecUpdate)
 						actualAddPartitionSpec := actual[idx].(*addPartitionSpecUpdate)
-						assert.True(t, expectedAddPartitionSpec.Spec.Equals(*actualAddPartitionSpec.Spec))
+						assert.True(t, expectedAddPartitionSpec.Spec.Equals(actualAddPartitionSpec.Spec.PartitionSpec))
 						assert.Equal(t, actualAddPartitionSpec.initial, expectedAddPartitionSpec.initial)
 					case "add-sort-order":
 						expectedAddSortOrder := u.(*addSortOrderUpdate)
 						actualAddSortOrder := actual[idx].(*addSortOrderUpdate)
-						assert.True(t, expectedAddSortOrder.SortOrder.Equals(*actualAddSortOrder.SortOrder))
+						assert.True(t, expectedAddSortOrder.SortOrder.Equals(actualAddSortOrder.SortOrder.SortOrder))
 						assert.Equal(t, actualAddSortOrder.initial, expectedAddSortOrder.initial)
 					default:
 						assert.Equal(t, u, actual[idx])
@@ -1298,4 +1298,63 @@ func TestRemoveEncryptionKeyUpdate_Apply_NoOp(t *testing.T) {
 	// Removing a key that doesn't exist should not error.
 	b := buildFromBase(t)
 	require.NoError(t, NewRemoveEncryptionKeyUpdate("nonexistent").Apply(b))
+}
+
+func TestAddPartitionSpecUpdate_UnmarshalVoidTombstone(t *testing.T) {
+	// A dropped partition field whose source column is gone is a void
+	// transform over source ID 0; BindToSchema carries it across, so the
+	// decoder must let it through.
+	data := []byte(`[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":0,"field-id":1000,"transform":"void","name":"x_bucket"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	b := buildFromBaseV3(t)
+	require.NoError(t, updates[0].Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	spec := meta.PartitionSpecByID(1)
+	require.NotNil(t, spec)
+	require.Equal(t, 1, spec.NumFields())
+	assert.Equal(t, "x_bucket", spec.Field(0).Name)
+	assert.IsType(t, iceberg.VoidTransform{}, spec.Field(0).Transform)
+}
+
+func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
+	// A non-void source ID that the current schema cannot resolve is still
+	// rejected, but by binding rather than by decoding.
+	data := []byte(`[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":0,"field-id":1000,"transform":"identity","name":"x"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	err := updates[0].Apply(buildFromBaseV3(t))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "must be positive")
+}
+
+func TestAddSortOrderUpdate_UnmarshalDefersBindingToApply(t *testing.T) {
+	// Decoding accepts the order; the schema it must resolve against is only
+	// known at Apply, which is where an unresolvable source ID is reported.
+	data := []byte(`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":0,"transform":"identity","direction":"asc","null-order":"nulls-first"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	err := updates[0].Apply(buildFromBaseV3(t))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not compatible with current schema")
+}
+
+func TestAddSpecAndSortOrderUpdates_ApplyRejectNilPayload(t *testing.T) {
+	err := NewAddPartitionSpecUpdate(nil, true).Apply(buildFromBaseV3(t))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+
+	err = NewAddSortOrderUpdate(nil).Apply(buildFromBaseV3(t))
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }

@@ -389,7 +389,11 @@ func (u *setCurrentSchemaUpdate) Apply(builder *MetadataBuilder) error {
 
 type addPartitionSpecUpdate struct {
 	baseUpdate
-	Spec    *iceberg.PartitionSpec `json:"spec"`
+	// The spec arrives unbound: Apply binds it to the table's current schema,
+	// so its source IDs are only required to resolve there. A dropped
+	// partition field in particular is a void transform over source ID 0,
+	// which BindToSchema carries across but a bound decode rejects.
+	Spec    *iceberg.UnboundPartitionSpec `json:"spec"`
 	initial bool
 }
 
@@ -397,15 +401,23 @@ type addPartitionSpecUpdate struct {
 // metadata. If the initial flag is set to true, the spec is considered the initial spec of the table,
 // and all other previously added specs in the metadata builder are removed.
 func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *addPartitionSpecUpdate {
-	return &addPartitionSpecUpdate{
+	upd := &addPartitionSpecUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSpec},
-		Spec:       spec,
 		initial:    initial,
 	}
+	if spec != nil {
+		upd.Spec = &iceberg.UnboundPartitionSpec{PartitionSpec: *spec}
+	}
+
+	return upd
 }
 
 func (u *addPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
-	return builder.AddPartitionSpec(u.Spec, u.initial)
+	if u.Spec == nil {
+		return fmt.Errorf("%w: %s requires field %q", iceberg.ErrInvalidArgument, UpdateAddSpec, "spec")
+	}
+
+	return builder.AddPartitionSpec(&u.Spec.PartitionSpec, u.initial)
 }
 
 type setDefaultSpecUpdate struct {
@@ -428,7 +440,10 @@ func (u *setDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 
 type addSortOrderUpdate struct {
 	baseUpdate
-	SortOrder *SortOrder `json:"sort-order"`
+	// Unbound for the same reason as addPartitionSpecUpdate.Spec: Apply checks
+	// the order against the table's current schema, which is what decides
+	// whether its source IDs resolve.
+	SortOrder *UnboundSortOrder `json:"sort-order"`
 	initial   bool
 }
 
@@ -436,14 +451,22 @@ type addSortOrderUpdate struct {
 // If the initial flag is set to true, the sort order is considered the initial sort order of the table,
 // and all previously added sort orders in the metadata builder are removed.
 func NewAddSortOrderUpdate(sortOrder *SortOrder) *addSortOrderUpdate {
-	return &addSortOrderUpdate{
+	upd := &addSortOrderUpdate{
 		baseUpdate: baseUpdate{ActionName: UpdateAddSortOrder},
-		SortOrder:  sortOrder,
 	}
+	if sortOrder != nil {
+		upd.SortOrder = &UnboundSortOrder{SortOrder: *sortOrder}
+	}
+
+	return upd
 }
 
 func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
-	return builder.AddSortOrder(u.SortOrder)
+	if u.SortOrder == nil {
+		return fmt.Errorf("%w: %s requires field %q", iceberg.ErrInvalidArgument, UpdateAddSortOrder, "sort-order")
+	}
+
+	return builder.AddSortOrder(&u.SortOrder.SortOrder)
 }
 
 type setDefaultSortOrderUpdate struct {
