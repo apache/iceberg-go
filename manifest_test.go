@@ -33,6 +33,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"
@@ -4329,4 +4331,168 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 	m.ErrorIs(errs[0], errCloseFinalPair,
 		"terminal error must equal or wrap the simulated close error")
 	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
+}
+
+func contentTestSpec() PartitionSpec { return NewPartitionSpecID(1) }
+
+func contentTestSchema() *Schema {
+	return NewSchema(0, NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true})
+}
+
+func contentTestEntry(t *testing.T, spec PartitionSpec, content ManifestEntryContent, path string) ManifestEntry {
+	t.Helper()
+
+	builder, err := NewDataFileBuilder(spec, content, path, ParquetFile, map[int]any{}, nil, nil, 1, 1024)
+	require.NoError(t, err)
+
+	snapshotID, seqNum := int64(1234), int64(1)
+
+	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+}
+
+func writeContentManifest(t *testing.T, version int, entryContent ManifestEntryContent,
+	writerOpts []ManifestWriterOption, fileOpts []ManifestFileOption,
+) ([]byte, ManifestFile, error) {
+	t.Helper()
+
+	schema, spec := contentTestSchema(), contentTestSpec()
+
+	var buf bytes.Buffer
+	cnt := &internal.CountingWriter{W: &buf}
+	writer, err := NewManifestWriter(version, cnt, spec, schema, 1234, writerOpts...)
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Add(contentTestEntry(t, spec, entryContent, "s3://bucket/ns/tbl/data/f.parquet")))
+	require.NoError(t, writer.Close())
+
+	mf, err := writer.ToManifestFile("s3://bucket/ns/tbl/metadata/m.avro", cnt.Count, fileOpts...)
+
+	return buf.Bytes(), mf, err
+}
+
+func TestToManifestFileInheritsWriterContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+		want         ManifestContent
+	}{
+		{
+			name:         "defaults to data",
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+		{
+			name:         "inherits deletes without redundant option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching deletes option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching data option",
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, mf, err := writeContentManifest(t, 2, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, mf.ManifestContent())
+
+			// remaining fields must keep the values ToManifestFile derives from the writer
+			assert.Equal(t, 2, mf.Version())
+			assert.Equal(t, "s3://bucket/ns/tbl/metadata/m.avro", mf.FilePath())
+			assert.Equal(t, int64(len(data)), mf.Length())
+			assert.Equal(t, int32(1), mf.PartitionSpecID())
+			assert.Equal(t, int64(1234), mf.SnapshotID())
+			assert.Equal(t, int64(-1), mf.SequenceNum())
+			assert.Equal(t, int64(1), mf.MinSequenceNum())
+			assert.Equal(t, int32(1), mf.AddedDataFiles())
+			assert.Zero(t, mf.ExistingDataFiles())
+			assert.Zero(t, mf.DeletedDataFiles())
+			assert.Equal(t, int64(1), mf.AddedRows())
+			assert.Zero(t, mf.ExistingRows())
+			assert.Zero(t, mf.DeletedRows())
+			assert.Empty(t, mf.Partitions())
+			assert.Nil(t, mf.KeyMetadata())
+			assert.Nil(t, mf.FirstRowID())
+
+			entries, err := ReadManifest(mf, bytes.NewReader(data), false)
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, tt.entryContent, entries[0].DataFile().ContentType())
+		})
+	}
+}
+
+func TestToManifestFileRejectsContentMismatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		version      int
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+	}{
+		{
+			name:         "data writer with deletes option",
+			version:      2,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+		{
+			name:         "deletes writer with data option",
+			version:      2,
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentPosDeletes,
+		},
+		{
+			// v1 has no delete manifests; NewManifestWriter rejects a deletes
+			// writer, and the file option must not smuggle one past that.
+			name:         "v1 writer with deletes option",
+			version:      1,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, mf, err := writeContentManifest(t, tt.version, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			assert.ErrorContains(t, err, "does not match writer content")
+			assert.Nil(t, mf)
+		})
+	}
+}
+
+func TestManifestListRoundTripsDeleteManifestContent(t *testing.T) {
+	manifestData, mf, err := writeContentManifest(t, 2, EntryContentPosDeletes,
+		[]ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)}, nil)
+	require.NoError(t, err)
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, WriteManifestList(2, &listBuf, 1234, nil, &seqNum, 0, []ManifestFile{mf}))
+
+	files, err := ReadManifestList(bytes.NewReader(listBuf.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, ManifestContentDeletes, files[0].ManifestContent())
+
+	entries, err := ReadManifest(files[0], bytes.NewReader(manifestData), false)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, EntryContentPosDeletes, entries[0].DataFile().ContentType())
 }
