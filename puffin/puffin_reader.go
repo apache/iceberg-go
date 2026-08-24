@@ -412,7 +412,7 @@ func (r *Reader) readFooter() error {
 	// Total footer size: magic(4) + payload + trailer(12)
 	totalFooterSize := MagicSize + payloadSize + footerTrailerSize
 
-	var payloadReader io.Reader
+	var payloadReader *io.SectionReader
 
 	// Validate footer start magic
 	if totalFooterSize <= readSize {
@@ -423,7 +423,11 @@ func (r *Reader) readFooter() error {
 		}
 
 		payloadOffset := footerOffset + MagicSize
-		payloadReader = bytes.NewReader(buf[payloadOffset : payloadOffset+int(payloadSize)])
+		payloadReader = io.NewSectionReader(
+			bytes.NewReader(buf[payloadOffset:payloadOffset+int(payloadSize)]),
+			0,
+			payloadSize,
+		)
 	} else {
 		// Footer is larger than our initial read, need to read magic separately
 		var footerMagic [MagicSize]byte
