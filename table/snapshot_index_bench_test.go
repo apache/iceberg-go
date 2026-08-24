@@ -43,12 +43,36 @@ func BenchmarkSnapshotByID(b *testing.B) {
 		}
 	})
 
+	b.Run("indexed-miss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(snapshotCount, "snapshots")
+		b.ResetTimer()
+		for range b.N {
+			snapshotLookupBenchmarkSink = 0
+			if metadata.SnapshotByID(-1) != nil {
+				snapshotLookupBenchmarkSink = 1
+			}
+		}
+	})
+
 	b.Run("linear", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ReportMetric(snapshotCount, "snapshots")
 		b.ResetTimer()
 		for range b.N {
 			snapshotLookupBenchmarkSink = linearSnapshotByID(snapshots, int64(snapshotCount-1)).SnapshotID
+		}
+	})
+
+	b.Run("linear-miss", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ReportMetric(snapshotCount, "snapshots")
+		b.ResetTimer()
+		for range b.N {
+			snapshotLookupBenchmarkSink = 0
+			if linearSnapshotByID(snapshots, -1) != nil {
+				snapshotLookupBenchmarkSink = 1
+			}
 		}
 	})
 }

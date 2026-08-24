@@ -63,9 +63,21 @@ func snapshotIDFromUUID(id uuid.UUID) int64 {
 
 type snapshotIndexData struct {
 	positions map[int64]int
+	// firstSnapshot identifies the snapshot slice used to build positions.
+	// It lets read-only lookups distinguish a complete index from an index
+	// left behind by an in-package fixture that replaced the slice.
+	firstSnapshot *Snapshot
 	// shared means positions is owned by more than one builder or metadata
 	// value and must be copied before a builder mutates it.
 	shared bool
+}
+
+func snapshotListFirst(snapshots []Snapshot) *Snapshot {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	return &snapshots[0]
 }
 
 func buildSnapshotIndex(snapshots []Snapshot) *snapshotIndexData {
@@ -76,7 +88,7 @@ func buildSnapshotIndex(snapshots []Snapshot) *snapshotIndexData {
 		}
 	}
 
-	return &snapshotIndexData{positions: positions}
+	return &snapshotIndexData{positions: positions, firstSnapshot: snapshotListFirst(snapshots)}
 }
 
 func cloneSnapshotIndex(index *snapshotIndexData) *snapshotIndexData {
@@ -84,11 +96,18 @@ func cloneSnapshotIndex(index *snapshotIndexData) *snapshotIndexData {
 		return nil
 	}
 
-	return &snapshotIndexData{positions: maps.Clone(index.positions)}
+	return &snapshotIndexData{
+		positions:     maps.Clone(index.positions),
+		firstSnapshot: index.firstSnapshot,
+	}
 }
 
 func snapshotIndexNeedsRebuild(index *snapshotIndexData, snapshots []Snapshot) bool {
-	return index == nil || len(index.positions) != len(snapshots)
+	if index == nil || len(index.positions) != len(snapshots) {
+		return true
+	}
+
+	return len(snapshots) > 0 && index.firstSnapshot != &snapshots[0]
 }
 
 // snapshotIndexPosition returns the position for id. Metadata loaded or built
@@ -106,6 +125,10 @@ func snapshotIndexPosition(index *snapshotIndexData, snapshots []Snapshot, id in
 				return i, true
 			}
 
+			return 0, false
+		}
+
+		if !snapshotIndexNeedsRebuild(index, snapshots) {
 			return 0, false
 		}
 	}
@@ -380,7 +403,6 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		lastPartitionID:      clonePtr(b.lastPartitionID),
 		props:                maps.Clone(b.props),
 		snapshotList:         slices.Clone(b.snapshotList),
-		snapshotIndex:        b.snapshotIndex,
 		currentSnapshotID:    clonePtr(b.currentSnapshotID),
 		snapshotLog:          slices.Clone(b.snapshotLog),
 		metadataLog:          slices.Clone(b.metadataLog),
@@ -396,6 +418,13 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		lastAddedSchemaID:    clonePtr(b.lastAddedSchemaID),
 		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
 		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
+	}
+	if b.snapshotIndex != nil {
+		cloned.snapshotIndex = &snapshotIndexData{
+			positions:     b.snapshotIndex.positions,
+			firstSnapshot: snapshotListFirst(cloned.snapshotList),
+			shared:        true,
+		}
 	}
 	if b.snapshotIndex != nil {
 		b.snapshotIndex.shared = true
@@ -655,6 +684,7 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 	b.ensureSnapshotIndexMutable()
 	b.snapshotList = append(b.snapshotList, *snapshot)
 	b.snapshotIndex.positions[snapshot.SnapshotID] = len(b.snapshotList) - 1
+	b.snapshotIndex.firstSnapshot = snapshotListFirst(b.snapshotList)
 
 	return nil
 }

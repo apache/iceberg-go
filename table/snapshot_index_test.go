@@ -154,7 +154,8 @@ func TestMetadataBuilderCloneSharesSnapshotIndexUntilSnapshotMutation(t *testing
 	require.NoError(t, builder.AddSnapshot(&first))
 
 	cloned := builder.clone()
-	require.Same(t, builder.snapshotIndex, cloned.snapshotIndex)
+	require.NotSame(t, builder.snapshotIndex, cloned.snapshotIndex)
+	require.Equal(t, builder.snapshotIndex.positions, cloned.snapshotIndex.positions)
 
 	second := freshBuilderSnapshot(2, &first.SnapshotID, 1, baseTimestamp+2)
 	require.NoError(t, cloned.AddSnapshot(&second))
