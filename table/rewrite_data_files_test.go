@@ -725,6 +725,49 @@ func TestRewriteDataFiles_PartialProgressRetainsSharedPositionDeleteAfterFailure
 		"generated files from tolerated failed batches must be removed")
 }
 
+func TestRewriteDataFiles_PartialProgressCleansOutputsBeforeCommit(t *testing.T) {
+	tbl, _ := newPartialProgressTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		dataPath := tbl.Location() + fmt.Sprintf("/data/precommit-%d.parquet", i)
+		writeParquetFile(t, dataPath, arrowSc, fmt.Sprintf(
+			`[{"id": %d, "data": "row"}]`, i+1))
+
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	groups := []table.CompactionTaskGroup{
+		{PartitionKey: "precommit-0", Tasks: []table.FileScanTask{tasks[0]}, TotalSizeBytes: tasks[0].File.FileSizeBytes()},
+		{PartitionKey: "precommit-1", Tasks: []table.FileScanTask{tasks[1]}, TotalSizeBytes: tasks[1].File.FileSizeBytes()},
+	}
+
+	// The first group writes an output before the second group fails while
+	// reading its source. Both groups are in one batch, so the output from the
+	// first group must be removed before the rewrite returns the read error.
+	missingPath := tasks[1].File.FilePath()
+	require.NoError(t, os.Remove(missingPath))
+	expectedFiles := parquetFiles(t, tbl.Location())
+
+	tx := tbl.NewTransaction()
+	result, err := tx.RewriteDataFiles(t.Context(), groups, table.RewriteDataFilesOptions{
+		PartialProgress: true,
+		MaxCommits:      1,
+	})
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.CompletedGroups)
+	assert.ElementsMatch(t, expectedFiles, parquetFiles(t, tbl.Location()),
+		"outputs from groups written before a pre-commit failure must be removed")
+}
+
 func parquetFiles(t *testing.T, location string) []string {
 	t.Helper()
 

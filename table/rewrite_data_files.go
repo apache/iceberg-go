@@ -446,7 +446,11 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	)
 	for df, err := range WriteRecords(ctx, tbl, arrowSchema, records, writeOpts...) {
 		if err != nil {
-			return CompactionGroupResult{}, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
+			return CompactionGroupResult{
+				PartitionKey: group.PartitionKey,
+				NewDataFiles: newFiles,
+				BytesAfter:   bytesAfter,
+			}, fmt.Errorf("write compacted files for group %q: %w", group.PartitionKey, err)
 		}
 		newFiles = append(newFiles, df)
 		bytesAfter += df.FileSizeBytes()
@@ -504,9 +508,6 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		return nil, errors.New("transaction has already been committed")
 	}
 	result := &RewriteResult{Table: t.tbl}
-	if len(groups) == 0 {
-		return result, nil
-	}
 	if len(meta.updates) > 0 || len(t.reqs) > 0 || len(t.validators) > 0 {
 		return nil, fmt.Errorf("%w: partial progress requires a fresh transaction",
 			ErrInvalidOperation)
@@ -519,6 +520,9 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		return nil, fmt.Errorf("%w: MaxCommits must be non-negative", ErrInvalidOperation)
 	}
 	maxFailedCommits := opts.MaxFailedCommits
+	if len(groups) == 0 {
+		return result, nil
+	}
 
 	pendingGroups := make([]CompactionTaskGroup, 0, len(groups))
 	for _, group := range groups {
@@ -548,15 +552,32 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		batchResults := make([]CompactionGroupResult, 0, len(batchGroups))
 		rewrittenPaths := make(map[string]struct{})
 		rewrittenFiles := make([]iceberg.DataFile, 0)
+		fs, err := current.fsF(ctx)
+		if err != nil {
+			return result, fmt.Errorf("open table IO for partial rewrite batch: %w", err)
+		}
+		cleanupBatch := func(cause error, extras ...CompactionGroupResult) error {
+			results := batchResults
+			if len(extras) > 0 {
+				results = make([]CompactionGroupResult, 0, len(batchResults)+len(extras))
+				results = append(results, batchResults...)
+				results = append(results, extras...)
+			}
+			if cleanupErr := cleanupCompactionOutputs(fs, results); cleanupErr != nil {
+				return errors.Join(cause, fmt.Errorf("clean up partial rewrite batch outputs: %w", cleanupErr))
+			}
+
+			return cause
+		}
 
 		for _, group := range batchGroups {
 			if err := ctx.Err(); err != nil {
-				return result, err
+				return result, cleanupBatch(err)
 			}
 
 			gr, err := ExecuteCompactionGroup(ctx, current, group, opts.GroupOptions...)
 			if err != nil {
-				return result, err
+				return result, cleanupBatch(err, gr)
 			}
 
 			if len(gr.OldDataFiles) == 0 && len(gr.NewDataFiles) == 0 {
@@ -576,14 +597,10 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 			continue
 		}
 
-		fs, err := current.fsF(ctx)
-		if err != nil {
-			return result, fmt.Errorf("open table IO for partial rewrite batch: %w", err)
-		}
 		deadPositionDeletes, err := CollectDeadPositionDeletes(
 			ctx, fs, latestSnapshotForBranch(current.Metadata(), t.branch), rewrittenPaths)
 		if err != nil {
-			return result, fmt.Errorf("collect dead position deletes for partial rewrite batch: %w", err)
+			return result, cleanupBatch(fmt.Errorf("collect dead position deletes for partial rewrite batch: %w", err))
 		}
 
 		// Deletion vectors are one-to-one with their referenced data file, so
@@ -608,7 +625,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 
 		groupTxn, err := current.NewTransactionOnBranchWithError(t.branch)
 		if err != nil {
-			return result, fmt.Errorf("create transaction for partial rewrite batch: %w", err)
+			return result, cleanupBatch(fmt.Errorf("create transaction for partial rewrite batch: %w", err))
 		}
 		newDataFiles := make([]iceberg.DataFile, 0)
 		oldDataFiles := make([]iceberg.DataFile, 0, len(rewrittenFiles))
@@ -618,7 +635,7 @@ func (t *Transaction) rewriteDataFilesPartial(ctx context.Context, groups []Comp
 		}
 		if err := groupTxn.ReplaceFiles(ctx, oldDataFiles, newDataFiles, deletesToRemove,
 			props, withRewriteSemantics()); err != nil {
-			return result, fmt.Errorf("stage partial rewrite batch: %w", err)
+			return result, cleanupBatch(fmt.Errorf("stage partial rewrite batch: %w", err))
 		}
 		groupTxn.addValidator(rewriteValidator(rewrittenFiles))
 
