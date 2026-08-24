@@ -29,7 +29,6 @@ func TestFetchScanTasksResponseRejectsInvalidShape(t *testing.T) {
 	t.Parallel()
 
 	for _, payload := range []string{
-		`{}`,
 		`{"plan-tasks":null}`,
 		`{"file-scan-tasks":null}`,
 		`{"plan-tasks":[],"delete-files":[{"content":"position-deletes"}]}`,
@@ -44,8 +43,10 @@ func TestFetchScanTasksResponseAcceptsPresentEmptyTaskField(t *testing.T) {
 	t.Parallel()
 
 	for _, payload := range []string{
+		`{}`,
 		`{"plan-tasks":[]}`,
 		`{"file-scan-tasks":[]}`,
+		`{"delete-files":[]}`,
 	} {
 		var resp FetchScanTasksResponse
 		require.NoError(t, json.Unmarshal([]byte(payload), &resp), payload)

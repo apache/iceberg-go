@@ -65,9 +65,6 @@ func (r *FetchScanTasksResponse) UnmarshalJSON(data []byte) error {
 	planTasks, hasPlanTasks := fields["plan-tasks"]
 	fileScanTasks, hasFileScanTasks := fields["file-scan-tasks"]
 	deleteFiles, hasDeleteFiles := fields["delete-files"]
-	if !hasPlanTasks && !hasFileScanTasks {
-		return fmt.Errorf("%w: fetchScanTasks response is missing both plan-tasks and file-scan-tasks", ErrRESTError)
-	}
 
 	isNull := func(raw json.RawMessage) bool {
 		return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
