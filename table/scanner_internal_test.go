@@ -330,6 +330,7 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 		name             string
 		partitionMatches bool
 		metricsMatches   bool
+		metricsErr       error
 		wantEvaluations  []string
 		wantEntries      int
 	}{
@@ -337,6 +338,12 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 			name:             "partition rejection skips metrics",
 			partitionMatches: false,
 			metricsMatches:   true,
+			wantEvaluations:  []string{"partition"},
+		},
+		{
+			name:             "partition rejection skips metrics errors",
+			partitionMatches: false,
+			metricsErr:       errors.New("metrics evaluation should be skipped"),
 			wantEvaluations:  []string{"partition"},
 		},
 		{
@@ -368,7 +375,7 @@ func TestOpenManifestShortCircuitsMetricsEvaluation(t *testing.T) {
 				func(iceberg.DataFile) (bool, error) {
 					evaluations = append(evaluations, "metrics")
 
-					return tt.metricsMatches, nil
+					return tt.metricsMatches, tt.metricsErr
 				},
 			)
 			require.NoError(t, err)

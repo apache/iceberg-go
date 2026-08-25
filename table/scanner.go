@@ -215,7 +215,7 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 			return nil, err
 		}
 
-		if p && m {
+		if m {
 			out = append(out, entry)
 		}
 	}

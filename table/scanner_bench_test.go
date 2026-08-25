@@ -88,6 +88,8 @@ func BenchmarkOpenManifestPartitionRejectsMostEntries(b *testing.B) {
 		b.Fatal(err)
 	}
 
+	// This simplified filter isolates skipped metrics evaluation; production
+	// scans build the evaluator through buildPartitionEvaluator.
 	partitionFilter := func(df iceberg.DataFile) (bool, error) {
 		return df.Partition()[1000].(int32) >= rejectThrough, nil
 	}
