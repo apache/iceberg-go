@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
@@ -1617,6 +1618,54 @@ func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchArrowValues() {
 
 				s.Equal(expectedValue, bound(nativeValue), "row %d", row)
 			}
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestArrowDecimalValuesPreserveSign() {
+	tests := []struct {
+		name       string
+		sourceType iceberg.Type
+		build      func() arrow.Array
+		want       iceberg.Decimal
+	}{
+		{
+			name:       "decimal32",
+			sourceType: iceberg.DecimalTypeOf(8, 2),
+			build: func() arrow.Array {
+				builder := array.NewDecimal32Builder(s.mem, &arrow.Decimal32Type{Precision: 8, Scale: 2})
+				builder.Append(arrowdecimal.Decimal32(-1234))
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+			want: iceberg.Decimal{Val: decimal128.FromI64(-1234), Scale: 2},
+		},
+		{
+			name:       "decimal64",
+			sourceType: iceberg.DecimalTypeOf(18, 2),
+			build: func() arrow.Array {
+				builder := array.NewDecimal64Builder(s.mem, &arrow.Decimal64Type{Precision: 18, Scale: 2})
+				builder.Append(arrowdecimal.Decimal64(-1234))
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+			want: iceberg.Decimal{Val: decimal128.FromI64(-1234), Scale: 2},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		s.Run(test.name, func() {
+			column := test.build()
+			defer column.Release()
+
+			value, err := getArrowValueAsIcebergValue(column, 0, test.sourceType)
+			s.Require().NoError(err)
+			s.Equal(test.want, value)
 		})
 	}
 }

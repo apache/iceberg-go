@@ -984,7 +984,7 @@ func getArrowValueAsIcebergValue(column arrow.Array, row int, sourceType iceberg
 	case *array.Decimal32:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal32Type).Scale),
 		}
 
@@ -992,7 +992,7 @@ func getArrowValueAsIcebergValue(column arrow.Array, row int, sourceType iceberg
 	case *array.Decimal64:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal64Type).Scale),
 		}
 
