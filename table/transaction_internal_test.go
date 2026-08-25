@@ -1928,7 +1928,9 @@ func TestTableCommitFencesTargetBranch(t *testing.T) {
 		assert.ErrorContains(t, err, "created concurrently")
 	})
 
-	t.Run("target name created as a tag is rejected", func(t *testing.T) {
+	// The branch-typed assertion is client-side only: requireBranch has no wire form, so a REST catalog
+	// enforces snapshot-id equality alone.
+	t.Run("target name created as a tag is rejected locally", func(t *testing.T) {
 		base := newConflictTestMetadata(t, &head)
 		tx := multiTableTestTable(t, base).NewTransactionOnBranch("audit")
 		require.NoError(t, tx.SetProperties(iceberg.Properties{"offsets": "42"}))
@@ -1976,6 +1978,12 @@ func TestTableCommitRequirementsMatchCommit(t *testing.T) {
 			cat := &reqCapturingCatalog{metadata: base}
 			committed := New(Identifier{"db", "multi-table"}, base, "metadata.json",
 				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, cat)
+			payload := multiTableTestTable(t, base)
+
+			// The catalog advances its metadata on commit; both sides must still derive their requirements
+			// from the same base.
+			require.Equal(t, base, committed.Metadata())
+			require.Equal(t, base, payload.Metadata())
 
 			txCommit := committed.NewTransactionOnBranch(branch)
 			require.NoError(t, txCommit.SetProperties(iceberg.Properties{"offsets": "42"}))
@@ -1983,7 +1991,7 @@ func TestTableCommitRequirementsMatchCommit(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, cat.reqs, 1)
 
-			txPayload := multiTableTestTable(t, base).NewTransactionOnBranch(branch)
+			txPayload := payload.NewTransactionOnBranch(branch)
 			require.NoError(t, txPayload.SetProperties(iceberg.Properties{"offsets": "42"}))
 			tc, err := txPayload.TableCommit()
 			require.NoError(t, err)
@@ -2036,8 +2044,6 @@ func TestTableCommitWithoutUpdatesStaysEmpty(t *testing.T) {
 	tc, err := tx.TableCommit()
 	require.NoError(t, err)
 
-	assert.Empty(t, tc.Requirements)
-	assert.Empty(t, tc.Updates)
-	assert.NotNil(t, tc.Requirements, "an empty payload must still serialize as []")
-	assert.NotNil(t, tc.Updates, "an empty payload must still serialize as []")
+	assert.Equal(t, []Requirement{}, tc.Requirements, "an empty payload must serialize as [], not null")
+	assert.Equal(t, []Update{}, tc.Updates, "an empty payload must serialize as [], not null")
 }

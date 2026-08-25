@@ -79,7 +79,7 @@ func (t *Transaction) TableCommit() (TableCommit, error) {
 	}
 
 	// Same derivation as Commit. Copying t.reqs alone leaves metadata-only transactions unfenced:
-	// their updates stage no ref requirement.
+	// their updates stage no ref requirement. The helper returns a fresh slice, so appending here cannot touch t.reqs.
 	reqs := append(transactionRequirements(t.reqs, t.branch, t.tbl.metadata), AssertTableUUID(meta.uuid))
 
 	updates := make([]Update, len(meta.updates))

@@ -323,6 +323,9 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// transactionRequirements returns the requirements a commit on branch must carry.
+// The result is always a fresh allocation, never aliasing reqs, so callers may append to it 
+// while holding the transaction lock.
 func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
 	if branch == "" {
 		branch = MainBranch
