@@ -544,12 +544,35 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	mem := compute.GetAllocator(ctx)
 
 	return func(record arrow.RecordBatch, rowIndices []int64) (arrow.RecordBatch, error) {
+		if len(rowIndices) == 0 && record.NumRows() == 0 {
+			record.Retain()
+
+			return record, nil
+		}
+
+		if start, end, ok := contiguousRowRange(rowIndices, record.NumRows()); ok {
+			if start == 0 && end == record.NumRows() {
+				record.Retain()
+
+				return record, nil
+			}
+
+			if contiguousSliceHasBoundedRetention(start, end, record.NumRows()) && recordHasRowBoundedStorage(record) {
+				return record.NewSlice(start, end), nil
+			}
+		}
+
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
 
 		bldr.AppendValues(rowIndices, nil)
 		rowIndicesArr := bldr.NewInt64Array()
 		defer rowIndicesArr.Release()
+
+		recordMetadata := arrow.Metadata{}
+		if recordWithMetadata, ok := record.(arrow.RecordBatchWithMetadata); ok {
+			recordMetadata = recordWithMetadata.Metadata()
+		}
 
 		partitionedRecord, err := compute.Take(
 			ctx,
@@ -561,8 +584,240 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 			return nil, err
 		}
 
-		return partitionedRecord.(*compute.RecordDatum).Value, nil
+		return materializeDictionaryColumns(ctx, partitionedRecord.(*compute.RecordDatum).Value, recordMetadata)
 	}
+}
+
+// materializeDictionaryColumns removes dictionary values that are not referenced
+// by a partial result. Arrow's Take kernel copies dictionary indices but reuses
+// the complete dictionary, which can otherwise retain a large variable-width
+// buffer in a rolling writer queue.
+func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch, recordMetadata arrow.Metadata) (arrow.RecordBatch, error) {
+	columns := slices.Clone(record.Columns())
+	fields := record.Schema().Fields()
+	materialized := make([]arrow.Array, 0)
+
+	for i, column := range columns {
+		values, changed, err := materializeDictionaryArray(ctx, column)
+		if err != nil {
+			for _, materializedColumn := range materialized {
+				materializedColumn.Release()
+			}
+			record.Release()
+
+			return nil, err
+		}
+		if !changed {
+			continue
+		}
+
+		columns[i] = values
+		fields[i].Type = values.DataType()
+		materialized = append(materialized, values)
+	}
+
+	if len(materialized) == 0 {
+		return record, nil
+	}
+
+	metadata := record.Schema().Metadata()
+	result := array.NewRecordBatchWithMetadata(arrow.NewSchema(fields, &metadata), columns, record.NumRows(), recordMetadata)
+	for _, materializedColumn := range materialized {
+		materializedColumn.Release()
+	}
+	record.Release()
+
+	return result, nil
+}
+
+// materializeDictionaryArray removes dictionaries recursively from the nested
+// array types used by Iceberg schemas. A dictionary array is decoded by taking
+// its selected logical values, while nested arrays are rebuilt only when one of
+// their children changes.
+func materializeDictionaryArray(ctx context.Context, input arrow.Array) (arrow.Array, bool, error) {
+	if input.DataType().ID() == arrow.DICTIONARY {
+		dictionary := input.(*array.Dictionary)
+		values, err := compute.TakeArray(ctx, dictionary.Dictionary(), dictionary.Indices())
+		if err != nil {
+			return nil, false, err
+		}
+
+		materializedValues, _, err := materializeDictionaryArray(ctx, values)
+		if err != nil {
+			values.Release()
+
+			return nil, false, err
+		}
+		if materializedValues != values {
+			values.Release()
+			values = materializedValues
+		}
+
+		return values, true, nil
+	}
+
+	dataType := input.DataType()
+	switch dataType.ID() {
+	case arrow.STRUCT, arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST, arrow.MAP:
+	default:
+		return input, false, nil
+	}
+
+	data := input.Data()
+	children := make([]arrow.Array, len(data.Children()))
+	changed := false
+	for i, childData := range data.Children() {
+		child := array.MakeFromData(childData)
+		materializedChild, childChanged, err := materializeDictionaryArray(ctx, child)
+		if err != nil {
+			child.Release()
+			for _, materializedChild := range children {
+				if materializedChild != nil {
+					materializedChild.Release()
+				}
+			}
+
+			return nil, false, err
+		}
+
+		if childChanged {
+			child.Release()
+			child = materializedChild
+			changed = true
+		}
+		children[i] = child
+	}
+
+	if !changed {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return input, false, nil
+	}
+
+	newType, err := nestedArrayTypeWithChildren(dataType, children)
+	if err != nil {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return nil, false, err
+	}
+
+	childData := make([]arrow.ArrayData, len(children))
+	for i, child := range children {
+		childData[i] = child.Data()
+	}
+	newData := array.NewData(newType, data.Len(), data.Buffers(), childData, data.NullN(), data.Offset())
+	result := array.MakeFromData(newData)
+	newData.Release()
+	for _, child := range children {
+		child.Release()
+	}
+
+	return result, true, nil
+}
+
+func nestedArrayTypeWithChildren(dataType arrow.DataType, children []arrow.Array) (arrow.DataType, error) {
+	switch dataType := dataType.(type) {
+	case *arrow.StructType:
+		fields := dataType.Fields()
+		if len(fields) != len(children) {
+			return nil, fmt.Errorf("struct has %d fields but %d children", len(fields), len(children))
+		}
+		for i, child := range children {
+			fields[i].Type = child.DataType()
+		}
+
+		return arrow.StructOf(fields...), nil
+	case *arrow.ListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.ListOfField(field), nil
+	case *arrow.LargeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("large list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.LargeListOfField(field), nil
+	case *arrow.FixedSizeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("fixed-size list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.FixedSizeListOfField(dataType.Len(), field), nil
+	case *arrow.MapType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("map has %d children", len(children))
+		}
+		entryType, ok := children[0].DataType().(*arrow.StructType)
+		if !ok || entryType.NumFields() != 2 {
+			return nil, fmt.Errorf("map child has type %s, want a two-field struct", children[0].DataType())
+		}
+
+		result := arrow.MapOfFields(entryType.Field(0), entryType.Field(1))
+		result.KeysSorted = dataType.KeysSorted
+
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unsupported nested array type %s", dataType)
+	}
+}
+
+// recordHasRowBoundedStorage reports whether a partial zero-copy slice retains
+// buffers whose size is bounded by the number of rows. Fixed-width arrays have
+// row-bounded value and validity buffers. Dictionary arrays are excluded even
+// though their indices are fixed-width because their dictionary values are not.
+func recordHasRowBoundedStorage(record arrow.RecordBatch) bool {
+	for _, column := range record.Columns() {
+		dataType := column.Data().DataType()
+		if dataType.ID() == arrow.DICTIONARY {
+			return false
+		}
+		if _, ok := dataType.(arrow.FixedWidthDataType); !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+// contiguousSliceHasBoundedRetention reports whether a partial zero-copy slice
+// retains no more than twice as many input rows as it returns. This bound is
+// meaningful only for records whose storage is row-bounded.
+func contiguousSliceHasBoundedRetention(start, end, numRows int64) bool {
+	selectedRows := end - start
+
+	return selectedRows >= numRows-selectedRows
+}
+
+func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {
+	if len(rowIndices) == 0 {
+		return 0, 0, false
+	}
+
+	start = rowIndices[0]
+	length := int64(len(rowIndices))
+	if start < 0 || length > numRows || start > numRows-length {
+		return 0, 0, false
+	}
+
+	for offset, row := range rowIndices[1:] {
+		if row != start+int64(offset)+1 {
+			return 0, 0, false
+		}
+	}
+
+	return start, start + length, true
 }
 
 func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType iceberg.Type) (iceberg.Literal, error) {

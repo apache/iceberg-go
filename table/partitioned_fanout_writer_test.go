@@ -113,6 +113,24 @@ func (s *FanoutWriterTestSuite) createLargeTestRecord(arrSchema *arrow.Schema, r
 	return bldr.NewRecordBatch()
 }
 
+func (s *FanoutWriterTestSuite) createSkewedTestRecord(arrSchema *arrow.Schema, rows int, idOffset int64, largePayloadRows, largePayloadSize, smallPayloadSize int) arrow.RecordBatch {
+	bldr := array.NewRecordBuilder(s.mem, arrSchema)
+	defer bldr.Release()
+
+	largePayload := strings.Repeat("l", largePayloadSize)
+	smallPayload := strings.Repeat("s", smallPayloadSize)
+	for i := range rows {
+		bldr.Field(0).(*array.Int64Builder).Append(idOffset + int64(i))
+		payload := smallPayload
+		if i < largePayloadRows {
+			payload = largePayload
+		}
+		bldr.Field(1).(*array.StringBuilder).Append(payload)
+	}
+
+	return bldr.NewRecordBatch()
+}
+
 func (s *FanoutWriterTestSuite) TestCloseAllFlushesAfterFanoutSuccessContextCancel() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
@@ -797,6 +815,320 @@ func (s *FanoutWriterTestSuite) TestPartitionRowCapacityLateDiscoveryIsGrowthSaf
 	}
 }
 
+func (s *FanoutWriterTestSuite) TestRecordHasRowBoundedStorage() {
+	intSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	intRecord := s.createCustomTestRecord(intSchema, [][]any{{int64(1)}})
+	defer intRecord.Release()
+	s.True(recordHasRowBoundedStorage(intRecord))
+
+	stringSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.BinaryTypes.String}}, nil)
+	stringRecord := s.createCustomTestRecord(stringSchema, [][]any{{"value"}})
+	defer stringRecord.Release()
+	s.False(recordHasRowBoundedStorage(stringRecord))
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.Append(0)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append("dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+	defer dict.Release()
+
+	dictSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: dictType}}, nil)
+	dictRecord := array.NewRecordBatch(dictSchema, []arrow.Array{dict}, 1)
+	defer dictRecord.Release()
+	s.False(recordHasRowBoundedStorage(dictRecord))
+}
+
+func (s *FanoutWriterTestSuite) TestContiguousSliceHasBoundedRetention() {
+	tests := []struct {
+		name        string
+		start       int64
+		end         int64
+		numRows     int64
+		wantBounded bool
+	}{
+		{name: "small partial range", start: 1, end: 2, numRows: 5},
+		{name: "just below half", start: 1, end: 3, numRows: 5},
+		{name: "half", start: 1, end: 3, numRows: 4, wantBounded: true},
+		{name: "more than half", start: 1, end: 4, numRows: 5, wantBounded: true},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			s.Equal(test.wantBounded, contiguousSliceHasBoundedRetention(test.start, test.end, test.numRows))
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyCopiesVariableWidthPartialSlices() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+	record := s.createSkewedTestRecord(arrSchema, 4, 0, 2, 1024, 1)
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	partitioned, err := partitionBatch(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	s.NotSame(record.Column(0).Data().Buffers()[1], partitioned.Column(0).Data().Buffers()[1])
+	s.NotSame(record.Column(1).Data().Buffers()[2], partitioned.Column(1).Data().Buffers()[2])
+	values := partitioned.Column(1).(*array.String)
+	s.Equal([]string{"s", "s"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPartialSlices() {
+	largeValue := strings.Repeat("l", 16*1024)
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append(largeValue)
+	dictBuilder.Append("small dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+	originalValuesBuffer := dictionary.Data().Buffers()[2]
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: dictType}}, nil)
+	recordMetadata := arrow.MetadataFrom(map[string]string{"record": "metadata"})
+	record := array.NewRecordBatchWithMetadata(arrSchema, []arrow.Array{dict}, 4, recordMetadata)
+	dict.Release()
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	partitioned, err := partitionBatch(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	s.Equal(arrow.STRING, partitioned.Column(0).DataType().ID())
+	s.NotSame(originalValuesBuffer, partitioned.Column(0).Data().Buffers()[2])
+	metadataRecord, ok := partitioned.(arrow.RecordBatchWithMetadata)
+	s.Require().True(ok)
+	recordMetadataValue, ok := metadataRecord.Metadata().GetValue("record")
+	s.Require().True(ok)
+	s.Equal("metadata", recordMetadataValue)
+	values := partitioned.Column(0).(*array.String)
+	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesNestedDictionaryPartialSlices() {
+	largeValue := strings.Repeat("l", 16*1024)
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append(largeValue)
+	dictBuilder.Append("small nested dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+	originalValuesBuffer := dictionary.Data().Buffers()[2]
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+
+	structFields := []arrow.Field{{Name: "value", Type: dictType}}
+	nested, err := array.NewStructArrayWithFields([]arrow.Array{dict}, structFields)
+	s.Require().NoError(err)
+	dict.Release()
+
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "nested", Type: nested.DataType()}}, nil)
+	record := array.NewRecordBatch(arrSchema, []arrow.Array{nested}, 4)
+	nested.Release()
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	partitioned, err := partitionBatch(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	values := partitioned.Column(0).(*array.Struct).Field(0).(*array.String)
+	s.Equal(arrow.STRING, values.DataType().ID())
+	s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+	s.Equal([]string{"small nested dictionary value", "small nested dictionary value"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesNestedDictionaryContainers() {
+	const rowCount = 4
+
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	newDictionary := func() (*array.Dictionary, *memory.Buffer) {
+		indexBuilder := array.NewInt8Builder(s.mem)
+		indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+		indices := indexBuilder.NewInt8Array()
+		indexBuilder.Release()
+
+		dictBuilder := array.NewStringBuilder(s.mem)
+		dictBuilder.Append(strings.Repeat("l", 16*1024))
+		dictBuilder.Append("small container dictionary value")
+		dictionary := dictBuilder.NewStringArray()
+		dictBuilder.Release()
+		originalValuesBuffer := dictionary.Data().Buffers()[2]
+
+		dict := array.NewDictionaryArray(dictType, indices, dictionary)
+		indices.Release()
+		dictionary.Release()
+
+		return dict, originalValuesBuffer
+	}
+	newOffsets := func() *array.Int32 {
+		offsetBuilder := array.NewInt32Builder(s.mem)
+		offsetBuilder.AppendValues([]int32{0, 1, 2, 3, 4}, nil)
+		offsets := offsetBuilder.NewInt32Array()
+		offsetBuilder.Release()
+
+		return offsets
+	}
+
+	s.Run("list", func() {
+		dict, originalValuesBuffer := newDictionary()
+		offsets := newOffsets()
+		listType := arrow.ListOf(dictType)
+		listData := array.NewData(listType, rowCount, []*memory.Buffer{nil, offsets.Data().Buffers()[1]}, []arrow.ArrayData{dict.Data()}, 0, 0)
+		list := array.NewListData(listData)
+		listData.Release()
+		offsets.Release()
+		dict.Release()
+
+		record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: listType}}, nil), []arrow.Array{list}, rowCount)
+		list.Release()
+		defer record.Release()
+
+		partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+		s.Require().NoError(err)
+		defer partitioned.Release()
+
+		values := partitioned.Column(0).(*array.List).ListValues().(*array.String)
+		s.Equal(arrow.STRING, values.DataType().ID())
+		s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+		s.Equal([]string{"small container dictionary value", "small container dictionary value"}, []string{values.Value(0), values.Value(1)})
+	})
+
+	s.Run("map", func() {
+		dict, originalValuesBuffer := newDictionary()
+		keysBuilder := array.NewStringBuilder(s.mem)
+		keysBuilder.AppendValues([]string{"a", "b", "c", "d"}, nil)
+		keys := keysBuilder.NewStringArray()
+		keysBuilder.Release()
+
+		entryFields := []arrow.Field{
+			{Name: "key", Type: arrow.BinaryTypes.String},
+			{Name: "value", Type: dictType, Nullable: true},
+		}
+		entries, err := array.NewStructArrayWithFields([]arrow.Array{keys, dict}, entryFields)
+		s.Require().NoError(err)
+		keys.Release()
+		dict.Release()
+
+		offsets := newOffsets()
+		mapType := arrow.MapOfFields(entryFields[0], entryFields[1])
+		mapData := array.NewData(mapType, rowCount, []*memory.Buffer{nil, offsets.Data().Buffers()[1]}, []arrow.ArrayData{entries.Data()}, 0, 0)
+		mapArray := array.NewMapData(mapData)
+		mapData.Release()
+		offsets.Release()
+		entries.Release()
+
+		record := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{{Name: "values", Type: mapType}}, nil), []arrow.Array{mapArray}, rowCount)
+		mapArray.Release()
+		defer record.Release()
+
+		partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+		s.Require().NoError(err)
+		defer partitioned.Release()
+
+		values := partitioned.Column(0).(*array.Map).Items().(*array.String)
+		s.Equal(arrow.STRING, values.DataType().ID())
+		s.NotSame(originalValuesBuffer, values.Data().Buffers()[2])
+		s.Equal([]string{"small container dictionary value", "small container dictionary value"}, []string{values.Value(0), values.Value(1)})
+	})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemoryForSkewedPayload() {
+	const (
+		inputRows         = 256
+		largePayloadRows  = inputRows / 2
+		largePayloadSize  = 16 * 1024
+		smallPayloadSize  = 1
+		selectedRowsCount = inputRows / 2
+	)
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+
+	probe := s.createSkewedTestRecord(arrSchema, inputRows, 0, largePayloadRows, largePayloadSize, smallPayloadSize)
+	fullBatchBytes := s.mem.CurrentAlloc()
+	probe.Release()
+
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
+		errorCh:  make(chan error, 1),
+		ctx:      s.ctx,
+	}
+	defer func() {
+		for len(writer.recordCh) > 0 {
+			(<-writer.recordCh).Release()
+		}
+	}()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	selectedRows := make([]int64, selectedRowsCount)
+	for i := range selectedRows {
+		selectedRows[i] = int64(largePayloadRows + i)
+	}
+
+	peakBytes := 0
+	for batch := range rollingDataWriterQueueCapacity {
+		record := s.createSkewedTestRecord(arrSchema, inputRows, int64(batch*inputRows), largePayloadRows, largePayloadSize, smallPayloadSize)
+		partitioned, err := partitionBatch(record, selectedRows)
+		s.Require().NoError(err)
+
+		s.Require().NoError(writer.Add(partitioned))
+		partitioned.Release()
+		record.Release()
+
+		peakBytes = max(peakBytes, s.mem.CurrentAlloc())
+	}
+
+	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionedWriterReusesExtractionPlan() {
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Int32},
@@ -921,6 +1253,131 @@ func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanHandlesReorderedRecor
 		partitions[1].partitionRec.Get(0).(int32),
 	}
 	s.ElementsMatch([]int32{7, 8}, values)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyFastPaths() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{{int64(0)}, {int64(1)}, {int64(2)}, {int64(3)}, {int64(4)}})
+	defer record.Release()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+
+	full, err := partitionBatch(record, []int64{0, 1, 2, 3, 4})
+	s.Require().NoError(err)
+	s.Same(record, full)
+	full.Release()
+
+	contiguous, err := partitionBatch(record, []int64{1, 2, 3})
+	s.Require().NoError(err)
+	defer contiguous.Release()
+	s.Same(record.Column(0).Data().Buffers()[1], contiguous.Column(0).Data().Buffers()[1])
+	s.Equal(int64(3), contiguous.NumRows())
+	contiguousValues := contiguous.Column(0).(*array.Int64)
+	s.Equal([]int64{1, 2, 3}, []int64{
+		contiguousValues.Value(0), contiguousValues.Value(1), contiguousValues.Value(2),
+	})
+
+	narrow, err := partitionBatch(record, []int64{1})
+	s.Require().NoError(err)
+	defer narrow.Release()
+	s.NotSame(record.Column(0).Data().Buffers()[1], narrow.Column(0).Data().Buffers()[1])
+
+	s.Equal(int64(1), narrow.NumRows())
+	narrowValues := narrow.Column(0).(*array.Int64)
+	s.Equal(int64(1), narrowValues.Value(0))
+
+	scattered, err := partitionBatch(record, []int64{0, 2, 4})
+	s.Require().NoError(err)
+	defer scattered.Release()
+	s.Equal(int64(3), scattered.NumRows())
+	scatteredValues := scattered.Column(0).(*array.Int64)
+	s.Equal([]int64{0, 2, 4}, []int64{
+		scatteredValues.Value(0), scatteredValues.Value(1), scatteredValues.Value(2),
+	})
+
+	empty, err := partitionBatch(record, nil)
+	s.Require().NoError(err)
+	defer empty.Release()
+	s.Zero(empty.NumRows())
+
+	emptyRecord := s.createCustomTestRecord(arrowSchema, nil)
+	defer emptyRecord.Release()
+	emptyFull, err := partitionBatch(emptyRecord, nil)
+	s.Require().NoError(err)
+	s.Same(emptyRecord, emptyFull)
+	emptyFull.Release()
+
+	_, err = partitionBatch(record, []int64{4, 5})
+	s.Error(err)
+}
+
+func (s *FanoutWriterTestSuite) TestContiguousRowRangeRejectsInvalidRanges() {
+	tests := []struct {
+		name    string
+		indices []int64
+		rows    int64
+		start   int64
+		end     int64
+		ok      bool
+	}{
+		{name: "empty", rows: 5},
+		{name: "single", indices: []int64{2}, rows: 5, start: 2, end: 3, ok: true},
+		{name: "full", indices: []int64{0, 1, 2, 3, 4}, rows: 5, start: 0, end: 5, ok: true},
+		{name: "gap", indices: []int64{1, 3}, rows: 5},
+		{name: "descending", indices: []int64{2, 1}, rows: 5},
+		{name: "negative", indices: []int64{-1}, rows: 5},
+		{name: "past end", indices: []int64{4, 5}, rows: 5},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			start, end, ok := contiguousRowRange(test.indices, test.rows)
+			s.Equal(test.ok, ok)
+			s.Equal(test.start, start)
+			s.Equal(test.end, end)
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory() {
+	const inputRows = 4096
+	const payloadSize = 128
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "payload", Type: arrow.BinaryTypes.String},
+	}, nil)
+
+	probe := s.createLargeTestRecord(arrSchema, inputRows, 0, payloadSize)
+	fullBatchBytes := s.mem.CurrentAlloc()
+	probe.Release()
+
+	writer := &RollingDataWriter{
+		recordCh: make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
+		errorCh:  make(chan error, 1),
+		ctx:      s.ctx,
+	}
+	defer func() {
+		for len(writer.recordCh) > 0 {
+			(<-writer.recordCh).Release()
+		}
+	}()
+
+	partitionBatch := partitionBatchByKey(s.ctx)
+	peakBytes := 0
+	for batch := range rollingDataWriterQueueCapacity {
+		record := s.createLargeTestRecord(arrSchema, inputRows, int64(batch*inputRows), payloadSize)
+		partitioned, err := partitionBatch(record, []int64{inputRows / 2})
+		s.Require().NoError(err)
+
+		s.Require().NoError(writer.Add(partitioned))
+		partitioned.Release()
+		record.Release()
+
+		peakBytes = max(peakBytes, s.mem.CurrentAlloc())
+	}
+
+	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

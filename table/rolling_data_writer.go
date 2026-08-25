@@ -43,6 +43,8 @@ import (
 // streaming goroutine has already stopped.
 var ErrWriterClosed = errors.New("writer is closed")
 
+const rollingDataWriterQueueCapacity = 64
+
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
@@ -334,7 +336,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
 		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, 64),
+		recordCh:        make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,
