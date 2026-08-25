@@ -308,6 +308,25 @@ func TestGroupPosDeletesByFilePathRejectsMismatchedLengths(t *testing.T) {
 	assert.Contains(t, err.Error(), "file_path and pos columns have different lengths: 2 and 1")
 }
 
+func TestGroupPosDeletesByFilePathRejectsNegativePositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, -1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "negative pos -1")
+}
+
 func TestGroupPosDeletesByFilePathOwnsResults(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
@@ -582,6 +601,39 @@ func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {
 	_, err := collectPosDeletePositions(positionDeletes{posCol})
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "unsupported pos column type")
+}
+
+func TestCollectPosDeletePositionsRejectsNegativePositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	posArr := int64Array(mem, -1)
+	defer posArr.Release()
+
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := collectPosDeletePositions(positionDeletes{posCol})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "negative pos -1")
+}
+
+func TestCollectPosDeletePositionsRejectsNullPositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := array.NewInt64Builder(mem)
+	bldr.AppendNull()
+	posArr := bldr.NewInt64Array()
+	bldr.Release()
+	defer posArr.Release()
+
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := collectPosDeletePositions(positionDeletes{posCol})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "null pos in position delete file")
 }
 
 func TestReadDeletesRejectsNullPos(t *testing.T) {
