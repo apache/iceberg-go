@@ -1386,6 +1386,87 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 	m.EqualValues(1000+firstCount, *entries[1].DataFile().FirstRowID())
 }
 
+func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceRejectsInvalidRange() {
+	tests := []struct {
+		name          string
+		firstRowID    int64
+		recordCount   int64
+		errorContains string
+	}{
+		{name: "overflow", firstRowID: math.MaxInt64, recordCount: 1, errorContains: "overflows int64"},
+		{name: "negative record count", firstRowID: 0, recordCount: -1, errorContains: "record count must be non-negative"},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			partitionSpec := NewPartitionSpecID(1,
+				PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+			entry := &manifestEntry{
+				EntryStatus: EntryStatusADDED,
+				Snapshot:    &entrySnapshotID,
+				Data: &dataFile{
+					Content:          EntryContentData,
+					Path:             "/data/file.parquet",
+					Format:           ParquetFile,
+					PartitionData:    map[string]any{"x": int(1)},
+					RecordCount:      tt.recordCount,
+					FileSize:         1000,
+					BlockSizeInBytes: 64 * 1024,
+				},
+			}
+			var manifestBuf bytes.Buffer
+			_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+				entrySnapshotID, []ManifestEntry{entry})
+			m.Require().NoError(err)
+
+			file := &manifestFile{
+				version:         3,
+				Path:            "/manifest.avro",
+				Content:         ManifestContentData,
+				FirstRowIDValue: &tt.firstRowID,
+			}
+			_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+
+	m.Run("negative manifest first row ID with explicit entry ID", func() {
+		partitionSpec := NewPartitionSpecID(1,
+			PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+		entryFirstRowID := int64(0)
+		entry := &manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      1,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  &entryFirstRowID,
+			},
+		}
+		var manifestBuf bytes.Buffer
+		_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+			entrySnapshotID, []ManifestEntry{entry})
+		m.Require().NoError(err)
+
+		negativeManifestFirstRowID := int64(-1)
+		file := &manifestFile{
+			version:         3,
+			Path:            "/manifest.avro",
+			Content:         ManifestContentData,
+			FirstRowIDValue: &negativeManifestFirstRowID,
+		}
+		_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.ErrorContains(err, "first row ID must be non-negative")
+	})
+}
+
 // TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries verifies that a
 // DELETED entry consumes no row IDs during inheritance, matching the
 // manifest-list writer, which reserves a manifest's id range as added+existing

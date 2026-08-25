@@ -807,6 +807,10 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	var nextFirstRowID int64
 	if inheritRowIDs {
 		nextFirstRowID = *file.FirstRowID()
+		if nextFirstRowID < 0 {
+			return nil, fmt.Errorf("%w: first row ID must be non-negative: %d",
+				ErrInvalidArgument, nextFirstRowID)
+		}
 	}
 
 	return &ManifestReader{
@@ -925,8 +929,17 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.inheritRowIDs && tmp.Status() != EntryStatusDELETED {
 		if df, ok := tmp.DataFile().(*dataFile); ok && df.FirstRowIDField == nil {
 			id := c.nextFirstRowID
+			count := df.Count()
+			if count < 0 {
+				return nil, fmt.Errorf("cannot inherit first row ID for data file %q: %w: record count must be non-negative: %d",
+					df.FilePath(), ErrInvalidArgument, count)
+			}
+			nextFirstRowID, err := advanceRowID(id, 0, count)
+			if err != nil {
+				return nil, fmt.Errorf("cannot inherit first row ID for data file %q: %w", df.FilePath(), err)
+			}
 			df.FirstRowIDField = &id
-			c.nextFirstRowID += df.Count()
+			c.nextFirstRowID = nextFirstRowID
 		}
 	}
 	if fieldToIDMap, ok := tmp.DataFile().(hasFieldToIDMap); ok {
