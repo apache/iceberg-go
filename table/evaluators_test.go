@@ -3022,6 +3022,7 @@ func (suite *StrictMetricsTestSuite) TestNotInMetrics() {
 		{iceberg.NotIn(ref, IntMinValue-1, IntMinValue), false, "should skip: some values may be == 30"},
 		{iceberg.NotIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should skip: some value may be == 75 or == 76"},
 		{iceberg.NotIn(ref, IntMaxValue, IntMaxValue+1), false, "should skip: some value may be == 79"},
+		{iceberg.NotIn(ref, int64(IntMaxValue), int64(IntMaxValue-1), int64(math.MaxInt32)+1), false, "should skip: in-range values remain after ignoring value outside int32 range"},
 		{iceberg.NotIn(ref, IntMaxValue+1, IntMaxValue+2), true, "should read: no values == 80 or == 81"},
 		{iceberg.NotIn(iceberg.Reference("always_5"), int32(5), int32(6)), false, "should skip: all values == 5"},
 		{iceberg.NotIn(iceberg.Reference("all_nulls"), "abc", "def"), true, "should read: notIn on all nulls column"},
