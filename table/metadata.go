@@ -61,6 +61,87 @@ func snapshotIDFromUUID(id uuid.UUID) int64 {
 	return int64(binary.LittleEndian.Uint64(out[:]) & math.MaxInt64)
 }
 
+type snapshotIndexData struct {
+	positions map[int64]int
+	// firstSnapshot identifies the snapshot slice used to build positions.
+	// It lets read-only lookups distinguish a complete index from an index
+	// left behind by an in-package fixture that replaced the slice.
+	firstSnapshot *Snapshot
+	// shared means positions is owned by more than one builder or metadata
+	// value and must be copied before a builder mutates it.
+	shared bool
+}
+
+func snapshotListFirst(snapshots []Snapshot) *Snapshot {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	return &snapshots[0]
+}
+
+func buildSnapshotIndex(snapshots []Snapshot) *snapshotIndexData {
+	positions := make(map[int64]int, len(snapshots))
+	for i, snapshot := range snapshots {
+		if _, exists := positions[snapshot.SnapshotID]; !exists {
+			positions[snapshot.SnapshotID] = i
+		}
+	}
+
+	return &snapshotIndexData{positions: positions, firstSnapshot: snapshotListFirst(snapshots)}
+}
+
+func cloneSnapshotIndex(index *snapshotIndexData) *snapshotIndexData {
+	if index == nil {
+		return nil
+	}
+
+	return &snapshotIndexData{
+		positions:     maps.Clone(index.positions),
+		firstSnapshot: index.firstSnapshot,
+	}
+}
+
+func snapshotIndexNeedsRebuild(index *snapshotIndexData, snapshots []Snapshot) bool {
+	if index == nil || len(index.positions) != len(snapshots) {
+		return true
+	}
+
+	return len(snapshots) > 0 && index.firstSnapshot != &snapshots[0]
+}
+
+// snapshotIndexPosition returns the position for id. Metadata loaded or built
+// through the normal paths always has a current index, so the linear scan is
+// only a compatibility fallback for in-package fixtures that replace the slice.
+func snapshotIndexPosition(index *snapshotIndexData, snapshots []Snapshot, id int64) (int, bool) {
+	if index != nil {
+		if i, ok := index.positions[id]; ok {
+			if i >= 0 && i < len(snapshots) && snapshots[i].SnapshotID == id {
+				return i, true
+			}
+
+			index = buildSnapshotIndex(snapshots)
+			if i, ok := index.positions[id]; ok {
+				return i, true
+			}
+
+			return 0, false
+		}
+
+		if !snapshotIndexNeedsRebuild(index, snapshots) {
+			return 0, false
+		}
+	}
+
+	for i := range snapshots {
+		if snapshots[i].SnapshotID == id {
+			return i, true
+		}
+	}
+
+	return 0, false
+}
+
 // Metadata for an iceberg table as specified in the Iceberg spec
 //
 // https://iceberg.apache.org/spec/#iceberg-table-spec
@@ -182,6 +263,7 @@ type MetadataBuilder struct {
 	lastPartitionID    *int
 	props              iceberg.Properties
 	snapshotList       []Snapshot
+	snapshotIndex      *snapshotIndexData // Derived from snapshotList; not serialized.
 	currentSnapshotID  *int64
 	snapshotLog        []SnapshotLogEntry
 	metadataLog        []MetadataLogEntry
@@ -214,6 +296,7 @@ func NewMetadataBuilder(formatVersion int) (*MetadataBuilder, error) {
 		specs:              make([]iceberg.PartitionSpec, 0),
 		props:              make(iceberg.Properties),
 		snapshotList:       make([]Snapshot, 0),
+		snapshotIndex:      buildSnapshotIndex(nil),
 		snapshotLog:        make([]SnapshotLogEntry, 0),
 		metadataLog:        make([]MetadataLogEntry, 0),
 		sortOrderList:      make([]SortOrder, 0),
@@ -252,6 +335,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.lastPartitionID = metadata.LastPartitionSpecID()
 	b.props = maps.Clone(metadata.Properties())
 	b.snapshotList = slices.Clone(metadata.Snapshots())
+	b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
 	b.sortOrderList = slices.Clone(metadata.SortOrders())
 	b.defaultSortOrderID = metadata.DefaultSortOrder()
 	if metadata.Version() > 1 {
@@ -335,6 +419,16 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		lastAddedPartitionID: clonePtr(b.lastAddedPartitionID),
 		lastAddedSortOrderID: clonePtr(b.lastAddedSortOrderID),
 	}
+	if b.snapshotIndex != nil {
+		cloned.snapshotIndex = &snapshotIndexData{
+			positions:     b.snapshotIndex.positions,
+			firstSnapshot: snapshotListFirst(cloned.snapshotList),
+			shared:        true,
+		}
+	}
+	if b.snapshotIndex != nil {
+		b.snapshotIndex.shared = true
+	}
 
 	return cloned
 }
@@ -370,12 +464,27 @@ func (b *MetadataBuilder) nextSequenceNumber() int64 {
 }
 
 func (b *MetadataBuilder) newSnapshotID() int64 {
-	snapshotID := generateSnapshotID()
-	for slices.ContainsFunc(b.snapshotList, func(s Snapshot) bool { return s.SnapshotID == snapshotID }) {
-		snapshotID = generateSnapshotID()
-	}
+	b.ensureSnapshotIndex()
 
-	return snapshotID
+	for {
+		snapshotID := generateSnapshotID()
+		if _, exists := b.snapshotIndex.positions[snapshotID]; !exists {
+			return snapshotID
+		}
+	}
+}
+
+func (b *MetadataBuilder) ensureSnapshotIndex() {
+	if snapshotIndexNeedsRebuild(b.snapshotIndex, b.snapshotList) {
+		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
+	}
+}
+
+func (b *MetadataBuilder) ensureSnapshotIndexMutable() {
+	b.ensureSnapshotIndex()
+	if b.snapshotIndex.shared {
+		b.snapshotIndex = cloneSnapshotIndex(b.snapshotIndex)
+	}
 }
 
 func (b *MetadataBuilder) currentSnapshot() *Snapshot {
@@ -572,7 +681,10 @@ func (b *MetadataBuilder) addSnapshotInternal(snapshot *Snapshot, preserveUpdate
 	b.updates = append(b.updates, upd)
 	b.lastUpdatedMS = snapshot.TimestampMs
 	b.lastSequenceNumber = &snapshot.SequenceNumber
+	b.ensureSnapshotIndexMutable()
 	b.snapshotList = append(b.snapshotList, *snapshot)
+	b.snapshotIndex.positions[snapshot.SnapshotID] = len(b.snapshotList) - 1
+	b.snapshotIndex.firstSnapshot = snapshotListFirst(b.snapshotList)
 
 	return nil
 }
@@ -655,11 +767,15 @@ func (b *MetadataBuilder) RemoveSnapshots(snapshotIds []int64, postCommit bool) 
 		}
 	}
 
+	previousSnapshotCount := len(b.snapshotList)
 	b.snapshotList = slices.DeleteFunc(b.snapshotList, func(e Snapshot) bool {
 		_, ok := removedIDs[e.SnapshotID]
 
 		return ok
 	})
+	if len(b.snapshotList) != previousSnapshotCount {
+		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
+	}
 	// Snapshot-log pruning is deferred to updateSnapshotLog during Build so
 	// removed entries remain available when trimming history gaps.
 
@@ -1087,6 +1203,11 @@ func (b *MetadataBuilder) SetLastUpdatedMS() *MetadataBuilder {
 }
 
 func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
+	b.ensureSnapshotIndex()
+	if b.snapshotIndex != nil {
+		b.snapshotIndex.shared = true
+	}
+
 	if _, err := b.GetSpecByID(b.defaultSpecID); err != nil {
 		return nil, fmt.Errorf("%w: defaultSpecID is invalid: %w", ErrInvalidMetadata, err)
 	}
@@ -1121,6 +1242,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		LastPartitionID:    b.lastPartitionID,
 		Props:              b.props,
 		SnapshotList:       b.snapshotList,
+		snapshotIndex:      b.snapshotIndex,
 		CurrentSnapshotID:  b.currentSnapshotID,
 		SnapshotLog:        b.snapshotLog,
 		MetadataLog:        b.metadataLog,
@@ -1211,10 +1333,16 @@ func (b *MetadataBuilder) GetSortOrderByID(id int) (*SortOrder, error) {
 }
 
 func (b *MetadataBuilder) SnapshotByID(id int64) (*Snapshot, error) {
-	for _, s := range b.snapshotList {
-		if s.SnapshotID == id {
-			return &s, nil
-		}
+	index := b.snapshotIndex
+	if snapshotIndexNeedsRebuild(index, b.snapshotList) {
+		index = buildSnapshotIndex(b.snapshotList)
+	}
+
+	i, ok := snapshotIndexPosition(index, b.snapshotList, id)
+	if ok {
+		snapshot := b.snapshotList[i]
+
+		return &snapshot, nil
 	}
 
 	return nil, fmt.Errorf("%w: id %d", ErrSnapshotNotFound, id)
@@ -1777,6 +1905,8 @@ type commonMetadata struct {
 	LastSequenceNumber *int64 `json:"last-sequence-number,omitempty"`
 	// V3+ fields
 	NextRowID *int64 `json:"next-row-id,omitempty"` // V3: Next available row ID
+
+	snapshotIndex *snapshotIndexData
 }
 
 func initCommonMetadataForDeserialization() commonMetadata {
@@ -1964,10 +2094,14 @@ func (c *commonMetadata) Snapshots() []Snapshot {
 }
 
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
-	for i := range c.SnapshotList {
-		if c.SnapshotList[i].SnapshotID == id {
-			return cloneSnapshotPtr(&c.SnapshotList[i])
-		}
+	index := c.snapshotIndex
+	if snapshotIndexNeedsRebuild(index, c.SnapshotList) {
+		index = buildSnapshotIndex(c.SnapshotList)
+	}
+
+	i, ok := snapshotIndexPosition(index, c.SnapshotList, id)
+	if ok {
+		return cloneSnapshotPtr(&c.SnapshotList[i])
 	}
 
 	return nil
@@ -2310,6 +2444,8 @@ func (c *commonMetadata) preValidate() {
 	if c.SnapshotLog == nil {
 		c.SnapshotLog = []SnapshotLogEntry{}
 	}
+
+	c.snapshotIndex = buildSnapshotIndex(c.SnapshotList)
 }
 
 func (c *commonMetadata) checkSchemas() error {

@@ -23,7 +23,10 @@ import (
 	"testing"
 )
 
-var removeSnapshotsBenchmarkSink int
+var (
+	removeSnapshotsBenchmarkSink int
+	metadataBuilderBenchmarkSink int
+)
 
 var removeSnapshotsBenchmarkCases = []struct {
 	snapshotCount int
@@ -95,6 +98,52 @@ func BenchmarkRemoveSnapshotsBuild(b *testing.B) {
 				b.StopTimer()
 				removeSnapshotsBenchmarkSink = len(builder.snapshotLog)
 				b.StartTimer()
+			}
+		})
+	}
+}
+
+func BenchmarkMetadataBuilderCloneAndBuild(b *testing.B) {
+	for _, snapshotCount := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			template := benchmarkSnapshotBuilder(snapshotCount)
+			template.ensureSnapshotIndex()
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for range b.N {
+				builder := template.clone()
+				if _, err := builder.Build(); err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(builder.snapshotIndex.positions)
+			}
+		})
+	}
+}
+
+func BenchmarkMetadataBuilderFromBase(b *testing.B) {
+	for _, snapshotCount := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("snapshots=%d", snapshotCount), func(b *testing.B) {
+			source := benchmarkSnapshotBuilder(snapshotCount)
+			source.ensureSnapshotIndex()
+			metadata, err := source.Build()
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
+			b.ResetTimer()
+
+			for range b.N {
+				builder, err := MetadataBuilderFromBase(metadata, "")
+				if err != nil {
+					b.Fatal(err)
+				}
+				metadataBuilderBenchmarkSink = len(builder.snapshotIndex.positions)
 			}
 		})
 	}
