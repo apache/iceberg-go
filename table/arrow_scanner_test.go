@@ -94,6 +94,61 @@ func (f *closeSignalFile) Close() error {
 	return err
 }
 
+type countingScanMetadata struct {
+	Metadata
+	currentSchemaCalls int
+	propertiesCalls    int
+	nameMappingCalls   int
+}
+
+func (m *countingScanMetadata) CurrentSchema() *iceberg.Schema {
+	m.currentSchemaCalls++
+
+	return m.Metadata.CurrentSchema()
+}
+
+func (m *countingScanMetadata) Properties() iceberg.Properties {
+	m.propertiesCalls++
+
+	return m.Metadata.Properties()
+}
+
+func (m *countingScanMetadata) NameMapping() iceberg.NameMapping {
+	m.nameMappingCalls++
+
+	return m.Metadata.NameMapping()
+}
+
+func TestArrowScanSnapshotsInvariants(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.String,
+	})
+	base, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"mem://test/table",
+		iceberg.Properties{"test-property": "test-value"},
+	)
+	require.NoError(t, err)
+
+	metadata := &countingScanMetadata{Metadata: base}
+	scan := &arrowScan{
+		metadata:        metadata,
+		projectedSchema: schema,
+	}
+
+	tableProperties := metadata.Properties()
+	invariants, err := scan.scanInvariants(tableProperties)
+	require.NoError(t, err)
+	assert.Equal(t, set[int]{1: {}}, invariants.projectedIDs)
+	assert.True(t, schema.Equals(invariants.tableSchema))
+	assert.Equal(t, tableProperties, invariants.tableProperties)
+	assert.Equal(t, 1, metadata.currentSchemaCalls)
+	assert.Equal(t, 1, metadata.propertiesCalls)
+	assert.Equal(t, 1, metadata.nameMappingCalls)
+}
+
 func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 	testSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "first_name", Type: &arrow.StringType{}, Nullable: false},
