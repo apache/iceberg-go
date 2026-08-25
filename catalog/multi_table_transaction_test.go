@@ -391,7 +391,7 @@ func TestMultiTableTransactionFailsAfterConcurrentAdvance(t *testing.T) {
 	assert.Equal(t, 1, cat.calls)
 }
 
-// Why: a catalog may reject a table change with no updates, which would fail the whole batch 
+// Why: a catalog may reject a table change with no updates, which would fail the whole batch
 // over an entry that changes nothing.
 func TestMultiTableTransactionSkipsTransactionsWithoutUpdates(t *testing.T) {
 	t.Run("empty transactions are left out of the request", func(t *testing.T) {
