@@ -489,7 +489,7 @@ func init() {
 <tr><td><code>history.expire.min-snapshots-to-keep</code></td><td>Minimum snapshots to retain when expiring. Default <code>1</code>.</td></tr>
 <tr><td><code>history.expire.max-snapshot-age-ms</code></td><td>Maximum age of retained snapshots. Default <code>432000000</code> (5 days).</td></tr>
 <tr><td><code>history.expire.max-ref-age-ms</code></td><td>Maximum age of branch/tag refs that are not the main branch. Default <code>Long.MAX_VALUE</code> (forever).</td></tr>
-<tr><td><code>gc.enabled</code></td><td>Gate for orphan-file cleanup.</td></tr>
+<tr><td><code>gc.enabled</code></td><td>Controls physical garbage collection. Snapshot expiration is rejected when <code>false</code>, and data-file cleanup skips deletion.</td></tr>
 </tbody></table>
 </div>
 <p>The unprefixed retention property names are accepted as compatibility fallbacks. The <code>history.expire.*</code> properties take precedence when both forms are set.</p>
