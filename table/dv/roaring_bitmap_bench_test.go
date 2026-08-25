@@ -45,14 +45,14 @@ func BenchmarkKeepMaskBytes(b *testing.B) {
 			} else if tt.dense {
 				bitmap.SetRange(0, uint64(length))
 			} else {
-				for i := 0; i < tt.deletions; i++ {
+				for i := range tt.deletions {
 					bitmap.Set(uint64(i) * uint64(length) / uint64(tt.deletions))
 				}
 			}
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				benchmarkKeepMask = bitmap.KeepMaskBytes(benchmarkLength)
 			}
 		})
