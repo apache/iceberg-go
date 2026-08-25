@@ -2437,6 +2437,50 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Equal("[]", string(md["partition-spec"]))
 }
 
+func (m *ManifestTestSuite) TestManifestWriterContentConsistency() {
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+
+	m.Run("manifest file inherits writer content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		manifest, err := writer.ToManifestFile("manifest.avro", int64(out.Len()))
+		m.Require().NoError(err)
+		m.Equal(ManifestContentDeletes, manifest.ManifestContent())
+	})
+
+	m.Run("rejects conflicting manifest file content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()),
+			WithManifestFileContent(ManifestContentData))
+		m.ErrorIs(err, ErrInvalidArgument)
+	})
+
+	m.Run("rejects data file in delete manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(manifestEntryV2Records[0]), ErrInvalidArgument)
+	})
+
+	m.Run("rejects delete file in data manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(&deleteEntry), ErrInvalidArgument)
+	})
+}
+
 func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
 	for _, version := range []int{1, 2, 3} {
 		m.Run("v"+strconv.Itoa(version), func() {
@@ -3866,12 +3910,14 @@ func (m *ManifestTestSuite) TestManifestWriterPreservesMinSequenceNumberZero() {
 	oldSnapshot := int64(999)
 	entries := make([]ManifestEntry, len(manifestEntryV1Records))
 	for i, rec := range manifestEntryV1Records {
+		dataFile := cloneDataFileAvroFields(rec.DataFile().(*dataFile))
+		dataFile.Content = EntryContentData
 		entries[i] = NewManifestEntry(
 			EntryStatusEXISTING,
 			&oldSnapshot,
 			&seqZero,
 			&seqZero,
-			rec.DataFile(),
+			dataFile,
 		)
 	}
 
