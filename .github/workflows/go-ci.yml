@@ -89,10 +89,10 @@ jobs:
         # collide on one entry; we manage the cache explicitly above instead.
         skip-cache: true
     - name: Run tests
-      run: go test -v ./...
+      run: make test
     # Race detector is opt-in per package/test.
     - name: Run race detector
-      run: go test -race -v ./codec/... ./table/...
+      run: make test-race
     - name: Run Arrow ownership assertions
       if: matrix.os == 'ubuntu-latest' && matrix.go == '1.26.1'
       run: make test-assert
