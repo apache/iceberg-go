@@ -376,38 +376,8 @@ func cloneField(field NestedField) NestedField {
 		Type:           cloneType(field.Type),
 		Required:       field.Required,
 		Doc:            field.Doc,
-		InitialDefault: cloneDefault(field.InitialDefault),
-		WriteDefault:   cloneDefault(field.WriteDefault),
-	}
-}
-
-func cloneDefault(value any) any {
-	switch value := value.(type) {
-	case []byte:
-		return slices.Clone(value)
-	case BinaryLiteral:
-		return BinaryLiteral(slices.Clone([]byte(value)))
-	case FixedLiteral:
-		return FixedLiteral(slices.Clone([]byte(value)))
-	case []any:
-		cloned := make([]any, len(value))
-		for i, item := range value {
-			cloned[i] = cloneDefault(item)
-		}
-
-		return cloned
-	case map[string]any:
-		cloned := make(map[string]any, len(value))
-		for key, item := range value {
-			cloned[key] = cloneDefault(item)
-		}
-
-		return cloned
-	default:
-		// Iceberg scalar defaults are value types (bool, numeric values,
-		// strings, UUIDs, and Decimals). Any mutable reference type must get
-		// an explicit deep-copy case above.
-		return value
+		InitialDefault: CloneDefaultValue(field.InitialDefault),
+		WriteDefault:   CloneDefaultValue(field.WriteDefault),
 	}
 }
 
