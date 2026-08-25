@@ -232,12 +232,39 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 		name  string
 		left  any
 		right any
+		equal bool
 	}{
-		{name: "integer widths", left: int32(7), right: int64(7)},
-		{name: "date and integer", left: iceberg.Date(7), right: int32(7)},
+		{name: "integer widths", left: int32(7), right: int64(7), equal: true},
+		{name: "date and integer", left: iceberg.Date(7), right: int32(7), equal: true},
 		{name: "float widths", left: float32(1.5), right: float64(1.5)},
-		{name: "NaN", left: math.Float32frombits(0x7fc00000), right: math.NaN()},
-		{name: "UUID and bytes", left: sampleUUID, right: sampleUUID[:]},
+		{
+			name:  "float32 NaN payloads",
+			left:  math.Float32frombits(0x7fc00001),
+			right: math.Float32frombits(0x7fc00002),
+			equal: true,
+		},
+		{
+			name:  "float64 NaN payloads",
+			left:  math.Float64frombits(0x7ff8000000000001),
+			right: math.Float64frombits(0x7ff8000000000002),
+			equal: true,
+		},
+		{
+			name:  "float widths keep NaNs distinct",
+			left:  math.Float32frombits(0x7fc00001),
+			right: math.Float64frombits(0x7ff8000000000001),
+		},
+		{
+			name:  "float32 signed zero",
+			left:  float32(math.Copysign(0, -1)),
+			right: float32(0),
+		},
+		{
+			name:  "float64 signed zero",
+			left:  math.Copysign(0, -1),
+			right: float64(0),
+		},
+		{name: "UUID and bytes", left: sampleUUID, right: sampleUUID[:], equal: true},
 	}
 
 	for _, tt := range tests {
@@ -246,7 +273,7 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 			require.NoError(t, err)
 			right, err := newEqualityDeletePartitionKey(1, map[int]any{1000: tt.right})
 			require.NoError(t, err)
-			assert.Equal(t, left, right)
+			assert.Equal(t, tt.equal, left == right)
 		})
 	}
 
@@ -272,6 +299,65 @@ func TestEqualityDeletePartitionKeyNormalizesValues(t *testing.T) {
 
 	_, err = newEqualityDeletePartitionKey(1, map[int]any{1000: struct{}{}})
 	assert.ErrorContains(t, err, "unsupported partition value type struct {}")
+}
+
+func TestEqualityDeleteIndexUsesFloatSemantics(t *testing.T) {
+	tests := []struct {
+		name            string
+		dataPartition   any
+		deletePartition any
+		match           bool
+	}{
+		{
+			name:            "float32 NaN payloads match",
+			dataPartition:   math.Float32frombits(0xffc00001),
+			deletePartition: math.Float32frombits(0x7fc00002),
+			match:           true,
+		},
+		{
+			name:            "float64 NaN payloads match",
+			dataPartition:   math.Float64frombits(0xfff8000000000001),
+			deletePartition: math.Float64frombits(0x7ff8000000000002),
+			match:           true,
+		},
+		{
+			name:            "float widths stay distinct",
+			dataPartition:   float32(1.5),
+			deletePartition: float64(1.5),
+		},
+		{
+			name:            "float32 signed zero stays distinct",
+			dataPartition:   float32(math.Copysign(0, -1)),
+			deletePartition: float32(0),
+		},
+		{
+			name:            "float64 signed zero stays distinct",
+			dataPartition:   math.Copysign(0, -1),
+			deletePartition: float64(0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleteEntry := newEqualityDeleteIndexTestEntry(
+				"delete.parquet", 1, map[int]any{1000: tt.deletePartition}, 2)
+			idx, err := buildEqualityDeleteIndex(
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+			require.NoError(t, err)
+
+			dataEntry := newEqualityDeleteIndexTestEntry(
+				"data.parquet", 1, map[int]any{1000: tt.dataPartition}, 1)
+			matched, err := idx.forDataFile(dataEntry)
+			require.NoError(t, err)
+			if tt.match {
+				require.Len(t, matched, 1)
+				assert.Equal(t, "delete.parquet", matched[0].FilePath())
+
+				return
+			}
+			assert.Empty(t, matched)
+		})
+	}
 }
 
 func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {

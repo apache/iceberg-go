@@ -24,7 +24,6 @@ import (
 	"iter"
 	"math"
 	"math/bits"
-	"reflect"
 	"slices"
 	"sync"
 
@@ -85,6 +84,8 @@ type (
 )
 
 const (
+	// Canonical NaN payloads make all NaNs of the same width compare equal.
+	// The width-specific key types and raw bits preserve float width and signed zero.
 	canonicalFloat32NaNBits uint32 = 0x7fc00000
 	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
 )
@@ -113,7 +114,9 @@ func comparablePartitionKey(value any) any {
 }
 
 func partitionValuesEqual(left, right any) bool {
-	return reflect.DeepEqual(comparablePartitionKey(left), comparablePartitionKey(right))
+	// Partition values are primitive literals; []byte is converted to a string key
+	// and float values are converted to comparable width-aware keys above.
+	return comparablePartitionKey(left) == comparablePartitionKey(right)
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {
