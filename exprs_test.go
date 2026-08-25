@@ -1027,6 +1027,38 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 	})
 }
 
+func TestBindOutOfRangeDate(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "d", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	ref := iceberg.Reference("d")
+	above, below := int64(math.MaxInt32)+1, int64(math.MinInt32)-1
+
+	tests := []struct {
+		name     string
+		pred     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{"eq above max", iceberg.EqualTo(ref, above), iceberg.AlwaysFalse{}},
+		{"eq below min", iceberg.EqualTo(ref, below), iceberg.AlwaysFalse{}},
+		{"neq above max", iceberg.NotEqualTo(ref, above), iceberg.AlwaysTrue{}},
+		{"in mixed range", iceberg.IsIn(ref, int64(34), above, below), iceberg.EqualTo(ref, iceberg.Date(34))},
+		{"in outside range", iceberg.IsIn(ref, above, below), iceberg.AlwaysFalse{}},
+		{"not in outside range", iceberg.NotIn(ref, above, below), iceberg.AlwaysTrue{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(sc, tt.pred, true)
+			require.NoError(t, err)
+			wantBound, err := iceberg.BindExpr(sc, tt.expected, true)
+			require.NoError(t, err)
+			assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
+		})
+	}
+}
+
 func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
 	sc := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}, Required: false},

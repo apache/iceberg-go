@@ -548,6 +548,12 @@ func (i Int64Literal) To(t Type) (Literal, error) {
 	case Float64Type:
 		return Float64Literal(i), nil
 	case DateType:
+		if math.MaxInt32 < i {
+			return Int32AboveMaxLiteral(), nil
+		} else if math.MinInt32 > i {
+			return Int32BelowMinLiteral(), nil
+		}
+
 		return DateLiteral(i), nil
 	case TimeType:
 		return TimeLiteral(i), nil

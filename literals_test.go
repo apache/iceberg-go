@@ -347,6 +347,22 @@ func TestInt64ToInt32OutsideBound(t *testing.T) {
 	assert.Equal(t, iceberg.PrimitiveTypes.Int32, belowMin.Type())
 }
 
+func TestInt64ToDateOutsideBound(t *testing.T) {
+	bigLit := iceberg.NewLiteral(int64(math.MaxInt32) + 1)
+	aboveMax, err := bigLit.To(iceberg.PrimitiveTypes.Date)
+	require.NoError(t, err)
+	assert.Implements(t, (*iceberg.AboveMaxLiteral)(nil), aboveMax)
+
+	smallLit := iceberg.NewLiteral(int64(math.MinInt32) - 1)
+	belowMin, err := smallLit.To(iceberg.PrimitiveTypes.Date)
+	require.NoError(t, err)
+	assert.Implements(t, (*iceberg.BelowMinLiteral)(nil), belowMin)
+
+	inRange, err := iceberg.NewLiteral(int64(math.MaxInt32)).To(iceberg.PrimitiveTypes.Date)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.DateLiteral(math.MaxInt32), inRange)
+}
+
 func TestBelowMinLiteralMarshalBinary(t *testing.T) {
 	_, err := iceberg.Int32BelowMinLiteral().MarshalBinary()
 	require.ErrorIs(t, err, iceberg.ErrInvalidBinSerialization)
