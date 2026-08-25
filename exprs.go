@@ -1124,7 +1124,7 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 }
 
 func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
-	if u.transform == nil {
+	if isNilTransform(u.transform) {
 		return nil, fmt.Errorf("%w: transform cannot be nil", ErrInvalidArgument)
 	}
 	if isUnknownTransform(u.transform) {
@@ -1147,6 +1147,20 @@ func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, 
 	}
 
 	return &BoundTransform{transform: u.transform, term: bound}, nil
+}
+
+func isNilTransform(transform Transform) bool {
+	if transform == nil {
+		return true
+	}
+
+	value := reflect.ValueOf(transform)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func isUnknownTransform(transform Transform) bool {

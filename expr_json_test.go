@@ -467,12 +467,24 @@ func TestUnboundTransformBindRejectsNilTransform(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
 	)
-	term := iceberg.NewUnboundTransform(nil, iceberg.Reference("id"))
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{name: "nil interface", transform: nil},
+		{name: "typed nil pointer", transform: (*iceberg.BucketTransform)(nil)},
+	}
 
-	bound, err := term.Bind(schema, true)
-	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
-	require.ErrorContains(t, err, "transform cannot be nil")
-	assert.Nil(t, bound)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := iceberg.NewUnboundTransform(tt.transform, iceberg.Reference("id"))
+
+			bound, err := term.Bind(schema, true)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "transform cannot be nil")
+			assert.Nil(t, bound)
+		})
+	}
 }
 
 // TestUnmarshalExpressionTransformTermInvalid rejects an invalid transform
