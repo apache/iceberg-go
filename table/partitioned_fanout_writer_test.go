@@ -1597,14 +1597,13 @@ func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchArrowValues() {
 	}
 
 	for _, test := range tests {
-		test := test
 		s.Run(test.name, func() {
 			column := test.build()
 			defer column.Release()
 
 			bound, ok := bindPartitionTransform(test.transform, test.sourceType)
 			s.Require().True(ok)
-			for row := 0; row < column.Len(); row++ {
+			for row := range column.Len() {
 				nativeValue, err := getArrowValueAsIcebergValue(column, row, test.sourceType)
 				s.Require().NoError(err)
 				literalValue, err := getArrowValueAsIcebergLiteral(column, row, test.sourceType)
@@ -1658,7 +1657,6 @@ func (s *FanoutWriterTestSuite) TestArrowDecimalValuesPreserveSign() {
 	}
 
 	for _, test := range tests {
-		test := test
 		s.Run(test.name, func() {
 			column := test.build()
 			defer column.Release()
