@@ -414,7 +414,7 @@ func NewAddPartitionSpecUpdate(spec *iceberg.PartitionSpec, initial bool) *addPa
 
 func (u *addPartitionSpecUpdate) Apply(builder *MetadataBuilder) error {
 	if u.Spec == nil {
-		return fmt.Errorf("%w: %s requires field %q", iceberg.ErrInvalidArgument, UpdateAddSpec, "spec")
+		return fmt.Errorf("%w: update %q requires field %q", iceberg.ErrInvalidArgument, UpdateAddSpec, "spec")
 	}
 
 	return builder.AddPartitionSpec(&u.Spec.PartitionSpec, u.initial)
@@ -440,9 +440,9 @@ func (u *setDefaultSpecUpdate) Apply(builder *MetadataBuilder) error {
 
 type addSortOrderUpdate struct {
 	baseUpdate
-	// Unbound for the same reason as addPartitionSpecUpdate.Spec: Apply checks
-	// the order against the table's current schema, which is what decides
-	// whether its source IDs resolve.
+	// Unbound so decoding accepts placeholder source IDs. Unlike the spec
+	// above, none are exempt at Apply: CheckCompatibility still requires every
+	// source ID to resolve in the current schema, so this only defers the error.
 	SortOrder *UnboundSortOrder `json:"sort-order"`
 	initial   bool
 }
@@ -463,7 +463,7 @@ func NewAddSortOrderUpdate(sortOrder *SortOrder) *addSortOrderUpdate {
 
 func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 	if u.SortOrder == nil {
-		return fmt.Errorf("%w: %s requires field %q", iceberg.ErrInvalidArgument, UpdateAddSortOrder, "sort-order")
+		return fmt.Errorf("%w: update %q requires field %q", iceberg.ErrInvalidArgument, UpdateAddSortOrder, "sort-order")
 	}
 
 	return builder.AddSortOrder(&u.SortOrder.SortOrder)

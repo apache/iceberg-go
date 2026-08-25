@@ -348,7 +348,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 		22,
 		[]SortField{
 			{SourceIDs: []int{19}, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst, Direction: SortASC},
-			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsFirst, Direction: SortDESC},
+			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsLast, Direction: SortDESC},
 			{SourceIDs: []int{22}, Transform: iceberg.VoidTransform{}, NullOrder: NullsFirst, Direction: SortASC},
 		},
 	)
@@ -513,26 +513,26 @@ func TestUnmarshalUpdates(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, len(tc.expected), len(actual))
-				for idx, u := range actual {
-					switch u.Action() {
-					case "add-schema":
-						expectedAddSchema := u.(*addSchemaUpdate)
+				require.Len(t, actual, len(tc.expected))
+				for idx, expected := range tc.expected {
+					switch expected.Action() {
+					case UpdateAddSchema:
+						expectedAddSchema := expected.(*addSchemaUpdate)
 						actualAddSchema := actual[idx].(*addSchemaUpdate)
 						assert.True(t, expectedAddSchema.Schema.Equals(actualAddSchema.Schema))
-						assert.Equal(t, actualAddSchema.initial, expectedAddSchema.initial)
-					case "add-partition-spec":
-						expectedAddPartitionSpec := u.(*addPartitionSpecUpdate)
+						assert.Equal(t, expectedAddSchema.initial, actualAddSchema.initial)
+					case UpdateAddSpec:
+						expectedAddPartitionSpec := expected.(*addPartitionSpecUpdate)
 						actualAddPartitionSpec := actual[idx].(*addPartitionSpecUpdate)
 						assert.True(t, expectedAddPartitionSpec.Spec.Equals(actualAddPartitionSpec.Spec.PartitionSpec))
-						assert.Equal(t, actualAddPartitionSpec.initial, expectedAddPartitionSpec.initial)
-					case "add-sort-order":
-						expectedAddSortOrder := u.(*addSortOrderUpdate)
+						assert.Equal(t, expectedAddPartitionSpec.initial, actualAddPartitionSpec.initial)
+					case UpdateAddSortOrder:
+						expectedAddSortOrder := expected.(*addSortOrderUpdate)
 						actualAddSortOrder := actual[idx].(*addSortOrderUpdate)
 						assert.True(t, expectedAddSortOrder.SortOrder.Equals(actualAddSortOrder.SortOrder.SortOrder))
-						assert.Equal(t, actualAddSortOrder.initial, expectedAddSortOrder.initial)
+						assert.Equal(t, expectedAddSortOrder.initial, actualAddSortOrder.initial)
 					default:
-						assert.Equal(t, u, actual[idx])
+						assert.Equal(t, expected, actual[idx])
 					}
 				}
 			}
@@ -1334,6 +1334,7 @@ func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
 
 	err := updates[0].Apply(buildFromBaseV3(t))
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot find source column with id: 0 in schema")
 	assert.NotContains(t, err.Error(), "must be positive")
 }
 
