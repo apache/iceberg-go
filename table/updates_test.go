@@ -145,6 +145,51 @@ func TestRemoveSnapshotsPostCommitSkipped(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRemoveSnapshotsPostCommitSkippedWhenGCDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		gcValue string
+	}{
+		{name: "false", gcValue: "false"},
+		{name: "one", gcValue: "1"},
+		{name: "garbage", gcValue: "garbage"},
+		{name: "false with trailing space", gcValue: "false "},
+		{name: "true with trailing space", gcValue: "true "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preMeta := buildMetaJSON(metaJSONOpts{
+				snapshots:  `{"snapshot-id":1,"timestamp-ms":1000}`,
+				statistics: `{"snapshot-id":1,"statistics-path":"s3://bucket/stats/snap1.puffin","file-size-in-bytes":100,"file-footer-size-in-bytes":10,"blob-metadata":[]}`,
+			})
+			postMeta := buildMetaJSON(metaJSONOpts{})
+
+			pre, err := ParseMetadataString(preMeta)
+			require.NoError(t, err)
+			post, err := ParseMetadataString(postMeta)
+			require.NoError(t, err)
+
+			postBuilder, err := MetadataBuilderFromBase(post, "")
+			require.NoError(t, err)
+			require.NoError(t, postBuilder.SetProperties(iceberg.Properties{GCEnabledKey: tt.gcValue}))
+			post, err = postBuilder.Build()
+			require.NoError(t, err)
+
+			tio := newTrackingCallsIO()
+			tio.files["s3://bucket/stats/snap1.puffin"] = []byte("puffin")
+			fsF := testFSF(tio)
+			preTable := New(Identifier{"ns", "tbl"}, pre, "metadata.json", fsF, nil)
+			postTable := New(Identifier{"ns", "tbl"}, post, "metadata.json", fsF, nil)
+
+			update := NewRemoveSnapshotsUpdate([]int64{1}, true)
+			require.NoError(t, update.PostCommit(context.Background(), preTable, postTable))
+			require.Contains(t, tio.files, "s3://bucket/stats/snap1.puffin")
+			require.Zero(t, tio.removeCount["s3://bucket/stats/snap1.puffin"])
+		})
+	}
+}
+
 func TestRemoveSnapshotsPostCommitDeletesStatisticsFiles(t *testing.T) {
 	// preTable has snapshot 1 with associated statistics and partition statistics files.
 	// postTable has no snapshots and no statistics (snapshot 1 has been expired).
