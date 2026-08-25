@@ -463,6 +463,18 @@ func TestUnboundTransformBind(t *testing.T) {
 	assert.True(t, bound.Type().Equals(iceberg.PrimitiveTypes.Int32))
 }
 
+func TestUnboundTransformBindRejectsNilTransform(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	term := iceberg.NewUnboundTransform(nil, iceberg.Reference("id"))
+
+	bound, err := term.Bind(schema, true)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "transform cannot be nil")
+	assert.Nil(t, bound)
+}
+
 // TestUnmarshalExpressionTransformTermInvalid rejects an invalid transform
 // string rather than panicking or binding nonsense.
 func TestUnmarshalExpressionTransformTermInvalid(t *testing.T) {

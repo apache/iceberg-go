@@ -1124,6 +1124,9 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 }
 
 func (u *UnboundTransform) Bind(schema *Schema, caseSensitive bool) (BoundTerm, error) {
+	if u.transform == nil {
+		return nil, fmt.Errorf("%w: transform cannot be nil", ErrInvalidArgument)
+	}
 	if isUnknownTransform(u.transform) {
 		return nil, fmt.Errorf("%w: unknown transform %s cannot be evaluated", ErrNotImplemented, u.transform)
 	}
