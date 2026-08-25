@@ -1619,6 +1619,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
+		if errors.Is(err, ErrInvalidMetadata) {
+			return nil, err
+		}
+
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 

@@ -449,6 +449,11 @@ func TestSnapshotUnmarshalRequiresSnapshotIDAndTimestamp(t *testing.T) {
 			data:    `{"snapshot-id": 25, "timestamp-ms": null, "manifests": []}`,
 			wantErr: "timestamp-ms is absent or null",
 		},
+		{
+			name:    "both fields missing",
+			data:    `{"manifests": []}`,
+			wantErr: "snapshot-id is absent or null",
+		},
 	}
 
 	for _, tt := range tests {
@@ -476,21 +481,55 @@ func TestSnapshotUnmarshalAcceptsExplicitZeroValues(t *testing.T) {
 	assert.NotNil(t, snapshot.ManifestLocations)
 }
 
-func TestSnapshotUnmarshalFailureLeavesSnapshotUnchanged(t *testing.T) {
-	snapshot := Snapshot()
-	original := Snapshot()
+func TestSnapshotUnmarshalPreservesRequiredFields(t *testing.T) {
+	var snapshot table.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"snapshot-id": 1234,
+		"timestamp-ms": 5678,
+		"manifests": []
+	}`), &snapshot))
 
-	err := json.Unmarshal([]byte(`{
-		"timestamp-ms": 1602638573590,
-		"manifest-list": "s3:/a/b/new.avro"
-	}`), &snapshot)
-	require.ErrorIs(t, err, table.ErrInvalidMetadata)
-	assert.True(t, snapshot.Equals(original), "expected snapshot to be untouched, got %s", snapshot)
+	assert.Equal(t, int64(1234), snapshot.SnapshotID)
+	assert.Equal(t, int64(5678), snapshot.TimestampMs)
+}
+
+func TestSnapshotUnmarshalFailureLeavesSnapshotUnchanged(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "missing snapshot-id",
+			data: `{
+				"timestamp-ms": 1602638573590,
+				"manifest-list": "s3:/a/b/new.avro"
+			}`,
+		},
+		{
+			name: "missing timestamp-ms",
+			data: `{
+				"snapshot-id": 26,
+				"manifest-list": "s3:/a/b/new.avro"
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := Snapshot()
+			original := Snapshot()
+
+			err := json.Unmarshal([]byte(tt.data), &snapshot)
+			require.ErrorIs(t, err, table.ErrInvalidMetadata)
+			assert.True(t, snapshot.Equals(original), "expected snapshot to be untouched, got %s", snapshot)
+			assert.Equal(t, original.ManifestList, snapshot.ManifestList)
+		})
+	}
 }
 
 // A null snapshot carries neither identity nor timestamp, so it is rejected
-// rather than decoded into a zero-value snapshot. Java's SnapshotParser
-// likewise refuses a null node.
+// rather than decoded into a zero-value snapshot. Java's SnapshotParser also
+// rejects null, but at its earlier object-node precondition.
 func TestSnapshotUnmarshalRejectsNullDocument(t *testing.T) {
 	var snapshot table.Snapshot
 	err := json.Unmarshal([]byte(`null`), &snapshot)
@@ -510,17 +549,17 @@ func TestParseMetadataRejectsSnapshotMissingRequiredFields(t *testing.T) {
 		{
 			name:    "missing snapshot-id",
 			mutate:  func(snapshots []any) { delete(snapshots[0].(map[string]any), "snapshot-id") },
-			wantErr: "snapshot-id is absent or null",
+			wantErr: "invalid metadata: snapshot-id is absent or null",
 		},
 		{
 			name:    "missing timestamp-ms",
 			mutate:  func(snapshots []any) { delete(snapshots[0].(map[string]any), "timestamp-ms") },
-			wantErr: "timestamp-ms is absent or null",
+			wantErr: "invalid metadata: timestamp-ms is absent or null",
 		},
 		{
 			name:    "null snapshot",
 			mutate:  func(snapshots []any) { snapshots[0] = nil },
-			wantErr: "snapshot-id is absent or null",
+			wantErr: "invalid metadata: snapshot-id is absent or null",
 		},
 	}
 
@@ -541,7 +580,7 @@ func TestParseMetadataRejectsSnapshotMissingRequiredFields(t *testing.T) {
 
 			_, err = table.ParseMetadataBytes(mutated)
 			require.ErrorIs(t, err, table.ErrInvalidMetadata)
-			assert.ErrorContains(t, err, tt.wantErr)
+			assert.EqualError(t, err, tt.wantErr)
 		})
 	}
 }

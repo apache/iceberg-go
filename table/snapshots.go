@@ -291,6 +291,7 @@ func (s *Snapshot) UnmarshalJSON(data []byte) error {
 	if aux.TimestampMs == nil {
 		return fmt.Errorf("%w: timestamp-ms is absent or null", ErrInvalidMetadata)
 	}
+	// The pointer fields shadow Alias, so json.Unmarshal does not populate next.
 	next.SnapshotID, next.TimestampMs = *aux.SnapshotID, *aux.TimestampMs
 
 	if next.ManifestList != "" {
