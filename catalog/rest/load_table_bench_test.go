@@ -81,7 +81,7 @@ func BenchmarkDecodeTableMetadata(b *testing.B) {
 			b.ResetTimer()
 			b.ReportAllocs()
 
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				var resp loadTableResponse
 				err := tc.decode(body, &resp)
 				require.NoError(b, err)
@@ -98,7 +98,7 @@ func makeTableResponseWithSnapshots(snapshotCount int64) []byte {
 	schemaID := 0
 	var snapshotTimestamp int64
 	var snapshotID int64
-	for i := int64(0); i < snapshotCount; i++ {
+	for i := range snapshotCount {
 		var parentID *int64
 		if i > 0 {
 			parentID = &i
