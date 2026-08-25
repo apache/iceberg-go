@@ -29,6 +29,7 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -713,6 +714,118 @@ func TestProcessPositionalDeletesAcrossBatches(t *testing.T) {
 
 		out.Release()
 	}
+}
+
+func TestProcessPositionalDeletesNoOpRetainsBatch(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(t.Context(), mem)
+	batch := checkedInt64RecordBatch(mem, 0, 1, 2)
+
+	process := processPositionalDeletes(ctx, set[int64]{99: {}}, (&rowPositionSource{}).cursor())
+	out, err := process(batch)
+	require.NoError(t, err)
+	assert.Same(t, batch, out)
+	out.Release()
+}
+
+func TestProcessPositionalDeletes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deletes   set[int64]
+		spans     []internal.RowGroupSpan
+		batches   [][]int64
+		expecteds [][]int64
+	}{
+		{
+			name:      "zero deletes",
+			deletes:   set[int64]{},
+			batches:   [][]int64{{0, 1, 2}},
+			expecteds: [][]int64{{0, 1, 2}},
+		},
+		{
+			name:      "first deletion",
+			deletes:   set[int64]{0: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{1, 2, 3}},
+		},
+		{
+			name:      "middle deletion",
+			deletes:   set[int64]{2: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{0, 1, 3}},
+		},
+		{
+			name:      "last deletion",
+			deletes:   set[int64]{3: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{0, 1, 2}},
+		},
+		{
+			name:      "all but last row deleted",
+			deletes:   set[int64]{0: {}, 1: {}, 2: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{3}},
+		},
+		{
+			name:      "batch boundary deletion",
+			deletes:   set[int64]{4: {}},
+			batches:   [][]int64{{0, 1, 2, 3}, {4, 5, 6}},
+			expecteds: [][]int64{{0, 1, 2, 3}, {5, 6}},
+		},
+		{
+			name:      "all rows deleted",
+			deletes:   set[int64]{0: {}, 1: {}, 2: {}},
+			batches:   [][]int64{{0, 1}, {2}},
+			expecteds: [][]int64{{}, {}},
+		},
+		{
+			name:    "pruned row group positions",
+			deletes: set[int64]{4: {}},
+			spans: []internal.RowGroupSpan{
+				{FirstRowPos: 0, NumRows: 2},
+				{FirstRowPos: 4, NumRows: 2},
+			},
+			batches:   [][]int64{{0, 1}, {4, 5}},
+			expecteds: [][]int64{{0, 1}, {5}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			process := processPositionalDeletes(ctx, tc.deletes, (&rowPositionSource{spans: tc.spans}).cursor())
+
+			for i, values := range tc.batches {
+				batch := checkedInt64RecordBatch(mem, values...)
+				out, err := process(batch)
+				require.NoErrorf(t, err, "batch %d", i)
+				got := out.Column(0).(*array.Int64).Int64Values()
+				if len(tc.expecteds[i]) == 0 {
+					assert.Empty(t, got)
+				} else {
+					assert.Equal(t, tc.expecteds[i], got)
+				}
+				out.Release()
+			}
+		})
+	}
+}
+
+func checkedInt64RecordBatch(mem memory.Allocator, values ...int64) arrow.RecordBatch {
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	bldr.AppendValues(values, nil)
+
+	col := bldr.NewArray()
+	defer col.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: false,
+	}}, nil)
+
+	return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
 }
 
 func stringArray(mem memory.Allocator, values ...string) *array.String {

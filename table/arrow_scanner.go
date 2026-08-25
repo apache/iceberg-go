@@ -576,15 +576,35 @@ type set[T comparable] map[T]struct{}
 // batch handed to compute.Take, not into the whole file. Without batch-local
 // indices, the second and later batches of a file would pass indices >= the batch
 // length and compute.Take would fail with "index error: N out of bounds".
+//
+// A nil result means that no row in the batch was deleted. The index builder is
+// allocated lazily after the first deleted row so clean batches can pass through
+// without reconstructing their columns.
 func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], cursor *rowPositionCursor, nrows int64) arrow.Array {
-	bldr := array.NewInt64Builder(mem)
-	defer bldr.Release()
+	var bldr *array.Int64Builder
 
 	for i := range nrows {
-		if _, ok := deletes[cursor.next()]; !ok {
+		if _, deleted := deletes[cursor.next()]; deleted {
+			if bldr == nil {
+				bldr = array.NewInt64Builder(mem)
+				bldr.Reserve(int(i))
+				for j := range i {
+					bldr.Append(j)
+				}
+			}
+
+			continue
+		}
+
+		if bldr != nil {
 			bldr.Append(i)
 		}
 	}
+
+	if bldr == nil {
+		return nil
+	}
+	defer bldr.Release()
 
 	return bldr.NewArray()
 }
@@ -598,6 +618,11 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *r
 		defer r.Release()
 
 		indices := combinePositionalDeletes(mem, deletes, cursor, r.NumRows())
+		if indices == nil {
+			r.Retain()
+
+			return r, nil
+		}
 		defer indices.Release()
 
 		out, err := compute.Take(ctx, *compute.DefaultTakeOptions(),
