@@ -273,13 +273,61 @@ func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T)
 	assert.ErrorContains(t, err, "sort field with source id 999 not found in schema")
 }
 
-func TestUnmarshalSortOrderDefaults(t *testing.T) {
-	var order table.SortOrder
-	require.NoError(t, json.Unmarshal([]byte(`{"fields": []}`), &order))
-	assert.Equal(t, table.UnsortedSortOrder, order)
+func TestUnmarshalSortOrderRequiresOrderID(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		jsonData string
+	}{
+		{name: "missing", jsonData: `{"fields": []}`},
+		{name: "null", jsonData: `{"order-id": null, "fields": []}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var order table.SortOrder
+			err := json.Unmarshal([]byte(tt.jsonData), &order)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "missing required 'order-id' key in JSON")
+		})
+	}
+}
 
-	require.NoError(t, json.Unmarshal([]byte(`{"fields": [{"source-id": 19, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &order))
-	assert.Equal(t, table.InitialSortOrderID, order.OrderID())
+func TestUnmarshalSortOrderRequiresFields(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		jsonData string
+	}{
+		{name: "missing", jsonData: `{"order-id": 0}`},
+		{name: "null", jsonData: `{"order-id": 0, "fields": null}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var order table.SortOrder
+			err := json.Unmarshal([]byte(tt.jsonData), &order)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "missing required 'fields' key in JSON")
+		})
+	}
+}
+
+func TestUnmarshalSortOrderAcceptsExplicitUnsortedOrder(t *testing.T) {
+	var order table.SortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 0, "fields": []}`), &order))
+	assert.Equal(t, table.UnsortedSortOrder, order)
+}
+
+func TestUnmarshalSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	var order table.SortOrder
+	err := json.Unmarshal([]byte(`{"order-id": 1, "fields": []}`), &order)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
+}
+
+func TestNewSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	_, err := table.NewSortOrder(1, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
 }
 
 func TestUnmarshalSortOrderRejectsInvalidSourceIDs(t *testing.T) {
