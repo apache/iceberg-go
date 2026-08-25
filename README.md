@@ -25,7 +25,7 @@
 
 ### Prerequisites
 
-* Go 1.25.9 or later
+* Go 1.25 or later
 
 ### Build
 
