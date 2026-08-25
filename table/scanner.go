@@ -941,6 +941,7 @@ func (scan *Scan) collectManifestEntries(
 	if err != nil {
 		return nil, err
 	}
+
 	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 }
 
