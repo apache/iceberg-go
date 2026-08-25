@@ -1368,6 +1368,19 @@ func TestHandleNon200_DecodeCanonicalErrorRendersExpectedMessage(t *testing.T) {
 	require.True(t, errors.Is(err, ErrForbidden))
 }
 
+func TestHandleNon200_RejectsTrailingJSON(t *testing.T) {
+	body := `{"message":"bad request"} {}`
+	rsp := &http.Response{
+		StatusCode:    http.StatusBadRequest,
+		ContentLength: int64(len(body)),
+		Body:          io.NopCloser(bytes.NewBufferString(body)),
+	}
+
+	err := handleNon200(rsp, nil, nil)
+	require.ErrorIs(t, err, ErrRESTError)
+	require.ErrorContains(t, err, "multiple JSON values")
+}
+
 func TestHandleNon200_EmptyBodyFallback(t *testing.T) {
 	rsp := &http.Response{
 		StatusCode:    http.StatusBadRequest,

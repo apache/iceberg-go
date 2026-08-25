@@ -583,13 +583,21 @@ func decodeJSONResponse(body io.Reader, dst any) error {
 		return fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
 	}
 
+	if err := rejectTrailingJSON(decoder); err != nil {
+		return fmt.Errorf("%w: %s", ErrRESTError, err)
+	}
+
+	return nil
+}
+
+func rejectTrailingJSON(decoder *json.Decoder) error {
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("%w: response contains multiple JSON values", ErrRESTError)
+			return errors.New("response contains multiple JSON values")
 		}
 
-		return fmt.Errorf("%w: error decoding trailing json payload: `%s`", ErrRESTError, err.Error())
+		return fmt.Errorf("error decoding trailing json payload: `%s`", err.Error())
 	}
 
 	return nil
@@ -618,7 +626,11 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 			Error: &e,
 		}
 
-		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
+		decoder := json.NewDecoder(rsp.Body)
+		decErr := decoder.Decode(&payload)
+		if decErr == nil {
+			decErr = rejectTrailingJSON(decoder)
+		}
 		if decErr != nil && decErr != io.EOF {
 			// Preserve the HTTP metadata even when the server returned a non-JSON
 			// error page. Callers such as WaitForPlan still need the status to apply
