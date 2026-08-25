@@ -924,11 +924,11 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	switch entryContent {
 	case EntryContentData:
 		if c.content != ManifestContentData {
-			return nil, fmt.Errorf("data file found in delete manifest")
+			return nil, errors.New("data file found in delete manifest")
 		}
 	case EntryContentPosDeletes, EntryContentEqDeletes:
 		if c.content != ManifestContentDeletes {
-			return nil, fmt.Errorf("delete file found in data manifest")
+			return nil, errors.New("delete file found in data manifest")
 		}
 	default:
 		return nil, fmt.Errorf("manifest entry has invalid content: %d", entryContent)
