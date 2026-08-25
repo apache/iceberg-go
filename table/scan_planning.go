@@ -120,6 +120,9 @@ type ScanPlanningRequest struct {
 // Scan that planned it; every ReadTasks call loads from it instead of the
 // table's FileIO. Replacing the plan releases that Scan's ownership; the old IO
 // closes after its remaining scan owners and active record iterators finish.
+// Call Scan.Close when the scan is no longer needed, including when planning
+// succeeds but its tasks are not read. Close is idempotent and waits for active
+// ReadTasks iterators before the plan IO is closed.
 // This ties a plan-scoped scan to PlanFiles -> ReadTasks: tasks from a remote
 // plan must be read by the Scan that produced them or one of its derived scans.
 // A Scan carrying plan-scoped IO is not safe for concurrent PlanFiles or

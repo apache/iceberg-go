@@ -117,8 +117,8 @@ func TestRefinedScanRetainsPlanIOOwnership(t *testing.T) {
 			assert.Same(t, first, scan.planIO.io)
 			assert.Same(t, second, refined.planIO.io)
 
-			scan.closePlanIO()
-			refined.closePlanIO()
+			require.NoError(t, scan.Close())
+			require.NoError(t, refined.Close())
 			assert.Equal(t, 1, first.closeCalls)
 			assert.Equal(t, 1, second.closeCalls)
 		})
@@ -277,6 +277,45 @@ func TestScanPlanningLocalClosesPreviousPlanIOAfterSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Nil(t, scan.planIO)
+	assert.Equal(t, 1, pio.closeCalls)
+}
+
+func TestScanCloseReleasesPlanIO(t *testing.T) {
+	t.Parallel()
+
+	pio := &countingPlanIO{}
+	scan := &Scan{
+		planner:      &fakeScanPlanner{result: ScanPlanningResult{IO: pio}, supports: true},
+		planningMode: ScanPlanningRemote,
+	}
+
+	_, err := scan.PlanFiles(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, scan.Close())
+	require.NoError(t, scan.Close())
+
+	assert.Equal(t, 1, pio.closeCalls)
+	assert.Nil(t, scan.planIO)
+
+	_, err = scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, ErrInvalidOperation)
+}
+
+func TestScanCloseWaitsForActiveReadTasks(t *testing.T) {
+	pio := &countingPlanIO{fs: icebergio.LocalFS{}}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.planIO = mustPlanIOState(t, pio)
+
+	_, records, err := scan.ReadTasks(context.Background(), nil)
+	require.NoError(t, err)
+	require.NoError(t, scan.Close())
+	assert.Equal(t, 0, pio.closeCalls)
+
+	for _, err := range records {
+		require.NoError(t, err)
+	}
 	assert.Equal(t, 1, pio.closeCalls)
 }
 

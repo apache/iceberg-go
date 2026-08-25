@@ -242,6 +242,7 @@ type Scan struct {
 	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
 	// the plan retires it after all active readers finish. See PlanIO.
 	planIO         *planIOState
+	closed         bool
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -847,6 +848,10 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	if scan.closed {
+		return nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
+	}
+
 	if scan.selectorErr != nil {
 		return nil, scan.selectorErr
 	}
@@ -922,7 +927,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
 	defer func() {
 		if err == nil {
-			scan.closePlanIO()
+			_ = scan.closePlanIO()
 		}
 	}()
 
@@ -1072,7 +1077,7 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 	oldPlanIO := scan.planIO
 	scan.planIO = planIO
 	if oldPlanIO != nil {
-		oldPlanIO.releaseOwner()
+		_ = oldPlanIO.releaseOwner()
 	}
 
 	return result.Tasks, nil
@@ -1126,6 +1131,7 @@ type planIOState struct {
 	owners    int
 	readers   int
 	closeOnce sync.Once
+	closeErr  error
 }
 
 func newPlanIOState(planIO PlanIO) (*planIOState, error) {
@@ -1186,19 +1192,27 @@ func (p *planIOState) release() {
 	p.mu.Unlock()
 
 	if closeNow {
-		p.closeOnce.Do(func() { _ = p.io.Close() })
+		_ = p.close()
 	}
 }
 
-func (p *planIOState) releaseOwner() {
+func (p *planIOState) releaseOwner() error {
 	p.mu.Lock()
 	p.owners--
 	closeNow := p.owners == 0 && p.readers == 0
 	p.mu.Unlock()
 
 	if closeNow {
-		p.closeOnce.Do(func() { _ = p.io.Close() })
+		return p.close()
 	}
+
+	return nil
+}
+
+func (p *planIOState) close() error {
+	p.closeOnce.Do(func() { p.closeErr = p.io.Close() })
+
+	return p.closeErr
 }
 
 type FileScanTask struct {
@@ -1241,6 +1255,10 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // scan's projection, per-task residual filters, and positional delete handling. This
 // is useful when the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if scan.closed {
+		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
+	}
+
 	if scan.selectorErr != nil {
 		return nil, nil, scan.selectorErr
 	}
@@ -1330,14 +1348,29 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 
 // closePlanIO releases the scoped resources associated with the current
 // remote plan. It is safe to call when no remote plan has been installed.
-func (scan *Scan) closePlanIO() {
+func (scan *Scan) closePlanIO() error {
 	if scan.planIO == nil {
-		return
+		return nil
 	}
 
 	planIO := scan.planIO
 	scan.planIO = nil
-	planIO.releaseOwner()
+
+	return planIO.releaseOwner()
+}
+
+// Close releases the plan-scoped resources owned by this scan. It is safe to
+// call more than once. Active ReadTasks iterators retain their reader lease and
+// can finish; the plan IO closes after the last lease is released. A scan must
+// not be used after Close.
+func (scan *Scan) Close() error {
+	if scan == nil || scan.closed {
+		return nil
+	}
+
+	scan.closed = true
+
+	return scan.closePlanIO()
 }
 
 // releasePlanIOAfter wraps an arrow record iterator so its plan-scoped IO lease

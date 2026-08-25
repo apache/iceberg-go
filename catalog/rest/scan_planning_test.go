@@ -500,6 +500,26 @@ func TestFetchScanTasksRejectsEmptyBody(t *testing.T) {
 	assert.Equal(t, FetchScanTasksResponse{}, resp)
 }
 
+func TestFetchScanTasksRejectsNullBody(t *testing.T) {
+	t.Parallel()
+
+	key := "0190b6c5-1c3d-7000-8000-000000000005"
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			require.Equal(t, http.MethodPost, req.Method)
+			_, err := w.Write([]byte("null"))
+			require.NoError(t, err)
+		})
+	})
+
+	resp, err := cat.FetchScanTasks(context.Background(), table.Identifier{"db", "tbl"}, FetchScanTasksRequest{
+		IdempotencyKey: &key,
+		PlanTask:       "task-1",
+	})
+	require.ErrorIs(t, err, ErrRESTError)
+	assert.Equal(t, FetchScanTasksResponse{}, resp)
+}
+
 func TestFetchPlanningResultRequest(t *testing.T) {
 	t.Parallel()
 

@@ -57,6 +57,10 @@ func validatePlanningTaskEnvelope(data []byte, status PlanStatus, tasks ScanTask
 }
 
 func (r *FetchScanTasksResponse) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("%w: fetchScanTasks response must be an object", ErrRESTError)
+	}
+
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
