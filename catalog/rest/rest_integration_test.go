@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -63,6 +64,10 @@ func (s *RestIntegrationSuite) loadCatalog(ctx context.Context) *rest.Catalog {
 
 func (s *RestIntegrationSuite) SetupTest() {
 	s.ctx = context.Background()
+	if strings.Contains(s.T().Name(), "/TestScanPlanningJava") {
+		return
+	}
+
 	s.cat = s.loadCatalog(s.ctx)
 }
 
