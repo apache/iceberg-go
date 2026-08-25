@@ -67,6 +67,9 @@ func BenchmarkPartitionExtraction(b *testing.B) {
 			}
 			defer record.Release()
 			writer := newPartitionedFanoutWriter(spec, icebergSchema, nil, nil)
+			if _, err := writer.getPartitions(record); err != nil {
+				b.Fatal(err)
+			}
 
 			b.ReportAllocs()
 			b.ResetTimer()

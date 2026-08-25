@@ -439,6 +439,9 @@ func bindPartitionValue(transform iceberg.Transform, sourceType iceberg.Type) fu
 			if err != nil {
 				return nil, err
 			}
+			if value == nil {
+				return nil, nil
+			}
 
 			transformed := transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: value})
 			if !transformed.Valid {
@@ -453,6 +456,9 @@ func bindPartitionValue(transform iceberg.Transform, sourceType iceberg.Type) fu
 		value, err := getArrowValueAsIcebergValue(column, row, sourceType)
 		if err != nil {
 			return nil, err
+		}
+		if value == nil {
+			return nil, nil
 		}
 
 		return bound(value), nil
@@ -487,6 +493,10 @@ func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type
 	case iceberg.VoidTransform:
 		return func(any) any { return nil }, true
 	case iceberg.BucketTransform:
+		if !typed.CanTransform(sourceType) {
+			break
+		}
+
 		return optionalInt(typed.Transformer(sourceType)), true
 	case iceberg.TruncateTransform:
 		transformer, err := typed.Transformer(sourceType)
