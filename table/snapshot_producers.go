@@ -819,9 +819,8 @@ func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, err
 	return slices.Concat(addedManifests, positionDeleteManifests), nil
 }
 
-// validateSpecs resolves every spec id the commit references before any phase
-// writes, because the parent-dependent manifests are written before the added
-// ones and a later rejection would orphan them.
+// validateSpecs resolves the spec ids of this producer's added and removed files up front.
+// Manifests are written phase by phase, so rejecting an id mid-way would leave the earlier phase's manifests orphaned.
 func (sp *snapshotProducer) validateSpecs() error {
 	check := func(df iceberg.DataFile) error {
 		if _, err := sp.spec(int(df.SpecID())); err != nil {
