@@ -1931,14 +1931,6 @@ func TestExistingManifests_ExactDVStillExpunged(t *testing.T) {
 func writeParentSnapshotWithDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) *Snapshot {
 	t.Helper()
 
-	mf := writeTestDeletesManifest(t, fs, spec, snapshotID, tag, deleteFiles...)
-
-	return writeParentSnapshotFromManifests(t, fs, snapshotID, tag, mf)
-}
-
-func writeTestDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.PartitionSpec, snapshotID int64, tag string, deleteFiles ...iceberg.DataFile) iceberg.ManifestFile {
-	t.Helper()
-
 	manifestPath := "mem://default/table-location/metadata/deletes-" + tag + ".avro"
 	var buf bytes.Buffer
 	wr, err := iceberg.NewManifestWriter(3, &buf, spec, simpleSchema(), snapshotID,
@@ -1958,17 +1950,11 @@ func writeTestDeletesManifest(t *testing.T, fs iceio.WriteFileIO, spec iceberg.P
 	require.NoError(t, err)
 	require.NoError(t, out.Close())
 
-	return mf
-}
-
-func writeParentSnapshotFromManifests(t *testing.T, fs iceio.WriteFileIO, snapshotID int64, tag string, manifests ...iceberg.ManifestFile) *Snapshot {
-	t.Helper()
-
 	listPath := "mem://default/table-location/metadata/snap-" + tag + ".avro"
 	lout, err := fs.Create(listPath)
 	require.NoError(t, err)
 	seq := int64(1)
-	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, manifests))
+	require.NoError(t, iceberg.WriteManifestList(3, lout, snapshotID, nil, &seq, 0, []iceberg.ManifestFile{mf}))
 	require.NoError(t, lout.Close())
 
 	return &Snapshot{
@@ -2032,7 +2018,7 @@ func TestAddDataFilesV2SucceedsWithoutFirstRowID(t *testing.T) {
 
 func unregisteredSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
-		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_identity", Transform: iceberg.IdentityTransform{},
 	})
 }
 
@@ -2126,37 +2112,59 @@ func TestAccumulateSummaryDeltaRejectsUnregisteredSpec(t *testing.T) {
 	assert.ErrorContains(t, err, "99")
 }
 
-func TestParentDependentManifestsMixedSpecWritesNoManifests(t *testing.T) {
+func TestBuildManifestsRejectsUnregisteredSpecBeforeWriting(t *testing.T) {
 	registered := partitionedSpec()
-	txn, wfs := createTestTransactionWithMemIO(t, registered)
-	sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+	partition := map[int]any{1000: int32(7)}
+	dataPath := "mem://default/table-location/data/d.parquet"
 
-	validDV := newTestDeletionVectorForRef(t, registered,
-		"mem://default/table-location/data/dv-valid.puffin",
-		"mem://default/table-location/data/valid.parquet")
-	orphanDV := newTestDeletionVectorForRef(t, unregisteredSpec(),
-		"mem://default/table-location/data/dv-orphan.puffin",
-		"mem://default/table-location/data/orphan.parquet")
-	sp.removeDeletionVector(validDV)
-	sp.removeDeletionVector(orphanDV)
+	setup := func(t *testing.T, tag string) (*snapshotProducer, iceio.WriteFileIO, *Snapshot) {
+		t.Helper()
 
-	parent := writeParentSnapshotFromManifests(t, wfs, 96, "mixed",
-		writeTestDeletesManifest(t, wfs, registered, 96, "mixed-valid", validDV),
-		writeTestDeletesManifest(t, wfs, unregisteredSpec(), 96, "mixed-orphan", orphanDV))
+		txn, wfs := createTestTransactionWithMemIO(t, registered)
+		sp := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
+		validDV := newTestDeletionVectorForRef(t, registered,
+			"mem://default/table-location/data/dv-valid.puffin", dataPath)
+		sp.removeDeletionVector(validDV)
 
-	before := metadataFiles(t, wfs)
-	_, err := sp.parentDependentManifests(context.Background(), parent)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
-	assert.Equal(t, before, metadataFiles(t, wfs),
-		"a rejected operation must not leave manifests behind")
+		return sp, wfs, writeParentSnapshotWithDeletesManifest(t, wfs, registered, 97, tag, validDV)
+	}
 
-	valid := newOverwriteFilesProducer(OpOverwrite, txn, wfs, nil, nil)
-	valid.removeDeletionVector(validDV)
-	_, err = valid.parentDependentManifests(context.Background(), parent)
-	require.NoError(t, err)
-	assert.Greater(t, len(metadataFiles(t, wfs)), len(before),
-		"the same probe must observe the manifests a successful run writes")
+	t.Run("unregistered added file", func(t *testing.T) {
+		sp, wfs, parent := setup(t, "added")
+		sp.appendDataFile(newTestDataFile(t, unregisteredSpec(),
+			"mem://default/table-location/data/orphan.parquet", partition))
+
+		before := metadataFiles(t, wfs)
+		_, _, err := sp.buildManifests(context.Background(), parent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+		assert.Equal(t, before, metadataFiles(t, wfs),
+			"the valid deletion must not be written before the added spec is rejected")
+	})
+
+	t.Run("unregistered removed file", func(t *testing.T) {
+		sp, wfs, parent := setup(t, "removed")
+		sp.removeDeleteFile(newTestPosDeleteFileForSpec(t, unregisteredSpec(),
+			"mem://default/table-location/data/orphan-del.parquet", partition, dataPath))
+
+		before := metadataFiles(t, wfs)
+		_, _, err := sp.buildManifests(context.Background(), parent)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
+		assert.Equal(t, before, metadataFiles(t, wfs))
+	})
+
+	t.Run("all specs registered", func(t *testing.T) {
+		sp, wfs, parent := setup(t, "registered")
+		sp.appendDataFile(newTestDataFile(t, registered,
+			"mem://default/table-location/data/added.parquet", partition))
+
+		before := metadataFiles(t, wfs)
+		_, _, err := sp.buildManifests(context.Background(), parent)
+		require.NoError(t, err)
+		assert.Greater(t, len(metadataFiles(t, wfs)), len(before),
+			"the same probe must observe the manifests a successful build writes")
+	})
 }
 
 func metadataFiles(t *testing.T, wfs iceio.WriteFileIO) []string {

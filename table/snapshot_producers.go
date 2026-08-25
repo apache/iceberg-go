@@ -634,11 +634,8 @@ func createSnapshotProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO
 
 func (sp *snapshotProducer) spec(id int) (iceberg.PartitionSpec, error) {
 	spec, err := sp.txn.meta.GetSpecByID(id)
-	if err == nil && spec == nil {
-		err = ErrPartitionSpecNotFound
-	}
 	if err != nil {
-		return iceberg.PartitionSpec{}, fmt.Errorf("unregistered partition spec id %d: %w", id, err)
+		return iceberg.PartitionSpec{}, err
 	}
 
 	return *spec, nil
@@ -775,6 +772,10 @@ func (sp *snapshotProducer) manifests(ctx context.Context) ([]iceberg.ManifestFi
 // (which evaluates deletedEntries) is built before any added-content writer is
 // created, so a delete-side failure cannot orphan added-content writers.
 func (sp *snapshotProducer) buildManifests(ctx context.Context, parent *Snapshot) (all, addedContent []iceberg.ManifestFile, err error) {
+	if err := sp.validateSpecs(); err != nil {
+		return nil, nil, err
+	}
+
 	dependent, err := sp.parentDependentManifests(ctx, parent)
 	if err != nil {
 		return nil, nil, err
@@ -798,10 +799,6 @@ func (sp *snapshotProducer) buildManifests(ctx context.Context, parent *Snapshot
 // written once and reused verbatim across OCC retries (rewriting them would
 // churn manifest paths and orphan object-store files on every attempt).
 func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, error) {
-	if err := sp.validateAddedSpecs(); err != nil {
-		return nil, err
-	}
-
 	var g errgroup.Group
 
 	addedManifests := make([]iceberg.ManifestFile, 0)
@@ -822,16 +819,35 @@ func (sp *snapshotProducer) addedContentManifests() ([]iceberg.ManifestFile, err
 	return slices.Concat(addedManifests, positionDeleteManifests), nil
 }
 
-func (sp *snapshotProducer) validateAddedSpecs() error {
-	for _, df := range sp.addedFiles {
+// validateSpecs resolves every spec id the commit references before any phase
+// writes, because the parent-dependent manifests are written before the added
+// ones and a later rejection would orphan them.
+func (sp *snapshotProducer) validateSpecs() error {
+	check := func(df iceberg.DataFile) error {
 		if _, err := sp.spec(int(df.SpecID())); err != nil {
+			return fmt.Errorf("file %s: %w", df.FilePath(), err)
+		}
+
+		return nil
+	}
+
+	for _, df := range sp.addedFiles {
+		if err := check(df); err != nil {
 			return err
 		}
 	}
 
 	for _, addition := range sp.addedDeleteFiles {
-		if _, err := sp.spec(int(addition.file.SpecID())); err != nil {
+		if err := check(addition.file); err != nil {
 			return err
+		}
+	}
+
+	for _, removed := range []map[string]iceberg.DataFile{sp.deletedFiles, sp.deletedDeleteFiles, sp.deletedDVsByRef} {
+		for _, df := range removed {
+			if err := check(df); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -865,6 +881,10 @@ func (sp *snapshotProducer) deleteManifestProducer(output *[]iceberg.ManifestFil
 // otherwise). Used on OCC retries, where addedContent was written at attempt 0
 // and is reused verbatim.
 func (sp *snapshotProducer) assembleManifests(ctx context.Context, parent *Snapshot, addedContent []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	if err := sp.validateSpecs(); err != nil {
+		return nil, err
+	}
+
 	dependent, err := sp.parentDependentManifests(ctx, parent)
 	if err != nil {
 		return nil, err
@@ -883,15 +903,6 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 	deleted, err := sp.deletedEntries(ctx, parent)
 	if err != nil {
 		return nil, err
-	}
-
-	// existingManifests only resolves the spec of a manifest that lost an entry,
-	// so these are the same ids both goroutines below need. Rejecting them here
-	// keeps a later group's failure from orphaning the manifests already written.
-	for _, entry := range deleted {
-		if _, err := sp.spec(int(entry.DataFile().SpecID())); err != nil {
-			return nil, err
-		}
 	}
 
 	var g errgroup.Group
