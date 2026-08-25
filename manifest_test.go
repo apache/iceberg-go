@@ -22,6 +22,7 @@ import (
 	"compress/flate"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -3853,15 +3854,15 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 		existingRows int64
 	}{
 		{name: "both row counts unknown", addedRows: -1, existingRows: -1},
-		{name: "existing row count unknown", addedRows: 1, existingRows: -1},
-		{name: "added row count unknown", addedRows: -1, existingRows: 1},
+		{name: "only existing row count unknown", addedRows: 1, existingRows: -1},
+		{name: "only added row count unknown", addedRows: -1, existingRows: 1},
 	}
 
-	for _, test := range tests {
-		m.Run(test.name, func() {
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
 			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
-			legacy.AddedRowsCount = test.addedRows
-			legacy.ExistingRowsCount = test.existingRows
+			legacy.AddedRowsCount = tt.addedRows
+			legacy.ExistingRowsCount = tt.existingRows
 
 			var v1Buf bytes.Buffer
 			m.Require().NoError(
@@ -3875,12 +3876,45 @@ func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCou
 			m.Require().NoError(err)
 			err = writer.AddManifests(manifests)
 			m.Require().ErrorIs(err, ErrInvalidArgument)
-			m.Require().ErrorContains(err, "cannot assign row-lineage IDs with unknown row counts")
+			m.Require().ErrorContains(err, "cannot assign row-lineage IDs because at least one row count is unknown")
+			m.Require().ErrorContains(err, fmt.Sprintf("existing=%d added=%d", tt.existingRows, tt.addedRows))
 			m.Require().ErrorContains(err, legacy.Path)
-			m.EqualValues(1000, *writer.NextRowID())
+			m.Require().EqualValues(1000, *writer.NextRowID())
 			m.Require().NoError(writer.Close())
 		})
 	}
+
+	m.Run("mixed batch failure poisons writer", func() {
+		valid := *(manifestFileRecordsV1[0].(*manifestFile))
+		valid.Path = "valid.avro"
+		unknown := valid
+		unknown.Path = "unknown-counts.avro"
+		unknown.AddedRowsCount = -1
+		unknown.ExistingRowsCount = -1
+		manifests := []ManifestFile{&valid, &unknown}
+
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 1000, nil)
+		m.Require().NoError(err)
+
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, unknown.Path)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+
+		retryErr := writer.AddManifests([]ManifestFile{&valid})
+		m.Require().ErrorIs(retryErr, err)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+		// Close flushes the partial OCF so we can verify that retrying did not
+		// append a colliding row ID. The failed writer output must be discarded.
+		m.Require().NoError(writer.Close())
+
+		written, readErr := ReadManifestList(bytes.NewReader(buf.Bytes()))
+		m.Require().NoError(readErr)
+		m.Require().Len(written, 1, "the failed batch must not be reusable")
+		m.Require().NotNil(written[0].FirstRowID())
+		m.Require().EqualValues(1000, *written[0].FirstRowID())
+	})
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
