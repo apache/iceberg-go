@@ -807,6 +807,10 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 	var nextFirstRowID int64
 	if inheritRowIDs {
 		nextFirstRowID = *file.FirstRowID()
+		if nextFirstRowID < 0 {
+			return nil, fmt.Errorf("%w: first row ID must be non-negative: %d",
+				ErrInvalidArgument, nextFirstRowID)
+		}
 	}
 
 	return &ManifestReader{

@@ -1430,6 +1430,41 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceRejectsInvali
 			m.ErrorContains(err, tt.errorContains)
 		})
 	}
+
+	m.Run("negative manifest first row ID with explicit entry ID", func() {
+		partitionSpec := NewPartitionSpecID(1,
+			PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+		entryFirstRowID := int64(0)
+		entry := &manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      1,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  &entryFirstRowID,
+			},
+		}
+		var manifestBuf bytes.Buffer
+		_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+			entrySnapshotID, []ManifestEntry{entry})
+		m.Require().NoError(err)
+
+		negativeManifestFirstRowID := int64(-1)
+		file := &manifestFile{
+			version:         3,
+			Path:            "/manifest.avro",
+			Content:         ManifestContentData,
+			FirstRowIDValue: &negativeManifestFirstRowID,
+		}
+		_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.ErrorContains(err, "first row ID must be non-negative")
+	})
 }
 
 // TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries verifies that a
