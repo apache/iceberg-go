@@ -1323,6 +1323,7 @@ func truncateNumber[T LiteralType](name string, pred BoundLiteralPredicate, fn f
 		if _, ok := adjusted.(BelowMinLiteral); ok {
 			return nil, nil
 		}
+
 		return LiteralPredicate(OpLTEQ, Reference(name),
 			transformLiteral(fn, adjusted)), nil
 	case OpLTEQ:
@@ -1333,6 +1334,7 @@ func truncateNumber[T LiteralType](name string, pred BoundLiteralPredicate, fn f
 		if _, ok := adjusted.(AboveMaxLiteral); ok {
 			return nil, nil
 		}
+
 		return LiteralPredicate(OpGTEQ, Reference(name),
 			transformLiteral(fn, adjusted)), nil
 	case OpGTEQ:
