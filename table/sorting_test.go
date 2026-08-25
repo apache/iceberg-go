@@ -222,6 +222,45 @@ func TestSortOrderUnmarshalRejectsZeroSourceID(t *testing.T) {
 	assert.ErrorContains(t, err, "source ID must be positive: 0")
 }
 
+// Spark numbers root fields from zero when converting a schema for a
+// create-table request (SparkTypeToType.struct), so `WRITE ORDERED BY` on the
+// first column sends source-id 0. The unbound order accepts it; the ID is
+// remapped by name when the order is bound to the fresh schema.
+func TestUnboundSortOrderUnmarshalAcceptsZeroSourceID(t *testing.T) {
+	var sortOrder table.UnboundSortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
+	require.Equal(t, 1, sortOrder.Len())
+	for _, field := range sortOrder.Fields() {
+		assert.Equal(t, 0, field.SourceID())
+	}
+
+	roundTripped, err := json.Marshal(sortOrder)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`, string(roundTripped))
+}
+
+func TestUnboundSortOrderUnmarshalRejectsNegativeSourceID(t *testing.T) {
+	var sortOrder table.UnboundSortOrder
+	err := json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": -1, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortSourceID)
+	assert.ErrorContains(t, err, "source ID must be non-negative: -1")
+}
+
+// A placeholder source ID that never gets remapped is still caught at binding time.
+func TestUnboundSortOrderCheckCompatibilityRejectsZeroSourceID(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	var sortOrder table.UnboundSortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
+
+	err := sortOrder.CheckCompatibility(schema)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortSourceID)
+	assert.ErrorContains(t, err, "source ID must be positive: 0")
+}
+
 func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},

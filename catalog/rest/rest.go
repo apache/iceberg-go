@@ -223,6 +223,12 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
+// createTableRequest is the create-table wire format. This client only encodes
+// it, from a spec and order already bound to the schema being sent. Source IDs
+// a server decodes refer to the schema in the same request, under whatever
+// numbering the client chose, so they need not be positive: decode into
+// iceberg.UnboundPartitionSpec and table.UnboundSortOrder, then bind through
+// table.NewMetadata (see #1664).
 type createTableRequest struct {
 	Name          string                 `json:"name"`
 	Schema        *iceberg.Schema        `json:"schema"`

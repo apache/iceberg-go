@@ -3096,6 +3096,10 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 		rowLimit:        -1, // No limit
 		concurrency:     concurrency,
 	}
+	invariants, err := scanner.scanInvariants(builtMeta.Properties())
+	if err != nil {
+		return nil, err
+	}
 
 	deletesPerFile, err := readAllDeleteFiles(ctx, fs, tasks, concurrency)
 	if err != nil {
@@ -3128,7 +3132,7 @@ func (t *Transaction) makePositionDeleteRecordsForFilter(ctx context.Context, fs
 						return
 					}
 
-					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records); err != nil {
+					if err := scanner.producePosDeletesFromTask(ctx, task, deletesPerFile[task.Value.File.FilePath()], records, invariants); err != nil {
 						cancel(err)
 
 						return
