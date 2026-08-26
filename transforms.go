@@ -1319,14 +1319,24 @@ func truncateNumber[T LiteralType](name string, pred BoundLiteralPredicate, fn f
 
 	switch pred.Op() {
 	case OpLT:
+		adjusted := boundary.Decrement()
+		if _, ok := adjusted.(BelowMinLiteral); ok {
+			return nil, nil
+		}
+
 		return LiteralPredicate(OpLTEQ, Reference(name),
-			transformLiteral(fn, boundary.Decrement())), nil
+			transformLiteral(fn, adjusted)), nil
 	case OpLTEQ:
 		return LiteralPredicate(OpLTEQ, Reference(name),
 			transformLiteral(fn, boundary)), nil
 	case OpGT:
+		adjusted := boundary.Increment()
+		if _, ok := adjusted.(AboveMaxLiteral); ok {
+			return nil, nil
+		}
+
 		return LiteralPredicate(OpGTEQ, Reference(name),
-			transformLiteral(fn, boundary.Increment())), nil
+			transformLiteral(fn, adjusted)), nil
 	case OpGTEQ:
 		return LiteralPredicate(OpGTEQ, Reference(name),
 			transformLiteral(fn, boundary)), nil
