@@ -2113,7 +2113,7 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <ul>
 <li>Reference the issue number in your PR description (e.g., &quot;Fixes #123&quot;).</li>
 <li>Keep PRs focused — one issue per PR.</li>
-<li>Run <code>go test ./...</code>, <code>gofmt</code>, and <code>golangci-lint run</code> before pushing. CI runs all of these too, but catching issues locally saves a round-trip.</li>
+<li>Run <code>make test</code> and <code>make lint</code> before pushing. CI runs all of these too, but catching issues locally saves a round-trip. <code>make lint-install</code> will install the linter if you don't have it yet.</li>
 <li>All commits must have a <code>Signed-off-by</code> line (<a href="https://developercertificate.org/">DCO</a>).</li>
 </ul>
 <h2 id="code-review"><a class="header" href="#code-review">Code Review</a></h2>
@@ -2126,7 +2126,8 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <pre><code class="language-bash">git clone https://github.com/apache/iceberg-go.git
 cd iceberg-go
 go build ./...
-go test ./...
+make test # runs all unit tests
+make test-race # runs all unit tests with race detector
 </code></pre>
 <h3 id="integration-tests"><a class="header" href="#integration-tests">Integration Tests</a></h3>
 <p>Integration tests require Docker and are gated behind a build tag:</p>
