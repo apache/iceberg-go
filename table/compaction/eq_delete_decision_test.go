@@ -331,6 +331,30 @@ func TestSurvivorSurvey_AddSurvivor_DefensiveSeq(t *testing.T) {
 	assert.Empty(t, got, "negative-seq survivor must keep eq-delete alive")
 }
 
+func TestSurvivorSurvey_AddSurvivorWithSpec_UsesMinimumSequence(t *testing.T) {
+	specs := compactionTestSpecs()
+	partition := map[int]any{1000: "us"}
+	survey := compaction.NewSurvivorSurvey()
+	survey.AddSurvivorWithSpec(1, partition, 9)
+	survey.AddSurvivorWithSpec(1, partition, 3)
+
+	alive, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		survey,
+		[]iceberg.ManifestEntry{makeEqDeleteEntry(t, specs[1], partition, 4, "/alive.parquet")},
+		specs,
+	)
+	require.NoError(t, err)
+	assert.Empty(t, alive, "the lowest sequence survivor must keep the delete alive")
+
+	dead, err := compaction.DecideDeadEqualityDeletesWithSpecs(
+		survey,
+		[]iceberg.ManifestEntry{makeEqDeleteEntry(t, specs[1], partition, 3, "/dead.parquet")},
+		specs,
+	)
+	require.NoError(t, err)
+	assert.Len(t, dead, 1, "a delete at the survivor sequence must be dead")
+}
+
 type survivor struct {
 	specID    int32
 	partition map[int]any
