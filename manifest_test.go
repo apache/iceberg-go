@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -505,6 +506,67 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	}
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
+func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value any
+		want  Literal
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool, value: true, want: NewLiteral(true)},
+		{name: "int32 from int", typ: PrimitiveTypes.Int32, value: int(7), want: NewLiteral(int32(7))},
+		{name: "int32 from literal", typ: PrimitiveTypes.Int32, value: Int32Literal(7), want: NewLiteral(int32(7))},
+		{name: "int64 from int", typ: PrimitiveTypes.Int64, value: int(8), want: NewLiteral(int64(8))},
+		{name: "float32 from float64", typ: PrimitiveTypes.Float32, value: float64(1.5), want: NewLiteral(float32(1.5))},
+		{name: "float64 from int", typ: PrimitiveTypes.Float64, value: int(9), want: NewLiteral(float64(9))},
+		{name: "string from bytes", typ: PrimitiveTypes.String, value: []byte("east"), want: NewLiteral("east")},
+		{name: "string from literal", typ: PrimitiveTypes.String, value: StringLiteral("east"), want: NewLiteral("east")},
+		{name: "date from int32", typ: PrimitiveTypes.Date, value: int32(10), want: NewLiteral(Date(10))},
+		{name: "time from duration", typ: PrimitiveTypes.Time, value: time.Duration(11), want: NewLiteral(Time(11))},
+		{name: "timestamp from int64", typ: PrimitiveTypes.Timestamp, value: int64(12), want: NewLiteral(Timestamp(12))},
+		{name: "timestamp with timezone from nanoseconds", typ: PrimitiveTypes.TimestampTz, value: TimestampNano(13), want: NewLiteral(Timestamp(13))},
+		{name: "binary from string", typ: PrimitiveTypes.Binary, value: "shard", want: NewLiteral([]byte("shard"))},
+		{name: "fixed from bytes", typ: FixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
+		{
+			name:  "uuid from array",
+			typ:   PrimitiveTypes.UUID,
+			value: [16]byte{1, 2, 3, 4},
+			want:  NewLiteral(uuid.UUID{1, 2, 3, 4}),
+		},
+		{
+			name:  "decimal from decimal literal",
+			typ:   DecimalTypeOf(10, 2),
+			value: DecimalLiteral{Val: decimal128.FromI64(130), Scale: 2},
+			want:  NewLiteral(Decimal{Val: decimal128.FromI64(130), Scale: 2}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err != nil {
+				t.Fatal(err)
+			}
+
+			got := stats.toSummary()
+			if got.LowerBound == nil || got.UpperBound == nil {
+				t.Fatalf("expected bounds, got lower=%v upper=%v", got.LowerBound, got.UpperBound)
+			}
+
+			want, err := tt.want.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(*got.LowerBound, want) || !bytes.Equal(*got.UpperBound, want) {
+				t.Fatalf("got bounds (%v, %v), want (%v, %v)", *got.LowerBound, *got.UpperBound, want, want)
+			}
+		})
 	}
 }
 
