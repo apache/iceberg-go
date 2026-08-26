@@ -57,8 +57,8 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Build()
 }
 
-func TestPlanFilesChecksFileIOForEachManifestWorker(t *testing.T) {
-	const manifestCount = 8
+func TestPlanFilesReusesFileIOWithinManifestBatches(t *testing.T) {
+	const manifestCount = 17
 
 	scan, fs := scanWithManifestCount(t, manifestCount)
 	var calls atomic.Int64
@@ -71,8 +71,9 @@ func TestPlanFilesChecksFileIOForEachManifestWorker(t *testing.T) {
 	tasks, err := scan.PlanFiles(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, tasks, manifestCount)
-	assert.Equal(t, int64(manifestCount+1), calls.Load(),
-		"the manifest list and each manifest worker need a FileIO renewal checkpoint")
+	expectedCalls := int64(1 + (manifestCount+scan.concurrency-1)/scan.concurrency)
+	assert.Equal(t, expectedCalls, calls.Load(),
+		"manifest batches should share FileIO while retaining factory renewal checkpoints")
 }
 
 type expiringManifestIO struct {

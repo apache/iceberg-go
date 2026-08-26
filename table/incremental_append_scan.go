@@ -204,9 +204,10 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if len(manifestList) == 0 {
 		return finish(nil)
 	}
-	// The IO above is scoped to reading manifest lists. Manifest workers must
-	// reacquire through the factory so long-running incremental plans can renew
-	// vended credentials between reads.
+	// The IO above is scoped to reading manifest lists. Manifest workers reuse
+	// one factory result per concurrent batch, then reacquire through the factory
+	// so long-running incremental plans can renew vended credentials between
+	// batches.
 	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
 	if err != nil {
 		return nil, err

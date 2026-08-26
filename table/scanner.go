@@ -931,6 +931,42 @@ func (scan *Scan) filterManifestsWithSchema(
 	return filtered, nil
 }
 
+// manifestIOBatch shares a FileIO within a concurrency-sized batch. A new
+// batch loads through the factory again so factories that renew credentials
+// still get regular checkpoints without rebuilding the backend for every
+// manifest.
+type manifestIOBatch struct {
+	factory FSysF
+	limit   int
+
+	mu        sync.Mutex
+	fs        io.IO
+	remaining int
+}
+
+func newManifestIOBatch(factory FSysF, limit int) *manifestIOBatch {
+	return &manifestIOBatch{factory: factory, limit: max(limit, 1)}
+}
+
+func (b *manifestIOBatch) acquire(ctx context.Context) (io.IO, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.remaining == 0 {
+		fs, err := b.factory(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		b.fs = fs
+		b.remaining = b.limit
+	}
+
+	b.remaining--
+
+	return b.fs, nil
+}
+
 // collectManifestEntries concurrently opens manifests, applies partition and metrics
 // filters, and accumulates both data entries and positional-delete entries.
 func (scan *Scan) collectManifestEntries(
@@ -962,6 +998,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 
 	minSeqNum := minSequenceNum(manifestList)
 	concurrencyLimit := min(scan.concurrency, len(manifestList))
+	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
 	entries := newManifestEntries()
 	g, _ := errgroup.WithContext(ctx)
@@ -978,10 +1015,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
-			// FileIO factories may renew credentials between manifest reads. Keep
-			// this load at the worker boundary instead of retaining the IO used for
-			// the manifest list across the whole plan.
-			fs, err := scan.ioF(ctx)
+			fs, err := manifestIO.acquire(ctx)
 			if err != nil {
 				return err
 			}
@@ -1105,9 +1139,9 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil {
 		return nil, err
 	}
-	// Share one FileIO for this planning operation between the manifest list
-	// and all manifest workers. Other concurrent table reads use the same
-	// ownership.
+	// Keep the manifest-list load separate from manifest workers. Workers reuse
+	// one FileIO within each concurrent batch, while the next batch loads again
+	// so credential-renewing factories retain their checkpoints.
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, acc)
