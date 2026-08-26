@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 
 	icebergio "github.com/apache/iceberg-go/io"
 )
@@ -43,6 +44,15 @@ const (
 	// blocks. Blocks allow random access (Seek/ReadAt) without buffering or
 	// decrypting the whole file.
 	StandardDefaultBlockSize = 64 * 1024
+
+	// StandardMaxBlockSize is the largest plaintext block size accepted
+	// from the AES GCM Stream header on read, and the largest that
+	// [WithBlockSize] will configure for writing. The header's block-length
+	// field is unauthenticated, untrusted data (the Iceberg AES GCM Stream
+	// spec's "File length" note applies equally here); without a ceiling, a
+	// crafted header claiming e.g. 1<<40 bytes would force a huge
+	// allocation (see readBlock) before any authentication check can run.
+	StandardMaxBlockSize = 128 * 1024 * 1024
 )
 
 // Sentinel errors returned by [StandardEncryptionManager].
@@ -64,15 +74,22 @@ var (
 	// produced by a newer, incompatible encoding version.
 	ErrUnsupportedKeyMetadataVersion = errors.New("encryption: unsupported key metadata version")
 
-	// ErrInvalidBlockSize is returned when a configured or decoded block
-	// size is not positive.
-	ErrInvalidBlockSize = errors.New("encryption: block size must be positive")
+	// ErrInvalidBlockSize is returned when a configured block size is not
+	// positive or exceeds [StandardMaxBlockSize].
+	ErrInvalidBlockSize = errors.New("encryption: block size must be positive and at most StandardMaxBlockSize")
+
+	// ErrInvalidStreamHeader is returned when the AES GCM Stream header
+	// (the "AGS1" magic and little-endian block-length fields at the start
+	// of an encrypted file, per the Iceberg AES GCM Stream spec) is
+	// missing, truncated, or specifies a block length outside the
+	// supported range.
+	ErrInvalidStreamHeader = errors.New("encryption: invalid AES GCM Stream header")
 
 	// ErrInvalidKeyMetadata is returned by
 	// [StandardEncryptionManager.NewDecryptedInputFile] when decoded key
 	// metadata fails basic sanity checks (e.g. a negative plaintext length
-	// or a nonce prefix of the wrong size). Key metadata is untrusted input
-	// on a crypto read path, so it is validated rather than trusted blindly.
+	// or a missing AAD prefix). Key metadata is untrusted input on a crypto
+	// read path, so it is validated rather than trusted blindly.
 	ErrInvalidKeyMetadata = errors.New("encryption: invalid key metadata")
 
 	// ErrOutputFileClosed is returned by [standardOutputFile.Write] when
@@ -80,20 +97,65 @@ var (
 	ErrOutputFileClosed = errors.New("encryption: write to closed StandardEncryptionManager output file")
 )
 
+// Constants describing the Iceberg AES GCM Stream ("AGS1") wire format used
+// for the ciphertext produced by [StandardEncryptionManager]. See
+// https://iceberg.apache.org/gcm-stream-spec/ for the full specification.
+const (
+	// standardStreamMagic identifies an AES GCM Stream version 1 file.
+	standardStreamMagic = "AGS1"
+
+	// standardHeaderLength is the length, in bytes, of the magic plus the
+	// little-endian block-length field written at the start of every file.
+	standardHeaderLength = len(standardStreamMagic) + 4
+
+	// standardNonceLength is the length, in bytes, of the random AES-GCM
+	// nonce stored at the start of every cipher block.
+	standardNonceLength = 12
+
+	// standardTagLength is the length, in bytes, of the AES-GCM
+	// authentication tag appended to every cipher block's ciphertext.
+	standardTagLength = 16
+
+	// standardBlockOverhead is the number of ciphertext bytes added to
+	// each block beyond its plaintext length (nonce + tag).
+	standardBlockOverhead = standardNonceLength + standardTagLength
+
+	// standardAADPrefixLength is the length, in bytes, of the random
+	// per-file AAD prefix generated for new output files.
+	standardAADPrefixLength = 16
+)
+
 // standardKeyMetadataVersion is the current encoding version written by
 // [StandardEncryptionManager]. It is bumped whenever the on-disk layout of
-// standardKeyMetadata or the block ciphertext format changes incompatibly.
+// standardKeyMetadata changes incompatibly.
 const standardKeyMetadataVersion = 1
 
 // standardKeyMetadata is the JSON-encoded structure stored as the opaque
 // [EncryptionKeyMetadata] for files produced by [StandardEncryptionManager].
+//
+// Per the table spec, DataFile/ManifestFile key_metadata is explicitly
+// "implementation-specific"; what must be Iceberg AES GCM Stream compliant -
+// and is - is the wire format of the encrypted byte stream itself (magic,
+// block framing, nonce placement, and AAD; see the constants above).
 type standardKeyMetadata struct {
-	Version         int    `json:"v"`
-	KeyID           string `json:"key-id"`
-	WrappedKey      []byte `json:"wrapped-key"`
-	NoncePrefix     []byte `json:"nonce-prefix"`
-	BlockSize       int    `json:"block-size"`
-	PlaintextLength int64  `json:"plaintext-length"`
+	Version    int    `json:"v"`
+	KeyID      string `json:"key-id"`
+	WrappedKey []byte `json:"wrapped-key"`
+
+	// AADPrefix is combined with each block's little-endian index to form
+	// the AES GCM Stream additional authenticated data, binding every
+	// ciphertext block to this file and to its position so that blocks
+	// cannot be silently reordered, replayed from another file, or spliced
+	// in from elsewhere in the same file. It is not secret.
+	AADPrefix []byte `json:"aad-prefix"`
+
+	// PlaintextLength is the trusted total plaintext size used to compute
+	// the block count on read. Per the AES GCM Stream spec's "File length"
+	// note, a reader must use a length from a trusted source rather than
+	// the underlying storage's reported size, since storage size alone
+	// cannot distinguish a genuinely short file from one truncated by an
+	// attacker who does not also control this metadata.
+	PlaintextLength int64 `json:"plaintext-length"`
 }
 
 // StandardEncryptionManager is a generic, format-agnostic [EncryptionManager]
@@ -101,11 +163,13 @@ type standardKeyMetadata struct {
 // manifest lists, Puffin statistics) using a [KeyManagementClient] to wrap
 // and unwrap a fresh AES-256-GCM data encryption key (DEK) per file.
 //
-// Each file is split into fixed-size plaintext blocks, and each block is
-// sealed independently with AES-GCM using a unique nonce (a per-file random
-// prefix combined with the block index). This bounds memory usage and
-// supports random access (Seek/ReadAt) on the decrypted file without
-// buffering or decrypting more than the requested blocks.
+// Each file is split into fixed-size plaintext blocks and written using the
+// Iceberg AES GCM Stream ("AGS1") format: a magic/block-length header
+// followed by independently authenticated blocks, each carrying its own
+// random nonce and authenticated with an AAD that binds it to the file and
+// to its position. This bounds memory usage and supports random access
+// (Seek/ReadAt) on the decrypted file without buffering or decrypting more
+// than the requested blocks.
 //
 // StandardEncryptionManager always encrypts and always decrypts: it fails
 // closed, returning [ErrKeyIDRequired] or [ErrKeyMetadataRequired] rather
@@ -130,7 +194,8 @@ func WithDEKLength(length int) StandardManagerOption {
 }
 
 // WithBlockSize overrides the default plaintext block size (in bytes) used
-// to split files for independent block-level authentication.
+// to split files for independent block-level authentication. size must be
+// positive and at most [StandardMaxBlockSize].
 func WithBlockSize(size int) StandardManagerOption {
 	return func(m *StandardEncryptionManager) { m.blockSize = size }
 }
@@ -157,7 +222,7 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 	if keyID == "" {
 		return nil, ErrKeyIDRequired
 	}
-	if m.blockSize <= 0 {
+	if m.blockSize <= 0 || m.blockSize > StandardMaxBlockSize {
 		return nil, fmt.Errorf("%w: got %d", ErrInvalidBlockSize, m.blockSize)
 	}
 	switch m.dekLength {
@@ -167,10 +232,8 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 	}
 
 	// The (key, nonce) uniqueness this block format relies on requires a
-	// freshly generated DEK for every file: the nonce is only 4 random bytes
-	// plus a block index, so reusing a DEK across files would reuse (DEK,
-	// nonce) pairs and break AES-GCM's security guarantees. Never cache or
-	// reuse plainDEK/wrappedDEK across calls to NewEncryptedOutputFile.
+	// freshly generated DEK for every file: never cache or reuse
+	// plainDEK/wrappedDEK across calls to NewEncryptedOutputFile.
 	var (
 		plainDEK, wrappedDEK []byte
 		err                  error
@@ -195,18 +258,27 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 		return nil, err
 	}
 
-	noncePrefix := make([]byte, 4)
-	if _, err := rand.Read(noncePrefix); err != nil {
-		return nil, fmt.Errorf("encryption: failed to generate nonce prefix: %w", err)
+	aadPrefix := make([]byte, standardAADPrefixLength)
+	if _, err := rand.Read(aadPrefix); err != nil {
+		return nil, fmt.Errorf("encryption: failed to generate AAD prefix: %w", err)
+	}
+
+	// Write the AES GCM Stream header (magic + little-endian block length)
+	// up front, before any ciphertext blocks, per the format spec.
+	header := make([]byte, standardHeaderLength)
+	copy(header, standardStreamMagic)
+	binary.LittleEndian.PutUint32(header[len(standardStreamMagic):], uint32(m.blockSize)) //nolint:gosec // bounded by ErrInvalidBlockSize above
+	if _, err := writer.Write(header); err != nil {
+		return nil, fmt.Errorf("encryption: failed to write stream header: %w", err)
 	}
 
 	return &standardOutputFile{
-		FileWriter:  writer,
-		aead:        aead,
-		noncePrefix: noncePrefix,
-		blockSize:   m.blockSize,
-		keyID:       keyID,
-		wrappedKey:  wrappedDEK,
+		FileWriter: writer,
+		aead:       aead,
+		aadPrefix:  aadPrefix,
+		blockSize:  m.blockSize,
+		keyID:      keyID,
+		wrappedKey: wrappedDEK,
 	}, nil
 }
 
@@ -226,14 +298,11 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 	if meta.Version != standardKeyMetadataVersion {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedKeyMetadataVersion, meta.Version)
 	}
-	if meta.BlockSize <= 0 {
-		return nil, fmt.Errorf("%w: block-size must be positive, got %d", ErrInvalidKeyMetadata, meta.BlockSize)
-	}
 	if meta.PlaintextLength < 0 {
 		return nil, fmt.Errorf("%w: plaintext-length must be non-negative, got %d", ErrInvalidKeyMetadata, meta.PlaintextLength)
 	}
-	if len(meta.NoncePrefix) != 4 {
-		return nil, fmt.Errorf("%w: nonce-prefix must be 4 bytes, got %d", ErrInvalidKeyMetadata, len(meta.NoncePrefix))
+	if len(meta.AADPrefix) == 0 {
+		return nil, fmt.Errorf("%w: aad-prefix must not be empty", ErrInvalidKeyMetadata)
 	}
 
 	plainDEK, err := m.kms.UnwrapKey(ctx, meta.KeyID, meta.WrappedKey)
@@ -246,11 +315,16 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 		return nil, err
 	}
 
+	blockSize, err := readStandardStreamHeader(file)
+	if err != nil {
+		return nil, err
+	}
+
 	return &standardInputFile{
 		underlying:      file,
 		aead:            aead,
-		noncePrefix:     meta.NoncePrefix,
-		blockSize:       meta.BlockSize,
+		aadPrefix:       meta.AADPrefix,
+		blockSize:       blockSize,
 		plaintextLength: meta.PlaintextLength,
 		keyMetadata:     keyMetadata,
 	}, nil
@@ -269,32 +343,86 @@ func newStandardAEAD(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-// standardBlockNonce derives the AES-GCM nonce for blockIndex: the 4-byte
-// per-file random prefix followed by the 8-byte big-endian block index.
-// Uniqueness of the (key, nonce) pair across every block ever sealed with a
-// given DEK depends entirely on the DEK being freshly generated per file;
-// see the caution in [StandardEncryptionManager.NewEncryptedOutputFile].
-func standardBlockNonce(prefix []byte, blockIndex uint64) []byte {
-	nonce := make([]byte, 12)
-	copy(nonce, prefix)
-	binary.BigEndian.PutUint64(nonce[4:], blockIndex)
+// readStandardStreamHeader reads and validates the AES GCM Stream magic and
+// block-length header at the start of file, returning the plaintext block
+// length. The header is untrusted, unauthenticated data, so the returned
+// length is bounded to [StandardMaxBlockSize] before any allocation sized by
+// it takes place.
+func readStandardStreamHeader(file icebergio.File) (int64, error) {
+	header := make([]byte, standardHeaderLength)
+	n, err := file.ReadAt(header, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, fmt.Errorf("encryption: failed to read stream header: %w", err)
+	}
+	if n != standardHeaderLength {
+		return 0, fmt.Errorf("%w: expected %d header bytes, got %d", ErrInvalidStreamHeader, standardHeaderLength, n)
+	}
+	if string(header[:len(standardStreamMagic)]) != standardStreamMagic {
+		return 0, fmt.Errorf("%w: missing %q magic", ErrInvalidStreamHeader, standardStreamMagic)
+	}
 
-	return nonce
+	blockSize := int64(binary.LittleEndian.Uint32(header[len(standardStreamMagic):]))
+	if blockSize <= 0 || blockSize > StandardMaxBlockSize {
+		return 0, fmt.Errorf("%w: block length %d out of supported range (0, %d]", ErrInvalidStreamHeader, blockSize, StandardMaxBlockSize)
+	}
+
+	return blockSize, nil
+}
+
+// standardBlockAAD derives the AES-GCM additional authenticated data for
+// blockIndex: the per-file AAD prefix followed by the 4-byte little-endian
+// block index, per the Iceberg AES GCM Stream spec. This binds every
+// ciphertext block to this file and to its position, which matters because
+// blocks carry independent random nonces (rather than a nonce derived from
+// the block index): without the index in the AAD, an attacker able to
+// tamper with ciphertext at rest could silently reorder or splice blocks.
+func standardBlockAAD(prefix []byte, blockIndex uint32) []byte {
+	aad := make([]byte, len(prefix)+4)
+	copy(aad, prefix)
+	binary.LittleEndian.PutUint32(aad[len(prefix):], blockIndex)
+
+	return aad
+}
+
+// checkedMulInt64 returns a*b and true, or (0, false) if the multiplication
+// overflows int64.
+func checkedMulInt64(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	result := a * b
+	if result/b != a {
+		return 0, false
+	}
+
+	return result, true
+}
+
+// checkedAddInt64 returns a+b and true, or (0, false) if the addition
+// overflows int64.
+func checkedAddInt64(a, b int64) (int64, bool) {
+	result := a + b
+	if (b > 0 && result < a) || (b < 0 && result > a) {
+		return 0, false
+	}
+
+	return result, true
 }
 
 // standardOutputFile is an [EncryptedOutputFile] that seals fixed-size
-// plaintext blocks with AES-GCM as they are written.
+// plaintext blocks with AES-GCM as they are written, using the Iceberg AES
+// GCM Stream ("AGS1") wire format.
 type standardOutputFile struct {
 	icebergio.FileWriter
 
-	aead        cipher.AEAD
-	noncePrefix []byte
-	blockSize   int
-	keyID       string
-	wrappedKey  []byte
+	aead       cipher.AEAD
+	aadPrefix  []byte
+	blockSize  int
+	keyID      string
+	wrappedKey []byte
 
 	buf        []byte
-	blockIndex uint64
+	blockIndex uint32
 	written    int64
 	closed     bool
 	err        error
@@ -313,29 +441,44 @@ func (f *standardOutputFile) Write(p []byte) (int, error) {
 	}
 
 	total := len(p)
+	consumed := 0 // bytes of p appended into f.buf so far in this call
+	accepted := 0 // bytes of p known to be durably flushed; reported on failure
 	for len(p) > 0 {
 		space := f.blockSize - len(f.buf)
 		n := min(space, len(p))
 		f.buf = append(f.buf, p[:n]...)
 		p = p[n:]
+		consumed += n
 		if len(f.buf) == f.blockSize {
 			if err := f.flushBlock(); err != nil {
 				f.err = err
 
-				return total - len(p), err
+				return accepted, err
 			}
+			accepted = consumed
 		}
 	}
 
 	return total, nil
 }
 
-// flushBlock seals and writes the currently buffered plaintext block.
-// f.written is only advanced once the ciphertext has actually reached the
-// underlying writer, so a failed flush never overcounts PlaintextLength.
+// flushBlock seals and writes the currently buffered plaintext block using a
+// fresh random nonce, per the Iceberg AES GCM Stream format. f.written is
+// only advanced once the ciphertext has actually reached the underlying
+// writer, so a failed flush never overcounts PlaintextLength.
 func (f *standardOutputFile) flushBlock() error {
-	ciphertext := f.aead.Seal(nil, standardBlockNonce(f.noncePrefix, f.blockIndex), f.buf, nil)
-	if _, err := f.FileWriter.Write(ciphertext); err != nil {
+	if f.blockIndex == math.MaxUint32 {
+		return errors.New("encryption: cannot write block: exceeded maximum block count")
+	}
+
+	nonce := make([]byte, standardNonceLength)
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("encryption: failed to generate block nonce: %w", err)
+	}
+
+	aad := standardBlockAAD(f.aadPrefix, f.blockIndex)
+	sealed := f.aead.Seal(nonce, nonce, f.buf, aad)
+	if _, err := f.FileWriter.Write(sealed); err != nil {
 		return fmt.Errorf("encryption: failed to write encrypted block: %w", err)
 	}
 	f.written += int64(len(f.buf))
@@ -371,9 +514,11 @@ func (f *standardOutputFile) ReadFrom(r io.Reader) (int64, error) {
 }
 
 // Close flushes any buffered partial block and finalizes the key metadata.
-// closed is only set once everything, including the underlying Close, has
-// succeeded; a failed Close poisons the writer (via f.err) so a retry
-// reliably reports the same error instead of masking the failure as success.
+// closed is only set, and keyMetadata only published, once everything -
+// including the underlying Close - has succeeded; a failed Close poisons the
+// writer (via f.err) so a retry reliably reports the same error instead of
+// masking the failure as success or exposing metadata for an output that
+// never finished.
 func (f *standardOutputFile) Close() error {
 	if f.err != nil {
 		return f.err
@@ -391,35 +536,35 @@ func (f *standardOutputFile) Close() error {
 		}
 	}
 
-	if f.keyMetadata == nil {
-		meta := standardKeyMetadata{
-			Version:         standardKeyMetadataVersion,
-			KeyID:           f.keyID,
-			WrappedKey:      f.wrappedKey,
-			NoncePrefix:     f.noncePrefix,
-			BlockSize:       f.blockSize,
-			PlaintextLength: f.written,
-		}
-		encoded, err := json.Marshal(meta)
-		if err != nil {
-			f.err = fmt.Errorf("encryption: failed to encode key metadata: %w", err)
-			_ = f.FileWriter.Close()
+	meta := standardKeyMetadata{
+		Version:         standardKeyMetadataVersion,
+		KeyID:           f.keyID,
+		WrappedKey:      f.wrappedKey,
+		AADPrefix:       f.aadPrefix,
+		PlaintextLength: f.written,
+	}
+	encoded, err := json.Marshal(meta)
+	if err != nil {
+		f.err = fmt.Errorf("encryption: failed to encode key metadata: %w", err)
+		_ = f.FileWriter.Close()
 
-			return f.err
-		}
-		f.keyMetadata = encoded
+		return f.err
 	}
 
 	if err := f.FileWriter.Close(); err != nil {
-		return fmt.Errorf("encryption: failed to close underlying writer: %w", err)
+		f.err = fmt.Errorf("encryption: failed to close underlying writer: %w", err)
+
+		return f.err
 	}
+
+	f.keyMetadata = encoded
 	f.closed = true
 
 	return nil
 }
 
 // KeyMetadata returns the finalized per-file key metadata. It is only
-// populated after Close has been called.
+// populated after Close has succeeded.
 func (f *standardOutputFile) KeyMetadata() EncryptionKeyMetadata { return f.keyMetadata }
 
 // standardInputFile is an [EncryptedInputFile] that decrypts fixed-size
@@ -432,8 +577,8 @@ func (f *standardOutputFile) KeyMetadata() EncryptionKeyMetadata { return f.keyM
 type standardInputFile struct {
 	underlying      icebergio.File
 	aead            cipher.AEAD
-	noncePrefix     []byte
-	blockSize       int
+	aadPrefix       []byte
+	blockSize       int64
 	plaintextLength int64
 	keyMetadata     EncryptionKeyMetadata
 
@@ -447,31 +592,59 @@ func (f *standardInputFile) numBlocks() int64 {
 		return 0
 	}
 
-	return (f.plaintextLength + int64(f.blockSize) - 1) / int64(f.blockSize)
+	// Overflow-safe ceiling division: plaintextLength and blockSize both
+	// originate from data outside this reader's control (key metadata and
+	// the untrusted stream header, respectively), so avoid computing
+	// (plaintextLength + blockSize - 1), which can overflow near
+	// math.MaxInt64.
+	return 1 + (f.plaintextLength-1)/f.blockSize
 }
 
 func (f *standardInputFile) blockPlainLen(idx int64) int64 {
 	if idx == f.numBlocks()-1 {
-		return f.plaintextLength - idx*int64(f.blockSize)
+		return f.plaintextLength - idx*f.blockSize
 	}
 
-	return int64(f.blockSize)
+	return f.blockSize
 }
 
-func (f *standardInputFile) physicalOffset(idx int64) int64 {
-	return idx * int64(f.blockSize+f.aead.Overhead())
+// blockPhysicalOffset computes the physical offset of block idx in the
+// underlying ciphertext, using overflow-checked arithmetic. blockSize
+// originates from the untrusted stream header and idx is derived from the
+// untrusted plaintext-length in key metadata; a small blockSize combined
+// with a huge plaintext-length could otherwise overflow int64 before the
+// resulting (implausible) offset is ever used in a read.
+func blockPhysicalOffset(idx, blockSize int64) (int64, error) {
+	physicalBlockSize, ok := checkedAddInt64(blockSize, standardBlockOverhead)
+	if !ok {
+		return 0, fmt.Errorf("%w: block size %d overflows physical layout", ErrInvalidKeyMetadata, blockSize)
+	}
+	product, ok := checkedMulInt64(idx, physicalBlockSize)
+	if !ok {
+		return 0, fmt.Errorf("%w: block %d physical offset overflows", ErrInvalidKeyMetadata, idx)
+	}
+	offset, ok := checkedAddInt64(product, int64(standardHeaderLength))
+	if !ok {
+		return 0, fmt.Errorf("%w: block %d physical offset overflows", ErrInvalidKeyMetadata, idx)
+	}
+
+	return offset, nil
 }
 
 // readBlock decrypts block idx. It validates idx and the computed block
-// length before reading, since metadata (blockSize, plaintextLength) can
-// originate from untrusted, JSON-decoded key metadata. It also honors the
+// length before reading, since metadata (plaintextLength) and the stream
+// header (blockSize) can originate from untrusted input. It also honors the
 // actual byte count returned by ReadAt: a short, non-EOF-explained read is
 // reported as [ErrCiphertextTooShort] (truncated storage) rather than being
 // silently zero-padded into the AEAD, which would otherwise surface as a
 // misleading [ErrAuthenticationFailed].
 func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
-	if idx < 0 || idx >= f.numBlocks() {
-		return nil, fmt.Errorf("%w: block index %d out of range [0, %d)", ErrInvalidKeyMetadata, idx, f.numBlocks())
+	numBlocks := f.numBlocks()
+	if idx < 0 || idx >= numBlocks {
+		return nil, fmt.Errorf("%w: block index %d out of range [0, %d)", ErrInvalidKeyMetadata, idx, numBlocks)
+	}
+	if idx > math.MaxUint32 {
+		return nil, fmt.Errorf("%w: block index %d exceeds the maximum supported block count", ErrInvalidKeyMetadata, idx)
 	}
 
 	plainLen := f.blockPlainLen(idx)
@@ -479,9 +652,14 @@ func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 		return nil, fmt.Errorf("%w: negative computed length for block %d", ErrInvalidKeyMetadata, idx)
 	}
 
-	wantLen := plainLen + int64(f.aead.Overhead())
+	offset, err := blockPhysicalOffset(idx, f.blockSize)
+	if err != nil {
+		return nil, err
+	}
+
+	wantLen := plainLen + standardBlockOverhead
 	ciphertext := make([]byte, wantLen)
-	n, err := f.underlying.ReadAt(ciphertext, f.physicalOffset(idx))
+	n, err := f.underlying.ReadAt(ciphertext, offset)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("encryption: failed to read block %d: %w", idx, err)
 	}
@@ -490,7 +668,10 @@ func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 	}
 	ciphertext = ciphertext[:n]
 
-	plaintext, err := f.aead.Open(nil, standardBlockNonce(f.noncePrefix, uint64(idx)), ciphertext, nil)
+	nonce, sealed := ciphertext[:standardNonceLength], ciphertext[standardNonceLength:]
+	aad := standardBlockAAD(f.aadPrefix, uint32(idx))
+
+	plaintext, err := f.aead.Open(nil, nonce, sealed, aad)
 	if err != nil {
 		return nil, fmt.Errorf("%w: block %d: %w", ErrAuthenticationFailed, idx, err)
 	}
@@ -515,12 +696,12 @@ func (f *standardInputFile) ReadAt(p []byte, off int64) (int, error) {
 		if curOff >= f.plaintextLength {
 			break
 		}
-		idx := curOff / int64(f.blockSize)
+		idx := curOff / f.blockSize
 		block, err := f.readBlock(idx)
 		if err != nil {
 			return read, err
 		}
-		inBlockOff := curOff - idx*int64(f.blockSize)
+		inBlockOff := curOff - idx*f.blockSize
 		read += copy(p[read:], block[inBlockOff:])
 	}
 
