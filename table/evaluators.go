@@ -575,6 +575,10 @@ func (m *manifestEvalVisitor) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *manifestEvalVisitor) VisitBound(pred iceberg.BoundPredicate) bool {
+	if isTransformedTerm(pred.Term()) {
+		return rowsMightMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -663,6 +667,12 @@ type metricsEvaluator struct {
 	nanCounts   map[int]int64
 	lowerBounds map[int][]byte
 	upperBounds map[int][]byte
+}
+
+func isTransformedTerm(term iceberg.BoundTerm) bool {
+	_, ok := term.(*iceberg.BoundTransform)
+
+	return ok
 }
 
 func (m *metricsEvaluator) VisitTrue() bool  { return rowsMightMatch }
@@ -836,6 +846,10 @@ func (m *inclusiveMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *inclusiveMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	if isTransformedTerm(pred.Term()) {
+		return rowsMightMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -1337,6 +1351,10 @@ func (m *strictMetricsEval) VisitUnbound(iceberg.UnboundPredicate) bool {
 }
 
 func (m *strictMetricsEval) VisitBound(pred iceberg.BoundPredicate) bool {
+	if isTransformedTerm(pred.Term()) {
+		return rowsMightNotMatch
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, m, iceberginternal.BoundPredicateRef{})
 }
 
@@ -1759,6 +1777,10 @@ func (c *bloomPredicateCollector) VisitUnbound(_ iceberg.UnboundPredicate) []int
 }
 
 func (c *bloomPredicateCollector) VisitBound(pred iceberg.BoundPredicate) []internal.RowGroupBloomPred {
+	if isTransformedTerm(pred.Term()) {
+		return nil
+	}
+
 	return iceberg.VisitBoundPredicateRef(pred, c, iceberginternal.BoundPredicateRef{})
 }
 

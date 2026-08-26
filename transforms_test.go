@@ -164,6 +164,36 @@ func TestUnknownTransformEquals(t *testing.T) {
 	assert.False(t, custom.Equals(iceberg.IdentityTransform{}))
 }
 
+func TestBuiltInTransformEqualsAcceptsPointerAndValue(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	unknownValue := unknown.(iceberg.UnknownTransform)
+
+	tests := []struct {
+		name    string
+		value   iceberg.Transform
+		pointer iceberg.Transform
+	}{
+		{"identity", iceberg.IdentityTransform{}, &iceberg.IdentityTransform{}},
+		{"void", iceberg.VoidTransform{}, &iceberg.VoidTransform{}},
+		{"unknown", unknownValue, &unknownValue},
+		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, &iceberg.BucketTransform{NumBuckets: 16}},
+		{"truncate", iceberg.TruncateTransform{Width: 8}, &iceberg.TruncateTransform{Width: 8}},
+		{"year", iceberg.YearTransform{}, &iceberg.YearTransform{}},
+		{"month", iceberg.MonthTransform{}, &iceberg.MonthTransform{}},
+		{"day", iceberg.DayTransform{}, &iceberg.DayTransform{}},
+		{"hour", iceberg.HourTransform{}, &iceberg.HourTransform{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.True(t, tt.value.Equals(tt.pointer))
+			assert.True(t, tt.pointer.Equals(tt.value))
+			assert.True(t, tt.pointer.Equals(tt.pointer))
+		})
+	}
+}
+
 // The zero value is constructible outside the package; it must not serialize
 // to "transform": "".
 func TestUnknownTransformRejectsEmptyName(t *testing.T) {
@@ -253,7 +283,7 @@ func TestToHumanStrType(t *testing.T) {
 		{"identity_nil", iceberg.IdentityTransform{}, iceberg.PrimitiveTypes.TimestampTz, nil, "null"},
 		{"year", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, int32(47), "2017"},
 		{"month", iceberg.MonthTransform{}, iceberg.PrimitiveTypes.Date, int32(575), "2017-12"},
-		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, int32(17501), "2017-12-01"},
+		{"day", iceberg.DayTransform{}, iceberg.PrimitiveTypes.Date, iceberg.Date(17501), "2017-12-01"},
 		{"hour", iceberg.HourTransform{}, iceberg.PrimitiveTypes.TimestampTz, int32(420042), "2017-12-01-18"},
 		{"year_nil", iceberg.YearTransform{}, iceberg.PrimitiveTypes.Date, nil, "null"},
 		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.String, int32(7), "7"},
@@ -332,7 +362,7 @@ func TestManifestPartitionVals(t *testing.T) {
 		{
 			transform:    iceberg.DayTransform{},
 			input:        iceberg.TimestampLiteral(ts.UnixMicro()),
-			expectResult: iceberg.Int32Literal(365 + 40),
+			expectResult: iceberg.DateLiteral(365 + 40),
 		},
 		{
 			transform:    iceberg.MonthTransform{},
@@ -982,7 +1012,7 @@ func TestDayTransformPreEpoch(t *testing.T) {
 					Val:   iceberg.TimestampLiteral(tt.micros),
 				})
 				require.True(t, result.Valid)
-				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+				assert.Equal(t, iceberg.DateLiteral(tt.expected), result.Val)
 			})
 		}
 	})
@@ -1088,7 +1118,7 @@ func TestDayTransformNanoseconds(t *testing.T) {
 					Val:   iceberg.TimestampNsLiteral(tt.nanos),
 				})
 				require.True(t, result.Valid)
-				assert.Equal(t, iceberg.Int32Literal(tt.expected), result.Val)
+				assert.Equal(t, iceberg.DateLiteral(tt.expected), result.Val)
 			})
 		}
 	})

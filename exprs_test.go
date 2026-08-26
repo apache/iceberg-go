@@ -133,6 +133,30 @@ func TestUnaryExpr(t *testing.T) {
 			assert.True(t, n1.Equals(iceberg.AlwaysFalse{}))
 			assert.True(t, n2.Equals(iceberg.AlwaysTrue{}))
 		})
+
+		t.Run("transform terms do not use source nullability", func(t *testing.T) {
+			voidID := iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+
+			isNull, err := iceberg.IsNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, isNull.Equals(iceberg.AlwaysTrue{}))
+
+			voidID = iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+			notNull, err := iceberg.NotNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, notNull.Equals(iceberg.AlwaysFalse{}))
+		})
+
+		t.Run("nested transforms are rejected", func(t *testing.T) {
+			nested := iceberg.NewUnboundTransform(
+				iceberg.BucketTransform{NumBuckets: 16},
+				iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 4}, iceberg.Reference("a")),
+			)
+
+			_, err := nested.Bind(sc, true)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.Contains(t, err.Error(), "direct reference")
+		})
 	})
 
 	t.Run("isnan notnan", func(t *testing.T) {
@@ -1074,4 +1098,22 @@ func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
+}
+
+func TestUnknownTransformCannotBindAsPredicate(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	transform, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+
+	tests := []iceberg.UnboundPredicate{
+		iceberg.IsNull(iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))),
+		iceberg.EqualTo(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1)),
+		iceberg.IsIn(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1), int32(2)).(iceberg.UnboundPredicate),
+	}
+	for _, pred := range tests {
+		_, err := pred.Bind(schema, true)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented, pred)
+	}
 }
