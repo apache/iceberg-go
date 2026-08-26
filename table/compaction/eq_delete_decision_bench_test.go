@@ -25,8 +25,10 @@ import (
 	"github.com/apache/iceberg-go/table/compaction"
 )
 
-var benchmarkDeadEqualityDeletes []iceberg.DataFile
-var benchmarkSurvivorSurvey *compaction.SurvivorSurvey
+var (
+	benchmarkDeadEqualityDeletes []iceberg.DataFile
+	benchmarkSurvivorSurvey      *compaction.SurvivorSurvey
+)
 
 func BenchmarkAddSurvivorWithSpec(b *testing.B) {
 	for _, fields := range []int{1, 8, 32} {
