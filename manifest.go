@@ -2355,35 +2355,56 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 			// silently coerces other types, which reintroduces #1200.
 			return v
 		case atype.TimeMillis:
+			// iceberg.Time counts microseconds; a time-millis Duration must be
+			// read as microseconds (val.Milliseconds() undercounts 1000x). The
+			// raw arm converts the millisecond wire value to microseconds too.
 			if val, ok := v.(time.Duration); ok {
-				return Time(val.Milliseconds())
+				return Time(val.Microseconds())
+			}
+			if ms, ok := avroIntAsInt64(v); ok {
+				return Time(ms * 1000)
 			}
 
-			return Time(v.(int64))
+			return v
 		case atype.TimeMicros:
 			if val, ok := v.(time.Duration); ok {
 				return Time(val.Microseconds())
 			}
-
-			return Time(v.(int64))
-		case atype.TimestampMillis:
-			if val, ok := v.(time.Time); ok {
-				return Timestamp(val.UTC().UnixMilli())
+			if us, ok := avroIntAsInt64(v); ok {
+				return Time(us)
 			}
 
-			return Timestamp(v.(int64))
+			return v
+		case atype.TimestampMillis:
+			// iceberg.Timestamp counts microseconds; UnixMilli() undercounts
+			// 1000x. Read both the time.Time and the raw millisecond wire value
+			// as microseconds.
+			if val, ok := v.(time.Time); ok {
+				return Timestamp(val.UTC().UnixMicro())
+			}
+			if ms, ok := avroIntAsInt64(v); ok {
+				return Timestamp(ms * 1000)
+			}
+
+			return v
 		case atype.TimestampMicros:
 			if val, ok := v.(time.Time); ok {
 				return Timestamp(val.UTC().UnixMicro())
 			}
+			if us, ok := avroIntAsInt64(v); ok {
+				return Timestamp(us)
+			}
 
-			return Timestamp(v.(int64))
+			return v
 		case atype.TimestampNanos:
 			if val, ok := v.(time.Time); ok {
 				return TimestampNano(val.UTC().UnixNano())
 			}
+			if ns, ok := avroIntAsInt64(v); ok {
+				return TimestampNano(ns)
+			}
 
-			return TimestampNano(v.(int64))
+			return v
 		case atype.Decimal:
 			if r, ok := v.(*big.Rat); ok {
 				scale := d.fieldIDToDecimalScale[fieldID]
@@ -2408,6 +2429,26 @@ func (d *dataFile) convertAvroValueToIcebergType(v any, fieldID int) any {
 	}
 
 	return v
+}
+
+// avroIntAsInt64 extracts an Avro int (int32) or long (int64) partition value
+// as an int64. A manifest from a foreign writer may declare a time/timestamp
+// logicalType on an underlying Avro type the spec does not permit for it (e.g.
+// timestamp-millis on an int). twmb/avro drops such an invalid logicalType when
+// decoding and yields the raw primitive, yet Schema.Root still reports the
+// logicalType, so the conversion arms must accept the raw integer instead of an
+// unchecked assertion that would panic (apache/iceberg-go#1847).
+func avroIntAsInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	}
+
+	return 0, false
 }
 
 func (d *dataFile) setFieldNameToIDMap(m map[string]int) { d.fieldNameToID = m }
