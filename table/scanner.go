@@ -127,26 +127,6 @@ func (p partitionRecord) Size() int            { return len(p) }
 func (p partitionRecord) Get(pos int) any      { return p[pos] }
 func (p partitionRecord) Set(pos int, val any) { p[pos] = val }
 
-// borrowedPartitionRecord exposes a DataFile's immutable partition map in
-// partition-field order without materializing a positional record or cloning
-// binary values. It is only valid for the current evaluator call.
-type borrowedPartitionRecord struct {
-	partition     map[int]any
-	partitionType *iceberg.StructType
-}
-
-func (p borrowedPartitionRecord) Size() int {
-	return len(p.partitionType.FieldList)
-}
-
-func (p borrowedPartitionRecord) Get(pos int) any {
-	return p.partition[p.partitionType.FieldList[pos].ID]
-}
-
-func (borrowedPartitionRecord) Set(int, any) {
-	panic("cannot set a borrowed partition record")
-}
-
 // manifestEntries holds the data, positional delete, and equality delete
 // entries read from manifests.
 type manifestEntries struct {
@@ -562,10 +542,7 @@ func buildPartitionEvaluator(specID int, metadata Metadata, schema *iceberg.Sche
 	}
 
 	return func(d iceberg.DataFile) (bool, error) {
-		return fn(borrowedPartitionRecord{
-			partition:     dataFilePartition(d),
-			partitionType: partType,
-		})
+		return fn(GetPartitionRecord(d, partType))
 	}, nil
 }
 

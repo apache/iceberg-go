@@ -31,7 +31,8 @@ import "github.com/apache/iceberg-go/internal"
 // evaluators. ColumnSizes and DistinctValueCounts are excluded because the
 // evaluator does not read them, and cloning those maps would add work to the
 // hot path without changing its result. Partition has a separate borrowed
-// accessor because partition data is read during scan planning.
+// accessor because partition records are built once per file during scan
+// planning.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,

@@ -255,31 +255,6 @@ func TestDataFilePartitionFallsBackToPublicGetter(t *testing.T) {
 	assert.Equal(t, map[int]any{1000: "partition"}, dataFilePartition(file))
 }
 
-func TestBorrowedPartitionRecordUsesPartitionFieldOrder(t *testing.T) {
-	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
-		{ID: 1000, Name: "first", Type: iceberg.PrimitiveTypes.Int32},
-		{ID: 1001, Name: "second", Type: iceberg.PrimitiveTypes.Binary},
-	}}
-	partition := map[int]any{
-		1000: int32(7),
-		1001: []byte{1, 2},
-	}
-	record := borrowedPartitionRecord{
-		partition:     partition,
-		partitionType: partitionType,
-	}
-
-	assert.Equal(t, 2, record.Size())
-	assert.Equal(t, int32(7), record.Get(0))
-	assert.Equal(t, []byte{1, 2}, record.Get(1))
-
-	binaryValue := record.Get(1).([]byte)
-	binaryValue[0] = 9
-	assert.Equal(t, []byte{9, 2}, partition[1001])
-	binaryValue[0] = 1
-	assert.Panics(t, func() { record.Set(0, int32(8)) })
-}
-
 func TestGetPartitionRecordClonesBinaryValues(t *testing.T) {
 	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
 		SourceIDs: []int{1}, FieldID: 1000, Name: "payload_part", Transform: iceberg.IdentityTransform{},
