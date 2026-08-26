@@ -78,28 +78,30 @@ func (s *SurvivorSurvey) AddSurvivor(partition map[int]any, seq int64) {
 		return
 	}
 
-	key := partitionMatchKey(partition)
-	if cur, ok := s.PartMinSeq[key]; ok {
-		seq = min(seq, cur)
-	}
-	s.PartMinSeq[key] = seq
+	updatePartitionMinSeq(s.PartMinSeq, partitionMatchKey(partition), seq)
 }
 
 // AddSurvivorWithSpec records a surviving data file's spec ID, partition, and
 // sequence number for exact equality-delete matching. It also maintains the
 // conservative survey used by [DecideDeadEqualityDeletes].
 func (s *SurvivorSurvey) AddSurvivorWithSpec(specID int32, partition map[int]any, seq int64) {
-	s.AddSurvivor(partition, seq)
 	if seq < 0 {
 		seq = 0
 	}
+
+	var specKey string
+	if len(partition) == 0 {
+		s.EmptyPartMinSeq = min(seq, s.EmptyPartMinSeq)
+		specKey = partitionBucketKey(specID, partition)
+	} else {
+		tuple := appendPartitionTuple(nil, partition)
+		updatePartitionMinSeq(s.PartMinSeq, string(tuple), seq)
+		specKey = partitionBucketKeyFromTuple(specID, tuple)
+	}
+
 	s.minSeq = min(seq, s.minSeq)
 
-	key := partitionBucketKey(specID, partition)
-	if cur, ok := s.specPartMinSeq[key]; ok {
-		seq = min(seq, cur)
-	}
-	s.specPartMinSeq[key] = seq
+	updatePartitionMinSeq(s.specPartMinSeq, specKey, seq)
 }
 
 func (s *SurvivorSurvey) conservativeMinSeq() int64 {
@@ -239,7 +241,14 @@ func partitionBucketKey(specID int32, part map[int]any) string {
 		return fmt.Sprintf("%d:_", specID)
 	}
 
-	return string(appendPartitionTuple(fmt.Appendf(nil, "%d:", specID), part))
+	return partitionBucketKeyFromTuple(specID, appendPartitionTuple(nil, part))
+}
+
+func partitionBucketKeyFromTuple(specID int32, tuple []byte) string {
+	key := make([]byte, 0, len(tuple)+12)
+	key = fmt.Appendf(key, "%d:", specID)
+
+	return string(append(key, tuple...))
 }
 
 // appendPartitionTuple emits the sorted "id=value;" tuple into dst.
@@ -255,4 +264,11 @@ func appendPartitionTuple(dst []byte, part map[int]any) []byte {
 	}
 
 	return dst
+}
+
+func updatePartitionMinSeq(partitions map[string]int64, key string, seq int64) {
+	if cur, ok := partitions[key]; ok {
+		seq = min(seq, cur)
+	}
+	partitions[key] = seq
 }

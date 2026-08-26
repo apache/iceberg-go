@@ -66,38 +66,9 @@ func CollectDeadPositionDeletes(
 	snap *table.Snapshot,
 	rewrittenPaths map[string]struct{},
 ) ([]iceberg.DataFile, error) {
-	if snap == nil || len(rewrittenPaths) == 0 {
-		return nil, nil
-	}
-
-	manifests, err := snap.Manifests(fs)
-	if err != nil {
-		return nil, err
-	}
-
-	// First pass: delete manifests, resolving each candidate's expunge scope.
-	candidates, hasPartitionScoped, err := collectPositionDeleteCandidates(ctx, fs, manifests)
-	if err != nil {
-		return nil, err
-	}
-
-	// Second pass runs only when a partition-scoped candidate needs a survivor
-	// check; file-scoped ones are decided from rewrittenPaths alone.
-	var minSurvivorSeq map[string]int64
-	if hasPartitionScoped {
-		minSurvivorSeq, err = minSurvivorSeqByPartition(ctx, fs, manifests, rewrittenPaths)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return decideDeadPositionDeletes(candidates, rewrittenPaths, minSurvivorSeq), nil
+	return table.CollectDeadPositionDeletes(ctx, fs, snap, rewrittenPaths)
 }
 
-// positionDeleteCandidate is a classic position-delete file resolved to its
-// expunge scope: fileScopedTarget is the single referenced data file for a
-// file-scoped delete, or "" for a partition-scoped one, which is then keyed by
-// partitionKey and gated by the delete's sequence number seq.
 type positionDeleteCandidate struct {
 	df               iceberg.DataFile
 	fileScopedTarget string

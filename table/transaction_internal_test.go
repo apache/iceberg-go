@@ -852,6 +852,57 @@ func expireSnapshotsSnapshot(t *testing.T, txn *Transaction, snapshotID int64) *
 	return nil
 }
 
+func TestExpireSnapshotsRejectsWhenGCDisabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		gcValue string
+		opts    []ExpireSnapshotsOpt
+	}{
+		{name: "false with post-commit cleanup", gcValue: "false"},
+		{name: "false without post-commit cleanup", gcValue: "false", opts: []ExpireSnapshotsOpt{WithPostCommit(false)}},
+		{name: "one", gcValue: "1"},
+		{name: "garbage", gcValue: "garbage"},
+		{name: "false with trailing space", gcValue: "false "},
+		{name: "true with trailing space", gcValue: "true "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txn := newTransactionWithSnapshotRefs(t)
+			txn.meta.props = iceberg.Properties{GCEnabledKey: tt.gcValue}
+
+			err := txn.ExpireSnapshots(tt.opts...)
+			require.ErrorContains(t, err, "GC is disabled")
+			require.Empty(t, txn.reqs)
+			_, err = txn.meta.SnapshotByID(10)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestIsGCEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		props iceberg.Properties
+		want  bool
+	}{
+		{name: "missing", want: true},
+		{name: "true", props: iceberg.Properties{GCEnabledKey: "true"}, want: true},
+		{name: "mixed case true", props: iceberg.Properties{GCEnabledKey: "TrUe"}, want: true},
+		{name: "false", props: iceberg.Properties{GCEnabledKey: "false"}},
+		{name: "one", props: iceberg.Properties{GCEnabledKey: "1"}},
+		{name: "garbage", props: iceberg.Properties{GCEnabledKey: "garbage"}},
+		{name: "false with trailing space", props: iceberg.Properties{GCEnabledKey: "false "}},
+		{name: "true with trailing space", props: iceberg.Properties{GCEnabledKey: "true "}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isGCEnabled(tt.props))
+		})
+	}
+}
+
 func TestTransactionApplyDedupesEquivalentRequirementsWithinAndAcrossCalls(t *testing.T) {
 	txn := newTransactionWithSnapshotRefs(t)
 

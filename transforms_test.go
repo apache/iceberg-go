@@ -20,6 +20,7 @@ package iceberg_test
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1123,6 +1124,48 @@ func TestTruncateTransform(t *testing.T) {
 			result := transform.Apply(iceberg.Optional[iceberg.Literal]{Val: tt.value, Valid: true})
 			require.True(t, result.Valid)
 			assert.Equal(t, tt.expected, result.Val)
+		})
+	}
+}
+
+func TestTruncateTransformProjectStrictNumericBounds(t *testing.T) {
+	tests := []struct {
+		name      string
+		fieldType iceberg.Type
+		predicate iceberg.UnboundPredicate
+	}{
+		{
+			name:      "int32 above maximum",
+			fieldType: iceberg.PrimitiveTypes.Int32,
+			predicate: iceberg.GreaterThan(iceberg.Reference("id"), int32(math.MaxInt32)),
+		},
+		{
+			name:      "int32 below minimum",
+			fieldType: iceberg.PrimitiveTypes.Int32,
+			predicate: iceberg.LessThan(iceberg.Reference("id"), int32(math.MinInt32)),
+		},
+		{
+			name:      "int64 above maximum",
+			fieldType: iceberg.PrimitiveTypes.Int64,
+			predicate: iceberg.GreaterThan(iceberg.Reference("id"), int64(math.MaxInt64)),
+		},
+		{
+			name:      "int64 below minimum",
+			fieldType: iceberg.PrimitiveTypes.Int64,
+			predicate: iceberg.LessThan(iceberg.Reference("id"), int64(math.MinInt64)),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "id", Type: tt.fieldType})
+			bound, err := tt.predicate.Bind(schema, true)
+			require.NoError(t, err)
+
+			projected, err := (iceberg.TruncateTransform{Width: 10}).Project(
+				"id_trunc", bound.(iceberg.BoundPredicate))
+			require.NoError(t, err)
+			assert.Nil(t, projected)
 		})
 	}
 }

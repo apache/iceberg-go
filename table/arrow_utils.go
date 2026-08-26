@@ -1047,13 +1047,15 @@ func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memor
 }
 
 type arrowProjectionVisitor struct {
-	ctx                 context.Context
-	fileSchema          *iceberg.Schema
-	tableProperties     iceberg.Properties
-	includeFieldIDs     bool
-	downcastNsTimestamp bool
-	useLargeTypes       bool
-	useWriteDefault     bool
+	ctx                  context.Context
+	fileSchema           *iceberg.Schema
+	tableProperties      iceberg.Properties
+	formatVersion        int
+	includeFieldIDs      bool
+	downcastNsTimestamp  bool
+	useLargeTypes        bool
+	useWriteDefault      bool
+	allowMissingRequired bool
 }
 
 func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
@@ -1079,8 +1081,13 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	if !field.Type.Equals(typ) {
 		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
-			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-			targetType := a.typeToArrowType(promoted)
+			var targetType arrow.DataType
+			if a.formatVersion >= 3 && canPromoteDateToTimestamp(fileField.Type, field.Type) {
+				targetType = a.typeToArrowType(field.Type)
+			} else {
+				promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+				targetType = a.typeToArrowType(promoted)
+			}
 			if !a.useLargeTypes {
 				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 			}
@@ -1189,6 +1196,19 @@ func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool
 	}
 }
 
+func canPromoteDateToTimestamp(fileType, readType iceberg.Type) bool {
+	if _, ok := fileType.(iceberg.DateType); !ok {
+		return false
+	}
+
+	switch readType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampNsType:
+		return true
+	default:
+		return false
+	}
+}
+
 func floorTimestampNanosecondsToMicroseconds(
 	mem memory.Allocator,
 	vals *array.Timestamp,
@@ -1269,7 +1289,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
 			case field.InitialDefault != nil && !a.useWriteDefault:
 				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), alloc)
-			case !field.Required:
+			case !field.Required || a.allowMissingRequired:
 				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
 			default:
 				panic(fmt.Errorf("%w: required field is missing and has no default value: %s",
@@ -1425,10 +1445,13 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
-	IncludeFieldIDs   bool
-	UseLargeTypes     bool
-	UseWriteDefault   bool
-	TableProperties   iceberg.Properties
+	// FormatVersion enables format-version-specific read promotions.
+	FormatVersion        int
+	IncludeFieldIDs      bool
+	UseLargeTypes        bool
+	UseWriteDefault      bool
+	AllowMissingRequired bool
+	TableProperties      iceberg.Properties
 }
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
@@ -1439,13 +1462,15 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 
 	result, err := iceberg.VisitSchemaWithPartner[arrow.Array, arrow.Array](requested, st,
 		&arrowProjectionVisitor{
-			ctx:                 ctx,
-			fileSchema:          fileSchema,
-			tableProperties:     opts.TableProperties,
-			includeFieldIDs:     opts.IncludeFieldIDs,
-			downcastNsTimestamp: opts.DowncastTimestamp,
-			useLargeTypes:       opts.UseLargeTypes,
-			useWriteDefault:     opts.UseWriteDefault,
+			ctx:                  ctx,
+			fileSchema:           fileSchema,
+			tableProperties:      opts.TableProperties,
+			formatVersion:        opts.FormatVersion,
+			includeFieldIDs:      opts.IncludeFieldIDs,
+			downcastNsTimestamp:  opts.DowncastTimestamp,
+			useLargeTypes:        opts.UseLargeTypes,
+			useWriteDefault:      opts.UseWriteDefault,
+			allowMissingRequired: opts.AllowMissingRequired,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err

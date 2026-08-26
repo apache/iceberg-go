@@ -320,6 +320,17 @@ type posDeleteCursor struct {
 	offset     int
 }
 
+func validatePositionDeletePositions(positions *array.Int64) error {
+	for row := range positions.Len() {
+		if position := positions.Value(row); position < 0 {
+			return fmt.Errorf("%w: negative pos %d in position delete file",
+				iceberg.ErrInvalidSchema, position)
+		}
+	}
+
+	return nil
+}
+
 func newPosDeleteCursor(posCol *arrow.Chunked) (posDeleteCursor, error) {
 	chunks := posCol.Chunks()
 	arrays := make([]*array.Int64, len(chunks))
@@ -417,6 +428,10 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 				return nil, fmt.Errorf("%w: position delete columns ended before file_path column",
 					iceberg.ErrInvalidSchema)
 			}
+			if pos < 0 {
+				return nil, fmt.Errorf("%w: negative pos %d in position delete file",
+					iceberg.ErrInvalidSchema, pos)
+			}
 			if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
 				return nil, fmt.Errorf("%w: null file_path dictionary value in position delete file",
 					iceberg.ErrInvalidSchema)
@@ -465,7 +480,15 @@ func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], e
 				return nil, fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
 					iceberg.ErrInvalidSchema, arr)
 			}
+			if posArr.NullN() > 0 {
+				return nil, fmt.Errorf("%w: null pos in position delete file",
+					iceberg.ErrInvalidSchema)
+			}
 			for _, v := range posArr.Int64Values() {
+				if v < 0 {
+					return nil, fmt.Errorf("%w: negative pos %d in position delete file",
+						iceberg.ErrInvalidSchema, v)
+				}
 				deletes[v] = struct{}{}
 			}
 		}
@@ -553,15 +576,35 @@ type set[T comparable] map[T]struct{}
 // batch handed to compute.Take, not into the whole file. Without batch-local
 // indices, the second and later batches of a file would pass indices >= the batch
 // length and compute.Take would fail with "index error: N out of bounds".
+//
+// A nil result means that no row in the batch was deleted. The index builder is
+// allocated lazily after the first deleted row so clean batches can pass through
+// without reconstructing their columns.
 func combinePositionalDeletes(mem memory.Allocator, deletes set[int64], cursor *rowPositionCursor, nrows int64) arrow.Array {
-	bldr := array.NewInt64Builder(mem)
-	defer bldr.Release()
+	var bldr *array.Int64Builder
 
 	for i := range nrows {
-		if _, ok := deletes[cursor.next()]; !ok {
+		if _, deleted := deletes[cursor.next()]; deleted {
+			if bldr == nil {
+				bldr = array.NewInt64Builder(mem)
+				bldr.Reserve(int(i))
+				for j := range i {
+					bldr.Append(j)
+				}
+			}
+
+			continue
+		}
+
+		if bldr != nil {
 			bldr.Append(i)
 		}
 	}
+
+	if bldr == nil {
+		return nil
+	}
+	defer bldr.Release()
 
 	return bldr.NewArray()
 }
@@ -575,6 +618,11 @@ func processPositionalDeletes(ctx context.Context, deletes set[int64], cursor *r
 		defer r.Release()
 
 		indices := combinePositionalDeletes(mem, deletes, cursor, r.NumRows())
+		if indices == nil {
+			r.Retain()
+
+			return r, nil
+		}
 		defer indices.Release()
 
 		out, err := compute.Take(ctx, *compute.DefaultTakeOptions(),

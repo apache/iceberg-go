@@ -1238,7 +1238,7 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // catalog drop operation should typically proceed so the catalog does not
 // get out of sync with storage.
 func (t Table) PurgeFiles(ctx context.Context) error {
-	gcEnabled := t.Metadata().Properties().GetBool("gc.enabled", true)
+	gcEnabled := isGCEnabled(t.Metadata().Properties())
 
 	fs, err := t.FS(ctx)
 	if err != nil {

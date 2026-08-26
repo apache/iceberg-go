@@ -608,6 +608,65 @@ func assertMissingLastUpdatedMS(t *testing.T, metadata map[string]any) {
 	assert.ErrorContains(t, err, "last-updated-ms is absent or null")
 }
 
+func TestMetadataRequiredFields(t *testing.T) {
+	versions := []struct {
+		name          string
+		formatVersion int
+		data          string
+	}{
+		{name: "v1", formatVersion: 1, data: ExampleTableMetadataV1},
+		{name: "v2", formatVersion: 2, data: ExampleTableMetadataV2},
+		{name: "v3", formatVersion: 3, data: ExampleTableMetadataV3},
+	}
+	mutations := []struct {
+		name       string
+		key        string
+		value      any
+		remove     bool
+		errorMatch string
+	}{
+		{name: "missing-location", key: "location", remove: true, errorMatch: "location is required"},
+		{name: "null-location", key: "location", value: nil, errorMatch: "location is required"},
+		{name: "empty-location", key: "location", value: "", errorMatch: "location is required"},
+		{name: "missing-table-uuid", key: "table-uuid", remove: true, errorMatch: "table-uuid is required"},
+		{name: "null-table-uuid", key: "table-uuid", value: nil, errorMatch: "table-uuid is required"},
+		{name: "zero-table-uuid", key: "table-uuid", value: uuid.Nil.String(), errorMatch: "table-uuid is required"},
+	}
+
+	for _, version := range versions {
+		var metadata map[string]any
+		decoder := json.NewDecoder(strings.NewReader(version.data))
+		decoder.UseNumber() // Preserve snapshot IDs larger than float64 can represent exactly.
+		require.NoError(t, decoder.Decode(&metadata))
+
+		for _, mutation := range mutations {
+			t.Run(version.name+"/"+mutation.name, func(t *testing.T) {
+				mutated := maps.Clone(metadata)
+				if mutation.remove {
+					delete(mutated, mutation.key)
+				} else {
+					mutated[mutation.key] = mutation.value
+				}
+
+				raw, err := json.Marshal(mutated)
+				require.NoError(t, err)
+
+				parsed, err := ParseMetadataBytes(raw)
+				required := mutation.key == "location" || version.formatVersion > 1
+				if required {
+					require.ErrorIs(t, err, ErrInvalidMetadata)
+					assert.ErrorContains(t, err, mutation.errorMatch)
+
+					return
+				}
+
+				require.NoError(t, err)
+				assert.Equal(t, uuid.Nil, parsed.TableUUID())
+			})
+		}
+	}
+}
+
 // A full v3 metadata document must load when its partition spec and sort order
 // use unknown transforms — nothing on the metadata path may trip a guard.
 func TestMetadataV3ParsesUnknownTransforms(t *testing.T) {
@@ -1449,12 +1508,14 @@ func TestV1WriteMetadataToV2(t *testing.T) {
 	metaV2 := meta.(*metadataV1).ToV2()
 	metaV2Json, err := json.Marshal(metaV2)
 	require.NoError(t, err)
+	_, err = ParseMetadataBytes(metaV2Json)
+	require.NoError(t, err)
 
 	rawData := make(map[string]any)
 	require.NoError(t, json.Unmarshal(metaV2Json, &rawData))
 
 	assert.EqualValues(t, 0, rawData["last-sequence-number"])
-	assert.NotEmpty(t, rawData["table-uuid"])
+	assert.NotEqual(t, uuid.Nil.String(), rawData["table-uuid"])
 	assert.EqualValues(t, 0, rawData["current-schema-id"])
 	assert.Equal(t, []any{map[string]any{
 		"fields": []any{
@@ -2564,7 +2625,12 @@ func TestDefaultSortOrder(t *testing.T) {
 	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
 	require.NoError(t, err)
 	meta.(*metadataV2).DefaultSortOrderID = orderID
-	sortOrder, err := NewSortOrder(orderID, nil)
+	sortOrder, err := NewSortOrder(orderID, []SortField{{
+		SourceIDs: []int{2},
+		Transform: iceberg.IdentityTransform{},
+		Direction: SortASC,
+		NullOrder: NullsFirst,
+	}})
 	require.NoError(t, err)
 
 	meta.(*metadataV2).SortOrderList = append(meta.(*metadataV2).SortOrderList, sortOrder)

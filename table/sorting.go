@@ -159,31 +159,49 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
-	if tf, ok := raw["transform"]; !ok || string(tf) == "null" {
+	transformJSON, hasTransform := raw["transform"]
+	if !hasTransform || string(transformJSON) == "null" {
 		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
 	}
 
-	aux := struct {
-		SourceID        int           `json:"source-id"`
-		SourceIDs       []int         `json:"source-ids,omitempty"`
-		TransformString string        `json:"transform"`
-		Direction       SortDirection `json:"direction"`
-		NullOrder       NullOrder     `json:"null-order"`
-	}{}
-
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var sourceID int
+	if hasSourceID {
+		if err := unmarshalJSONField(raw["source-id"], "source-id", &sourceID); err != nil {
+			return err
+		}
+	}
+	var sourceIDs []int
+	if hasSourceIDs {
+		if err := unmarshalJSONField(raw["source-ids"], "source-ids", &sourceIDs); err != nil {
+			return err
+		}
+	}
+	var transformString string
+	if err := unmarshalJSONField(transformJSON, "transform", &transformString); err != nil {
 		return err
+	}
+	var direction SortDirection
+	if directionJSON, ok := raw["direction"]; ok {
+		if err := unmarshalJSONField(directionJSON, "direction", &direction); err != nil {
+			return err
+		}
+	}
+	var nullOrder NullOrder
+	if nullOrderJSON, ok := raw["null-order"]; ok {
+		if err := unmarshalJSONField(nullOrderJSON, "null-order", &nullOrder); err != nil {
+			return err
+		}
 	}
 
 	next := SortField{
-		Direction: aux.Direction,
-		NullOrder: aux.NullOrder,
+		Direction: direction,
+		NullOrder: nullOrder,
 	}
 
 	if hasSourceIDs {
-		next.SourceIDs = aux.SourceIDs
+		next.SourceIDs = sourceIDs
 	} else {
-		next.SourceIDs = []int{aux.SourceID}
+		next.SourceIDs = []int{sourceID}
 	}
 
 	if err := validateSortSourceIDs(next.SourceIDs, binding); err != nil {
@@ -191,7 +209,7 @@ func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	}
 
 	var err error
-	if next.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
 
@@ -220,6 +238,20 @@ func validateSortSourceID(id int, binding orderBinding) error {
 	}
 	if id < 0 {
 		return fmt.Errorf("%w: source ID must be non-negative: %d", ErrInvalidSortSourceID, id)
+	}
+
+	return nil
+}
+
+func unmarshalJSONField(data json.RawMessage, field string, value any) error {
+	if err := json.Unmarshal(data, value); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			typeErr.Struct = ""
+			typeErr.Field = field
+		}
+
+		return err
 	}
 
 	return nil
@@ -319,30 +351,30 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 
 func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 	aux := struct {
-		OrderID int               `json:"order-id"`
-		Fields  []json.RawMessage `json:"fields"`
-	}{OrderID: -1}
+		OrderID *int               `json:"order-id"`
+		Fields  *[]json.RawMessage `json:"fields"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	fields := make([]SortField, len(aux.Fields))
-	for i, rawField := range aux.Fields {
+	if aux.OrderID == nil {
+		return fmt.Errorf("%w: sort order is missing required 'order-id' key in JSON", iceberg.ErrInvalidArgument)
+	}
+
+	if aux.Fields == nil {
+		return fmt.Errorf("%w: sort order is missing required 'fields' key in JSON", iceberg.ErrInvalidArgument)
+	}
+
+	fields := make([]SortField, len(*aux.Fields))
+	for i, rawField := range *aux.Fields {
 		if err := fields[i].unmarshal(rawField, binding); err != nil {
 			return err
 		}
 	}
 
-	if len(fields) == 0 && aux.OrderID == -1 {
-		aux.OrderID = 0
-	}
-
-	if aux.OrderID == -1 {
-		aux.OrderID = InitialSortOrderID
-	}
-
-	newOrder, err := newSortOrder(aux.OrderID, fields, false)
+	newOrder, err := newSortOrder(*aux.OrderID, fields, false)
 	if err != nil {
 		return err
 	}
@@ -356,6 +388,7 @@ func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
 //
 // The orderID must be greater than or equal to 0.
 // If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
+// If fields is empty, orderID must be 0.
 // Fields need to have non-nil Transform, valid Direction and NullOrder values,
 // and non-empty source IDs.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
@@ -370,6 +403,10 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 
 	if orderID == 0 && len(fields) != 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
+	}
+
+	if orderID != UnsortedSortOrderID && len(fields) == 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID %d requires at least one sort field", ErrInvalidSortOrderID, orderID)
 	}
 
 	if fields == nil {

@@ -1386,6 +1386,87 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 	m.EqualValues(1000+firstCount, *entries[1].DataFile().FirstRowID())
 }
 
+func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceRejectsInvalidRange() {
+	tests := []struct {
+		name          string
+		firstRowID    int64
+		recordCount   int64
+		errorContains string
+	}{
+		{name: "overflow", firstRowID: math.MaxInt64, recordCount: 1, errorContains: "overflows int64"},
+		{name: "negative record count", firstRowID: 0, recordCount: -1, errorContains: "record count must be non-negative"},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			partitionSpec := NewPartitionSpecID(1,
+				PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+			entry := &manifestEntry{
+				EntryStatus: EntryStatusADDED,
+				Snapshot:    &entrySnapshotID,
+				Data: &dataFile{
+					Content:          EntryContentData,
+					Path:             "/data/file.parquet",
+					Format:           ParquetFile,
+					PartitionData:    map[string]any{"x": int(1)},
+					RecordCount:      tt.recordCount,
+					FileSize:         1000,
+					BlockSizeInBytes: 64 * 1024,
+				},
+			}
+			var manifestBuf bytes.Buffer
+			_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+				entrySnapshotID, []ManifestEntry{entry})
+			m.Require().NoError(err)
+
+			file := &manifestFile{
+				version:         3,
+				Path:            "/manifest.avro",
+				Content:         ManifestContentData,
+				FirstRowIDValue: &tt.firstRowID,
+			}
+			_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+
+	m.Run("negative manifest first row ID with explicit entry ID", func() {
+		partitionSpec := NewPartitionSpecID(1,
+			PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+		entryFirstRowID := int64(0)
+		entry := &manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      1,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  &entryFirstRowID,
+			},
+		}
+		var manifestBuf bytes.Buffer
+		_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+			entrySnapshotID, []ManifestEntry{entry})
+		m.Require().NoError(err)
+
+		negativeManifestFirstRowID := int64(-1)
+		file := &manifestFile{
+			version:         3,
+			Path:            "/manifest.avro",
+			Content:         ManifestContentData,
+			FirstRowIDValue: &negativeManifestFirstRowID,
+		}
+		_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.ErrorContains(err, "first row ID must be non-negative")
+	})
+}
+
 // TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries verifies that a
 // DELETED entry consumes no row IDs during inheritance, matching the
 // manifest-list writer, which reserves a manifest's id range as added+existing
@@ -2126,6 +2207,84 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	m.Require().ErrorIs(err, io.EOF)
 }
 
+func (m *ManifestTestSuite) TestManifestReaderRejectsInvalidEntries() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+	invalidContentEntry := deleteEntry
+	invalidContentFile := cloneDataFileAvroFields(deleteFile)
+	invalidContentFile.Content = ManifestEntryContent(3)
+	invalidContentEntry.Data = invalidContentFile
+
+	tests := []struct {
+		name            string
+		manifestContent ManifestContent
+		entry           *manifestEntry
+		errorContains   string
+	}{
+		{
+			name:            "unknown status",
+			manifestContent: ManifestContentData,
+			entry: func() *manifestEntry {
+				entry := *manifestEntryV2Records[0]
+				entry.EntryStatus = ManifestEntryStatus(3)
+
+				return &entry
+			}(),
+			errorContains: "invalid status",
+		},
+		{
+			name:            "data file in delete manifest",
+			manifestContent: ManifestContentDeletes,
+			entry:           manifestEntryV2Records[0],
+			errorContains:   "data file found in delete manifest",
+		},
+		{
+			name:            "delete file in data manifest",
+			manifestContent: ManifestContentData,
+			entry:           &deleteEntry,
+			errorContains:   "delete file found in data manifest",
+		},
+		{
+			name:            "unknown content",
+			manifestContent: ManifestContentDeletes,
+			entry:           &invalidContentEntry,
+			errorContains:   "invalid content",
+		},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			mw := ManifestWriter{version: 2, spec: partitionSpec, schema: testSchema, content: tt.manifestContent}
+			metadata, err := mw.meta()
+			m.Require().NoError(err)
+
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, entrySchema,
+				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Encode(tt.entry))
+			m.Require().NoError(writer.Close())
+
+			manifest := &manifestFile{version: 2, SpecID: 1, Content: tt.manifestContent}
+			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
+			m.Require().NoError(err)
+			defer reader.Close()
+
+			_, err = reader.ReadEntry()
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
@@ -2354,6 +2513,50 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	m.NotEqual("null", string(md["partition-spec"]))
 	m.Equal("[]", string(md["partition-spec"]))
+}
+
+func (m *ManifestTestSuite) TestManifestWriterContentConsistency() {
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+
+	m.Run("manifest file inherits writer content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		manifest, err := writer.ToManifestFile("manifest.avro", int64(out.Len()))
+		m.Require().NoError(err)
+		m.Equal(ManifestContentDeletes, manifest.ManifestContent())
+	})
+
+	m.Run("rejects conflicting manifest file content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()),
+			WithManifestFileContent(ManifestContentData))
+		m.ErrorIs(err, ErrInvalidArgument)
+	})
+
+	m.Run("rejects data file in delete manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(manifestEntryV2Records[0]), ErrInvalidArgument)
+	})
+
+	m.Run("rejects delete file in data manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(&deleteEntry), ErrInvalidArgument)
+	})
 }
 
 func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
@@ -3785,12 +3988,14 @@ func (m *ManifestTestSuite) TestManifestWriterPreservesMinSequenceNumberZero() {
 	oldSnapshot := int64(999)
 	entries := make([]ManifestEntry, len(manifestEntryV1Records))
 	for i, rec := range manifestEntryV1Records {
+		dataFile := cloneDataFileAvroFields(rec.DataFile().(*dataFile))
+		dataFile.Content = EntryContentData
 		entries[i] = NewManifestEntry(
 			EntryStatusEXISTING,
 			&oldSnapshot,
 			&seqZero,
 			&seqZero,
-			rec.DataFile(),
+			dataFile,
 		)
 	}
 
