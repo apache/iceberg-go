@@ -730,6 +730,123 @@ func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
 	require.NoError(t, <-loaded)
 }
 
+type closeTrackingIO struct {
+	iceio.IO
+	closeCount *atomic.Int32
+}
+
+func (f *closeTrackingIO) Close() error {
+	f.closeCount.Add(1)
+
+	return nil
+}
+
+func TestPrefixScopedIOClosesFilesystemLostToCacheRace(t *testing.T) {
+	const scheme = "prefix-scoped-cache-race-test"
+
+	loadStarted := make(chan struct{}, 2)
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+	defer release()
+
+	var closeCount atomic.Int32
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		loadStarted <- struct{}{}
+		<-releaseLoad
+
+		return &closeTrackingIO{IO: iceio.LocalFS{}, closeCount: &closeCount}, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	type result struct {
+		fs  iceio.IO
+		err error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			fs, err := p.filesystemFor(scheme + "://bucket/file.parquet")
+			results <- result{fs: fs, err: err}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-loadStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent filesystem loads")
+		}
+	}
+	release()
+
+	var cached iceio.IO
+	for range 2 {
+		select {
+		case result := <-results:
+			require.NoError(t, result.err)
+			if cached == nil {
+				cached = result.fs
+			} else {
+				assert.Same(t, cached, result.fs)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for filesystem loads")
+		}
+	}
+
+	assert.Equal(t, int32(1), closeCount.Load(),
+		"the filesystem that lost the cache race must be closed")
+	require.NoError(t, p.Close())
+	assert.Equal(t, int32(2), closeCount.Load(),
+		"the cached filesystem must be closed when the scoped IO closes")
+}
+
+func TestPrefixScopedIOClosesFilesystemLoadedAfterClose(t *testing.T) {
+	const scheme = "prefix-scoped-close-during-load-test"
+
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+	defer release()
+
+	var closeCount atomic.Int32
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		close(loadStarted)
+		<-releaseLoad
+
+		return &closeTrackingIO{IO: iceio.LocalFS{}, closeCount: &closeCount}, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := p.filesystemFor(scheme + "://bucket/file.parquet")
+		loaded <- err
+	}()
+
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem load")
+	}
+	require.NoError(t, p.Close())
+	release()
+
+	select {
+	case err := <-loaded:
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "prefix-scoped IO is closed")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem load to finish")
+	}
+	assert.Equal(t, int32(1), closeCount.Load(),
+		"a filesystem loaded after Close must be closed before returning")
+}
+
 func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
 	t.Parallel()
 

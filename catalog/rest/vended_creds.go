@@ -351,10 +351,19 @@ func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 	if p.closed {
 		p.mu.Unlock()
 
+		closeErr := closeOptionalIO(fs)
+		if closeErr != nil {
+			return nil, errors.Join(errors.New("prefix-scoped IO is closed"), closeErr)
+		}
+
 		return nil, errors.New("prefix-scoped IO is closed")
 	}
 	if existing, ok := p.filesystems[key]; ok {
 		p.mu.Unlock()
+
+		if err := closeOptionalIO(fs); err != nil {
+			return nil, err
+		}
 
 		return existing, nil
 	}
@@ -430,6 +439,14 @@ func scopedFilesystemKey(credentialIndex int, location string) string {
 	return fmt.Sprintf("%d:%s://%s", credentialIndex, parsed.Scheme, parsed.Host)
 }
 
+func closeOptionalIO(fs iceio.IO) error {
+	if closer, ok := fs.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+
+	return nil
+}
+
 func (p *prefixScopedIO) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -441,9 +458,7 @@ func (p *prefixScopedIO) Close() error {
 
 	var closeErr error
 	for _, fs := range p.filesystems {
-		if closer, ok := fs.(interface{ Close() error }); ok {
-			closeErr = errors.Join(closeErr, closer.Close())
-		}
+		closeErr = errors.Join(closeErr, closeOptionalIO(fs))
 	}
 	p.filesystems = nil
 
