@@ -164,6 +164,36 @@ func TestUnknownTransformEquals(t *testing.T) {
 	assert.False(t, custom.Equals(iceberg.IdentityTransform{}))
 }
 
+func TestBuiltInTransformEqualsAcceptsPointerAndValue(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+	unknownValue := unknown.(iceberg.UnknownTransform)
+
+	tests := []struct {
+		name    string
+		value   iceberg.Transform
+		pointer iceberg.Transform
+	}{
+		{"identity", iceberg.IdentityTransform{}, &iceberg.IdentityTransform{}},
+		{"void", iceberg.VoidTransform{}, &iceberg.VoidTransform{}},
+		{"unknown", unknownValue, &unknownValue},
+		{"bucket", iceberg.BucketTransform{NumBuckets: 16}, &iceberg.BucketTransform{NumBuckets: 16}},
+		{"truncate", iceberg.TruncateTransform{Width: 8}, &iceberg.TruncateTransform{Width: 8}},
+		{"year", iceberg.YearTransform{}, &iceberg.YearTransform{}},
+		{"month", iceberg.MonthTransform{}, &iceberg.MonthTransform{}},
+		{"day", iceberg.DayTransform{}, &iceberg.DayTransform{}},
+		{"hour", iceberg.HourTransform{}, &iceberg.HourTransform{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.True(t, tt.value.Equals(tt.pointer))
+			assert.True(t, tt.pointer.Equals(tt.value))
+			assert.True(t, tt.pointer.Equals(tt.pointer))
+		})
+	}
+}
+
 // The zero value is constructible outside the package; it must not serialize
 // to "transform": "".
 func TestUnknownTransformRejectsEmptyName(t *testing.T) {

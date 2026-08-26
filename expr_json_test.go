@@ -463,6 +463,30 @@ func TestUnboundTransformBind(t *testing.T) {
 	assert.True(t, bound.Type().Equals(iceberg.PrimitiveTypes.Int32))
 }
 
+func TestTransformTermPointerEqualityAndProjection(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
+	pointerTerm := iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))
+	valueTerm := iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16}, iceberg.Reference("id"))
+
+	assert.True(t, pointerTerm.Equals(pointerTerm))
+	assert.True(t, pointerTerm.Equals(valueTerm))
+	assert.True(t, valueTerm.Equals(pointerTerm))
+
+	bound, err := iceberg.BindExpr(schema, iceberg.EqualTo(pointerTerm, int32(1)), true)
+	require.NoError(t, err)
+	assert.True(t, bound.Equals(bound))
+
+	predicate, ok := bound.(iceberg.BoundPredicate)
+	require.True(t, ok)
+	projected, err := transform.Project("id_bucket", predicate)
+	require.NoError(t, err)
+	require.NotNil(t, projected)
+	assert.True(t, iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(1)).Equals(projected))
+}
+
 func TestUnboundTransformBindRejectsNilTransform(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},

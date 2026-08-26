@@ -138,9 +138,14 @@ func (IdentityTransform) ResultType(t Type) Type { return t }
 func (IdentityTransform) PreservesOrder() bool   { return true }
 
 func (IdentityTransform) Equals(other Transform) bool {
-	_, ok := other.(IdentityTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case IdentityTransform:
+		return true
+	case *IdentityTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -229,9 +234,14 @@ func (VoidTransform) ResultType(t Type) Type { return t }
 func (VoidTransform) PreservesOrder() bool   { return false }
 
 func (VoidTransform) Equals(other Transform) bool {
-	_, ok := other.(VoidTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case VoidTransform:
+		return true
+	case *VoidTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -278,9 +288,14 @@ func (UnknownTransform) ResultType(Type) Type { return StringType{} }
 func (UnknownTransform) PreservesOrder() bool { return false }
 
 func (t UnknownTransform) Equals(other Transform) bool {
-	o, ok := other.(UnknownTransform)
-
-	return ok && t.name == o.name
+	switch rhs := other.(type) {
+	case UnknownTransform:
+		return t.name == rhs.name
+	case *UnknownTransform:
+		return rhs != nil && t.name == rhs.name
+	default:
+		return false
+	}
 }
 
 // Apply can't be evaluated for an unknown transform.
@@ -398,12 +413,14 @@ func hashDecimal(v Decimal) uint32 {
 }
 
 func (t BucketTransform) Equals(other Transform) bool {
-	rhs, ok := other.(BucketTransform)
-	if !ok {
+	switch rhs := other.(type) {
+	case BucketTransform:
+		return t.NumBuckets == rhs.NumBuckets
+	case *BucketTransform:
+		return rhs != nil && t.NumBuckets == rhs.NumBuckets
+	default:
 		return false
 	}
-
-	return t.NumBuckets == rhs.NumBuckets
 }
 
 func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -594,12 +611,14 @@ func (TruncateTransform) CanTransform(t Type) bool {
 func (TruncateTransform) ResultType(t Type) Type { return t }
 func (TruncateTransform) PreservesOrder() bool   { return true }
 func (t TruncateTransform) Equals(other Transform) bool {
-	rhs, ok := other.(TruncateTransform)
-	if !ok {
+	switch rhs := other.(type) {
+	case TruncateTransform:
+		return t.Width == rhs.Width
+	case *TruncateTransform:
+		return rhs != nil && t.Width == rhs.Width
+	default:
 		return false
 	}
-
-	return t.Width == rhs.Width
 }
 
 func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
@@ -855,9 +874,14 @@ func (YearTransform) ResultType(Type) Type                { return PrimitiveType
 func (YearTransform) PreservesOrder() bool                { return true }
 
 func (YearTransform) Equals(other Transform) bool {
-	_, ok := other.(YearTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case YearTransform:
+		return true
+	case *YearTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -952,9 +976,14 @@ func (MonthTransform) ResultType(Type) Type                { return PrimitiveTyp
 func (MonthTransform) PreservesOrder() bool                { return true }
 
 func (MonthTransform) Equals(other Transform) bool {
-	_, ok := other.(MonthTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case MonthTransform:
+		return true
+	case *MonthTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -1061,9 +1090,14 @@ func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes
 func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
-	_, ok := other.(DayTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case DayTransform:
+		return true
+	case *DayTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (DayTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -1169,9 +1203,14 @@ func (HourTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 func (HourTransform) PreservesOrder() bool { return true }
 
 func (HourTransform) Equals(other Transform) bool {
-	_, ok := other.(HourTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case HourTransform:
+		return true
+	case *HourTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
