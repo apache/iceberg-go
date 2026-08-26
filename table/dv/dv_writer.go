@@ -124,6 +124,33 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, par
 	return nil
 }
 
+// AddPosition accumulates one position to delete for a given data file.
+// It has the same first-write partition metadata and validation semantics as
+// Add, without requiring callers that process one deleted row at a time to
+// allocate a one-element positions slice.
+func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32, partitionData map[int]any) error {
+	if position < 0 {
+		return fmt.Errorf("%w: invalid deletion position %d for %q: positions must be >= 0",
+			iceberg.ErrInvalidArgument, position, dataFilePath)
+	}
+
+	entry, ok := w.entries[dataFilePath]
+	if !ok {
+		// Keep the same defensive-copy and first-write-wins semantics as Add.
+		entry = &dvEntry{
+			bitmap:        NewRoaringPositionBitmap(),
+			specID:        specID,
+			partitionData: maps.Clone(partitionData),
+		}
+		w.entries[dataFilePath] = entry
+		w.order = append(w.order, dataFilePath)
+	}
+
+	entry.bitmap.Set(uint64(position))
+
+	return nil
+}
+
 // Load seeds the writer with an already-written deletion vector for a data
 // file so subsequent Add calls merge new positions into it. The spec permits
 // at most one DV per data file per snapshot, so when a data file that already
