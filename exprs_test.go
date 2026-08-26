@@ -997,6 +997,34 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 			assert.Equal(t, tt.exp, b)
 		})
 	}
+
+	t.Run("set predicates", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			pred     iceberg.BooleanExpression
+			expected iceberg.BooleanExpression
+		}{
+			{"int in mixed range", iceberg.IsIn(ref, int64(34), above, below), iceberg.EqualTo(ref, int32(34))},
+			{"int not in mixed range", iceberg.NotIn(ref, int64(34), above, below), iceberg.NotEqualTo(ref, int32(34))},
+			{"int in mixed range set", iceberg.IsIn(ref, int64(34), int64(35), above, below), iceberg.IsIn(ref, int32(34), int32(35))},
+			{"int in outside range", iceberg.IsIn(ref, above, below), iceberg.AlwaysFalse{}},
+			{"int not in outside range", iceberg.NotIn(ref, above, below), iceberg.AlwaysTrue{}},
+			{"float in mixed range", iceberg.IsIn(ref2, float64(34), above2, below2), iceberg.EqualTo(ref2, float32(34))},
+			{"float not in mixed range", iceberg.NotIn(ref2, float64(34), above2, below2), iceberg.NotEqualTo(ref2, float32(34))},
+			{"float in outside range", iceberg.IsIn(ref2, above2, below2), iceberg.AlwaysFalse{}},
+			{"float not in outside range", iceberg.NotIn(ref2, above2, below2), iceberg.AlwaysTrue{}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				bound, err := iceberg.BindExpr(sc, tt.pred, true)
+				require.NoError(t, err)
+				wantBound, err := iceberg.BindExpr(sc, tt.expected, true)
+				require.NoError(t, err)
+				assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
+			})
+		}
+	})
 }
 
 func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
