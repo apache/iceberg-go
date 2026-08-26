@@ -42,6 +42,7 @@ import (
 func constructTestTable(t *testing.T, writeStats []string) (*metadata.FileMetaData, Metadata) {
 	tableMeta, err := ParseMetadataString(`{
 		"format-version": 2,
+		"table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c1",
 		"last-sequence-number": 0,
         "location": "s3://bucket/test/location",
         "last-column-id": 7,

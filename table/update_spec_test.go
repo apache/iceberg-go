@@ -95,7 +95,7 @@ func TestUpdateSpecPreservesSourceLessVoidTombstone(t *testing.T) {
 		SourceIDs: []int{1}, FieldID: 1000, Name: "id",
 		Transform: iceberg.VoidTransform{},
 	})
-	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "", nil)
+	meta, err := table.NewMetadata(testSchema, &spec, table.UnsortedSortOrder, "s3://bucket/test/location", nil)
 	require.NoError(t, err)
 
 	metadataJSON, err := json.Marshal(meta)
