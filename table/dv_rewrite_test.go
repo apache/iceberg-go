@@ -61,11 +61,15 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 			groups, rewritten := planDVCompaction(t, tbl, dvTarget)
 
 			rtx := tbl.NewTransaction()
-			_, err := rtx.RewriteDataFiles(ctx, groups,
+			result, err := rtx.RewriteDataFiles(ctx, groups,
 				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
 			require.NoError(t, err)
-			tbl, err = rtx.Commit(ctx)
-			require.NoError(t, err)
+			if partialProgress {
+				tbl = result.Table
+			} else {
+				tbl, err = rtx.Commit(ctx)
+				require.NoError(t, err)
+			}
 
 			assertRowCount(t, tbl, 3) // DV applied during the rewrite; id=1 stays gone
 			assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
@@ -95,11 +99,15 @@ func TestRewriteDataFilesPreservesRowIDThroughDeletionVector(t *testing.T) {
 
 			groups, _ := planDVCompaction(t, tbl, dvTarget)
 			rtx := tbl.NewTransaction()
-			_, err := rtx.RewriteDataFiles(ctx, groups,
+			result, err := rtx.RewriteDataFiles(ctx, groups,
 				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
 			require.NoError(t, err)
-			tbl, err = rtx.Commit(ctx)
-			require.NoError(t, err)
+			if partialProgress {
+				tbl = result.Table
+			} else {
+				tbl, err = rtx.Commit(ctx)
+				require.NoError(t, err)
+			}
 
 			assert.Equal(t, before, rowIDByID(t, tbl),
 				"_row_id must be preserved for survivors when a deletion vector is applied during compaction")
