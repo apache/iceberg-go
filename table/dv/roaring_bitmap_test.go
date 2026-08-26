@@ -251,6 +251,17 @@ func TestKeepMaskBytes(t *testing.T) {
 		}
 	})
 
+	t.Run("sparse high position", func(t *testing.T) {
+		const length int64 = 1 << 20
+		bm := NewRoaringPositionBitmap()
+		bm.Set(uint64(length - 1))
+
+		mask := bm.KeepMaskBytes(length)
+		require.Len(t, mask, int(length/8))
+		assert.False(t, bitAt(mask, length-1))
+		assert.True(t, bitAt(mask, length-2))
+	})
+
 	t.Run("length not byte-aligned: trailing bits cleared", func(t *testing.T) {
 		// Length 13 → 2 bytes, bits 13..15 in byte 1 must be 0 even when no
 		// deletes touch them. Pins the trailing-byte mask logic.
