@@ -33,6 +33,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	puffinFooterTrailerSize       = 3 * puffin.MagicSize
+	compressedFooterLZ4FrameStart = 2 * puffin.MagicSize
+	compressedFooterLZ4FLGOffset  = compressedFooterLZ4FrameStart + puffin.MagicSize
+	compressedFooterLZ4BDOffset   = compressedFooterLZ4FLGOffset + 1
+)
+
 // --- Test Helpers ---
 
 func newWriter() (*puffin.Writer, *bytes.Buffer) {
@@ -169,7 +176,7 @@ func validFileWithBlob() []byte {
 
 func fileWithFooterPayload(payload []byte) []byte {
 	data := append([]byte("PFA1PFA1"), payload...)
-	trailer := make([]byte, 12)
+	trailer := make([]byte, puffinFooterTrailerSize)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(payload)))
 	copy(trailer[8:], "PFA1")
 
@@ -204,7 +211,7 @@ func compressedLZ4Frame(t *testing.T, payload []byte, options ...lz4.Option) []b
 func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, options ...lz4.Option) []byte {
 	compressed := compressedLZ4Frame(t, payload, options...)
 	data := append([]byte("PFA1PFA1"), compressed...)
-	trailer := make([]byte, 12)
+	trailer := make([]byte, puffinFooterTrailerSize)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
 	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
 	copy(trailer[8:], "PFA1")
@@ -218,7 +225,7 @@ func fileWithCompressedFooterFrames(frames ...[]byte) []byte {
 		compressed = append(compressed, frame...)
 	}
 	data := append([]byte("PFA1PFA1"), compressed...)
-	trailer := make([]byte, 12)
+	trailer := make([]byte, puffinFooterTrailerSize)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
 	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
 	copy(trailer[8:], "PFA1")
@@ -695,7 +702,8 @@ func TestReaderInvalidFile(t *testing.T) {
 
 func TestReaderRejectsNegativeFooterPayloadSize(t *testing.T) {
 	data := validFile()
-	binary.LittleEndian.PutUint32(data[len(data)-12:len(data)-8], ^uint32(0))
+	trailerOffset := len(data) - puffinFooterTrailerSize
+	binary.LittleEndian.PutUint32(data[trailerOffset:trailerOffset+puffin.MagicSize], ^uint32(0))
 
 	_, err := puffin.NewReader(bytes.NewReader(data))
 	require.ErrorContains(t, err, "invalid footer payload size -1")
@@ -769,30 +777,10 @@ func TestReaderPreservesLZ4ChecksumError(t *testing.T) {
 		lz4.SizeOption(uint64(len(payload))),
 		lz4.ChecksumOption(true),
 	)
-	data[len(data)-13] ^= 0xff
+	data[len(data)-puffinFooterTrailerSize-1] ^= 0xff
 
 	_, err := puffin.NewReader(bytes.NewReader(data))
 	require.ErrorContains(t, err, "invalid frame checksum")
-}
-
-func TestReaderPreservesLZ4BlockChecksumError(t *testing.T) {
-	payload := []byte(`{"blobs":[]}`)
-	frame := compressedLZ4Frame(
-		t,
-		payload,
-		lz4.SizeOption(uint64(len(payload))),
-		lz4.BlockChecksumOption(true),
-		lz4.ChecksumOption(false),
-	)
-	const lz4FrameHeaderSizeWithContentExternal = 15
-	const lz4FrameBlockSizeMaskExternal = 0x7fffffff
-	blockSize := binary.LittleEndian.Uint32(frame[lz4FrameHeaderSizeWithContentExternal:]) & lz4FrameBlockSizeMaskExternal
-	blockChecksumOffset := lz4FrameHeaderSizeWithContentExternal + 4 + int(blockSize)
-	frame[blockChecksumOffset] ^= 0xff
-	data := fileWithCompressedFooterFrames(frame)
-
-	_, err := puffin.NewReader(bytes.NewReader(data))
-	require.ErrorContains(t, err, "invalid block checksum")
 }
 
 func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
@@ -812,35 +800,35 @@ func TestReaderRejectsUnsupportedLZ4FrameFlags(t *testing.T) {
 		{
 			name: "version",
 			mutate: func(data []byte) {
-				data[12] = data[12]&^byte(0xc0) | 0x80
+				data[compressedFooterLZ4FLGOffset] = data[compressedFooterLZ4FLGOffset]&^byte(0xc0) | 0x80
 			},
 			wantErr: "frame version",
 		},
 		{
 			name: "reserved FLG flag",
 			mutate: func(data []byte) {
-				data[12] |= 0x02
+				data[compressedFooterLZ4FLGOffset] |= 0x02
 			},
 			wantErr: "reserved flag",
 		},
 		{
 			name: "dictionary ID",
 			mutate: func(data []byte) {
-				data[12] |= 0x01
+				data[compressedFooterLZ4FLGOffset] |= 0x01
 			},
 			wantErr: "dictionary ID",
 		},
 		{
 			name: "reserved BD flags",
 			mutate: func(data []byte) {
-				data[13] |= 0x01
+				data[compressedFooterLZ4BDOffset] |= 0x01
 			},
 			wantErr: "reserved block descriptor flags",
 		},
 		{
 			name: "reserved BD high flag",
 			mutate: func(data []byte) {
-				data[13] |= 0x80
+				data[compressedFooterLZ4BDOffset] |= 0x80
 			},
 			wantErr: "reserved block descriptor flags",
 		},
@@ -868,23 +856,30 @@ func TestReaderRejectsConcatenatedLZ4FooterFrames(t *testing.T) {
 }
 
 func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
-	t.Run("uncompressed JSON remains unrestricted", func(t *testing.T) {
+	t.Run("uncompressed JSON beyond limit", func(t *testing.T) {
 		data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("uncompressed payload at limit", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}`)
+		data := fileWithFooterPayload(payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(int64(len(payload))))
 		require.NoError(t, err)
 	})
 
-	t.Run("uncompressed trailing content remains unrestricted", func(t *testing.T) {
+	t.Run("uncompressed trailing content beyond limit", func(t *testing.T) {
 		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
 		data := fileWithFooterPayload(payload)
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
-		require.NoError(t, err)
+		require.ErrorContains(t, err, "footer exceeds maximum size")
 	})
 
-	t.Run("invalid limit is ignored for uncompressed JSON", func(t *testing.T) {
+	t.Run("invalid limit is rejected for uncompressed JSON", func(t *testing.T) {
 		data := fileWithFooterPayload([]byte(`{"blobs":[]}`))
 		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(0))
-		require.NoError(t, err)
+		require.ErrorContains(t, err, "invalid maximum footer size")
 	})
 
 	t.Run("compressed output beyond limit", func(t *testing.T) {

@@ -52,6 +52,16 @@ func compressedReaderTestFrame(t *testing.T, payload []byte, options ...lz4.Opti
 	return compressed.Bytes()
 }
 
+func compressedReaderTestFile(frame []byte) []byte {
+	data := append([]byte("PFA1PFA1"), frame...)
+	trailer := make([]byte, footerTrailerSize)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(frame)))
+	binary.LittleEndian.PutUint32(trailer[4:8], FooterFlagCompressed)
+	copy(trailer[8:], magic[:])
+
+	return append(data, trailer...)
+}
+
 func TestValidateLZ4FrameEnvelopeUsesBufferedReads(t *testing.T) {
 	frame := compressedReaderTestFrame(t, []byte(`{"blobs":[]}`), lz4.ChecksumOption(false))
 	endMark := frame[len(frame)-4:]
@@ -114,4 +124,21 @@ func TestValidateLZ4FrameEnvelopeRejectsOversizedBlock(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "exceeds declared maximum")
 	require.Equal(t, []int{frameHeader.headerSize + 4}, reader.readLengths)
+}
+
+func TestReaderPreservesLZ4BlockChecksumError(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	frame := compressedReaderTestFrame(
+		t,
+		payload,
+		lz4.BlockChecksumOption(true),
+		lz4.ChecksumOption(false),
+	)
+	blockSize := binary.LittleEndian.Uint32(frame[lz4FrameHeaderSizeWithContent:]) & lz4FrameBlockSizeMask
+	blockChecksumOffset := lz4FrameHeaderSizeWithContent + 4 + int(blockSize)
+	frame[blockChecksumOffset] ^= 0xff
+	data := compressedReaderTestFile(frame)
+
+	_, err := NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid block checksum")
 }

@@ -47,9 +47,9 @@ const (
 	// Override with WithMaxBlobSize when creating a reader.
 	DefaultMaxBlobSize = 256 << 20
 
-	// DefaultMaxFooterSize is the maximum decompressed size allowed for
-	// compressed footer payloads when reading (64 MB). Override with
-	// WithMaxFooterSize when creating a reader.
+	// DefaultMaxFooterSize is the maximum footer payload size allowed when
+	// reading (64 MB). For compressed footer payloads, the limit applies after
+	// decompression. Override with WithMaxFooterSize when creating a reader.
 	DefaultMaxFooterSize = 64 << 20
 
 	// CreatedBy is a human-readable identification of the application writing the file, along with its version.

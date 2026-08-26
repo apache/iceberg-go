@@ -79,11 +79,11 @@ func WithMaxBlobSize(size int64) ReaderOption {
 	}
 }
 
-// WithMaxFooterSize sets the maximum decompressed size allowed for compressed
-// footer payloads when reading. This bounds memory used by JSON decoding and
-// decompression of untrusted Puffin metadata. The default is
-// DefaultMaxFooterSize (64 MB). A non-positive size is rejected for compressed
-// footer payloads.
+// WithMaxFooterSize sets the maximum footer payload size allowed when reading.
+// For compressed footer payloads, the limit applies after decompression. This
+// bounds memory used by JSON decoding and decompression of untrusted Puffin
+// metadata. The default is DefaultMaxFooterSize (64 MB). A non-positive size
+// is rejected.
 func WithMaxFooterSize(size int64) ReaderOption {
 	return func(r *Reader) {
 		r.maxFooterSize = size
@@ -401,6 +401,9 @@ func (r *Reader) readFooter() error {
 	if payloadSize < 0 {
 		return fmt.Errorf("puffin: invalid footer payload size %d", payloadSize)
 	}
+	if r.maxFooterSize <= 0 {
+		return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
+	}
 
 	// Calculate footer start position
 	// Layout: [header magic (4)] [blobs...] [footer magic (4)] [JSON (payloadSize)] [trailer (12)]
@@ -440,15 +443,17 @@ func (r *Reader) readFooter() error {
 
 		payloadReader = io.NewSectionReader(r.r, footerStart+MagicSize, payloadSize)
 	}
+	if flags&FooterFlagCompressed == 0 && payloadSize > r.maxFooterSize {
+		return fmt.Errorf("puffin: footer exceeds maximum size %d", r.maxFooterSize)
+	}
 
 	var footerReader io.Reader = payloadReader
 	var compressedFooter *countingReader
 	var compressedContentSize uint64
 	var limitedFooter *io.LimitedReader
 	if flags&FooterFlagCompressed != 0 {
-		if r.maxFooterSize <= 0 {
-			return fmt.Errorf("puffin: invalid maximum footer size %d", r.maxFooterSize)
-		}
+		// Java, PyIceberg, and Rust currently reject compressed Puffin footers;
+		// keep this flag reader-only until those implementations catch up.
 
 		frameHeader, err := readLZ4FrameHeader(payloadReader)
 		if err != nil {
