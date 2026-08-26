@@ -25,7 +25,30 @@ import (
 	"github.com/apache/iceberg-go/table/compaction"
 )
 
-var benchmarkDeadEqualityDeletes []iceberg.DataFile
+var (
+	benchmarkDeadEqualityDeletes []iceberg.DataFile
+	benchmarkSurvivorSurvey      *compaction.SurvivorSurvey
+)
+
+func BenchmarkAddSurvivorWithSpec(b *testing.B) {
+	for _, fields := range []int{1, 8, 32} {
+		b.Run(fmt.Sprintf("fields=%d", fields), func(b *testing.B) {
+			partition := make(map[int]any, fields)
+			for i := range fields {
+				partition[1000+i] = i
+			}
+
+			survey := compaction.NewSurvivorSurvey()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				survey.AddSurvivorWithSpec(1, partition, 10)
+			}
+			b.StopTimer()
+			benchmarkSurvivorSurvey = survey
+		})
+	}
+}
 
 func BenchmarkDecideDeadEqualityDeletes(b *testing.B) {
 	for _, tc := range []struct {
