@@ -20,6 +20,7 @@ package rest
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -687,6 +688,46 @@ func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
 	assert.Equal(t, "plan-secret", props[iceio.S3SecretAccessKey])
 	assert.NotContains(t, props, iceio.S3SessionToken)
 	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
+}
+
+func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+
+	iceio.Register("prefix-scoped-lock-test", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		close(loadStarted)
+		<-releaseLoad
+
+		return iceio.LocalFS{}, nil
+	})
+	defer iceio.Unregister("prefix-scoped-lock-test")
+	defer release()
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := p.filesystemFor("prefix-scoped-lock-test://bucket/file.parquet")
+		loaded <- err
+	}()
+
+	<-loadStarted
+	lockAcquired := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		p.mu.Unlock()
+		close(lockAcquired)
+	}()
+
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("filesystem cache lock was held during filesystem loading")
+	}
+
+	release()
+	require.NoError(t, <-loaded)
 }
 
 func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {

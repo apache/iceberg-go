@@ -280,6 +280,20 @@ func TestScanPlanningLocalClosesPreviousPlanIOAfterSuccess(t *testing.T) {
 	assert.Equal(t, 1, pio.closeCalls)
 }
 
+func TestScanPlanningLocalPropagatesPlanIOCloseError(t *testing.T) {
+	closeErr := errors.New("close plan io")
+	pio := &countingPlanIO{closeErr: closeErr}
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	scan.planIO = mustPlanIOState(t, pio)
+
+	_, err = scan.PlanFiles(context.Background())
+	require.ErrorIs(t, err, closeErr)
+	assert.Nil(t, scan.planIO)
+	assert.Equal(t, 1, pio.closeCalls)
+}
+
 func TestScanCloseReleasesPlanIO(t *testing.T) {
 	t.Parallel()
 
@@ -668,6 +682,7 @@ func (fakePlanIO) Close() error                               { return nil }
 type countingPlanIO struct {
 	loadErrs   []error
 	fs         icebergio.IO
+	closeErr   error
 	loadCalls  int
 	closeCalls int
 }
@@ -684,7 +699,7 @@ func (p *countingPlanIO) Load(context.Context) (icebergio.IO, error) {
 func (p *countingPlanIO) Close() error {
 	p.closeCalls++
 
-	return nil
+	return p.closeErr
 }
 
 type sequenceScanPlanner struct {

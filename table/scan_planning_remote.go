@@ -23,10 +23,6 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-type fullRemoteScanPlanner interface {
-	SupportsFullRemoteScanPlanning() bool
-}
-
 // supportsAutomaticRemotePlanning is deliberately more conservative than
 // explicit remote mode when a planner exposes a split capability surface. A
 // REST server that only advertises the initial /plan endpoint may complete an
@@ -36,7 +32,7 @@ func supportsAutomaticRemotePlanning(planner ScanPlanner) bool {
 	if planner == nil {
 		return false
 	}
-	if full, ok := planner.(fullRemoteScanPlanner); ok {
+	if full, ok := planner.(FullRemoteScanPlanner); ok {
 		return full.SupportsFullRemoteScanPlanning()
 	}
 
@@ -95,6 +91,7 @@ func appendRemoteProjectedTypeIDs(ids *[]int, typ iceberg.Type, fieldID int, inc
 			*ids = append(*ids, typ.KeyID, typ.ValueID)
 		} else {
 			appendRemoteProjectedTypeIDs(ids, typ.ValueType, typ.ValueID, false)
+			appendRemoteProjectedTypeIDs(ids, typ.KeyType, typ.KeyID, false)
 		}
 	default:
 		if includeFieldID {

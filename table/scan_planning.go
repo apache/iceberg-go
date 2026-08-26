@@ -141,11 +141,22 @@ type ScanPlanningResult struct {
 // ScanPlanner plans scans for a table. rest.Catalog implements it; non-REST
 // catalogs leave it nil and planning stays local.
 //
-// SupportsRemoteScanPlanning reports whether the planner can complete a remote
-// plan end-to-end for the requested scan.
+// SupportsRemoteScanPlanning reports whether the planner can submit a remote
+// plan for the requested scan. A planner with separate continuation
+// capabilities can implement FullRemoteScanPlanner so auto mode can require
+// the complete remote scan flow.
 type ScanPlanner interface {
 	SupportsRemoteScanPlanning() bool
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
+}
+
+// FullRemoteScanPlanner is an optional capability extension for ScanPlanner.
+// A planner that exposes separate submission and continuation capabilities can
+// implement SupportsFullRemoteScanPlanning so auto mode only selects it when
+// the complete remote scan flow is available. Planners that do not implement
+// this extension retain the original ScanPlanner behavior.
+type FullRemoteScanPlanner interface {
+	SupportsFullRemoteScanPlanning() bool
 }
 
 // Scan integration:

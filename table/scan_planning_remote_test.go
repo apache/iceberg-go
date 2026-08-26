@@ -108,6 +108,20 @@ func TestRemotePlanningSelectedFieldsExpandsWildcardNestedProjection(t *testing.
 				ValueID: 18, ValueType: iceberg.PrimitiveTypes.Int32,
 			},
 		},
+		iceberg.NestedField{
+			ID:   19,
+			Name: "map_struct_key",
+			Type: &iceberg.MapType{
+				KeyID: 20, KeyType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 21, Name: "a", Type: iceberg.PrimitiveTypes.String},
+					{ID: 22, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+				}},
+				ValueID: 23, ValueType: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 24, Name: "a", Type: iceberg.PrimitiveTypes.String},
+					{ID: 25, Name: "b", Type: iceberg.PrimitiveTypes.Int32},
+				}},
+			},
+		},
 	)
 
 	scan := &Scan{selectedFields: []string{"*"}, caseSensitive: true}
@@ -125,5 +139,9 @@ func TestRemotePlanningSelectedFieldsExpandsWildcardNestedProjection(t *testing.
 		"list_primitive.element",
 		"map_primitive.key",
 		"map_primitive.value",
+		"map_struct_key.key.a",
+		"map_struct_key.key.b",
+		"map_struct_key.value.a",
+		"map_struct_key.value.b",
 	}, got)
 }

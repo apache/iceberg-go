@@ -47,6 +47,10 @@ import (
 // Compile-time proof that the REST catalog satisfies the table planner seam.
 var _ table.ScanPlanner = (*Catalog)(nil)
 
+// Compile-time proof that the REST catalog exposes the optional full-capability
+// extension used by table.Scan's auto planning mode.
+var _ table.FullRemoteScanPlanner = (*Catalog)(nil)
+
 // ErrPlanExpired is returned when polling a plan that the server no longer
 // knows about: a fetchPlanningResult 404 whose error.type is exactly
 // NoSuchPlanIdException. It is distinct from a table/namespace-gone 404
@@ -173,7 +177,8 @@ func (r *Catalog) SupportsFullRemoteScanPlanning() bool {
 
 // SupportsRemoteScanPlanning reports whether this catalog can submit a remote
 // plan. Any continuation capability is validated against the response returned
-// by the server.
+// by the server; SupportsFullRemoteScanPlanning reports whether auto mode can
+// safely use the complete continuation flow without a local fallback.
 func (r *Catalog) SupportsRemoteScanPlanning() bool {
 	return r.SupportsPlanTableScan()
 }
@@ -438,9 +443,6 @@ func marshalScanFilter(req table.ScanPlanningRequest) ([]byte, error) {
 
 	schema := req.Schema
 	if schema == nil {
-		if req.Metadata == nil {
-			return nil, fmt.Errorf("%w: cannot encode scan filter without table metadata", iceberg.ErrInvalidArgument)
-		}
 		schema = req.Metadata.CurrentSchema()
 	}
 	if schema == nil {

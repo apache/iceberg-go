@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -242,7 +243,7 @@ type Scan struct {
 	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
 	// the plan retires it after all active readers finish. See PlanIO.
 	planIO         *planIOState
-	closed         bool
+	closed         uint32
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
@@ -848,7 +849,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
-	if scan.closed {
+	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
 	}
 
@@ -927,7 +928,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
 	defer func() {
 		if err == nil {
-			_ = scan.closePlanIO()
+			err = scan.closePlanIO()
 		}
 	}()
 
@@ -1255,7 +1256,7 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // scan's projection, per-task residual filters, and positional delete handling. This
 // is useful when the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
-	if scan.closed {
+	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
 	}
 
@@ -1364,11 +1365,9 @@ func (scan *Scan) closePlanIO() error {
 // can finish; the plan IO closes after the last lease is released. A scan must
 // not be used after Close.
 func (scan *Scan) Close() error {
-	if scan == nil || scan.closed {
+	if scan == nil || !atomic.CompareAndSwapUint32(&scan.closed, 0, 1) {
 		return nil
 	}
-
-	scan.closed = true
 
 	return scan.closePlanIO()
 }

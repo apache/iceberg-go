@@ -316,25 +316,29 @@ func (p *prefixScopedIO) Remove(name string) error {
 
 func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 	credentialIndex := matchingStorageCredentialIndex(p.credentials, name)
+	key := scopedFilesystemKey(credentialIndex, name)
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+
+		return nil, errors.New("prefix-scoped IO is closed")
+	}
 	if credentialIndex >= 0 {
 		if expiresAt, ok := parseCredentialExpiry(p.credentials[credentialIndex].Config); ok &&
 			p.now().After(expiresAt) {
+			p.mu.Unlock()
+
 			return nil, fmt.Errorf("%w: %s expired at %s",
 				ErrVendedCredentialsExpired, name, expiresAt.Format(time.RFC3339))
 		}
 	}
-
-	key := scopedFilesystemKey(credentialIndex, name)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.closed {
-		return nil, errors.New("prefix-scoped IO is closed")
-	}
 	if fs, ok := p.filesystems[key]; ok {
+		p.mu.Unlock()
+
 		return fs, nil
 	}
+	p.mu.Unlock()
 
 	props := p.propertiesForLocation(name)
 
@@ -343,7 +347,19 @@ func (p *prefixScopedIO) filesystemFor(name string) (iceio.IO, error) {
 		return nil, err
 	}
 
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+
+		return nil, errors.New("prefix-scoped IO is closed")
+	}
+	if existing, ok := p.filesystems[key]; ok {
+		p.mu.Unlock()
+
+		return existing, nil
+	}
 	p.filesystems[key] = fs
+	p.mu.Unlock()
 
 	return fs, nil
 }
