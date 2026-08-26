@@ -918,6 +918,25 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
+	switch tmp.Status() {
+	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
+	default:
+		return nil, fmt.Errorf("manifest entry has invalid status: %d", tmp.Status())
+	}
+
+	entryContent := tmp.DataFile().ContentType()
+	switch entryContent {
+	case EntryContentData:
+		if c.content != ManifestContentData {
+			return nil, errors.New("data file found in delete manifest")
+		}
+	case EntryContentPosDeletes, EntryContentEqDeletes:
+		if c.content != ManifestContentDeletes {
+			return nil, errors.New("delete file found in data manifest")
+		}
+	default:
+		return nil, fmt.Errorf("manifest entry has invalid content: %d", entryContent)
+	}
 	tmp.inherit(c.file)
 	// First Row ID Inheritance (spec): assign the manifest's first_row_id to data
 	// files that lack one, advancing by record_count only on the files actually
