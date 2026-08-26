@@ -487,6 +487,29 @@ func TestUnboundTransformBindRejectsNilTransform(t *testing.T) {
 	}
 }
 
+func TestUnboundTransformNilTransformMethodsAreSafe(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{name: "nil interface", transform: nil},
+		{name: "typed nil pointer", transform: (*iceberg.BucketTransform)(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := iceberg.NewUnboundTransform(tt.transform, iceberg.Reference("id"))
+
+			assert.NotPanics(t, func() { _ = term.String() })
+			assert.True(t, term.Equals(term))
+
+			_, err := json.Marshal(term)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "transform cannot be nil")
+		})
+	}
+}
+
 // TestUnmarshalExpressionTransformTermInvalid rejects an invalid transform
 // string rather than panicking or binding nonsense.
 func TestUnmarshalExpressionTransformTermInvalid(t *testing.T) {

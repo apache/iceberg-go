@@ -1108,7 +1108,16 @@ func NewUnboundTransform(transform Transform, term UnboundTerm) *UnboundTransfor
 
 func (*UnboundTransform) isTerm() {}
 func (u *UnboundTransform) String() string {
-	return fmt.Sprintf("UnboundTransform(transform=%s, term=%s)", u.transform, u.term)
+	if u == nil {
+		return "UnboundTransform(<nil>)"
+	}
+
+	transform := "<nil>"
+	if !isNilTransform(u.transform) {
+		transform = u.transform.String()
+	}
+
+	return fmt.Sprintf("UnboundTransform(transform=%s, term=%s)", transform, u.term)
 }
 
 // Transform returns the transform applied to the term.
@@ -1118,6 +1127,21 @@ func (u *UnboundTransform) Equals(other UnboundTerm) bool {
 	rhs, ok := other.(*UnboundTransform)
 	if !ok {
 		return false
+	}
+	if u == nil || rhs == nil {
+		return u == rhs
+	}
+
+	leftNil, rightNil := isNilTransform(u.transform), isNilTransform(rhs.transform)
+	if leftNil || rightNil {
+		if !leftNil || !rightNil || reflect.TypeOf(u.transform) != reflect.TypeOf(rhs.transform) {
+			return false
+		}
+		if u.term == nil || rhs.term == nil {
+			return u.term == nil && rhs.term == nil
+		}
+
+		return u.term.Equals(rhs.term)
 	}
 
 	return u.transform.Equals(rhs.transform) && u.term.Equals(rhs.term)

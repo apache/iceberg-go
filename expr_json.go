@@ -293,6 +293,13 @@ func (b *BoundTransform) MarshalJSON() ([]byte, error) {
 }
 
 func (u *UnboundTransform) MarshalJSON() ([]byte, error) {
+	if u == nil {
+		return nil, fmt.Errorf("%w: cannot serialize a nil transform term", ErrInvalidArgument)
+	}
+	if isNilTransform(u.transform) {
+		return nil, fmt.Errorf("%w: transform cannot be nil", ErrInvalidArgument)
+	}
+
 	ref, ok := u.term.(Reference)
 	if !ok {
 		return nil, fmt.Errorf("%w: cannot serialize transform over a non-reference term", ErrInvalidArgument)
