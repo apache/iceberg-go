@@ -19,205 +19,439 @@
 
 # Apache Iceberg Go Security Threat Model
 
-This document describes the detailed security threat model for Apache
-Iceberg Go. It is intended for maintainers and automated security triage.
+## Status and Reporting
+
+This document is detailed guidance for Apache Iceberg Go maintainers and
+automated security triage. It describes classification defaults and the
+evidence needed to raise confidence; it does not replace case-by-case review by
+the project or the Apache Security Team.
+
+Possible vulnerabilities must be reported privately through the Apache Security
+Team process. This document guides classification and scanner confidence; it
+does not authorize public disclosure and does not automatically accept or
+reject a report.
+
+Follow the [Apache security vulnerability reporting
+process](https://www.apache.org/security/) and send undisclosed reports to
+`security@apache.org`. Do not open a public issue for a possible undisclosed
+vulnerability.
 
 ## Purpose
 
-Apache Iceberg Go is primarily a client library and implementation of the
-Iceberg table format and catalog interactions for Go applications and services.
-It is typically embedded in larger systems that provide their own
-authentication, authorization, and credential management. Because of that
-deployment model, not every unsafe or surprising behavior is a security
-vulnerability in Iceberg Go itself.
+Apache Iceberg Go is a client library, table-format implementation, catalog
+client, and command-line tool. It is commonly embedded in applications and
+services that supply their own authorization, credential management, and
+storage policy.
 
-This model is intended to answer:
+This threat model helps a reviewer describe:
 
-- what Iceberg Go generally treats as a security vulnerability
-- what Iceberg Go generally treats as correctness, hardening, or deployment
-  work
-- which boundaries are primarily owned by Iceberg Go versus the surrounding
-  catalog, application, or service
-- which issue classes should be downgraded by default by scanners
+- the actor and the capability the actor already has;
+- the input or service the actor controls;
+- the Iceberg Go-owned or external boundary affected;
+- any secret or credential that reaches a new audience; and
+- demonstrated confidentiality, integrity, availability, memory, or
+  destructive impact.
+
+The categories below are conditional triage defaults, not blanket rejection
+rules. A finding that crosses an Iceberg Go-owned boundary or demonstrates a
+security impact must be reviewed even when it also has a normally trusted
+precondition.
+
+In this document, a **new audience** is any log, error, CLI text or JSON output,
+serialized metadata, host, catalog or client, or principal that was not already
+authorized to receive the secret, credential, or credential-bearing request.
 
 ## Scope
 
-This model is scoped to the Apache Iceberg Go repository itself:
+This model covers Iceberg Go-owned behavior in:
 
-- table format and metadata handling
-- catalog and REST catalog clients
-- transport, credential, and configuration handling implemented in this repo
-- command-line or helper tooling shipped in this repo
+- the Go library and CLI;
+- catalog implementations and REST catalog clients;
+- configuration, HTTP transport, authentication, request signing, metrics, and
+  delegated storage credentials;
+- table metadata, manifests, data-file planning, deletion vectors, and Puffin
+  files; and
+- built-in and registered IO adapters, including local filesystem operations.
 
-It is not a general threat model for every Go service that embeds Iceberg Go.
-
-In particular, it does not attempt to define the complete security model for:
-
-- applications or services that embed Iceberg Go
-- storage-level authorization enforced outside Iceberg Go
+It is not a complete threat model for every process or deployment that embeds
+Iceberg Go. Application user authorization, provider IAM, storage ACLs,
+catalog-side credential scope, and embedding-application tenant isolation are
+external enforcement points unless Iceberg Go explicitly takes ownership of a
+more specific boundary.
 
 ## Security Goals
 
 Iceberg Go should:
 
-- avoid exposing secrets or delegated credentials to principals that were not
-  already trusted with them
-- avoid creating new unauthorized capabilities in Iceberg Go-owned components
-- avoid violating trust boundaries that Iceberg Go itself owns, such as
-  leaking auth, transport, or credential-bearing state across catalog or
-  client boundaries in the same process
+- prevent tokens, client secrets, storage credentials, signed requests, and
+  credential-bearing configuration from reaching a new audience;
+- preserve per-catalog and per-client authentication and credential isolation
+  for state Iceberg Go creates, including internally managed auth, transport,
+  metrics, and delegated-credential state;
+- avoid creating network, signing, storage, or destructive capabilities that
+  the configured principal did not authorize;
+- avoid attacker-observable memory disclosure or memory corruption in direct
+  or transitive native or `unsafe` behavior; and
+- avoid deleting or mutating objects beyond the actor's proven table,
+  warehouse, catalog, or storage capability.
 
-Iceberg Go does not aim to be the primary enforcement point for:
-
-- user-to-user authorization inside the embedding application
-- storage-level authorization
-- service-side credential scoping performed by an external catalog
+Iceberg Go is not the primary enforcement point for application user
+authorization, provider IAM, storage ACLs, catalog-side credential scope, or
+tenant isolation in the embedding application. Those external responsibilities
+do not waive the Iceberg Go-owned isolation and routing goals above.
 
 ## Roles
 
 ### Operator
 
-The operator configures the surrounding catalog, application, service, and
-storage integration around Iceberg Go. This role is trusted to choose
-endpoints, warehouses, storage integrations, and credentials.
+The operator chooses catalog properties, initial endpoints, warehouse and
+storage roots, transports, TLS and proxy settings, and credentials. Those
+choices are trusted deployment inputs. An operator may also deliberately
+install plugins or share objects between clients.
 
 ### Catalog control plane
 
-The catalog control plane resolves tables and supplies metadata, locations,
-configuration, and delegated credentials to Iceberg Go. It may be implemented
-by a REST catalog server or another catalog implementation. Iceberg Go assumes
-this control plane is trusted and outside its primary security boundary.
+The selected catalog resolves tables and may supply metadata, locations,
+configuration, endpoint capabilities, and delegated storage credentials. The
+catalog is normally trusted for those control-plane choices, but that trust
+does not authorize Iceberg Go to send credentials to an unintended audience or
+to cross a separate client boundary.
 
 ### REST catalog client
 
-The REST catalog client consumes catalog-provided metadata, configuration, and
-credentials. Client-side bugs in routing, caching, or reuse may still be
-security-relevant if they leak credential-bearing state across boundaries that
-the Iceberg Go client is expected to preserve.
+The REST client applies operator and catalog configuration, constructs
+catalog-local sessions, routes OAuth and catalog requests, optionally signs
+requests with SigV4, negotiates advertised endpoints, and selects
+prefix-matching vended credentials for storage IO. Client-owned routing,
+selection, caching, or reuse bugs are in scope when they create a new audience,
+cross a separately constructed catalog or client, or add an unauthorized
+capability.
 
 ### Embedding application
 
-Applications and services embedding Iceberg Go are responsible for their own
-user-facing authorization boundaries unless Iceberg Go explicitly documents
-otherwise.
+The embedding application decides which users may invoke Iceberg Go and owns
+its user and tenant boundaries. It may intentionally share an `AuthManager`,
+transport, database handle, registry implementation, or other mutable object.
+Such deliberate sharing is caller-owned; Iceberg Go-created state that crosses
+otherwise separate catalog or client instances is not.
 
 ### Table writer or maintainer
 
-This role may already have legitimate power to write or replace table
-metadata, write or delete files, choose paths under an allowed warehouse or
-table location, and invoke destructive maintenance operations. If a report
-only shows a new way to achieve the same effect this role can already cause
-legitimately, it is usually not a security issue in Iceberg Go.
+A writer or maintainer may be authorized to replace metadata, add or remove
+table references, write files, and invoke maintenance operations. A reviewer
+must establish the actor's actual capability, the affected objects, and the
+audience before treating a new path as equivalent to an authorized operation.
+
+### CLI operator
+
+The CLI is an operator-authorized client, not a privilege boundary.
+Confirmations, `--yes`, and dry-run behavior are safety UX. Destructive
+commands execute with the caller's catalog and storage authority; the CLI does
+not add a separate authorization layer.
 
 ## Trust Boundaries
 
 ### Boundary 1: operator-trusted configuration
 
-The following are generally treated as trusted operator or deployment inputs:
+Catalog properties, initial endpoints, warehouse and storage roots, custom
+transports, TLS configuration, proxy settings, and credentials are
+operator-trusted deployment inputs. A finding that requires direct control of
+those values normally has a trusted-input precondition and therefore lower
+confidence.
 
-- catalog properties
-- endpoint configuration
-- warehouse and storage roots
-- transport wiring and credential configuration
+That downgrade does not apply when Iceberg Go exposes a secret to a new
+audience, reuses state across a separately constructed catalog or client,
+bypasses an operator-selected restriction, causes attacker-observable memory
+impact, or performs an unauthorized mutation or deletion.
 
-If a report depends on the attacker controlling those values directly, it is
-usually not a vulnerability in Iceberg Go itself.
+### Boundary 2: catalog-supplied metadata and locations
 
-### Boundary 2: catalog-supplied metadata
+The selected catalog is trusted to provide table metadata, table and file
+locations, table properties, manifests, data-file references, statistics, and
+other control-plane information. Iceberg Go follows those values to construct
+IO and table operations; it does not impose a universal table-root sandbox.
 
-Iceberg Go often accepts metadata locations, table properties, namespace
-properties, and related control-plane information from a catalog. By default,
-Iceberg Go treats those sources as trusted.
+Incorrect or malicious catalog-supplied content is normally a trusted-input or
+robustness precondition. It remains security-relevant when processing it
+discloses a secret, crosses client state, creates an unauthorized capability,
+causes attacker-observable memory disclosure or corruption, or deletes or
+mutates objects beyond the actor's proven authority.
 
-This means a malicious catalog supplying incorrect or malicious metadata is
-usually not an Iceberg Go vulnerability by itself.
+### Boundary 3: REST configuration, routing, and delegated storage access
 
-### Boundary 3: REST catalog-supplied configuration and delegated storage access
+The selected REST catalog is trusted to supply metadata, locations,
+`/v1/config` defaults and overrides, endpoint capability advertisements, and
+vended storage credentials. Configuration merging may change the effective
+REST base URI, OAuth route, catalog prefix, and other client properties.
+Advertised capabilities select REST operations, while location-prefix matching
+selects vended credentials used to construct storage IO.
 
-In REST deployments, Iceberg Go may also accept service endpoints,
-configuration, and delegated storage access from the REST catalog server. By
-default, those are treated as trusted control-plane inputs unless Iceberg Go
-explicitly documents a stronger guarantee.
+A malicious control plane is normally a trusted-input precondition, but that
+precondition does not dismiss a client bug that forwards a credential to a new
+host, creates an unexpected outbound request, crosses a separately constructed
+catalog/client boundary, or bypasses an operator-selected restriction.
 
-This means a malicious REST catalog server sending dangerous endpoints is
-usually not an Iceberg Go vulnerability by itself. It also means many
-credential-selection bugs are often correctness or specification issues rather
-than security boundary failures.
-
-The major exception is secret exposure. If Iceberg Go surfaces credentials or
-secrets to a new audience that was not already trusted with them, that is
-security-relevant.
+OAuth routing, SigV4 signing, endpoint selection, and delegated-credential
+selection therefore require impact-based review. The mere presence of a
+configurable endpoint, server override, advertised endpoint, or vended
+credential is not by itself a vulnerability.
 
 ### Boundary 4: storage-level authorization
 
-Object store permissions are enforced by the storage provider and the
-credentials the surrounding deployment chooses to hand to Iceberg Go. Iceberg
-Go is not the root authority for bucket- or object-level authorization.
+Storage providers enforce object permissions through provider IAM, storage
+ACLs, and the credentials made available to Iceberg Go. Catalog-side credential
+scope is also an external enforcement point.
+
+A storage operation that is already authorized against the same objects is
+normally not a new Iceberg Go capability. A client bug remains in scope if it
+misroutes credentials, expands their effective use, crosses client state, or
+deletes or mutates objects outside the actor's proven storage capability.
+
+### Boundary 5: Iceberg Go-owned client state
+
+Iceberg Go internally creates REST sessions and per-catalog authentication,
+transport, metrics, and delegated-credential state. Separately constructed
+catalogs and clients must not receive one another's internally managed state.
+
+Callers may intentionally share an `AuthManager`, custom transport, database
+handle or implementation, or registry implementation. Effects inherent in that
+explicitly shared object are caller-owned by default. This exception does not
+disclaim credential crossover or state reuse caused by Iceberg Go-owned
+per-catalog or per-client state.
+
+### Boundary 6: configuration discovery and process-global registries
+
+Iceberg Go loads operator-controlled configuration from
+`~/.iceberg-go.yaml`, from the directory selected by `GOICEBERG_HOME`, or from
+an explicit CLI `--config` path. The library also initializes process-global
+configuration state, and its catalog and IO registries are process-global
+plugin mechanisms that callers can extend.
+
+Those documented configuration sources and registries are not tenant-isolation
+boundaries. Control of them normally demonstrates operator or
+embedding-application authority and lowers scanner confidence. Reassess when
+Iceberg Go sends a secret to a new audience, crosses internally managed
+catalog/client state, creates an unauthorized integrity capability, exposes or
+corrupts memory, or causes an unauthorized destructive effect.
+
+### Boundary 7: table provenance
+
+Iceberg Go follows caller- or catalog-selected metadata, manifest, data, and
+Puffin locations without authenticating who authored the referenced content.
+Dataset provenance and admission normally belong to the caller, catalog, or
+embedding application.
+
+Missing or malicious provenance is therefore a confidence-lowering
+precondition, not a blanket exclusion. A new credential audience,
+cross-catalog or cross-client state reuse, unauthorized integrity impact,
+attacker-observable memory impact, or destructive side effect remains
+reviewable regardless of who supplied the table.
 
 ## In-Scope Security Vulnerabilities
 
-The following categories are generally security-relevant in Iceberg Go when
-the report is credible and reproducible.
+The following categories are higher-confidence when the report identifies a
+credible actor, controlled input, affected boundary, and reproducible impact.
 
 ### 1. Secret or credential disclosure to a new audience
 
-Examples include:
+Examples include tokens, client secrets, storage credentials, signed requests,
+or credential-bearing configuration reaching:
 
-- catalog or storage credentials exposed through a user-visible surface
-- one catalog's credentials or auth state leaking into another catalog or
-  client
+- a new log, error, CLI text or JSON output, or serialized metadata record;
+- a host other than the one authorized to receive it;
+- another catalog or client; or
+- another principal.
+
+The report should identify the secret, its intended audience, the new audience,
+and the Iceberg Go-owned path that disclosed it.
 
 ### 2. Iceberg Go-owned trust-boundary violations
 
-Security issues exist when Iceberg Go itself is expected to separate catalogs,
-clients, or principals and fails to do so.
+Internally managed auth, transport, metrics, or delegated-credential state
+crossing separately constructed catalog or client instances is in scope. This
+includes unintended caching or reuse even when both instances run in one
+process.
 
-Examples include:
+The mere existence of a process-global registry or a caller-supplied shared
+object is not sufficient. The report must show that Iceberg Go-owned state
+crossed a boundary the caller did not intentionally combine.
 
-- process-global auth or transport state crossing catalog instances
-- secret-bearing state from one principal reused for another principal within
-  an Iceberg Go-owned boundary
+### 3. New unauthorized client capabilities
+
+Client-owned OAuth routing, SigV4 signing, REST endpoint selection, or
+vended-credential prefix selection is in scope when it creates a network,
+signing, or storage capability the configured principal did not authorize.
+Bypassing an operator-selected endpoint, TLS, proxy, credential-scope, or
+routing restriction is also reviewable.
+
+A configurable endpoint or a catalog-advertised operation alone is not a
+vulnerability; the report must show the new capability and why the relevant
+principal did not already authorize it.
+
+### 4. Demonstrated memory disclosure or corruption
+
+Demonstrated attacker-observable memory disclosure or memory corruption through
+direct or transitive native or `unsafe` behavior is in scope. Classification
+depends on observable confidentiality or integrity impact, not on whether the
+failure originates in this repository or a dependency.
+
+The mere presence of an `unsafe` zero-copy conversion, a Go panic, or malformed
+input is not sufficient without the memory or boundary impact.
+
+### 5. Unauthorized destructive effects
+
+Deletion or mutation beyond the actor's proven table, warehouse, catalog, or
+storage capability is in scope. Review cross-table or cross-root writes and
+deletions, and purge behavior that reaches objects the actor was not authorized
+to affect.
+
+Iceberg Go does not guarantee universal table-root containment.
+`write.data.path` and `write.metadata.path` may select paths outside the table
+root, local IO operates on supplied filesystem paths, and `PurgeFiles` may
+delete referenced files outside the table root. Those behaviors are not
+automatically vulnerabilities, but cross-table/root deletion or unauthorized
+purge remains reviewable.
 
 ## Usually Out of Scope or Non-Security by Default
 
-These categories may still be real bugs worth fixing, but they are not usually
-security vulnerabilities in Iceberg Go itself.
+The following categories usually lower confidence rather than reject a report.
+Every default is conditional: a demonstrated new secret audience,
+cross-catalog or cross-client effect, unauthorized integrity capability,
+attacker-observable memory impact, documented Iceberg Go-owned availability
+boundary, or unauthorized destructive effect requires reassessment.
 
 ### 1. Correctness bugs
 
-Examples include incorrect metadata handling, ambiguous matching semantics,
-and logic bugs that do not create a new trust-boundary violation.
+Incorrect metadata results, ambiguous matching, specification deviations, and
+logic errors are normally correctness issues when they affect only results the
+actor was already authorized to obtain or change.
+
+Reassess when the bug exposes a secret, crosses internally managed client
+state, creates an unauthorized capability or integrity effect, discloses or
+corrupts memory, violates an Iceberg Go-owned availability boundary, or causes
+an unauthorized mutation or deletion.
 
 ### 2. Parser hardening and malformed-input robustness
 
-Malformed-input crashes, runtime exceptions, and memory amplification are
-usually treated as robustness or hardening work rather than security issues in
-Iceberg Go itself.
+For malformed metadata, manifests, Avro, Parquet, Puffin, or deletion vectors,
+panics, errors, allocation amplification, decompression expansion, and
+availability-only failures are robustness or hardening findings by default.
 
-### 3. Malicious catalog or external service scenarios
+Reassess when the report demonstrates secret exposure, attacker-observable
+memory, unauthorized integrity impact, cross-client effects, or a documented
+availability boundary owned by Iceberg Go.
 
-Reports that require a malicious catalog or other external control-plane
-service are usually outside Iceberg Go's primary security boundary.
+Destructive processing of referenced paths is also reviewable when it exceeds
+the actor's proven authority.
 
-### 4. Equivalent-harm reports
+### 3. Resource exhaustion and algorithmic complexity
 
-If the actor already has a legitimate capability that can cause the same harm,
-the new path is usually not a security issue.
+CPU, memory, goroutine, IO, network, allocation, or decompression amplification
+is normally hardening work when the only demonstrated effect is availability
+within resources the caller or trusted catalog was already allowed to consume.
+This includes readers that buffer an input or expand compressed data without a
+decoded-size limit.
+
+Reassess when the report demonstrates secret exposure, cross-client effects,
+unauthorized integrity impact, attacker-observable memory, an unauthorized
+destructive effect, or a documented availability or resource-isolation
+boundary owned by Iceberg Go.
+
+### 4. Malicious catalog or external service scenarios
+
+A report that requires the selected catalog, OAuth service, storage service, or
+other operator-trusted control plane to be malicious normally has a trusted
+precondition and lower confidence. Trust in that service is not proof that all
+resulting client behavior is authorized.
+
+A new credential audience, unexpected outbound request, cross-catalog or
+cross-client state reuse, bypass of an operator-selected restriction,
+unauthorized integrity or memory impact, or unauthorized destructive effect
+overrides this default downgrade.
+
+### 5. Equivalent-harm and authorized-writer reports
+
+Equivalent-harm claims require evidence that the actor already had the same
+capability against the same objects and audience. Writer or maintainer status
+alone is not that evidence, and no universal catalog path-containment guarantee
+should be assumed.
+
+`write.data.path`, `write.metadata.path`, local IO, and `PurgeFiles` may operate
+on referenced external paths. A new credential audience, cross-boundary state
+reuse, greater integrity capability, attacker-observable memory impact,
+cross-table/root deletion, or unauthorized purge overrides the default
+downgrade.
+
+### 6. Caller-owned shared objects and process-global registries
+
+Effects that follow directly from a caller deliberately sharing an
+`AuthManager`, transport, database handle, registry implementation, or other
+mutable object are normally caller-owned. Process-global catalog and IO
+registries are plugin mechanisms, and their existence alone is not a
+credential-isolation failure.
+
+Reassess when Iceberg Go-owned per-catalog or per-client state crosses into the
+shared object unexpectedly, a secret gains a new audience, or the behavior
+creates unauthorized integrity, memory, availability-boundary, or destructive
+impact.
+
+### 7. Configuration loaded from documented locations
+
+Reading `~/.iceberg-go.yaml`, using the directory selected by
+`GOICEBERG_HOME`, and honoring an explicit CLI `--config` path are documented,
+operator-controlled configuration behavior. A report based only on an actor
+who can already modify one of those selected sources normally has lower
+confidence.
+
+Reassess when loading that configuration sends a secret to a new audience,
+crosses internally managed client state, bypasses an operator-selected
+restriction, causes unauthorized integrity or attacker-observable memory
+impact, violates an Iceberg Go-owned availability boundary, or causes an
+unauthorized destructive effect.
+
+### 8. Provenance of the table being read
+
+Iceberg Go does not authenticate authorship of caller- or catalog-selected table
+metadata, manifests, data files, or Puffin files. A finding based only on
+untrusted content has lower confidence when the report does not establish that
+the deployment admitted that content across a boundary Iceberg Go owns. An
+external file reference alone is not a vulnerability.
+
+Reassess when the content exposes a secret to a new audience, crosses
+catalog/client state, creates unauthorized integrity impact, demonstrates
+attacker-observable memory disclosure or corruption, violates a documented
+Iceberg Go-owned availability boundary, or triggers an unauthorized destructive
+effect.
 
 ## Scanner Calibration Rules
 
-A scanner targeting Iceberg Go should treat a finding as higher-confidence
-only if it plausibly shows one of the following:
+Higher-confidence signals include:
 
-- exposure of a secret or delegated credential to a new audience
-- creation of a new unauthorized capability in an Iceberg Go-owned component
-- violation of an Iceberg Go-owned trust boundary rather than a surrounding
-  catalog, application, service, or operator boundary
+- a secret or delegated credential reaching a new audience;
+- a new unauthorized capability in Iceberg Go-owned code;
+- violation of internally managed per-catalog or per-client isolation; or
+- demonstrated confidentiality, integrity, memory, or unauthorized destructive
+  impact.
 
-A finding should be downgraded or rejected by default if it instead depends
-primarily on:
+Lower-confidence signals include:
 
-- malformed-input robustness or denial-of-service behavior
-- a malicious catalog or external service
-- a principal that already has equivalent power through legitimate write or
-  maintenance capabilities
+- malformed-input or resource-exhaustion findings with availability-only impact
+  and no documented Iceberg Go-owned availability boundary;
+- a trusted malicious control plane with no new credential audience, unexpected
+  outbound capability, or cross-client effect;
+- an actor with proven equivalent capability against the same objects and
+  audience;
+- behavior inherent in caller-owned shared objects;
+- documented configuration discovery; or
+- data with no established provenance and no demonstrated Iceberg Go-owned
+  boundary crossing.
+
+Scanners should report the actor, controlled input, affected boundary, existing
+and new capability, intended and actual credential audience, and demonstrated
+impact. They should not classify the mere presence of a configurable endpoint,
+`unsafe` conversion, global registry, malformed input, or external file
+reference as a vulnerability.
+
+These signals route findings for human review; they do not automatically accept
+or reject a report. Endpoint routing, credential scope, shared state, `unsafe`
+behavior, and destructive paths always require explicit human review.
