@@ -231,6 +231,9 @@ func IsDeletionVector(df iceberg.DataFile) bool {
 		df.ContentType() == iceberg.EntryContentPosDeletes
 }
 
+// Scan represents a table scan. It implements [io.Closer]; callers should
+// close it when they are done, including early exits after remote planning
+// succeeds but before all records are consumed.
 type Scan struct {
 	identifier          Identifier
 	metadata            Metadata

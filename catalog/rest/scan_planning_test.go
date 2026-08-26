@@ -213,6 +213,7 @@ func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
 
 	for _, payload := range []string{
 		`{"status":"submitted","plan-id":"abc","file-scan-tasks":[]}`,
+		`{"status":"submitted","plan-id":"abc","delete-files":[]}`,
 		`{"status":"failed","plan-tasks":[]}`,
 		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
 		`{"status":"failed","plan-id":"abc"}`,
@@ -286,6 +287,7 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 
 		for _, payload := range []string{
 			`{"status":"submitted","plan-tasks":[]}`,
+			`{"status":"submitted","delete-files":[]}`,
 			`{"status":"cancelled","file-scan-tasks":[]}`,
 			`{"status":"completed","delete-files":[{}]}`,
 		} {

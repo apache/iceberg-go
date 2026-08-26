@@ -28,29 +28,40 @@ import (
 func TestFetchScanTasksResponseRejectsInvalidShape(t *testing.T) {
 	t.Parallel()
 
-	for _, payload := range []string{
-		`{"plan-tasks":null}`,
-		`{"file-scan-tasks":null}`,
-		`{"plan-tasks":[],"delete-files":[{"content":"position-deletes"}]}`,
-	} {
-		var resp FetchScanTasksResponse
-		err := json.Unmarshal([]byte(payload), &resp)
-		require.ErrorIs(t, err, ErrRESTError, payload)
+	tests := map[string]string{
+		"null plan-tasks":            `{"plan-tasks":null}`,
+		"null file-scan-tasks":       `{"file-scan-tasks":null}`,
+		"delete-files without tasks": `{"plan-tasks":[],"delete-files":[{"content":"position-deletes"}]}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var resp FetchScanTasksResponse
+			err := json.Unmarshal([]byte(payload), &resp)
+			require.ErrorIs(t, err, ErrRESTError)
+		})
 	}
 }
 
 func TestFetchScanTasksResponseAcceptsPresentEmptyTaskField(t *testing.T) {
 	t.Parallel()
 
-	for _, payload := range []string{
-		`{}`,
-		`{"plan-tasks":[]}`,
-		`{"file-scan-tasks":[]}`,
-		`{"delete-files":[]}`,
-	} {
-		var resp FetchScanTasksResponse
-		require.NoError(t, json.Unmarshal([]byte(payload), &resp), payload)
-		assert.Empty(t, resp.PlanTasks)
-		assert.Empty(t, resp.FileScanTasks)
+	tests := map[string]string{
+		"no task fields":        `{}`,
+		"empty plan-tasks":      `{"plan-tasks":[]}`,
+		"empty file-scan-tasks": `{"file-scan-tasks":[]}`,
+		"empty delete-files":    `{"delete-files":[]}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var resp FetchScanTasksResponse
+			require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+			assert.Empty(t, resp.PlanTasks)
+			assert.Empty(t, resp.FileScanTasks)
+			assert.Empty(t, resp.DeleteFiles)
+		})
 	}
 }

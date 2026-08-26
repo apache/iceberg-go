@@ -23,6 +23,7 @@ package table
 
 import (
 	"context"
+	"io"
 
 	"github.com/apache/iceberg-go"
 	icebergio "github.com/apache/iceberg-go/io"
@@ -76,6 +77,9 @@ type ScanPlanningMetadata interface {
 // Compile-time guard that the full Metadata interface still satisfies the
 // narrowed planner view, so callers can pass a table.Metadata directly.
 var _ ScanPlanningMetadata = (Metadata)(nil)
+
+// Compile-time guard that Scan exposes the lifecycle contract as io.Closer.
+var _ io.Closer = (*Scan)(nil)
 
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
