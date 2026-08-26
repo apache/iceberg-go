@@ -20,6 +20,7 @@ LICENSE
 NOTICE
 go.sum
 build
+CLAUDE.md
 rat-results.txt
 operation_string.go
 duckdb_v3_manifest_list.avro
