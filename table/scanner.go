@@ -1001,7 +1001,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
 	entries := newManifestEntries()
-	g, _ := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
 	partitionFilters := scan.partitionFiltersForSchema(schema)
@@ -1015,7 +1015,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
-			fs, err := manifestIO.acquire(ctx)
+			fs, err := manifestIO.acquire(gctx)
 			if err != nil {
 				return err
 			}

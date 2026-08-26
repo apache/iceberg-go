@@ -99,6 +99,23 @@ func (fs *expiringManifestIO) Remove(name string) error {
 	return fs.base.Remove(name)
 }
 
+type failingManifestIO struct {
+	base        *iceio.MemFS
+	failingPath string
+}
+
+func (fs *failingManifestIO) Open(name string) (iceio.File, error) {
+	if name == fs.failingPath {
+		return nil, errors.New("manifest failed")
+	}
+
+	return fs.base.Open(name)
+}
+
+func (fs *failingManifestIO) Remove(name string) error {
+	return fs.base.Remove(name)
+}
+
 func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {
 	scan, fs := scanWithManifestCount(t, 1)
 	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
@@ -117,6 +134,35 @@ func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, tasks, 1)
 	assert.Equal(t, int64(2), calls.Load(), "manifest workers must reacquire FileIO after the manifest list read")
+}
+
+func TestPlanFilesStopsLoadingManifestIOAfterWorkerError(t *testing.T) {
+	scan, fs := scanWithManifestCount(t, 2)
+	scan.concurrency = 1
+
+	var factoryCalls atomic.Int64
+	var canceledFactoryCalls atomic.Int64
+	scan.ioF = func(ctx context.Context) (iceio.IO, error) {
+		if ctx.Err() != nil {
+			canceledFactoryCalls.Add(1)
+
+			return nil, ctx.Err()
+		}
+
+		if factoryCalls.Add(1) == 1 {
+			return fs, nil
+		}
+
+		return &failingManifestIO{
+			base:        fs,
+			failingPath: "mem://planning/table/metadata/manifest-0.avro",
+		}, nil
+	}
+
+	_, err := scan.PlanFiles(t.Context())
+	require.ErrorContains(t, err, "manifest failed")
+	assert.Equal(t, int64(1), canceledFactoryCalls.Load(),
+		"a later manifest worker should observe cancellation before loading FileIO")
 }
 
 func BenchmarkPlanFilesFileIOFactory(b *testing.B) {
