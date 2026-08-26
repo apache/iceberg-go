@@ -704,6 +704,61 @@ func TestBuildPartitionEvaluatorWithInvalidSpecID(t *testing.T) {
 	assert.ErrorContains(t, err, "id 999")
 }
 
+func TestBuildPartitionEvaluatorMatchesPartitionValues(t *testing.T) {
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id_part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "s3://test-bucket/test_table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	partitionFilter := iceberg.EqualTo(iceberg.Reference("id_part"), int32(7))
+	partitionFilters := newKeyDefaultMapWrapErr(func(int) (iceberg.BooleanExpression, error) {
+		return partitionFilter, nil
+	})
+	evaluator, err := buildPartitionEvaluator(spec.ID(), metadata, schema, partitionFilters, true)
+	require.NoError(t, err)
+
+	dataFile, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"s3://test-bucket/test_table/data.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: int32(7)},
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	matches, err := evaluator(dataFile.Build())
+	require.NoError(t, err)
+	assert.True(t, matches)
+
+	dataFile, err = iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"s3://test-bucket/test_table/other.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: int32(8)},
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	matches, err = evaluator(dataFile.Build())
+	require.NoError(t, err)
+	assert.False(t, matches)
+}
+
 func TestTimeTravelManifestPruningUsesSnapshotSchema(t *testing.T) {
 	spec := iceberg.NewPartitionSpecID(0, iceberg.PartitionField{
 		SourceIDs: []int{1},
