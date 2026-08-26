@@ -933,17 +933,42 @@ func scanFilterSchema() *iceberg.Schema {
 	)
 }
 
-// scanTestMetadata is a ScanPlanningMetadata carrying only a schema — all filter
-// encoding needs.
+// scanTestMetadata is a ScanPlanningMetadata carrying a schema and the
+// unpartitioned spec — what filter encoding and task decoding need.
 type scanTestMetadata struct{ schema *iceberg.Schema }
 
-func (m scanTestMetadata) CurrentSchema() *iceberg.Schema               { return m.schema }
-func (m scanTestMetadata) Schemas() []*iceberg.Schema                   { return []*iceberg.Schema{m.schema} }
-func (m scanTestMetadata) PartitionSpec() iceberg.PartitionSpec         { return iceberg.PartitionSpec{} }
-func (m scanTestMetadata) PartitionSpecByID(int) *iceberg.PartitionSpec { return nil }
-func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot             { return nil }
-func (m scanTestMetadata) SnapshotByID(int64) *table.Snapshot           { return nil }
-func (m scanTestMetadata) Properties() iceberg.Properties               { return nil }
+func (m scanTestMetadata) CurrentSchema() *iceberg.Schema       { return m.schema }
+func (m scanTestMetadata) Schemas() []*iceberg.Schema           { return []*iceberg.Schema{m.schema} }
+func (m scanTestMetadata) PartitionSpec() iceberg.PartitionSpec { return *iceberg.UnpartitionedSpec }
+func (m scanTestMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	if id != 0 {
+		return nil
+	}
+
+	return iceberg.UnpartitionedSpec
+}
+func (m scanTestMetadata) CurrentSnapshot() *table.Snapshot   { return nil }
+func (m scanTestMetadata) SnapshotByID(int64) *table.Snapshot { return nil }
+func (m scanTestMetadata) Properties() iceberg.Properties     { return nil }
+
+// scanTaskJSON is one unpartitioned data-file scan task, optionally referencing
+// delete files by index into its own envelope's delete-files array.
+func scanTaskJSON(path, refsJSON string) string {
+	return `{"data-file":{"spec-id":0,"partition":[],"content":"data","file-path":"` + path +
+		`","file-format":"parquet","file-size-in-bytes":4096,"record-count":100}` + refsJSON + `}`
+}
+
+// deleteFileJSON is one delete file: parquet for a positional delete, puffin for
+// a deletion vector.
+func deleteFileJSON(path, format string) string {
+	extra := ""
+	if format == "puffin" {
+		extra = `,"content-offset":0,"content-size-in-bytes":16`
+	}
+
+	return `{"spec-id":0,"partition":[],"content":"position-deletes","file-path":"` + path +
+		`","file-format":"` + format + `","file-size-in-bytes":512,"record-count":5` + extra + `}`
+}
 
 // planFilesReq is a minimal planner request naming the test table.
 func planFilesReq() table.ScanPlanningRequest {
@@ -997,21 +1022,118 @@ func TestPlanFilesEncodesFilter(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestPlanFilesTasksNotYetDecodable documents the one stubbed boundary: a plan
-// that returns actual file-scan-tasks surfaces ErrNotImplemented until the
-// scan-task decoder phase fills in RESTFileScanTask.
-func TestPlanFilesTasksNotYetDecodable(t *testing.T) {
+// TestPlanFilesDecodesTasks covers the ordinary case: an inline-completed plan
+// carrying a data file comes back as a FileScanTask, with the scan's own filter
+// standing in as the residual the server omitted.
+func TestPlanFilesDecodesTasks(t *testing.T) {
 	t.Parallel()
 
 	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
 		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
-			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","file-scan-tasks":[{}]}`))
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","file-scan-tasks":[` +
+				scanTaskJSON("s3://bucket/tbl/data.parquet", "") + `]}`))
 			require.NoError(t, err)
 		})
 	})
 
-	_, err := cat.PlanFiles(context.Background(), planFilesReq())
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	planReq := planFilesReq()
+	planReq.RowFilter = iceberg.EqualTo(iceberg.Reference("i"), int32(25))
+
+	result, err := cat.PlanFiles(context.Background(), planReq)
+	require.NoError(t, err)
+	require.Len(t, result.Tasks, 1)
+	assert.Equal(t, "s3://bucket/tbl/data.parquet", result.Tasks[0].File.FilePath())
+	assert.Equal(t, int64(4096), result.Tasks[0].Length)
+	assert.True(t, result.Tasks[0].Residual.Equals(planReq.RowFilter))
+}
+
+// TestPlanFilesDecodesEachEnvelopeSeparately is the regression guard for
+// envelope-local delete references. Both envelopes here say
+// delete-file-references [0], each meaning their own delete file. Accumulating
+// the raw payloads before decoding would repoint the second task at the first
+// envelope's delete — the wrong deletes applied, with no error anywhere.
+func TestPlanFilesDecodesEachEnvelopeSeparately(t *testing.T) {
+	t.Parallel()
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan, endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","plan-tasks":["h1"],"file-scan-tasks":[` +
+				scanTaskJSON("s3://bucket/tbl/inline.parquet", `,"delete-file-references":[0]`) +
+				`],"delete-files":[` + deleteFileJSON("s3://bucket/tbl/inline-delete.parquet", "parquet") + `]}`))
+			require.NoError(t, err)
+		})
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"file-scan-tasks":[` +
+				scanTaskJSON("s3://bucket/tbl/fanout.parquet", `,"delete-file-references":[0]`) +
+				`],"delete-files":[` + deleteFileJSON("s3://bucket/tbl/fanout-delete.parquet", "parquet") + `]}`))
+			require.NoError(t, err)
+		})
+	})
+
+	result, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.NoError(t, err)
+	require.Len(t, result.Tasks, 2)
+
+	// Queue order: the inline envelope first, then each plan-task it fans out to.
+	assert.Equal(t, "s3://bucket/tbl/inline.parquet", result.Tasks[0].File.FilePath())
+	require.Len(t, result.Tasks[0].DeleteFiles, 1)
+	assert.Equal(t, "s3://bucket/tbl/inline-delete.parquet", result.Tasks[0].DeleteFiles[0].FilePath())
+
+	assert.Equal(t, "s3://bucket/tbl/fanout.parquet", result.Tasks[1].File.FilePath())
+	require.Len(t, result.Tasks[1].DeleteFiles, 1)
+	assert.Equal(t, "s3://bucket/tbl/fanout-delete.parquet", result.Tasks[1].DeleteFiles[0].FilePath())
+}
+
+// TestPlanFilesSuppressesPositionalDeletesCoveredByDV checks that a server
+// referencing both a deletion vector and a positional delete for one data file
+// yields only the DV, matching (*Scan).planFilesLocal.
+func TestPlanFilesSuppressesPositionalDeletesCoveredByDV(t *testing.T) {
+	t.Parallel()
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1","file-scan-tasks":[` +
+				scanTaskJSON("s3://bucket/tbl/data.parquet", `,"delete-file-references":[0,1]`) +
+				`],"delete-files":[` +
+				deleteFileJSON("s3://bucket/tbl/deletes.parquet", "parquet") + `,` +
+				deleteFileJSON("s3://bucket/tbl/deletes.puffin", "puffin") + `]}`))
+			require.NoError(t, err)
+		})
+	})
+
+	result, err := cat.PlanFiles(context.Background(), planFilesReq())
+	require.NoError(t, err)
+	require.Len(t, result.Tasks, 1)
+	assert.Empty(t, result.Tasks[0].DeleteFiles, "a DV supersedes positional deletes for its data file")
+	require.Len(t, result.Tasks[0].DeletionVectorFiles, 1)
+	assert.Equal(t, "s3://bucket/tbl/deletes.puffin", result.Tasks[0].DeletionVectorFiles[0].FilePath())
+}
+
+// TestPlanFilesBindsFilterToRequestSchema checks the filter binds against the
+// schema the scan resolved, not the table's current one — the snapshot-pinned
+// case, where the two differ.
+func TestPlanFilesBindsFilterToRequestSchema(t *testing.T) {
+	t.Parallel()
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointPlanTableScan}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/plan", func(w http.ResponseWriter, req *http.Request) {
+			var got PlanTableScanRequest
+			require.NoError(t, json.NewDecoder(req.Body).Decode(&got))
+			assert.JSONEq(t, `{"type":"eq","term":"renamed","value":25}`, string(got.Filter))
+
+			_, err := w.Write([]byte(`{"status":"completed","plan-id":"plan-1"}`))
+			require.NoError(t, err)
+		})
+	})
+
+	planReq := planFilesReq()
+	planReq.Schema = iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "renamed", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	planReq.RowFilter = iceberg.EqualTo(iceberg.Reference("renamed"), int32(25))
+
+	_, err := cat.PlanFiles(context.Background(), planReq)
+	require.NoError(t, err)
 }
 
 // TestPlanFilesPollsSubmittedPlan covers the async arm: a submitted plan is

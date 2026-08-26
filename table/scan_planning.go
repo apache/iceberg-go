@@ -84,17 +84,21 @@ var _ ScanPlanningMetadata = (Metadata)(nil)
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
-// Open question (epic OQ4): when the table has evolved, UseSnapshotSchema must
-// pin which schema binds a returned residual and the partition decode: the
-// snapshot's schema (via schema-id), kept separate from each file's partition
-// spec-id. Incremental scans (start/end snapshot) are deferred to a later
-// phase; point-in-time SnapshotID lands first.
+// When the table has evolved, Schema pins which schema binds the row filter and
+// a returned residual, kept separate from each file's partition spec-id;
+// UseSnapshotSchema tells the server the same thing. Incremental scans
+// (start/end snapshot) are deferred to a later phase; point-in-time SnapshotID
+// lands first.
 type ScanPlanningRequest struct {
 	Identifier Identifier
 	// Metadata is the narrowed planner view of table metadata (see
 	// ScanPlanningMetadata); MetadataLocation is kept separate.
 	Metadata         ScanPlanningMetadata
 	MetadataLocation string
+	// Schema is the schema the scan is bound to: the table's current schema for
+	// a live scan, the snapshot's schema for a pinned or as-of one. Nil falls
+	// back to Metadata.CurrentSchema.
+	Schema           *iceberg.Schema
 	SnapshotID       *int64
 	SelectedFields   []string
 	RowFilter        iceberg.BooleanExpression
@@ -105,7 +109,8 @@ type ScanPlanningRequest struct {
 	// Nil means use the scan default.
 	CaseSensitive *bool
 	// UseSnapshotSchema is a pointer to distinguish the spec default from an
-	// explicit false when the scanner-delegation phase binds it to table config.
+	// explicit false. It is the wire-side counterpart of Schema: true when Schema
+	// came from the scan's snapshot rather than the table's current schema.
 	UseSnapshotSchema *bool
 }
 
