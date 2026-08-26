@@ -25,9 +25,8 @@ test:
 test-assert:
 	go test -tags=assert -v -run='^(TestInspectFilesTablesEarlyRelease|TestInspectDataFilesEmitsEmptyBatchWhenAllEntriesAreDeleted|TestInspectDataFilesEmptyTableEarlyRelease|TestInspectPositionDeletesEarlyRelease)$$' ./table
 
-# Race detector is opt-in per package/test.
 test-race:
-	go test -race -v ./codec/... ./metrics/... ./table/...
+	go test -race -v ./...
 
 docs-gen:
 	go run ./website/gen

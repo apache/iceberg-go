@@ -52,7 +52,7 @@ git clone https://github.com/apache/iceberg-go.git
 cd iceberg-go
 go build ./...
 make test # runs all unit tests
-make test-race # runs race-enabled tests
+make test-race # runs all unit tests with race detector
 ```
 
 ### Integration Tests
