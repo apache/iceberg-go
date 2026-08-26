@@ -61,6 +61,12 @@ In this document, a **new audience** is any log, error, CLI text or JSON output,
 serialized metadata, host, catalog or client, or principal that was not already
 authorized to receive the secret, credential, or credential-bearing request.
 
+A **documented Iceberg Go-owned availability boundary** is an explicit
+project-owned resource limit or isolation contract that Iceberg Go documents
+and enforces, such as the Puffin reader's configured maximum blob size (256 MB
+by default). It is not a general availability guarantee for an embedding
+service.
+
 ## Scope
 
 This model covers Iceberg Go-owned behavior in:
@@ -90,6 +96,8 @@ Iceberg Go should:
   metrics, and delegated-credential state;
 - avoid creating network, signing, storage, or destructive capabilities that
   the configured principal did not authorize;
+- preserve documented Iceberg Go-owned availability boundaries by enforcing
+  their explicit resource limits or isolation contracts;
 - avoid attacker-observable memory disclosure or memory corruption in direct
   or transitive native or `unsafe` behavior; and
 - avoid deleting or mutating objects beyond the actor's proven table,
@@ -328,8 +336,8 @@ actor was already authorized to obtain or change.
 
 Reassess when the bug exposes a secret, crosses internally managed client
 state, creates an unauthorized capability or integrity effect, discloses or
-corrupts memory, violates an Iceberg Go-owned availability boundary, or causes
-an unauthorized mutation or deletion.
+corrupts memory, violates a documented Iceberg Go-owned availability boundary,
+or causes an unauthorized mutation or deletion.
 
 ### 2. Parser hardening and malformed-input robustness
 
@@ -339,7 +347,7 @@ availability-only failures are robustness or hardening findings by default.
 
 Reassess when the report demonstrates secret exposure, attacker-observable
 memory, unauthorized integrity impact, cross-client effects, or a documented
-availability boundary owned by Iceberg Go.
+Iceberg Go-owned availability boundary.
 
 Destructive processing of referenced paths is also reviewable when it exceeds
 the actor's proven authority.
@@ -354,8 +362,7 @@ decoded-size limit.
 
 Reassess when the report demonstrates secret exposure, cross-client effects,
 unauthorized integrity impact, attacker-observable memory, an unauthorized
-destructive effect, or a documented availability or resource-isolation
-boundary owned by Iceberg Go.
+destructive effect, or a documented Iceberg Go-owned availability boundary.
 
 ### 4. Malicious catalog or external service scenarios
 
@@ -392,8 +399,8 @@ credential-isolation failure.
 
 Reassess when Iceberg Go-owned per-catalog or per-client state crosses into the
 shared object unexpectedly, a secret gains a new audience, or the behavior
-creates unauthorized integrity, memory, availability-boundary, or destructive
-impact.
+creates unauthorized integrity or memory impact, violates a documented Iceberg
+Go-owned availability boundary, or causes unauthorized destructive impact.
 
 ### 7. Configuration loaded from documented locations
 
@@ -406,8 +413,8 @@ confidence.
 Reassess when loading that configuration sends a secret to a new audience,
 crosses internally managed client state, bypasses an operator-selected
 restriction, causes unauthorized integrity or attacker-observable memory
-impact, violates an Iceberg Go-owned availability boundary, or causes an
-unauthorized destructive effect.
+impact, violates a documented Iceberg Go-owned availability boundary, or
+causes an unauthorized destructive effect.
 
 ### 8. Provenance of the table being read
 
