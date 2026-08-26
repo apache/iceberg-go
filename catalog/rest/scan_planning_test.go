@@ -211,30 +211,38 @@ func TestPlanTableScanResponseAcceptsCompletedWithPlanID(t *testing.T) {
 func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
 	t.Parallel()
 
-	for _, payload := range []string{
+	for i, payload := range []string{
 		`{"status":"submitted","plan-id":"abc","file-scan-tasks":[]}`,
 		`{"status":"submitted","plan-id":"abc","delete-files":[]}`,
 		`{"status":"failed","plan-tasks":[]}`,
 		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
 		`{"status":"failed","plan-id":"abc"}`,
 	} {
-		var resp PlanTableScanResponse
-		require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+		t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+			t.Parallel()
+
+			var resp PlanTableScanResponse
+			require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+		})
 	}
 }
 
 func TestPlanTableScanResponseAcceptsFailedWithoutUsableError(t *testing.T) {
 	t.Parallel()
 
-	for _, payload := range []string{
+	for i, payload := range []string{
 		`{"status":"failed"}`,
 		`{"status":"failed","error":null}`,
 		`{"status":"failed","error":"oops"}`,
 	} {
-		var resp PlanTableScanResponse
-		require.NoError(t, json.Unmarshal([]byte(payload), &resp))
-		assert.Equal(t, PlanStatusFailed, resp.Status)
-		assert.Nil(t, resp.Error)
+		t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+			t.Parallel()
+
+			var resp PlanTableScanResponse
+			require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+			assert.Equal(t, PlanStatusFailed, resp.Status)
+			assert.Nil(t, resp.Error)
+		})
 	}
 }
 
@@ -262,15 +270,19 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 	t.Run("failed without usable error is accepted", func(t *testing.T) {
 		t.Parallel()
 
-		for _, payload := range []string{
+		for i, payload := range []string{
 			`{"status":"failed"}`,
 			`{"status":"failed","error":null}`,
 			`{"status":"failed","error":"oops"}`,
 		} {
-			var resp FetchPlanningResultResponse
-			require.NoError(t, json.Unmarshal([]byte(payload), &resp))
-			assert.Equal(t, PlanStatusFailed, resp.Status)
-			assert.Nil(t, resp.Error)
+			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+				t.Parallel()
+
+				var resp FetchPlanningResultResponse
+				require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+				assert.Equal(t, PlanStatusFailed, resp.Status)
+				assert.Nil(t, resp.Error)
+			})
 		}
 	})
 
@@ -285,14 +297,18 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 	t.Run("rejects task fields before completion", func(t *testing.T) {
 		t.Parallel()
 
-		for _, payload := range []string{
+		for i, payload := range []string{
 			`{"status":"submitted","plan-tasks":[]}`,
 			`{"status":"submitted","delete-files":[]}`,
 			`{"status":"cancelled","file-scan-tasks":[]}`,
 			`{"status":"completed","delete-files":[{}]}`,
 		} {
-			var resp FetchPlanningResultResponse
-			require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+				t.Parallel()
+
+				var resp FetchPlanningResultResponse
+				require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+			})
 		}
 	})
 }

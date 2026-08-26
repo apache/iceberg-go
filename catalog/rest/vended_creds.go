@@ -449,18 +449,20 @@ func closeOptionalIO(fs iceio.IO) error {
 
 func (p *prefixScopedIO) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.closed {
+		p.mu.Unlock()
+
 		return nil
 	}
 	p.closed = true
+	filesystems := p.filesystems
+	p.filesystems = nil
+	p.mu.Unlock()
 
 	var closeErr error
-	for _, fs := range p.filesystems {
+	for _, fs := range filesystems {
 		closeErr = errors.Join(closeErr, closeOptionalIO(fs))
 	}
-	p.filesystems = nil
 
 	return closeErr
 }

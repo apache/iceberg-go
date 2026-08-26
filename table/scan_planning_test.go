@@ -316,6 +316,8 @@ func TestScanCloseReleasesPlanIO(t *testing.T) {
 }
 
 func TestScanCloseWaitsForActiveReadTasks(t *testing.T) {
+	t.Parallel()
+
 	pio := &countingPlanIO{fs: icebergio.LocalFS{}}
 	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
 	scan, err := txn.Scan()
@@ -324,12 +326,14 @@ func TestScanCloseWaitsForActiveReadTasks(t *testing.T) {
 
 	_, records, err := scan.ReadTasks(context.Background(), nil)
 	require.NoError(t, err)
-	require.NoError(t, scan.Close())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- scan.Close() }()
 	assert.Equal(t, 0, pio.closeCalls)
 
 	for _, err := range records {
 		require.NoError(t, err)
 	}
+	require.NoError(t, <-closeDone)
 	assert.Equal(t, 1, pio.closeCalls)
 }
 

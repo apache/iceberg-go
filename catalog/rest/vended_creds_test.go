@@ -741,6 +741,19 @@ func (f *closeTrackingIO) Close() error {
 	return nil
 }
 
+type blockingCloseIO struct {
+	iceio.IO
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (f *blockingCloseIO) Close() error {
+	close(f.started)
+	<-f.release
+
+	return nil
+}
+
 func TestPrefixScopedIOClosesFilesystemLostToCacheRace(t *testing.T) {
 	const scheme = "prefix-scoped-cache-race-test"
 
@@ -845,6 +858,46 @@ func TestPrefixScopedIOClosesFilesystemLoadedAfterClose(t *testing.T) {
 	}
 	assert.Equal(t, int32(1), closeCount.Load(),
 		"a filesystem loaded after Close must be closed before returning")
+}
+
+func TestPrefixScopedIODoesNotHoldLockDuringFilesystemClose(t *testing.T) {
+	t.Parallel()
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	defer release()
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	p.filesystems["cached"] = &blockingCloseIO{
+		IO:      iceio.LocalFS{},
+		started: closeStarted,
+		release: releaseClose,
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- p.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem close")
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		close(lockAcquired)
+		p.mu.Unlock()
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("filesystem cache lock was held during filesystem close")
+	}
+
+	release()
+	require.NoError(t, <-closeDone)
 }
 
 func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
