@@ -443,8 +443,8 @@ func cloneNestedFields(fields []iceberg.NestedField) []iceberg.NestedField {
 	clones := slices.Clone(fields)
 	for i := range clones {
 		clones[i].Type = cloneSchemaType(clones[i].Type)
-		clones[i].InitialDefault = cloneDefault(clones[i].InitialDefault)
-		clones[i].WriteDefault = cloneDefault(clones[i].WriteDefault)
+		clones[i].InitialDefault = iceberg.CloneDefaultValue(clones[i].InitialDefault)
+		clones[i].WriteDefault = iceberg.CloneDefaultValue(clones[i].WriteDefault)
 	}
 
 	return clones
@@ -470,33 +470,6 @@ func cloneSchemaType(typ iceberg.Type) iceberg.Type {
 		}
 	default:
 		return typ
-	}
-}
-
-func cloneDefault(value any) any {
-	switch value := value.(type) {
-	case []byte:
-		return slices.Clone(value)
-	case iceberg.BinaryLiteral:
-		return iceberg.BinaryLiteral(slices.Clone([]byte(value)))
-	case iceberg.FixedLiteral:
-		return iceberg.FixedLiteral(slices.Clone([]byte(value)))
-	case []any:
-		clones := make([]any, len(value))
-		for i, item := range value {
-			clones[i] = cloneDefault(item)
-		}
-
-		return clones
-	case map[string]any:
-		clones := make(map[string]any, len(value))
-		for key, item := range value {
-			clones[key] = cloneDefault(item)
-		}
-
-		return clones
-	default:
-		return value
 	}
 }
 
