@@ -62,8 +62,10 @@ services:
   rest-scan-planning:
     # 1.10.1 predates the fixture's scan-planning implementation. Pin the
     # multi-platform image built from apache/iceberg@b0df3ca so the Java wire
-    # compatibility tests are reproducible even though the released tag is not
-    # available yet.
+    # compatibility tests are reproducible.
+    # TODO(#1880): Replace the digest with a stable release tag once a
+    # scan-planning-capable fixture tag is published.
+    # The image declares a /v1/config healthcheck that compose up --wait uses.
     image: apache/iceberg-rest-fixture:latest@sha256:db8de90b5b7693d4ac334c336f91d9bbe320d7b19f4f514d26de84cdfbcbfe8d
     container_name: iceberg-rest-scan-planning
     networks:
