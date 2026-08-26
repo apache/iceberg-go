@@ -716,8 +716,8 @@ func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
 	lockAcquired := make(chan struct{})
 	go func() {
 		p.mu.Lock()
-		p.mu.Unlock()
 		close(lockAcquired)
+		p.mu.Unlock()
 	}()
 
 	select {
