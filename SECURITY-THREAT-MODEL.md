@@ -31,10 +31,12 @@ Team process. This document guides classification and scanner confidence; it
 does not authorize public disclosure and does not automatically accept or
 reject a report.
 
-Follow the [Apache security vulnerability reporting
-process](https://www.apache.org/security/) and send undisclosed reports to
-`security@apache.org`. Do not open a public issue for a possible undisclosed
-vulnerability.
+Follow the [Apache Iceberg security model](https://iceberg.apache.org/security/)
+and the [Apache security vulnerability reporting
+process](https://www.apache.org/security/). Send undisclosed Iceberg reports to
+`security@iceberg.apache.org`; the Apache Security Team's
+`security@apache.org` address remains a private fallback. Do not open a public
+issue for a possible undisclosed vulnerability.
 
 ## Purpose
 
@@ -62,10 +64,9 @@ serialized metadata, host, catalog or client, or principal that was not already
 authorized to receive the secret, credential, or credential-bearing request.
 
 A **documented Iceberg Go-owned availability boundary** is an explicit
-project-owned resource limit or isolation contract that Iceberg Go documents
-and enforces, such as the Puffin reader's configured maximum blob size (256 MB
-by default). It is not a general availability guarantee for an embedding
-service.
+project-owned resource limit that Iceberg Go documents and enforces, such as
+the Puffin reader's configured maximum blob size (256 MB by default). It is not
+a general availability guarantee for an embedding service.
 
 ## Scope
 
@@ -97,7 +98,7 @@ Iceberg Go should:
 - avoid creating network, signing, storage, or destructive capabilities that
   the configured principal did not authorize;
 - preserve documented Iceberg Go-owned availability boundaries by enforcing
-  their explicit resource limits or isolation contracts;
+  their explicit resource limits;
 - avoid attacker-observable memory disclosure or memory corruption in direct
   or transitive native or `unsafe` behavior; and
 - avoid deleting or mutating objects beyond the actor's proven table,
@@ -139,7 +140,8 @@ capability.
 
 The embedding application decides which users may invoke Iceberg Go and owns
 its user and tenant boundaries. It may intentionally share an `AuthManager`,
-transport, database handle, registry implementation, or other mutable object.
+custom transport, database handle or implementation, registry implementation,
+or other mutable dependency.
 Such deliberate sharing is caller-owned; Iceberg Go-created state that crosses
 otherwise separate catalog or client instances is not.
 
@@ -222,8 +224,9 @@ transport, metrics, and delegated-credential state. Separately constructed
 catalogs and clients must not receive one another's internally managed state.
 
 Callers may intentionally share an `AuthManager`, custom transport, database
-handle or implementation, or registry implementation. Effects inherent in that
-explicitly shared object are caller-owned by default. This exception does not
+handle or implementation, registry implementation, or other mutable dependency.
+Effects inherent in an explicitly shared object are caller-owned by default.
+This exception does not
 disclaim credential crossover or state reuse caused by Iceberg Go-owned
 per-catalog or per-client state.
 
@@ -259,6 +262,11 @@ reviewable regardless of who supplied the table.
 
 The following categories are higher-confidence when the report identifies a
 credible actor, controlled input, affected boundary, and reproducible impact.
+
+A demonstrated violation of a documented Iceberg Go-owned availability
+boundary is also in scope. The report must identify the enforced resource limit
+and show how Iceberg Go failed to enforce it; resource exhaustion with no such
+violation remains hardening by default.
 
 ### 1. Secret or credential disclosure to a new audience
 
@@ -325,8 +333,9 @@ purge remains reviewable.
 The following categories usually lower confidence rather than reject a report.
 Every default is conditional: a demonstrated new secret audience,
 cross-catalog or cross-client effect, unauthorized integrity capability,
-attacker-observable memory impact, documented Iceberg Go-owned availability
-boundary, or unauthorized destructive effect requires reassessment.
+attacker-observable memory impact, a demonstrated violation of a documented
+Iceberg Go-owned availability boundary, or unauthorized destructive effect
+requires reassessment.
 
 ### 1. Correctness bugs
 
@@ -346,8 +355,8 @@ panics, errors, allocation amplification, decompression expansion, and
 availability-only failures are robustness or hardening findings by default.
 
 Reassess when the report demonstrates secret exposure, attacker-observable
-memory, unauthorized integrity impact, cross-client effects, or a documented
-Iceberg Go-owned availability boundary.
+memory, unauthorized integrity impact, cross-client effects, or a demonstrated
+violation of a documented Iceberg Go-owned availability boundary.
 
 Destructive processing of referenced paths is also reviewable when it exceeds
 the actor's proven authority.
@@ -362,7 +371,8 @@ decoded-size limit.
 
 Reassess when the report demonstrates secret exposure, cross-client effects,
 unauthorized integrity impact, attacker-observable memory, an unauthorized
-destructive effect, or a documented Iceberg Go-owned availability boundary.
+destructive effect, or a demonstrated violation of a documented Iceberg
+Go-owned availability boundary.
 
 ### 4. Malicious catalog or external service scenarios
 
@@ -392,9 +402,10 @@ downgrade.
 ### 6. Caller-owned shared objects and process-global registries
 
 Effects that follow directly from a caller deliberately sharing an
-`AuthManager`, transport, database handle, registry implementation, or other
-mutable object are normally caller-owned. Process-global catalog and IO
-registries are plugin mechanisms, and their existence alone is not a
+`AuthManager`, custom transport, database handle or implementation, registry
+implementation, or other mutable dependency are normally caller-owned.
+Process-global catalog and IO registries are plugin mechanisms, and their
+existence alone is not a
 credential-isolation failure.
 
 Reassess when Iceberg Go-owned per-catalog or per-client state crosses into the
@@ -436,14 +447,17 @@ Higher-confidence signals include:
 
 - a secret or delegated credential reaching a new audience;
 - a new unauthorized capability in Iceberg Go-owned code;
-- violation of internally managed per-catalog or per-client isolation; or
+- violation of internally managed per-catalog or per-client isolation;
+- a demonstrated violation of a documented Iceberg Go-owned availability
+  boundary; or
 - demonstrated confidentiality, integrity, memory, or unauthorized destructive
   impact.
 
 Lower-confidence signals include:
 
 - malformed-input or resource-exhaustion findings with availability-only impact
-  and no documented Iceberg Go-owned availability boundary;
+  and no demonstrated violation of a documented Iceberg Go-owned availability
+  boundary;
 - a trusted malicious control plane with no new credential audience, unexpected
   outbound capability, or cross-client effect;
 - an actor with proven equivalent capability against the same objects and
@@ -461,4 +475,5 @@ reference as a vulnerability.
 
 These signals route findings for human review; they do not automatically accept
 or reject a report. Endpoint routing, credential scope, shared state, `unsafe`
-behavior, and destructive paths always require explicit human review.
+behavior, destructive paths, and violations of documented Iceberg Go-owned
+availability boundaries always require explicit human review.
