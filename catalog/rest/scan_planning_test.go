@@ -256,6 +256,22 @@ func TestPlanTableScanResponseAcceptsFailedWithError(t *testing.T) {
 	assert.Equal(t, "boom", resp.Error.Message)
 }
 
+func TestPlanTableScanResponseRejectsErrorOnNonFailedStatus(t *testing.T) {
+	t.Parallel()
+
+	for i, payload := range []string{
+		`{"status":"completed","plan-id":"abc","error":"oops"}`,
+		`{"status":"submitted","plan-id":"abc","error":[]}`,
+	} {
+		t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+			t.Parallel()
+
+			var resp PlanTableScanResponse
+			require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+		})
+	}
+}
+
 func TestPlanTableScanResponseRejectsUnknownStatus(t *testing.T) {
 	t.Parallel()
 
@@ -302,6 +318,23 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 			`{"status":"submitted","delete-files":[]}`,
 			`{"status":"cancelled","file-scan-tasks":[]}`,
 			`{"status":"completed","delete-files":[{}]}`,
+		} {
+			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
+				t.Parallel()
+
+				var resp FetchPlanningResultResponse
+				require.ErrorIs(t, json.Unmarshal([]byte(payload), &resp), ErrRESTError, payload)
+			})
+		}
+	})
+
+	t.Run("rejects error on non-failed status", func(t *testing.T) {
+		t.Parallel()
+
+		for i, payload := range []string{
+			`{"status":"completed","error":"oops"}`,
+			`{"status":"submitted","error":[]}`,
+			`{"status":"cancelled","error":{}}`,
 		} {
 			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
 				t.Parallel()

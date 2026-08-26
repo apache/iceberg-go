@@ -1083,7 +1083,7 @@ func (r *PlanTableScanResponse) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("%w: planTableScan response has unknown status %q", ErrRESTError, resp.Status)
 	}
-	if decodePlanningError(resp.Error) != nil && resp.Status != PlanStatusFailed {
+	if resp.Status != PlanStatusFailed && len(resp.Error) > 0 && !isJSONNull(resp.Error) {
 		return fmt.Errorf("%w: planTableScan response includes error for status %q", ErrRESTError, resp.Status)
 	}
 	if err := validatePlanningTaskEnvelope(data, resp.Status, resp.ScanTasks, "planTableScan"); err != nil {
@@ -1127,7 +1127,7 @@ func (r *FetchPlanningResultResponse) UnmarshalJSON(data []byte) error {
 	default:
 		return fmt.Errorf("%w: fetchPlanningResult response has unknown status %q", ErrRESTError, resp.Status)
 	}
-	if decodePlanningError(resp.Error) != nil && resp.Status != PlanStatusFailed {
+	if resp.Status != PlanStatusFailed && len(resp.Error) > 0 && !isJSONNull(resp.Error) {
 		return fmt.Errorf("%w: fetchPlanningResult response includes error for status %q", ErrRESTError, resp.Status)
 	}
 	if err := validatePlanningTaskEnvelope(data, resp.Status, resp.ScanTasks, "fetchPlanningResult"); err != nil {
