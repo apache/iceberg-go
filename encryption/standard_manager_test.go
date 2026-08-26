@@ -19,8 +19,10 @@ package encryption_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"testing"
 
 	"github.com/apache/iceberg-go/encryption"
@@ -127,7 +129,10 @@ func TestStandardEncryptionManager_TamperedBlockFailsAuthentication(t *testing.T
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4)
 
 	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
-	ciphertext[0] ^= 0xFF // flip a bit in the first block's ciphertext
+	// Flip a bit inside the first block's ciphertext, past the 8-byte AES
+	// GCM Stream header and 12-byte nonce; flipping the header instead
+	// would fail earlier, at stream-header validation.
+	ciphertext[8+12] ^= 0xFF
 
 	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
 	require.NoError(t, err)
@@ -135,6 +140,60 @@ func TestStandardEncryptionManager_TamperedBlockFailsAuthentication(t *testing.T
 	_, err = io.ReadAll(in)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrAuthenticationFailed))
+}
+
+func TestStandardEncryptionManager_ReorderedBlocksFailAuthentication(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 2) // exactly two full 16-byte blocks
+
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+
+	// The AES GCM Stream header (magic + block length) is 8 bytes; each
+	// cipher block here is 16 (block size) + 12 (nonce) + 16 (tag) = 44
+	// bytes. Swap the two blocks: with a random nonce per block, only the
+	// AAD (which binds a block to its position) can catch this.
+	const headerLen, blockPhysicalLen = 8, 44
+	block1 := append([]byte(nil), ciphertext[headerLen:headerLen+blockPhysicalLen]...)
+	block2 := append([]byte(nil), ciphertext[headerLen+blockPhysicalLen:headerLen+2*blockPhysicalLen]...)
+	copy(ciphertext[headerLen:headerLen+blockPhysicalLen], block2)
+	copy(ciphertext[headerLen+blockPhysicalLen:headerLen+2*blockPhysicalLen], block1)
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.NoError(t, err)
+
+	_, err = io.ReadAll(in)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrAuthenticationFailed), "swapping blocks must be detected: the AAD binds each block to its position")
+}
+
+func TestStandardEncryptionManager_StreamHeaderMagicMismatchRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
+	copy(ciphertext[:4], "XXXX")
+
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
+}
+
+func TestStandardEncryptionManager_StreamHeaderZeroBlockLengthRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
+	binary.LittleEndian.PutUint32(ciphertext[4:8], 0)
+
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
+}
+
+func TestStandardEncryptionManager_StreamHeaderBlockLengthExceedsMaxRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
+	binary.LittleEndian.PutUint32(ciphertext[4:8], math.MaxUint32)
+
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
 }
 
 func TestStandardEncryptionManager_OutputFile_EmptyKeyIDRejected(t *testing.T) {
@@ -178,25 +237,24 @@ func TestStandardEncryptionManager_NegativeBlockSizeRejectedOnWrite(t *testing.T
 	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
 }
 
-func TestStandardEncryptionManager_ZeroBlockSizeMetadataRejectedOnRead(t *testing.T) {
-	mgr, _ := newTestStandardManager(t)
-	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AAAAAA==","block-size":0,"plaintext-length":10}`)
-	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
+func TestStandardEncryptionManager_BlockSizeExceedingMaxRejectedOnWrite(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(encryption.StandardMaxBlockSize+1))
+	_, err := mgr.NewEncryptedOutputFile(t.Context(), &memFileWriter{}, "kek-1")
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
+	assert.True(t, errors.Is(err, encryption.ErrInvalidBlockSize))
 }
 
 func TestStandardEncryptionManager_NegativePlaintextLengthMetadataRejectedOnRead(t *testing.T) {
 	mgr, _ := newTestStandardManager(t)
-	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AAAAAA==","block-size":16,"plaintext-length":-1}`)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","aad-prefix":"MTIzNDU2Nzg5MDEyMzQ1Ng==","plaintext-length":-1}`)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
 }
 
-func TestStandardEncryptionManager_BadNoncePrefixLengthMetadataRejectedOnRead(t *testing.T) {
+func TestStandardEncryptionManager_EmptyAADPrefixMetadataRejectedOnRead(t *testing.T) {
 	mgr, _ := newTestStandardManager(t)
-	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","nonce-prefix":"AA==","block-size":16,"plaintext-length":10}`)
+	meta := []byte(`{"v":1,"key-id":"kek-1","wrapped-key":"AA==","aad-prefix":"","plaintext-length":10}`)
 	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(nil), meta)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrInvalidKeyMetadata))
@@ -281,13 +339,17 @@ func (w *failAfterNWriter) Write(p []byte) (int, error) {
 
 func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.T) {
 	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(4))
-	fw := &failAfterNWriter{failAt: 2}
+	// Write call 1 is the AES GCM Stream header written by
+	// NewEncryptedOutputFile; call 2 flushes the first (4-byte) block;
+	// call 3 flushes the second block and fails.
+	fw := &failAfterNWriter{failAt: 3}
 	out, err := mgr.NewEncryptedOutputFile(t.Context(), fw, "kek-1")
 	require.NoError(t, err)
 
 	// First block (4 bytes) flushes fine; the second block's flush fails.
-	_, err = out.Write([]byte("aaaabbbb"))
+	n, err := out.Write([]byte("aaaabbbb"))
 	require.Error(t, err)
+	assert.Equal(t, 4, n, "only the first block reached storage")
 
 	// A subsequent Write must return the same sticky error, not attempt more I/O.
 	_, err2 := out.Write([]byte("c"))
