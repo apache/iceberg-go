@@ -124,7 +124,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <div class="sidebar-scrollbox">
-                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li><li class="chapter-item expanded "><a href="concurrent-writes.html">Concurrent Writes</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
+                <ol class="chapter"><li class="chapter-item expanded "><a href="introduction.html">Introduction</a></li><li class="chapter-item expanded affix "><li class="part-title">User Guide</li><li class="chapter-item expanded "><a href="install.html">Install</a></li><li class="chapter-item expanded "><a href="getting-started.html">Getting Started</a></li><li class="chapter-item expanded "><a href="configuration.html">Configuration</a></li><li class="chapter-item expanded "><a href="cli.html">CLI</a></li><li class="chapter-item expanded "><a href="api.html">API</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="row-filter-syntax.html">Row Filter Syntax</a></li><li class="chapter-item expanded "><a href="expression-dsl.html">Expression DSL</a></li><li class="chapter-item expanded "><a href="concurrent-writes.html">Concurrent Writes</a></li><li class="chapter-item expanded "><a href="metrics-reporting.html">Metrics Reporting</a></li></ol></li><li class="chapter-item expanded "><a href="feature-status.html">Feature Status</a></li><li class="chapter-item expanded affix "><li class="part-title">Developer Guide</li><li class="chapter-item expanded "><a href="contributing.html">Contributing</a></li><li class="chapter-item expanded "><a href="community.html">Community</a></li><li class="chapter-item expanded "><a href="glossary.html">Glossary</a></li><li class="chapter-item expanded affix "><li class="part-title">Releases</li><li class="chapter-item expanded "><a href="releases.html">Releases</a></li><li><ol class="section"><li class="chapter-item expanded "><a href="verify-release.html">Verify a release</a></li><li class="chapter-item expanded "><a href="how-to-release.html">How to release</a></li></ol></li><li class="chapter-item expanded "><li class="part-title">Ecosystem</li><li class="chapter-item expanded "><a href="ecosystem.html">Other Iceberg implementations</a></li></ol>
             </div>
             <div id="sidebar-resize-handle" class="sidebar-resize-handle">
                 <div class="sidebar-resize-indicator"></div>
@@ -1832,6 +1832,143 @@ not yet wrap their conflict errors, so the retry loop will not fire on them.</p>
   ~ specific language governing permissions and limitations
   ~ under the License.
 -->
+<h1 id="metrics-reporting-1"><a class="header" href="#metrics-reporting-1">Metrics Reporting</a></h1>
+<p>Iceberg Go implements Iceberg's Metrics Reporting API. After scan planning it can
+emit a <strong><code>ScanReport</code></strong> (files and manifests considered, scanned, and skipped;
+bytes read; planning duration), and after a commit a <strong><code>CommitReport</code></strong> (commit
+attempts, duration, and the added/removed/total file, record, and delete counts).
+These metrics are otherwise invisible from outside the client; a reporter gives
+operators a standard way to collect them.</p>
+<p>A pluggable <a href="https://pkg.go.dev/github.com/apache/iceberg-go/metrics#Reporter"><code>metrics.Reporter</code></a>
+is the sink that receives those reports.</p>
+<h2 id="opt-in-by-default"><a class="header" href="#opt-in-by-default">Opt-in by default</a></h2>
+<p>Reporting is <strong>strictly opt-in</strong>. With no reporter configured the instrumented
+code paths do no work, and the client emits no logs and no network traffic.</p>
+<p>This is a deliberate divergence from Iceberg Java, which defaults to the logging
+reporter. A library must not start emitting output the caller never asked for, so
+Iceberg Go defaults to a no-op reporter until you select one. Callers migrating
+from Java that want reports by default must select the <code>logging</code> reporter
+explicitly.</p>
+<h2 id="selecting-a-reporter"><a class="header" href="#selecting-a-reporter">Selecting a reporter</a></h2>
+<h3 id="catalog-wide-via-a-property"><a class="header" href="#catalog-wide-via-a-property">Catalog-wide, via a property</a></h3>
+<p>Set <code>metrics-reporter-impl</code> to a registered reporter name. Every table loaded
+from the catalog inherits it. This works for REST-catalog config too, since it is
+an ordinary catalog property.</p>
+<pre><code class="language-go">cat, err := catalog.Load(ctx, &quot;prod&quot;, iceberg.Properties{
+    &quot;metrics-reporter-impl&quot;: &quot;logging&quot;, // built-in: &quot;nop&quot; (default) or &quot;logging&quot;
+})
+</code></pre>
+<p>An unrecognized name is an error, so a typo surfaces rather than silently
+disabling metrics.</p>
+<h3 id="per-scan-override"><a class="header" href="#per-scan-override">Per-scan override</a></h3>
+<p>Override the reporter for a single scan with <code>table.WithReporter</code>; it takes
+precedence over the reporter inherited from the table.</p>
+<pre><code class="language-go">inmem := &amp;metrics.InMemoryReporter{}
+
+scan := tbl.Scan(table.WithReporter(inmem))
+// ... run the scan ...
+
+for _, report := range inmem.Reports() {
+    if sr, ok := report.(metrics.ScanReport); ok {
+        fmt.Println(sr.TableName, sr.Metrics.ResultDataFiles)
+    }
+}
+</code></pre>
+<h2 id="built-in-reporters"><a class="header" href="#built-in-reporters">Built-in reporters</a></h2>
+<div class="table-wrapper"><table><thead><tr><th>Reporter</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>metrics.NopReporter{}</code></td><td>Discards every report. The default when nothing is configured.</td></tr>
+<tr><td><code>metrics.NewLoggingReporter(logger)</code></td><td>Logs each report via an <code>slog.Logger</code> (<code>slog.Default()</code> when <code>nil</code>). Registered as <code>&quot;logging&quot;</code>.</td></tr>
+<tr><td><code>&amp;metrics.InMemoryReporter{}</code></td><td>Retains every report for inspection via <code>Reports()</code>; <code>Reset()</code> clears them. Intended for tests.</td></tr>
+<tr><td><code>metrics.Combine(reporters...)</code></td><td>Fans each report out to several reporters. A panic in one is isolated from the rest.</td></tr>
+</tbody></table>
+</div>
+<h2 id="writing-a-custom-reporter"><a class="header" href="#writing-a-custom-reporter">Writing a custom reporter</a></h2>
+<p>Implement the two-method <a href="https://pkg.go.dev/github.com/apache/iceberg-go/metrics#Reporter"><code>Reporter</code></a>
+interface and type-switch on the concrete report:</p>
+<pre><code class="language-go">type myReporter struct{}
+
+func (myReporter) Report(ctx context.Context, report metrics.MetricsReport) {
+    switch r := report.(type) {
+    case metrics.ScanReport:
+        // record r.Metrics ...
+    case metrics.CommitReport:
+        // record r.Metrics ...
+    }
+}
+
+func (myReporter) Close() error { return nil } // release any held resources
+</code></pre>
+<p>Two contract rules matter:</p>
+<ul>
+<li><strong>Never block or fail the operation.</strong> <code>Report</code> is called inline at the
+scan/commit completion point. A network-backed reporter must dispatch the send
+on a background worker, and any error must be handled internally (logged and
+swallowed), never returned to the caller.</li>
+<li><strong>Be safe for concurrent use.</strong> <code>Report</code> may be called from multiple
+goroutines.</li>
+</ul>
+<p>To make a custom reporter selectable by name from <code>metrics-reporter-impl</code>,
+register a factory for it (typically from <code>init</code>):</p>
+<pre><code class="language-go">func init() {
+    metrics.Register(&quot;my-reporter&quot;, func(props map[string]string) (metrics.Reporter, error) {
+        return myReporter{}, nil
+    })
+}
+</code></pre>
+<h2 id="reporting-to-a-rest-catalog"><a class="header" href="#reporting-to-a-rest-catalog">Reporting to a REST catalog</a></h2>
+<p>A REST catalog can also POST each report to the catalog's
+<code>.../tables/{table}/metrics</code> endpoint. This is a separate opt-in from the
+in-process reporter above and is <strong>off by default</strong>; the POST is dispatched on a
+background worker so it never stalls a scan or commit. See the
+<a href="./configuration.html#metrics-reporting">REST metrics-reporting properties</a> for the
+enablement flag and timeout.</p>
+<h2 id="opentelemetry"><a class="header" href="#opentelemetry">OpenTelemetry</a></h2>
+<blockquote>
+<p><strong>Experimental.</strong> The OpenTelemetry metric and attribute names track the
+still-unmerged Iceberg Java reporter
+(<a href="https://github.com/apache/iceberg/pull/16250">apache/iceberg#16250</a>) and may
+change to stay aligned with it.</p>
+</blockquote>
+<p>The <code>metrics/otel</code> package provides an OpenTelemetry-backed reporter. The host
+owns the OpenTelemetry SDK; the reporter only looks up a meter (the global
+<code>MeterProvider</code> by default, or one you pass with <code>WithMeter</code>).</p>
+<pre><code class="language-go">import &quot;github.com/apache/iceberg-go/metrics/otel&quot;
+
+rep, err := otel.NewReporter(
+    otel.WithMeter(meter),
+    otel.WithAttributes(otel.AttrTableName, otel.AttrOperation),
+)
+</code></pre>
+<p>It exports a curated subset of the report fields under <code>iceberg.scan.*</code> /
+<code>iceberg.commit.*</code> instrument names (e.g. <code>iceberg.scan.planning.duration</code>,
+<code>iceberg.scan.result.data_files</code>, <code>iceberg.commit.duration</code>,
+<code>iceberg.commit.data_files.added</code>).</p>
+<p><code>WithAttributes</code> bounds label cardinality by allowlist. The default set is table
+name + operation; schema id (<code>otel.AttrSchemaID</code>) is opt-in. The snapshot id is
+<strong>never</strong> attached as a metric attribute because it is unbounded — per-snapshot
+detail stays available through the full reports and the table's snapshot history.</p>
+<p>The OpenTelemetry reporter is not registered under a <code>metrics-reporter-impl</code> name
+automatically. To select it by property, register a factory for it as shown in
+<a href="metrics-reporting.html#writing-a-custom-reporter">Writing a custom reporter</a>; otherwise pass the
+instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</code>.</p>
+<div style="break-before: page; page-break-before: always;"></div><!--
+  ~ Licensed to the Apache Software Foundation (ASF) under one
+  ~ or more contributor license agreements.  See the NOTICE file
+  ~ distributed with this work for additional information
+  ~ regarding copyright ownership.  The ASF licenses this file
+  ~ to you under the Apache License, Version 2.0 (the
+  ~ "License"); you may not use this file except in compliance
+  ~ with the License.  You may obtain a copy of the License at
+  ~
+  ~   http://www.apache.org/licenses/LICENSE-2.0
+  ~
+  ~ Unless required by applicable law or agreed to in writing,
+  ~ software distributed under the License is distributed on an
+  ~ "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  ~ KIND, either express or implied.  See the License for the
+  ~ specific language governing permissions and limitations
+  ~ under the License.
+-->
 <h1 id="feature-status"><a class="header" href="#feature-status">Feature Status</a></h1>
 <p>This page tracks what Apache Iceberg Go currently supports. The matrix is kept in sync with the project <a href="https://github.com/apache/iceberg-go/blob/main/README.md"><code>README.md</code></a>; if you spot a discrepancy, file an issue.</p>
 <h2 id="spec-format-version-coverage"><a class="header" href="#spec-format-version-coverage">Spec format version coverage</a></h2>
@@ -1927,6 +2064,18 @@ not yet wrap their conflict errors, so the retry loop will not fire on them.</p>
 <tr><td style="text-align: left">Write Pos Delete</td><td style="text-align: center">X</td></tr>
 <tr><td style="text-align: left">Write Eq Delete</td><td style="text-align: center">X</td></tr>
 <tr><td style="text-align: left">Row Delta</td><td style="text-align: center">X</td></tr>
+</tbody></table>
+</div>
+<h2 id="metrics-reporting-2"><a class="header" href="#metrics-reporting-2">Metrics reporting</a></h2>
+<p>Iceberg's Metrics Reporting API is supported. Reporting is opt-in (default no-op). See <a href="./metrics-reporting.html">Metrics Reporting</a>.</p>
+<div class="table-wrapper"><table><thead><tr><th>Feature</th><th>Status</th></tr></thead><tbody>
+<tr><td><code>ScanReport</code> (scan-planning metrics)</td><td>Supported</td></tr>
+<tr><td><code>CommitReport</code> (commit metrics)</td><td>Supported</td></tr>
+<tr><td>Built-in reporters (nop, logging, in-memory, combine)</td><td>Supported</td></tr>
+<tr><td>Reporter selection via <code>metrics-reporter-impl</code> + registry</td><td>Supported</td></tr>
+<tr><td>REST <code>/metrics</code> reporter (opt-in POST to catalog)</td><td>Supported</td></tr>
+<tr><td>OpenTelemetry reporter (<code>metrics/otel</code>)</td><td>Supported (experimental; tracks Java <a href="https://github.com/apache/iceberg/pull/16250">apache/iceberg#16250</a>)</td></tr>
+<tr><td><code>ScanReport.filter</code> as structured Expression JSON</td><td>Supported (sanitized; falls back to always-true)</td></tr>
 </tbody></table>
 </div><div style="break-before: page; page-break-before: always;"></div><!--
   ~ Licensed to the Apache Software Foundation (ASF) under one
