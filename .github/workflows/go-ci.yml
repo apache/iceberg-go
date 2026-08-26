@@ -88,11 +88,8 @@ jobs:
         # The action's own cache key omits the Go version, so all matrix cells
         # collide on one entry; we manage the cache explicitly above instead.
         skip-cache: true
-    - name: Run tests
-      run: go test -v ./...
-    # Race detector is opt-in per package/test.
-    - name: Run race detector
-      run: go test -race -v ./codec/... ./table/...
+    - name: Run tests with race detector 
+      run: make test-race
     - name: Run Arrow ownership assertions
       if: matrix.os == 'ubuntu-latest' && matrix.go == '1.26.1'
       run: make test-assert
