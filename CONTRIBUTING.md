@@ -36,7 +36,7 @@ If two PRs land for the same issue, we will generally keep the one from the cont
 
 - Reference the issue number in your PR description (e.g., "Fixes #123").
 - Keep PRs focused — one issue per PR.
-- Run `go test ./...`, `gofmt`, and `golangci-lint run` before pushing. CI runs all of these too, but catching issues locally saves a round-trip.
+- Run `make test` and `make lint` before pushing. CI runs all of these too, but catching issues locally saves a round-trip. `make lint-install` will install the linter if you don't have it yet.
 - All commits must have a `Signed-off-by` line ([DCO](https://developercertificate.org/)).
 
 ## Code Review
@@ -51,7 +51,8 @@ If two PRs land for the same issue, we will generally keep the one from the cont
 git clone https://github.com/apache/iceberg-go.git
 cd iceberg-go
 go build ./...
-go test ./...
+make test # runs all unit tests
+make test-race # runs race-enabled tests
 ```
 
 ### Integration Tests
