@@ -34,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -66,6 +67,7 @@ type partitionFieldInfo struct {
 	fieldID     int
 	sourceType  iceberg.Type
 	columnIndex int
+	valueAt     func(arrow.Array, int) (any, error)
 }
 
 type partitionExtractionPlan struct {
@@ -362,6 +364,7 @@ func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Sche
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
 			columnIndex: colIndices[0],
+			valueAt:     bindPartitionValue(sourceField.Transform, sourceType),
 		}
 	}
 
@@ -398,25 +401,19 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 		for i, fieldInfo := range p.fields {
 			col := partitionColumns[i]
 			if col != nil && !col.IsNull(int(row)) {
-				sourceField := fieldInfo.sourceField
-				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
+				value, err := fieldInfo.valueAt(col, int(row))
 				if err != nil {
 					return nil, fmt.Errorf(
 						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
 						fieldInfo.sourceName,
-						sourceField.SourceID(),
+						fieldInfo.sourceField.SourceID(),
 						col.DataType(),
 						fieldInfo.sourceType,
 						err,
 					)
 				}
 
-				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
-				if transformedLiteral.Valid {
-					partitionRec[i] = transformedLiteral.Val.Any()
-				} else {
-					partitionRec[i] = nil
-				}
+				partitionRec[i] = value
 			} else {
 				partitionRec[i] = nil
 			}
@@ -432,6 +429,97 @@ func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) 
 
 func (p *partitionExtractionPlan) matchesSchema(recordSchema *arrow.Schema) bool {
 	return recordSchema == p.recordSchema || recordSchema.Equal(p.recordSchema)
+}
+
+func bindPartitionValue(transform iceberg.Transform, sourceType iceberg.Type) func(arrow.Array, int) (any, error) {
+	bound, ok := bindPartitionTransform(transform, sourceType)
+	if !ok {
+		return func(column arrow.Array, row int) (any, error) {
+			value, err := getArrowValueAsIcebergLiteral(column, row, sourceType)
+			if err != nil {
+				return nil, err
+			}
+			if value == nil {
+				return nil, nil
+			}
+
+			transformed := transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: value})
+			if !transformed.Valid {
+				return nil, nil
+			}
+
+			return transformed.Val.Any(), nil
+		}
+	}
+
+	return func(column arrow.Array, row int) (any, error) {
+		value, err := getArrowValueAsIcebergValue(column, row, sourceType)
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			return nil, nil
+		}
+
+		return bound(value), nil
+	}
+}
+
+func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type) (func(any) any, bool) {
+	optionalInt := func(transformer func(any) iceberg.Optional[int32]) func(any) any {
+		return func(value any) any {
+			transformed := transformer(value)
+			if !transformed.Valid {
+				return nil
+			}
+
+			return transformed.Val
+		}
+	}
+	optionalDate := func(transformer func(any) iceberg.Optional[int32]) func(any) any {
+		return func(value any) any {
+			transformed := transformer(value)
+			if !transformed.Valid {
+				return nil
+			}
+
+			return iceberg.Date(transformed.Val)
+		}
+	}
+
+	switch typed := transform.(type) {
+	case iceberg.IdentityTransform:
+		return func(value any) any { return value }, true
+	case iceberg.VoidTransform:
+		return func(any) any { return nil }, true
+	case iceberg.BucketTransform:
+		if !typed.CanTransform(sourceType) {
+			break
+		}
+
+		return optionalInt(typed.Transformer(sourceType)), true
+	case iceberg.TruncateTransform:
+		transformer, err := typed.Transformer(sourceType)
+		if err == nil {
+			return transformer, true
+		}
+	case iceberg.UnknownTransform:
+		return func(any) any { return nil }, true
+	}
+
+	// Year, month, and hour transforms bind through TimeTransform.
+	if typed, ok := transform.(iceberg.TimeTransform); ok {
+		transformer, err := typed.Transformer(sourceType)
+		if err == nil {
+			if _, ok := transform.(iceberg.DayTransform); ok {
+				return optionalDate(transformer), true
+			}
+
+			return optionalInt(transformer), true
+		}
+	}
+
+	return nil, false
 }
 
 // partitionMapNode represents a simple tree structure for storing partitionInfo.
@@ -821,6 +909,60 @@ func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok
 }
 
 func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
+	value, err := getArrowValueAsIcebergValue(column, row, sourceType)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, nil
+	}
+
+	literal, err := partitionLiteralFromValue(value)
+	if err != nil {
+		return nil, err
+	}
+	switch sourceType.(type) {
+	case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		return literal.To(sourceType)
+	default:
+		return literal, nil
+	}
+}
+
+func partitionLiteralFromValue(value any) (iceberg.Literal, error) {
+	switch value := value.(type) {
+	case bool:
+		return iceberg.NewLiteral(value), nil
+	case int32:
+		return iceberg.NewLiteral(value), nil
+	case int64:
+		return iceberg.NewLiteral(value), nil
+	case float32:
+		return iceberg.NewLiteral(value), nil
+	case float64:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Date:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Time:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Timestamp:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.TimestampNano:
+		return iceberg.NewLiteral(value), nil
+	case string:
+		return iceberg.NewLiteral(value), nil
+	case []byte:
+		return iceberg.NewLiteral(value), nil
+	case uuid.UUID:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Decimal:
+		return iceberg.NewLiteral(value), nil
+	default:
+		return nil, fmt.Errorf("unsupported Iceberg literal value type: %T", value)
+	}
+}
+
+func getArrowValueAsIcebergValue(column arrow.Array, row int, sourceType iceberg.Type) (any, error) {
 	if column.IsNull(row) {
 		return nil, nil
 	}
@@ -828,33 +970,33 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	switch arr := column.(type) {
 	case *array.Date32:
 
-		return iceberg.NewLiteral(iceberg.Date(arr.Value(row))), nil
+		return iceberg.Date(arr.Value(row)), nil
 	case *array.Time64:
 		dt, ok := arr.DataType().(*arrow.Time64Type)
 		if !ok || dt.Unit != arrow.Microsecond {
 			return nil, fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, arr.DataType())
 		}
 
-		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
+		return iceberg.Time(arr.Value(row)), nil
 	case *array.Timestamp:
 
-		return timestampLiteralFromArrow(arr, row, sourceType)
+		return timestampValueFromArrow(arr, row, sourceType)
 	case *array.Decimal32:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal32Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *array.Decimal64:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal64Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *array.Decimal128:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
@@ -862,56 +1004,56 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *extensions.UUIDArray:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 
 	case *array.String:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.LargeString:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int64:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int32:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int16:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Int8:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint64:
 
-		return iceberg.NewLiteral(int64(arr.Value(row))), nil
+		return int64(arr.Value(row)), nil
 	case *array.Uint32:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint16:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint8:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Float32:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Float64:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Boolean:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Binary:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.LargeBinary:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.FixedSizeBinary:
 		switch sourceType.(type) {
 		case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
@@ -919,7 +1061,12 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 			return nil, fmt.Errorf("%w: cannot convert Arrow %s to Iceberg type %v", iceberg.ErrInvalidSchema, arr.DataType(), sourceType)
 		}
 
-		return iceberg.NewLiteral(arr.Value(row)).To(sourceType)
+		literal, err := iceberg.NewLiteral(arr.Value(row)).To(sourceType)
+		if err != nil {
+			return nil, err
+		}
+
+		return literal.Any(), nil
 
 	default:
 		val := column.GetOneForMarshal(row)
@@ -928,7 +1075,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	}
 }
 
-func timestampLiteralFromArrow(arr *array.Timestamp, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
+func timestampValueFromArrow(arr *array.Timestamp, row int, sourceType iceberg.Type) (any, error) {
 	timestampType := arr.DataType().(*arrow.TimestampType)
 	value := int64(arr.Value(row))
 
@@ -939,14 +1086,14 @@ func timestampLiteralFromArrow(arr *array.Timestamp, row int, sourceType iceberg
 			return nil, err
 		}
 
-		return iceberg.NewLiteral(iceberg.Timestamp(micros)), nil
+		return iceberg.Timestamp(micros), nil
 	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
 		nanos, err := arrowTimestampToNanos(value, timestampType.Unit)
 		if err != nil {
 			return nil, err
 		}
 
-		return iceberg.NewLiteral(iceberg.TimestampNano(nanos)), nil
+		return iceberg.TimestampNano(nanos), nil
 	default:
 		return nil, fmt.Errorf("cannot convert arrow timestamp to iceberg literal for source type %v", sourceType)
 	}
