@@ -316,6 +316,45 @@ func TestBuildPartitionMatchPredicate_UsesNonIdentityTransform(t *testing.T) {
 	}
 }
 
+func TestBuildPartitionMatchPredicate_UsesNestedSourcePath(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 10, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 11, Name: "category", Type: iceberg.PrimitiveTypes.String},
+			},
+		}},
+		iceberg.NestedField{ID: 12, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := identitySpec(iceberg.PartitionField{
+		SourceIDs: []int{11}, FieldID: 1000, Name: "category_part",
+		Transform: iceberg.TruncateTransform{Width: 3},
+	})
+
+	expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{{1000: "boo"}})
+	require.NoError(t, err)
+	_, err = iceberg.BindExpr(schema, expr, true)
+	require.NoError(t, err)
+
+	want := iceberg.EqualTo(
+		iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("location.category")),
+		"boo",
+	)
+	assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+}
+
+func TestBuildPartitionMatchPredicate_RecognizesPointerIdentityTransform(t *testing.T) {
+	spec := identitySpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_part",
+		Transform: &iceberg.IdentityTransform{},
+	})
+
+	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: int32(1)}})
+	require.NoError(t, err)
+
+	want := iceberg.EqualTo(iceberg.Reference("id"), int32(1))
+	assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+}
+
 func TestBuildPartitionMatchPredicate_UnknownSourceID(t *testing.T) {
 	// Partition field points at a source id that is not present in the schema.
 	spec := identitySpec(identityField(999, 1000, "ghost"))

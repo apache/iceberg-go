@@ -70,12 +70,17 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
 				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
 		}
+		sourceName, ok := schema.FindColumnName(f.SourceIDs[0])
+		if !ok {
+			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
+				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
+		}
 		if !f.Transform.CanTransform(src.Type) {
 			return nil, fmt.Errorf("%w: transform %s cannot be applied to source field %q of type %s",
 				iceberg.ErrInvalidArgument, f.Transform, src.Name, src.Type)
 		}
 
-		fields = append(fields, fieldRef{id: f.FieldID, name: src.Name, transform: f.Transform})
+		fields = append(fields, fieldRef{id: f.FieldID, name: sourceName, transform: f.Transform})
 	}
 
 	// NewAnd/NewOr fold away the AlwaysTrue/AlwaysFalse seeds, so a single-field,
@@ -150,11 +155,22 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 
 func partitionTerm(transform iceberg.Transform, name string) iceberg.UnboundTerm {
 	ref := iceberg.Reference(name)
-	if _, ok := transform.(iceberg.IdentityTransform); ok {
+	if isIdentityTransform(transform) {
 		return ref
 	}
 
 	return iceberg.NewUnboundTransform(transform, ref)
+}
+
+func isIdentityTransform(transform iceberg.Transform) bool {
+	switch t := transform.(type) {
+	case iceberg.IdentityTransform:
+		return true
+	case *iceberg.IdentityTransform:
+		return t != nil
+	default:
+		return false
+	}
 }
 
 // isNaN reports whether v is a floating-point NaN.
