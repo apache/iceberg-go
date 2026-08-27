@@ -863,3 +863,65 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 
 	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
 }
+
+func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list-1.avro")
+	sharedManifestListPath := filepath.Join(dir, "manifest-list-2.avro")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 1, manifestPath, filepath.Join(dir, "data.parquet"))
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+	writeManifestList(t, tio.trackingIO, snapshotID+1, sharedManifestListPath, []iceberg.ManifestFile{mf})
+
+	ctx := &conflictContext{
+		fs: tio,
+		concurrent: []Snapshot{
+			{SnapshotID: snapshotID, ManifestList: manifestListPath},
+			{SnapshotID: snapshotID + 1, ManifestList: sharedManifestListPath},
+		},
+	}
+
+	var visited int
+	visit := func(Snapshot, iceberg.ManifestEntry) error {
+		visited++
+		return nil
+	}
+	for range 2 {
+		require.NoError(t, ctx.forEachAddedEntry(iceberg.ManifestContentData, visit))
+	}
+
+	assert.Equal(t, 2, visited)
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 1, tio.openCount[sharedManifestListPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictValidationDoesNotCacheEarlyManifestExit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list.avro")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 1, manifestPath, filepath.Join(dir, "data.parquet"))
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+	ctx := &conflictContext{
+		fs:         tio,
+		concurrent: []Snapshot{{SnapshotID: snapshotID, ManifestList: manifestListPath}},
+	}
+
+	stop := errors.New("stop validation")
+	err := ctx.forEachAddedEntry(iceberg.ManifestContentData, func(Snapshot, iceberg.ManifestEntry) error {
+		return stop
+	})
+	require.ErrorIs(t, err, stop)
+
+	require.NoError(t, ctx.forEachAddedEntry(iceberg.ManifestContentData, func(Snapshot, iceberg.ManifestEntry) error {
+		return nil
+	}))
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 2, tio.openCount[manifestPath])
+}
