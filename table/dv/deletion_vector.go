@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"math"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
@@ -121,22 +122,42 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 	bitmap.RunLengthEncode()
 
-	var bitmapBuf bytes.Buffer
-	if err := bitmap.Serialize(&bitmapBuf); err != nil {
+	serializedSize := bitmap.serializedSize()
+	innerLen := uint64(dvMagicSize) + serializedSize
+	if innerLen > math.MaxUint32 {
+		return nil, fmt.Errorf("deletion vector payload too large: %d bytes", innerLen)
+	}
+
+	totalSize := uint64(dvLengthSize+dvMagicSize+dvCRCSize) + serializedSize
+	if totalSize > uint64(math.MaxInt) {
+		return nil, fmt.Errorf("deletion vector serialized size %d exceeds maximum supported size %d", totalSize, math.MaxInt)
+	}
+
+	var buf bytes.Buffer
+	buf.Grow(int(totalSize))
+
+	var header [dvLengthSize + dvMagicSize]byte
+	binary.LittleEndian.PutUint32(header[dvLengthSize:], DVMagicNumber)
+	_, _ = buf.Write(header[:])
+
+	if err := bitmap.Serialize(&buf); err != nil {
 		return nil, fmt.Errorf("serialize roaring bitmap: %w", err)
 	}
 
-	bitmapBytes := bitmapBuf.Bytes()
-	innerLen := dvMagicSize + len(bitmapBytes)
-	totalSize := dvLengthSize + innerLen + dvCRCSize
-	out := make([]byte, totalSize)
+	bitmapDataEnd := buf.Len()
+	innerLen = uint64(bitmapDataEnd - dvLengthSize)
+	if innerLen > math.MaxUint32 {
+		return nil, fmt.Errorf("deletion vector payload too large: %d bytes", innerLen)
+	}
 
-	binary.BigEndian.PutUint32(out[0:dvLengthSize], uint32(innerLen))
-	binary.LittleEndian.PutUint32(out[dvLengthSize:dvLengthSize+dvMagicSize], DVMagicNumber)
-	copy(out[dvLengthSize+dvMagicSize:], bitmapBytes)
+	crc := crc32.ChecksumIEEE(buf.Bytes()[dvLengthSize:bitmapDataEnd])
 
-	crc := crc32.ChecksumIEEE(out[dvLengthSize : totalSize-dvCRCSize])
-	binary.BigEndian.PutUint32(out[totalSize-dvCRCSize:], crc)
+	var trailer [dvCRCSize]byte
+	binary.BigEndian.PutUint32(trailer[:], crc)
+	_, _ = buf.Write(trailer[:])
+
+	out := buf.Bytes()
+	binary.BigEndian.PutUint32(out[:dvLengthSize], uint32(innerLen))
 
 	return out, nil
 }

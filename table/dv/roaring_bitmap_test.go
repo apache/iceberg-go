@@ -74,6 +74,38 @@ func TestDeserializeRoaringBitmapJava32BitValues(t *testing.T) {
 	assert.False(t, bm.Contains(10))
 }
 
+// Why: SerializeDV reserves the exact portable bitmap size before writing the
+// envelope, so the size helper must stay in sync with Serialize.
+// Condition: empty, sparse multi-bucket, and run-optimized bitmaps.
+// Assertion: the predicted size equals the bytes written for every shape.
+func TestRoaringPositionBitmapSerializedSize(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		positions []uint64
+		emptyKey  bool
+	}{
+		{name: "empty"},
+		{name: "sparse multi-bucket", positions: []uint64{1, 3, (uint64(1) << 32) | 7}},
+		{name: "run-optimized", positions: []uint64{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}},
+		{name: "empty bucket omitted", emptyKey: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bm := NewRoaringPositionBitmap()
+			for _, position := range tt.positions {
+				bm.Set(position)
+			}
+			if tt.emptyKey {
+				bm.bitmaps[7] = roaring.New()
+			}
+			bm.RunLengthEncode()
+
+			var buf bytes.Buffer
+			require.NoError(t, bm.Serialize(&buf))
+			assert.Equal(t, uint64(buf.Len()), bm.serializedSize())
+		})
+	}
+}
+
 // Why: metadata-table readers need deterministic expansion of deletion vectors.
 // Condition: positions span multiple high-bit buckets and were inserted out of order.
 // Assertion: Positions yields every value once in ascending order.

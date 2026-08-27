@@ -209,6 +209,20 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 	return nil
 }
 
+// serializedSize returns the exact size of the portable bitmap encoding after
+// RunLengthEncode has been called. Empty buckets are omitted by Serialize and
+// therefore do not contribute.
+func (b *RoaringPositionBitmap) serializedSize() uint64 {
+	size := uint64(8) // bitmap count
+	for _, bm := range b.bitmaps {
+		if bm.GetCardinality() > 0 {
+			size += 4 + bm.GetSerializedSizeInBytes() // bucket key + bitmap
+		}
+	}
+
+	return size
+}
+
 // DeserializeRoaringPositionBitmap reads a bitmap from the Iceberg portable format.
 // Format: [count] { [key][bitmap] } .....{[key_n][bitmap_n]}
 func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, error) {
