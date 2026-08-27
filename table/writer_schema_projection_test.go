@@ -105,6 +105,71 @@ func TestToRequestedSchemaWriteFastPath(t *testing.T) {
 			wantReuse: true,
 		},
 		{
+			name: "exact multi-column Arrow schema",
+			requested: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			),
+			provided: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			),
+			batch: func(t *testing.T, mem memory.Allocator) arrow.RecordBatch {
+				schema := projectionTestSchema(t, iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+					iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+				))
+
+				return projectionTestRecord(t, mem, schema, []byte(`{"id": 1, "name": "one"}`))
+			},
+			wantReuse: true,
+		},
+		{
+			name: "exact nested Arrow schema",
+			requested: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+				iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+					{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+				}}},
+			),
+			provided: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+				iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+					{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+				}}},
+			),
+			batch: func(t *testing.T, mem memory.Allocator) arrow.RecordBatch {
+				schema := projectionTestSchema(t, iceberg.NewSchema(0,
+					iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+					iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+						{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+						{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+					}}},
+				))
+
+				return projectionTestRecord(t, mem, schema, []byte(`{"id": 1, "profile": {"name": "one", "age": 42}}`))
+			},
+			wantReuse: true,
+		},
+		{
+			name: "required field with nullable batch",
+			requested: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			),
+			provided: iceberg.NewSchema(0,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			),
+			batch: func(t *testing.T, mem memory.Allocator) arrow.RecordBatch {
+				schema := arrow.NewSchema([]arrow.Field{{
+					Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true, Metadata: writerFieldIDMeta("1"),
+				}}, nil)
+
+				return projectionTestRecord(t, mem, schema, []byte(`{"id": 1}`))
+			},
+		},
+		{
 			name: "reordered columns",
 			requested: iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
@@ -266,6 +331,37 @@ func TestToRequestedSchemaWriteFastPath(t *testing.T) {
 	}
 }
 
+func TestToRequestedSchemaMatchesSchemaToArrowSchema(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	requested := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "profile", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			{ID: 4, Name: "age", Type: iceberg.PrimitiveTypes.Int32},
+		}}},
+	)
+	inputSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "profile", Type: arrow.StructOf(
+			arrow.Field{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+			arrow.Field{Name: "age", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		), Nullable: true},
+	}, nil)
+	batch := projectionTestRecord(t, mem, inputSchema, []byte(`{"id": 1, "profile": {"name": "one", "age": 42}}`))
+	defer batch.Release()
+
+	got, err := ToRequestedSchema(context.Background(), requested, requested, batch, writerProjectionOptions())
+	require.NoError(t, err)
+	defer got.Release()
+
+	expected, err := SchemaToArrowSchemaWithOptions(requested, ArrowSchemaOptions{IncludeFieldIDs: true})
+	require.NoError(t, err)
+	assert.True(t, got.Schema().Equal(expected), "expected schema: %s\ngot: %s", expected, got.Schema())
+	assert.True(t, got.Schema().Metadata().Equal(expected.Metadata()))
+}
+
 type captureWriteDataFileFormat struct {
 	tblutils.FileFormat
 	batches []arrow.RecordBatch
@@ -318,6 +414,8 @@ func TestDefaultDataFileWriterReusesExactBatch(t *testing.T) {
 	arrowSchema := projectionTestSchema(t, schema)
 	record := projectionTestRecord(t, mem, arrowSchema, []byte(`{"id": 1}`))
 	defer record.Release()
+	// writeFile releases both the task batch and the returned batch. The fast
+	// path returns this same record, so retain it for the extra release.
 	record.Retain()
 
 	_, err = writer.writeFile(t.Context(), nil, WriteTask{
@@ -330,6 +428,9 @@ func TestDefaultDataFileWriterReusesExactBatch(t *testing.T) {
 }
 
 func TestRollingDataWriterReusesExactBatch(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
@@ -358,7 +459,7 @@ func TestRollingDataWriterReusesExactBatch(t *testing.T) {
 
 	output := make(chan iceberg.DataFile, 1)
 	writer := factory.newRollingDataWriter(t.Context(), "", nil, output)
-	record := projectionTestRecord(t, memory.DefaultAllocator, arrowSchema, []byte(`{"id": 1}`))
+	record := projectionTestRecord(t, mem, arrowSchema, []byte(`{"id": 1}`))
 	defer record.Release()
 
 	require.NoError(t, writer.Add(record))

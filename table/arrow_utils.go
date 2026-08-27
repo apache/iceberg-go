@@ -1495,8 +1495,12 @@ func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 }
 
 func arrowSchemaEqual(left, right *arrow.Schema) bool {
-	// Schema.Equal intentionally ignores top-level metadata, but projection
-	// creates a schema without it, so include it in the no-op check.
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	// Schema.Equal ignores top-level metadata. Full projection strips it, so
+	// guard it here; otherwise the fast path would preserve metadata projection drops.
 	return left.Equal(right) && left.Metadata().Equal(right.Metadata())
 }
 
