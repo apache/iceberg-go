@@ -427,7 +427,8 @@ func TestPositionDeletePartitionedFanoutWriterEarlyStopCancelsRecordProduction(t
 	require.NoError(t, metadataBuilder.SetCurrentSchemaID(0))
 	require.NoError(t, metadataBuilder.AddPartitionSpec(&partitionSpec, true))
 	require.NoError(t, metadataBuilder.SetDefaultSpecID(0))
-	require.NoError(t, metadataBuilder.AddSortOrder(&UnsortedSortOrder))
+	unsortedSortOrder := UnsortedSortOrder
+	require.NoError(t, metadataBuilder.AddSortOrder(&unsortedSortOrder))
 	require.NoError(t, metadataBuilder.SetDefaultSortOrderID(0))
 	latestMeta, err := metadataBuilder.Build()
 	require.NoError(t, err)

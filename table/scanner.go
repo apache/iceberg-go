@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -233,25 +234,35 @@ func IsDeletionVector(df iceberg.DataFile) bool {
 		df.ContentType() == iceberg.EntryContentPosDeletes
 }
 
+// Scan represents a table scan. It implements [io.Closer]; callers should
+// close it when they are done, including early exits after remote planning
+// succeeds but before all records are consumed.
 type Scan struct {
-	identifier       Identifier
-	metadata         Metadata
-	metadataLocation string
-	ioF              FSysF
-	planner          ScanPlanner
-	planningMode     ScanPlanningMode
-	// planIO, when non-nil, owns the plan-scoped FileIO loader set by remote
+	identifier          Identifier
+	metadata            Metadata
+	metadataLocation    string
+	ioF                 FSysF
+	planner             ScanPlanner
+	scanPlanningIOProps iceberg.Properties
+	planningMode        ScanPlanningMode
+	// planIO, when non-nil, is a plan-scoped FileIO loader set by remote scan
 	// planning. ReadTasks leases it instead of falling back to ioF, and replacing
 	// the plan retires it after all active readers finish. See PlanIO.
 	planIO         *planIOState
+	closed         uint32
 	rowFilter      iceberg.BooleanExpression
 	selectedFields []string
 	caseSensitive  bool
 	snapshotID     *int64
 	asOfTimestamp  *int64
-	selectorErr    error
-	options        iceberg.Properties
-	limit          int64
+	// useSnapshotSchema is set for explicit snapshot/time-travel and tag
+	// scans. A branch ref deliberately keeps the table's current schema. A nil
+	// value preserves the historical behavior for scans assembled directly in
+	// package tests with snapshotID/asOfTimestamp fields set.
+	useSnapshotSchema *bool
+	options           iceberg.Properties
+	limit             int64
+	selectorErr       error
 
 	includeRowLineage bool
 
@@ -312,6 +323,16 @@ func (scan *Scan) UseRef(name string) (*Scan, error) {
 	if snap := scan.metadata.SnapshotByName(name); snap != nil {
 		out := scan.clone()
 		out.snapshotID = &snap.SnapshotID
+		out.asOfTimestamp = nil
+		useSnapshotSchema := true
+		for refName, ref := range scan.metadata.Refs() {
+			if refName == name {
+				useSnapshotSchema = ref.SnapshotRefType == TagRef
+
+				break
+			}
+		}
+		out.useSnapshotSchema = &useSnapshotSchema
 
 		return out, nil
 	}
@@ -426,10 +447,11 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 	}
 
 	curSchema := scan.metadata.CurrentSchema()
-	if scan.snapshotID == nil && scan.asOfTimestamp == nil {
+	if !scan.snapshotSchemaEnabled() {
 		// Live scans intentionally use the table's current schema. A schema-only
 		// metadata update can advance CurrentSchema without creating a snapshot,
-		// while explicit snapshot/as-of scans use the snapshot schema below.
+		// and branch refs intentionally use the table schema even though they
+		// resolve to a snapshot.
 		return curSchema, nil
 	}
 
@@ -450,6 +472,14 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 
 	return nil, fmt.Errorf("%w: snapshot %d references unknown schema id %d",
 		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
+}
+
+func (scan *Scan) snapshotSchemaEnabled() bool {
+	if scan.useSnapshotSchema != nil {
+		return *scan.useSnapshotSchema
+	}
+
+	return scan.snapshotID != nil || scan.asOfTimestamp != nil
 }
 
 // splitLineageMetadataFields partitions selectedFields into user fields and
@@ -825,6 +855,10 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	if atomic.LoadUint32(&scan.closed) != 0 {
+		return nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
+	}
+
 	if scan.selectorErr != nil {
 		return nil, scan.selectorErr
 	}
@@ -842,7 +876,8 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 	case ScanPlanningRemote:
 		return scan.planFilesRemote(ctx)
 	case ScanPlanningAuto:
-		if scan.planner != nil && scan.planner.SupportsRemoteScanPlanning() {
+		if supportsAutomaticRemotePlanning(scan.planner) &&
+			!scan.requiresLastUpdatedSequenceNumber() {
 			return scan.planFilesRemote(ctx)
 		}
 	case ScanPlanningLocal:
@@ -899,7 +934,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
 	defer func() {
 		if err == nil {
-			scan.closePlanIO()
+			err = scan.closePlanIO()
 		}
 	}()
 
@@ -984,25 +1019,53 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 }
 
 func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
+	if scan.requiresLastUpdatedSequenceNumber() {
+		return nil, fmt.Errorf(
+			"%w: remote scan planning cannot populate %s",
+			ErrInvalidOperation,
+			iceberg.LastUpdatedSequenceNumberColumnName,
+		)
+	}
+
 	if scan.planner == nil || !scan.planner.SupportsRemoteScanPlanning() {
 		return nil, fmt.Errorf("%w: remote scan planning is unavailable", ErrInvalidOperation)
 	}
 
-	caseSensitive := scan.caseSensitive
-	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
-		Identifier:       slices.Clone(scan.identifier),
-		Metadata:         scan.metadata,
-		MetadataLocation: scan.metadataLocation,
-		SnapshotID:       scan.snapshotID,
-		SelectedFields:   scan.selectedFields,
-		RowFilter:        scan.rowFilter,
-		CaseSensitive:    &caseSensitive,
-	})
+	var schema *iceberg.Schema
+	if scan.metadata != nil {
+		var err error
+		schema, err = scan.effectiveSchema()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	selectedFields, err := remotePlanningSelectedFields(scan, schema)
 	if err != nil {
 		return nil, err
 	}
 
-	planIO, err := newPlanIOState(result.IO)
+	caseSensitive := scan.caseSensitive
+	useSnapshotSchema := scan.snapshotSchemaEnabled()
+	var minRowsRequested *int64
+	if scan.limit >= 0 {
+		minRows := scan.limit
+		minRowsRequested = &minRows
+	}
+
+	result, err := scan.planner.PlanFiles(ctx, ScanPlanningRequest{
+		Identifier:        slices.Clone(scan.identifier),
+		Metadata:          scan.metadata,
+		Schema:            schema,
+		MetadataLocation:  scan.metadataLocation,
+		FileIOProperties:  maps.Clone(scan.scanPlanningIOProps),
+		SnapshotID:        scan.snapshotID,
+		SelectedFields:    selectedFields,
+		RowFilter:         scan.rowFilter,
+		MinRowsRequested:  minRowsRequested,
+		CaseSensitive:     &caseSensitive,
+		UseSnapshotSchema: &useSnapshotSchema,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1013,13 +1076,59 @@ func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
 		return result.Tasks, nil
 	}
 
+	planIO, err := newPlanIOState(result.IO)
+	if err != nil {
+		return nil, err
+	}
+
 	oldPlanIO := scan.planIO
 	scan.planIO = planIO
 	if oldPlanIO != nil {
-		oldPlanIO.releaseOwner()
+		_ = oldPlanIO.releaseOwner()
 	}
 
 	return result.Tasks, nil
+}
+
+// requiresLastUpdatedSequenceNumber reports whether the scan projection needs
+// the manifest-entry data sequence number. The REST FileScanTask payload does
+// not carry that value, so remote planning cannot safely synthesize the
+// _last_updated_sequence_number metadata column for files that do not store it
+// physically. Auto mode falls back to local planning; explicit remote mode
+// fails before making a request rather than returning silently incomplete data.
+func (scan *Scan) requiresLastUpdatedSequenceNumber() bool {
+	if scan.includeRowLineage {
+		return true
+	}
+
+	for _, field := range scan.selectedFields {
+		if scan.caseSensitive {
+			if field == iceberg.LastUpdatedSequenceNumberColumnName {
+				return true
+			}
+		} else if strings.EqualFold(field, iceberg.LastUpdatedSequenceNumberColumnName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (scan *Scan) remoteSelectedFields(schema *iceberg.Schema) []string {
+	if !slices.Contains(scan.selectedFields, "*") {
+		return slices.Clone(scan.selectedFields)
+	}
+	if schema == nil {
+		return nil
+	}
+
+	fields := schema.Fields()
+	selected := make([]string, 0, len(fields))
+	for _, field := range fields {
+		selected = append(selected, field.Name)
+	}
+
+	return selected
 }
 
 type planIOState struct {
@@ -1029,6 +1138,7 @@ type planIOState struct {
 	owners    int
 	readers   int
 	closeOnce sync.Once
+	closeErr  error
 }
 
 func newPlanIOState(planIO PlanIO) (*planIOState, error) {
@@ -1089,19 +1199,27 @@ func (p *planIOState) release() {
 	p.mu.Unlock()
 
 	if closeNow {
-		p.closeOnce.Do(func() { _ = p.io.Close() })
+		_ = p.close()
 	}
 }
 
-func (p *planIOState) releaseOwner() {
+func (p *planIOState) releaseOwner() error {
 	p.mu.Lock()
 	p.owners--
 	closeNow := p.owners == 0 && p.readers == 0
 	p.mu.Unlock()
 
 	if closeNow {
-		p.closeOnce.Do(func() { _ = p.io.Close() })
+		return p.close()
 	}
+
+	return nil
+}
+
+func (p *planIOState) close() error {
+	p.closeOnce.Do(func() { p.closeErr = p.io.Close() })
+
+	return p.closeErr
 }
 
 type FileScanTask struct {
@@ -1112,8 +1230,8 @@ type FileScanTask struct {
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
 	// for this task. Remote planners may simplify the original filter using
-	// file metadata; nil means the caller did not provide a task residual and
-	// ReadTasks falls back to the Scan's original row filter.
+	// file metadata; nil means the caller did not provide a task residual.
+	// ReadTasks applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression
 
 	// Row lineage (v3): constants used when reading to synthesize _row_id and _last_updated_sequence_number.
@@ -1144,10 +1262,13 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // scan's projection, per-task residual filters, and positional delete handling. This
 // is useful when the caller has already planned or selected specific tasks to read.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
+	if atomic.LoadUint32(&scan.closed) != 0 {
+		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
+	}
+
 	if scan.selectorErr != nil {
 		return nil, nil, scan.selectorErr
 	}
-
 	var (
 		boundFilter iceberg.BooleanExpression
 		err         error
@@ -1234,14 +1355,27 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 
 // closePlanIO releases the scoped resources associated with the current
 // remote plan. It is safe to call when no remote plan has been installed.
-func (scan *Scan) closePlanIO() {
+func (scan *Scan) closePlanIO() error {
 	if scan.planIO == nil {
-		return
+		return nil
 	}
 
 	planIO := scan.planIO
 	scan.planIO = nil
-	planIO.releaseOwner()
+
+	return planIO.releaseOwner()
+}
+
+// Close releases the plan-scoped resources owned by this scan. It is safe to
+// call more than once. Active ReadTasks iterators retain their reader lease and
+// can finish; the plan IO closes after the last lease is released. A scan must
+// not be used after Close.
+func (scan *Scan) Close() error {
+	if scan == nil || !atomic.CompareAndSwapUint32(&scan.closed, 0, 1) {
+		return nil
+	}
+
+	return scan.closePlanIO()
 }
 
 // releasePlanIOAfter wraps an arrow record iterator so its plan-scoped IO lease
