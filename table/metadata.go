@@ -216,6 +216,80 @@ func schemaIndexLookup(index *schemaIndexData, schemas []*iceberg.Schema, id int
 	return nil, false
 }
 
+type partitionSpecIndexData struct {
+	positions map[int]int
+	// firstSpec identifies the spec slice used to build positions. It lets
+	// read-only lookups detect an index left behind by an in-package fixture
+	// that replaced the slice.
+	firstSpec *iceberg.PartitionSpec
+	// shared means positions is owned by more than one builder or metadata
+	// value and must be copied before a builder mutates it.
+	shared bool
+}
+
+// Small spec slices are faster to search directly than to hash-map lookup.
+const partitionSpecIndexMinSize = 32
+
+func partitionSpecListFirst(specs []iceberg.PartitionSpec) *iceberg.PartitionSpec {
+	if len(specs) == 0 {
+		return nil
+	}
+
+	return &specs[0]
+}
+
+func buildPartitionSpecIndex(specs []iceberg.PartitionSpec) *partitionSpecIndexData {
+	positions := make(map[int]int, len(specs))
+	for i := range specs {
+		id := specs[i].ID()
+		if _, exists := positions[id]; !exists {
+			positions[id] = i
+		}
+	}
+
+	return &partitionSpecIndexData{positions: positions, firstSpec: partitionSpecListFirst(specs)}
+}
+
+func clonePartitionSpecIndex(index *partitionSpecIndexData) *partitionSpecIndexData {
+	if index == nil {
+		return nil
+	}
+
+	return &partitionSpecIndexData{
+		positions: maps.Clone(index.positions),
+		firstSpec: index.firstSpec,
+	}
+}
+
+func partitionSpecIndexNeedsRebuild(index *partitionSpecIndexData, specs []iceberg.PartitionSpec) bool {
+	if index == nil || len(index.positions) != len(specs) {
+		return true
+	}
+
+	return len(specs) > 0 && index.firstSpec != &specs[0]
+}
+
+// partitionSpecIndexPosition returns the position for id. The map is the fast
+// path, while the linear scan preserves lookup behavior if an in-package
+// fixture mutates a spec in place without rebuilding the derived index.
+func partitionSpecIndexPosition(index *partitionSpecIndexData, specs []iceberg.PartitionSpec, id int) (int, bool) {
+	if index != nil && len(specs) >= partitionSpecIndexMinSize {
+		if i, ok := index.positions[id]; ok {
+			if i >= 0 && i < len(specs) && specs[i].ID() == id {
+				return i, true
+			}
+		}
+	}
+
+	for i := range specs {
+		if specs[i].ID() == id {
+			return i, true
+		}
+	}
+
+	return 0, false
+}
+
 // Metadata for an iceberg table as specified in the Iceberg spec
 //
 // https://iceberg.apache.org/spec/#iceberg-table-spec
@@ -334,6 +408,7 @@ type MetadataBuilder struct {
 	schemaIndex        *schemaIndexData // Derived from schemaList; not serialized.
 	currentSchemaID    int
 	specs              []iceberg.PartitionSpec
+	partitionSpecIndex *partitionSpecIndexData // Derived from specs; not serialized.
 	defaultSpecID      int
 	lastPartitionID    *int
 	props              iceberg.Properties
@@ -370,6 +445,7 @@ func NewMetadataBuilder(formatVersion int) (*MetadataBuilder, error) {
 		schemaList:         make([]*iceberg.Schema, 0),
 		schemaIndex:        buildSchemaIndex(nil),
 		specs:              make([]iceberg.PartitionSpec, 0),
+		partitionSpecIndex: buildPartitionSpecIndex(nil),
 		props:              make(iceberg.Properties),
 		snapshotList:       make([]Snapshot, 0),
 		snapshotIndex:      buildSnapshotIndex(nil),
@@ -487,6 +563,8 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	}
 	b.schemaIndex = buildSchemaIndex(b.schemaList)
 
+	b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
+
 	if currentFileLocation != "" {
 		b.previousFileEntry = &MetadataLogEntry{
 			MetadataFile: currentFileLocation,
@@ -556,14 +634,20 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 		}
 		b.schemaIndex.shared = true
 	}
+	if b.partitionSpecIndex != nil {
+		cloned.partitionSpecIndex = &partitionSpecIndexData{
+			positions: b.partitionSpecIndex.positions,
+			firstSpec: partitionSpecListFirst(cloned.specs),
+			shared:    true,
+		}
+		b.partitionSpecIndex.shared = true
+	}
 	if b.snapshotIndex != nil {
 		cloned.snapshotIndex = &snapshotIndexData{
 			positions:     b.snapshotIndex.positions,
 			firstSnapshot: snapshotListFirst(cloned.snapshotList),
 			shared:        true,
 		}
-	}
-	if b.snapshotIndex != nil {
 		b.snapshotIndex.shared = true
 	}
 
@@ -634,6 +718,19 @@ func (b *MetadataBuilder) ensureSnapshotIndexMutable() {
 	b.ensureSnapshotIndex()
 	if b.snapshotIndex.shared {
 		b.snapshotIndex = cloneSnapshotIndex(b.snapshotIndex)
+	}
+}
+
+func (b *MetadataBuilder) ensurePartitionSpecIndex() {
+	if partitionSpecIndexNeedsRebuild(b.partitionSpecIndex, b.specs) {
+		b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
+	}
+}
+
+func (b *MetadataBuilder) ensurePartitionSpecIndexMutable() {
+	b.ensurePartitionSpecIndex()
+	if b.partitionSpecIndex.shared {
+		b.partitionSpecIndex = clonePartitionSpecIndex(b.partitionSpecIndex)
 	}
 }
 
@@ -746,14 +843,16 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	}
 	lastPartitionID := max(maxFieldID, prev)
 
-	var specs []iceberg.PartitionSpec
 	if initial {
-		specs = []iceberg.PartitionSpec{freshSpec}
+		b.specs = []iceberg.PartitionSpec{freshSpec}
+		b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
 	} else {
-		specs = append(b.specs, freshSpec)
+		b.ensurePartitionSpecIndexMutable()
+		b.specs = append(b.specs, freshSpec)
+		b.partitionSpecIndex.positions[newSpecID] = len(b.specs) - 1
+		b.partitionSpecIndex.firstSpec = partitionSpecListFirst(b.specs)
 	}
 
-	b.specs = specs
 	b.lastPartitionID = &lastPartitionID
 	b.lastAddedPartitionID = &newSpecID
 	b.updates = append(b.updates, NewAddPartitionSpecUpdate(&freshSpec, initial))
@@ -1361,6 +1460,8 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 	if b.schemaIndex != nil {
 		b.schemaIndex.shared = true
 	}
+	b.ensurePartitionSpecIndex()
+	b.partitionSpecIndex.shared = true
 	b.ensureSnapshotIndex()
 	if b.snapshotIndex != nil {
 		b.snapshotIndex.shared = true
@@ -1397,6 +1498,7 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		schemaIndex:        b.schemaIndex,
 		CurrentSchemaID:    b.currentSchemaID,
 		Specs:              b.specs,
+		partitionSpecIndex: b.partitionSpecIndex,
 		DefaultSpecID:      defaultSpecID,
 		LastPartitionID:    b.lastPartitionID,
 		Props:              b.props,
@@ -1474,10 +1576,13 @@ func (b *MetadataBuilder) GetSchemaByID(id int) (*iceberg.Schema, error) {
 }
 
 func (b *MetadataBuilder) GetSpecByID(id int) (*iceberg.PartitionSpec, error) {
-	for _, s := range b.specs {
-		if s.ID() == id {
-			return &s, nil
-		}
+	b.ensurePartitionSpecIndex()
+
+	i, ok := partitionSpecIndexPosition(b.partitionSpecIndex, b.specs, id)
+	if ok {
+		spec := b.specs[i]
+
+		return &spec, nil
 	}
 
 	return nil, fmt.Errorf("%w: id %d", ErrPartitionSpecNotFound, id)
@@ -1701,9 +1806,9 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 		newSpecs = append(newSpecs, spec)
 	}
 
-	b.specs = newSpecs
-
 	if len(removed) != 0 {
+		b.specs = newSpecs
+		b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
 		b.updates = append(b.updates, NewRemoveSpecUpdate(removed))
 	}
 
@@ -2140,9 +2245,10 @@ type commonMetadata struct {
 	// V3+ fields
 	NextRowID *int64 `json:"next-row-id,omitempty"` // V3: Next available row ID
 
-	schemaIndex       *schemaIndexData
-	snapshotIndex     *snapshotIndexData
-	deferredSnapshots *deferredSnapshotState
+	schemaIndex        *schemaIndexData
+	partitionSpecIndex *partitionSpecIndexData
+	snapshotIndex      *snapshotIndexData
+	deferredSnapshots  *deferredSnapshotState
 }
 
 func (c *commonMetadata) metadataBuilderCommon() *commonMetadata { return c }
@@ -2325,23 +2431,29 @@ func (c *commonMetadata) DefaultPartitionSpec() int {
 	return c.DefaultSpecID
 }
 
+func (c *commonMetadata) ensurePartitionSpecIndex() {
+	if partitionSpecIndexNeedsRebuild(c.partitionSpecIndex, c.Specs) {
+		c.partitionSpecIndex = buildPartitionSpecIndex(c.Specs)
+	}
+}
+
 func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
-	for _, s := range c.Specs {
-		if s.ID() == c.DefaultSpecID {
-			return clonePartitionSpec(s)
-		}
+	c.ensurePartitionSpecIndex()
+
+	if i, ok := partitionSpecIndexPosition(c.partitionSpecIndex, c.Specs, c.DefaultSpecID); ok {
+		return clonePartitionSpec(c.Specs[i])
 	}
 
 	return clonePartitionSpec(*iceberg.UnpartitionedSpec)
 }
 
 func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
-	for _, s := range c.Specs {
-		if s.ID() == id {
-			clone := clonePartitionSpec(s)
+	c.ensurePartitionSpecIndex()
 
-			return &clone
-		}
+	if i, ok := partitionSpecIndexPosition(c.partitionSpecIndex, c.Specs, id); ok {
+		clone := clonePartitionSpec(c.Specs[i])
+
+		return &clone
 	}
 
 	return nil
@@ -2742,6 +2854,7 @@ func (c *commonMetadata) preValidate() {
 	}
 
 	c.schemaIndex = buildSchemaIndex(c.SchemaList)
+	c.partitionSpecIndex = buildPartitionSpecIndex(c.Specs)
 	c.snapshotIndex = buildSnapshotIndex(c.SnapshotList)
 }
 
