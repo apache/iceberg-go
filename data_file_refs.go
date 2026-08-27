@@ -44,6 +44,27 @@ func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	return d.valCntMap, d.nullCntMap, d.nanCntMap, d.lowerBoundMap, d.upperBoundMap
 }
 
+func (d *dataFile) DataFileCollectionsRef(_ internal.DataFileRef) (
+	map[int]int64, []byte, []int64, []int,
+) {
+	d.initColumnStatsData()
+
+	var keyMetadata []byte
+	if d.Key != nil {
+		keyMetadata = *d.Key
+	}
+	var splitOffsets []int64
+	if d.Splits != nil {
+		splitOffsets = *d.Splits
+	}
+	var equalityFieldIDs []int
+	if d.EqualityIDs != nil {
+		equalityFieldIDs = *d.EqualityIDs
+	}
+
+	return d.colSizeMap, keyMetadata, splitOffsets, equalityFieldIDs
+}
+
 // DataFilePartitionRef returns the data file's partition map without copying.
 // The token restricts this zero-copy accessor to trusted in-module callers;
 // the public Partition getter continues returning a defensive copy. The

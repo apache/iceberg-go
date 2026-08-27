@@ -75,6 +75,30 @@ func (f *publicStatsDataFile) UpperBoundValues() map[int][]byte {
 	return f.DataFile.UpperBoundValues()
 }
 
+func (f *publicStatsDataFile) ColumnSizes() map[int]int64 {
+	f.getterCalls++
+
+	return f.DataFile.ColumnSizes()
+}
+
+func (f *publicStatsDataFile) KeyMetadata() []byte {
+	f.getterCalls++
+
+	return f.DataFile.KeyMetadata()
+}
+
+func (f *publicStatsDataFile) SplitOffsets() []int64 {
+	f.getterCalls++
+
+	return f.DataFile.SplitOffsets()
+}
+
+func (f *publicStatsDataFile) EqualityFieldIDs() []int {
+	f.getterCalls++
+
+	return f.DataFile.EqualityFieldIDs()
+}
+
 func testDataFileWithStats(t *testing.T) iceberg.DataFile {
 	t.Helper()
 
@@ -98,11 +122,15 @@ func testDataFileWithStats(t *testing.T) iceberg.DataFile {
 	require.NoError(t, err)
 
 	return builder.
+		ColumnSizes(map[int]int64{1: 10}).
 		ValueCounts(map[int]int64{1: 2}).
 		NullValueCounts(map[int]int64{1: 0}).
 		NaNValueCounts(map[int]int64{1: 0}).
 		LowerBoundValues(map[int][]byte{1: {1, 2}}).
 		UpperBoundValues(map[int][]byte{1: {3, 4}}).
+		KeyMetadata([]byte{5, 6}).
+		SplitOffsets([]int64{0, 64}).
+		EqualityFieldIDs([]int{1}).
 		Build()
 }
 
@@ -135,6 +163,35 @@ func TestDataFileStatsFallsBackToPublicGetters(t *testing.T) {
 	assert.Equal(t, map[int][]byte{1: {1, 2}}, lowerBounds)
 	assert.Equal(t, map[int][]byte{1: {3, 4}}, upperBounds)
 	assert.Equal(t, 5, file.getterCalls)
+}
+
+func TestDataFileCollectionsUsesBorrowedView(t *testing.T) {
+	file := testDataFileWithStats(t)
+	require.Implements(t, (*internal.DataFileCollectionsRef)(nil), file)
+
+	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
+	assert.Equal(t, map[int]int64{1: 10}, columnSizes)
+	assert.Equal(t, []byte{5, 6}, keyMetadata)
+	assert.Equal(t, []int64{0, 64}, splitOffsets)
+	assert.Equal(t, []int{1}, equalityFieldIDs)
+
+	var measuredColumnSizes map[int]int64
+	allocs := testing.AllocsPerRun(100, func() {
+		measuredColumnSizes, _, _, _ = dataFileCollections(file)
+	})
+	assert.InDelta(t, 0.0, allocs, 0.5)
+	assert.Equal(t, map[int]int64{1: 10}, measuredColumnSizes)
+}
+
+func TestDataFileCollectionsFallsBackToPublicGetters(t *testing.T) {
+	file := &publicStatsDataFile{DataFile: testDataFileWithStats(t)}
+
+	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
+	assert.Equal(t, map[int]int64{1: 10}, columnSizes)
+	assert.Equal(t, []byte{5, 6}, keyMetadata)
+	assert.Equal(t, []int64{0, 64}, splitOffsets)
+	assert.Equal(t, []int{1}, equalityFieldIDs)
+	assert.Equal(t, 4, file.getterCalls)
 }
 
 func TestDataFileBoundsUseBorrowedView(t *testing.T) {

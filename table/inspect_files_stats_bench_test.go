@@ -24,6 +24,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 )
 
 type inspectPublicStatsDataFile struct {
@@ -62,6 +63,59 @@ func BenchmarkInspectContentFileAppenderDataFileStats(b *testing.B) {
 				publicFiles := make([]iceberg.DataFile, len(files))
 				for i, file := range files {
 					publicFiles[i] = &inspectPublicStatsDataFile{DataFile: file}
+				}
+
+				b.Run("borrowed", func(b *testing.B) {
+					benchmarkAppendInspectContentFiles(b, partitionType, files)
+				})
+				b.Run("public", func(b *testing.B) {
+					benchmarkAppendInspectContentFiles(b, partitionType, publicFiles)
+				})
+			})
+		}
+	}
+}
+
+type inspectPublicCollectionsDataFile struct {
+	iceberg.DataFile
+}
+
+func (f *inspectPublicCollectionsDataFile) DataFileStatsRef(_ internal.DataFileRef) (
+	map[int]int64, map[int]int64, map[int]int64, map[int][]byte, map[int][]byte,
+) {
+	return internal.BorrowedDataFileStats(f.DataFile)
+}
+
+func (f *inspectPublicCollectionsDataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
+	return internal.BorrowedDataFilePartition(f.DataFile)
+}
+
+func BenchmarkInspectContentFileAppenderDataFileCollections(b *testing.B) {
+	cases := []struct {
+		name             string
+		columnSizes      int
+		splitOffsets     int
+		equalityFieldIDs int
+		keyMetadata      int
+	}{
+		{name: "empty"},
+		{name: "medium", columnSizes: 32, splitOffsets: 16, equalityFieldIDs: 8, keyMetadata: 32},
+		{name: "wide", columnSizes: 128, splitOffsets: 64, equalityFieldIDs: 16, keyMetadata: 128},
+	}
+	for _, fileCount := range []int{4096, 16384} {
+		for _, benchmarkCase := range cases {
+			b.Run(fmt.Sprintf("files=%d/%s", fileCount, benchmarkCase.name), func(b *testing.B) {
+				partitionType, files := benchmarkInspectContentFilesWithCollections(
+					b,
+					benchmarkCase.columnSizes,
+					benchmarkCase.splitOffsets,
+					benchmarkCase.equalityFieldIDs,
+					benchmarkCase.keyMetadata,
+					fileCount,
+				)
+				publicFiles := make([]iceberg.DataFile, len(files))
+				for i, file := range files {
+					publicFiles[i] = &inspectPublicCollectionsDataFile{DataFile: file}
 				}
 
 				b.Run("borrowed", func(b *testing.B) {
@@ -158,6 +212,78 @@ func benchmarkInspectContentFilesWithStats(
 				NaNValueCounts(nanCounts).
 				LowerBoundValues(lowerBounds).
 				UpperBoundValues(upperBounds)
+		}
+		files[i] = builder.Build()
+	}
+
+	return partitionType, files
+}
+
+func benchmarkInspectContentFilesWithCollections(
+	b *testing.B,
+	columnSizesWidth int,
+	splitOffsetsWidth int,
+	equalityFieldIDsWidth int,
+	keyMetadataWidth int,
+	fileCount int,
+) (*iceberg.StructType, []iceberg.DataFile) {
+	b.Helper()
+
+	schemaWidth := max(max(columnSizesWidth, equalityFieldIDsWidth), 1)
+	schemaFields := make([]iceberg.NestedField, schemaWidth)
+	for i := range schemaFields {
+		fieldID := i + 1
+		schemaFields[i] = iceberg.NestedField{
+			ID: fieldID, Name: fmt.Sprintf("field_%d", fieldID),
+			Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		}
+	}
+	schema := iceberg.NewSchema(0, schemaFields...)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: iceberg.IdentityTransform{},
+	})
+	partitionType := spec.PartitionType(schema)
+
+	var keyMetadata []byte
+	if keyMetadataWidth > 0 {
+		keyMetadata = make([]byte, keyMetadataWidth)
+		for i := range keyMetadata {
+			keyMetadata[i] = byte(i)
+		}
+	}
+
+	files := make([]iceberg.DataFile, fileCount)
+	for i := range files {
+		builder, err := iceberg.NewDataFileBuilder(
+			spec, iceberg.EntryContentData, fmt.Sprintf("file-%d.parquet", i),
+			iceberg.ParquetFile, map[int]any{1000: int32(i)}, nil, nil, 1, 1,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if columnSizesWidth > 0 {
+			columnSizes := make(map[int]int64, columnSizesWidth)
+			for field := range columnSizesWidth {
+				columnSizes[field+1] = int64(field + 1)
+			}
+			builder = builder.ColumnSizes(columnSizes)
+		}
+		if keyMetadata != nil {
+			builder = builder.KeyMetadata(keyMetadata)
+		}
+		if splitOffsetsWidth > 0 {
+			splitOffsets := make([]int64, splitOffsetsWidth)
+			for offset := range splitOffsets {
+				splitOffsets[offset] = int64(offset * 4096)
+			}
+			builder = builder.SplitOffsets(splitOffsets)
+		}
+		if equalityFieldIDsWidth > 0 {
+			equalityFieldIDs := make([]int, equalityFieldIDsWidth)
+			for field := range equalityFieldIDs {
+				equalityFieldIDs[field] = field + 1
+			}
+			builder = builder.EqualityFieldIDs(equalityFieldIDs)
 		}
 		files[i] = builder.Build()
 	}
