@@ -156,7 +156,6 @@ func BenchmarkToRequestedSchemaWriteFastPath(b *testing.B) {
 				}
 				b.ReportMetric(float64(rows), "rows/op")
 			})
-
 		})
 	}
 }
