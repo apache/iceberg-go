@@ -190,7 +190,9 @@ type equalityDeleteFileSet struct {
 
 func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDeleteFileSet {
 	return &equalityDeleteFileSet{
-		id:                id,
+		id: id,
+		// Keys are encoded in fieldIDs order, so this key must remain
+		// order-sensitive unless the encoded keys are canonicalized too.
 		groupKey:          fmt.Sprint(deleteSet.fieldIDs),
 		equalityDeleteSet: deleteSet,
 	}
@@ -316,19 +318,18 @@ func buildEqualityDeleteSetsPerTask(
 				continue
 			}
 
-			if groups == nil {
-				if len(groupFiles) == 0 {
-					groupKey = dk.groupKey
-				} else if dk.groupKey != groupKey {
-					groups = make(map[string][]*equalityDeleteFileSet, 2)
-					groups[groupKey] = groupFiles
-				}
-			}
-
-			if groups == nil {
-				groupFiles = append(groupFiles, dk)
-			} else {
+			if groups != nil {
 				groups[dk.groupKey] = append(groups[dk.groupKey], dk)
+			} else if len(groupFiles) == 0 {
+				groupKey = dk.groupKey
+				groupFiles = append(groupFiles, dk)
+			} else if dk.groupKey != groupKey {
+				groups = make(map[string][]*equalityDeleteFileSet, 2)
+				groups[groupKey] = groupFiles
+				groupFiles = nil
+				groups[dk.groupKey] = append(groups[dk.groupKey], dk)
+			} else {
+				groupFiles = append(groupFiles, dk)
 			}
 		}
 
