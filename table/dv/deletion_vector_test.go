@@ -221,6 +221,35 @@ type failingOpenFS struct {
 func (f failingOpenFS) Open(string) (iceio.File, error) { return nil, f.err }
 func (f failingOpenFS) Remove(string) error             { return nil }
 
+type countingReadIO struct {
+	base  iceio.IO
+	reads int
+}
+
+func (f *countingReadIO) Open(name string) (iceio.File, error) {
+	file, err := f.base.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	return &countingReadFile{File: file, reads: &f.reads}, nil
+}
+
+func (f *countingReadIO) Remove(name string) error {
+	return f.base.Remove(name)
+}
+
+type countingReadFile struct {
+	iceio.File
+	reads *int
+}
+
+func (f *countingReadFile) ReadAt(p []byte, off int64) (int, error) {
+	(*f.reads)++
+
+	return f.File.ReadAt(p, off)
+}
+
 // Why: SerializeDV run-length encodes before emitting bytes, so a caller that
 // records contiguous deletes one position at a time still gets a compact blob
 // rather than dense containers. Without that step the envelope carries a full
@@ -529,6 +558,53 @@ func TestReadDVs(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidDeletionVector)
 		assert.ErrorContains(t, err, "manifest referenced_data_file")
 	})
+}
+
+func TestReadDVsCoalescesAdjacentBlobReads(t *testing.T) {
+	dir := t.TempDir()
+	first := NewRoaringPositionBitmap()
+	first.Set(1)
+	firstData, err := SerializeDV(first)
+	require.NoError(t, err)
+
+	second := NewRoaringPositionBitmap()
+	second.Set(2)
+	secondData, err := SerializeDV(second)
+	require.NoError(t, err)
+
+	path, metas := writePuffinWithDVBlobs(t, dir,
+		testPuffinBlobInput{
+			data: firstData,
+			props: map[string]string{
+				dvReferencedDataFileProperty: "data-001.parquet",
+				dvCardinalityProperty:        "1",
+			},
+		},
+		testPuffinBlobInput{
+			data: secondData,
+			props: map[string]string{
+				dvReferencedDataFileProperty: "data-002.parquet",
+				dvCardinalityProperty:        "1",
+			},
+		},
+	)
+
+	firstOffset, firstSize := metas[0].Offset, metas[0].Length
+	secondOffset, secondSize := metas[1].Offset, metas[1].Length
+	files := []iceberg.DataFile{
+		newDVTestFile(path, 1, &secondOffset, &secondSize),
+		newDVTestFile(path, 1, &firstOffset, &firstSize),
+	}
+	files[0].(*mockDVFile).referencedDataFile = strPtr("data-002.parquet")
+	files[1].(*mockDVFile).referencedDataFile = strPtr("data-001.parquet")
+
+	fs := &countingReadIO{base: iceio.LocalFS{}}
+	bitmaps, err := ReadDVs(fs, files)
+	require.NoError(t, err)
+	require.Len(t, bitmaps, 2)
+	assert.True(t, bitmaps[0].Contains(2))
+	assert.True(t, bitmaps[1].Contains(1))
+	assert.Equal(t, 3, fs.reads)
 }
 
 // Why: ReadDV should reject callers that pass the wrong file type before doing any I/O.
