@@ -655,7 +655,7 @@ func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.specID.Append(file.SpecID())
 
 	if b.partition != nil {
-		if err := b.partition.append(file.Partition()); err != nil {
+		if err := b.partition.append(dataFilePartition(file)); err != nil {
 			return err
 		}
 	}
@@ -665,19 +665,20 @@ func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	if err := appendInspectInt64Map(b.columnSizes, file.ColumnSizes()); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.valueCounts, file.ValueCounts()); err != nil {
+	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
+	if err := appendInspectInt64Map(b.valueCounts, valueCounts); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nullValueCounts, file.NullValueCounts()); err != nil {
+	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nanValueCounts, file.NaNValueCounts()); err != nil {
+	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.lowerBounds, file.LowerBoundValues()); err != nil {
+	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.upperBounds, file.UpperBoundValues()); err != nil {
+	if err := appendInspectBinaryMap(b.upperBounds, upperBounds); err != nil {
 		return err
 	}
 	appendInspectBytes(b.keyMetadata, file.KeyMetadata())
