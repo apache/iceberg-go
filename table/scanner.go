@@ -203,6 +203,8 @@ func classifiedManifestEntriesForKind(kind manifestEntryKind, entries []iceberg.
 		classified.equalityDeleteEntries = entries
 	case manifestEntryDV:
 		classified.dvEntries = entries
+	default:
+		panic(fmt.Sprintf("unhandled manifest entry kind %d", kind))
 	}
 
 	return classified
@@ -272,18 +274,23 @@ func appendClassifiedManifestEntry(classified *classifiedManifestEntries, kind m
 		classified.equalityDeleteEntries = append(classified.equalityDeleteEntries, entry)
 	case manifestEntryDV:
 		classified.dvEntries = append(classified.dvEntries, entry)
+	default:
+		panic(fmt.Sprintf("unhandled manifest entry kind %d", kind))
 	}
 }
 
 func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	classified, err := classifyManifestEntries(entries)
 
+	// Preserve the existing partial-commit behavior on classification errors.
+	// Callers discard the accumulator when merge returns an error.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.dataEntries = append(m.dataEntries, classified.dataEntries...)
 	m.positionalDeleteEntries = append(m.positionalDeleteEntries, classified.positionalDeleteEntries...)
 	m.equalityDeleteEntries = append(m.equalityDeleteEntries, classified.equalityDeleteEntries...)
 	m.dvEntries = append(m.dvEntries, classified.dvEntries...)
-	m.mu.Unlock()
 
 	return err
 }
