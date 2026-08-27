@@ -28,6 +28,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
 	"github.com/apache/iceberg-go"
+	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/dv"
 	tblutils "github.com/apache/iceberg-go/table/internal"
@@ -793,7 +794,8 @@ func validatePositionDeleteFilePathValues(values arrow.TypedArray[string], arr a
 func positionDeletesPartitionType(
 	metadata Metadata,
 ) (*iceberg.StructType, map[int]int, error) {
-	base, err := inspectPartitionType(metadata)
+	currentSchema := metadata.CurrentSchema()
+	base, err := inspectPartitionTypeWithSchema(metadata, currentSchema)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -811,21 +813,40 @@ func positionDeletesPartitionType(
 	for _, field := range base.FieldList {
 		used[field.ID] = struct{}{}
 	}
-
 	fields := make([]iceberg.NestedField, len(base.FieldList))
 	idByOld := make(map[int]int, len(base.FieldList))
-	nextID := max(1, metadata.LastColumnID()+1)
+	maxFieldID := int64(math.MaxInt32)
+	nextID := int64(1)
+	wrapped := false
+	lastColumnID := metadata.LastColumnID()
+	if lastColumnID >= 0 && int64(lastColumnID) < maxFieldID {
+		nextID = int64(lastColumnID) + 1
+	} else if int64(lastColumnID) >= maxFieldID {
+		wrapped = true
+	}
 	for index, field := range base.FieldList {
 		for {
-			if _, exists := used[nextID]; !exists {
-				break
+			if nextID > maxFieldID {
+				if wrapped {
+					return nil, nil, fmt.Errorf("%w: no field ID available for position delete partition field %q",
+						iceberg.ErrInvalidSchema, field.Name)
+				}
+				nextID = 1
+				wrapped = true
+			}
+			fieldID := int(nextID)
+			if _, exists := used[fieldID]; !exists {
+				if _, exists := currentSchema.FindFieldByIDRef(fieldID, iceinternal.SchemaRef{}); !exists {
+					break
+				}
 			}
 			nextID++
 		}
-		idByOld[field.ID] = nextID
-		field.ID = nextID
+		fieldID := int(nextID)
+		idByOld[field.ID] = fieldID
+		field.ID = fieldID
 		fields[index] = field
-		used[nextID] = struct{}{}
+		used[fieldID] = struct{}{}
 		nextID++
 	}
 

@@ -297,7 +297,13 @@ func emptyInspectRecordBatch(alloc memory.Allocator, schema *arrow.Schema) iter.
 // union of partition fields from every spec, which lets metadata tables
 // represent live files written before partition evolution.
 func inspectPartitionType(metadata Metadata) (*iceberg.StructType, error) {
-	currentSchema := metadata.CurrentSchema()
+	return inspectPartitionTypeWithSchema(metadata, metadata.CurrentSchema())
+}
+
+func inspectPartitionTypeWithSchema(
+	metadata Metadata,
+	currentSchema *iceberg.Schema,
+) (*iceberg.StructType, error) {
 	specs := metadata.PartitionSpecs()
 	sort.Slice(specs, func(left, right int) bool {
 		return specs[left].ID() > specs[right].ID()
