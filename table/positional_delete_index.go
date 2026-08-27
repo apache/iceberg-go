@@ -47,7 +47,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 			continue
 		}
 
-		partitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), deleteFile.Partition())
+		partitionKey, err := canonicalPartitionKey(deleteFile.SpecID(), dataFilePartition(deleteFile))
 		if err != nil {
 			return nil, fmt.Errorf("indexing positional delete file %s: %w", deleteFile.FilePath(), err)
 		}
@@ -83,7 +83,7 @@ func (idx *positionalDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) (
 	dataFile := dataEntry.DataFile()
 	var partitionEntries []iceberg.ManifestEntry
 	if len(idx.byPartition) > 0 {
-		partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), dataFile.Partition())
+		partitionKey, err := canonicalPartitionKey(dataFile.SpecID(), dataFilePartition(dataFile))
 		if err != nil {
 			return nil, fmt.Errorf("matching positional deletes to data file %s: %w", dataFile.FilePath(), err)
 		}

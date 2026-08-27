@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,6 +95,70 @@ func newPositionalDeleteIndexDataEntry(
 
 	return iceberg.NewManifestEntry(
 		iceberg.EntryStatusADDED, nil, &sequenceNumber, nil, file)
+}
+
+type borrowedPartitionDataFile struct {
+	iceberg.DataFile
+	publicPartitionCalls   int
+	borrowedPartitionCalls int
+}
+
+func (f *borrowedPartitionDataFile) Partition() map[int]any {
+	f.publicPartitionCalls++
+
+	return f.DataFile.Partition()
+}
+
+func (f *borrowedPartitionDataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
+	f.borrowedPartitionCalls++
+
+	return internal.BorrowedDataFilePartition(f.DataFile)
+}
+
+func newBorrowedPartitionDataFile(
+	t *testing.T,
+	contentType iceberg.ManifestEntryContent,
+	path string,
+	partition map[int]any,
+) *borrowedPartitionDataFile {
+	t.Helper()
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, contentType, path, iceberg.ParquetFile, partition, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	return &borrowedPartitionDataFile{DataFile: builder.Build()}
+}
+
+func TestPositionalDeleteIndexUsesBorrowedPartitions(t *testing.T) {
+	partition := map[int]any{1000: int32(7)}
+	deleteFile := newBorrowedPartitionDataFile(
+		t, iceberg.EntryContentPosDeletes, "delete.parquet", partition)
+	dataFile := newBorrowedPartitionDataFile(
+		t, iceberg.EntryContentData, "data.parquet", partition)
+	deleteSequence, dataSequence := int64(2), int64(1)
+	deleteEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &deleteSequence, nil, deleteFile)
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSequence, nil, dataFile)
+
+	idx, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{deleteEntry})
+	require.NoError(t, err)
+
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "delete.parquet", matched[0].FilePath())
+	assert.Zero(t, deleteFile.publicPartitionCalls)
+	assert.Equal(t, 1, deleteFile.borrowedPartitionCalls)
+	assert.Zero(t, dataFile.publicPartitionCalls)
+	assert.Equal(t, 1, dataFile.borrowedPartitionCalls)
 }
 
 func TestPositionalDeleteIndexMatchesPathPartitionAndSequence(t *testing.T) {

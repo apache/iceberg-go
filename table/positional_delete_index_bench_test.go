@@ -26,6 +26,31 @@ import (
 )
 
 var positionalDeleteBenchmarkSink int
+var positionalDeletePartitionKeyBenchmarkSink string
+
+func BenchmarkPositionalDeletePartitionKey(b *testing.B) {
+	for _, benchmark := range []struct {
+		name        string
+		fieldCount  int
+		binaryValue bool
+	}{
+		{name: "int32", fieldCount: 1},
+		{name: "int32", fieldCount: 8},
+		{name: "binary", fieldCount: 32, binaryValue: true},
+	} {
+		b.Run(fmt.Sprintf("%s/fields=%d/files=10000", benchmark.name, benchmark.fieldCount), func(b *testing.B) {
+			files := positionalDeletePartitionKeyBenchmarkFiles(
+				b, benchmark.fieldCount, benchmark.binaryValue, 10_000)
+
+			b.Run("before", func(b *testing.B) {
+				benchmarkPositionalDeletePartitionKeys(b, files, false)
+			})
+			b.Run("after", func(b *testing.B) {
+				benchmarkPositionalDeletePartitionKeys(b, files, true)
+			})
+		})
+	}
+}
 
 func BenchmarkPositionalDeleteIndexSparsePaths20KBy5K(b *testing.B) {
 	const (
@@ -44,6 +69,86 @@ func BenchmarkPositionalDeleteIndexSparsePaths20KBy5K(b *testing.B) {
 	if positionalDeleteBenchmarkSink != deleteFileCount {
 		b.Fatalf("expected %d matches, got %d", deleteFileCount, positionalDeleteBenchmarkSink)
 	}
+}
+
+func positionalDeletePartitionKeyBenchmarkFiles(
+	b *testing.B,
+	fieldCount int,
+	binaryValue bool,
+	fileCount int,
+) []iceberg.DataFile {
+	b.Helper()
+
+	partitionFields := make([]iceberg.PartitionField, fieldCount)
+	for i := range fieldCount {
+		fieldID := 1000 + i
+		partitionFields[i] = iceberg.PartitionField{
+			SourceIDs: []int{i + 1},
+			FieldID:   fieldID,
+			Name:      fmt.Sprintf("partition_%d", fieldID),
+			Transform: iceberg.IdentityTransform{},
+		}
+	}
+	spec := iceberg.NewPartitionSpecID(1, partitionFields...)
+	files := make([]iceberg.DataFile, fileCount)
+	for i := range files {
+		partition := make(map[int]any, fieldCount)
+		for field, partitionField := range partitionFields {
+			if binaryValue {
+				partition[partitionField.FieldID] = []byte(fmt.Sprintf(
+					"partition-%02d-%02d", i%100, field))
+			} else {
+				partition[partitionField.FieldID] = int32(i % 100)
+			}
+		}
+
+		builder, err := iceberg.NewDataFileBuilder(
+			spec,
+			iceberg.EntryContentData,
+			fmt.Sprintf("data-%05d.parquet", i),
+			iceberg.ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		files[i] = builder.Build()
+	}
+
+	return files
+}
+
+func benchmarkPositionalDeletePartitionKeys(
+	b *testing.B,
+	files []iceberg.DataFile,
+	borrowed bool,
+) {
+	b.Helper()
+	b.ReportAllocs()
+	b.ReportMetric(float64(len(files)), "files/op")
+	b.ResetTimer()
+
+	var key string
+	for range b.N {
+		for _, file := range files {
+			var partition map[int]any
+			if borrowed {
+				partition = dataFilePartition(file)
+			} else {
+				partition = file.Partition()
+			}
+			var err error
+			key, err = canonicalPartitionKey(file.SpecID(), partition)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	positionalDeletePartitionKeyBenchmarkSink = key
 }
 
 func BenchmarkPositionalDeletePlanningSparsePaths(b *testing.B) {
