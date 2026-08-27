@@ -173,6 +173,7 @@ func classifyManifestEntry(entry iceberg.ManifestEntry) (manifestEntryKind, erro
 		if IsDeletionVector(dataFile) {
 			return manifestEntryDV, nil
 		}
+
 		return manifestEntryPositionalDelete, nil
 	case iceberg.EntryContentEqDeletes:
 		return manifestEntryEqualityDelete, nil
@@ -232,12 +233,13 @@ func classifyManifestEntries(entries []iceberg.ManifestEntry) (classifiedManifes
 			for j, validEntry := range entries[:i] {
 				appendClassifiedManifestEntry(&classified, kinds[j], validEntry)
 			}
+
 			return classified, err
 		}
 
 		if kinds == nil && kind != firstKind {
 			kinds = make([]manifestEntryKind, len(entries))
-			for j := 0; j < i; j++ {
+			for j := range i {
 				kinds[j] = firstKind
 			}
 			counts[firstKind] = i
