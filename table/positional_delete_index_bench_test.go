@@ -25,8 +25,10 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-var positionalDeleteBenchmarkSink int
-var positionalDeletePartitionKeyBenchmarkSink string
+var (
+	positionalDeleteBenchmarkSink             int
+	positionalDeletePartitionKeyBenchmarkSink string
+)
 
 func BenchmarkPositionalDeletePartitionKey(b *testing.B) {
 	for _, benchmark := range []struct {
