@@ -754,13 +754,18 @@ var filePathFieldID = func() int {
 // Java's DeleteFileIndex keys its PartitionMap by specId, and field IDs
 // are only meaningful within a single spec.
 func canonicalPartitionKey(specID int32, partition map[int]any) (string, error) {
-	ids := make([]int, 0, len(partition))
+	var idStorage [8]int
+	ids := idStorage[:0]
+	if len(partition) > len(idStorage) {
+		ids = make([]int, 0, len(partition))
+	}
 	for id := range partition {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 
-	buf := strconv.AppendInt(nil, int64(specID), 10)
+	var bufStorage [256]byte
+	buf := strconv.AppendInt(bufStorage[:0], int64(specID), 10)
 	buf = append(buf, '|')
 	for _, id := range ids {
 		buf = strconv.AppendInt(buf, int64(id), 10)

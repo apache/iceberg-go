@@ -585,6 +585,22 @@ func TestCanonicalPartitionKey(t *testing.T) {
 			assert.Contains(t, err.Error(), "unsupported partition value type")
 		}
 	})
+
+	t.Run("wide partition uses fallback storage", func(t *testing.T) {
+		first := make(map[int]any, 16)
+		second := make(map[int]any, 16)
+		for id := 1; id <= 16; id++ {
+			value := fmt.Sprintf("field-%d-012345678901234567890123456789", id)
+			first[id] = value
+		}
+		for id := 16; id >= 1; id-- {
+			second[id] = first[id]
+		}
+
+		assert.Equal(t,
+			mustCanonicalPartitionKey(t, 0, first),
+			mustCanonicalPartitionKey(t, 0, second))
+	})
 }
 
 // TestValidateNoNewDeletesForRewrittenFiles_PosDeleteMatching drives the
