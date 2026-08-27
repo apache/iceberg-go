@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -61,6 +62,26 @@ func (t *inspectPartitionAggregateTree) lookup(record partitionRecord) *inspectP
 	node := t
 	for _, value := range record {
 		child, ok := node.children[comparablePartitionKey(value)]
+		if !ok {
+			return nil
+		}
+		node = child
+	}
+
+	return node.aggregate
+}
+
+func (t *inspectPartitionAggregateTree) lookupPartition(
+	partition map[int]any,
+	partitionType *iceberg.StructType,
+) *inspectPartitionAggregate {
+	node := t
+	if partitionType == nil {
+		return node.aggregate
+	}
+
+	for _, field := range partitionType.FieldList {
+		child, ok := node.children[comparablePartitionKey(partition[field.ID])]
 		if !ok {
 			return nil
 		}
@@ -152,10 +173,11 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 				return nil, err
 			}
 			file := entry.DataFile()
-			partition := inspectCoercePartition(file.Partition(), partitionType)
-			record := newPartitionRecord(partition, partitionType)
-			aggregate := aggregateTree.lookup(record)
+			partitionValues := dataFilePartition(file)
+			aggregate := aggregateTree.lookupPartition(partitionValues, partitionType)
 			if aggregate == nil {
+				partition := inspectCoercePartition(partitionValues, partitionType)
+				record := newPartitionRecord(partition, partitionType)
 				aggregate = &inspectPartitionAggregate{
 					partition:       cloneInspectPartition(partition),
 					partitionRecord: record,
@@ -253,6 +275,9 @@ func cloneInspectPartition(partition map[int]any) map[int]any {
 	}
 	returnMap := make(map[int]any, len(partition))
 	for id, value := range partition {
+		if bytes, ok := value.([]byte); ok {
+			value = slices.Clone(bytes)
+		}
 		returnMap[id] = value
 	}
 

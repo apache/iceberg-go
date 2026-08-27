@@ -2632,6 +2632,43 @@ func TestInspectPartitionAggregateTreeDistinguishesFloatWidthsAndSignedZero(t *t
 	require.Nil(t, tree.lookup(partitionRecord{float64(0)}))
 }
 
+func TestInspectPartitionAggregateTreeLookupPartition(t *testing.T) {
+	partitionType := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 1000, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+		{ID: 1001, Name: "payload", Type: iceberg.PrimitiveTypes.Binary},
+		{ID: 1002, Name: "score", Type: iceberg.PrimitiveTypes.Float64},
+	}}
+	partition := map[int]any{
+		1000: int32(7),
+		1001: []byte{1, 2, 3},
+		1002: math.NaN(),
+	}
+	record := newPartitionRecord(inspectCoercePartition(partition, partitionType), partitionType)
+	aggregate := &inspectPartitionAggregate{specID: 1}
+	tree := newInspectPartitionAggregateTree()
+	tree.insert(record, aggregate)
+
+	require.Same(t, aggregate, tree.lookupPartition(partition, partitionType))
+	require.Nil(t, tree.lookupPartition(map[int]any{
+		1000: int32(7),
+		1001: []byte{1, 2, 4},
+		1002: math.NaN(),
+	}, partitionType))
+}
+
+func TestCloneInspectPartitionClonesBinaryValues(t *testing.T) {
+	value := []byte{1, 2, 3}
+	cloned := cloneInspectPartition(map[int]any{1000: value})
+
+	value[0] = 4
+	require.Equal(t, []byte{1, 2, 3}, cloned[1000])
+
+	clonedValue := cloned[1000].([]byte)
+	clonedValue[1] = 5
+
+	require.Equal(t, []byte{4, 2, 3}, value)
+}
+
 func TestInspectPartitionsAggregatesDataAndDeletes(t *testing.T) {
 	const snapshotID = int64(1)
 	spec := partitionedSpec()
