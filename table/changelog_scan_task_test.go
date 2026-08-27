@@ -24,43 +24,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func changelogTestDataFile(t *testing.T, path string, content iceberg.ManifestEntryContent) iceberg.DataFile {
+func changelogTestDataFile(t *testing.T, path string, content iceberg.ManifestEntryContent, format iceberg.FileFormat) iceberg.DataFile {
 	t.Helper()
 
 	b, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
-		content, path, iceberg.ParquetFile, nil, nil, nil, 10, 1024)
+		content, path, format, nil, nil, nil, 10, 1024)
 	require.NoError(t, err)
 
 	return b.Build()
 }
 
 func TestAddedRowsScanTaskAppliesSameSnapshotDeletes(t *testing.T) {
-	data := changelogTestDataFile(t, "data/f1.parquet", iceberg.EntryContentData)
-	posDel := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes)
+	data := changelogTestDataFile(t, "data/f1.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
+	posDel := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
+	eqDel := changelogTestDataFile(t, "deletes/d2.parquet", iceberg.EntryContentEqDeletes, iceberg.ParquetFile)
+	dv := changelogTestDataFile(t, "deletes/d3.puffin", iceberg.EntryContentPosDeletes, iceberg.PuffinFile)
 
-	task := NewAddedRowsScanTask(data, []iceberg.DataFile{posDel}, 0, 42)
+	task := NewAddedRowsScanTask(data, []iceberg.DataFile{eqDel, dv, posDel}, 0, 42)
 
 	require.Equal(t, 0, task.ChangeOrdinal())
 	require.Equal(t, int64(42), task.CommitSnapshotID())
 	require.Equal(t, data.FilePath(), task.File.FilePath())
-	require.Equal(t, []iceberg.DataFile{posDel}, task.Deletes())
+	require.Equal(t, []iceberg.DataFile{posDel}, task.DeleteFiles)
+	require.Equal(t, []iceberg.DataFile{eqDel}, task.EqualityDeleteFiles)
+	require.Equal(t, []iceberg.DataFile{dv}, task.DeletionVectorFiles)
+	require.Equal(t, []iceberg.DataFile{posDel, eqDel, dv}, task.Deletes())
 }
 
 func TestDeletedDataFileScanTaskKeepsExistingDeletes(t *testing.T) {
-	data := changelogTestDataFile(t, "data/f2.parquet", iceberg.EntryContentData)
-	existing := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes)
+	data := changelogTestDataFile(t, "data/f2.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
+	existing := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
 
 	task := NewDeletedDataFileScanTask(data, []iceberg.DataFile{existing}, 1, 43)
 
 	require.Equal(t, 1, task.ChangeOrdinal())
 	require.Equal(t, int64(43), task.CommitSnapshotID())
 	require.Equal(t, []iceberg.DataFile{existing}, task.ExistingDeletes())
+	require.Equal(t, []iceberg.DataFile{existing}, task.DeleteFiles)
 }
 
 func TestDeletedRowsScanTaskSeparatesAddedAndExistingDeletes(t *testing.T) {
-	data := changelogTestDataFile(t, "data/f2.parquet", iceberg.EntryContentData)
-	added := changelogTestDataFile(t, "deletes/d2.parquet", iceberg.EntryContentEqDeletes)
-	existing := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes)
+	data := changelogTestDataFile(t, "data/f2.parquet", iceberg.EntryContentData, iceberg.ParquetFile)
+	added := changelogTestDataFile(t, "deletes/d2.parquet", iceberg.EntryContentEqDeletes, iceberg.ParquetFile)
+	existing := changelogTestDataFile(t, "deletes/d1.parquet", iceberg.EntryContentPosDeletes, iceberg.ParquetFile)
 
 	task := NewDeletedRowsScanTask(data, []iceberg.DataFile{added}, []iceberg.DataFile{existing}, 2, 44)
 
@@ -69,4 +75,6 @@ func TestDeletedRowsScanTaskSeparatesAddedAndExistingDeletes(t *testing.T) {
 	require.Equal(t, []iceberg.DataFile{added}, task.AddedDeletes())
 	require.Equal(t, []iceberg.DataFile{existing}, task.ExistingDeletes())
 	require.Equal(t, existing.FilePath(), task.DeleteFiles[0].FilePath())
+	require.Empty(t, task.EqualityDeleteFiles)
+	require.Equal(t, []iceberg.DataFile{added}, task.addedDeletes.EqualityDeleteFiles)
 }
