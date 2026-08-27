@@ -159,7 +159,7 @@ func buildEqualityDeleteIndex(
 			continue
 		}
 
-		partition := df.Partition()
+		partition := dataFilePartition(df)
 		key, err := newEqualityDeletePartitionKey(df.SpecID(), partition)
 		if err != nil {
 			return nil, fmt.Errorf("indexing equality delete file %s: %w", df.FilePath(), err)
@@ -194,7 +194,7 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 	partitionEntries := []iceberg.ManifestEntry(nil)
 	if len(idx.byPartition) > 0 {
 		dataFile := dataEntry.DataFile()
-		partition := dataFile.Partition()
+		partition := dataFilePartition(dataFile)
 		if len(partition) > 0 {
 			key, err := newEqualityDeletePartitionKey(dataFile.SpecID(), partition)
 			if err != nil {
