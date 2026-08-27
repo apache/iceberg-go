@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -89,4 +90,94 @@ func BenchmarkDefaultDataFileWriter(b *testing.B) {
 		}
 	}
 	b.ReportMetric(float64(rows), "rows/op")
+}
+
+func BenchmarkToRequestedSchemaWriteFastPath(b *testing.B) {
+	requested := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64,
+	})
+	requestedArrowSchema, err := SchemaToArrowSchemaWithOptions(requested, ArrowSchemaOptions{IncludeFieldIDs: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	provided := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32,
+	})
+	providedArrowSchema, err := SchemaToArrowSchemaWithOptions(provided, ArrowSchemaOptions{IncludeFieldIDs: true})
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	opts := SchemaOptions{
+		DowncastTimestamp: true,
+		IncludeFieldIDs:   true,
+		UseWriteDefault:   true,
+	}
+	for _, rows := range []int{0, 1, 16, 1024, 65536} {
+		b.Run(fmt.Sprintf("rows=%d", rows), func(b *testing.B) {
+			exact := benchmarkIntRecord(b, requestedArrowSchema, rows, true)
+			defer exact.Release()
+			conversion := benchmarkIntRecord(b, providedArrowSchema, rows, false)
+			defer conversion.Release()
+
+			b.Run("projection", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					out, err := ToRequestedSchema(b.Context(), requested, requested, exact, opts)
+					if err != nil {
+						b.Fatal(err)
+					}
+					out.Release()
+				}
+				b.ReportMetric(float64(rows), "rows/op")
+			})
+
+			b.Run("exact_fast_path", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					out, err := toRequestedSchema(b.Context(), requested, requested, exact, opts, requestedArrowSchema)
+					if err != nil {
+						b.Fatal(err)
+					}
+					out.Release()
+				}
+				b.ReportMetric(float64(rows), "rows/op")
+			})
+
+			b.Run("conversion", func(b *testing.B) {
+				b.ReportAllocs()
+				for b.Loop() {
+					out, err := toRequestedSchema(b.Context(), requested, provided, conversion, opts, requestedArrowSchema)
+					if err != nil {
+						b.Fatal(err)
+					}
+					out.Release()
+				}
+				b.ReportMetric(float64(rows), "rows/op")
+			})
+
+		})
+	}
+}
+
+func benchmarkIntRecord(b *testing.B, schema *arrow.Schema, rows int, int64Values bool) arrow.RecordBatch {
+	b.Helper()
+
+	builder := array.NewRecordBuilder(memory.DefaultAllocator, schema)
+	if int64Values {
+		field := builder.Field(0).(*array.Int64Builder)
+		for range rows {
+			field.Append(1)
+		}
+	} else {
+		field := builder.Field(0).(*array.Int32Builder)
+		for range rows {
+			field.Append(1)
+		}
+	}
+	record := builder.NewRecordBatch()
+	builder.Release()
+
+	return record
 }
