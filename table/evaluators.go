@@ -62,7 +62,7 @@ type manifestEvalVisitor struct {
 }
 
 func (m *manifestEvalVisitor) Eval(manifest iceberg.ManifestFile) (bool, error) {
-	parts := manifest.Partitions()
+	parts := manifestFilePartitions(manifest)
 	if len(parts) == 0 {
 		return rowsMightMatch, nil
 	}
