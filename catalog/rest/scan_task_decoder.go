@@ -207,9 +207,11 @@ func DecodeScanTasks(
 				dvOwners[ref] = dataFile.FilePath()
 				// Derive referenced-data-file from the FileScanTask association
 				// when the server omits Java's optional extension field.
-				deleteFile, err = decodeRESTDeleteFile(wireDelete, metadata, dataFile.FilePath())
-				if err != nil {
-					return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, ref, err)
+				if wireDelete.ReferencedDataFile == nil {
+					deleteFile, err = decodeRESTDeleteFile(wireDelete, metadata, dataFile.FilePath())
+					if err != nil {
+						return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, ref, err)
+					}
 				}
 			}
 
