@@ -279,3 +279,34 @@ func BenchmarkDataFileStatsFromMetaNestedVariant(b *testing.B) {
 	b.ReportMetric(float64(rowGroups*rows), "rows/op")
 	b.ReportMetric(float64(rowGroups*9), "columns/op")
 }
+
+func BenchmarkDataFileStatsFromMetaMostlyInactive(b *testing.B) {
+	const (
+		rowGroups = 32
+		rows      = 10_000
+	)
+
+	fixture := newStatsColumnsBenchmarkFixture(b, rowGroups, rows)
+	statsCols := map[int]StatisticsCollector{
+		1: {FieldID: 1, Mode: MetricsMode{Typ: MetricModeNone}, IcebergTyp: iceberg.PrimitiveTypes.Int32},
+		2: {FieldID: 2, Mode: MetricsMode{Typ: MetricModeNone}, IcebergTyp: iceberg.PrimitiveTypes.Float64},
+		3: {FieldID: 3, Mode: MetricsMode{Typ: MetricModeFull}, IcebergTyp: iceberg.PrimitiveTypes.String},
+		4: {FieldID: 4, Mode: MetricsMode{Typ: MetricModeNone}, ColName: "payload"},
+	}
+
+	format := parquetFormat{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		stats := format.DataFileStatsFromMeta(
+			fixture.meta, statsCols, fixture.colMapping, fixture.variantFieldIDs, nil)
+		if stats.RecordCount != int64(rowGroups*rows) {
+			b.Fatalf("unexpected record count: %d", stats.RecordCount)
+		}
+		if len(stats.ValueCounts) != 1 {
+			b.Fatalf("expected one active column, got %d", len(stats.ValueCounts))
+		}
+	}
+	b.ReportMetric(float64(rowGroups*rows), "rows/op")
+	b.ReportMetric(float64(rowGroups*9), "columns/op")
+}

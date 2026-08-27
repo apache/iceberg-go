@@ -1470,25 +1470,26 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		}
 
 		for pos := range rowGroup.NumColumns() {
-			colChunk, err = rowGroup.ColumnChunk(pos)
-			if err != nil {
-				panic(err)
-			}
-
 			column := columns[pos]
 			if column.resolveErr != nil {
+				if _, err = rowGroup.ColumnChunk(pos); err != nil {
+					panic(err)
+				}
+
 				panic(column.resolveErr)
 			}
-			if column.variantChild || column.skipStats {
+			if column.variantChild || column.skipStats || column.statsCol.Mode.Typ == MetricModeNone {
 				continue
 			}
 
 			fieldID, statsCol := column.fieldID, column.statsCol
-			if statsCol.Mode.Typ == MetricModeNone {
-				continue
-			}
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
+			}
+
+			colChunk, err = rowGroup.ColumnChunk(pos)
+			if err != nil {
+				panic(err)
 			}
 
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
