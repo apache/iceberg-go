@@ -38,13 +38,19 @@ const (
 	// footerTrailerSize accounts for footer length (4)+ flags (4) + trailing magic (4).
 	footerTrailerSize = 12
 
-	// FooterFlagCompressed indicates a compressed footer; unsupported in this implementation.
+	// FooterFlagCompressed indicates that the footer payload uses the Puffin
+	// format's LZ4 frame compression.
 	FooterFlagCompressed = 1 // bit 0
 
 	// Prevents OOM
 	// DefaultMaxBlobSize is the maximum blob size allowed when reading (256 MB).
 	// Override with WithMaxBlobSize when creating a reader.
 	DefaultMaxBlobSize = 256 << 20
+
+	// DefaultMaxFooterSize is the maximum footer payload size allowed when
+	// reading (64 MB). For compressed footer payloads, the limit applies after
+	// decompression. Override with WithMaxFooterSize when creating a reader.
+	DefaultMaxFooterSize = 64 << 20
 
 	// CreatedBy is a human-readable identification of the application writing the file, along with its version.
 	// Example: "Trino version 381".
