@@ -91,7 +91,7 @@ func equalityDeleteConflictBenchmarkInput(
 
 	schemaFields := make([]iceberg.NestedField, fieldCount)
 	partitionFields := make([]iceberg.PartitionField, fieldCount)
-	for i := 0; i < fieldCount; i++ {
+	for i := range fieldCount {
 		fieldID := i + 1
 		fieldName := fmt.Sprintf("partition_%d", i)
 		schemaFields[i] = iceberg.NestedField{
@@ -122,10 +122,10 @@ func equalityDeleteConflictBenchmarkInput(
 	}
 
 	files := make([]iceberg.DataFile, fileCount)
-	for i := 0; i < fileCount; i++ {
+	for i := range fileCount {
 		partition := make(map[int]any, fieldCount)
 		partitionID := i % partitionCount
-		for field := 0; field < fieldCount; field++ {
+		for field := range fieldCount {
 			partition[1000+field] = fmt.Sprintf("partition-%d-field-%d", partitionID, field)
 		}
 
