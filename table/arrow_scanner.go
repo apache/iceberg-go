@@ -395,7 +395,8 @@ func (a *posDeleteAccumulator) finish() map[string]*arrow.Chunked {
 }
 
 func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int, filePathLen int,
-	posType arrow.DataType, posNulls int, posLen int) error {
+	posType arrow.DataType, posNulls int, posLen int,
+) error {
 	if filePathNulls > 0 {
 		return fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
 	}
@@ -419,7 +420,8 @@ func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int, fi
 }
 
 func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePathChunk arrow.Array,
-	posCursor *posDeleteCursor) error {
+	posCursor *posDeleteCursor,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
