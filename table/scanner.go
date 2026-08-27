@@ -151,21 +151,20 @@ func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	defer m.mu.Unlock()
 
 	for _, entry := range entries {
-		dataFile := entry.DataFile()
-		switch dataFile.ContentType() {
-		case iceberg.EntryContentData:
+		kind, err := classifyDataFile(entry.DataFile())
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, entry)
+		}
+
+		switch kind {
+		case dataFileKindData:
 			m.dataEntries = append(m.dataEntries, entry)
-		case iceberg.EntryContentPosDeletes:
-			if IsDeletionVector(dataFile) {
-				m.dvEntries = append(m.dvEntries, entry)
-			} else {
-				m.positionalDeleteEntries = append(m.positionalDeleteEntries, entry)
-			}
-		case iceberg.EntryContentEqDeletes:
+		case dataFileKindPosDeletes:
+			m.positionalDeleteEntries = append(m.positionalDeleteEntries, entry)
+		case dataFileKindEqDeletes:
 			m.equalityDeleteEntries = append(m.equalityDeleteEntries, entry)
-		default:
-			return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
-				ErrInvalidMetadata, dataFile.ContentType(), entry)
+		case dataFileKindDeletionVector:
+			m.dvEntries = append(m.dvEntries, entry)
 		}
 	}
 
@@ -228,6 +227,35 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 func IsDeletionVector(df iceberg.DataFile) bool {
 	return df.FileFormat() == iceberg.PuffinFile &&
 		df.ContentType() == iceberg.EntryContentPosDeletes
+}
+
+type dataFileKind int
+
+const (
+	dataFileKindData dataFileKind = iota
+	dataFileKindPosDeletes
+	dataFileKindEqDeletes
+	dataFileKindDeletionVector
+)
+
+// classifyDataFile buckets a file by content type. Deletion vectors are
+// Puffin position-delete files and are split out from regular pos-deletes.
+func classifyDataFile(f iceberg.DataFile) (dataFileKind, error) {
+	switch f.ContentType() {
+	case iceberg.EntryContentData:
+		return dataFileKindData, nil
+	case iceberg.EntryContentPosDeletes:
+		if IsDeletionVector(f) {
+			return dataFileKindDeletionVector, nil
+		}
+
+		return dataFileKindPosDeletes, nil
+	case iceberg.EntryContentEqDeletes:
+		return dataFileKindEqDeletes, nil
+	default:
+		return 0, fmt.Errorf("%w: unknown DataFileContent type (%s)",
+			ErrInvalidMetadata, f.ContentType())
+	}
 }
 
 type Scan struct {

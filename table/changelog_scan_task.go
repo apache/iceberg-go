@@ -17,7 +17,49 @@
 
 package table
 
-import "github.com/apache/iceberg-go"
+import (
+	"fmt"
+
+	"github.com/apache/iceberg-go"
+)
+
+// ChangelogOperation is the kind of change a changelog scan task produces.
+type ChangelogOperation string
+
+const (
+	ChangelogOpInsert       ChangelogOperation = "INSERT"
+	ChangelogOpDelete       ChangelogOperation = "DELETE"
+	ChangelogOpUpdateBefore ChangelogOperation = "UPDATE_BEFORE"
+	ChangelogOpUpdateAfter  ChangelogOperation = "UPDATE_AFTER"
+)
+
+// ChangelogScanTask is a unit of work that produces changelog rows.
+type ChangelogScanTask interface {
+	Operation() ChangelogOperation
+	ChangeOrdinal() int
+	CommitSnapshotID() int64
+}
+
+var (
+	_ ChangelogScanTask = AddedRowsScanTask{}
+	_ ChangelogScanTask = DeletedDataFileScanTask{}
+	_ ChangelogScanTask = DeletedRowsScanTask{}
+)
+
+// classifiedDeletes holds delete files split the same way FileScanTask does,
+// without a second FileScanTask whose range and lineage fields would be zero.
+type classifiedDeletes struct {
+	pos, eq, dv []iceberg.DataFile
+}
+
+func (d classifiedDeletes) files() []iceberg.DataFile {
+	out := make([]iceberg.DataFile, 0, len(d.pos)+len(d.eq)+len(d.dv))
+	out = append(out, d.pos...)
+	out = append(out, d.eq...)
+	out = append(out, d.dv...)
+
+	return out
+}
 
 // AddedRowsScanTask is a changelog insert produced by adding a data file.
 // Matching delete files committed in the same snapshot, or from squashed
@@ -33,16 +75,22 @@ type AddedRowsScanTask struct {
 // delete files that apply while reading the added file. Position deletes,
 // equality deletes, and deletion vectors are stored on the matching
 // FileScanTask fields.
-func NewAddedRowsScanTask(dataFile iceberg.DataFile, deletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) AddedRowsScanTask {
+func NewAddedRowsScanTask(dataFile iceberg.DataFile, deletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) (AddedRowsScanTask, error) {
+	task, err := fileScanTaskWithDeletes(dataFile, deletes)
+	if err != nil {
+		return AddedRowsScanTask{}, err
+	}
+
 	return AddedRowsScanTask{
-		FileScanTask:     fileScanTaskWithDeletes(dataFile, deletes),
+		FileScanTask:     task,
 		changeOrdinal:    changeOrdinal,
 		commitSnapshotID: commitSnapshotID,
-	}
+	}, nil
 }
 
-func (t AddedRowsScanTask) ChangeOrdinal() int      { return t.changeOrdinal }
-func (t AddedRowsScanTask) CommitSnapshotID() int64 { return t.commitSnapshotID }
+func (t AddedRowsScanTask) Operation() ChangelogOperation { return ChangelogOpInsert }
+func (t AddedRowsScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
+func (t AddedRowsScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
 
 // Deletes returns every delete file applied while reading the added data
 // file: position deletes, then equality deletes, then deletion vectors.
@@ -61,16 +109,22 @@ type DeletedDataFileScanTask struct {
 }
 
 // NewDeletedDataFileScanTask constructs a delete task for a removed data file.
-func NewDeletedDataFileScanTask(dataFile iceberg.DataFile, existingDeletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) DeletedDataFileScanTask {
+func NewDeletedDataFileScanTask(dataFile iceberg.DataFile, existingDeletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) (DeletedDataFileScanTask, error) {
+	task, err := fileScanTaskWithDeletes(dataFile, existingDeletes)
+	if err != nil {
+		return DeletedDataFileScanTask{}, err
+	}
+
 	return DeletedDataFileScanTask{
-		FileScanTask:     fileScanTaskWithDeletes(dataFile, existingDeletes),
+		FileScanTask:     task,
 		changeOrdinal:    changeOrdinal,
 		commitSnapshotID: commitSnapshotID,
-	}
+	}, nil
 }
 
-func (t DeletedDataFileScanTask) ChangeOrdinal() int      { return t.changeOrdinal }
-func (t DeletedDataFileScanTask) CommitSnapshotID() int64 { return t.commitSnapshotID }
+func (t DeletedDataFileScanTask) Operation() ChangelogOperation { return ChangelogOpDelete }
+func (t DeletedDataFileScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
+func (t DeletedDataFileScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
 
 // ExistingDeletes returns delete files that applied before the data file was
 // removed.
@@ -84,7 +138,7 @@ func (t DeletedDataFileScanTask) ExistingDeletes() []iceberg.DataFile {
 // those rows must not be emitted again.
 type DeletedRowsScanTask struct {
 	FileScanTask
-	addedDeletes     FileScanTask
+	addedDeletes     classifiedDeletes
 	changeOrdinal    int
 	commitSnapshotID int64
 }
@@ -92,22 +146,33 @@ type DeletedRowsScanTask struct {
 // NewDeletedRowsScanTask constructs a row-level delete task. existingDeletes
 // are stored on the embedded FileScanTask so later readers can reuse the
 // normal scan delete path for the live-row baseline.
-func NewDeletedRowsScanTask(dataFile iceberg.DataFile, addedDeletes, existingDeletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) DeletedRowsScanTask {
+func NewDeletedRowsScanTask(dataFile iceberg.DataFile, addedDeletes, existingDeletes []iceberg.DataFile, changeOrdinal int, commitSnapshotID int64) (DeletedRowsScanTask, error) {
+	existing, err := fileScanTaskWithDeletes(dataFile, existingDeletes)
+	if err != nil {
+		return DeletedRowsScanTask{}, err
+	}
+
+	added, err := classifyDeleteFiles(addedDeletes)
+	if err != nil {
+		return DeletedRowsScanTask{}, err
+	}
+
 	return DeletedRowsScanTask{
-		FileScanTask:     fileScanTaskWithDeletes(dataFile, existingDeletes),
-		addedDeletes:     fileScanTaskWithDeletes(dataFile, addedDeletes),
+		FileScanTask:     existing,
+		addedDeletes:     added,
 		changeOrdinal:    changeOrdinal,
 		commitSnapshotID: commitSnapshotID,
-	}
+	}, nil
 }
 
-func (t DeletedRowsScanTask) ChangeOrdinal() int      { return t.changeOrdinal }
-func (t DeletedRowsScanTask) CommitSnapshotID() int64 { return t.commitSnapshotID }
+func (t DeletedRowsScanTask) Operation() ChangelogOperation { return ChangelogOpDelete }
+func (t DeletedRowsScanTask) ChangeOrdinal() int            { return t.changeOrdinal }
+func (t DeletedRowsScanTask) CommitSnapshotID() int64       { return t.commitSnapshotID }
 
 // AddedDeletes returns delete files whose removals should appear in the
 // changelog.
 func (t DeletedRowsScanTask) AddedDeletes() []iceberg.DataFile {
-	return allDeleteFiles(t.addedDeletes)
+	return t.addedDeletes.files()
 }
 
 // ExistingDeletes returns delete files that already applied before this
@@ -116,37 +181,48 @@ func (t DeletedRowsScanTask) ExistingDeletes() []iceberg.DataFile {
 	return allDeleteFiles(t.FileScanTask)
 }
 
-func fileScanTaskWithDeletes(dataFile iceberg.DataFile, deletes []iceberg.DataFile) FileScanTask {
-	pos, eq, dv := classifyDeleteFiles(deletes)
+func fileScanTaskWithDeletes(dataFile iceberg.DataFile, deletes []iceberg.DataFile) (FileScanTask, error) {
+	classified, err := classifyDeleteFiles(deletes)
+	if err != nil {
+		return FileScanTask{}, err
+	}
+
 	return FileScanTask{
 		File:                dataFile,
-		DeleteFiles:         pos,
-		EqualityDeleteFiles: eq,
-		DeletionVectorFiles: dv,
-	}
+		DeleteFiles:         classified.pos,
+		EqualityDeleteFiles: classified.eq,
+		DeletionVectorFiles: classified.dv,
+	}, nil
 }
 
-func classifyDeleteFiles(files []iceberg.DataFile) (pos, eq, dv []iceberg.DataFile) {
+func classifyDeleteFiles(files []iceberg.DataFile) (classifiedDeletes, error) {
+	var out classifiedDeletes
 	for _, f := range files {
-		if f == nil {
-			continue
+		kind, err := classifyDataFile(f)
+		if err != nil {
+			return classifiedDeletes{}, err
 		}
-		switch {
-		case IsDeletionVector(f):
-			dv = append(dv, f)
-		case f.ContentType() == iceberg.EntryContentEqDeletes:
-			eq = append(eq, f)
-		case f.ContentType() == iceberg.EntryContentPosDeletes:
-			pos = append(pos, f)
+
+		switch kind {
+		case dataFileKindPosDeletes:
+			out.pos = append(out.pos, f)
+		case dataFileKindEqDeletes:
+			out.eq = append(out.eq, f)
+		case dataFileKindDeletionVector:
+			out.dv = append(out.dv, f)
+		default:
+			return classifiedDeletes{}, fmt.Errorf("%w: expected delete file, got content type %s",
+				ErrInvalidMetadata, f.ContentType())
 		}
 	}
-	return pos, eq, dv
+
+	return out, nil
 }
 
 func allDeleteFiles(task FileScanTask) []iceberg.DataFile {
-	out := make([]iceberg.DataFile, 0, len(task.DeleteFiles)+len(task.EqualityDeleteFiles)+len(task.DeletionVectorFiles))
-	out = append(out, task.DeleteFiles...)
-	out = append(out, task.EqualityDeleteFiles...)
-	out = append(out, task.DeletionVectorFiles...)
-	return out
+	return classifiedDeletes{
+		pos: task.DeleteFiles,
+		eq:  task.EqualityDeleteFiles,
+		dv:  task.DeletionVectorFiles,
+	}.files()
 }
