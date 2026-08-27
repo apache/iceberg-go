@@ -1333,8 +1333,9 @@ func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
 	require.Len(t, updates, 1)
 
 	err := updates[0].Apply(buildFromBaseV3(t))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot find source column with id: 0 in schema")
+	// Pinned to BindToSchema's wording on purpose: the assertion below only
+	// shows the decoder let the field through, not who rejected it.
+	require.ErrorContains(t, err, "cannot find source column with id: 0 in schema")
 	assert.NotContains(t, err.Error(), "must be positive")
 }
 
@@ -1347,9 +1348,39 @@ func TestAddSortOrderUpdate_UnmarshalDefersBindingToApply(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &updates))
 	require.Len(t, updates, 1)
 
-	err := updates[0].Apply(buildFromBaseV3(t))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not compatible with current schema")
+	require.ErrorContains(t, updates[0].Apply(buildFromBaseV3(t)), "not compatible with current schema")
+}
+
+func TestAddSortOrderUpdate_UnmarshalRoundTrip(t *testing.T) {
+	// The decode no longer validates source IDs, so cover the resolvable case
+	// end to end: field 1 is x in baseMetaV3JSON.
+	data := []byte(`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"desc","null-order":"nulls-last"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	b := buildFromBaseV3(t)
+	require.NoError(t, updates[0].Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	var order SortOrder
+	var found bool
+	for _, o := range meta.SortOrders() {
+		if o.OrderID() == 1 {
+			order, found = o, true
+		}
+	}
+	require.True(t, found)
+	require.Equal(t, 1, order.Len())
+
+	field := order.Field(0)
+	assert.Equal(t, []int{1}, field.SourceIDs)
+	assert.Equal(t, SortDESC, field.Direction)
+	assert.Equal(t, NullsLast, field.NullOrder)
+	assert.IsType(t, iceberg.IdentityTransform{}, field.Transform)
 }
 
 func TestAddSpecAndSortOrderUpdates_ApplyRejectNilPayload(t *testing.T) {

@@ -257,17 +257,27 @@ type SortOrder struct {
 	fields  []SortField
 }
 
-// UnboundSortOrder decodes a sort order that a client sent in a create-table
-// request, before it has been bound to a schema. Such an order carries the
-// client's placeholder source IDs rather than table field IDs. A client numbers
-// those placeholders however it likes, so unlike bound field IDs they need not
-// be positive: Spark numbers the columns of a new table from zero, so sorting
-// by the first column arrives as source-id 0. Binding the embedded order to the
-// schema the client sent resolves the placeholders to field IDs.
+// UnboundSortOrder decodes a sort order whose source IDs have not yet been
+// resolved against the schema that decides them, so unlike bound field IDs they
+// need not be positive. Two wire forms arrive this way:
+//
+//   - A create-table request's write order, which carries the client's
+//     placeholder source IDs rather than table field IDs. A client numbers those
+//     placeholders however it likes: Spark numbers the columns of a new table
+//     from zero, so sorting by the first column arrives as source-id 0. Binding
+//     the embedded order to the schema the client sent resolves them.
+//   - An add-sort-order commit payload, which applying the update checks against
+//     the table's current schema.
+//
+// Decoding unbound defers the check rather than dropping it: every source ID
+// must still resolve in the schema it is checked against, and no transform is
+// exempt, so an order the schema cannot satisfy is rejected when the update is
+// applied.
 //
 // Use SortOrder for orders read from table metadata, where source IDs are bound
-// field IDs and must be positive. Catalog implementations that serve the REST
-// create-table request should decode its write order into this type.
+// field IDs and must be positive. Catalog implementations should decode both the
+// REST create-table request's write order and an add-sort-order commit payload
+// into this type.
 type UnboundSortOrder struct {
 	SortOrder
 }

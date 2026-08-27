@@ -466,6 +466,8 @@ func (u *addSortOrderUpdate) Apply(builder *MetadataBuilder) error {
 		return fmt.Errorf("%w: update %q requires field %q", iceberg.ErrInvalidArgument, UpdateAddSortOrder, "sort-order")
 	}
 
+	// AddSortOrder writes the fresh order ID into the order it is given and
+	// keeps a pointer to that field, so the builder aliases this update.
 	return builder.AddSortOrder(&u.SortOrder.SortOrder)
 }
 

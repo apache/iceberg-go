@@ -219,23 +219,31 @@ type PartitionSpec struct {
 	sourceIdToFields map[int][]PartitionField
 }
 
-// UnboundPartitionSpec decodes a partition spec that a client sent in a
-// create-table request, before it has been bound to a schema. Such a spec
-// carries the client's placeholder source IDs rather than table field IDs.
-// A client numbers those placeholders however it likes, so unlike bound field
-// IDs they need not be positive: Spark numbers the columns of a new table from
-// zero, so partitioning by the first column arrives as source-id 0.
+// UnboundPartitionSpec decodes a partition spec whose source IDs have not yet
+// been resolved against the schema that decides them, so unlike bound field IDs
+// they need not be positive. Two wire forms arrive this way:
 //
-// The placeholders are field IDs of the schema the client sent with the spec,
-// so BindToSchema resolves them only when given that same schema. Passing the
-// schema the table ends up with instead binds against unrelated IDs, and a
-// placeholder that collides with one of them binds silently to the wrong
-// column. table.NewMetadata does the whole create-table flow, resolving the
-// placeholders through the request schema by name and reassigning fresh IDs.
+//   - A create-table request's spec, which carries the client's placeholder
+//     source IDs rather than table field IDs. A client numbers those
+//     placeholders however it likes: Spark numbers the columns of a new table
+//     from zero, so partitioning by the first column arrives as source-id 0.
+//   - An add-spec commit payload, whose source IDs are the current schema's
+//     field IDs, except that a dropped partition field arrives as a void
+//     transform over source-id 0. Applying the update binds the spec to the
+//     table's current schema, which is what decides whether the rest resolve.
+//
+// A create-table spec's placeholders are field IDs of the schema the client
+// sent with it, so BindToSchema resolves them only when given that same
+// schema. Passing the schema the table ends up with instead binds against
+// unrelated IDs, and a placeholder that collides with one of them binds
+// silently to the wrong column. table.NewMetadata does the whole create-table
+// flow, resolving the placeholders through the request schema by name and
+// reassigning fresh IDs.
 //
 // Use PartitionSpec for specs read from table metadata, where source IDs are
-// bound field IDs and must be positive. Catalog implementations that serve the
-// REST create-table request should decode its partition spec into this type.
+// bound field IDs: positive, apart from the void tombstone a dropped field
+// leaves behind. Catalog implementations should decode both the REST
+// create-table request's spec and an add-spec commit payload into this type.
 type UnboundPartitionSpec struct {
 	PartitionSpec
 }
