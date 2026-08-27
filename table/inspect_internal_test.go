@@ -3066,7 +3066,8 @@ func TestAppendParquetPositionDeleteRowsRejectsNegativePosition(t *testing.T) {
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
+		positionDeleteFileMeta{},
+		func(positionDeleteFileMeta, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 
 			return true, nil
@@ -3152,7 +3153,8 @@ func TestAppendParquetPositionDeleteRowsRejectsNullRow(t *testing.T) {
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		context.Background(), memFS, newPosDeleteFile(t, deletePath, 1, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
+		positionDeleteFileMeta{},
+		func(positionDeleteFileMeta, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 
 			return true, nil
@@ -3450,7 +3452,8 @@ func TestAppendParquetPositionDeleteRowsStopsOnContextCancellation(t *testing.T)
 	rows := 0
 	keepGoing, err := appendParquetPositionDeleteRows(
 		ctx, memFS, newPosDeleteFile(t, deletePath, 2, 128),
-		func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error) {
+		positionDeleteFileMeta{},
+		func(positionDeleteFileMeta, string, int64, scalar.Scalar, bool) (bool, error) {
 			rows++
 			cancel()
 
