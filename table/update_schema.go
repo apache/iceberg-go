@@ -1388,7 +1388,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 			}
 		}
 		if !found {
-			continue
+			panic(fmt.Errorf("cannot move field %d: field not found", move.FieldID))
 		}
 
 		reordered = append(reordered[:fieldIndex], reordered[fieldIndex+1:]...)
@@ -1408,7 +1408,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 				}
 			}
 			if !found {
-				continue
+				panic(fmt.Errorf("cannot move field %d: target field %d not found", move.FieldID, move.RelativeTo))
 			}
 
 			if move.Op == MoveOpBefore {

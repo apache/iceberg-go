@@ -490,6 +490,16 @@ func TestApplyChanges(t *testing.T) {
 			{ID: 4, Name: "name", Type: iceberg.PrimitiveTypes.UUID, Required: false, Doc: ""},
 		}, st.(*iceberg.StructType).Fields())
 	})
+
+	t.Run("test move with missing target fails", func(t *testing.T) {
+		_, err := iceberg.Visit(originalSchema, &applyChanges{
+			deletes: map[int]struct{}{2: {}},
+			moves: map[int][]move{
+				TableRootID: {{FieldID: 3, RelativeTo: 2, Op: MoveOpBefore}},
+			},
+		})
+		require.ErrorContains(t, err, "cannot move field 3: target field 2 not found")
+	})
 }
 
 func TestDeleteColumn(t *testing.T) {
@@ -889,32 +899,37 @@ func TestMoveColumn(t *testing.T) {
 
 func TestMoveRelativeToDeletedColumnRejected(t *testing.T) {
 	tests := []struct {
-		name  string
-		build func(*UpdateSchema) *UpdateSchema
+		name    string
+		build   func(*UpdateSchema) *UpdateSchema
+		wantErr string
 	}{
 		{
 			name: "delete then move before",
 			build: func(update *UpdateSchema) *UpdateSchema {
 				return update.DeleteColumn([]string{"name"}).MoveBefore([]string{"age"}, []string{"name"})
 			},
+			wantErr: "has been deleted",
 		},
 		{
 			name: "move before then delete",
 			build: func(update *UpdateSchema) *UpdateSchema {
 				return update.MoveBefore([]string{"age"}, []string{"name"}).DeleteColumn([]string{"name"})
 			},
+			wantErr: "cannot be deleted",
 		},
 		{
 			name: "delete then move after",
 			build: func(update *UpdateSchema) *UpdateSchema {
 				return update.DeleteColumn([]string{"name"}).MoveAfter([]string{"age"}, []string{"name"})
 			},
+			wantErr: "has been deleted",
 		},
 		{
 			name: "move after then delete",
 			build: func(update *UpdateSchema) *UpdateSchema {
 				return update.MoveAfter([]string{"age"}, []string{"name"}).DeleteColumn([]string{"name"})
 			},
+			wantErr: "cannot be deleted",
 		},
 	}
 
@@ -922,10 +937,43 @@ func TestMoveRelativeToDeletedColumnRejected(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tbl := New([]string{"id"}, testMetadata, "", nil, nil)
 			_, err := tt.build(NewUpdateSchema(tbl.NewTransaction(), true, true)).Apply()
-			require.ErrorContains(t, err, "move target")
+			require.ErrorContains(t, err, tt.wantErr)
 			require.ErrorContains(t, err, "name")
 		})
 	}
+
+	t.Run("move then delete source", func(t *testing.T) {
+		tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+		_, err := NewUpdateSchema(tbl.NewTransaction(), true, true).
+			MoveBefore([]string{"age"}, []string{"name"}).
+			DeleteColumn([]string{"age"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot move field 3: field not found")
+	})
+
+	t.Run("delete with unrelated move", func(t *testing.T) {
+		tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+		updated, err := NewUpdateSchema(tbl.NewTransaction(), true, true).
+			DeleteColumn([]string{"name"}).
+			MoveBefore([]string{"age"}, []string{"id"}).
+			Apply()
+		require.NoError(t, err)
+		fields := updated.Fields()
+		names := make([]string, len(fields))
+		for i, field := range fields {
+			names[i] = field.Name
+		}
+		require.Equal(t, []string{"age", "id", "address", "tags", "properties"}, names)
+	})
+
+	t.Run("nested move target cannot be deleted", func(t *testing.T) {
+		tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+		_, err := NewUpdateSchema(tbl.NewTransaction(), true, true).
+			MoveBefore([]string{"address", "zip"}, []string{"address", "city"}).
+			DeleteColumn([]string{"address", "city"}).
+			Apply()
+		require.ErrorContains(t, err, "cannot be deleted: address.city")
+	})
 }
 
 func TestChainedOperations(t *testing.T) {
