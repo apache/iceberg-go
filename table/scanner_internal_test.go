@@ -47,7 +47,7 @@ func newDataManifest(minSeqNum int64) iceberg.ManifestFile {
 		Content(iceberg.ManifestContentData).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
-		}
+}
 
 func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 	return iceberg.NewManifestFile(2, "/path/to/manifest.avro", 1000, 0, 1).
