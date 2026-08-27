@@ -56,10 +56,32 @@ func (f *borrowedInspectDataFile) UpperBoundValues() map[int][]byte {
 	panic("metadata appender called the public UpperBoundValues getter")
 }
 
+func (f *borrowedInspectDataFile) ColumnSizes() map[int]int64 {
+	panic("metadata appender called the public ColumnSizes getter")
+}
+
+func (f *borrowedInspectDataFile) KeyMetadata() []byte {
+	panic("metadata appender called the public KeyMetadata getter")
+}
+
+func (f *borrowedInspectDataFile) SplitOffsets() []int64 {
+	panic("metadata appender called the public SplitOffsets getter")
+}
+
+func (f *borrowedInspectDataFile) EqualityFieldIDs() []int {
+	panic("metadata appender called the public EqualityFieldIDs getter")
+}
+
 func (f *borrowedInspectDataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	map[int]int64, map[int]int64, map[int]int64, map[int][]byte, map[int][]byte,
 ) {
 	return internal.BorrowedDataFileStats(f.DataFile)
+}
+
+func (f *borrowedInspectDataFile) DataFileCollectionsRef(_ internal.DataFileRef) (
+	map[int]int64, []byte, []int64, []int,
+) {
+	return internal.BorrowedDataFileCollections(f.DataFile)
 }
 
 func (f *borrowedInspectDataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
@@ -82,6 +104,25 @@ func TestInspectContentFileBuilderUsesBorrowedDataFileMetadata(t *testing.T) {
 		start, end := valueCounts.ValueOffsets(0)
 		require.EqualValues(t, 1, end-start)
 		require.EqualValues(t, 2, valueCounts.Items().(*array.Int64).Value(int(start)))
+
+		columnSizes := record.Column(7).(*array.Map)
+		require.False(t, columnSizes.IsNull(0))
+		start, end = columnSizes.ValueOffsets(0)
+		require.EqualValues(t, 1, end-start)
+		require.EqualValues(t, 10, columnSizes.Items().(*array.Int64).Value(int(start)))
+
+		require.Equal(t, []byte{5, 6}, record.Column(13).(*array.Binary).Value(0))
+
+		splitOffsets := record.Column(14).(*array.List)
+		start, end = splitOffsets.ValueOffsets(0)
+		require.EqualValues(t, 2, end-start)
+		require.EqualValues(t, 0, splitOffsets.ListValues().(*array.Int64).Value(int(start)))
+		require.EqualValues(t, 64, splitOffsets.ListValues().(*array.Int64).Value(int(start+1)))
+
+		equalityIDs := record.Column(15).(*array.List)
+		start, end = equalityIDs.ValueOffsets(0)
+		require.EqualValues(t, 1, end-start)
+		require.EqualValues(t, 1, equalityIDs.ListValues().(*array.Int32).Value(int(start)))
 	})
 }
 
@@ -94,7 +135,7 @@ func TestInspectContentFileBuilderFallsBackToPublicDataFileMetadata(t *testing.T
 	withInspectContentFileRecord(t, partitionType, file, func(record arrow.RecordBatch) {
 		require.EqualValues(t, 1, record.NumRows())
 	})
-	require.Equal(t, 5, file.getterCalls)
+	require.Equal(t, 9, file.getterCalls)
 }
 
 func withInspectContentFileRecord(

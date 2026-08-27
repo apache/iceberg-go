@@ -64,6 +64,35 @@ func BorrowedDataFileStats(file DataFileStats) (
 		file.LowerBoundValues(), file.UpperBoundValues()
 }
 
+type DataFileCollections interface {
+	ColumnSizes() map[int]int64
+	KeyMetadata() []byte
+	SplitOffsets() []int64
+	EqualityFieldIDs() []int
+}
+
+type DataFileCollectionsRef interface {
+	DataFileCollectionsRef(DataFileRef) (
+		columnSizes map[int]int64,
+		keyMetadata []byte,
+		splitOffsets []int64,
+		equalityFieldIDs []int,
+	)
+}
+
+func BorrowedDataFileCollections(file DataFileCollections) (
+	columnSizes map[int]int64,
+	keyMetadata []byte,
+	splitOffsets []int64,
+	equalityFieldIDs []int,
+) {
+	if ref, ok := file.(DataFileCollectionsRef); ok {
+		return ref.DataFileCollectionsRef(DataFileRef{})
+	}
+
+	return file.ColumnSizes(), file.KeyMetadata(), file.SplitOffsets(), file.EqualityFieldIDs()
+}
+
 // BorrowedDataFileBounds returns the lower and upper bounds without copying
 // for the built-in data file and falls back to the public getters for external
 // implementations. The returned maps and byte slices are read-only borrows.

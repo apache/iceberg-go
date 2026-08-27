@@ -36,6 +36,15 @@ func dataFileStats(file iceberg.DataFile) (
 	return internal.BorrowedDataFileStats(file)
 }
 
+func dataFileCollections(file iceberg.DataFile) (
+	columnSizes map[int]int64,
+	keyMetadata []byte,
+	splitOffsets []int64,
+	equalityFieldIDs []int,
+) {
+	return internal.BorrowedDataFileCollections(file)
+}
+
 // dataFilePartition returns a borrowed partition map for the concrete
 // manifest data file and falls back to the public getter for other DataFile
 // implementations. Callers must use the map only for the current planning

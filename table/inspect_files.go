@@ -662,7 +662,8 @@ func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 
 	b.recordCount.Append(file.Count())
 	b.fileSize.Append(file.FileSizeBytes())
-	if err := appendInspectInt64Map(b.columnSizes, file.ColumnSizes()); err != nil {
+	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
+	if err := appendInspectInt64Map(b.columnSizes, columnSizes); err != nil {
 		return err
 	}
 	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
@@ -681,11 +682,11 @@ func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	if err := appendInspectBinaryMap(b.upperBounds, upperBounds); err != nil {
 		return err
 	}
-	appendInspectBytes(b.keyMetadata, file.KeyMetadata())
-	if err := appendInspectInt64List(b.splitOffsets, file.SplitOffsets()); err != nil {
+	appendInspectBytes(b.keyMetadata, keyMetadata)
+	if err := appendInspectInt64List(b.splitOffsets, splitOffsets); err != nil {
 		return err
 	}
-	if err := appendInspectInt32List(b.equalityIDs, file.EqualityFieldIDs()); err != nil {
+	if err := appendInspectInt32List(b.equalityIDs, equalityFieldIDs); err != nil {
 		return err
 	}
 	if err := appendInspectOptionalInt32(b.sortOrderID, file.SortOrderID()); err != nil {
