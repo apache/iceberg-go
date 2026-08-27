@@ -771,7 +771,9 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 	} else {
 		clear(m.valueCounts)
 	}
-	if m.nullCounts != nil {
+	if m.nullCounts == nil {
+		m.nullCounts = make(map[int]int64, len(colIndices))
+	} else {
 		clear(m.nullCounts)
 	}
 	m.nanCounts = nil
@@ -804,13 +806,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		fieldID := int(stats.Descr().SchemaNode().FieldID())
 		m.valueCounts[fieldID] = stats.NumValues()
 		if stats.HasNullCount() {
-			if m.nullCounts == nil {
-				m.nullCounts = make(map[int]int64, len(colIndices))
-			}
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
 		if stats.HasMinMax() {
 			if m.lowerBounds == nil {
+				// Lower and upper bounds are always allocated together.
 				m.lowerBounds = make(map[int][]byte, len(colIndices))
 				m.upperBounds = make(map[int][]byte, len(colIndices))
 			}

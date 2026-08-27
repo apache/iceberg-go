@@ -85,6 +85,7 @@ func benchmarkRowGroupMetricsMaps(
 }
 
 func benchmarkTestRowGroupBefore(m *inclusiveMetricsEval, rgmeta *metadata.RowGroupMetaData, colIndices []int) (bool, error) {
+	// Keep this as a frozen pre-#1899 copy; it should not track future changes to TestRowGroup.
 	if !m.includeEmptyFiles && rgmeta.NumRows() == 0 {
 		return rowsCannotMatch, nil
 	}

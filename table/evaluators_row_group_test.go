@@ -79,17 +79,25 @@ func buildRowGroupMetricsMetadata(t testing.TB, rowGroups, columns int, withStat
 func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 	withStats := buildRowGroupMetricsMetadata(t, 1, 2, true)
 	withoutStats := buildRowGroupMetricsMetadata(t, 1, 2, false)
-	eval := &inclusiveMetricsEval{expr: iceberg.AlwaysTrue{}}
-
-	keep, err := eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "field_0", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "field_1", Type: iceberg.PrimitiveTypes.String},
+	)
+	expr, err := iceberg.BindExpr(schema,
+		iceberg.NotStartsWith(iceberg.Reference("field_0"), "a"), true)
 	require.NoError(t, err)
-	assert.True(t, keep)
+	eval := &inclusiveMetricsEval{expr: expr}
+
+	firstKeep, err := eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
+	require.NoError(t, err)
+	assert.True(t, firstKeep)
 	assert.NotNil(t, eval.valueCounts)
-	assert.Nil(t, eval.nullCounts)
+	assert.NotNil(t, eval.nullCounts)
 	assert.Nil(t, eval.lowerBounds)
 	assert.Nil(t, eval.upperBounds)
+	assert.False(t, eval.mayContainNull(1))
 
-	keep, err = eval.TestRowGroup(withStats.RowGroup(0), []int{0, 1})
+	keep, err := eval.TestRowGroup(withStats.RowGroup(0), []int{0, 1})
 	require.NoError(t, err)
 	assert.True(t, keep)
 	assert.Len(t, eval.valueCounts, 2)
@@ -99,7 +107,12 @@ func TestInclusiveMetricsEvalRowGroupMetricsLifecycle(t *testing.T) {
 
 	keep, err = eval.TestRowGroup(withoutStats.RowGroup(0), []int{0, 1})
 	require.NoError(t, err)
-	assert.True(t, keep)
+	assert.Equal(t, firstKeep, keep)
+	assert.False(t, eval.mayContainNull(1))
+	assert.NotNil(t, eval.valueCounts)
+	assert.NotNil(t, eval.nullCounts)
+	assert.NotNil(t, eval.lowerBounds)
+	assert.NotNil(t, eval.upperBounds)
 	assert.Empty(t, eval.valueCounts)
 	assert.Empty(t, eval.nullCounts)
 	assert.Empty(t, eval.lowerBounds)
