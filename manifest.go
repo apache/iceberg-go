@@ -1205,6 +1205,11 @@ type partitionFieldStats[T LiteralType] struct {
 type partitionValueConverter[T LiteralType] func(any) (T, bool)
 
 func partitionLiteralValue(value any) (any, bool) {
+	switch value.(type) {
+	case AboveMaxLiteral, BelowMinLiteral:
+		return nil, false
+	}
+
 	literal, ok := value.(Literal)
 	if !ok {
 		return nil, false
@@ -1233,7 +1238,7 @@ func (p *unknownPartitionFieldStats) update(any) error {
 	return nil
 }
 
-func newPartitionFieldStats[T LiteralType](convert partitionValueConverter[T]) fieldStats {
+func makePartitionFieldStats[T LiteralType](convert partitionValueConverter[T]) fieldStats {
 	return &partitionFieldStats[T]{
 		cmp:     getComparator[T](),
 		convert: convert,
@@ -1241,9 +1246,16 @@ func newPartitionFieldStats[T LiteralType](convert partitionValueConverter[T]) f
 }
 
 func convertPartitionBool(value any) (bool, bool) {
-	converted, ok := value.(bool)
+	switch value := value.(type) {
+	case bool:
+		return value, true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionBool(literal)
+		}
 
-	return converted, ok
+		return false, false
+	}
 }
 
 func convertPartitionInt32(value any) (int32, bool) {
@@ -1473,7 +1485,7 @@ func convertPartitionUUID(value any) (uuid.UUID, bool) {
 	case [16]byte:
 		return uuid.UUID(value), true
 	case []byte:
-		if len(value) < len(uuid.UUID{}) {
+		if len(value) != len(uuid.UUID{}) {
 			return uuid.UUID{}, false
 		}
 
@@ -1494,8 +1506,6 @@ func convertPartitionDecimal(value any) (Decimal, bool) {
 	switch value := value.(type) {
 	case Decimal:
 		return value, true
-	case DecimalLiteral:
-		return Decimal(value), true
 	default:
 		if literal, ok := partitionLiteralValue(value); ok {
 			return convertPartitionDecimal(literal)
@@ -1528,33 +1538,33 @@ func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	case UnknownType:
 		return &unknownPartitionFieldStats{}, nil
 	case BooleanType:
-		return newPartitionFieldStats[bool](convertPartitionBool), nil
+		return makePartitionFieldStats[bool](convertPartitionBool), nil
 	case Int32Type:
-		return newPartitionFieldStats[int32](convertPartitionInt32), nil
+		return makePartitionFieldStats[int32](convertPartitionInt32), nil
 	case Int64Type:
-		return newPartitionFieldStats[int64](convertPartitionInt64), nil
+		return makePartitionFieldStats[int64](convertPartitionInt64), nil
 	case Float32Type:
-		return newPartitionFieldStats[float32](convertPartitionFloat32), nil
+		return makePartitionFieldStats[float32](convertPartitionFloat32), nil
 	case Float64Type:
-		return newPartitionFieldStats[float64](convertPartitionFloat64), nil
+		return makePartitionFieldStats[float64](convertPartitionFloat64), nil
 	case StringType:
-		return newPartitionFieldStats[string](convertPartitionString), nil
+		return makePartitionFieldStats[string](convertPartitionString), nil
 	case DateType:
-		return newPartitionFieldStats[Date](convertPartitionDate), nil
+		return makePartitionFieldStats[Date](convertPartitionDate), nil
 	case TimeType:
-		return newPartitionFieldStats[Time](convertPartitionTime), nil
+		return makePartitionFieldStats[Time](convertPartitionTime), nil
 	case TimestampType:
-		return newPartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
+		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case TimestampTzType:
-		return newPartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
+		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case UUIDType:
-		return newPartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
+		return makePartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
 	case BinaryType:
-		return newPartitionFieldStats[[]byte](convertPartitionBytes), nil
+		return makePartitionFieldStats[[]byte](convertPartitionBytes), nil
 	case FixedType:
-		return newPartitionFieldStats[[]byte](convertPartitionBytes), nil
+		return makePartitionFieldStats[[]byte](convertPartitionBytes), nil
 	case DecimalType:
-		return newPartitionFieldStats[Decimal](convertPartitionDecimal), nil
+		return makePartitionFieldStats[Decimal](convertPartitionDecimal), nil
 	default:
 		return nil, fmt.Errorf("expected primitive type for partition type: %s", typ)
 	}

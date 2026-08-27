@@ -517,17 +517,19 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 		want  Literal
 	}{
 		{name: "boolean", typ: PrimitiveTypes.Bool, value: true, want: NewLiteral(true)},
+		{name: "boolean from literal", typ: PrimitiveTypes.Bool, value: BoolLiteral(true), want: NewLiteral(true)},
 		{name: "int32 from int", typ: PrimitiveTypes.Int32, value: int(7), want: NewLiteral(int32(7))},
 		{name: "int32 from literal", typ: PrimitiveTypes.Int32, value: Int32Literal(7), want: NewLiteral(int32(7))},
+		{name: "int32 wraps overflowing int64", typ: PrimitiveTypes.Int32, value: int64(math.MaxInt32) + 1, want: NewLiteral(int32(math.MinInt32))},
 		{name: "int64 from int", typ: PrimitiveTypes.Int64, value: int(8), want: NewLiteral(int64(8))},
 		{name: "float32 from float64", typ: PrimitiveTypes.Float32, value: float64(1.5), want: NewLiteral(float32(1.5))},
+		{name: "float32 overflows to infinity", typ: PrimitiveTypes.Float32, value: float64(math.MaxFloat32) * 2, want: NewLiteral(float32(math.Inf(1)))},
 		{name: "float64 from int", typ: PrimitiveTypes.Float64, value: int(9), want: NewLiteral(float64(9))},
 		{name: "string from bytes", typ: PrimitiveTypes.String, value: []byte("east"), want: NewLiteral("east")},
 		{name: "string from literal", typ: PrimitiveTypes.String, value: StringLiteral("east"), want: NewLiteral("east")},
 		{name: "date from int32", typ: PrimitiveTypes.Date, value: int32(10), want: NewLiteral(Date(10))},
 		{name: "time from duration", typ: PrimitiveTypes.Time, value: time.Duration(11), want: NewLiteral(Time(11))},
 		{name: "timestamp from int64", typ: PrimitiveTypes.Timestamp, value: int64(12), want: NewLiteral(Timestamp(12))},
-		{name: "timestamp with timezone from nanoseconds", typ: PrimitiveTypes.TimestampTz, value: TimestampNano(13), want: NewLiteral(Timestamp(13))},
 		{name: "binary from string", typ: PrimitiveTypes.Binary, value: "shard", want: NewLiteral([]byte("shard"))},
 		{name: "fixed from bytes", typ: FixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
 		{
@@ -567,6 +569,81 @@ func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
 				t.Fatalf("got bounds (%v, %v), want (%v, %v)", *got.LowerBound, *got.UpperBound, want, want)
 			}
 		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsUnsupportedValues(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  PrimitiveType
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool},
+		{name: "int32", typ: PrimitiveTypes.Int32},
+		{name: "int64", typ: PrimitiveTypes.Int64},
+		{name: "float32", typ: PrimitiveTypes.Float32},
+		{name: "float64", typ: PrimitiveTypes.Float64},
+		{name: "string", typ: PrimitiveTypes.String},
+		{name: "date", typ: PrimitiveTypes.Date},
+		{name: "time", typ: PrimitiveTypes.Time},
+		{name: "timestamp", typ: PrimitiveTypes.Timestamp},
+		{name: "timestamp with timezone", typ: PrimitiveTypes.TimestampTz},
+		{name: "uuid", typ: PrimitiveTypes.UUID},
+		{name: "binary", typ: PrimitiveTypes.Binary},
+		{name: "fixed", typ: FixedTypeOf(5)},
+		{name: "decimal", typ: DecimalTypeOf(10, 2)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(struct{}{}); err == nil {
+				t.Fatal("expected unsupported value to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsSentinelLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value Literal
+	}{
+		{name: "int32 above max", typ: PrimitiveTypes.Int32, value: Int32AboveMaxLiteral()},
+		{name: "int32 below min", typ: PrimitiveTypes.Int32, value: Int32BelowMinLiteral()},
+		{name: "int64 above max", typ: PrimitiveTypes.Int64, value: Int64AboveMaxLiteral()},
+		{name: "int64 below min", typ: PrimitiveTypes.Int64, value: Int64BelowMinLiteral()},
+		{name: "float32 above max", typ: PrimitiveTypes.Float32, value: Float32AboveMaxLiteral()},
+		{name: "float32 below min", typ: PrimitiveTypes.Float32, value: Float32BelowMinLiteral()},
+		{name: "float64 above max", typ: PrimitiveTypes.Float64, value: Float64AboveMaxLiteral()},
+		{name: "float64 below min", typ: PrimitiveTypes.Float64, value: Float64BelowMinLiteral()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err == nil {
+				t.Fatal("expected sentinel literal to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsInvalidUUIDLengths(t *testing.T) {
+	for _, value := range [][]byte{make([]byte, len(uuid.UUID{})-1), make([]byte, len(uuid.UUID{})+1)} {
+		stats, err := newPartitionFieldStat(PrimitiveTypes.UUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stats.update(value); err == nil {
+			t.Fatalf("expected UUID with length %d to return an error", len(value))
+		}
 	}
 }
 
