@@ -361,106 +361,177 @@ func (c *posDeleteCursor) next() (int64, bool) {
 	return pos, true
 }
 
-func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if filePathCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
-	}
-	if filePathValueType(filePathCol.DataType()).ID() == arrow.STRING_VIEW {
-		return nil, fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
-			iceberg.ErrInvalidSchema, filePathCol.DataType())
-	}
-	if posCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
-	}
-	if posCol.DataType().ID() != arrow.INT64 {
-		return nil, fmt.Errorf("%w: unsupported pos column type %s in position delete file",
-			iceberg.ErrInvalidSchema, posCol.DataType())
-	}
-	if filePathCol.Len() != posCol.Len() {
-		return nil, fmt.Errorf("%w: file_path and pos columns have different lengths: %d and %d",
-			iceberg.ErrInvalidSchema, filePathCol.Len(), posCol.Len())
-	}
+type posDeleteAccumulator struct {
+	mem      memory.Allocator
+	builders map[string]*array.Int64Builder
+}
 
-	mem := compute.GetAllocator(ctx)
-	posCursor, err := newPosDeleteCursor(posCol)
-	if err != nil {
-		return nil, err
+func newPosDeleteAccumulator(ctx context.Context) *posDeleteAccumulator {
+	return &posDeleteAccumulator{
+		mem:      compute.GetAllocator(ctx),
+		builders: make(map[string]*array.Int64Builder),
 	}
+}
 
-	builders := make(map[string]*array.Int64Builder)
-	defer func() {
-		if err != nil {
-			for _, builder := range builders {
-				builder.Release()
-			}
-		}
-	}()
-
-	for _, filePathChunk := range filePathCol.Chunks() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		paths, pathErr := filePathValues(filePathChunk)
-		if pathErr != nil {
-			return nil, pathErr
-		}
-
-		var dictionary arrow.Array
-		var indices *array.Dictionary
-		if dict, ok := filePathChunk.(*array.Dictionary); ok && dict.Dictionary().NullN() > 0 {
-			dictionary = dict.Dictionary()
-			indices = dict
-		}
-
-		for i := range filePathChunk.Len() {
-			if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-			}
-
-			pos, ok := posCursor.next()
-			if !ok {
-				return nil, fmt.Errorf("%w: position delete columns ended before file_path column",
-					iceberg.ErrInvalidSchema)
-			}
-			if pos < 0 {
-				return nil, fmt.Errorf("%w: negative pos %d in position delete file",
-					iceberg.ErrInvalidSchema, pos)
-			}
-			if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
-				return nil, fmt.Errorf("%w: null file_path dictionary value in position delete file",
-					iceberg.ErrInvalidSchema)
-			}
-
-			path := paths.Value(i)
-			builder, ok := builders[path]
-			if !ok {
-				path = strings.Clone(path)
-				builder = array.NewInt64Builder(mem)
-				builders[path] = builder
-			}
-			builder.Append(pos)
-		}
+func (a *posDeleteAccumulator) release() {
+	for _, builder := range a.builders {
+		builder.Release()
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+	a.builders = nil
+}
 
-	results = make(map[string]*arrow.Chunked, len(builders))
-	for path, builder := range builders {
+func (a *posDeleteAccumulator) finish() map[string]*arrow.Chunked {
+	results := make(map[string]*arrow.Chunked, len(a.builders))
+	for path, builder := range a.builders {
 		positions := builder.NewInt64Array()
 		builder.Release()
 
 		results[path] = arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{positions})
 		positions.Release()
 	}
+	a.builders = nil
 
-	return results, nil
+	return results
+}
+
+func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int, filePathLen int,
+	posType arrow.DataType, posNulls int, posLen int) error {
+	if filePathNulls > 0 {
+		return fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if filePathValueType(filePathType).ID() == arrow.STRING_VIEW {
+		return fmt.Errorf("%w: unsupported file_path column type %s in position delete file",
+			iceberg.ErrInvalidSchema, filePathType)
+	}
+	if posNulls > 0 {
+		return fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	}
+	if posType.ID() != arrow.INT64 {
+		return fmt.Errorf("%w: unsupported pos column type %s in position delete file",
+			iceberg.ErrInvalidSchema, posType)
+	}
+	if filePathLen != posLen {
+		return fmt.Errorf("%w: file_path and pos columns have different lengths: %d and %d",
+			iceberg.ErrInvalidSchema, filePathLen, posLen)
+	}
+
+	return nil
+}
+
+func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePathChunk arrow.Array,
+	posCursor *posDeleteCursor) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	paths, err := filePathValues(filePathChunk)
+	if err != nil {
+		return err
+	}
+
+	var dictionary arrow.Array
+	var indices *array.Dictionary
+	if dict, ok := filePathChunk.(*array.Dictionary); ok && dict.Dictionary().NullN() > 0 {
+		dictionary = dict.Dictionary()
+		indices = dict
+	}
+
+	for i := range filePathChunk.Len() {
+		if i&(positionalDeleteCancellationCheckInterval-1) == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+
+		pos, ok := posCursor.next()
+		if !ok {
+			return fmt.Errorf("%w: position delete columns ended before file_path column",
+				iceberg.ErrInvalidSchema)
+		}
+		if pos < 0 {
+			return fmt.Errorf("%w: negative pos %d in position delete file",
+				iceberg.ErrInvalidSchema, pos)
+		}
+		if dictionary != nil && dictionary.IsNull(indices.GetValueIndex(i)) {
+			return fmt.Errorf("%w: null file_path dictionary value in position delete file",
+				iceberg.ErrInvalidSchema)
+		}
+
+		path := paths.Value(i)
+		builder, ok := a.builders[path]
+		if !ok {
+			path = strings.Clone(path)
+			builder = array.NewInt64Builder(a.mem)
+			a.builders[path] = builder
+		}
+		builder.Append(pos)
+	}
+
+	return nil
+}
+
+func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, posCol *arrow.Chunked) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(), filePathCol.Len(),
+		posCol.DataType(), posCol.NullN(), posCol.Len()); err != nil {
+		return err
+	}
+
+	posCursor, err := newPosDeleteCursor(posCol)
+	if err != nil {
+		return err
+	}
+
+	for _, filePathChunk := range filePathCol.Chunks() {
+		if err := a.appendFilePathChunk(ctx, filePathChunk, &posCursor); err != nil {
+			return err
+		}
+	}
+
+	return ctx.Err()
+}
+
+func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.RecordBatch) error {
+	if record.NumCols() != 2 {
+		return fmt.Errorf("%w: projected position delete record has %d columns, expected 2",
+			iceberg.ErrInvalidSchema, record.NumCols())
+	}
+
+	filePathCol := record.Column(0)
+	posCol := record.Column(1)
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(), filePathCol.Len(),
+		posCol.DataType(), posCol.NullN(), posCol.Len()); err != nil {
+		return err
+	}
+
+	posArr, ok := posCol.(*array.Int64)
+	if !ok {
+		return fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
+			iceberg.ErrInvalidSchema, posCol)
+	}
+	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
+	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
+		return err
+	}
+
+	return ctx.Err()
+}
+
+func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
+	acc := newPosDeleteAccumulator(ctx)
+	defer func() {
+		if err != nil {
+			acc.release()
+		}
+	}()
+
+	if err := acc.appendChunked(ctx, filePathCol, posCol); err != nil {
+		return nil, err
+	}
+
+	return acc.finish(), nil
 }
 
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
@@ -517,29 +588,42 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
 
-	tbl, err := rdr.ReadTable(ctx)
+	schema, err := rdr.Schema()
 	if err != nil {
 		return nil, err
 	}
-	defer tbl.Release()
 
-	tbl, err = array.UnifyTableDicts(compute.GetAllocator(ctx), tbl)
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
 	if err != nil {
 		return nil, err
 	}
-	defer tbl.Release()
 
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	records, err := rdr.GetRecords(ctx, []int{filePathIndex, posIndex}, nil)
 	if err != nil {
 		return nil, err
 	}
-	filePathCol := tbl.Column(filePathIndex).Data()
-	posCol := tbl.Column(posIndex).Data()
-	if posCol.NullN() > 0 {
-		return nil, fmt.Errorf("%w: null pos in position delete file", iceberg.ErrInvalidSchema)
+	defer records.Release()
+
+	acc := newPosDeleteAccumulator(ctx)
+	defer func() {
+		if err != nil {
+			acc.release()
+		}
+	}()
+
+	for records.Next() {
+		if err := acc.appendRecord(ctx, records.RecordBatch()); err != nil {
+			return nil, err
+		}
+	}
+	if err := records.Err(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	return groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	return acc.finish(), nil
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
