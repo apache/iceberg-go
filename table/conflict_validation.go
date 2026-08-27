@@ -51,7 +51,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"slices"
 	"sort"
@@ -200,19 +199,26 @@ type conflictManifestList struct {
 	err       error
 }
 
+const maxConflictManifestCacheBytes = 64 << 20
+
+var errConflictManifestIOReadOnly = errors.New("conflict manifest IO is read-only")
+
 // conflictManifestIO is a read-through cache used only while conflict
 // validators inspect one conflictContext. Manifest files are immutable after
 // they are committed, so the same path can be safely served from the cached
 // bytes to later validators without reopening the backing object store.
 //
 // The cache stores raw bytes instead of decoded entries. The first read still
-// streams from the backing IO and is recorded only when it reaches EOF, so an
-// early validator exit does not force a full manifest read. Later reads stream
-// decoded entries from the completed bytes and let each ManifestFile
-// descriptor apply its own inheritance metadata.
+// streams from the backing IO and is recorded only when it has consumed the
+// size reported by Stat, so an early validator exit does not cache a partial
+// manifest. The cache is bounded per validation attempt; reads after the
+// bound fall through to the backing IO. Later reads stream decoded entries
+// from completed bytes and let each ManifestFile descriptor apply its own
+// inheritance metadata.
 type conflictManifestIO struct {
-	base  iceio.IO
-	files map[string][]byte
+	base        iceio.IO
+	files       map[string][]byte
+	cachedBytes int64
 }
 
 func newConflictManifestIO(base iceio.IO) *conflictManifestIO {
@@ -231,19 +237,33 @@ func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.cachedBytes >= maxConflictManifestCacheBytes {
+		return f, nil
+	}
+
+	info, statErr := f.Stat()
+	if statErr != nil || info == nil || info.Size() < 0 {
+		if statIO, ok := c.base.(iceio.StatIO); ok {
+			info, statErr = statIO.Stat(name)
+		}
+	}
+	if statErr != nil || info == nil || info.Size() < 0 {
+		return f, nil
+	}
 
 	return &conflictManifestRecordingFile{
-		base:      f,
-		cache:     c,
-		name:      name,
-		cacheable: true,
+		base:         f,
+		cache:        c,
+		name:         name,
+		expectedSize: info.Size(),
+		cacheLimit:   maxConflictManifestCacheBytes - c.cachedBytes,
+		cacheable:    true,
+		complete:     info.Size() == 0,
 	}, nil
 }
 
-func (c *conflictManifestIO) Remove(name string) error {
-	delete(c.files, name)
-
-	return c.base.Remove(name)
+func (c *conflictManifestIO) Remove(string) error {
+	return errConflictManifestIOReadOnly
 }
 
 func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
@@ -285,34 +305,39 @@ func (f *conflictManifestFile) Stat() (fs.FileInfo, error) {
 }
 
 type conflictManifestRecordingFile struct {
-	base      iceio.File
-	cache     *conflictManifestIO
-	name      string
-	data      []byte
-	cacheable bool
-	complete  bool
+	base         iceio.File
+	cache        *conflictManifestIO
+	name         string
+	expectedSize int64
+	cacheLimit   int64
+	data         []byte
+	cacheable    bool
+	complete     bool
 }
 
 func (f *conflictManifestRecordingFile) Read(p []byte) (int, error) {
 	n, err := f.base.Read(p)
 	if f.cacheable && n > 0 {
-		f.data = append(f.data, p[:n]...)
-	}
-	if f.cacheable && errors.Is(err, io.EOF) {
-		f.complete = true
+		if int64(len(f.data))+int64(n) > f.cacheLimit {
+			f.cacheable = false
+			f.data = nil
+		} else {
+			f.data = append(f.data, p[:n]...)
+			f.complete = int64(len(f.data)) == f.expectedSize
+		}
 	}
 
 	return n, err
 }
 
 func (f *conflictManifestRecordingFile) ReadAt(p []byte, offset int64) (int, error) {
-	f.cacheable = false
+	f.disableCaching()
 
 	return f.base.ReadAt(p, offset)
 }
 
 func (f *conflictManifestRecordingFile) Seek(offset int64, whence int) (int64, error) {
-	f.cacheable = false
+	f.disableCaching()
 
 	return f.base.Seek(offset, whence)
 }
@@ -323,12 +348,25 @@ func (f *conflictManifestRecordingFile) Stat() (fs.FileInfo, error) {
 
 func (f *conflictManifestRecordingFile) Close() error {
 	err := f.base.Close()
-	if err == nil && f.cacheable && f.complete {
+	if err == nil && f.cacheable && f.complete && int64(len(f.data)) == f.expectedSize {
 		f.cache.files[f.name] = f.data
+		f.cache.cachedBytes += int64(len(f.data))
 	}
 
 	return err
 }
+
+func (f *conflictManifestRecordingFile) disableCaching() {
+	f.cacheable = false
+	f.complete = false
+	f.data = nil
+}
+
+var (
+	_ iceio.IO   = (*conflictManifestIO)(nil)
+	_ iceio.File = (*conflictManifestFile)(nil)
+	_ iceio.File = (*conflictManifestRecordingFile)(nil)
+)
 
 type conflictManifestFileInfo struct {
 	name string
@@ -358,7 +396,7 @@ func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, e
 		return cached.manifests, cached.err
 	}
 
-	manifests, err := snap.Manifests(c.manifestReadIO())
+	manifests, err := snap.Manifests(c.fs)
 	c.manifestLists[snap.SnapshotID] = conflictManifestList{manifests: manifests, err: err}
 
 	return manifests, err
@@ -527,12 +565,10 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 				continue
 			}
 			path := entry.DataFile().FilePath()
-			if _, ok := needed[path]; ok {
-				delete(needed, path)
-				if len(needed) == 0 {
-					return nil
-				}
-			}
+			delete(needed, path)
+		}
+		if len(needed) == 0 {
+			return nil
 		}
 	}
 

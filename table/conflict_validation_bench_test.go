@@ -19,6 +19,7 @@ package table
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -113,6 +114,37 @@ func BenchmarkConflictValidationSharedManifestReads(b *testing.B) {
 	}
 }
 
+func BenchmarkConflictValidationMixedValidators(b *testing.B) {
+	for _, entryCount := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("entries=%d", entryCount), func(b *testing.B) {
+			baseContext := newConflictValidationBenchmarkContext(b, entryCount)
+			fs := baseContext.fs.(*conflictValidationBenchmarkIO)
+			referencedPath := "data-0.parquet"
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				ctx := &conflictContext{
+					current:    baseContext.current,
+					branch:     baseContext.branch,
+					fs:         baseContext.fs,
+					concurrent: baseContext.concurrent,
+				}
+				if err := validateDataFilesExist(ctx, []string{referencedPath}); err != nil {
+					b.Fatal(err)
+				}
+
+				err := validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{})
+				if !errors.Is(err, ErrConflictingDataFiles) {
+					b.Fatalf("validateAddedDataFilesMatchingFilter() error = %v", err)
+				}
+			}
+			b.ReportMetric(float64(fs.opens)/float64(b.N), "backend-opens/op")
+			b.ReportMetric(float64(fs.bytes)/float64(b.N), "backend-bytes/op")
+		})
+	}
+}
+
 type conflictValidationBenchmarkIO struct {
 	iceio.IO
 	opens int
@@ -200,11 +232,66 @@ func newConflictValidationBenchmarkContext(b *testing.B, entryCount int) *confli
 		b.Fatal(err)
 	}
 
+	baseID := int64(1)
+	baseMeta, err := NewMetadata(
+		schema,
+		&spec,
+		UnsortedSortOrder,
+		"mem://conflict-validation-benchmark",
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	baseBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+	baseSnapshot := Snapshot{
+		SnapshotID:     baseID,
+		SequenceNumber: 1,
+		TimestampMs:    baseMeta.LastUpdatedMillis() + 1,
+		Summary:        &Summary{Operation: OpAppend},
+	}
+	if err := baseBuilder.AddSnapshot(&baseSnapshot); err != nil {
+		b.Fatal(err)
+	}
+	if err := baseBuilder.SetSnapshotRef(MainBranch, baseID, BranchRef); err != nil {
+		b.Fatal(err)
+	}
+	baseMeta, err = baseBuilder.Build()
+	if err != nil {
+		b.Fatal(err)
+	}
+	currentBuilder, err := MetadataBuilderFromBase(baseMeta, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+	concurrentSnapshot := Snapshot{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &baseID,
+		SequenceNumber:   2,
+		TimestampMs:      baseMeta.LastUpdatedMillis() + 2,
+		ManifestList:     manifestListPath,
+		Summary:          &Summary{Operation: OpAppend},
+	}
+	if err := currentBuilder.AddSnapshot(&concurrentSnapshot); err != nil {
+		b.Fatal(err)
+	}
+	if err := currentBuilder.SetSnapshotRef(MainBranch, snapshotID, BranchRef); err != nil {
+		b.Fatal(err)
+	}
+	currentMeta, err := currentBuilder.Build()
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	return &conflictContext{
-		fs: &conflictValidationBenchmarkIO{IO: baseFS},
-		concurrent: []Snapshot{{
-			SnapshotID:   snapshotID,
-			ManifestList: manifestListPath,
-		}},
+		current: currentMeta,
+		branch:  MainBranch,
+		fs:      &conflictValidationBenchmarkIO{IO: baseFS},
+		concurrent: []Snapshot{
+			concurrentSnapshot,
+		},
 	}
 }

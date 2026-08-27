@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math"
 	"path/filepath"
@@ -864,6 +865,19 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
 }
 
+type conflictValidationStatIO struct {
+	*trackingCallsIO
+}
+
+func (c *conflictValidationStatIO) Stat(name string) (fs.FileInfo, error) {
+	data, ok := c.files[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+}
+
 func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
 	tio := newTrackingCallsIO()
 	dir := filepath.ToSlash(t.TempDir())
@@ -877,7 +891,7 @@ func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
 	writeManifestList(t, tio.trackingIO, snapshotID+1, sharedManifestListPath, []iceberg.ManifestFile{mf})
 
 	ctx := &conflictContext{
-		fs: tio,
+		fs: &conflictValidationStatIO{trackingCallsIO: tio},
 		concurrent: []Snapshot{
 			{SnapshotID: snapshotID, ManifestList: manifestListPath},
 			{SnapshotID: snapshotID + 1, ManifestList: sharedManifestListPath},
@@ -900,7 +914,7 @@ func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
 	assert.Equal(t, 1, tio.openCount[manifestPath])
 }
 
-func TestConflictValidationDoesNotCacheEarlyManifestExit(t *testing.T) {
+func TestConflictValidationCachesFullyReadManifestAfterEarlyExit(t *testing.T) {
 	tio := newTrackingCallsIO()
 	dir := filepath.ToSlash(t.TempDir())
 	snapshotID := int64(2)
@@ -910,7 +924,7 @@ func TestConflictValidationDoesNotCacheEarlyManifestExit(t *testing.T) {
 	mf := writeManifest(t, tio.trackingIO, snapshotID, 1, manifestPath, filepath.Join(dir, "data.parquet"))
 	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
 	ctx := &conflictContext{
-		fs:         tio,
+		fs:         &conflictValidationStatIO{trackingCallsIO: tio},
 		concurrent: []Snapshot{{SnapshotID: snapshotID, ManifestList: manifestListPath}},
 	}
 
@@ -924,5 +938,96 @@ func TestConflictValidationDoesNotCacheEarlyManifestExit(t *testing.T) {
 		return nil
 	}))
 	assert.Equal(t, 1, tio.openCount[manifestListPath])
-	assert.Equal(t, 2, tio.openCount[manifestPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictValidationSharesManifestAfterDataFileEarlyExit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	baseID := int64(1)
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list.avro")
+	dataPath := filepath.Join(dir, "data.parquet")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 2, manifestPath, dataPath)
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+
+	base := newConflictTestMetadata(t, &baseID)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	concSnapshot := Snapshot{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &baseID,
+		SequenceNumber:   2,
+		TimestampMs:      base.LastUpdatedMillis() + 2,
+		ManifestList:     manifestListPath,
+		Summary:          &Summary{Operation: OpAppend},
+	}
+	require.NoError(t, builder.AddSnapshot(&concSnapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	current, err := builder.Build()
+	require.NoError(t, err)
+
+	ctx, err := newConflictContext(
+		base,
+		current,
+		MainBranch,
+		&conflictValidationStatIO{trackingCallsIO: tio},
+		true,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, validateDataFilesExist(ctx, []string{dataPath}))
+	err = validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{})
+	require.ErrorIs(t, err, ErrConflictingDataFiles)
+
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictManifestIODoesNotCachePartialRead(t *testing.T) {
+	tio := newTrackingCallsIO()
+	manifestPath := "manifest.avro"
+	tio.files[manifestPath] = []byte("abc")
+	cache := newConflictManifestIO(&conflictValidationStatIO{trackingCallsIO: tio})
+
+	f, err := cache.Open(manifestPath)
+	require.NoError(t, err)
+	buf := make([]byte, 1)
+	_, err = f.Read(buf)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	assert.NotContains(t, cache.files, manifestPath)
+}
+
+func TestConflictManifestIOIsReadOnly(t *testing.T) {
+	tio := newTrackingCallsIO()
+	cache := newConflictManifestIO(tio)
+
+	err := cache.Remove("manifest.avro")
+	require.Error(t, err)
+	assert.Zero(t, tio.removeCount["manifest.avro"])
+}
+
+func TestConflictManifestIOStopsCachingAtByteLimit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	manifestPath := "manifest.avro"
+	tio.files[manifestPath] = []byte("ab")
+	cache := &conflictManifestIO{
+		base:        &conflictValidationStatIO{trackingCallsIO: tio},
+		files:       make(map[string][]byte),
+		cachedBytes: maxConflictManifestCacheBytes - 1,
+	}
+
+	f, err := cache.Open(manifestPath)
+	require.NoError(t, err)
+	buf := make([]byte, 2)
+	_, err = f.Read(buf)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	assert.NotContains(t, cache.files, manifestPath)
+	assert.Equal(t, int64(maxConflictManifestCacheBytes-1), cache.cachedBytes)
 }
