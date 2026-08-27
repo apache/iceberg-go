@@ -22,18 +22,10 @@ import (
 	iceberginternal "github.com/apache/iceberg-go/internal"
 )
 
-type manifestFilePartitionRef interface {
-	ManifestFilePartitionRef(iceberginternal.ManifestFileRef) []iceberg.FieldSummary
-}
-
 // manifestFilePartitions returns partition summaries without copying for the
 // built-in manifest file and falls back to the public getter for external
 // implementations. Callers must treat the returned slice and nested bounds as
 // read-only and must not retain them beyond the current operation.
 func manifestFilePartitions(file iceberg.ManifestFile) []iceberg.FieldSummary {
-	if ref, ok := file.(manifestFilePartitionRef); ok {
-		return ref.ManifestFilePartitionRef(iceberginternal.ManifestFileRef{})
-	}
-
-	return file.Partitions()
+	return iceberginternal.BorrowedManifestFilePartitions(file)
 }

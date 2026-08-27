@@ -19,6 +19,7 @@ package table
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -46,8 +47,6 @@ func BenchmarkManifestEvaluatorBuiltInPartitions(b *testing.B) {
 				}
 
 				b.ReportAllocs()
-				b.ReportMetric(float64(manifestCount), "manifests")
-				b.ReportMetric(float64(fieldCount), "partition_fields")
 				b.ResetTimer()
 				for range b.N {
 					matched := 0
@@ -97,18 +96,20 @@ func manifestEvaluatorBenchmarkFilter(fieldCount int) iceberg.BooleanExpression 
 }
 
 func manifestEvaluatorBenchmarkSummaries(fieldCount int) []iceberg.FieldSummary {
-	lower, err := iceberg.Int32Literal(0).MarshalBinary()
+	lowerBound, err := iceberg.Int32Literal(0).MarshalBinary()
 	if err != nil {
 		panic(err)
 	}
-	upper, err := iceberg.Int32Literal(100).MarshalBinary()
+	upperBound, err := iceberg.Int32Literal(100).MarshalBinary()
 	if err != nil {
 		panic(err)
 	}
-	containsNaN := false
 
 	summaries := make([]iceberg.FieldSummary, fieldCount)
 	for i := range summaries {
+		containsNaN := false
+		lower := slices.Clone(lowerBound)
+		upper := slices.Clone(upperBound)
 		summaries[i] = iceberg.FieldSummary{
 			ContainsNaN: &containsNaN,
 			LowerBound:  &lower,

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,16 +49,24 @@ func TestManifestFilePartitionsUsesBorrowedView(t *testing.T) {
 		}},
 	).Build()
 
-	require.Implements(t, (*manifestFilePartitionRef)(nil), manifest)
+	require.Implements(t, (*iceberginternal.ManifestPartitionBorrower[iceberg.FieldSummary])(nil), manifest)
 	partitions := manifestFilePartitions(manifest)
 	require.Len(t, partitions, 1)
 	assert.Equal(t, []byte{1, 2}, *partitions[0].LowerBound)
 	assert.Equal(t, []byte{3, 4}, *partitions[0].UpperBound)
 
+	// This intentionally violates the read-only borrow contract to prove that
+	// the returned bound aliases manifest storage. Callers must not mutate it.
+	(*partitions[0].LowerBound)[0] = 9
+	borrowedAgain := manifestFilePartitions(manifest)
+	require.NotNil(t, borrowedAgain[0].LowerBound)
+	assert.Equal(t, byte(9), (*borrowedAgain[0].LowerBound)[0])
+	(*partitions[0].LowerBound)[0] = 1
+
 	allocs := testing.AllocsPerRun(100, func() {
 		partitions = manifestFilePartitions(manifest)
 	})
-	assert.InDelta(t, 0.0, allocs, 0.5)
+	assert.Zero(t, allocs)
 }
 
 func TestManifestFilePartitionsFallsBackToPublicGetter(t *testing.T) {

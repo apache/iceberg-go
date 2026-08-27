@@ -28,5 +28,7 @@ func (m *manifestFile) ManifestFilePartitionRef(_ internal.ManifestFileRef) []Fi
 		return nil
 	}
 
+	// The builder and decoder maintain that a non-nil PartitionList points to
+	// a non-nil slice.
 	return *m.PartitionList
 }
