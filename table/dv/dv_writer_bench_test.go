@@ -25,7 +25,7 @@ func BenchmarkDVWriterAddSinglePosition(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		if err := w.Add(dataFilePath, []int64{int64(i)}, 0, nil); err != nil {
 			b.Fatal(err)
 		}
@@ -38,7 +38,7 @@ func BenchmarkDVWriterAddPosition(b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		if err := w.AddPosition(dataFilePath, int64(i), 0, nil); err != nil {
 			b.Fatal(err)
 		}
