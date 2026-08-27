@@ -1483,13 +1483,13 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 			}
 
 			fieldID, statsCol := column.fieldID, column.statsCol
-			if _, invalid := invalidateCol[fieldID]; invalid {
-				continue
-			}
-
 			colChunk, err = rowGroup.ColumnChunk(pos)
 			if err != nil {
 				panic(err)
+			}
+
+			if _, invalid := invalidateCol[fieldID]; invalid {
+				continue
 			}
 
 			colSizes[fieldID] += colChunk.TotalCompressedSize()
