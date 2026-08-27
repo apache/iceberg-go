@@ -808,22 +808,13 @@ func positionDeletesPartitionType(
 		positionDeleteContentOffsetID: {},
 		positionDeleteContentSizeID:   {},
 	}
-	for _, schema := range metadata.Schemas() {
-		fields, err := iceberg.IndexByID(schema)
-		if err != nil {
-			return nil, nil, err
-		}
-		for id := range fields {
-			used[id] = struct{}{}
-		}
-	}
 	for _, field := range base.FieldList {
 		used[field.ID] = struct{}{}
 	}
 
 	fields := make([]iceberg.NestedField, len(base.FieldList))
 	idByOld := make(map[int]int, len(base.FieldList))
-	nextID := 1
+	nextID := max(1, metadata.LastColumnID()+1)
 	for index, field := range base.FieldList {
 		for {
 			if _, exists := used[nextID]; !exists {

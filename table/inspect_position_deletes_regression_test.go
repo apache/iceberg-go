@@ -217,8 +217,36 @@ func TestPositionDeletesPartitionTypeAvoidsHistoricalSchemaFieldIDs(t *testing.T
 		LastPartitionID: &lastPartitionID,
 	}}
 
-	partitionType, partitionIDs, err := positionDeletesPartitionType(metadata)
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
 	require.Equal(t, 3, partitionType.FieldList[0].ID)
+}
+
+type metadataWithoutSchemaHistory struct {
+	Metadata
+}
+
+func (metadataWithoutSchemaHistory) Schemas() []*iceberg.Schema {
+	panic("position delete partition type should use LastColumnID instead of schema history")
+}
+
+func TestPositionDeletesPartitionTypeSkipsReservedIDsAfterLastColumnID(t *testing.T) {
+	currentSchema := simpleSchema()
+	spec := partitionedSpec()
+	lastPartitionID := 1000
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		LastColumnId:    positionDeleteContentSizeID - 1,
+		SchemaList:      []*iceberg.Schema{currentSchema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   spec.ID(),
+		LastPartitionID: &lastPartitionID,
+	}}
+
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
+	require.NoError(t, err)
+	require.Equal(t, map[int]int{1000: positionDeleteSpecID + 1}, partitionIDs)
+	require.Equal(t, positionDeleteSpecID+1, partitionType.FieldList[0].ID)
 }

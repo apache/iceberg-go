@@ -168,6 +168,59 @@ func TestPositionDeleteAppenderDoesNotReadUnpartitionedPartition(t *testing.T) {
 	require.Zero(t, file.partitionCalls)
 }
 
+var positionDeletesPartitionTypeBenchmarkSink *iceberg.StructType
+
+func BenchmarkPositionDeletesPartitionType(b *testing.B) {
+	for _, schemaCount := range []int{1, 16, 128, 1024} {
+		b.Run(fmt.Sprintf("schemas=%d/fields=64", schemaCount), func(b *testing.B) {
+			metadata := benchmarkPositionDeletesMetadata(b, schemaCount, 64)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				partitionType, _, err := positionDeletesPartitionType(metadata)
+				if err != nil {
+					b.Fatal(err)
+				}
+				positionDeletesPartitionTypeBenchmarkSink = partitionType
+			}
+		})
+	}
+}
+
+func benchmarkPositionDeletesMetadata(b *testing.B, schemaCount, fieldsPerSchema int) Metadata {
+	b.Helper()
+
+	schemas := make([]*iceberg.Schema, schemaCount)
+	lastColumnID := 0
+	for schemaID := range schemaCount {
+		fields := make([]iceberg.NestedField, fieldsPerSchema)
+		for fieldIndex := range fieldsPerSchema {
+			fieldID := schemaID*fieldsPerSchema + fieldIndex + 1
+			fields[fieldIndex] = iceberg.NestedField{
+				ID: fieldID, Name: fmt.Sprintf("field_%d", fieldID),
+				Type: iceberg.PrimitiveTypes.Int32, Required: true,
+			}
+			lastColumnID = fieldID
+		}
+		schemas[schemaID] = iceberg.NewSchema(schemaID, fields...)
+	}
+
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	lastPartitionID := 1000
+
+	return &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		LastColumnId:    lastColumnID,
+		SchemaList:      schemas,
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   spec.ID(),
+		LastPartitionID: &lastPartitionID,
+	}}
+}
+
 func BenchmarkPositionDeleteAppender(b *testing.B) {
 	for _, fieldCount := range []int{1, 5} {
 		for _, rowCount := range []int{1_000, 100_000} {
