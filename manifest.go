@@ -1697,6 +1697,7 @@ type ManifestListWriter struct {
 	sequenceNumber   int64
 	writer           *ocf.Writer
 	nextRowID        *int64
+	failure          error
 }
 
 func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
@@ -1770,11 +1771,9 @@ func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
 	if firstRowID < 0 {
 		return 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
 	}
-	if existingRows == -1 {
-		existingRows = 0
-	}
-	if addedRows == -1 {
-		addedRows = 0
+	if existingRows == -1 || addedRows == -1 {
+		return 0, fmt.Errorf("%w: cannot assign row-lineage IDs because at least one row count is unknown (existing=%d added=%d); rewrite or compact the legacy manifest before upgrading to v3",
+			ErrInvalidArgument, existingRows, addedRows)
 	}
 	if existingRows < 0 || addedRows < 0 {
 		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
@@ -1819,18 +1818,29 @@ func (m *ManifestListWriter) NextRowID() *int64 {
 	return m.nextRowID
 }
 
+// AddManifests appends manifest files to the list. If it returns an error, the
+// writer is poisoned: callers must close and discard it, and subsequent calls
+// return the original error.
 func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
+	if m.failure != nil {
+		return m.failure
+	}
 	if len(files) == 0 {
 		return nil
 	}
-	if m.version == 3 && m.nextRowID != nil {
-		batchStartRowID := *m.nextRowID
-		defer func() {
-			if err != nil {
+	hasRowID := m.version == 3 && m.nextRowID != nil
+	var batchStartRowID int64
+	if hasRowID {
+		batchStartRowID = *m.nextRowID
+	}
+	defer func() {
+		if err != nil {
+			if hasRowID {
 				*m.nextRowID = batchStartRowID
 			}
-		}()
-	}
+			m.failure = err
+		}
+	}()
 
 	switch m.version {
 	case 1:
