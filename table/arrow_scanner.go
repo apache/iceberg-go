@@ -883,6 +883,10 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 
 func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, tasks []FileScanTask) error {
 	for _, task := range tasks {
+		if task.Residual == nil {
+			continue
+		}
+
 		rowFilter, err := as.rowFilterForTask(task)
 		if err != nil {
 			return err

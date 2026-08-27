@@ -149,6 +149,31 @@ func TestArrowScanSnapshotsInvariants(t *testing.T) {
 	assert.Equal(t, 1, metadata.nameMappingCalls)
 }
 
+func TestArrowScanAddTaskProjectedFieldIDsSkipsNilResiduals(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	boundFilter, err := iceberg.BindExpr(schema,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)), true)
+	require.NoError(t, err)
+
+	scanner := &arrowScan{
+		scanSchema:     schema,
+		boundRowFilter: boundFilter,
+	}
+	invariants := &arrowScanInvariants{projectedIDs: set[int]{1: {}}}
+	tasks := []FileScanTask{
+		{},
+		{Residual: iceberg.EqualTo(iceberg.Reference("data"), "value")},
+		{},
+	}
+
+	err = scanner.addTaskProjectedFieldIDs(invariants, tasks)
+	require.NoError(t, err)
+	assert.Equal(t, set[int]{1: {}, 2: {}}, invariants.projectedIDs)
+}
+
 func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
 	testSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "first_name", Type: &arrow.StringType{}, Nullable: false},
