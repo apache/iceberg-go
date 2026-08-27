@@ -190,3 +190,62 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 		})
 	}
 }
+
+func benchmarkComplexBoundFilter(b *testing.B, schema *iceberg.Schema) iceberg.BooleanExpression {
+	b.Helper()
+
+	filter := iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("field_0.value"), "value_0"),
+		iceberg.NewOr(
+			iceberg.GreaterThan(iceberg.Reference("field_1.count"), int64(10)),
+			iceberg.LessThan(iceberg.Reference("field_2.count"), int64(20)),
+		),
+		iceberg.NewNot(iceberg.IsNull(iceberg.Reference("field_3.value"))),
+		iceberg.IsIn(iceberg.Reference("field_4.count"), int64(1), int64(2), int64(3)),
+		iceberg.NotEqualTo(iceberg.Reference("field_5.value"), "value_5"),
+	)
+
+	bound, err := iceberg.BindExpr(schema, filter, true)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return bound
+}
+
+func BenchmarkArrowScanAddTaskProjectedFieldIDs(b *testing.B) {
+	schema := benchmarkScanSchema(8)
+	filter := benchmarkComplexBoundFilter(b, schema)
+	baseIDs, err := iceberg.ExtractFieldIDs(filter)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for _, taskCount := range []int{1_000, 10_000, 100_000} {
+		b.Run(fmt.Sprintf("tasks=%d/residual=nil", taskCount), func(b *testing.B) {
+			tasks := make([]FileScanTask, taskCount)
+			scanner := &arrowScan{
+				scanSchema:     schema,
+				boundRowFilter: filter,
+			}
+			invariants := &arrowScanInvariants{projectedIDs: make(set[int], len(baseIDs))}
+			for _, id := range baseIDs {
+				invariants.projectedIDs[id] = struct{}{}
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if err := scanner.addTaskProjectedFieldIDs(invariants, tasks); err != nil {
+					b.Fatal(err)
+				}
+			}
+
+			b.StopTimer()
+			if len(invariants.projectedIDs) != len(baseIDs) {
+				b.Fatalf("projected field IDs changed: got %d, want %d", len(invariants.projectedIDs), len(baseIDs))
+			}
+			b.ReportMetric(float64(taskCount), "tasks/op")
+		})
+	}
+}
