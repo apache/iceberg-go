@@ -284,6 +284,139 @@ func TestPositionalDeleteIndexPrunesPartitionEntriesUsingPathMetrics(t *testing.
 		positionalDeletePaths(matched))
 }
 
+func TestFilePathMayMatch(t *testing.T) {
+	const dataFilePath = "data-m.parquet"
+
+	tests := []struct {
+		name        string
+		count       int64
+		lower       []byte
+		upper       []byte
+		hasLower    bool
+		hasUpper    bool
+		valueCounts map[int]int64
+		nullCounts  map[int]int64
+		nanCounts   map[int]int64
+		want        bool
+	}{
+		{
+			name:     "empty file",
+			count:    0,
+			lower:    []byte(dataFilePath),
+			upper:    []byte(dataFilePath),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "exact bounds",
+			count:    1,
+			lower:    []byte(dataFilePath),
+			upper:    []byte(dataFilePath),
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "inside bounds",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			upper:    []byte("data-z.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "below lower bound",
+			count:    1,
+			lower:    []byte("data-n.parquet"),
+			upper:    []byte("data-z.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "above upper bound",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			upper:    []byte("data-l.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "missing lower bound",
+			count:    1,
+			upper:    []byte("data-z.parquet"),
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "missing upper bound",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			hasLower: true,
+			want:     true,
+		},
+		{
+			name:  "missing both bounds",
+			count: 1,
+			want:  true,
+		},
+		{
+			name:     "nil bounds are missing",
+			count:    1,
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:        "null-only metadata",
+			count:       1,
+			lower:       []byte("data-a.parquet"),
+			upper:       []byte("data-z.parquet"),
+			hasLower:    true,
+			hasUpper:    true,
+			valueCounts: map[int]int64{filePathFieldID: 1},
+			nullCounts:  map[int]int64{filePathFieldID: 1},
+			want:        false,
+		},
+		{
+			name:        "nan-only metadata",
+			count:       1,
+			lower:       []byte("data-a.parquet"),
+			upper:       []byte("data-z.parquet"),
+			hasLower:    true,
+			hasUpper:    true,
+			valueCounts: map[int]int64{filePathFieldID: 1},
+			nanCounts:   map[int]int64{filePathFieldID: 1},
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lowerBounds, upperBounds map[int][]byte
+			if tt.hasLower {
+				lowerBounds = map[int][]byte{filePathFieldID: tt.lower}
+			}
+			if tt.hasUpper {
+				upperBounds = map[int][]byte{filePathFieldID: tt.upper}
+			}
+
+			file := &mockDataFile{
+				count:       tt.count,
+				valueCounts: tt.valueCounts,
+				nullCounts:  tt.nullCounts,
+				nanCounts:   tt.nanCounts,
+				lowerBounds: lowerBounds,
+				upperBounds: upperBounds,
+			}
+			assert.Equal(t, tt.want, filePathMayMatch(file, dataFilePath))
+		})
+	}
+}
+
 func TestPositionalDeleteIndexHandlesUnknownSequenceNumbers(t *testing.T) {
 	dataPath := "data.parquet"
 	deleteEntries := []iceberg.ManifestEntry{

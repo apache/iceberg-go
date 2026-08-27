@@ -18,6 +18,7 @@
 package table
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"slices"
@@ -115,27 +116,43 @@ func appendPartitionDeletesFromSequence(
 		return out, nil
 	}
 
-	evaluator, err := newInclusiveMetricsEvaluator(
-		iceberg.PositionalDeleteSchema,
-		iceberg.EqualTo(iceberg.Reference("file_path"), dataFilePath),
-		true,
-		false,
-	)
-	if err != nil {
-		return nil, err
-	}
-
 	for _, entry := range entries[start:] {
-		matches, err := evaluator(entry.DataFile())
-		if err != nil {
-			return nil, err
-		}
-		if matches {
-			out = append(out, entry.DataFile())
+		deleteFile := entry.DataFile()
+		if filePathMayMatch(deleteFile, dataFilePath) {
+			out = append(out, deleteFile)
 		}
 	}
 
 	return out, nil
+}
+
+// filePathMayMatch mirrors inclusive metrics evaluation for the required
+// file_path field in a position-delete file. It only checks the bounds needed
+// by the positional-delete index and keeps missing or malformed metadata
+// conservative.
+func filePathMayMatch(deleteFile iceberg.DataFile, dataFilePath string) bool {
+	if deleteFile.Count() == 0 {
+		return false
+	}
+
+	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(deleteFile)
+	if valueCount, ok := valueCounts[filePathFieldID]; ok {
+		if nullCount, ok := nullCounts[filePathFieldID]; ok && nullCount == valueCount {
+			return false
+		}
+		if nanCount, ok := nanCounts[filePathFieldID]; ok && nanCount == valueCount {
+			return false
+		}
+	}
+
+	if lower := lowerBounds[filePathFieldID]; lower != nil && bytes.Compare(lower, []byte(dataFilePath)) > 0 {
+		return false
+	}
+	if upper := upperBounds[filePathFieldID]; upper != nil && bytes.Compare(upper, []byte(dataFilePath)) < 0 {
+		return false
+	}
+
+	return true
 }
 
 func appendPositionalDeletesFromSequence(
