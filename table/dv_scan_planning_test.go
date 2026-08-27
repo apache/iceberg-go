@@ -141,6 +141,29 @@ func TestManifestEntries_DVClassification(t *testing.T) {
 	assert.Len(t, entries.equalityDeleteEntries, 1)
 }
 
+func TestManifestEntries_MergeRejectsUnknownContent(t *testing.T) {
+	snapshotID := int64(1)
+	validEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+		path:        "s3://bucket/data/data-001.parquet",
+		contentType: iceberg.EntryContentData,
+	})
+	invalidEntry := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+		path:        "s3://bucket/data/unknown.bin",
+		contentType: iceberg.ManifestEntryContent(99),
+	})
+	entryAfterInvalid := iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, nil, nil, &mockDataFile{
+		path:        "s3://bucket/data/data-002.parquet",
+		contentType: iceberg.EntryContentData,
+	})
+
+	entries := newManifestEntries()
+	err := entries.merge([]iceberg.ManifestEntry{validEntry, invalidEntry, entryAfterInvalid})
+
+	assert.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "unknown DataFileContent type")
+	assert.Equal(t, []iceberg.ManifestEntry{validEntry}, entries.dataEntries)
+}
+
 func TestManifestEntries_ConcurrentMerge(t *testing.T) {
 	snapshotID := int64(1)
 	batch := []iceberg.ManifestEntry{
