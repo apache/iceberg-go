@@ -206,6 +206,7 @@ func TestDVWriterAddPosition(t *testing.T) {
 	partition := map[int]any{1000: "EU"}
 
 	require.NoError(t, w.AddPosition(dataPath, 1, 0, partition))
+	partition[1000] = "MUTATED"
 	require.NoError(t, w.AddPosition(dataPath, 3, 0, partition))
 	require.NoError(t, w.AddPosition(dataPath, 1, 0, map[int]any{1000: "US"}))
 
@@ -213,7 +214,7 @@ func TestDVWriterAddPosition(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dataFiles, 1)
 	assert.Equal(t, int64(2), dataFiles[0].Count())
-	assert.Equal(t, partition, dataFiles[0].Partition())
+	assert.Equal(t, map[int]any{1000: "EU"}, dataFiles[0].Partition())
 	verifyDVReadBack(t, fs, dataFiles[0])
 }
 
@@ -254,6 +255,26 @@ func TestDVWriterAddPositionRejectsNegativePosition(t *testing.T) {
 	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-position.puffin")
 	require.NoError(t, err)
 	assert.Nil(t, dataFiles)
+}
+
+func TestDVWriterAddPositionRejectsNegativeAfterValidPosition(t *testing.T) {
+	fs := newTestFS()
+	w := NewDVWriter(fs, unpartitionedResolver())
+
+	dataPath := "s3://bucket/data/file-001.parquet"
+	require.NoError(t, w.AddPosition(dataPath, 1, 0, nil))
+	require.ErrorIs(t, w.AddPosition(dataPath, -1, 0, nil), iceberg.ErrInvalidArgument)
+
+	dataFiles, err := w.Flush(context.Background(), "mem://test/negative-position-after-valid.puffin")
+	require.NoError(t, err)
+	require.Len(t, dataFiles, 1)
+	assert.Equal(t, int64(1), dataFiles[0].Count(),
+		"negative AddPosition should not mutate prior valid state")
+
+	bm, err := ReadDV(fs, dataFiles[0])
+	require.NoError(t, err)
+	assert.True(t, bm.Contains(1))
+	assert.Equal(t, dataFiles[0].Count(), bm.Cardinality())
 }
 
 func TestDVWriterAddNegativeFirstCreatesNoEntry(t *testing.T) {

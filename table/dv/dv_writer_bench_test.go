@@ -22,11 +22,15 @@ import "testing"
 func BenchmarkDVWriterAddSinglePosition(b *testing.B) {
 	w := NewDVWriter(nil, nil)
 	const dataFilePath = "s3://bucket/data/file.parquet"
+	// Seed a fixed-size bitmap so the timed loop does not measure bitmap growth.
+	if err := w.Add(dataFilePath, []int64{0}, 0, nil); err != nil {
+		b.Fatal(err)
+	}
 
-	b.ReportAllocs()
 	b.ResetTimer()
-	for i := range b.N {
-		if err := w.Add(dataFilePath, []int64{int64(i)}, 0, nil); err != nil {
+	b.ReportAllocs()
+	for i := 0; b.Loop(); i++ {
+		if err := w.Add(dataFilePath, []int64{1}, 0, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -35,11 +39,15 @@ func BenchmarkDVWriterAddSinglePosition(b *testing.B) {
 func BenchmarkDVWriterAddPosition(b *testing.B) {
 	w := NewDVWriter(nil, nil)
 	const dataFilePath = "s3://bucket/data/file.parquet"
+	// Seed a fixed-size bitmap so the timed loop does not measure bitmap growth.
+	if err := w.AddPosition(dataFilePath, 0, 0, nil); err != nil {
+		b.Fatal(err)
+	}
 
-	b.ReportAllocs()
 	b.ResetTimer()
-	for i := range b.N {
-		if err := w.AddPosition(dataFilePath, int64(i), 0, nil); err != nil {
+	b.ReportAllocs()
+	for i := 0; b.Loop(); i++ {
+		if err := w.AddPosition(dataFilePath, 1, 0, nil); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -66,6 +66,29 @@ func NewDVWriter(fs iceio.WriteFileIO, specByID SpecResolver) *DVWriter {
 	}
 }
 
+func (w *DVWriter) getOrCreateEntry(dataFilePath string, specID int32, partitionData map[int]any) *dvEntry {
+	entry, ok := w.entries[dataFilePath]
+	if ok {
+		return entry
+	}
+
+	// Defensive copy of partitionData on capture so a caller that
+	// mutates or reuses the map between calls and Flush can't silently
+	// corrupt the entry. Mirrors Java's StructLikeUtil.copy(partition)
+	// in BaseDVFileWriter.Deletes. partitionData=nil round-trips as
+	// nil (maps.Clone returns nil on nil input). specID is a value
+	// type so no copy is needed.
+	entry = &dvEntry{
+		bitmap:        NewRoaringPositionBitmap(),
+		specID:        specID,
+		partitionData: maps.Clone(partitionData),
+	}
+	w.entries[dataFilePath] = entry
+	w.order = append(w.order, dataFilePath)
+
+	return entry
+}
+
 // Add accumulates positions to delete for a given data file. specID and
 // partitionData come from the data file's own manifest entry (typically
 // partitionContext.specID + partitionContext.partitionData on the caller
@@ -100,22 +123,7 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, par
 		}
 	}
 
-	entry, ok := w.entries[dataFilePath]
-	if !ok {
-		// Defensive copy of partitionData on capture so a caller that
-		// mutates or reuses the map between Add and Flush can't silently
-		// corrupt the entry. Mirrors Java's StructLikeUtil.copy(partition)
-		// in BaseDVFileWriter.Deletes. partitionData=nil round-trips as
-		// nil (maps.Clone returns nil on nil input). specID is a value
-		// type so no copy is needed.
-		entry = &dvEntry{
-			bitmap:        NewRoaringPositionBitmap(),
-			specID:        specID,
-			partitionData: maps.Clone(partitionData),
-		}
-		w.entries[dataFilePath] = entry
-		w.order = append(w.order, dataFilePath)
-	}
+	entry := w.getOrCreateEntry(dataFilePath, specID, partitionData)
 
 	for _, pos := range positions {
 		entry.bitmap.Set(uint64(pos))
@@ -125,26 +133,19 @@ func (w *DVWriter) Add(dataFilePath string, positions []int64, specID int32, par
 }
 
 // AddPosition accumulates one position to delete for a given data file.
-// It has the same first-write partition metadata and validation semantics as
-// Add, without requiring callers that process one deleted row at a time to
-// allocate a one-element positions slice.
+// It has the same first-write partition metadata and per-call validation
+// semantics as Add, while avoiding Add's batch loop for callers that process
+// one deleted row at a time. This mirrors Java's per-position delete operation.
+// AddPosition calls are independent rather than transactional as a group. If
+// a later call fails, positions added by earlier successful calls remain in
+// the writer.
 func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32, partitionData map[int]any) error {
 	if position < 0 {
 		return fmt.Errorf("%w: invalid deletion position %d for %q: positions must be >= 0",
 			iceberg.ErrInvalidArgument, position, dataFilePath)
 	}
 
-	entry, ok := w.entries[dataFilePath]
-	if !ok {
-		// Keep the same defensive-copy and first-write-wins semantics as Add.
-		entry = &dvEntry{
-			bitmap:        NewRoaringPositionBitmap(),
-			specID:        specID,
-			partitionData: maps.Clone(partitionData),
-		}
-		w.entries[dataFilePath] = entry
-		w.order = append(w.order, dataFilePath)
-	}
+	entry := w.getOrCreateEntry(dataFilePath, specID, partitionData)
 
 	entry.bitmap.Set(uint64(position))
 
@@ -152,15 +153,16 @@ func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32
 }
 
 // Load seeds the writer with an already-written deletion vector for a data
-// file so subsequent Add calls merge new positions into it. The spec permits
-// at most one DV per data file per snapshot, so when a data file that already
-// has a DV receives more deletes the old positions must be carried into the
-// replacement DV (and the old DV superseded) rather than dropped.
+// file so subsequent Add or AddPosition calls merge new positions into it.
+// The spec permits at most one DV per data file per snapshot. When a data file
+// that already has a DV receives more deletes, the old positions must be
+// carried into the replacement DV (and the old DV superseded) rather than dropped.
 //
-// Load is intended to be called before any Add for the same path: on the first
-// call for a path it captures specID and partitionData exactly as Add would and
-// unions the supplied bitmap into a fresh entry. If an entry already exists
-// (because Add or Load ran first for this path), Load only unions the bitmap in
+// Load is intended to be called before any Add or AddPosition call for the same
+// path: on the first call for a path it captures specID and partitionData
+// exactly as Add would and unions the supplied bitmap into a fresh entry. If an
+// entry already exists (because Add, AddPosition, or Load ran first for this
+// path), Load only unions the bitmap in
 // and the earlier specID/partitionData are kept — the later values are ignored,
 // mirroring Add's first-write-wins behavior. Callers must not pass conflicting
 // partition values across calls for the same path.
@@ -170,16 +172,7 @@ func (w *DVWriter) AddPosition(dataFilePath string, position int64, specID int32
 // useful — collectExistingDVs always supplies a non-nil bitmap read from the
 // existing DV.)
 func (w *DVWriter) Load(dataFilePath string, bitmap *RoaringPositionBitmap, specID int32, partitionData map[int]any) {
-	entry, ok := w.entries[dataFilePath]
-	if !ok {
-		entry = &dvEntry{
-			bitmap:        NewRoaringPositionBitmap(),
-			specID:        specID,
-			partitionData: maps.Clone(partitionData),
-		}
-		w.entries[dataFilePath] = entry
-		w.order = append(w.order, dataFilePath)
-	}
+	entry := w.getOrCreateEntry(dataFilePath, specID, partitionData)
 
 	entry.bitmap.Or(bitmap)
 }
