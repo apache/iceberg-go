@@ -275,17 +275,25 @@ func mustLoadRecordBatchFromJSON(schema *arrow.Schema, content string) arrow.Rec
 func writePosDeleteParquetToMemFS(t *testing.T, memFS *iceio.MemFS, path, content string) {
 	t.Helper()
 
-	rec := mustLoadRecordBatchFromJSON(PositionalDeleteArrowSchema, content)
+	writePosDeleteParquetToMemFSWithSchema(t, memFS, path, PositionalDeleteArrowSchema, content)
+}
+
+func writePosDeleteParquetToMemFSWithSchema(t *testing.T, memFS *iceio.MemFS, path string,
+	schema *arrow.Schema, content string,
+) {
+	t.Helper()
+
+	rec := mustLoadRecordBatchFromJSON(schema, content)
 	defer rec.Release()
 
-	tbl := array.NewTableFromRecords(PositionalDeleteArrowSchema, []arrow.RecordBatch{rec})
+	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{rec})
 	defer tbl.Release()
 
 	fw, err := memFS.Create(path)
 	require.NoError(t, err)
 
 	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
-		parquet.NewWriterProperties(parquet.WithStats(true)),
+		parquet.NewWriterProperties(parquet.WithDictionaryDefault(true), parquet.WithStats(true)),
 		pqarrow.DefaultWriterProps()))
 	require.NoError(t, fw.Close())
 }

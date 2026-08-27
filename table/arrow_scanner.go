@@ -43,8 +43,10 @@ import (
 )
 
 const (
-	ScanOptionArrowUseLargeTypes              = "arrow.use_large_types"
-	ScanOptionRowLineageEnabled               = "row_lineage.enabled"
+	ScanOptionArrowUseLargeTypes = "arrow.use_large_types"
+	ScanOptionRowLineageEnabled  = "row_lineage.enabled"
+	// This must stay a power of two because appendFilePathChunk uses a bit mask
+	// for periodic cancellation checks.
 	positionalDeleteCancellationCheckInterval = 16 * 1024
 )
 
@@ -381,6 +383,10 @@ func (a *posDeleteAccumulator) release() {
 }
 
 func (a *posDeleteAccumulator) finish() map[string]*arrow.Chunked {
+	if a.builders == nil {
+		panic("position delete accumulator is already finished or released")
+	}
+
 	results := make(map[string]*arrow.Chunked, len(a.builders))
 	for path, builder := range a.builders {
 		positions := builder.NewInt64Array()
@@ -394,8 +400,8 @@ func (a *posDeleteAccumulator) finish() map[string]*arrow.Chunked {
 	return results
 }
 
-func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int, filePathLen int,
-	posType arrow.DataType, posNulls int, posLen int,
+func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int,
+	posType arrow.DataType, posNulls int,
 ) error {
 	if filePathNulls > 0 {
 		return fmt.Errorf("%w: null file_path in position delete file", iceberg.ErrInvalidSchema)
@@ -411,6 +417,11 @@ func validatePosDeleteColumns(filePathType arrow.DataType, filePathNulls int, fi
 		return fmt.Errorf("%w: unsupported pos column type %s in position delete file",
 			iceberg.ErrInvalidSchema, posType)
 	}
+
+	return nil
+}
+
+func validatePosDeleteColumnLengths(filePathLen, posLen int) error {
 	if filePathLen != posLen {
 		return fmt.Errorf("%w: file_path and pos columns have different lengths: %d and %d",
 			iceberg.ErrInvalidSchema, filePathLen, posLen)
@@ -476,8 +487,11 @@ func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, p
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(), filePathCol.Len(),
-		posCol.DataType(), posCol.NullN(), posCol.Len()); err != nil {
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(),
+		posCol.DataType(), posCol.NullN()); err != nil {
+		return err
+	}
+	if err := validatePosDeleteColumnLengths(filePathCol.Len(), posCol.Len()); err != nil {
 		return err
 	}
 
@@ -503,16 +517,12 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 
 	filePathCol := record.Column(0)
 	posCol := record.Column(1)
-	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(), filePathCol.Len(),
-		posCol.DataType(), posCol.NullN(), posCol.Len()); err != nil {
+	if err := validatePosDeleteColumns(filePathCol.DataType(), filePathCol.NullN(),
+		posCol.DataType(), posCol.NullN()); err != nil {
 		return err
 	}
 
-	posArr, ok := posCol.(*array.Int64)
-	if !ok {
-		return fmt.Errorf("%w: unsupported pos chunk array type %T in position delete file",
-			iceberg.ErrInvalidSchema, posCol)
-	}
+	posArr := posCol.(*array.Int64)
 	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
 	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
 		return err
@@ -604,10 +614,14 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	if err != nil {
 		return nil, err
 	}
+	// Do not unify dictionaries here: appendFilePathChunk decodes each batch to
+	// string values, so independent dictionaries across batches are safe.
 	defer records.Release()
 
 	acc := newPosDeleteAccumulator(ctx)
 	defer func() {
+		// Returning an error assigns the named return value before deferred
+		// functions run, which releases builders on every error path.
 		if err != nil {
 			acc.release()
 		}
