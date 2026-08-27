@@ -388,6 +388,11 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 			return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
 		}
 	}
+	for _, move := range u.moves[parentID] {
+		if move.RelativeTo == field.ID {
+			return fmt.Errorf("field that is used as a move target cannot be deleted: %s", fullName)
+		}
+	}
 
 	delete(u.identifierFieldNames, fullName)
 
@@ -625,6 +630,9 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 
 		if relativeToFieldID == fieldID {
 			return fmt.Errorf("cannot move a field to itself: %s", fullName)
+		}
+		if u.isDeleted(relativeToFieldID) {
+			return fmt.Errorf("field that has been deleted cannot be used as a move target: %s", relativeToFullName)
 		}
 
 		if u.findParentID(relativeToFieldID) != parentID {

@@ -887,6 +887,47 @@ func TestMoveColumn(t *testing.T) {
 	})
 }
 
+func TestMoveRelativeToDeletedColumnRejected(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*UpdateSchema) *UpdateSchema
+	}{
+		{
+			name: "delete then move before",
+			build: func(update *UpdateSchema) *UpdateSchema {
+				return update.DeleteColumn([]string{"name"}).MoveBefore([]string{"age"}, []string{"name"})
+			},
+		},
+		{
+			name: "move before then delete",
+			build: func(update *UpdateSchema) *UpdateSchema {
+				return update.MoveBefore([]string{"age"}, []string{"name"}).DeleteColumn([]string{"name"})
+			},
+		},
+		{
+			name: "delete then move after",
+			build: func(update *UpdateSchema) *UpdateSchema {
+				return update.DeleteColumn([]string{"name"}).MoveAfter([]string{"age"}, []string{"name"})
+			},
+		},
+		{
+			name: "move after then delete",
+			build: func(update *UpdateSchema) *UpdateSchema {
+				return update.MoveAfter([]string{"age"}, []string{"name"}).DeleteColumn([]string{"name"})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := New([]string{"id"}, testMetadata, "", nil, nil)
+			_, err := tt.build(NewUpdateSchema(tbl.NewTransaction(), true, true)).Apply()
+			require.ErrorContains(t, err, "move target")
+			require.ErrorContains(t, err, "name")
+		})
+	}
+}
+
 func TestChainedOperations(t *testing.T) {
 	t.Run("test multiple operations in chain", func(t *testing.T) {
 		table := New([]string{"id"}, testMetadata, "", nil, nil)
