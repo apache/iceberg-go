@@ -242,10 +242,60 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	}
 }
 
+func buildBenchDeleteSetIntNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64((i*3+1)%100))
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "category"},
+	}
+}
+
+func buildBenchDeleteSetStringNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		name := fmt.Sprintf("user-%08d", i*3+1)
+		_ = binary.Write(&buf, binary.BigEndian, int32(len(name)))
+		buf.WriteString(name)
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "name"},
+	}
+}
+
 func BenchmarkProcessEqualityDeletesInt(b *testing.B) {
 	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt)
 }
 
 func BenchmarkProcessEqualityDeletesString(b *testing.B) {
 	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString)
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchInt(b *testing.B) {
+	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetIntNoMatch)
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchString(b *testing.B) {
+	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetStringNoMatch)
 }

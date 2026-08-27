@@ -781,14 +781,8 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
 
-		maskBuf := memory.NewResizableBuffer(mem)
-		defer maskBuf.Release()
-		maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
-		maskBytes := maskBuf.Bytes()
-
-		for i := range maskBytes {
-			maskBytes[i] = 0xFF
-		}
+		var maskBuf *memory.Buffer
+		var maskBytes []byte
 
 		var keyBuf bytes.Buffer
 
@@ -798,12 +792,16 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 				var err error
 				encoders[i], err = makeArrowFieldEncoder(r, fieldRefs[setIdx][i], eqDel.fieldIDs[i], name, dataFilePath)
 				if err != nil {
+					if maskBuf != nil {
+						maskBuf.Release()
+					}
+
 					return nil, err
 				}
 			}
 
 			for row := range numRows {
-				if !bitutil.BitIsSet(maskBytes, row) {
+				if maskBytes != nil && !bitutil.BitIsSet(maskBytes, row) {
 					continue
 				}
 
@@ -813,21 +811,40 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 					enc(&keyBuf, row)
 				}
 
-				if _, deleted := eqDel.keys[bufString(&keyBuf)]; deleted {
-					bitutil.ClearBit(maskBytes, row)
+				if _, deleted := eqDel.keys[bufString(&keyBuf)]; !deleted {
+					continue
 				}
+
+				if maskBuf == nil {
+					maskBuf = memory.NewResizableBuffer(mem)
+					maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
+					maskBytes = maskBuf.Bytes()
+
+					for i := range maskBytes {
+						maskBytes[i] = 0xFF
+					}
+				}
+
+				bitutil.ClearBit(maskBytes, row)
 			}
+		}
+
+		if maskBuf == nil {
+			r.Retain()
+
+			return r, nil
 		}
 
 		mask := array.NewBooleanData(array.NewData(
 			arrow.FixedWidthTypes.Boolean, numRows,
 			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0))
-		defer mask.Release()
 
 		filtered, err := compute.Filter(ctx,
 			compute.NewDatumWithoutOwning(r),
 			compute.NewDatumWithoutOwning(mask),
 			*compute.DefaultFilterOptions())
+		mask.Release()
+		maskBuf.Release()
 		if err != nil {
 			return nil, err
 		}

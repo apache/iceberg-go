@@ -481,6 +481,43 @@ func TestProcessEqualityDeletesUsesStructuralFieldPaths(t *testing.T) {
 	result.Release()
 }
 
+func TestProcessEqualityDeletesReturnsOriginalBatchWhenNoRowsMatch(t *testing.T) {
+	builder := array.NewInt64Builder(memory.DefaultAllocator)
+	builder.AppendValues([]int64{1, 2}, nil)
+	values := builder.NewArray()
+	builder.Release()
+
+	unmatchedBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	unmatchedBuilder.Append(3)
+	unmatched := unmatchedBuilder.NewArray()
+	unmatchedBuilder.Release()
+	var unmatchedKey bytes.Buffer
+	encodeArrowValue(&unmatchedKey, unmatched, 0)
+	unmatched.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int64,
+	}}, nil)
+	record := array.NewRecordBatch(schema, []arrow.Array{values}, 2)
+	values.Release()
+
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	process, err := processEqualityDeletesColumnarForFile(context.Background(), []*equalityDeleteSet{{
+		keys:     set[string]{unmatchedKey.String(): {}},
+		fieldIDs: []int{1},
+		colNames: []string{"id"},
+	}}, fileSchema, "data.parquet")
+	require.NoError(t, err)
+
+	result, err := process(record)
+	require.NoError(t, err)
+	assert.Same(t, record, result)
+	assert.Equal(t, int64(2), result.NumRows())
+	result.Release()
+}
+
 func TestProcessEqualityDeletesRejectsMismatchedFieldMetadata(t *testing.T) {
 	process, err := processEqualityDeletesColumnarForFile(context.Background(), []*equalityDeleteSet{{
 		keys:     make(set[string]),
