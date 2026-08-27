@@ -637,6 +637,33 @@ func TestCollectPosDeletePositionsRejectsNullPositions(t *testing.T) {
 	assert.Contains(t, err.Error(), "null pos in position delete file")
 }
 
+func TestCollectPosDeletePositionsDeduplicatesAcrossChunks(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	first := int64Array(mem, 1, 2, 2)
+	defer first.Release()
+	second := int64Array(mem, 3, 4)
+	defer second.Release()
+	third := int64Array(mem, 4, 5)
+	defer third.Release()
+
+	firstColumn := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{first, second})
+	defer firstColumn.Release()
+	secondColumn := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{third})
+	defer secondColumn.Release()
+
+	got, err := collectPosDeletePositions(positionDeletes{firstColumn, secondColumn})
+	require.NoError(t, err)
+	assert.Equal(t, set[int64]{1: {}, 2: {}, 3: {}, 4: {}, 5: {}}, got)
+}
+
+func TestCollectPosDeletePositionsRejectsNilChunk(t *testing.T) {
+	_, err := collectPosDeletePositions(positionDeletes{nil})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "nil pos column chunk")
+}
+
 func TestReadDeletesRejectsNullPos(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	ctx := compute.WithAllocator(t.Context(), mem)

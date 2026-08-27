@@ -463,8 +463,17 @@ func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.C
 	return results, nil
 }
 
+const maxPositionalDeletePreallocation = 64 * 1024
+
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
-	deletes := set[int64]{}
+	totalPositions := 0
+	for _, chunk := range positionalDeletes {
+		if chunk != nil {
+			totalPositions += chunk.Len()
+		}
+	}
+
+	deletes := make(set[int64], min(totalPositions, maxPositionalDeletePreallocation))
 	for _, chunk := range positionalDeletes {
 		if chunk == nil {
 			return nil, fmt.Errorf("%w: nil pos column chunk in position delete file",

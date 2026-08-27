@@ -246,6 +246,49 @@ func BenchmarkProcessPositionalDeletes(b *testing.B) {
 	}
 }
 
+var collectPosDeletePositionsBenchmarkSink int
+
+func BenchmarkCollectPosDeletePositions(b *testing.B) {
+	for _, tc := range []struct {
+		name            string
+		numRows         int
+		numChunks       int
+		uniquePositions int
+	}{
+		{name: "rows=1K/chunks=1/unique", numRows: 1_000, numChunks: 1, uniquePositions: 1_000},
+		{name: "rows=100K/chunks=4/unique", numRows: 100_000, numChunks: 4, uniquePositions: 100_000},
+		{name: "rows=1M/chunks=16/unique", numRows: 1_000_000, numChunks: 16, uniquePositions: 1_000_000},
+		{name: "rows=1K/chunks=1/duplicate", numRows: 1_000, numChunks: 1, uniquePositions: 1},
+		{name: "rows=100K/chunks=4/duplicate", numRows: 100_000, numChunks: 4, uniquePositions: 1},
+		{name: "rows=1M/chunks=16/duplicate", numRows: 1_000_000, numChunks: 16, uniquePositions: 1},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			values := make([]int64, tc.numRows)
+			for i := range values {
+				values[i] = int64(i % tc.uniquePositions)
+			}
+			chunks := makeInt64Chunks(memory.DefaultAllocator, values, tc.numChunks)
+			posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, chunks)
+			defer func() {
+				posCol.Release()
+				for _, chunk := range chunks {
+					chunk.Release()
+				}
+			}()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				deletes, err := collectPosDeletePositions(positionDeletes{posCol})
+				if err != nil {
+					b.Fatal(err)
+				}
+				collectPosDeletePositionsBenchmarkSink = len(deletes)
+			}
+		})
+	}
+}
+
 func benchmarkPositionalDeleteSet(numRows int64, survivors ...int64) set[int64] {
 	deletes := make(set[int64], int(numRows))
 	for i := range numRows {
