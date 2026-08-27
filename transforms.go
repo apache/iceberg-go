@@ -1359,7 +1359,7 @@ func truncateNumber[T LiteralType](name string, pred BoundLiteralPredicate, fn f
 	boundary, ok := pred.Literal().(NumericLiteral)
 	if !ok {
 		return nil, fmt.Errorf("%w: expected numeric literal, got %s",
-			ErrInvalidArgument, boundary.Type())
+			ErrInvalidArgument, pred.Literal().Type())
 	}
 
 	switch pred.Op() {

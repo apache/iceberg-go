@@ -1200,6 +1200,32 @@ func TestTruncateTransformProjectStrictNumericBounds(t *testing.T) {
 	}
 }
 
+type nonNumericBoundLiteralPredicate struct {
+	iceberg.BoundLiteralPredicate
+}
+
+func (nonNumericBoundLiteralPredicate) Literal() iceberg.Literal {
+	return iceberg.BoolLiteral(true)
+}
+
+func TestTruncateTransformProjectRejectsNonNumericLiteral(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID:   1,
+		Name: "id",
+		Type: iceberg.PrimitiveTypes.Int32,
+	})
+	bound, err := iceberg.EqualTo(iceberg.Reference("id"), int32(1)).Bind(schema, true)
+	require.NoError(t, err)
+
+	pred, ok := bound.(iceberg.BoundLiteralPredicate)
+	require.True(t, ok)
+
+	_, err = (iceberg.TruncateTransform{Width: 10}).Project(
+		"id_trunc", nonNumericBoundLiteralPredicate{BoundLiteralPredicate: pred})
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "expected numeric literal, got boolean")
+}
+
 func TestTruncateTransformStringUnicode(t *testing.T) {
 	tests := []struct {
 		name     string
