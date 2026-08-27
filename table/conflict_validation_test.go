@@ -887,6 +887,7 @@ func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
 	var visited int
 	visit := func(Snapshot, iceberg.ManifestEntry) error {
 		visited++
+
 		return nil
 	}
 	for range 2 {
