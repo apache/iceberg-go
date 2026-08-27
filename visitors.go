@@ -82,6 +82,10 @@ type BoundGeospatialExprVisitor[T any] interface {
 	VisitBBoxNotIntersects(BoundTerm, BoundingBox) T
 }
 
+type boundSetExtremaExprVisitor[T any] interface {
+	VisitInWithExtrema(BoundTerm, Set[Literal], Literal, Literal) T
+}
+
 // VisitExpr is a convenience function to use a given visitor to visit all parts of
 // a boolean expression in-order. Values returned from the methods are passed to the
 // subsequent methods, effectively "bubbling up" the results.
@@ -202,7 +206,19 @@ func VisitBoundPredicateRef[T any](e BoundPredicate, visitor BoundBooleanExprVis
 func visitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisitor[T], borrowed bool) T {
 	switch e.Op() {
 	case OpIn:
-		return visitor.VisitIn(e.Term(), literalSetForVisit(e, borrowed))
+		literals := literalSetForVisit(e, borrowed)
+		if borrowed {
+			if extrema, ok := e.(boundSetExtremaRef); ok {
+				min, max, hasExtrema := extrema.boundSetExtremaRef()
+				if hasExtrema {
+					if extremaVisitor, ok := visitor.(boundSetExtremaExprVisitor[T]); ok {
+						return extremaVisitor.VisitInWithExtrema(e.Term(), literals, min, max)
+					}
+				}
+			}
+		}
+
+		return visitor.VisitIn(e.Term(), literals)
 	case OpNotIn:
 		return visitor.VisitNotIn(e.Term(), literalSetForVisit(e, borrowed))
 	case OpIsNan:

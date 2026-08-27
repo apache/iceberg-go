@@ -150,6 +150,8 @@ func allBoundCheck(bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want
 		return allBoundCmp[iceberg.Time](bound, set, want)
 	case iceberg.TimestampType, iceberg.TimestampTzType:
 		return allBoundCmp[iceberg.Timestamp](bound, set, want)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return allBoundCmp[iceberg.TimestampNano](bound, set, want)
 	case iceberg.BinaryType, iceberg.FixedType:
 		return allBoundCmp[[]byte](bound, set, want)
 	case iceberg.StringType:
@@ -162,7 +164,53 @@ func allBoundCheck(bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want
 	panic(iceberg.ErrType)
 }
 
+func compareBound[T iceberg.LiteralType](bound, value iceberg.Literal) int {
+	val := bound.(iceberg.TypedLiteral[T])
+
+	return val.Comparator()(val.Value(), value.(iceberg.TypedLiteral[T]).Value())
+}
+
+func boundCompare(bound, value iceberg.Literal) int {
+	switch bound.Type().(type) {
+	case iceberg.BooleanType:
+		return compareBound[bool](bound, value)
+	case iceberg.Int32Type:
+		return compareBound[int32](bound, value)
+	case iceberg.Int64Type:
+		return compareBound[int64](bound, value)
+	case iceberg.Float32Type:
+		return compareBound[float32](bound, value)
+	case iceberg.Float64Type:
+		return compareBound[float64](bound, value)
+	case iceberg.DateType:
+		return compareBound[iceberg.Date](bound, value)
+	case iceberg.TimeType:
+		return compareBound[iceberg.Time](bound, value)
+	case iceberg.TimestampType, iceberg.TimestampTzType:
+		return compareBound[iceberg.Timestamp](bound, value)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return compareBound[iceberg.TimestampNano](bound, value)
+	case iceberg.BinaryType, iceberg.FixedType:
+		return compareBound[[]byte](bound, value)
+	case iceberg.StringType:
+		return compareBound[string](bound, value)
+	case iceberg.UUIDType:
+		return compareBound[uuid.UUID](bound, value)
+	case iceberg.DecimalType:
+		return compareBound[iceberg.Decimal](bound, value)
+	}
+	panic(iceberg.ErrType)
+}
+
 func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
+	return m.visitIn(term, literals, nil, nil)
+}
+
+func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], min, max iceberg.Literal) bool {
+	return m.visitIn(term, literals, min, max)
+}
+
+func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], min, max iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
 
@@ -179,7 +227,11 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 		panic(err)
 	}
 
-	if allBoundCheck(lower, literals, 1) {
+	if max != nil {
+		if boundCompare(lower, max) == 1 {
+			return rowsCannotMatch
+		}
+	} else if allBoundCheck(lower, literals, 1) {
 		return rowsCannotMatch
 	}
 
@@ -189,7 +241,11 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 			panic(err)
 		}
 
-		if allBoundCheck(upper, literals, -1) {
+		if min != nil {
+			if boundCompare(upper, min) == -1 {
+				return rowsCannotMatch
+			}
+		} else if allBoundCheck(upper, literals, -1) {
 			return rowsCannotMatch
 		}
 	}
