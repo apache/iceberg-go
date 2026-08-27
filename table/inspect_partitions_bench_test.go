@@ -24,16 +24,18 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
+type inspectPartitionAggregationBenchmarkCase struct {
+	name           string
+	fileCount      int
+	partitionCount int
+	fieldCount     int
+	binary         bool
+}
+
 var inspectPartitionAggregationBenchmarkSink int
 
 func BenchmarkInspectPartitionAggregation(b *testing.B) {
-	for _, benchmark := range []struct {
-		name           string
-		fileCount      int
-		partitionCount int
-		fieldCount     int
-		binary         bool
-	}{
+	for _, benchmark := range []inspectPartitionAggregationBenchmarkCase{
 		{name: "int32", fileCount: 10_000, partitionCount: 100, fieldCount: 1},
 		{name: "int32", fileCount: 100_000, partitionCount: 100, fieldCount: 8},
 		{name: "binary", fileCount: 100_000, partitionCount: 100, fieldCount: 32, binary: true},
@@ -60,7 +62,6 @@ func benchmarkInspectPartitionAggregation(
 	b.Helper()
 	b.ReportAllocs()
 	b.ReportMetric(float64(len(files)), "files/op")
-	b.ResetTimer()
 	for b.Loop() {
 		tree := newInspectPartitionAggregateTree()
 		aggregateCount := 0
@@ -72,9 +73,8 @@ func benchmarkInspectPartitionAggregation(
 				aggregate = tree.lookup(record)
 				if aggregate == nil {
 					aggregate = &inspectPartitionAggregate{
-						partition:       cloneInspectPartition(partition),
-						partitionRecord: record,
-						orderingKey:     inspectPartitionKey(partition),
+						partition:   cloneInspectPartition(partition),
+						orderingKey: inspectPartitionKey(partition),
 					}
 					tree.insert(record, aggregate)
 					aggregateCount++
@@ -86,9 +86,8 @@ func benchmarkInspectPartitionAggregation(
 					partition := inspectCoercePartition(partitionValues, partitionType)
 					record := newPartitionRecord(partition, partitionType)
 					aggregate = &inspectPartitionAggregate{
-						partition:       cloneInspectPartition(partition),
-						partitionRecord: record,
-						orderingKey:     inspectPartitionKey(partition),
+						partition:   cloneInspectPartition(partition),
+						orderingKey: inspectPartitionKey(partition),
 					}
 					tree.insert(record, aggregate)
 					aggregateCount++
@@ -103,13 +102,7 @@ func benchmarkInspectPartitionAggregation(
 
 func benchmarkInspectPartitionFiles(
 	b *testing.B,
-	benchmark struct {
-		name           string
-		fileCount      int
-		partitionCount int
-		fieldCount     int
-		binary         bool
-	},
+	benchmark inspectPartitionAggregationBenchmarkCase,
 ) (*iceberg.StructType, []iceberg.DataFile) {
 	b.Helper()
 

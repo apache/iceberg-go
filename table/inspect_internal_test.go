@@ -2654,6 +2654,19 @@ func TestInspectPartitionAggregateTreeLookupPartition(t *testing.T) {
 		1001: []byte{1, 2, 4},
 		1002: math.NaN(),
 	}, partitionType))
+
+	// A file written with an older partition spec does not have the field
+	// added by a later spec. Both lookup paths must key the missing field as nil.
+	evolvedPartition := map[int]any{
+		1000: int32(7),
+		1002: math.NaN(),
+	}
+	evolvedRecord := newPartitionRecord(inspectCoercePartition(evolvedPartition, partitionType), partitionType)
+	evolvedAggregate := &inspectPartitionAggregate{specID: 2}
+	tree.insert(evolvedRecord, evolvedAggregate)
+
+	require.Same(t, evolvedAggregate, tree.lookupPartition(evolvedPartition, partitionType))
+	require.Same(t, evolvedAggregate, tree.lookup(evolvedRecord))
 }
 
 func TestCloneInspectPartitionClonesBinaryValues(t *testing.T) {

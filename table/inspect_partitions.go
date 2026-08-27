@@ -43,7 +43,6 @@ type inspectPartitionAggregate struct {
 	equalityDeleteFiles int32
 	lastUpdatedAt       *int64
 	lastUpdatedSnapshot *int64
-	partitionRecord     partitionRecord
 	orderingKey         string
 }
 
@@ -76,10 +75,6 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 	partitionType *iceberg.StructType,
 ) *inspectPartitionAggregate {
 	node := t
-	if partitionType == nil {
-		return node.aggregate
-	}
-
 	for _, field := range partitionType.FieldList {
 		child, ok := node.children[comparablePartitionKey(partition[field.ID])]
 		if !ok {
@@ -91,6 +86,9 @@ func (t *inspectPartitionAggregateTree) lookupPartition(
 	return node.aggregate
 }
 
+// insert walks the positional record, while lookupPartition walks partition
+// field IDs. Build records with the same partition type so their field order
+// stays aligned.
 func (t *inspectPartitionAggregateTree) insert(record partitionRecord, aggregate *inspectPartitionAggregate) {
 	node := t
 	for _, value := range record {
@@ -179,9 +177,8 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 				partition := inspectCoercePartition(partitionValues, partitionType)
 				record := newPartitionRecord(partition, partitionType)
 				aggregate = &inspectPartitionAggregate{
-					partition:       cloneInspectPartition(partition),
-					partitionRecord: record,
-					orderingKey:     inspectPartitionKey(partition),
+					partition:   cloneInspectPartition(partition),
+					orderingKey: inspectPartitionKey(partition),
 				}
 				aggregates = append(aggregates, aggregate)
 				aggregateTree.insert(record, aggregate)
