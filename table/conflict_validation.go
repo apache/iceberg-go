@@ -510,14 +510,24 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 	return validateNoConflictingDataFiles(ctx, filter, level)
 }
 
+type equalityDeletePartitionSpecInfo struct {
+	fields       map[int]iceberg.PartitionField
+	sourceFields map[int]equalityDeleteSourceFieldInfo
+}
+
+type equalityDeleteSourceFieldInfo struct {
+	name  string
+	found bool
+}
+
 // eqDeletePartitionsToFilter converts equality-delete data files into an
 // OR-of-ANDs BooleanExpression in row (source) space, suitable for passing
 // to validateAddedDataFilesMatchingFilter.
 //
-// For each eq-delete file it resolves each partition field ID to the source
-// schema field name via the file's partition spec, then builds an EqualTo
-// predicate using Reference(sourceFieldName). Multiple fields within one
-// partition are AND-ed; multiple eq-delete files are OR-ed.
+// For each distinct (spec ID, partition) tuple it resolves each partition
+// field ID to the source schema field name via the file's partition spec, then
+// builds an EqualTo predicate using Reference(sourceFieldName). Multiple
+// fields within one partition are AND-ed; multiple partitions are OR-ed.
 //
 // The resulting expression is projected per-concurrent-manifest's spec ID
 // inside validateAddedDataFilesMatchingFilter (via buildPartitionProjection),
@@ -529,21 +539,32 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 // RowDelta.validate).
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
+	specInfoByID := make(map[int]*equalityDeletePartitionSpecInfo)
+	seen := make(map[string]struct{}, len(files))
+	var currentSchema *iceberg.Schema
+
 	for _, f := range files {
 		p := iceberginternal.BorrowedDataFilePartition(f)
 		if len(p) == 0 {
 			return iceberg.AlwaysTrue{}, nil
 		}
 
-		spec := meta.PartitionSpecByID(int(f.SpecID()))
-		if spec == nil {
-			return nil, fmt.Errorf("partition spec ID %d not found in metadata", f.SpecID())
-		}
+		specID := int(f.SpecID())
+		specInfo, ok := specInfoByID[specID]
+		if !ok {
+			spec := meta.PartitionSpecByID(specID)
+			if spec == nil {
+				return nil, fmt.Errorf("partition spec ID %d not found in metadata", f.SpecID())
+			}
 
-		// Build partition field ID → PartitionField lookup for this spec.
-		partFieldByID := make(map[int]iceberg.PartitionField, spec.NumFields())
-		for _, pf := range spec.Fields() {
-			partFieldByID[pf.FieldID] = pf
+			specInfo = &equalityDeletePartitionSpecInfo{
+				fields:       make(map[int]iceberg.PartitionField, spec.NumFields()),
+				sourceFields: make(map[int]equalityDeleteSourceFieldInfo, spec.NumFields()),
+			}
+			for _, pf := range spec.Fields() {
+				specInfo.fields[pf.FieldID] = pf
+			}
+			specInfoByID[specID] = specInfo
 		}
 
 		// Sort partition field IDs for deterministic expression order.
@@ -561,7 +582,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 		// until a full PartitionSet-style partition-space approach is added.
 		identityOnly := true
 		for _, fid := range fieldIDs {
-			if pf, ok := partFieldByID[fid]; ok {
+			if pf, ok := specInfo.fields[fid]; ok {
 				if _, isIdentity := pf.Transform.(iceberg.IdentityTransform); !isIdentity {
 					identityOnly = false
 
@@ -570,37 +591,55 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 			}
 		}
 		if !identityOnly {
-			terms = append(terms, iceberg.AlwaysTrue{})
+			return iceberg.AlwaysTrue{}, nil
+		}
 
-			continue
+		// canonicalPartitionKey is injective for the supported partition values
+		// and includes the spec ID. If a custom Literal implementation is not
+		// part of that closed set, skip deduplication and let the existing literal
+		// conversion below preserve its behavior.
+		if key, err := canonicalPartitionKey(f.SpecID(), p); err == nil {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
 		}
 
 		conjuncts := make([]iceberg.BooleanExpression, 0, len(p))
 		for _, partFieldID := range fieldIDs {
-			pf, ok := partFieldByID[partFieldID]
+			pf, ok := specInfo.fields[partFieldID]
 			if !ok {
 				return nil, fmt.Errorf("partition field ID %d not found in spec %d", partFieldID, f.SpecID())
 			}
 
-			// Resolve to source schema field to obtain the Reference name.
-			sourceField, ok := meta.CurrentSchema().FindFieldByID(pf.SourceID())
-			if !ok {
+			// Resolve each source field at most once per partition spec. The
+			// current schema is cloned lazily, and only once for this filter.
+			sourceField, resolved := specInfo.sourceFields[partFieldID]
+			if !resolved {
+				if currentSchema == nil {
+					currentSchema = meta.CurrentSchema()
+				}
+				field, found := currentSchema.FindFieldByID(pf.SourceID())
+				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
+				specInfo.sourceFields[partFieldID] = sourceField
+			}
+			if !sourceField.found {
 				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]
 			if value == nil {
-				conjuncts = append(conjuncts, iceberg.IsNull(iceberg.Reference(sourceField.Name)))
+				conjuncts = append(conjuncts, iceberg.IsNull(iceberg.Reference(sourceField.name)))
 
 				continue
 			}
 
 			lit, err := internal.LiteralForPartitionValue(value)
 			if err != nil {
-				return nil, fmt.Errorf("partition field %q: %w", sourceField.Name, err)
+				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
-			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.Name), lit))
+			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
 		}
 
 		if len(conjuncts) == 1 {
