@@ -61,6 +61,7 @@ type boundSetExtremaVisitVisitor struct {
 
 func (v *boundSetExtremaVisitVisitor) VisitInWithExtrema(_ BoundTerm, _ Set[Literal], min, max Literal) bool {
 	v.min, v.max = min, max
+
 	return true
 }
 

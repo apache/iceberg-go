@@ -1037,6 +1037,7 @@ func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok boo
 		typed, typeOK := lit.(TypedLiteral[T])
 		if !typeOK {
 			valid = false
+
 			return false
 		}
 
@@ -1046,6 +1047,7 @@ func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok boo
 			min, max = lit, lit
 			minValue, maxValue = value, value
 			ok = true
+
 			return true
 		}
 
