@@ -72,6 +72,9 @@ func NewMultiTableTransaction(cat Catalog) (*MultiTableTransaction, error) {
 // with all other transactions in this multi-table transaction.
 // Returns an error if the transaction is nil, already committed, or
 // targets a table that was already added.
+//
+// A transaction may still be empty here and gain updates before Commit,
+// so emptiness is only decided when the payloads are built.
 func (m *MultiTableTransaction) AddTransaction(tx *table.Transaction) error {
 	if tx == nil {
 		return errors.New("transaction must not be nil")
@@ -102,8 +105,14 @@ func (m *MultiTableTransaction) AddTransaction(tx *table.Transaction) error {
 
 // Commit extracts pending changes from all added transactions and
 // commits them atomically. On success, all transactions are marked
-// as committed. On failure, no transactions are marked committed
-// and the caller may retry.
+// as committed. On failure, no transactions are marked committed.
+//
+// A retry must be rebuilt from freshly loaded tables:
+// each payload asserts the branch head its transaction read.
+//
+// Transactions that stage no updates are left out of the request, since
+// a catalog may reject a table change carrying none. They are still
+// marked committed. A request with nothing left to send is not made.
 //
 // PostCommit hooks are not executed. Because the multi-table commit
 // endpoint returns 204 No Content, callers must LoadTable individually
@@ -118,18 +127,26 @@ func (m *MultiTableTransaction) Commit(ctx context.Context) error {
 	}
 
 	commits := make([]table.TableCommit, 0, len(m.txns))
-	for _, tx := range m.txns {
+	names := make([]string, 0, len(m.txns))
+	for i, tx := range m.txns {
 		tc, err := tx.TableCommit()
 		if err != nil {
 			return err
 		}
 
+		if len(tc.Updates) == 0 {
+			continue
+		}
+
 		commits = append(commits, tc)
+		names = append(names, m.tableNames[i])
 	}
 
-	if err := m.cat.CommitTransaction(ctx, commits); err != nil {
-		return fmt.Errorf("commit transaction for tables [%s]: %w",
-			strings.Join(m.tableNames, ", "), err)
+	if len(commits) > 0 {
+		if err := m.cat.CommitTransaction(ctx, commits); err != nil {
+			return fmt.Errorf("commit transaction for tables [%s]: %w",
+				strings.Join(names, ", "), err)
+		}
 	}
 
 	m.committed = true
