@@ -183,8 +183,17 @@ func makeArrowFieldEncoder(record arrow.RecordBatch, ref arrowFieldRef, fieldID 
 }
 
 type equalityDeleteFileSet struct {
-	id int
+	id       int
+	groupKey string
 	*equalityDeleteSet
+}
+
+func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDeleteFileSet {
+	return &equalityDeleteFileSet{
+		id:                id,
+		groupKey:          fmt.Sprint(deleteSet.fieldIDs),
+		equalityDeleteSet: deleteSet,
+	}
 }
 
 // readAllEqualityDeleteFiles reads all unique equality delete files from
@@ -266,14 +275,11 @@ func readAllEqualityDeleteFiles(ctx context.Context, fs iceio.IO, schema *iceber
 
 	perFile := make(map[string]*equalityDeleteFileSet)
 	for result := range resultCh {
-		perFile[result.path] = &equalityDeleteFileSet{
-			id: result.id,
-			equalityDeleteSet: &equalityDeleteSet{
-				fieldIDs: result.fieldIDs,
-				colNames: result.colNames,
-				keys:     result.keys,
-			},
-		}
+		perFile[result.path] = newEqualityDeleteFileSet(result.id, &equalityDeleteSet{
+			fieldIDs: result.fieldIDs,
+			colNames: result.colNames,
+			keys:     result.keys,
+		})
 	}
 
 	if err := g.Wait(); err != nil {
@@ -298,16 +304,45 @@ func buildEqualityDeleteSetsPerTask(
 			continue
 		}
 
-		// Group delete files by their field IDs key.
-		groups := make(map[string][]*equalityDeleteFileSet)
+		var (
+			groupKey   string
+			groupFiles []*equalityDeleteFileSet
+			groups     map[string][]*equalityDeleteFileSet
+		)
+
 		for _, d := range t.EqualityDeleteFiles {
 			dk, ok := perFile[d.FilePath()]
 			if !ok {
 				continue
 			}
 
-			groupKey := fmt.Sprint(dk.fieldIDs)
-			groups[groupKey] = append(groups[groupKey], dk)
+			if groups == nil {
+				if len(groupFiles) == 0 {
+					groupKey = dk.groupKey
+				} else if dk.groupKey != groupKey {
+					groups = make(map[string][]*equalityDeleteFileSet, 2)
+					groups[groupKey] = groupFiles
+				}
+			}
+
+			if groups == nil {
+				groupFiles = append(groupFiles, dk)
+			} else {
+				groups[dk.groupKey] = append(groups[dk.groupKey], dk)
+			}
+		}
+
+		if groups == nil {
+			if len(groupFiles) == 0 {
+				continue
+			}
+
+			deleteSet := equalityDeleteSetForFiles(groupFiles, sharedSets)
+			if len(deleteSet.keys) > 0 {
+				perTask[i] = []*equalityDeleteSet{deleteSet}
+			}
+
+			continue
 		}
 
 		sets := make([]*equalityDeleteSet, 0, len(groups))

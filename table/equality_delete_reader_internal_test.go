@@ -583,30 +583,21 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 	deleteC := newEqualityDeleteSetAssemblyTestFile(t, "delete-c.parquet", []int{1})
 
 	perFile := map[string]*equalityDeleteFileSet{
-		deleteA.FilePath(): {
-			id: 0,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"a": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteB.FilePath(): {
-			id: 1,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"b": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteC.FilePath(): {
-			id: 2,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"c": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
+		deleteA.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
+			keys:     set[string]{"a": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteB.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
+			keys:     set[string]{"b": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteC.FilePath(): newEqualityDeleteFileSet(2, &equalityDeleteSet{
+			keys:     set[string]{"c": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
 	}
 
 	tasks := []FileScanTask{
@@ -635,22 +626,16 @@ func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
 	deleteCategory := newEqualityDeleteSetAssemblyTestFile(t, "delete-category.parquet", []int{2})
 
 	perFile := map[string]*equalityDeleteFileSet{
-		deleteID.FilePath(): {
-			id: 0,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"id": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteCategory.FilePath(): {
-			id: 1,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"category": {}},
-				fieldIDs: []int{2},
-				colNames: []string{"category"},
-			},
-		},
+		deleteID.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
+			keys:     set[string]{"id": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteCategory.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
+			keys:     set[string]{"category": {}},
+			fieldIDs: []int{2},
+			colNames: []string{"category"},
+		}),
 	}
 
 	perTask := buildEqualityDeleteSetsPerTask([]FileScanTask{{

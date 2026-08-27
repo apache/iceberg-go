@@ -182,14 +182,11 @@ func equalityDeleteAssemblyBenchmarkInput(
 			for keyIndex := range keysPerFile {
 				keys[fmt.Sprintf("key-%d-%d", fileID, keyIndex)] = struct{}{}
 			}
-			perFile[path] = &equalityDeleteFileSet{
-				id: fileID,
-				equalityDeleteSet: &equalityDeleteSet{
-					keys:     keys,
-					fieldIDs: []int{1},
-					colNames: []string{"id"},
-				},
-			}
+			perFile[path] = newEqualityDeleteFileSet(fileID, &equalityDeleteSet{
+				keys:     keys,
+				fieldIDs: []int{1},
+				colNames: []string{"id"},
+			})
 			fileID++
 		}
 
