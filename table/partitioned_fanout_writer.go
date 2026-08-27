@@ -77,27 +77,48 @@ type partitionExtractionPlan struct {
 	fields       []partitionFieldInfo
 }
 
-type binaryPartitionKey string
+type (
+	binaryPartitionKey  string
+	float32PartitionKey uint32
+	float64PartitionKey uint64
+)
 
-type nanPartitionKey struct {
-	bits int
-}
+const (
+	// Canonical NaN payloads make all NaNs of the same width compare equal.
+	// The width-specific key types preserve float width, while using raw bits
+	// intentionally keeps -0.0 and +0.0 distinct.
+	canonicalFloat32NaNBits uint32 = 0x7fc00000
+	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
+)
 
 func comparablePartitionKey(value any) any {
 	switch value := value.(type) {
 	case []byte:
 		return binaryPartitionKey(value)
 	case float32:
+		rawBits := math.Float32bits(value)
 		if math.IsNaN(float64(value)) {
-			return nanPartitionKey{bits: 32}
+			rawBits = canonicalFloat32NaNBits
 		}
+
+		return float32PartitionKey(rawBits)
 	case float64:
+		rawBits := math.Float64bits(value)
 		if math.IsNaN(value) {
-			return nanPartitionKey{bits: 64}
+			rawBits = canonicalFloat64NaNBits
 		}
+
+		return float64PartitionKey(rawBits)
 	}
 
 	return value
+}
+
+func partitionValuesEqual(left, right any) bool {
+	// Supported partition values are primitive literals; []byte is converted to
+	// a string key and float values are converted to comparable width-aware keys
+	// above. The default branch preserves comparable scalar values.
+	return comparablePartitionKey(left) == comparablePartitionKey(right)
 }
 
 func partitionRecordsEqual(left, right partitionRecord) bool {
@@ -105,7 +126,7 @@ func partitionRecordsEqual(left, right partitionRecord) bool {
 		return false
 	}
 	for i := range left {
-		if comparablePartitionKey(left[i]) != comparablePartitionKey(right[i]) {
+		if !partitionValuesEqual(left[i], right[i]) {
 			return false
 		}
 	}
