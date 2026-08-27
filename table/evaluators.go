@@ -111,6 +111,8 @@ func removeBoundCheck(bound iceberg.Literal, vals []iceberg.Literal, toDelete in
 		return removeBoundCmp[iceberg.Time](bound, vals, toDelete)
 	case iceberg.TimestampType, iceberg.TimestampTzType:
 		return removeBoundCmp[iceberg.Timestamp](bound, vals, toDelete)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return removeBoundCmp[iceberg.TimestampNano](bound, vals, toDelete)
 	case iceberg.BinaryType, iceberg.FixedType:
 		return removeBoundCmp[[]byte](bound, vals, toDelete)
 	case iceberg.StringType:
@@ -164,53 +166,15 @@ func allBoundCheck(bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want
 	panic(iceberg.ErrType)
 }
 
-func compareBound[T iceberg.LiteralType](bound, value iceberg.Literal) int {
-	val := bound.(iceberg.TypedLiteral[T])
-
-	return val.Comparator()(val.Value(), value.(iceberg.TypedLiteral[T]).Value())
-}
-
-func boundCompare(bound, value iceberg.Literal) int {
-	switch bound.Type().(type) {
-	case iceberg.BooleanType:
-		return compareBound[bool](bound, value)
-	case iceberg.Int32Type:
-		return compareBound[int32](bound, value)
-	case iceberg.Int64Type:
-		return compareBound[int64](bound, value)
-	case iceberg.Float32Type:
-		return compareBound[float32](bound, value)
-	case iceberg.Float64Type:
-		return compareBound[float64](bound, value)
-	case iceberg.DateType:
-		return compareBound[iceberg.Date](bound, value)
-	case iceberg.TimeType:
-		return compareBound[iceberg.Time](bound, value)
-	case iceberg.TimestampType, iceberg.TimestampTzType:
-		return compareBound[iceberg.Timestamp](bound, value)
-	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
-		return compareBound[iceberg.TimestampNano](bound, value)
-	case iceberg.BinaryType, iceberg.FixedType:
-		return compareBound[[]byte](bound, value)
-	case iceberg.StringType:
-		return compareBound[string](bound, value)
-	case iceberg.UUIDType:
-		return compareBound[uuid.UUID](bound, value)
-	case iceberg.DecimalType:
-		return compareBound[iceberg.Decimal](bound, value)
-	}
-	panic(iceberg.ErrType)
-}
-
 func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
 	return m.visitIn(term, literals, nil, nil)
 }
 
-func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], min, max iceberg.Literal) bool {
-	return m.visitIn(term, literals, min, max)
+func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
+	return m.visitIn(term, literals, minLit, maxLit)
 }
 
-func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], min, max iceberg.Literal) bool {
+func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
 
@@ -218,21 +182,22 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 		return rowsCannotMatch
 	}
 
-	if literals.Len() > inPredicateLimit {
-		return rowsMightMatch
-	}
-
 	lower, err := iceberg.LiteralFromBytes(term.Type(), *field.LowerBound)
 	if err != nil {
 		panic(err)
 	}
 
-	if max != nil {
-		if boundCompare(lower, max) == 1 {
+	if maxLit != nil {
+		if getCmpLiteral(lower)(lower, maxLit) > 0 {
 			return rowsCannotMatch
 		}
-	} else if allBoundCheck(lower, literals, 1) {
-		return rowsCannotMatch
+	} else {
+		if literals.Len() > inPredicateLimit {
+			return rowsMightMatch
+		}
+		if allBoundCheck(lower, literals, 1) {
+			return rowsCannotMatch
+		}
 	}
 
 	if field.UpperBound != nil {
@@ -241,8 +206,8 @@ func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.S
 			panic(err)
 		}
 
-		if min != nil {
-			if boundCompare(upper, min) == -1 {
+		if minLit != nil {
+			if getCmpLiteral(upper)(upper, minLit) < 0 {
 				return rowsCannotMatch
 			}
 		} else if allBoundCheck(upper, literals, -1) {
@@ -337,6 +302,8 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 	case iceberg.TypedLiteral[iceberg.Time]:
 		return getCmp(l)
 	case iceberg.TypedLiteral[iceberg.Timestamp]:
+		return getCmp(l)
+	case iceberg.TypedLiteral[iceberg.TimestampNano]:
 		return getCmp(l)
 	case iceberg.TypedLiteral[[]byte]:
 		return getCmp(l)

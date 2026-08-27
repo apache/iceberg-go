@@ -31,14 +31,16 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 		return iceberg.Decimal{Val: decimal128.FromI64(value), Scale: 2}
 	}
 
-	tests := []struct {
+	type testCase struct {
 		name       string
 		typ        iceberg.Type
 		expr       iceberg.BooleanExpression
 		lower      iceberg.Literal
 		upper      iceberg.Literal
 		expectRead bool
-	}{
+	}
+
+	tests := []testCase{
 		{
 			name:       "decimal below lower bound",
 			typ:        iceberg.DecimalTypeOf(12, 2),
@@ -89,6 +91,30 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 		},
 	}
 
+	largeValues := make([]int32, inPredicateLimit+1)
+	for i := range largeValues {
+		largeValues[i] = int32(i)
+	}
+	largeIn := iceberg.IsIn(iceberg.Reference("value"), largeValues...)
+	tests = append(tests,
+		testCase{
+			name:       "large IN below lower bound",
+			typ:        iceberg.PrimitiveTypes.Int32,
+			expr:       largeIn,
+			lower:      iceberg.NewLiteral(int32(inPredicateLimit + 1)),
+			upper:      iceberg.NewLiteral(int32(inPredicateLimit + 2)),
+			expectRead: false,
+		},
+		testCase{
+			name:       "large IN includes lower bound",
+			typ:        iceberg.PrimitiveTypes.Int32,
+			expr:       largeIn,
+			lower:      iceberg.NewLiteral(int32(inPredicateLimit)),
+			upper:      iceberg.NewLiteral(int32(inPredicateLimit)),
+			expectRead: true,
+		},
+	)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
@@ -111,4 +137,18 @@ func TestManifestEvaluatorInPredicateExtrema(t *testing.T) {
 			assert.Equal(t, tt.expectRead, result)
 		})
 	}
+}
+
+func TestRemoveBoundCheckSupportsTimestampNanos(t *testing.T) {
+	bound := iceberg.NewLiteral(iceberg.TimestampNano(2))
+	values := []iceberg.Literal{
+		iceberg.NewLiteral(iceberg.TimestampNano(1)),
+		iceberg.NewLiteral(iceberg.TimestampNano(2)),
+		iceberg.NewLiteral(iceberg.TimestampNano(3)),
+	}
+
+	assert.Equal(t, []iceberg.Literal{
+		iceberg.NewLiteral(iceberg.TimestampNano(2)),
+		iceberg.NewLiteral(iceberg.TimestampNano(3)),
+	}, removeBoundCheck(bound, values, 1))
 }

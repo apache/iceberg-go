@@ -1026,7 +1026,7 @@ type boundSetPredicate[T LiteralType] struct {
 	hasExtrema bool
 }
 
-func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok bool) {
+func literalSetExtrema[T LiteralType](lits literalSet) (minLit, maxLit Literal, ok bool) {
 	var (
 		cmp                Comparator[T]
 		minValue, maxValue T
@@ -1044,7 +1044,7 @@ func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok boo
 		value := typed.Value()
 		if !ok {
 			cmp = typed.Comparator()
-			min, max = lit, lit
+			minLit, maxLit = lit, lit
 			minValue, maxValue = value, value
 			ok = true
 
@@ -1052,10 +1052,10 @@ func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok boo
 		}
 
 		if cmp(value, minValue) < 0 {
-			min, minValue = lit, value
+			minLit, minValue = lit, value
 		}
 		if cmp(value, maxValue) > 0 {
-			max, maxValue = lit, value
+			maxLit, maxValue = lit, value
 		}
 
 		return true
@@ -1065,7 +1065,7 @@ func literalSetExtrema[T LiteralType](lits literalSet) (min, max Literal, ok boo
 		return nil, nil, false
 	}
 
-	return min, max, ok
+	return minLit, maxLit, ok
 }
 
 func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
@@ -1081,12 +1081,9 @@ func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
 func (bsp *boundSetPredicate[T]) Op() Operation { return bsp.op }
 func (bsp *boundSetPredicate[T]) Negate() BooleanExpression {
 	return &boundSetPredicate[T]{
-		op:         bsp.op.Negate(),
-		term:       bsp.term,
-		lits:       bsp.lits,
-		minLiteral: bsp.minLiteral,
-		maxLiteral: bsp.maxLiteral,
-		hasExtrema: bsp.hasExtrema,
+		op:   bsp.op.Negate(),
+		term: bsp.term,
+		lits: bsp.lits,
 	}
 }
 func (bsp *boundSetPredicate[T]) Term() BoundTerm     { return bsp.term }

@@ -82,6 +82,9 @@ type BoundGeospatialExprVisitor[T any] interface {
 	VisitBBoxNotIntersects(BoundTerm, BoundingBox) T
 }
 
+// boundSetExtremaExprVisitor is consulted only by the borrowed
+// VisitBoundPredicateRef path. The table package's manifest evaluator is
+// currently the only implementation.
 type boundSetExtremaExprVisitor[T any] interface {
 	VisitInWithExtrema(BoundTerm, Set[Literal], Literal, Literal) T
 }
@@ -209,10 +212,10 @@ func visitBoundPredicate[T any](e BoundPredicate, visitor BoundBooleanExprVisito
 		literals := literalSetForVisit(e, borrowed)
 		if borrowed {
 			if extrema, ok := e.(boundSetExtremaRef); ok {
-				min, max, hasExtrema := extrema.boundSetExtremaRef()
+				minLit, maxLit, hasExtrema := extrema.boundSetExtremaRef()
 				if hasExtrema {
 					if extremaVisitor, ok := visitor.(boundSetExtremaExprVisitor[T]); ok {
-						return extremaVisitor.VisitInWithExtrema(e.Term(), literals, min, max)
+						return extremaVisitor.VisitInWithExtrema(e.Term(), literals, minLit, maxLit)
 					}
 				}
 			}
