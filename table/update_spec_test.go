@@ -802,11 +802,12 @@ func TestUpdateSpecBuildChanges(t *testing.T) {
 		assert.NotNil(t, reqs)
 
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(reqs))
+		assert.Equal(t, 2, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
 		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
+		assert.Equal(t, table.AssertDefaultSpecID(testNonPartitionedTable.Metadata().DefaultPartitionSpec()), reqs[1])
 	})
 
 	t.Run("build changes on removed partition field", func(t *testing.T) {
@@ -821,11 +822,12 @@ func TestUpdateSpecBuildChanges(t *testing.T) {
 		assert.NotNil(t, reqs)
 
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(reqs))
+		assert.Equal(t, 2, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
 		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
+		assert.Equal(t, table.AssertDefaultSpecID(testPartitionedTable.Metadata().DefaultPartitionSpec()), reqs[1])
 	})
 
 	t.Run("build changes on renamed partition field", func(t *testing.T) {
@@ -838,12 +840,46 @@ func TestUpdateSpecBuildChanges(t *testing.T) {
 
 		assert.NoError(t, err)
 		assert.Equal(t, 2, len(updates))
-		assert.Equal(t, 1, len(reqs))
+		assert.Equal(t, 2, len(reqs))
 
 		assert.Equal(t, table.UpdateAddSpec, updates[0].Action())
 		assert.Equal(t, table.UpdateSetDefaultSpec, updates[1].Action())
 		assert.Equal(t, "assert-last-assigned-partition-id", reqs[0].GetType())
+		assert.Equal(t, table.AssertDefaultSpecID(testPartitionedTable.Metadata().DefaultPartitionSpec()), reqs[1])
 	})
+}
+
+func TestUpdateSpecRemoveOnlyRaceIsFenced(t *testing.T) {
+	// Two racing remove-only spec evolutions assign no new partition field
+	// ids, so assert-last-assigned-partition-id cannot order them; only
+	// assert-default-spec-id detects that the loser read a stale default.
+
+	// Writer A builds its requirements against the base table.
+	txnA := testPartitionedTable.NewTransaction()
+	_, reqsA, err := table.NewUpdateSpec(txnA, false).
+		RemoveField("street_void").
+		BuildUpdates()
+	require.NoError(t, err)
+
+	// Writer B commits the same remove-only evolution first: the default
+	// spec id moves, the last assigned partition field id does not.
+	txnB := testPartitionedTable.NewTransaction()
+	require.NoError(t, table.NewUpdateSpec(txnB, false).RemoveField("street_void").Commit())
+	stagedB, err := txnB.StagedTable()
+	require.NoError(t, err)
+	movedMeta := stagedB.Metadata()
+	require.NotEqual(t, testPartitionedTable.Metadata().DefaultPartitionSpec(), movedMeta.DefaultPartitionSpec())
+	require.Equal(t, testPartitionedTable.Metadata().LastPartitionSpecID(), movedMeta.LastPartitionSpecID())
+
+	// Validating A's requirements against B's committed state must fail on
+	// exactly the default-spec fence.
+	failed := make([]string, 0)
+	for _, req := range reqsA {
+		if err := req.Validate(movedMeta); err != nil {
+			failed = append(failed, req.GetType())
+		}
+	}
+	assert.Equal(t, []string{"assert-default-spec-id"}, failed)
 }
 
 func TestUpdateSpecCommit(t *testing.T) {
