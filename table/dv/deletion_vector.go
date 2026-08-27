@@ -56,6 +56,10 @@ const (
 	dvMagicSize  = 4 // magic field
 	dvCRCSize    = 4 // CRC-32 checksum
 	dvMinSize    = dvLengthSize + dvMagicSize + dvCRCSize
+
+	// maxCoalescedDVRangeSize caps a range only when it is extended with
+	// another blob. A single blob may still be up to DefaultMaxBlobSize.
+	maxCoalescedDVRangeSize int64 = 8 << 20
 )
 
 // DeserializeDV parses a deletion vector blob and returns a bitmap of deleted positions.
@@ -292,6 +296,8 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 		for end < len(reads) {
 			next := reads[end]
 			nextEnd := next.offset + next.blob.Length
+			// Only coalesce contiguous or overlapping blobs. Gaps are left as
+			// separate reads so the range does not fetch unrelated bytes.
 			if next.offset > rangeEnd || nextEnd-rangeStart > maxCoalescedDVRangeSize {
 				break
 			}
@@ -308,10 +314,11 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 		for _, read := range reads[start:end] {
 			blobStart := read.offset - rangeStart
 			blobEnd := blobStart + read.blob.Length
-			bitmaps[read.index], err = DeserializeDV(rangeData[blobStart:blobEnd], read.manifestCardinality)
+			bitmap, err := DeserializeDV(rangeData[blobStart:blobEnd], read.manifestCardinality)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("deserialize DV blob at offset %d: %w", read.offset, err)
 			}
+			bitmaps[read.index] = bitmap
 		}
 
 		start = end
@@ -319,8 +326,6 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 
 	return bitmaps, nil
 }
-
-const maxCoalescedDVRangeSize int64 = 8 << 20
 
 func validateDVFile(dvFile iceberg.DataFile) error {
 	if dvFile.FileFormat() != iceberg.PuffinFile {

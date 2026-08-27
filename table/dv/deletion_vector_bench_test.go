@@ -80,9 +80,8 @@ func BenchmarkReadDVs(b *testing.B) {
 			fs := &countingReadIO{base: iceio.LocalFS{}}
 
 			b.ReportAllocs()
-			b.ResetTimer()
 			for b.Loop() {
-				fs.reads = 0
+				fs.reset()
 				bitmaps, err := ReadDVs(fs, files)
 				if err != nil {
 					b.Fatal(err)
@@ -92,7 +91,6 @@ func BenchmarkReadDVs(b *testing.B) {
 				}
 			}
 			b.ReportMetric(float64(fs.reads), "range-reads/op")
-			b.StopTimer()
 		})
 	}
 }
@@ -127,7 +125,7 @@ func benchmarkDVFiles(b *testing.B, numDVs int) []iceberg.DataFile {
 			Type:           puffin.BlobTypeDeletionVector,
 			SnapshotID:     -1,
 			SequenceNumber: -1,
-			Fields:         []int32{},
+			Fields:         []int32{2147483546},
 			Properties: map[string]string{
 				dvReferencedDataFileProperty: referencedDataFile,
 				dvCardinalityProperty:        "1",
