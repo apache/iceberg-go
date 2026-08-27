@@ -446,13 +446,12 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 		return nil, scan.selectorErr
 	}
 
-	curSchema := scan.metadata.CurrentSchema()
 	if !scan.snapshotSchemaEnabled() {
 		// Live scans intentionally use the table's current schema. A schema-only
 		// metadata update can advance CurrentSchema without creating a snapshot,
 		// and branch refs intentionally use the table schema even though they
 		// resolve to a snapshot.
-		return curSchema, nil
+		return scan.metadata.CurrentSchema(), nil
 	}
 
 	snap, err := scan.ResolveSnapshot()
@@ -461,17 +460,33 @@ func (scan *Scan) effectiveSchema() (*iceberg.Schema, error) {
 	}
 
 	if snap.SchemaID == nil {
-		return curSchema, nil
+		return scan.metadata.CurrentSchema(), nil
 	}
 
-	for _, schema := range scan.metadata.Schemas() {
-		if schema.ID == *snap.SchemaID {
-			return schema, nil
-		}
+	if schema := schemaFromMetadata(scan.metadata, *snap.SchemaID); schema != nil {
+		return schema, nil
 	}
 
 	return nil, fmt.Errorf("%w: snapshot %d references unknown schema id %d",
 		ErrInvalidMetadata, snap.SnapshotID, *snap.SchemaID)
+}
+
+type metadataSchemaByID interface {
+	schemaByID(int) *iceberg.Schema
+}
+
+func schemaFromMetadata(metadata Metadata, id int) *iceberg.Schema {
+	if lookup, ok := metadata.(metadataSchemaByID); ok {
+		return lookup.schemaByID(id)
+	}
+
+	for _, schema := range metadata.Schemas() {
+		if schema.ID == id {
+			return schema
+		}
+	}
+
+	return nil
 }
 
 func (scan *Scan) snapshotSchemaEnabled() bool {

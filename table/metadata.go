@@ -2060,12 +2060,25 @@ func (c *commonMetadata) LastUpdatedMillis() int64   { return c.LastUpdatedMS }
 func (c *commonMetadata) LastColumnID() int          { return c.LastColumnId }
 func (c *commonMetadata) Schemas() []*iceberg.Schema { return cloneSchemas(c.SchemaList) }
 func (c *commonMetadata) CurrentSchema() *iceberg.Schema {
-	for _, s := range c.SchemaList {
-		if s.ID == c.CurrentSchemaID {
-			return cloneSchema(s)
+	if schema := c.schemaByID(c.CurrentSchemaID); schema != nil {
+		return schema
+	}
+
+	panic("should never get here")
+}
+
+// schemaByID returns a defensive copy of one schema without cloning the rest
+// of the schema history. The method is promoted by the concrete metadata
+// versions through commonMetadata and is intentionally not part of Metadata,
+// so custom Metadata implementations keep the public Schemas fallback.
+func (c *commonMetadata) schemaByID(id int) *iceberg.Schema {
+	for _, schema := range c.SchemaList {
+		if schema.ID == id {
+			return cloneSchema(schema)
 		}
 	}
-	panic("should never get here")
+
+	return nil
 }
 
 func (c *commonMetadata) PartitionSpecs() []iceberg.PartitionSpec {

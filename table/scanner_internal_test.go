@@ -950,6 +950,71 @@ func TestTimeTravelUnknownSnapshotSchemaIDErrors(t *testing.T) {
 	assert.ErrorContains(t, err, strconv.Itoa(missingSchemaID))
 }
 
+type trackingSchemaMetadata struct {
+	*metadataV2
+	schemaByIDCalls    int
+	currentSchemaCalls int
+	schemasCalls       int
+}
+
+func (m *trackingSchemaMetadata) schemaByID(id int) *iceberg.Schema {
+	m.schemaByIDCalls++
+
+	return m.metadataV2.schemaByID(id)
+}
+
+func (m *trackingSchemaMetadata) CurrentSchema() *iceberg.Schema {
+	m.currentSchemaCalls++
+
+	return m.metadataV2.CurrentSchema()
+}
+
+func (m *trackingSchemaMetadata) Schemas() []*iceberg.Schema {
+	m.schemasCalls++
+
+	return m.metadataV2.Schemas()
+}
+
+func TestEffectiveSchemaUsesBuiltInSchemaLookup(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	scan, oldSchema, _ := newSchemaEvolutionScan(t, &spec, iceio.NewMemFS())
+	native, ok := scan.metadata.(*metadataV2)
+	require.True(t, ok)
+
+	tracked := &trackingSchemaMetadata{metadataV2: native}
+	scan.metadata = tracked
+
+	got, err := scan.effectiveSchema()
+	require.NoError(t, err)
+	assert.Equal(t, oldSchema.ID, got.ID)
+	assert.Equal(t, 1, tracked.schemaByIDCalls)
+	assert.Zero(t, tracked.currentSchemaCalls)
+	assert.Zero(t, tracked.schemasCalls)
+}
+
+type fallbackSchemaMetadata struct {
+	Metadata
+	schemasCalls int
+}
+
+func (m *fallbackSchemaMetadata) Schemas() []*iceberg.Schema {
+	m.schemasCalls++
+
+	return m.Metadata.Schemas()
+}
+
+func TestEffectiveSchemaFallsBackToPublicSchemaList(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	scan, oldSchema, _ := newSchemaEvolutionScan(t, &spec, iceio.NewMemFS())
+	fallback := &fallbackSchemaMetadata{Metadata: scan.metadata}
+	scan.metadata = fallback
+
+	got, err := scan.effectiveSchema()
+	require.NoError(t, err)
+	assert.Equal(t, oldSchema.ID, got.ID)
+	assert.Equal(t, 1, fallback.schemasCalls)
+}
+
 func int32Bound(v int32) []byte {
 	out := make([]byte, 4)
 	binary.LittleEndian.PutUint32(out, uint32(v))
