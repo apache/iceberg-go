@@ -188,17 +188,24 @@ func (l *lazyPositionDeleteLoader) load(ctx context.Context, task FileScanTask) 
 
 	targetPath := task.File.FilePath()
 	deletes := make(positionDeletes, 0, len(task.DeleteFiles))
-	seen := make(map[string]struct{}, len(task.DeleteFiles))
+	// Most scan tasks carry one positional delete file. Avoid allocating a
+	// deduplication map unless there can actually be duplicate entries.
+	var seen map[string]struct{}
+	if len(task.DeleteFiles) > 1 {
+		seen = make(map[string]struct{}, len(task.DeleteFiles))
+	}
 	for _, deleteFile := range task.DeleteFiles {
 		if deleteFile.ContentType() != iceberg.EntryContentPosDeletes {
 			continue
 		}
 
 		path := deleteFile.FilePath()
-		if _, ok := seen[path]; ok {
-			continue
+		if seen != nil {
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
 		}
-		seen[path] = struct{}{}
 
 		cached, ok := l.files[path]
 		if !ok {
