@@ -163,7 +163,7 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 		"expected equality deletes to apply when the equality field is not projected")
 }
 
-func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.T) {
+func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {
 	ctx := t.Context()
 	tbl := newEqDeleteReadTestTable(t)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Metadata().CurrentSchema(), nil, false, false)
@@ -218,8 +218,15 @@ func TestEqualityDeleteReadSharesMultiFileUnionAcrossConcurrentTasks(t *testing.
 	require.NoError(t, err)
 	require.Len(t, tasks, 2)
 	for _, task := range tasks {
-		require.Len(t, task.EqualityDeleteFiles, 2,
-			"each task must use the same multi-file equality-delete union")
+		require.Len(t, task.EqualityDeleteFiles, 1)
+		switch {
+		case strings.HasSuffix(task.File.FilePath(), "/data-001.parquet"):
+			assert.Equal(t, deleteTwoFiles[0].FilePath(), task.EqualityDeleteFiles[0].FilePath())
+		case strings.HasSuffix(task.File.FilePath(), "/data-002.parquet"):
+			assert.Equal(t, deleteThreeFiles[0].FilePath(), task.EqualityDeleteFiles[0].FilePath())
+		default:
+			t.Errorf("unexpected data file %s", task.File.FilePath())
+		}
 	}
 
 	_, records, err := scan.ReadTasks(ctx, tasks)

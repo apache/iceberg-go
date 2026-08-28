@@ -1127,7 +1127,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil {
 		return nil, err
 	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(entries.equalityDeleteEntries, scan.metadata)
+	eqDeleteIndex, err := buildEqualityDeleteIndex(entries.equalityDeleteEntries, scan.metadata, schema)
 	if err != nil {
 		return nil, err
 	}
