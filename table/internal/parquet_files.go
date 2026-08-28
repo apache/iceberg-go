@@ -1839,6 +1839,29 @@ func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping i
 	return pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
 }
 
+// parquetRowGroupSplitOffset returns the same first-page offset used when
+// DataFileStatistics.SplitOffsets is built. RowGroup.file_offset is optional
+// in Parquet and Arrow returns zero when it is absent, so relying on it can
+// discard every row group in a split task from an otherwise valid file.
+func parquetRowGroupSplitOffset(rgMeta *metadata.RowGroupMetaData) int64 {
+	if rgMeta.NumColumns() > 0 {
+		if firstColumn, err := rgMeta.ColumnChunk(0); err == nil {
+			dataOffset := firstColumn.DataPageOffset()
+			if firstColumn.HasDictionaryPage() {
+				dictOffset := firstColumn.DictionaryPageOffset()
+				if dictOffset >= 0 && (dataOffset < 0 || dictOffset < dataOffset) {
+					return dictOffset
+				}
+			}
+			if dataOffset >= 0 {
+				return dataOffset
+			}
+		}
+	}
+
+	return rgMeta.FileOffset()
+}
+
 func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	var rowGroupTester *ParquetRowGroupTester
 
@@ -1870,6 +1893,9 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
 		}
 
+		rangeStart := rowGroupTester.Start
+		rangeEnd := rangeStart + rowGroupTester.Length
+		validRange := rangeStart >= 0 && rangeEnd > rangeStart
 		rgList = make([]int, 0)
 		var firstRowPos int64
 		for rg := range numRg {
@@ -1880,9 +1906,8 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 			use := true
 			if rowGroupTester.Length > 0 {
-				end := rowGroupTester.Start + rowGroupTester.Length
-				use = rowGroupTester.Start >= 0 && end > rowGroupTester.Start &&
-					rgMeta.FileOffset() >= rowGroupTester.Start && rgMeta.FileOffset() < end
+				offset := parquetRowGroupSplitOffset(rgMeta)
+				use = validRange && offset >= rangeStart && offset < rangeEnd
 			}
 			if use && rowGroupTester.StatsFn != nil {
 				var err error

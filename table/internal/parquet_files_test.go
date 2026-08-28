@@ -2252,6 +2252,46 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 	}
 }
 
+func TestParquetRowGroupRangeSelectionFallsBackToFirstColumnOffset(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	meta := pqReader.MetaData()
+	offsets := make([]int64, meta.NumRowGroups())
+	for i := range offsets {
+		rg := meta.RowGroup(i)
+		column, columnErr := rg.ColumnChunk(0)
+		require.NoError(t, columnErr)
+		offsets[i] = column.DataPageOffset()
+		if column.HasDictionaryPage() && column.DictionaryPageOffset() < offsets[i] {
+			offsets[i] = column.DictionaryPageOffset()
+		}
+	}
+
+	// RowGroup.file_offset is optional. Removing it reproduces a valid file
+	// where the old range check saw offset zero instead of the planned split
+	// offset for the second group.
+	meta.RowGroups[1].FileOffset = nil
+
+	arrReader, err := pqarrow.NewFileReader(pqReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	rdr := internal.WrapParquetFileReader(arrReader)
+	defer rdr.Close()
+
+	tester := &internal.ParquetRowGroupTester{
+		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil },
+		Start:   offsets[1],
+		Length:  int64(len(data)) - offsets[1],
+	}
+	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+	require.NoError(t, err)
+	assert.Equal(t, int64(rgSize), countRecords(t, rr))
+}
+
 func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
 	mem := memory.DefaultAllocator
 
