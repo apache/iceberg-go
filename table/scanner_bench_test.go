@@ -27,6 +27,107 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 )
 
+var effectiveSchemaBenchmarkSink int
+
+func BenchmarkEffectiveSchemaSnapshot(b *testing.B) {
+	for _, schemaCount := range []int{1, 16, 128, 1024} {
+		for _, fieldCount := range []int{16, 128} {
+			b.Run(fmt.Sprintf("schemas=%d/fields=%d", schemaCount, fieldCount), func(b *testing.B) {
+				scan := benchmarkHistoricalSchemaScan(b, schemaCount, fieldCount)
+
+				b.Run("before", func(b *testing.B) {
+					benchmarkEffectiveSchema(b, scan, false)
+				})
+				b.Run("after", func(b *testing.B) {
+					benchmarkEffectiveSchema(b, scan, true)
+				})
+			})
+		}
+	}
+}
+
+func benchmarkHistoricalSchemaScan(b *testing.B, schemaCount, fieldCount int) *Scan {
+	b.Helper()
+
+	schemas := make([]*iceberg.Schema, schemaCount)
+	for schemaID := range schemaCount {
+		fields := make([]iceberg.NestedField, fieldCount)
+		for fieldID := range fieldCount {
+			fields[fieldID] = iceberg.NestedField{
+				ID:       fieldID + 1,
+				Name:     fmt.Sprintf("field_%d", fieldID),
+				Type:     iceberg.PrimitiveTypes.Int64,
+				Required: true,
+			}
+		}
+		schemas[schemaID] = iceberg.NewSchema(schemaID, fields...)
+	}
+
+	snapshotID := int64(1)
+	snapshotSchemaID := schemas[len(schemas)-1].ID
+	snapshots := []Snapshot{{SnapshotID: snapshotID, SchemaID: &snapshotSchemaID}}
+	metadata := &metadataV2{
+		commonMetadata: commonMetadata{
+			SchemaList:        schemas,
+			CurrentSchemaID:   schemas[0].ID,
+			SnapshotList:      snapshots,
+			CurrentSnapshotID: &snapshotID,
+			snapshotIndex:     buildSnapshotIndex(snapshots),
+		},
+	}
+
+	return &Scan{
+		metadata:   metadata,
+		snapshotID: &snapshotID,
+	}
+}
+
+func benchmarkEffectiveSchema(b *testing.B, scan *Scan, useLookup bool) {
+	b.Helper()
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		var (
+			schema *iceberg.Schema
+			err    error
+		)
+		if useLookup {
+			schema, err = scan.effectiveSchema()
+		} else {
+			schema, err = effectiveSchemaBeforeLookup(scan)
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+		effectiveSchemaBenchmarkSink += schema.ID
+	}
+}
+
+func effectiveSchemaBeforeLookup(scan *Scan) (*iceberg.Schema, error) {
+	curSchema := scan.metadata.CurrentSchema()
+	if !scan.snapshotSchemaEnabled() {
+		return curSchema, nil
+	}
+
+	snap, err := scan.ResolveSnapshot()
+	if err != nil {
+		return nil, err
+	}
+
+	if snap.SchemaID == nil {
+		return curSchema, nil
+	}
+
+	for _, schema := range scan.metadata.Schemas() {
+		if schema.ID == *snap.SchemaID {
+			return schema, nil
+		}
+	}
+
+	return nil, fmt.Errorf("schema %d not found", *snap.SchemaID)
+}
+
 func BenchmarkOpenManifestPartitionRejectsMostEntries(b *testing.B) {
 	const (
 		entryCount    = 1_000
