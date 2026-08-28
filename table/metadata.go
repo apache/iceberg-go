@@ -1766,15 +1766,22 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
-	ver := struct {
-		FormatVersion int `json:"format-version"`
-	}{}
-	if err := json.Unmarshal(b, &ver); err != nil {
+	// Keep the raw top-level object for all preflight checks so it is only
+	// decoded once before the version-specific metadata decode below.
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	var formatVersion int
+	if rawVersion, ok := metadata["format-version"]; ok {
+		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+		}
+	}
+
 	var ret Metadata
-	switch ver.FormatVersion {
+	switch formatVersion {
 	case 1:
 		ret = &metadataV1{}
 	case 2:
@@ -1785,11 +1792,11 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, ErrInvalidMetadataFormatVersion
 	}
 
-	normalized, err := assignMissingPartitionFieldIDs(b)
+	normalized, err := assignMissingPartitionFieldIDsFromMetadata(b, metadata)
 	if err != nil {
 		return nil, err
 	}
-	if err := requirePartitionSpecIDs(normalized); err != nil {
+	if err := requirePartitionSpecIDsFromMetadata(metadata); err != nil {
 		return nil, err
 	}
 
@@ -1810,6 +1817,10 @@ func requirePartitionSpecIDs(b []byte) error {
 		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	return requirePartitionSpecIDsFromMetadata(metadata)
+}
+
+func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
 	rawSpecs, ok := metadata["partition-specs"]
 	if !ok {
 		return nil
@@ -1833,18 +1844,23 @@ func requirePartitionSpecIDs(b []byte) error {
 	return nil
 }
 
+type rawPartitionSpec struct {
+	ID     int                          `json:"spec-id"`
+	Fields []map[string]json.RawMessage `json:"fields"`
+}
+
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 	var metadata map[string]json.RawMessage
 	if err := json.Unmarshal(b, &metadata); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
+
+	return assignMissingPartitionFieldIDsFromMetadata(b, metadata)
+}
+
+func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]json.RawMessage) ([]byte, error) {
 	if err := requireLastUpdatedMS(metadata); err != nil {
 		return nil, err
-	}
-
-	type rawPartitionSpec struct {
-		ID     int                          `json:"spec-id"`
-		Fields []map[string]json.RawMessage `json:"fields"`
 	}
 
 	var specs []rawPartitionSpec

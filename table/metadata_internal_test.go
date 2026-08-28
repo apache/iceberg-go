@@ -1315,19 +1315,39 @@ func TestRejectZeroSourceIDInV1LegacyPartitionSpec(t *testing.T) {
 }
 
 func TestRejectsStoredPartitionSpecWithoutID(t *testing.T) {
-	var metadata map[string]any
-	decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
-	decoder.UseNumber()
-	require.NoError(t, decoder.Decode(&metadata))
-	specs := metadata["partition-specs"].([]any)
-	delete(specs[0].(map[string]any), "spec-id")
+	for _, tt := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "missing",
+			mutate: func(spec map[string]any) {
+				delete(spec, "spec-id")
+			},
+		},
+		{
+			name: "null",
+			mutate: func(spec map[string]any) {
+				spec["spec-id"] = nil
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata map[string]any
+			decoder := json.NewDecoder(strings.NewReader(ExampleTableMetadataV2))
+			decoder.UseNumber()
+			require.NoError(t, decoder.Decode(&metadata))
+			specs := metadata["partition-specs"].([]any)
+			tt.mutate(specs[0].(map[string]any))
 
-	data, err := json.Marshal(metadata)
-	require.NoError(t, err)
+			data, err := json.Marshal(metadata)
+			require.NoError(t, err)
 
-	_, err = ParseMetadataBytes(data)
-	require.ErrorIs(t, err, ErrInvalidMetadata)
-	assert.ErrorContains(t, err, "missing required spec-id")
+			_, err = ParseMetadataBytes(data)
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+			assert.ErrorContains(t, err, "missing required spec-id")
+		})
+	}
 }
 
 func TestSortOrderNotFound(t *testing.T) {
