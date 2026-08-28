@@ -82,6 +82,66 @@ func BenchmarkPartitionExtraction(b *testing.B) {
 	}
 }
 
+func BenchmarkPartitionMapCollection(b *testing.B) {
+	for _, test := range []struct {
+		fieldCount     int
+		partitionCount int
+	}{
+		{fieldCount: 2, partitionCount: 64},
+		{fieldCount: 2, partitionCount: 1_024},
+		{fieldCount: 2, partitionCount: 16_384},
+		{fieldCount: 4, partitionCount: 64},
+		{fieldCount: 4, partitionCount: 1_024},
+		{fieldCount: 4, partitionCount: 16_384},
+	} {
+		b.Run(fmt.Sprintf("fields_%d/partitions_%d", test.fieldCount, test.partitionCount), func(b *testing.B) {
+			tree := benchmarkPartitionMap(b, test.fieldCount, test.partitionCount)
+			b.ReportAllocs()
+			b.ReportMetric(float64(test.partitionCount), "partitions/op")
+			b.ResetTimer()
+			for b.Loop() {
+				partitionCollectionBenchmarkSink = len(tree.collectPartitions())
+			}
+		})
+	}
+}
+
+var partitionCollectionBenchmarkSink int
+
+func benchmarkPartitionMap(b *testing.B, fieldCount, partitionCount int) *partitionMapNode {
+	b.Helper()
+
+	base := 1
+	for {
+		combinations := 1
+		for range fieldCount {
+			combinations *= base
+		}
+		if combinations >= partitionCount {
+			break
+		}
+		base++
+	}
+
+	fieldInfo := make([]partitionFieldInfo, fieldCount)
+	for field := range fieldCount {
+		fieldInfo[field].fieldID = 1000 + field
+	}
+
+	tree := newPartitionMapNode()
+	for partition := range partitionCount {
+		record := make(partitionRecord, fieldCount)
+		value := partition
+		for field := range fieldCount {
+			record[field] = int32(value % base)
+			value /= base
+		}
+		tree.getOrCreate(record, fieldInfo, int64(partitionCount))
+	}
+
+	return tree
+}
+
 func BenchmarkPartitionTransforms(b *testing.B) {
 	const rows = 65_536
 

@@ -460,6 +460,36 @@ func (s *FanoutWriterTestSuite) TestPartitionMapUsesComparableKeysAtEveryLevel()
 	s.ElementsMatch([][]int64{{0, 1}, {2}, {3, 4}}, rowsByPartition)
 }
 
+func (s *FanoutWriterTestSuite) TestCollectPartitionsReturnsAllLeavesInOneResult() {
+	fieldInfo := []partitionFieldInfo{
+		{fieldID: 1000},
+		{fieldID: 1001},
+		{fieldID: 1002},
+	}
+	records := []partitionRecord{
+		{int32(0), int32(0), int32(0)},
+		{int32(0), int32(1), int32(0)},
+		{int32(1), int32(0), int32(0)},
+		{int32(1), int32(0), int32(1)},
+	}
+
+	tree := newPartitionMapNode()
+	for _, record := range records {
+		tree.getOrCreate(record, fieldInfo, int64(len(records)))
+	}
+
+	partitions := tree.collectPartitions()
+	s.Require().Len(partitions, len(records))
+	s.Equal(len(records), tree.partitionCount)
+	s.Equal(len(records), cap(partitions), "collection should use one exact result buffer")
+
+	got := make([]partitionRecord, 0, len(partitions))
+	for _, partition := range partitions {
+		got = append(got, partition.partitionRec)
+	}
+	s.ElementsMatch(records, got)
+}
+
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},

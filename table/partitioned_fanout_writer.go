@@ -549,9 +549,9 @@ func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type
 // is in the order of the partition spec.
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
-	children  map[any]any
-	leafCount int
-	// partitionCount is maintained by the root node for the current batch.
+	children map[any]any
+	// partitionCount is maintained by the root node for the current batch and
+	// sizes the single result slice returned by collectPartitions.
 	partitionCount int
 }
 
@@ -602,7 +602,6 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 		partitionRec:    partRecCopy,
 	}
 	node.children[lastKey] = partVal
-	node.leafCount++
 	n.partitionCount++
 
 	return partVal
@@ -634,13 +633,18 @@ func initialPartitionRowCapacity(numRows int64, partitionCount int) int {
 // the clustered writer, whose revisit check would otherwise depend on
 // Go's randomized map iteration) must sort the result themselves.
 func (n *partitionMapNode) collectPartitions() []*partitionInfo {
-	result := make([]*partitionInfo, 0, n.leafCount)
+	result := make([]*partitionInfo, 0, n.partitionCount)
+
+	return n.appendPartitions(result)
+}
+
+func (n *partitionMapNode) appendPartitions(result []*partitionInfo) []*partitionInfo {
 	for _, v := range n.children {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
-			result = append(result, node.collectPartitions()...)
+			result = node.appendPartitions(result)
 		}
 	}
 
