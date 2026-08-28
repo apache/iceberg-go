@@ -1340,15 +1340,33 @@ func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
 }
 
 func TestAddSortOrderUpdate_UnmarshalDefersBindingToApply(t *testing.T) {
-	// Decoding accepts the order; the schema it must resolve against is only
-	// known at Apply, which is where an unresolvable source ID is reported.
-	data := []byte(`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":0,"transform":"identity","direction":"asc","null-order":"nulls-first"}]}}]`)
+	// Decoding accepts the order either way; Apply reports both the positivity
+	// check and the schema lookup, which needs a schema only Apply knows. Source
+	// ID 0 fails the first and never reaches the second, so 999 covers the
+	// lookup: positive, and absent from baseMetaV3JSON.
+	for _, tt := range []struct {
+		name     string
+		sourceID int
+		message  string
+	}{
+		{name: "not positive", sourceID: 0, message: "source ID must be positive: 0"},
+		{name: "unresolvable", sourceID: 999, message: "sort field with source id 999 not found in schema"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := fmt.Appendf(nil,
+				`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":%d,"transform":"identity","direction":"asc","null-order":"nulls-first"}]}}]`,
+				tt.sourceID,
+			)
 
-	var updates Updates
-	require.NoError(t, json.Unmarshal(data, &updates))
-	require.Len(t, updates, 1)
+			var updates Updates
+			require.NoError(t, json.Unmarshal(data, &updates))
+			require.Len(t, updates, 1)
 
-	require.ErrorContains(t, updates[0].Apply(buildFromBaseV3(t)), "not compatible with current schema")
+			err := updates[0].Apply(buildFromBaseV3(t))
+			require.ErrorContains(t, err, "not compatible with current schema")
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
 }
 
 func TestAddSortOrderUpdate_UnmarshalRoundTrip(t *testing.T) {
@@ -1371,6 +1389,8 @@ func TestAddSortOrderUpdate_UnmarshalRoundTrip(t *testing.T) {
 	for _, o := range meta.SortOrders() {
 		if o.OrderID() == 1 {
 			order, found = o, true
+
+			break
 		}
 	}
 	require.True(t, found)
@@ -1384,9 +1404,13 @@ func TestAddSortOrderUpdate_UnmarshalRoundTrip(t *testing.T) {
 }
 
 func TestAddSpecAndSortOrderUpdates_ApplyRejectNilPayload(t *testing.T) {
-	err := NewAddPartitionSpecUpdate(nil, true).Apply(buildFromBaseV3(t))
-	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	t.Run("add-spec", func(t *testing.T) {
+		err := NewAddPartitionSpecUpdate(nil, true).Apply(buildFromBaseV3(t))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
 
-	err = NewAddSortOrderUpdate(nil).Apply(buildFromBaseV3(t))
-	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	t.Run("add-sort-order", func(t *testing.T) {
+		err := NewAddSortOrderUpdate(nil).Apply(buildFromBaseV3(t))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
 }
