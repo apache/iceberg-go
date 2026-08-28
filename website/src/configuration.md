@@ -317,7 +317,7 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 
 | Key | Default | Description |
 |---|---|---|
-| `read.split.target-size` | `134217728` | Target size for splitting large local Parquet files at their recorded row-group offsets. |
+| `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 
 ### Metrics and metadata lifecycle
 

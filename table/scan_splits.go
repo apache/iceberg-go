@@ -19,11 +19,12 @@ package table
 
 import "github.com/apache/iceberg-go"
 
-// splitParquetScanTask returns one task per valid Parquet split offset when a
-// complete, large-file task can be split safely. The boolean is false when the
-// original task should be used unchanged. Split offsets are absolute byte
-// positions in the data file and each resulting range ends at the next offset,
-// or at the end of the file.
+// splitParquetScanTask returns coalesced byte-range tasks when a complete,
+// large-file task can be split safely. The boolean is false when the original
+// task should be used unchanged. Split offsets are absolute byte positions in
+// the data file and each safe range ends at the next supplied offset, or at the
+// end of the file. The first range starts at byte zero so sparse split-offset
+// lists cannot leave leading row groups unassigned.
 //
 // Tasks that are already partial, small, non-Parquet, or missing usable split
 // offsets stay unchanged. Keeping the original task in those cases preserves
@@ -51,20 +52,38 @@ func splitParquetScanTask(task FileScanTask, targetSize int64) ([]FileScanTask, 
 	}
 
 	result := make([]FileScanTask, 0, len(offsets))
-	for i, start := range offsets {
-		end := fileSize
-		if i+1 < len(offsets) {
-			end = offsets[i+1]
-		}
-		if end <= start {
-			return nil, false
-		}
-
+	appendTask := func(start, end int64) {
 		split := task
 		split.Start = start
 		split.Length = end - start
 		result = append(result, split)
 	}
+
+	var taskStart, taskEnd int64
+	for i := range offsets {
+		chunkStart := int64(0)
+		if i > 0 {
+			chunkStart = offsets[i]
+		}
+
+		chunkEnd := fileSize
+		if i+1 < len(offsets) {
+			chunkEnd = offsets[i+1]
+		}
+		if chunkEnd <= chunkStart {
+			return nil, false
+		}
+
+		if taskEnd > taskStart && chunkEnd-taskStart > targetSize {
+			appendTask(taskStart, taskEnd)
+			taskStart = chunkStart
+		}
+		taskEnd = chunkEnd
+	}
+	if taskEnd <= taskStart {
+		return nil, false
+	}
+	appendTask(taskStart, taskEnd)
 
 	return result, true
 }

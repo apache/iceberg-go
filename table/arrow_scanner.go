@@ -1512,9 +1512,12 @@ func (as *arrowScan) processRecordsWithPlans(
 		}
 		// A complete task already reads every row group. Leave its byte range
 		// unset so malformed or legacy row-group offsets cannot change the
-		// historical full-file behavior. Split and remote partial tasks carry
-		// their range through to the reader.
-		if task.Value.Start != 0 || task.Value.Length != task.Value.File.FileSizeBytes() {
+		// historical full-file behavior. A zero-value task is also treated as
+		// complete for callers that omit the range. Split and remote partial
+		// tasks carry their range through to the reader.
+		if task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes()) {
+			tester.RangeSet = true
 			tester.Start = task.Value.Start
 			tester.Length = task.Value.Length
 		}

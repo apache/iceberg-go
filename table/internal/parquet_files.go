@@ -1799,11 +1799,12 @@ type RowGroupBloomPred struct {
 type ParquetRowGroupTester struct {
 	StatsFn    func(*metadata.RowGroupMetaData, []int) (bool, error)
 	BloomPreds []RowGroupBloomPred // nil = no bloom filter pass
-	// Start and Length, when Length is positive, select row groups whose
-	// absolute Parquet row-group offset falls in [Start, Start+Length). A
-	// non-positive Length keeps the historical behavior of reading the whole
-	// file, which is useful for callers that construct a tester without a scan
-	// task.
+	// RangeSet indicates that Start and Length came from an explicit scan task.
+	// Without it, the zero value keeps the historical full-file behavior for
+	// callers that construct a tester only for row-group pruning.
+	RangeSet bool
+	// When RangeSet is true, Start and Length select row groups whose absolute
+	// Parquet row-group offset falls in [Start, Start+Length).
 	Start, Length int64
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full
@@ -1862,6 +1863,16 @@ func parquetRowGroupSplitOffset(rgMeta *metadata.RowGroupMetaData) int64 {
 	return rgMeta.FileOffset()
 }
 
+func validateParquetRowGroupRange(fileSize, start, length int64) error {
+	if start < 0 || length <= 0 || start > fileSize || length > fileSize-start {
+		return fmt.Errorf(
+			"%w: invalid parquet row-group range: start=%d, length=%d, file size=%d",
+			iceberg.ErrInvalidArgument, start, length, fileSize)
+	}
+
+	return nil
+}
+
 func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	var rowGroupTester *ParquetRowGroupTester
 
@@ -1873,8 +1884,17 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
+	rangeSet := rowGroupTester != nil &&
+		(rowGroupTester.RangeSet || rowGroupTester.Start != 0 || rowGroupTester.Length != 0)
+	if rangeSet {
+		if err := validateParquetRowGroupRange(
+			w.SourceFileSize(), rowGroupTester.Start, rowGroupTester.Length); err != nil {
+			return nil, err
+		}
+	}
+
 	var rgList []int
-	if rowGroupTester != nil && (rowGroupTester.Length > 0 ||
+	if rowGroupTester != nil && (rangeSet ||
 		rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
@@ -1895,7 +1915,6 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 		rangeStart := rowGroupTester.Start
 		rangeEnd := rangeStart + rowGroupTester.Length
-		validRange := rangeStart >= 0 && rangeEnd > rangeStart
 		rgList = make([]int, 0)
 		var firstRowPos int64
 		for rg := range numRg {
@@ -1905,9 +1924,9 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			firstRowPos += numRows
 
 			use := true
-			if rowGroupTester.Length > 0 {
+			if rangeSet {
 				offset := parquetRowGroupSplitOffset(rgMeta)
-				use = validRange && offset >= rangeStart && offset < rangeEnd
+				use = offset >= rangeStart && offset < rangeEnd
 			}
 			if use && rowGroupTester.StatsFn != nil {
 				var err error

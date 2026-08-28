@@ -78,6 +78,25 @@ func splitTestDataFile(t *testing.T, format iceberg.FileFormat, size int64, offs
 	return builder.Build()
 }
 
+func dataFileWithSplitOffsets(t *testing.T, source iceberg.DataFile, offsets []int64) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		source.ContentType(),
+		source.FilePath(),
+		source.FileFormat(),
+		nil,
+		nil,
+		nil,
+		source.Count(),
+		source.FileSizeBytes(),
+	)
+	require.NoError(t, err)
+
+	return builder.SplitOffsets(offsets).Build()
+}
+
 func TestSplitParquetScanTask(t *testing.T) {
 	firstRowID := int64(10)
 	file := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 70})
@@ -94,14 +113,61 @@ func TestSplitParquetScanTask(t *testing.T) {
 	require.True(t, split)
 	require.Len(t, got, 3)
 
-	assert.Equal(t, []int64{32, 30, 30}, []int64{got[0].Length, got[1].Length, got[2].Length})
-	assert.Equal(t, []int64{8, 40, 70}, []int64{got[0].Start, got[1].Start, got[2].Start})
+	assert.Equal(t, []int64{40, 30, 30}, []int64{got[0].Length, got[1].Length, got[2].Length})
+	assert.Equal(t, []int64{0, 40, 70}, []int64{got[0].Start, got[1].Start, got[2].Start})
 	for _, split := range got {
 		assert.Equal(t, task.File, split.File)
 		assert.Equal(t, task.DeleteFiles, split.DeleteFiles)
 		assert.Equal(t, task.Residual, split.Residual)
 		assert.Equal(t, task.FirstRowID, split.FirstRowID)
 	}
+}
+
+func TestSplitParquetScanTaskCoversSparseOffsets(t *testing.T) {
+	tests := []struct {
+		name    string
+		offsets []int64
+		starts  []int64
+		lengths []int64
+	}{
+		{
+			name:    "omitted leading row group",
+			offsets: []int64{40, 70},
+			starts:  []int64{0, 70},
+			lengths: []int64{70, 30},
+		},
+		{
+			name:    "omitted interior row group",
+			offsets: []int64{8, 70},
+			starts:  []int64{0, 70},
+			lengths: []int64{70, 30},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file := splitTestDataFile(t, iceberg.ParquetFile, 100, tt.offsets)
+			task := FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+
+			got, split := splitParquetScanTask(task, 50)
+			require.True(t, split)
+			require.Len(t, got, len(tt.starts))
+			assert.Equal(t, tt.starts, []int64{got[0].Start, got[1].Start})
+			assert.Equal(t, tt.lengths, []int64{got[0].Length, got[1].Length})
+			assert.Equal(t, file.FileSizeBytes(), got[len(got)-1].Start+got[len(got)-1].Length)
+		})
+	}
+}
+
+func TestSplitParquetScanTaskCoalescesRangesToTarget(t *testing.T) {
+	file := splitTestDataFile(t, iceberg.ParquetFile, 80, []int64{10, 20, 30, 40, 50, 60, 70})
+	task := FileScanTask{File: file, Start: 0, Length: file.FileSizeBytes()}
+
+	got, split := splitParquetScanTask(task, 25)
+	require.True(t, split)
+	require.Len(t, got, 4)
+	assert.Equal(t, []int64{0, 20, 40, 60}, []int64{got[0].Start, got[1].Start, got[2].Start, got[3].Start})
+	assert.Equal(t, []int64{20, 20, 20, 20}, []int64{got[0].Length, got[1].Length, got[2].Length, got[3].Length})
 }
 
 func TestSplitParquetScanTaskKeepsUnsafeTasksIntact(t *testing.T) {
@@ -221,6 +287,29 @@ func TestPlanFilesSplitsLargeParquetFileAndReadsEachRowOnce(t *testing.T) {
 			assert.Equal(t, tasks[i-1].Start+tasks[i-1].Length, task.Start)
 		}
 	}
+
+	fullOffsets := tasks[0].File.SplitOffsets()
+	require.Len(t, fullOffsets, 4)
+	sparseFile := dataFileWithSplitOffsets(t, tasks[0].File, []int64{fullOffsets[1], fullOffsets[3]})
+	sparseTask := FileScanTask{File: sparseFile, Start: 0, Length: sparseFile.FileSizeBytes()}
+	sparseTasks, split := splitParquetScanTask(sparseTask, 1)
+	require.True(t, split)
+	require.Len(t, sparseTasks, 2)
+
+	_, sparseRecords, err := tbl.Scan().ReadTasks(ctx, sparseTasks)
+	require.NoError(t, err)
+	seen := make(map[int64]int)
+	for record, readErr := range sparseRecords {
+		require.NoError(t, readErr)
+		ids := record.Column(record.Schema().FieldIndices("id")[0]).(*array.Int64)
+		for i := range ids.Len() {
+			seen[ids.Value(i)]++
+		}
+		record.Release()
+	}
+	wantSeen := map[int64]int{1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1}
+	assert.Equal(t, wantSeen, seen,
+		"sparse split offsets must retain leading and interior row groups")
 
 	result, err := tbl.Scan(WithRowLineage()).ToArrowTable(ctx)
 	require.NoError(t, err)

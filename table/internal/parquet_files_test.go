@@ -2223,8 +2223,8 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 			wantSurvivors: nil,
 		},
 		{
-			name:     "zero length keeps legacy whole file behavior",
-			start:    offsets[1],
+			name:     "unset range keeps legacy whole file behavior",
+			start:    0,
 			length:   0,
 			wantRows: 2 * rgSize,
 		},
@@ -2248,6 +2248,53 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 
 			assert.Equal(t, tt.wantRows, countRecords(t, rr))
 			assert.Equal(t, tt.wantSurvivors, survivors)
+		})
+	}
+}
+
+func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	meta := pqReader.MetaData()
+	firstOffset := meta.RowGroup(0).FileOffset()
+	fileSize := int64(len(data))
+	require.NoError(t, pqReader.Close())
+
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+	tests := []struct {
+		name     string
+		start    int64
+		length   int64
+		rangeSet bool
+	}{
+		{name: "negative start", start: -1, length: 1},
+		{name: "zero length", start: firstOffset, length: 0},
+		{name: "zero length at file start", start: 0, length: 0, rangeSet: true},
+		{name: "negative length", start: 0, length: -1},
+		{name: "start beyond file", start: fileSize + 1, length: 1},
+		{name: "length beyond file", start: firstOffset, length: fileSize - firstOffset + 1},
+		{name: "range end overflows", start: math.MaxInt64, length: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:  alwaysKeep,
+				RangeSet: tt.rangeSet,
+				Start:    tt.start,
+				Length:   tt.length,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			assert.Nil(t, rr)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 		})
 	}
 }
