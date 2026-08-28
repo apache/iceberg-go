@@ -393,7 +393,7 @@ func TestUnmarshalUpdates(t *testing.T) {
 		22,
 		[]SortField{
 			{SourceIDs: []int{19}, Transform: iceberg.IdentityTransform{}, NullOrder: NullsFirst, Direction: SortASC},
-			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsFirst, Direction: SortDESC},
+			{SourceIDs: []int{25}, Transform: iceberg.BucketTransform{NumBuckets: 4}, NullOrder: NullsLast, Direction: SortDESC},
 			{SourceIDs: []int{22}, Transform: iceberg.VoidTransform{}, NullOrder: NullsFirst, Direction: SortASC},
 		},
 	)
@@ -558,26 +558,26 @@ func TestUnmarshalUpdates(t *testing.T) {
 				}
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, len(tc.expected), len(actual))
-				for idx, u := range actual {
-					switch u.Action() {
-					case "add-schema":
-						expectedAddSchema := u.(*addSchemaUpdate)
+				require.Len(t, actual, len(tc.expected))
+				for idx, expected := range tc.expected {
+					switch expected.Action() {
+					case UpdateAddSchema:
+						expectedAddSchema := expected.(*addSchemaUpdate)
 						actualAddSchema := actual[idx].(*addSchemaUpdate)
 						assert.True(t, expectedAddSchema.Schema.Equals(actualAddSchema.Schema))
-						assert.Equal(t, actualAddSchema.initial, expectedAddSchema.initial)
-					case "add-partition-spec":
-						expectedAddPartitionSpec := u.(*addPartitionSpecUpdate)
+						assert.Equal(t, expectedAddSchema.initial, actualAddSchema.initial)
+					case UpdateAddSpec:
+						expectedAddPartitionSpec := expected.(*addPartitionSpecUpdate)
 						actualAddPartitionSpec := actual[idx].(*addPartitionSpecUpdate)
-						assert.True(t, expectedAddPartitionSpec.Spec.Equals(*actualAddPartitionSpec.Spec))
-						assert.Equal(t, actualAddPartitionSpec.initial, expectedAddPartitionSpec.initial)
-					case "add-sort-order":
-						expectedAddSortOrder := u.(*addSortOrderUpdate)
+						assert.True(t, expectedAddPartitionSpec.Spec.Equals(actualAddPartitionSpec.Spec.PartitionSpec))
+						assert.Equal(t, expectedAddPartitionSpec.initial, actualAddPartitionSpec.initial)
+					case UpdateAddSortOrder:
+						expectedAddSortOrder := expected.(*addSortOrderUpdate)
 						actualAddSortOrder := actual[idx].(*addSortOrderUpdate)
-						assert.True(t, expectedAddSortOrder.SortOrder.Equals(*actualAddSortOrder.SortOrder))
-						assert.Equal(t, actualAddSortOrder.initial, expectedAddSortOrder.initial)
+						assert.True(t, expectedAddSortOrder.SortOrder.Equals(actualAddSortOrder.SortOrder.SortOrder))
+						assert.Equal(t, expectedAddSortOrder.initial, actualAddSortOrder.initial)
 					default:
-						assert.Equal(t, u, actual[idx])
+						assert.Equal(t, expected, actual[idx])
 					}
 				}
 			}
@@ -1343,4 +1343,119 @@ func TestRemoveEncryptionKeyUpdate_Apply_NoOp(t *testing.T) {
 	// Removing a key that doesn't exist should not error.
 	b := buildFromBase(t)
 	require.NoError(t, NewRemoveEncryptionKeyUpdate("nonexistent").Apply(b))
+}
+
+func TestAddPartitionSpecUpdate_UnmarshalVoidTombstone(t *testing.T) {
+	// A dropped partition field whose source column is gone is a void
+	// transform over source ID 0; BindToSchema carries it across, so the
+	// decoder must let it through.
+	data := []byte(`[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":0,"field-id":1000,"transform":"void","name":"x_bucket"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	b := buildFromBaseV3(t)
+	require.NoError(t, updates[0].Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	spec := meta.PartitionSpecByID(1)
+	require.NotNil(t, spec)
+	require.Equal(t, 1, spec.NumFields())
+	assert.Equal(t, "x_bucket", spec.Field(0).Name)
+	assert.IsType(t, iceberg.VoidTransform{}, spec.Field(0).Transform)
+}
+
+func TestAddPartitionSpecUpdate_UnmarshalUnresolvableSourceID(t *testing.T) {
+	// A non-void source ID that the current schema cannot resolve is still
+	// rejected, but by binding rather than by decoding.
+	data := []byte(`[{"action":"add-spec","spec":{"spec-id":1,"fields":[{"source-id":0,"field-id":1000,"transform":"identity","name":"x"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	err := updates[0].Apply(buildFromBaseV3(t))
+	// Pinned to BindToSchema's wording on purpose: the assertion below only
+	// shows the decoder let the field through, not who rejected it.
+	require.ErrorContains(t, err, "cannot find source column with id: 0 in schema")
+	assert.NotContains(t, err.Error(), "must be positive")
+}
+
+func TestAddSortOrderUpdate_UnmarshalDefersBindingToApply(t *testing.T) {
+	// Decoding accepts the order either way; Apply reports both the positivity
+	// check and the schema lookup, which needs a schema only Apply knows. Source
+	// ID 0 fails the first and never reaches the second, so 999 covers the
+	// lookup: positive, and absent from baseMetaV3JSON.
+	for _, tt := range []struct {
+		name     string
+		sourceID int
+		message  string
+	}{
+		{name: "not positive", sourceID: 0, message: "source ID must be positive: 0"},
+		{name: "unresolvable", sourceID: 999, message: "sort field with source id 999 not found in schema"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := fmt.Appendf(nil,
+				`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":%d,"transform":"identity","direction":"asc","null-order":"nulls-first"}]}}]`,
+				tt.sourceID,
+			)
+
+			var updates Updates
+			require.NoError(t, json.Unmarshal(data, &updates))
+			require.Len(t, updates, 1)
+
+			err := updates[0].Apply(buildFromBaseV3(t))
+			require.ErrorContains(t, err, "not compatible with current schema")
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestAddSortOrderUpdate_UnmarshalRoundTrip(t *testing.T) {
+	// The decode no longer validates source IDs, so cover the resolvable case
+	// end to end: field 1 is x in baseMetaV3JSON.
+	data := []byte(`[{"action":"add-sort-order","sort-order":{"order-id":1,"fields":[{"source-id":1,"transform":"identity","direction":"desc","null-order":"nulls-last"}]}}]`)
+
+	var updates Updates
+	require.NoError(t, json.Unmarshal(data, &updates))
+	require.Len(t, updates, 1)
+
+	b := buildFromBaseV3(t)
+	require.NoError(t, updates[0].Apply(b))
+
+	meta, err := b.Build()
+	require.NoError(t, err)
+
+	var order SortOrder
+	var found bool
+	for _, o := range meta.SortOrders() {
+		if o.OrderID() == 1 {
+			order, found = o, true
+
+			break
+		}
+	}
+	require.True(t, found)
+	require.Equal(t, 1, order.Len())
+
+	field := order.Field(0)
+	assert.Equal(t, []int{1}, field.SourceIDs)
+	assert.Equal(t, SortDESC, field.Direction)
+	assert.Equal(t, NullsLast, field.NullOrder)
+	assert.IsType(t, iceberg.IdentityTransform{}, field.Transform)
+}
+
+func TestAddSpecAndSortOrderUpdates_ApplyRejectNilPayload(t *testing.T) {
+	t.Run("add-spec", func(t *testing.T) {
+		err := NewAddPartitionSpecUpdate(nil, true).Apply(buildFromBaseV3(t))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
+
+	t.Run("add-sort-order", func(t *testing.T) {
+		err := NewAddSortOrderUpdate(nil).Apply(buildFromBaseV3(t))
+		require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	})
 }
