@@ -51,7 +51,7 @@ func remotePlanningSelectedFields(scan *Scan, schema *iceberg.Schema) ([]string,
 		return scan.remoteSelectedFields(schema), nil
 	}
 
-	ids := make([]int, 0, len(schema.Fields()))
+	ids := make([]int, 0, schema.NumFields())
 	for _, field := range schema.Fields() {
 		appendRemoteProjectedFieldIDs(&ids, field)
 	}
