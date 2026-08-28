@@ -44,6 +44,10 @@ func BenchmarkUpdateSpecBuildUpdates(b *testing.B) {
 			tc.schemaFields, tc.existingFields, tc.addedFields, tc.nested)
 		b.Run(name, func(b *testing.B) {
 			schema, sourceNames, sourceIDs := benchmarkUpdateSpecSchema(tc.schemaFields, tc.nested)
+			addedNames := make([]string, tc.addedFields)
+			for i := range addedNames {
+				addedNames[i] = fmt.Sprintf("added_%04d", tc.existingFields+i)
+			}
 			partitionFields := make([]iceberg.PartitionField, tc.existingFields)
 			for i := range tc.existingFields {
 				partitionFields[i] = iceberg.PartitionField{
@@ -72,7 +76,7 @@ func BenchmarkUpdateSpecBuildUpdates(b *testing.B) {
 				update := NewUpdateSpec(txn, false)
 				for i := tc.existingFields; i < tc.existingFields+tc.addedFields; i++ {
 					update.AddField(sourceNames[i], iceberg.IdentityTransform{},
-						fmt.Sprintf("added_%04d", i))
+						addedNames[i-tc.existingFields])
 				}
 				updates, requirements, err := update.BuildUpdates()
 				if err != nil {
@@ -100,6 +104,7 @@ func benchmarkUpdateSpecSchema(fieldCount int, nested bool) (*iceberg.Schema, []
 				Type:     iceberg.PrimitiveTypes.Int64,
 			}
 			sourceIDs[i] = i + 1
+
 			continue
 		}
 

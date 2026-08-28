@@ -43,6 +43,7 @@ type UpdateSpec struct {
 	// all schema-dependent operations in this update.
 	meta                  Metadata
 	schema                *iceberg.Schema
+	historicalFields      map[transformKey][]iceberg.PartitionField
 	err                   error
 	nameToField           map[string]iceberg.PartitionField
 	nameToAddedField      map[string]iceberg.PartitionField
@@ -210,10 +211,12 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 		return iceberg.PartitionSpec{}, us.err
 	}
 
-	partitionFields := make([]iceberg.PartitionField, 0)
-	partitionNames := make(map[string]bool)
 	spec := us.meta.PartitionSpec()
-	for _, field := range spec.Fields() {
+	specFields := spec.Fields()
+	capacity := spec.NumFields() + len(us.adds)
+	partitionFields := make([]iceberg.PartitionField, 0, capacity)
+	partitionNames := make(map[string]bool, capacity)
+	for _, field := range specFields {
 		var newField iceberg.PartitionField
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
@@ -416,6 +419,23 @@ func (us *UpdateSpec) rewriteDeleteAndAddField(existing iceberg.PartitionField, 
 	return us.renameField(existing.Name, name)()
 }
 
+func (us *UpdateSpec) historicalPartitionFields(key transformKey) []iceberg.PartitionField {
+	if us.historicalFields == nil {
+		us.historicalFields = make(map[transformKey][]iceberg.PartitionField)
+		for _, spec := range us.meta.PartitionSpecs() {
+			for _, field := range spec.Fields() {
+				historicalKey := transformKey{
+					SourceId:  field.SourceID(),
+					Transform: field.Transform.String(),
+				}
+				us.historicalFields[historicalKey] = append(us.historicalFields[historicalKey], field)
+			}
+		}
+	}
+
+	return us.historicalFields[key]
+}
+
 func (us *UpdateSpec) renameField(name string, newName string) updateSpecOp {
 	return func() error {
 		existingField, exists := us.nameToField[newName]
@@ -454,38 +474,26 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 	// resurrects fields removed in an earlier committed update; same-update
 	// remove/re-add is handled ahead of this call by rewriteDeleteAndAddField.
 	if us.meta.Version() >= 2 {
-		sourceId, transformName := key.SourceId, key.Transform
-		historicalFields := make([]iceberg.PartitionField, 0)
-		// PartitionSpecs() is ordered by ascending spec ID, so when the same
-		// source + transform appears under different names across specs (e.g. a
-		// field renamed before it was removed), the lowest-spec-ID match wins.
-		// The match's own name is returned, which for the no-name case may be an
-		// older name than the current schema uses; this precedence is
+		// PartitionSpecs() is ordered by ascending spec ID, so the cached slice
+		// keeps the lowest-spec-ID match first when a field was renamed across
+		// specs. The match's own name is returned, which for the no-name case may
+		// be an older name than the current schema uses; this precedence is
 		// deterministic and preserves the original (permanent) field ID.
-		for _, spec := range us.meta.PartitionSpecs() {
-			for _, field := range spec.Fields() {
-				historicalFields = append(historicalFields, field)
-			}
-		}
-		for _, field := range historicalFields {
-			// Transform.String() is canonical: field.Transform is a parsed
-			// Transform whose String() re-normalizes any non-canonical on-disk
-			// text (e.g. "bucket[016]" -> "bucket[16]"), and transformName comes
-			// from a Transform.String() as well. The textual compare therefore
-			// distinguishes parameterized transforms (bucket[16] vs bucket[8])
-			// correctly without a structural comparison.
-			if field.SourceID() == sourceId && field.Transform.String() == transformName {
-				// Reuse the historical field's ID when no explicit name is
-				// requested (match on source + transform alone) or when the
-				// requested name matches.
-				if len(name) == 0 || field.Name == name {
-					return iceberg.PartitionField{
-						SourceIDs: []int{sourceId},
-						FieldID:   field.FieldID,
-						Name:      field.Name,
-						Transform: field.Transform,
-					}, nil
-				}
+		for _, field := range us.historicalPartitionFields(key) {
+			// The cache key uses Transform.String(), which re-normalizes any
+			// non-canonical on-disk text (e.g. "bucket[016]" -> "bucket[16]").
+			// This distinguishes parameterized transforms (bucket[16] vs
+			// bucket[8]) without a structural comparison.
+			// Reuse the historical field's ID when no explicit name is
+			// requested (match on source + transform alone) or when the
+			// requested name matches.
+			if len(name) == 0 || field.Name == name {
+				return iceberg.PartitionField{
+					SourceIDs: []int{key.SourceId},
+					FieldID:   field.FieldID,
+					Name:      field.Name,
+					Transform: field.Transform,
+				}, nil
 			}
 		}
 	}
