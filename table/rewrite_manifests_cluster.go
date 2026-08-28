@@ -118,9 +118,11 @@ func validateManifestClusterKey(key any) error {
 // partition spec. Writers stay open while entries for other keys are read so a
 // later file with the same key is still written beside the earlier files.
 func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
-	writers := make(map[manifestClusterKey]*manifestClusterWriter)
-	order := make([]manifestClusterKey, 0)
-	paths := make([]string, 0)
+	// One output writer is tracked per key, so reserve space for the common
+	// case where each input manifest introduces a new cluster.
+	writers := make(map[manifestClusterKey]*manifestClusterWriter, len(manifests))
+	order := make([]manifestClusterKey, 0, len(manifests))
+	paths := make([]string, 0, len(manifests))
 	completed := false
 
 	defer func() {
