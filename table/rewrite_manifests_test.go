@@ -20,6 +20,7 @@ package table_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -221,6 +222,56 @@ func TestRewriteManifestsClusterBy(t *testing.T) {
 				"a clustered manifest must not mix cluster keys")
 		}
 	}
+}
+
+func TestRewriteManifestsRejectsRuntimeUncomparableClusterKey(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fs := iceio.LocalFS{}
+
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, iceberg.Properties{
+			table.ManifestMergeEnabledKey: "false",
+		})
+	require.NoError(t, err)
+
+	cat := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "uncomparable_cluster_key"}, meta,
+		dir+"/metadata/00000.json",
+		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", 2)
+
+	txn := tbl.NewTransaction()
+	_, err = txn.RewriteManifests(ctx, table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+		return struct{ Value any }{Value: []int{1}}
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not comparable")
+}
+
+func TestRewriteManifestsRejectsNonReflexiveClusterKey(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fs := iceio.LocalFS{}
+
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, iceberg.Properties{
+			table.ManifestMergeEnabledKey: "false",
+		})
+	require.NoError(t, err)
+
+	cat := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "nan_cluster_key"}, meta,
+		dir+"/metadata/00000.json",
+		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", 1)
+
+	txn := tbl.NewTransaction()
+	_, err = txn.RewriteManifests(ctx, table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+		return math.NaN()
+	}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not reflexive")
 }
 
 // TestRewriteManifestsClusterByRollsAtTargetSize verifies that one cluster key

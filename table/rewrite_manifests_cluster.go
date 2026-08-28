@@ -99,16 +99,19 @@ func validateManifestClusterKey(key any) error {
 	}
 
 	typ := reflect.TypeOf(key)
-	if !typ.Comparable() {
+	value := reflect.ValueOf(key)
+	if !value.Comparable() {
 		return fmt.Errorf("manifest cluster key type %s is not comparable", typ)
 	}
 
-	value := reflect.ValueOf(key)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Pointer, reflect.UnsafePointer:
 		if value.IsNil() {
 			return errors.New("manifest cluster key must be non-nil")
 		}
+	}
+	if !value.Equal(value) {
+		return fmt.Errorf("manifest cluster key type %s is not reflexive", typ)
 	}
 
 	return nil

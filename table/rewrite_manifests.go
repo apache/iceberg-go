@@ -114,7 +114,7 @@ func WithRewriteManifestPredicate(pred func(iceberg.ManifestFile) bool) RewriteM
 // WithRewriteManifestClusterBy groups rewritten data files by the key returned
 // by clusterBy. Files with the same key and partition spec are written to the
 // same manifest until the target size is reached, after which another manifest
-// is started for that key. The key must be non-nil and comparable.
+// is started for that key. The key must be non-nil, comparable, and equal to itself.
 func WithRewriteManifestClusterBy(clusterBy func(iceberg.DataFile) any) RewriteManifestsOpt {
 	return func(c *rewriteManifestsCfg) { c.clusterBy = clusterBy }
 }
