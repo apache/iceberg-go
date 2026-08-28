@@ -172,10 +172,10 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 		return errors.New("cannot apply updates to nil metadata")
 	}
 
-	current, err := stagedMeta.Build()
-	if err != nil {
-		return err
-	}
+	// Only new requirement validation needs the immutable metadata view.
+	// Updates can be applied directly to the staged builder, and duplicate
+	// requirements only need conflict checks.
+	var current Metadata
 
 	// Deduplicate requirements by semantic key, rejecting pairs that
 	// share a key but cannot both hold (see checkRequirementConflict).
@@ -207,6 +207,12 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			}
 
 			continue
+		}
+		if current == nil {
+			current, err = stagedMeta.Build()
+			if err != nil {
+				return err
+			}
 		}
 		if err := r.Validate(current); err != nil {
 			return err
