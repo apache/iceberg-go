@@ -2329,6 +2329,10 @@ func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
 }
 
 func cloneSnapshotRefs(refs map[string]SnapshotRef) map[string]SnapshotRef {
+	if refs == nil {
+		return nil
+	}
+
 	clones := make(map[string]SnapshotRef, len(refs))
 	for name, ref := range refs {
 		clones[name] = cloneSnapshotRef(ref)

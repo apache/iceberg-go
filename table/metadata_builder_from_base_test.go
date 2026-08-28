@@ -158,3 +158,15 @@ func TestMetadataBuilderFromBaseCopiesBuiltinMetadata(t *testing.T) {
 	require.Equal(t, "kms-key", *metadata.EncryptionKeyList[0].EncryptedByID)
 	require.Equal(t, "value", metadata.EncryptionKeyList[0].Properties["encryption"])
 }
+
+func TestMetadataBuilderFromBaseKeepsNilSnapshotRefs(t *testing.T) {
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{iceberg.NewSchema(0)},
+		CurrentSchemaID: 0,
+		SnapshotRefs:    nil,
+	}}
+
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+	require.Nil(t, builder.refs)
+}
