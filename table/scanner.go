@@ -158,6 +158,23 @@ type manifestEntries struct {
 	mu                      sync.Mutex
 }
 
+type classifiedManifestEntries struct {
+	dataEntries             []iceberg.ManifestEntry
+	positionalDeleteEntries []iceberg.ManifestEntry
+	equalityDeleteEntries   []iceberg.ManifestEntry
+	dvEntries               []iceberg.ManifestEntry
+}
+
+type manifestEntryKind uint8
+
+const (
+	manifestEntryData manifestEntryKind = iota
+	manifestEntryPositionalDelete
+	manifestEntryEqualityDelete
+	manifestEntryDV
+	manifestEntryKindCount
+)
+
 func newManifestEntries() *manifestEntries {
 	return &manifestEntries{
 		dataEntries:             make([]iceberg.ManifestEntry, 0),
@@ -167,30 +184,135 @@ func newManifestEntries() *manifestEntries {
 	}
 }
 
-func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func classifyManifestEntry(entry iceberg.ManifestEntry) (manifestEntryKind, error) {
+	dataFile := entry.DataFile()
+	switch dataFile.ContentType() {
+	case iceberg.EntryContentData:
+		return manifestEntryData, nil
+	case iceberg.EntryContentPosDeletes:
+		if IsDeletionVector(dataFile) {
+			return manifestEntryDV, nil
+		}
 
-	for _, entry := range entries {
-		dataFile := entry.DataFile()
-		switch dataFile.ContentType() {
-		case iceberg.EntryContentData:
-			m.dataEntries = append(m.dataEntries, entry)
-		case iceberg.EntryContentPosDeletes:
-			if IsDeletionVector(dataFile) {
-				m.dvEntries = append(m.dvEntries, entry)
-			} else {
-				m.positionalDeleteEntries = append(m.positionalDeleteEntries, entry)
+		return manifestEntryPositionalDelete, nil
+	case iceberg.EntryContentEqDeletes:
+		return manifestEntryEqualityDelete, nil
+	default:
+		return 0, fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
+			ErrInvalidMetadata, dataFile.ContentType(), entry)
+	}
+}
+
+func newClassifiedManifestEntries(counts [manifestEntryKindCount]int) classifiedManifestEntries {
+	return classifiedManifestEntries{
+		dataEntries:             make([]iceberg.ManifestEntry, 0, counts[manifestEntryData]),
+		positionalDeleteEntries: make([]iceberg.ManifestEntry, 0, counts[manifestEntryPositionalDelete]),
+		equalityDeleteEntries:   make([]iceberg.ManifestEntry, 0, counts[manifestEntryEqualityDelete]),
+		dvEntries:               make([]iceberg.ManifestEntry, 0, counts[manifestEntryDV]),
+	}
+}
+
+func classifiedManifestEntriesForKind(kind manifestEntryKind, entries []iceberg.ManifestEntry) classifiedManifestEntries {
+	classified := classifiedManifestEntries{}
+	switch kind {
+	case manifestEntryData:
+		classified.dataEntries = entries
+	case manifestEntryPositionalDelete:
+		classified.positionalDeleteEntries = entries
+	case manifestEntryEqualityDelete:
+		classified.equalityDeleteEntries = entries
+	case manifestEntryDV:
+		classified.dvEntries = entries
+	default:
+		panic(fmt.Sprintf("unhandled manifest entry kind %d", kind))
+	}
+
+	return classified
+}
+
+func classifyManifestEntries(entries []iceberg.ManifestEntry) (classifiedManifestEntries, error) {
+	if len(entries) == 0 {
+		return classifiedManifestEntries{}, nil
+	}
+
+	firstKind, err := classifyManifestEntry(entries[0])
+	if err != nil {
+		return classifiedManifestEntries{}, err
+	}
+
+	var (
+		kinds  []manifestEntryKind
+		counts [manifestEntryKindCount]int
+	)
+	for i := 1; i < len(entries); i++ {
+		kind, err := classifyManifestEntry(entries[i])
+		if err != nil {
+			if kinds == nil {
+				return classifiedManifestEntriesForKind(firstKind, entries[:i]), err
 			}
-		case iceberg.EntryContentEqDeletes:
-			m.equalityDeleteEntries = append(m.equalityDeleteEntries, entry)
-		default:
-			return fmt.Errorf("%w: unknown DataFileContent type (%s): %s",
-				ErrInvalidMetadata, dataFile.ContentType(), entry)
+
+			classified := newClassifiedManifestEntries(counts)
+			for j, validEntry := range entries[:i] {
+				appendClassifiedManifestEntry(&classified, kinds[j], validEntry)
+			}
+
+			return classified, err
+		}
+
+		if kinds == nil && kind != firstKind {
+			kinds = make([]manifestEntryKind, len(entries))
+			for j := range i {
+				kinds[j] = firstKind
+			}
+			counts[firstKind] = i
+		}
+		if kinds != nil {
+			kinds[i] = kind
+			counts[kind]++
 		}
 	}
 
-	return nil
+	if kinds == nil {
+		return classifiedManifestEntriesForKind(firstKind, entries), nil
+	}
+
+	classified := newClassifiedManifestEntries(counts)
+	for i, entry := range entries {
+		appendClassifiedManifestEntry(&classified, kinds[i], entry)
+	}
+
+	return classified, nil
+}
+
+func appendClassifiedManifestEntry(classified *classifiedManifestEntries, kind manifestEntryKind, entry iceberg.ManifestEntry) {
+	switch kind {
+	case manifestEntryData:
+		classified.dataEntries = append(classified.dataEntries, entry)
+	case manifestEntryPositionalDelete:
+		classified.positionalDeleteEntries = append(classified.positionalDeleteEntries, entry)
+	case manifestEntryEqualityDelete:
+		classified.equalityDeleteEntries = append(classified.equalityDeleteEntries, entry)
+	case manifestEntryDV:
+		classified.dvEntries = append(classified.dvEntries, entry)
+	default:
+		panic(fmt.Sprintf("unhandled manifest entry kind %d", kind))
+	}
+}
+
+func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
+	classified, err := classifyManifestEntries(entries)
+
+	// Preserve the existing partial-commit behavior on classification errors.
+	// Callers discard the accumulator when merge returns an error.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.dataEntries = append(m.dataEntries, classified.dataEntries...)
+	m.positionalDeleteEntries = append(m.positionalDeleteEntries, classified.positionalDeleteEntries...)
+	m.equalityDeleteEntries = append(m.equalityDeleteEntries, classified.equalityDeleteEntries...)
+	m.dvEntries = append(m.dvEntries, classified.dvEntries...)
+
+	return err
 }
 
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
