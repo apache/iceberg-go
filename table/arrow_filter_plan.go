@@ -56,6 +56,13 @@ func (p *compiledFileFilterPlan) recordProcessor(ctx context.Context) recProcess
 }
 
 func (p *compiledFileFilterPlan) statsEvaluator() func(*metadata.RowGroupMetaData, []int) (bool, error) {
+	// Passing an AlwaysTrue evaluator still allocates fresh metric maps for
+	// every row group. A nil evaluator has the same keep-all semantics and lets
+	// the Parquet reader take its no-pruning path.
+	if p == nil || p.statsFilter == nil || p.statsFilter.Equals(iceberg.AlwaysTrue{}) {
+		return nil
+	}
+
 	return newParquetRowGroupStatsEvaluatorFromRewritten(p.statsFilter, false)
 }
 

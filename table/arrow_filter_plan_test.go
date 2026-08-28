@@ -50,6 +50,12 @@ func TestCompiledFileFilterPlansReusePhysicalSchema(t *testing.T) {
 	assert.Len(t, scan.filterPlanCache.plans, 1)
 }
 
+func TestCompiledFileFilterPlanSkipsAlwaysTrueStatsEvaluator(t *testing.T) {
+	plan := &compiledFileFilterPlan{statsFilter: iceberg.AlwaysTrue{}}
+
+	assert.Nil(t, plan.statsEvaluator())
+}
+
 func TestCompiledFileFilterPlansSeparatePhysicalTypes(t *testing.T) {
 	int32Schema := iceberg.NewSchema(1, iceberg.NestedField{
 		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
