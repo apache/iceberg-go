@@ -1199,7 +1199,7 @@ func (scan *Scan) canLimitLocalPlanning(acc *scanMetricsAccumulator) bool {
 // counts reach limit. It falls back to the complete list when a count is
 // unknown, overflows, or when every manifest is needed anyway.
 func limitManifestListByRows(manifestList []iceberg.ManifestFile, limit int64) ([]iceberg.ManifestFile, bool) {
-	if limit <= 0 {
+	if limit <= 0 || len(manifestList) < 2 {
 		return manifestList, false
 	}
 

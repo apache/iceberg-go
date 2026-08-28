@@ -76,6 +76,15 @@ func TestLimitManifestListByRows(t *testing.T) {
 			wantLimited: true,
 		},
 		{
+			name: "single manifest does not narrow",
+			manifests: []iceberg.ManifestFile{
+				rowCountManifest("manifest-1", 5, 0),
+			},
+			limit:       1,
+			wantPaths:   []string{"manifest-1"},
+			wantLimited: false,
+		},
+		{
 			name: "unknown count after prefix does not block limit",
 			manifests: []iceberg.ManifestFile{
 				rowCountManifest("manifest-1", 5, 0),
