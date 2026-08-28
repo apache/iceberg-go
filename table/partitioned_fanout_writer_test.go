@@ -1014,6 +1014,18 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyCopiesVariableWidthPartia
 	s.Equal([]string{"s", "s"}, []string{values.Value(0), values.Value(1)})
 }
 
+func (s *FanoutWriterTestSuite) TestMaterializeDictionaryColumnsReturnsOriginalRecordWithoutDictionaries() {
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	record := s.createCustomTestRecord(arrSchema, [][]any{{int64(1)}, {int64(2)}})
+	defer record.Release()
+
+	record.Retain()
+	materialized, err := materializeDictionaryColumns(s.ctx, record, arrow.Metadata{})
+	s.Require().NoError(err)
+	s.Same(record, materialized)
+	materialized.Release()
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPartialSlices() {
 	largeValue := strings.Repeat("l", 16*1024)
 
@@ -1056,6 +1068,52 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPar
 	s.Require().True(ok)
 	s.Equal("metadata", recordMetadataValue)
 	values := partitioned.Column(0).(*array.String)
+	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryColumnsAcrossColumns() {
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append("large dictionary value")
+	dictBuilder.Append("small dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+
+	idBuilder := array.NewInt64Builder(s.mem)
+	idBuilder.AppendValues([]int64{10, 11, 12, 13}, nil)
+	ids := idBuilder.NewInt64Array()
+	idBuilder.Release()
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "value", Type: dictType},
+	}, nil)
+	record := array.NewRecordBatch(arrSchema, []arrow.Array{ids, dict}, 4)
+	ids.Release()
+	dict.Release()
+	defer record.Release()
+
+	partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	s.Equal(arrow.INT64, partitioned.Column(0).DataType().ID())
+	ids = partitioned.Column(0).(*array.Int64)
+	s.Equal([]int64{12, 13}, []int64{ids.Value(0), ids.Value(1)})
+	s.Equal(arrow.STRING, partitioned.Column(1).DataType().ID())
+	values := partitioned.Column(1).(*array.String)
 	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
 }
 

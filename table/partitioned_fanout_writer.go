@@ -706,11 +706,11 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 // the complete dictionary, which can otherwise retain a large variable-width
 // buffer in a rolling writer queue.
 func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch, recordMetadata arrow.Metadata) (arrow.RecordBatch, error) {
-	columns := slices.Clone(record.Columns())
-	fields := record.Schema().Fields()
-	materialized := make([]arrow.Array, 0)
+	var columns []arrow.Array
+	var fields []arrow.Field
+	var materialized []arrow.Array
 
-	for i, column := range columns {
+	for i, column := range record.Columns() {
 		values, changed, err := materializeDictionaryArray(ctx, column)
 		if err != nil {
 			for _, materializedColumn := range materialized {
@@ -724,12 +724,18 @@ func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch,
 			continue
 		}
 
+		if columns == nil {
+			columns = slices.Clone(record.Columns())
+			fields = record.Schema().Fields()
+			materialized = make([]arrow.Array, 0, 1)
+		}
+
 		columns[i] = values
 		fields[i].Type = values.DataType()
 		materialized = append(materialized, values)
 	}
 
-	if len(materialized) == 0 {
+	if columns == nil {
 		return record, nil
 	}
 
