@@ -34,6 +34,9 @@ const (
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
 
+	ReadSplitTargetSizeKey     = "read.split.target-size"
+	ReadSplitTargetSizeDefault = 128 * 1024 * 1024 // 128 MB
+
 	DefaultNameMappingKey = "schema.name-mapping.default"
 
 	MetricsModeColumnConfPrefix    = "write.metadata.metrics.column"

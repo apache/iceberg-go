@@ -313,6 +313,12 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 | `write.format.default` | `parquet` | File format used when writing data files. Read in `table/writer.go` and `table/rolling_data_writer.go`. |
 | `write.target-file-size-bytes` | (set by writer) | Target size for newly written data files. Read in `table/arrow_utils.go` and `table/equality_delete_writer.go`. |
 
+### Scan reads
+
+| Key | Default | Description |
+|---|---|---|
+| `read.split.target-size` | `134217728` | Target size for splitting large local Parquet files at their recorded row-group offsets. |
+
 ### Metrics and metadata lifecycle
 
 | Key | Description |

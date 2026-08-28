@@ -2168,6 +2168,90 @@ func TestBloomFilterRowGroupPruning(t *testing.T) {
 	})
 }
 
+func TestParquetRowGroupRangeSelection(t *testing.T) {
+	const rgSize = 100
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	defer pqReader.Close()
+
+	meta := pqReader.MetaData()
+	offsets := []int64{meta.RowGroup(0).FileOffset(), meta.RowGroup(1).FileOffset()}
+	require.Less(t, offsets[0], offsets[1])
+
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+
+	tests := []struct {
+		name          string
+		start         int64
+		length        int64
+		bloomPreds    []internal.RowGroupBloomPred
+		wantRows      int64
+		wantSurvivors []internal.RowGroupSpan
+	}{
+		{
+			name:          "first row group",
+			start:         offsets[0],
+			length:        offsets[1] - offsets[0],
+			wantRows:      rgSize,
+			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
+		},
+		{
+			name:          "second row group",
+			start:         offsets[1],
+			length:        int64(len(data)) - offsets[1],
+			wantRows:      rgSize,
+			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
+		},
+		{
+			name:   "range and bloom pruning combine",
+			start:  offsets[0],
+			length: offsets[1] - offsets[0],
+			bloomPreds: []internal.RowGroupBloomPred{{
+				FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)},
+			}},
+			wantRows: 0,
+		},
+		{
+			name:          "whole file range",
+			start:         offsets[0],
+			length:        int64(len(data)) - offsets[0],
+			wantRows:      2 * rgSize,
+			wantSurvivors: nil,
+		},
+		{
+			name:     "zero length keeps legacy whole file behavior",
+			start:    offsets[1],
+			length:   0,
+			wantRows: 2 * rgSize,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdr := openBloomTestReader(t, data)
+			defer rdr.Close()
+
+			var survivors []internal.RowGroupSpan
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:    alwaysKeep,
+				BloomPreds: tt.bloomPreds,
+				Start:      tt.start,
+				Length:     tt.length,
+				Survivors:  &survivors,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.wantRows, countRecords(t, rr))
+			assert.Equal(t, tt.wantSurvivors, survivors)
+		})
+	}
+}
+
 func TestShreddedVariantStatsDoesNotPanic(t *testing.T) {
 	mem := memory.DefaultAllocator
 

@@ -1162,6 +1162,8 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	}
 
 	results = make([]FileScanTask, 0, len(entries.dataEntries))
+	splitTargetSize := scan.metadata.Properties().GetInt64(
+		ReadSplitTargetSizeKey, ReadSplitTargetSizeDefault)
 	for _, e := range entries.dataEntries {
 		// Spec §Scan Planning: when a deletion vector applies to a data
 		// file, positional-delete files must NOT be applied. The DV is
@@ -1201,15 +1203,17 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 			s := seq
 			task.DataSequenceNumber = &s
 		}
-		results = append(results, task)
+		// Metrics count data files and their deletes once per base file. The
+		// execution task can contain one range per row group.
+		acc.resultDataFiles++
+		acc.addResultDeleteMetrics(task)
+		if splitTasks, split := splitParquetScanTask(task, splitTargetSize); split {
+			results = append(results, splitTasks...)
+		} else {
+			results = append(results, task)
+		}
 		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
-
-	acc.resultDataFiles = int64(len(results))
-	// Delete-file metrics are derived from the planned tasks so they are
-	// result-scoped, consistent with result-data-files and total-file-size (a
-	// DV-suppressed positional delete never lands on a task, so it is excluded).
-	acc.applyResultDeleteMetrics(results)
 
 	return results, nil
 }
