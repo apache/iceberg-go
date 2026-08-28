@@ -214,7 +214,7 @@ func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask
 
 	idBuilder := array.NewInt64Builder(memory.DefaultAllocator)
 	payloadBuilder := array.NewStringBuilder(memory.DefaultAllocator)
-	for i := int64(0); i < rowCount; i++ {
+	for i := range rowCount {
 		idBuilder.Append(i)
 		payloadBuilder.Append(fmt.Sprintf("payload-%d", i%128))
 	}

@@ -240,7 +240,7 @@ func TestPlanFilesSplitsLargeParquetFileAndReadsEachRowOnce(t *testing.T) {
 		ids := idChunks[chunk].(*array.Int64)
 		rowIDs := rowIDChunks[chunk].(*array.Int64)
 		require.Equal(t, ids.Len(), rowIDs.Len())
-		for i := 0; i < ids.Len(); i++ {
+		for i := range ids.Len() {
 			gotRowIDs[ids.Value(i)] = rowIDs.Value(i)
 		}
 	}
@@ -277,7 +277,7 @@ func TestPlanFilesSplitsLargeParquetFileAndReadsEachRowOnce(t *testing.T) {
 		require.NoError(t, err)
 		ids := record.Column(record.Schema().FieldIndices("id")[0]).(*array.Int64)
 		rowIDs := record.Column(record.Schema().FieldIndices(iceberg.RowIDColumnName)[0]).(*array.Int64)
-		for i := 0; i < int(record.NumRows()); i++ {
+		for i := range int(record.NumRows()) {
 			gotRowIDs[ids.Value(i)] = rowIDs.Value(i)
 		}
 		record.Release()
@@ -308,7 +308,7 @@ func TestPlanFilesSplitsLargeParquetFileAndReadsEachRowOnce(t *testing.T) {
 		require.NoError(t, err)
 		ids := record.Column(record.Schema().FieldIndices("id")[0]).(*array.Int64)
 		rowIDs := record.Column(record.Schema().FieldIndices(iceberg.RowIDColumnName)[0]).(*array.Int64)
-		for i := 0; i < int(record.NumRows()); i++ {
+		for i := range int(record.NumRows()) {
 			gotRowIDs[ids.Value(i)] = rowIDs.Value(i)
 		}
 		record.Release()
