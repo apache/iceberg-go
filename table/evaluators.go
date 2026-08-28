@@ -789,11 +789,23 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		return rowsCannotMatch, nil
 	}
 
-	m.valueCounts = make(map[int]int64)
-	m.nullCounts = make(map[int]int64)
+	if m.valueCounts == nil {
+		m.valueCounts = make(map[int]int64, len(colIndices))
+	} else {
+		clear(m.valueCounts)
+	}
+	if m.nullCounts == nil {
+		m.nullCounts = make(map[int]int64, len(colIndices))
+	} else {
+		clear(m.nullCounts)
+	}
 	m.nanCounts = nil
-	m.lowerBounds = make(map[int][]byte)
-	m.upperBounds = make(map[int][]byte)
+	if m.lowerBounds != nil {
+		clear(m.lowerBounds)
+	}
+	if m.upperBounds != nil {
+		clear(m.upperBounds)
+	}
 
 	for _, c := range colIndices {
 		colMeta, err := rgmeta.ColumnChunk(c)
@@ -820,6 +832,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
 		if stats.HasMinMax() {
+			if m.lowerBounds == nil {
+				// Lower and upper bounds are always allocated together.
+				m.lowerBounds = make(map[int][]byte, len(colIndices))
+				m.upperBounds = make(map[int][]byte, len(colIndices))
+			}
 			m.lowerBounds[fieldID] = stats.EncodeMin()
 			m.upperBounds[fieldID] = stats.EncodeMax()
 		}
