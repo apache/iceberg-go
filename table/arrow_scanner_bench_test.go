@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -238,8 +239,10 @@ func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask
 		b.Fatal(err)
 	}
 
-	const path = "mem://split-benchmark/data.parquet"
-	fs := iceio.NewMemFS()
+	// MemFS intentionally returns a copy from Open. Use a local file here so
+	// B/op measures scanner allocations instead of one full-file copy per task.
+	path := filepath.Join(b.TempDir(), "data.parquet")
+	fs := iceio.LocalFS{}
 	if err := fs.WriteFile(path, buf.Bytes()); err != nil {
 		b.Fatal(err)
 	}

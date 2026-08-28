@@ -127,7 +127,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		return nil, err
 	}
 
-	return wrapPqArrowReader{arrRdr}, nil
+	return wrapPqArrowReader{FileReader: arrRdr}, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
@@ -1822,6 +1822,7 @@ type RowGroupSpan struct {
 
 type wrapPqArrowReader struct {
 	*pqarrow.FileReader
+	rowGroupInfos []parquetRowGroupInfo
 }
 
 func (w wrapPqArrowReader) Metadata() Metadata {
@@ -1861,6 +1862,19 @@ func parquetRowGroupSplitOffset(rgMeta *metadata.RowGroupMetaData) int64 {
 	}
 
 	return rgMeta.FileOffset()
+}
+
+func parquetRowGroupInfos(rdr *file.Reader) []parquetRowGroupInfo {
+	result := make([]parquetRowGroupInfo, rdr.NumRowGroups())
+	for i := range result {
+		rgMeta := rdr.MetaData().RowGroup(i)
+		result[i] = parquetRowGroupInfo{
+			splitOffset: parquetRowGroupSplitOffset(rgMeta),
+			numRows:     rgMeta.NumRows(),
+		}
+	}
+
+	return result
 }
 
 func validateParquetRowGroupRange(fileSize, start, length int64) error {
@@ -1918,15 +1932,31 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		rgList = make([]int, 0)
 		var firstRowPos int64
 		for rg := range numRg {
-			rgMeta := fileMeta.RowGroup(rg)
-			numRows := rgMeta.NumRows()
 			pos := firstRowPos
+			var (
+				rgMeta  *metadata.RowGroupMetaData
+				numRows int64
+				offset  int64
+			)
+			if len(w.rowGroupInfos) == numRg {
+				info := w.rowGroupInfos[rg]
+				numRows = info.numRows
+				offset = info.splitOffset
+			} else {
+				rgMeta = fileMeta.RowGroup(rg)
+				numRows = rgMeta.NumRows()
+			}
 			firstRowPos += numRows
 
 			use := true
 			if rangeSet {
-				offset := parquetRowGroupSplitOffset(rgMeta)
+				if len(w.rowGroupInfos) != numRg {
+					offset = parquetRowGroupSplitOffset(rgMeta)
+				}
 				use = offset >= rangeStart && offset < rangeEnd
+			}
+			if use && (rowGroupTester.StatsFn != nil || bfReader != nil) && rgMeta == nil {
+				rgMeta = fileMeta.RowGroup(rg)
 			}
 			if use && rowGroupTester.StatsFn != nil {
 				var err error
@@ -2042,10 +2072,42 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		}
 	}()
 
-	rdr, err := file.NewParquetReader(pf,
-		file.WithReadProps(parquet.NewReaderProperties(pfs.mem)))
-	if err != nil {
-		return nil, err
+	readProps := parquet.NewReaderProperties(pfs.mem)
+	var rdr *file.Reader
+	var rowGroupInfos []parquetRowGroupInfo
+	if cache := parquetMetadataCacheFromContext(ctx); cache != nil {
+		entry := cache.entry(parquetMetadataCacheKey{
+			path: pfs.file.FilePath(),
+			size: pfs.file.FileSizeBytes(),
+		})
+
+		var parsed *file.Reader
+		entry.once.Do(func() {
+			parsed, entry.err = file.NewParquetReader(pf, file.WithReadProps(readProps))
+			if entry.err == nil {
+				entry.fileMetadata = parsed.MetaData()
+				entry.rowGroupInfos = parquetRowGroupInfos(parsed)
+			}
+		})
+		if entry.err != nil {
+			return nil, entry.err
+		}
+		rowGroupInfos = entry.rowGroupInfos
+
+		if parsed != nil {
+			rdr = parsed
+		} else {
+			rdr, err = file.NewParquetReader(pf,
+				file.WithMetadata(entry.fileMetadata), file.WithReadProps(readProps))
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		rdr, err = file.NewParquetReader(pf, file.WithReadProps(readProps))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	props := TablePropertiesFromContext(ctx)
@@ -2064,7 +2126,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		return nil, err
 	}
 
-	result = wrapPqArrowReader{fr}
+	result = wrapPqArrowReader{FileReader: fr, rowGroupInfos: rowGroupInfos}
 
 	return result, nil
 }

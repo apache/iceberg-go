@@ -71,12 +71,19 @@ type trackingOpenFile struct {
 	*bytes.Reader
 	closeErr error
 	closed   bool
+	readAt   int
 }
 
 func (f *trackingOpenFile) Close() error {
 	f.closed = true
 
 	return f.closeErr
+}
+
+func (f *trackingOpenFile) ReadAt(p []byte, off int64) (int, error) {
+	f.readAt++
+
+	return f.Reader.ReadAt(p, off)
 }
 
 func (f *trackingOpenFile) Stat() (iofs.FileInfo, error) {
@@ -331,6 +338,42 @@ func TestParquetGetReaderClosesFileOnNewFileReaderFailure(t *testing.T) {
 	_, err = fileSource.GetReader(context.Background())
 	require.Error(t, err)
 	assert.True(t, mockFile.closed)
+}
+
+func TestParquetGetReaderReusesMetadataWithinContext(t *testing.T) {
+	data := buildBloomTestParquet(t, 2)
+	mockFile := &trackingOpenFile{Reader: bytes.NewReader(data)}
+	mockIO := &trackingFileSystem{file: mockFile}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		"data.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		4,
+		int64(len(data)),
+	)
+	require.NoError(t, err)
+
+	fileSource, err := internal.GetFile(context.Background(), mockIO, builder.Build(), false)
+	require.NoError(t, err)
+
+	ctx := internal.WithParquetMetadataCache(context.Background())
+	first, err := fileSource.GetReader(ctx)
+	require.NoError(t, err)
+	firstReadAt := mockFile.readAt
+	require.Positive(t, firstReadAt)
+
+	second, err := fileSource.GetReader(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, firstReadAt, mockFile.readAt,
+		"the second reader should reuse the parsed footer metadata")
+
+	require.NoError(t, first.Close())
+	require.NoError(t, second.Close())
 }
 
 func assertBounds[T iceberg.LiteralType](t *testing.T, bound []byte, typ iceberg.Type, expected T) {
