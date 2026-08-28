@@ -39,7 +39,10 @@ type UpdateSpec struct {
 	// when this UpdateSpec is constructed. Schema and partition-spec resolution
 	// read from it so partitioning can reference columns/specs staged earlier in
 	// the transaction; concurrency assertions are handled separately (BuildUpdates).
+	// schema is the single defensive copy of the current staged schema reused by
+	// all schema-dependent operations in this update.
 	meta                  Metadata
+	schema                *iceberg.Schema
 	err                   error
 	nameToField           map[string]iceberg.PartitionField
 	nameToAddedField      map[string]iceberg.PartitionField
@@ -117,6 +120,7 @@ func NewUpdateSpec(t *Transaction, caseSensitive bool) *UpdateSpec {
 		}] = partitionField
 		nameToField[partitionField.Name] = partitionField
 	}
+	us.schema = stagedMeta.CurrentSchema()
 	lastAssignedFieldId := us.meta.LastPartitionSpecID()
 	if lastAssignedFieldId == nil {
 		v := iceberg.PartitionDataIDStart - 1
@@ -214,9 +218,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 		var err error
 		if _, deleted := us.deletes[field.FieldID]; !deleted {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, rename, field.Transform, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
+				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, field.Name, field.Transform, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -224,9 +228,9 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 			partitionFields = append(partitionFields, newField)
 		} else if us.meta.Version() == 1 {
 			if rename, renamed := us.renames[field.Name]; renamed {
-				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, rename, iceberg.VoidTransform{}, partitionNames)
 			} else {
-				newField, err = us.addNewField(us.meta.CurrentSchema(), field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
+				newField, err = us.addNewField(us.schema, field.SourceID(), field.FieldID, field.Name, iceberg.VoidTransform{}, partitionNames)
 			}
 			if err != nil {
 				return iceberg.PartitionSpec{}, err
@@ -240,7 +244,7 @@ func (us *UpdateSpec) Apply() (iceberg.PartitionSpec, error) {
 		return iceberg.PartitionSpec{}, err
 	}
 	candidate := iceberg.NewPartitionSpec(partitionFields...)
-	newSpec, err := candidate.BindToSchema(us.meta.CurrentSchema(), nil, nil)
+	newSpec, err := candidate.BindToSchema(us.schema, nil, nil)
 	if err != nil {
 		return iceberg.PartitionSpec{}, err
 	}
@@ -307,7 +311,7 @@ func (us *UpdateSpec) addField(sourceColName string, transform iceberg.Transform
 	return func() error {
 		// Finds the column in the schema and binds it with case sensitivity.
 		ref := iceberg.Reference(sourceColName)
-		boundTerm, err := ref.Bind(us.meta.CurrentSchema(), us.caseSensitive)
+		boundTerm, err := ref.Bind(us.schema, us.caseSensitive)
 		if err != nil {
 			return err
 		}
@@ -494,7 +498,7 @@ func (us *UpdateSpec) partitionField(key transformKey, name string) (iceberg.Par
 			Transform: transform,
 		}
 		var err error
-		name, err = iceberg.GeneratePartitionFieldName(us.meta.CurrentSchema(), tmpField)
+		name, err = iceberg.GeneratePartitionFieldName(us.schema, tmpField)
 		if err != nil {
 			return iceberg.PartitionField{}, err
 		}
