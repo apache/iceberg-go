@@ -169,6 +169,7 @@ func (v *physicalSchemaKeyVisitor) Schema(_ *iceberg.Schema, _ struct{}) struct{
 func (v *physicalSchemaKeyVisitor) Struct(_ iceberg.StructType, _ []struct{}) struct{} {
 	return struct{}{}
 }
+
 func (v *physicalSchemaKeyVisitor) Field(_ iceberg.NestedField, _ struct{}) struct{} {
 	return struct{}{}
 }
