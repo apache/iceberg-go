@@ -468,9 +468,18 @@ const maxPositionalDeletePreallocation = 64 * 1024
 func collectPosDeletePositions(positionalDeletes positionDeletes) (set[int64], error) {
 	totalPositions := 0
 	for _, chunk := range positionalDeletes {
-		if chunk != nil {
-			totalPositions += chunk.Len()
+		if chunk == nil {
+			continue
 		}
+		// The set only reserves a bounded hint. Stop summing once that
+		// hint is reached so a large collection of chunks cannot overflow
+		// int before the cap is applied.
+		if chunk.Len() >= maxPositionalDeletePreallocation-totalPositions {
+			totalPositions = maxPositionalDeletePreallocation
+
+			break
+		}
+		totalPositions += chunk.Len()
 	}
 
 	deletes := make(set[int64], min(totalPositions, maxPositionalDeletePreallocation))
