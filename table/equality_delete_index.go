@@ -89,78 +89,91 @@ func equalityDeleteMetricValueFromLiteral(
 				value.integerValue = 1
 			}
 		}
+
 		return value, ok
 	case equalityDeleteRangeInt32:
 		v, ok := literal.(iceberg.TypedLiteral[int32])
 		if ok {
 			value.integerValue = int64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeInt64:
 		v, ok := literal.(iceberg.TypedLiteral[int64])
 		if ok {
 			value.integerValue = v.Value()
 		}
+
 		return value, ok
 	case equalityDeleteRangeFloat32:
 		v, ok := literal.(iceberg.TypedLiteral[float32])
 		if ok {
 			value.floatValue = float64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeFloat64:
 		v, ok := literal.(iceberg.TypedLiteral[float64])
 		if ok {
 			value.floatValue = v.Value()
 		}
+
 		return value, ok
 	case equalityDeleteRangeDate:
 		v, ok := literal.(iceberg.TypedLiteral[iceberg.Date])
 		if ok {
 			value.integerValue = int64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeTime:
 		v, ok := literal.(iceberg.TypedLiteral[iceberg.Time])
 		if ok {
 			value.integerValue = int64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeTimestamp:
 		v, ok := literal.(iceberg.TypedLiteral[iceberg.Timestamp])
 		if ok {
 			value.integerValue = int64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeTimestampNano:
 		v, ok := literal.(iceberg.TypedLiteral[iceberg.TimestampNano])
 		if ok {
 			value.integerValue = int64(v.Value())
 		}
+
 		return value, ok
 	case equalityDeleteRangeString:
 		v, ok := literal.(iceberg.TypedLiteral[string])
 		if ok {
 			value.reference = v.Value()
 		}
+
 		return value, ok
 	case equalityDeleteRangeBytes:
 		v, ok := literal.(iceberg.TypedLiteral[[]byte])
 		if ok {
 			value.reference = v.Value()
 		}
+
 		return value, ok
 	case equalityDeleteRangeUUID:
 		v, ok := literal.(iceberg.TypedLiteral[uuid.UUID])
 		if ok {
 			value.uuidValue = v.Value()
 		}
+
 		return value, ok
 	case equalityDeleteRangeDecimal:
 		v, ok := literal.(iceberg.TypedLiteral[iceberg.Decimal])
 		if ok {
 			value.decimalValue = v.Value()
 		}
+
 		return value, ok
 	default:
 		return equalityDeleteMetricValue{}, false
@@ -612,6 +625,7 @@ func equalityDeleteDataContainsNull(nullCounts map[int]int64, field *equalityDel
 	}
 
 	nullCount, ok := nullCounts[field.fieldID]
+
 	return !ok || nullCount > 0
 }
 
@@ -633,6 +647,7 @@ func equalityDeleteDataAllNull(stats equalityDeleteDataFileStats, field *equalit
 
 	nullCount, hasNullCount := stats.nullCounts[field.fieldID]
 	valueCount, hasValueCount := stats.valueCounts[field.fieldID]
+
 	return hasNullCount && hasValueCount && nullCount == valueCount
 }
 
@@ -653,6 +668,7 @@ func equalityDeleteDataAllNonNull(nullCounts map[int]int64, field *equalityDelet
 	}
 
 	nullCount, ok := nullCounts[field.fieldID]
+
 	return ok && nullCount <= 0
 }
 
@@ -671,6 +687,7 @@ func equalityDeleteFloatRangesAreKnown(
 	// Float bounds exclude NaN values. Only use them when both files
 	// explicitly prove that the field contains no NaNs.
 	dataNaNCount, dataHasNaNCount := dataStats.nanCounts[field.fieldID]
+
 	return dataHasNaNCount && dataNaNCount == 0 && field.hasNaNCount && field.nanCount == 0
 }
 

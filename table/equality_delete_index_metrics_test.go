@@ -337,7 +337,6 @@ func TestEqualityDeleteIndexDoesNotUseUncertainFloatBounds(t *testing.T) {
 	matched, err = idx.forDataFile(dataEntry)
 	require.NoError(t, err)
 	assert.Empty(t, matched)
-
 }
 
 func TestEqualityDeleteMetricValueCompareSupportsRangeTypes(t *testing.T) {
@@ -368,9 +367,11 @@ func TestEqualityDeleteMetricValueCompareSupportsRangeTypes(t *testing.T) {
 		{"string", iceberg.PrimitiveTypes.String, iceberg.NewLiteral("a"), iceberg.NewLiteral("b")},
 		{"binary", iceberg.PrimitiveTypes.Binary, iceberg.NewLiteral([]byte{1}), iceberg.NewLiteral([]byte{2})},
 		{"fixed", iceberg.FixedTypeOf(2), fixedLower, fixedUpper},
-		{"uuid", iceberg.PrimitiveTypes.UUID,
+		{
+			"uuid", iceberg.PrimitiveTypes.UUID,
 			iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000001")),
-			iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000002"))},
+			iceberg.NewLiteral(uuid.MustParse("00000000-0000-0000-0000-000000000002")),
+		},
 		{"decimal", iceberg.DecimalTypeOf(9, 0), decimalLower, decimalUpper},
 	}
 
