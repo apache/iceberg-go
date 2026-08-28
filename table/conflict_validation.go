@@ -51,10 +51,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
@@ -168,11 +170,11 @@ var (
 // concurrent commits and validators return nil without reading
 // manifests.
 //
-// conflictContext is immutable once constructed — do NOT reuse the
-// same context across retry attempts that re-fetch catalog state,
-// because the cached concurrent-snapshot walk becomes stale. There
-// is deliberately no Refresh or mutator method; a refresh must flow
-// as a fresh call to newConflictContext(newBase, newCurrent, ...).
+// The metadata and concurrent-snapshot walk are fixed once constructed — do
+// NOT reuse the same context across retry attempts that re-fetch catalog
+// state, because both the walk and its read caches would become stale. There
+// is deliberately no Refresh or mutator method; a refresh must flow as a
+// fresh call to newConflictContext(newBase, newCurrent, ...).
 type conflictContext struct {
 	current       Metadata
 	branch        string
@@ -181,6 +183,223 @@ type conflictContext struct {
 
 	// Resolved once; subsequent validator calls reuse the walk.
 	concurrent []Snapshot
+
+	// Lazily caches raw manifest bytes for this validation attempt. The
+	// cache is intentionally scoped to the context because all validators
+	// inspect the same immutable metadata snapshot, while ManifestFile.Entries
+	// still performs descriptor-specific inheritance for each logical read.
+	manifestIO *conflictManifestIO
+
+	// Parsed manifest-list descriptors are also shared across validators.
+	manifestLists map[int64]conflictManifestList
+}
+
+type conflictManifestList struct {
+	manifests []iceberg.ManifestFile
+	err       error
+}
+
+const maxConflictManifestCacheBytes = 64 << 20
+
+var errConflictManifestIOReadOnly = errors.New("conflict manifest IO is read-only")
+
+// conflictManifestIO is a read-through cache used only while conflict
+// validators inspect one conflictContext. Manifest files are immutable after
+// they are committed, so the same path can be safely served from the cached
+// bytes to later validators without reopening the backing object store.
+//
+// The cache stores raw bytes instead of decoded entries. The first read still
+// streams from the backing IO and is recorded only when it has consumed the
+// size reported by Stat, so an early validator exit does not cache a partial
+// manifest. The cache is bounded per validation attempt; reads after the
+// bound fall through to the backing IO. Later reads stream decoded entries
+// from completed bytes and let each ManifestFile descriptor apply its own
+// inheritance metadata.
+type conflictManifestIO struct {
+	base        iceio.IO
+	files       map[string][]byte
+	cachedBytes int64
+}
+
+func newConflictManifestIO(base iceio.IO) *conflictManifestIO {
+	return &conflictManifestIO{
+		base:  base,
+		files: make(map[string][]byte),
+	}
+}
+
+func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
+	if data, ok := c.files[name]; ok {
+		return newConflictManifestFile(name, data), nil
+	}
+
+	f, err := c.base.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if c.cachedBytes >= maxConflictManifestCacheBytes {
+		return f, nil
+	}
+
+	info, statErr := f.Stat()
+	if statErr != nil || info == nil || info.Size() < 0 {
+		if statIO, ok := c.base.(iceio.StatIO); ok {
+			info, statErr = statIO.Stat(name)
+		}
+	}
+	if statErr != nil || info == nil || info.Size() < 0 {
+		return f, nil
+	}
+
+	return &conflictManifestRecordingFile{
+		base:         f,
+		cache:        c,
+		name:         name,
+		expectedSize: info.Size(),
+		cacheLimit:   maxConflictManifestCacheBytes - c.cachedBytes,
+		cacheable:    true,
+		complete:     info.Size() == 0,
+	}, nil
+}
+
+func (c *conflictManifestIO) Remove(string) error {
+	return errConflictManifestIOReadOnly
+}
+
+func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
+	if data, ok := c.files[name]; ok {
+		return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+	}
+
+	if statIO, ok := c.base.(iceio.StatIO); ok {
+		return statIO.Stat(name)
+	}
+
+	f, err := c.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return f.Stat()
+}
+
+type conflictManifestFile struct {
+	*bytes.Reader
+	name string
+	size int64
+}
+
+func newConflictManifestFile(name string, data []byte) *conflictManifestFile {
+	return &conflictManifestFile{
+		Reader: bytes.NewReader(data),
+		name:   name,
+		size:   int64(len(data)),
+	}
+}
+
+func (f *conflictManifestFile) Close() error { return nil }
+
+func (f *conflictManifestFile) Stat() (fs.FileInfo, error) {
+	return conflictManifestFileInfo{name: f.name, size: f.size}, nil
+}
+
+type conflictManifestRecordingFile struct {
+	base         iceio.File
+	cache        *conflictManifestIO
+	name         string
+	expectedSize int64
+	cacheLimit   int64
+	data         []byte
+	cacheable    bool
+	complete     bool
+}
+
+func (f *conflictManifestRecordingFile) Read(p []byte) (int, error) {
+	n, err := f.base.Read(p)
+	if f.cacheable && n > 0 {
+		if int64(len(f.data))+int64(n) > f.cacheLimit {
+			f.cacheable = false
+			f.data = nil
+		} else {
+			f.data = append(f.data, p[:n]...)
+			f.complete = int64(len(f.data)) == f.expectedSize
+		}
+	}
+
+	return n, err
+}
+
+func (f *conflictManifestRecordingFile) ReadAt(p []byte, offset int64) (int, error) {
+	f.disableCaching()
+
+	return f.base.ReadAt(p, offset)
+}
+
+func (f *conflictManifestRecordingFile) Seek(offset int64, whence int) (int64, error) {
+	f.disableCaching()
+
+	return f.base.Seek(offset, whence)
+}
+
+func (f *conflictManifestRecordingFile) Stat() (fs.FileInfo, error) {
+	return f.base.Stat()
+}
+
+func (f *conflictManifestRecordingFile) Close() error {
+	err := f.base.Close()
+	if err == nil && f.cacheable && f.complete && int64(len(f.data)) == f.expectedSize {
+		f.cache.files[f.name] = f.data
+		f.cache.cachedBytes += int64(len(f.data))
+	}
+
+	return err
+}
+
+func (f *conflictManifestRecordingFile) disableCaching() {
+	f.cacheable = false
+	f.complete = false
+	f.data = nil
+}
+
+var (
+	_ iceio.IO   = (*conflictManifestIO)(nil)
+	_ iceio.File = (*conflictManifestFile)(nil)
+	_ iceio.File = (*conflictManifestRecordingFile)(nil)
+)
+
+type conflictManifestFileInfo struct {
+	name string
+	size int64
+}
+
+func (f conflictManifestFileInfo) Name() string       { return f.name }
+func (f conflictManifestFileInfo) Size() int64        { return f.size }
+func (f conflictManifestFileInfo) Mode() fs.FileMode  { return 0 }
+func (f conflictManifestFileInfo) ModTime() time.Time { return time.Time{} }
+func (f conflictManifestFileInfo) IsDir() bool        { return false }
+func (f conflictManifestFileInfo) Sys() any           { return nil }
+
+func (c *conflictContext) manifestReadIO() *conflictManifestIO {
+	if c.manifestIO == nil {
+		c.manifestIO = newConflictManifestIO(c.fs)
+	}
+
+	return c.manifestIO
+}
+
+func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, error) {
+	if c.manifestLists == nil {
+		c.manifestLists = make(map[int64]conflictManifestList)
+	}
+	if cached, ok := c.manifestLists[snap.SnapshotID]; ok {
+		return cached.manifests, cached.err
+	}
+
+	manifests, err := snap.Manifests(c.fs)
+	c.manifestLists[snap.SnapshotID] = conflictManifestList{manifests: manifests, err: err}
+
+	return manifests, err
 }
 
 // newConflictContext builds a validation context for the given
@@ -259,20 +478,30 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 // The visitor returns early if the callback returns a non-nil error.
 func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
 	for _, snap := range c.concurrent {
-		for entry, err := range snap.entries(c.fs, content) {
-			if err != nil {
-				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
-			}
-			if entry.Status() != iceberg.EntryStatusADDED {
+		manifests, err := c.manifestsFor(snap)
+		if err != nil {
+			return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+		}
+		for _, mf := range manifests {
+			if content >= 0 && mf.ManifestContent() != content {
 				continue
 			}
-			if entry.SnapshotID() != snap.SnapshotID {
-				// Entry was inherited from a prior snapshot and is
-				// not attributable to this concurrent commit.
-				continue
-			}
-			if err := visit(snap, entry); err != nil {
-				return err
+
+			for entry, err := range mf.Entries(c.manifestReadIO(), false) {
+				if err != nil {
+					return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+				}
+				if entry.Status() != iceberg.EntryStatusADDED {
+					continue
+				}
+				if entry.SnapshotID() != snap.SnapshotID {
+					// Entry was inherited from a prior snapshot and is
+					// not attributable to this concurrent commit.
+					continue
+				}
+				if err := visit(snap, entry); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -317,22 +546,29 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
 	}
 
-	for entry, err := range head.entries(ctx.fs, iceberg.ManifestContentData) {
-		if err != nil {
-			return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
-		}
-		// A DELETED entry means the file was removed (e.g. rewritten by a
-		// concurrent compaction); it is no longer live data a pos-delete can
-		// apply to, so it does not satisfy existence.
-		if entry.Status() == iceberg.EntryStatusDELETED {
+	manifests, err := ctx.manifestsFor(*head)
+	if err != nil {
+		return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
+	}
+	for _, mf := range manifests {
+		if mf.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		path := entry.DataFile().FilePath()
-		if _, ok := needed[path]; ok {
-			delete(needed, path)
-			if len(needed) == 0 {
-				return nil
+		for entry, err := range mf.Entries(ctx.manifestReadIO(), false) {
+			if err != nil {
+				return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 			}
+			// A DELETED entry means the file was removed (e.g. rewritten by a
+			// concurrent compaction); it is no longer live data a pos-delete can
+			// apply to, so it does not satisfy existence.
+			if entry.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			path := entry.DataFile().FilePath()
+			delete(needed, path)
+		}
+		if len(needed) == 0 {
+			return nil
 		}
 	}
 
@@ -403,7 +639,7 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	}
 
 	for _, snap := range ctx.concurrent {
-		manifests, err := snap.Manifests(ctx.fs)
+		manifests, err := ctx.manifestsFor(snap)
 		if err != nil {
 			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
 		}
@@ -428,7 +664,7 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
 			}
-			for e, err := range mf.Entries(ctx.fs, false) {
+			for e, err := range mf.Entries(ctx.manifestReadIO(), false) {
 				if err != nil {
 					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
 				}
