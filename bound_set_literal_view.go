@@ -50,8 +50,16 @@ type boundSetLiteralRef interface {
 	boundSetLiteralsRef() Set[Literal]
 }
 
+type boundSetExtremaRef interface {
+	boundSetExtremaRef() (minLit, maxLit Literal, ok bool)
+}
+
 func (bsp *boundSetPredicate[T]) boundSetLiteralsRef() Set[Literal] {
 	return bsp.lits
+}
+
+func (bsp *boundSetPredicate[T]) boundSetExtremaRef() (minLit, maxLit Literal, ok bool) {
+	return bsp.minLiteral, bsp.maxLiteral, bsp.hasExtrema
 }
 
 func boundSetLiteralsForVisit(predicate BoundPredicate) Set[Literal] {
