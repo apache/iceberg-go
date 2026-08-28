@@ -67,7 +67,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Azure Blob Storage   |    X      |
 | Local Filesystem     |    X      |
 
-S3, GCS, and Azure require a blank import: `_ "github.com/apache/iceberg-go/io/gocloud"`. See [Configuration](./configuration.md).
+S3, GCS, and Azure each require a blank import of their backend package, for example `_ "github.com/apache/iceberg-go/io/gocloud/s3"`. See [Configuration](./configuration.md).
 
 ## Metadata operations
 

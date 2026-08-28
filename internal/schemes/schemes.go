@@ -15,28 +15,28 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package hadoop
+package schemes
 
-import (
-	icebergio "github.com/apache/iceberg-go/io"
-	"github.com/apache/iceberg-go/io/gocloud/blobfs"
+import "slices"
+
+var (
+	S3    = []string{"s3", "s3a", "s3n", "oss"}
+	GCS   = []string{"gs"}
+	Azure = []string{"abfs", "abfss", "wasb", "wasbs"}
 )
 
-// HadoopCatalogFS represents all the interfaces that a filesystem implementation
-// must satisfy to be used for a Hadoop catalog implementation.
-type HadoopCatalogFS interface {
-	icebergio.ListableIO
-	icebergio.ReadFileIO
-	icebergio.WriteFileIO
-	icebergio.StatIO
-	icebergio.RenameIO
-	icebergio.RenameNoReplaceIO
-	icebergio.RemoveAllIO
-	icebergio.MkdirAllIO
+var byBackend = map[string][]string{
+	"s3":    S3,
+	"gcs":   GCS,
+	"azure": Azure,
 }
 
-// LocalFS can be used to implement a Hadoop catalog with a local filesystem.
-var _ HadoopCatalogFS = (*icebergio.LocalFS)(nil)
+func BackendFor(scheme string) string {
+	for backend, list := range byBackend {
+		if slices.Contains(list, scheme) {
+			return backend
+		}
+	}
 
-// BlobFileIO can be used to implement a Hadoop catalog with a blob storage bucket.
-var _ HadoopCatalogFS = (*blobfs.FileIO)(nil)
+	return ""
+}
