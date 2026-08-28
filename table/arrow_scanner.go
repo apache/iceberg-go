@@ -663,7 +663,7 @@ func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.Data
 		return nil, err
 	}
 
-	tester, err := newPositionDeleteRowGroupTester(targets)
+	tester, err := newPositionDeleteRowGroupTester(schema, targets)
 	if err != nil {
 		return nil, err
 	}
@@ -700,8 +700,15 @@ func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.Data
 	return acc.finish(), nil
 }
 
-func newPositionDeleteRowGroupTester(targets map[string]struct{}) (*tblutils.ParquetRowGroupTester, error) {
+func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]struct{}) (*tblutils.ParquetRowGroupTester, error) {
 	if len(targets) == 0 || len(targets) > inPredicateLimit {
+		return nil, nil
+	}
+	pruningEnabled, err := positionDeletePruningEnabled(schema)
+	if err != nil {
+		return nil, err
+	}
+	if !pruningEnabled {
 		return nil, nil
 	}
 
@@ -720,7 +727,7 @@ func newPositionDeleteRowGroupTester(targets map[string]struct{}) (*tblutils.Par
 		slices.Sort(paths)
 		filter = iceberg.IsIn(iceberg.Reference("file_path"), paths...)
 	}
-	filter, err := iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
+	filter, err = iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
 	if err != nil {
 		return nil, err
 	}
@@ -762,6 +769,51 @@ func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileR
 	}
 
 	return columns, nil
+}
+
+func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
+	physicalIDs := indexArrowFieldsByMetadata(schema)
+	if len(physicalIDs) == 0 {
+		// External position-delete files are allowed to omit Iceberg field IDs.
+		// The name-based projection and row-level target filter remain safe, but
+		// stats and Bloom pruning cannot be trusted without the IDs.
+		return false, nil
+	}
+
+	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
+	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
+	for _, field := range []iceberg.NestedField{filePathField, posField} {
+		if len(physicalIDs[field.ID]) > 1 {
+			return false, fmt.Errorf("%w: position delete field ID %d is not unique",
+				iceberg.ErrInvalidSchema, field.ID)
+		}
+	}
+
+	for _, want := range []struct {
+		name string
+		id   int
+	}{
+		{name: filePathField.Name, id: filePathField.ID},
+		{name: posField.Name, id: posField.ID},
+	} {
+		indices := schema.FieldIndices(want.name)
+		if len(indices) != 1 {
+			return false, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
+				iceberg.ErrInvalidSchema, want.name, len(indices))
+		}
+
+		fieldID := getFieldID(schema.Field(indices[0]))
+		if fieldID == nil {
+			return false, fmt.Errorf("%w: position delete column %q is missing its canonical field ID %d",
+				iceberg.ErrInvalidSchema, want.name, want.id)
+		}
+		if *fieldID != want.id {
+			return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d",
+				iceberg.ErrInvalidSchema, want.name, *fieldID, want.id)
+		}
+	}
+
+	return true, nil
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
