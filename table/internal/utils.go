@@ -578,6 +578,11 @@ func nextValidRune(r rune) (rune, bool) {
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
+	if trunc < 0 {
+		// A negative width cannot describe a prefix. Keep the original bound
+		// instead of panicking on the slice expression below.
+		return slices.Clone(val)
+	}
 	if trunc >= len(val) {
 		return slices.Clone(val)
 	}

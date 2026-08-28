@@ -110,6 +110,7 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
 		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
 		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
+		{"negative width keeps bound", []byte{0x01, 0x02}, -1, []byte{0x01, 0x02}},
 	}
 
 	for _, tt := range tests {
