@@ -772,10 +772,16 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 		return nil, err
 	}
 
+	return newParquetRowGroupStatsEvaluatorFromRewritten(rewritten, includeEmptyFiles), nil
+}
+
+func newParquetRowGroupStatsEvaluatorFromRewritten(
+	expr iceberg.BooleanExpression, includeEmptyFiles bool,
+) func(*metadata.RowGroupMetaData, []int) (bool, error) {
 	return (&inclusiveMetricsEval{
 		includeEmptyFiles: includeEmptyFiles,
-		expr:              rewritten,
-	}).TestRowGroup, nil
+		expr:              expr,
+	}).TestRowGroup
 }
 
 type inclusiveMetricsEval struct {
@@ -1930,5 +1936,13 @@ func newBloomFilterPredicates(expr iceberg.BooleanExpression) ([]internal.RowGro
 		return nil, err
 	}
 
-	return iceberg.VisitExpr(rewritten, &bloomPredicateCollector{})
+	return newBloomFilterPredicatesFromRewritten(rewritten)
+}
+
+func newBloomFilterPredicatesFromRewritten(expr iceberg.BooleanExpression) ([]internal.RowGroupBloomPred, error) {
+	if expr == nil {
+		return nil, nil
+	}
+
+	return iceberg.VisitExpr(expr, &bloomPredicateCollector{})
 }
