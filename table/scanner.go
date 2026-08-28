@@ -1103,6 +1103,13 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
+	if scan.canLimitLocalPlanning(acc) {
+		// The manifest counters above describe partition pruning. Keep them
+		// unchanged when a row limit narrows the manifest list afterwards.
+		if limitedManifests, limited := limitManifestListByRows(manifestList, scan.limit); limited {
+			manifestList = limitedManifests
+		}
+	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
 	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
@@ -1176,6 +1183,45 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	acc.applyResultDeleteMetrics(results)
 
 	return results, nil
+}
+
+// canLimitLocalPlanning reports whether the manifest-list row counts are
+// sufficient to safely narrow local planning for this scan. A row filter can
+// remove rows from a data file, and delete manifests can remove rows at read
+// time, so both cases keep the existing full planning path.
+func (scan *Scan) canLimitLocalPlanning(acc *scanMetricsAccumulator) bool {
+	return scan.limit > 0 &&
+		(scan.rowFilter == nil || scan.rowFilter.Equals(iceberg.AlwaysTrue{})) &&
+		acc.totalDeleteManifests == 0
+}
+
+// limitManifestListByRows returns the shortest manifest prefix whose live row
+// counts reach limit. It falls back to the complete list when a count is
+// unknown, overflows, or when every manifest is needed anyway.
+func limitManifestListByRows(manifestList []iceberg.ManifestFile, limit int64) ([]iceberg.ManifestFile, bool) {
+	if limit <= 0 {
+		return manifestList, false
+	}
+
+	remaining := limit
+	for i, manifest := range manifestList {
+		addedRows, existingRows := manifest.AddedRows(), manifest.ExistingRows()
+		if addedRows < 0 || existingRows < 0 || existingRows > math.MaxInt64-addedRows {
+			return manifestList, false
+		}
+
+		rows := addedRows + existingRows
+		if rows >= remaining {
+			if i+1 == len(manifestList) {
+				return manifestList, false
+			}
+
+			return manifestList[:i+1], true
+		}
+		remaining -= rows
+	}
+
+	return manifestList, false
 }
 
 func (scan *Scan) planFilesRemote(ctx context.Context) ([]FileScanTask, error) {
