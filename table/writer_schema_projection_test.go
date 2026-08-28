@@ -427,6 +427,26 @@ func TestDefaultDataFileWriterReusesExactBatch(t *testing.T) {
 	assert.Same(t, record, format.batches[0])
 }
 
+func TestDefaultDataFileWriterPrecomputesParquetSchemaMetadata(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	props := iceberg.Properties{PropertyFormatVersion: "3"}
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, t.TempDir(), props)
+	require.NoError(t, err)
+	metaBuilder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	writer, err := newDataFileWriter(t.TempDir(), iceio.LocalFS{}, metaBuilder, props)
+	require.NoError(t, err)
+
+	wantMapping, err := tblutils.GetFileFormat(iceberg.ParquetFile).PathToIDMapping(schema)
+	require.NoError(t, err)
+	assert.Equal(t, wantMapping, writer.invariants.colMapping)
+	assert.Equal(t, map[int]struct{}{2: {}}, writer.invariants.variantFieldIDs)
+}
+
 func TestRollingDataWriterReusesExactBatch(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 	defer mem.AssertSize(t, 0)
@@ -454,6 +474,10 @@ func TestRollingDataWriterReusesExactBatch(t *testing.T) {
 		},
 	}, metaBuilder, schema, 1024*1024)
 	require.NoError(t, err)
+	wantMapping, err := tblutils.GetFileFormat(iceberg.ParquetFile).PathToIDMapping(schema)
+	require.NoError(t, err)
+	assert.Equal(t, wantMapping, factory.colMapping)
+	assert.Empty(t, factory.variantFieldIDs)
 	format := &captureWriteDataFileFormat{FileFormat: tblutils.GetFileFormat(iceberg.ParquetFile)}
 	factory.format = format
 
