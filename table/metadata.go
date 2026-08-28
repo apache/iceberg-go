@@ -18,7 +18,6 @@
 package table
 
 import (
-	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -1796,9 +1795,6 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := requirePartitionSpecIDsFromMetadata(metadata); err != nil {
-		return nil, err
-	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
 		if errors.Is(err, ErrInvalidMetadata) {
@@ -1826,27 +1822,27 @@ func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) er
 		return nil
 	}
 
-	var specs []json.RawMessage
+	var specs []rawPartitionSpec
 	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
 		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
 	}
-	for i, rawSpec := range specs {
-		var spec map[string]json.RawMessage
-		if err := json.Unmarshal(rawSpec, &spec); err != nil {
-			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
-		}
-		rawID, ok := spec["spec-id"]
-		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+
+	return validatePartitionSpecIDs(specs)
+}
+
+type rawPartitionSpec struct {
+	ID     *int                         `json:"spec-id"`
+	Fields []map[string]json.RawMessage `json:"fields"`
+}
+
+func validatePartitionSpecIDs(specs []rawPartitionSpec) error {
+	for i, spec := range specs {
+		if spec.ID == nil {
 			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
 		}
 	}
 
 	return nil
-}
-
-type rawPartitionSpec struct {
-	ID     int                          `json:"spec-id"`
-	Fields []map[string]json.RawMessage `json:"fields"`
 }
 
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
@@ -1870,6 +1866,9 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 			return nil, err
 		}
 		usesSpecList = true
+		if err := validatePartitionSpecIDs(specs); err != nil {
+			return nil, err
+		}
 	} else if rawFields, ok := metadata["partition-spec"]; ok {
 		var fields []map[string]json.RawMessage
 		if err := json.Unmarshal(rawFields, &fields); err != nil {
