@@ -272,6 +272,53 @@ func TestCommonMetadataPartitionSpecLookupsConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
+// Why: read-only metadata lookups must not rebuild the shared index when
+// partition spec IDs are duplicated in an in-package fixture.
+// Condition: the index contains 64 specs with the same ID and many goroutines
+// repeatedly look up that ID.
+// Assertion: every lookup succeeds and the index remains stable.
+func TestCommonMetadataPartitionSpecIndexDuplicateIDsConcurrent(t *testing.T) {
+	const (
+		specCount      = 64
+		goroutineCount = 8
+		lookupCount    = 1_000
+	)
+	specs := make([]iceberg.PartitionSpec, specCount)
+	for i := range specs {
+		specs[i] = iceberg.NewPartitionSpecID(7)
+	}
+	metadata := &commonMetadata{
+		Specs:              specs,
+		DefaultSpecID:      7,
+		partitionSpecIndex: buildPartitionSpecIndex(specs),
+	}
+	originalIndex := metadata.partitionSpecIndex
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(goroutineCount)
+	for range goroutineCount {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			for range lookupCount {
+				spec := metadata.PartitionSpecByID(7)
+				if spec == nil || spec.ID() != 7 {
+					t.Errorf("expected partition spec 7, got %v", spec)
+
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Same(t, originalIndex, metadata.partitionSpecIndex)
+	assert.Equal(t, specCount, metadata.partitionSpecIndex.sourceCount)
+}
+
 func TestMetadataBuilderPartitionSpecIndexCopyOnWriteConcurrent(t *testing.T) {
 	builderValue := builderWithoutChanges(2)
 	const indexedSpecCount = 1_024
