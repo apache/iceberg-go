@@ -204,8 +204,11 @@ func TestRewriteManifestsClusterBy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, manifests, 2)
 	for _, manifest := range manifests {
-		entries, err := manifest.FetchEntries(fs, true)
-		require.NoError(t, err)
+		entries := make([]iceberg.ManifestEntry, 0)
+		for entry, entryErr := range manifest.Entries(fs, true) {
+			require.NoError(t, entryErr)
+			entries = append(entries, entry)
+		}
 		require.NotEmpty(t, entries)
 
 		want := clusterKey(entries[0].DataFile())
@@ -254,9 +257,12 @@ func TestRewriteManifestsClusterByRollsAtTargetSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, manifests, 3)
 	for _, manifest := range manifests {
-		entries, err := manifest.FetchEntries(fs, true)
-		require.NoError(t, err)
-		assert.Len(t, entries, 1, "target size should roll the single cluster key")
+		entryCount := 0
+		for _, entryErr := range manifest.Entries(fs, true) {
+			require.NoError(t, entryErr)
+			entryCount++
+		}
+		assert.Equal(t, 1, entryCount, "target size should roll the single cluster key")
 	}
 }
 
