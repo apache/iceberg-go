@@ -1,0 +1,224 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package table
+
+import (
+	"encoding/json"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func metadataWithUnreferencedSnapshot(t testing.TB) []byte {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &fields))
+	fields["refs"] = json.RawMessage(`{}`)
+
+	data, err := json.Marshal(fields)
+	require.NoError(t, err)
+
+	return data
+}
+
+func TestParseMetadataBytesDeferredSnapshots(t *testing.T) {
+	data := metadataWithUnreferencedSnapshot(t)
+	eager, err := ParseMetadataBytes(data)
+	require.NoError(t, err)
+	require.Len(t, eager.Snapshots(), 2)
+	historicalID := eager.Snapshots()[0].SnapshotID
+
+	meta, err := ParseMetadataBytesDeferredSnapshots(data)
+	require.NoError(t, err)
+	common := commonMetadataOf(meta)
+	require.NotNil(t, common.deferredSnapshots)
+	require.Len(t, common.SnapshotList, 1)
+	assert.Nil(t, common.deferredSnapshots.snapshots)
+
+	assert.Equal(t, eager.CurrentSnapshot(), meta.CurrentSnapshot())
+	assert.Equal(t, eager.SnapshotByName(MainBranch), meta.SnapshotByName(MainBranch))
+	assert.Nil(t, common.deferredSnapshots.snapshots, "referenced snapshot access must remain eager")
+
+	assert.Equal(t, eager.SnapshotByID(historicalID), meta.SnapshotByID(historicalID))
+	assert.Nil(t, common.deferredSnapshots.snapshots, "historical lookup must decode only the requested snapshot")
+	entry := &common.deferredSnapshots.entries[common.deferredSnapshots.byID[historicalID]]
+	assert.Equal(t, historicalID, entry.snapshot.SnapshotID)
+
+	assert.Len(t, meta.Snapshots(), 2)
+	assert.Len(t, common.deferredSnapshots.snapshots, 2)
+	assert.True(t, eager.Equals(meta))
+}
+
+func TestDeferredSnapshotsMaterializeForCollectionAndSerialization(t *testing.T) {
+	data := metadataWithUnreferencedSnapshot(t)
+	meta, err := ParseMetadataBytesDeferredSnapshots(data)
+	require.NoError(t, err)
+	deferredState := commonMetadataOf(meta).deferredSnapshots
+	require.NotEmpty(t, deferredState.raw)
+
+	serialized, err := json.Marshal(meta)
+	require.NoError(t, err)
+	assert.Nil(t, deferredState.raw)
+	assert.Nil(t, deferredState.entries)
+	assert.Nil(t, deferredState.byID)
+	reparsed, err := ParseMetadataBytes(serialized)
+	require.NoError(t, err)
+	assert.Len(t, reparsed.Snapshots(), 2)
+	assert.Len(t, meta.Snapshots(), 2)
+
+	eager, err := ParseMetadataBytes(data)
+	require.NoError(t, err)
+	eagerBuilder, err := MetadataBuilderFromBase(eager, "")
+	require.NoError(t, err)
+	eagerRebuilt, err := eagerBuilder.Build()
+	require.NoError(t, err)
+
+	deferredForBuilder, err := ParseMetadataBytesDeferredSnapshots(data)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(deferredForBuilder, "")
+	require.NoError(t, err)
+	rebuilt, err := builder.Build()
+	require.NoError(t, err)
+	assert.Equal(t, eagerRebuilt.Snapshots(), rebuilt.Snapshots())
+}
+
+func TestDeferredSnapshotsV1ToV2MaterializesHistory(t *testing.T) {
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV1), &fields))
+	fields["refs"] = json.RawMessage(`{}`)
+	data, err := json.Marshal(fields)
+	require.NoError(t, err)
+
+	deferred, err := ParseMetadataBytesDeferredSnapshots(data)
+	require.NoError(t, err)
+	eager, err := ParseMetadataBytes(data)
+	require.NoError(t, err)
+
+	converted := deferred.(*metadataV1).ToV2()
+	assert.Equal(t, eager.Snapshots(), converted.Snapshots())
+	assert.Nil(t, converted.deferredSnapshots)
+}
+
+func TestDeferredSnapshotGettersReturnDefensiveCopies(t *testing.T) {
+	meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
+	require.NoError(t, err)
+	historicalID := int64(3051729675574597004)
+
+	historical := meta.SnapshotByID(historicalID)
+	require.NotNil(t, historical)
+	historical.ManifestList = "mutated"
+	historical.Summary.Properties["mutated"] = "true"
+
+	all := meta.Snapshots()
+	require.Len(t, all, 2)
+	all[0].ManifestList = "also-mutated"
+
+	unchanged := meta.SnapshotByID(historicalID)
+	require.NotNil(t, unchanged)
+	assert.NotEqual(t, "mutated", unchanged.ManifestList)
+	assert.NotEqual(t, "also-mutated", unchanged.ManifestList)
+	assert.NotContains(t, unchanged.Summary.Properties, "mutated")
+}
+
+func TestDeferredSnapshotsRoundTripAllMetadataVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "v1", data: ExampleTableMetadataV1},
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &fields))
+			fields["refs"] = json.RawMessage(`{}`)
+			data, err := json.Marshal(fields)
+			require.NoError(t, err)
+
+			eager, err := ParseMetadataBytes(data)
+			require.NoError(t, err)
+			deferred, err := ParseMetadataBytesDeferredSnapshots(data)
+			require.NoError(t, err)
+			assert.True(t, eager.Equals(deferred))
+
+			serialized, err := json.Marshal(deferred)
+			require.NoError(t, err)
+			reparsed, err := ParseMetadataBytes(serialized)
+			require.NoError(t, err)
+			assert.True(t, eager.Equals(reparsed))
+		})
+	}
+}
+
+func TestDeferredSnapshotsValidateUnreferencedHistory(t *testing.T) {
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(metadataWithUnreferencedSnapshot(t), &fields))
+
+	var snapshots []map[string]any
+	require.NoError(t, json.Unmarshal(fields["snapshots"], &snapshots))
+	snapshots[0]["summary"] = map[string]any{"operation": "append", "invalid": 1}
+	fields["snapshots"], _ = json.Marshal(snapshots)
+	data, err := json.Marshal(fields)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytesDeferredSnapshots(data)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+}
+
+func TestDeferredSnapshotsConcurrentMaterialization(t *testing.T) {
+	meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
+	require.NoError(t, err)
+	historicalID := int64(3051729675574597004)
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			require.NotNil(t, meta.CurrentSnapshot())
+			require.NotNil(t, meta.SnapshotByID(historicalID))
+			require.Len(t, meta.Snapshots(), 2)
+		}()
+	}
+	wg.Wait()
+}
+
+func TestDeferredSnapshotsConcurrentSingleLookupDoesNotMaterializeHistory(t *testing.T) {
+	meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
+	require.NoError(t, err)
+	historicalID := int64(3051729675574597004)
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			require.Equal(t, historicalID, meta.SnapshotByID(historicalID).SnapshotID)
+		}()
+	}
+	wg.Wait()
+
+	common := commonMetadataOf(meta)
+	assert.Nil(t, common.deferredSnapshots.snapshots)
+	entry := &common.deferredSnapshots.entries[common.deferredSnapshots.byID[historicalID]]
+	assert.Equal(t, historicalID, entry.snapshot.SnapshotID)
+}
