@@ -116,3 +116,31 @@ func TestNewFileWriterCachesGeoNormalizationColumns(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []int{1}, parquetWriter.geoNormalizeCols)
 }
+
+func TestNewFileWriterUsesProvidedSchemaMetadata(t *testing.T) {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+	}, nil)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	colMapping := map[string]int{"provided": 99}
+	variantFieldIDs := map[int]struct{}{99: {}}
+	format := parquetFormat{}
+	writer, err := format.NewFileWriter(context.Background(), iceio.NewMemFS(), nil, WriteFileInfo{
+		FileSchema:      fileSchema,
+		Spec:            *iceberg.UnpartitionedSpec,
+		FileName:        "provided-schema-metadata.parquet",
+		ColMapping:      colMapping,
+		VariantFieldIDs: variantFieldIDs,
+		WriteProps:      format.GetWriteProperties(iceberg.Properties{}),
+	}, arrowSchema)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, writer.Abort()) }()
+
+	parquetWriter, ok := writer.(*ParquetFileWriter)
+	require.True(t, ok)
+	assert.Equal(t, colMapping, parquetWriter.colMapping)
+	assert.Equal(t, variantFieldIDs, parquetWriter.variantFieldIDs)
+	assert.Equal(t, 99, parquetWriter.colMapping["provided"])
+}

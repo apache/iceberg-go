@@ -310,6 +310,10 @@ func NewMetadataBuilder(formatVersion int) (*MetadataBuilder, error) {
 	}, nil
 }
 
+type metadataBuilderSource interface {
+	metadataBuilderCommon() *commonMetadata
+}
+
 // MetadataBuilderFromBase creates a MetadataBuilder from an existing Metadata object.
 // currentFileLocation is the location where the current version of the metadata
 // file is stored. This is used to update the metadata log. If currentFileLocation is
@@ -323,41 +327,84 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 	b.loc = metadata.Location()
 	b.lastUpdatedMS = 0
 	b.lastColumnId = metadata.LastColumnID()
-	b.schemaList = slices.Clone(metadata.Schemas())
-	currentSchema := metadata.CurrentSchema()
-	if currentSchema == nil {
-		return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
-	}
-	b.currentSchemaID = currentSchema.ID
-	b.specs = slices.Clone(metadata.PartitionSpecs())
-	defaultSpecID := metadata.DefaultPartitionSpec()
-	b.defaultSpecID = defaultSpecID
-	b.lastPartitionID = metadata.LastPartitionSpecID()
-	b.props = maps.Clone(metadata.Properties())
-	b.snapshotList = slices.Clone(metadata.Snapshots())
-	b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
-	b.sortOrderList = slices.Clone(metadata.SortOrders())
-	b.defaultSortOrderID = metadata.DefaultSortOrder()
-	if metadata.Version() > 1 {
-		seq := metadata.LastSequenceNumber()
-		b.lastSequenceNumber = &seq
-	}
 
-	if metadata.Version() >= 3 {
-		nextRowID := metadata.NextRowID()
-		b.nextRowID = &nextRowID
-	}
+	if source, ok := metadata.(metadataBuilderSource); ok {
+		common := source.metadataBuilderCommon()
+		if common == nil || !slices.ContainsFunc(common.SchemaList, func(schema *iceberg.Schema) bool {
+			return schema != nil && schema.ID == common.CurrentSchemaID
+		}) {
+			return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+		}
 
-	if metadata.CurrentSnapshot() != nil {
-		b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
+		b.currentSchemaID = common.CurrentSchemaID
+		b.defaultSpecID = metadata.DefaultPartitionSpec()
+		b.defaultSortOrderID = metadata.DefaultSortOrder()
+		b.schemaList = cloneSchemas(common.SchemaList)
+		b.specs = clonePartitionSpecs(common.Specs)
+		b.lastPartitionID = clonePtr(common.LastPartitionID)
+		b.props = maps.Clone(common.Props)
+		if b.props == nil {
+			b.props = iceberg.Properties{}
+		}
+		b.snapshotList = cloneSnapshots(common.SnapshotList)
+		b.snapshotLog = cloneCollected(common.SnapshotLog)
+		b.metadataLog = cloneCollected(common.MetadataLog)
+		b.sortOrderList = cloneSortOrders(common.SortOrderList)
+		b.refs = cloneSnapshotRefs(common.SnapshotRefs)
+		if len(common.StatisticsList) > 0 {
+			b.statisticsList = cloneStatisticsFiles(common.StatisticsList)
+		}
+		b.partitionStatsList = cloneCollected(common.PartitionStatsList)
+		if len(common.EncryptionKeyList) > 0 {
+			b.encryptionKeyList = cloneEncryptionKeys(common.EncryptionKeyList)
+		}
+		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
+		if metadata.Version() > 1 {
+			seq := metadata.LastSequenceNumber()
+			b.lastSequenceNumber = &seq
+		}
+		if metadata.Version() >= 3 {
+			nextRowID := metadata.NextRowID()
+			b.nextRowID = &nextRowID
+		}
+		if common.CurrentSnapshotID != nil {
+			if _, ok := snapshotIndexPosition(common.snapshotIndex, common.SnapshotList, *common.CurrentSnapshotID); ok {
+				b.currentSnapshotID = clonePtr(common.CurrentSnapshotID)
+			}
+		}
+	} else {
+		b.schemaList = slices.Clone(metadata.Schemas())
+		currentSchema := metadata.CurrentSchema()
+		if currentSchema == nil {
+			return nil, fmt.Errorf("%w: current schema is missing", ErrInvalidMetadata)
+		}
+		b.currentSchemaID = currentSchema.ID
+		b.specs = slices.Clone(metadata.PartitionSpecs())
+		b.defaultSpecID = metadata.DefaultPartitionSpec()
+		b.lastPartitionID = metadata.LastPartitionSpecID()
+		b.props = maps.Clone(metadata.Properties())
+		b.snapshotList = slices.Clone(metadata.Snapshots())
+		b.snapshotIndex = buildSnapshotIndex(b.snapshotList)
+		b.sortOrderList = slices.Clone(metadata.SortOrders())
+		b.defaultSortOrderID = metadata.DefaultSortOrder()
+		if metadata.Version() > 1 {
+			seq := metadata.LastSequenceNumber()
+			b.lastSequenceNumber = &seq
+		}
+		if metadata.Version() >= 3 {
+			nextRowID := metadata.NextRowID()
+			b.nextRowID = &nextRowID
+		}
+		if metadata.CurrentSnapshot() != nil {
+			b.currentSnapshotID = &metadata.CurrentSnapshot().SnapshotID
+		}
+		b.refs = maps.Collect(metadata.Refs())
+		b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
+		b.metadataLog = slices.Collect(metadata.PreviousFiles())
+		b.statisticsList = slices.Collect(metadata.Statistics())
+		b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
+		b.encryptionKeyList = slices.Collect(metadata.EncryptionKeys())
 	}
-
-	b.refs = maps.Collect(metadata.Refs())
-	b.snapshotLog = slices.Collect(metadata.SnapshotLogs())
-	b.metadataLog = slices.Collect(metadata.PreviousFiles())
-	b.statisticsList = slices.Collect(metadata.Statistics())
-	b.partitionStatsList = slices.Collect(metadata.PartitionStatistics())
-	b.encryptionKeyList = slices.Collect(metadata.EncryptionKeys())
 
 	if currentFileLocation != "" {
 		b.previousFileEntry = &MetadataLogEntry{
@@ -1913,6 +1960,8 @@ type commonMetadata struct {
 	snapshotIndex *snapshotIndexData
 }
 
+func (c *commonMetadata) metadataBuilderCommon() *commonMetadata { return c }
+
 func initCommonMetadataForDeserialization() commonMetadata {
 	return commonMetadata{
 		// These fields use negative sentinels so validation can distinguish omitted
@@ -2290,6 +2339,27 @@ func cloneSnapshotRef(ref SnapshotRef) SnapshotRef {
 	}
 
 	return clone
+}
+
+func cloneSnapshotRefs(refs map[string]SnapshotRef) map[string]SnapshotRef {
+	if refs == nil {
+		return nil
+	}
+
+	clones := make(map[string]SnapshotRef, len(refs))
+	for name, ref := range refs {
+		clones[name] = cloneSnapshotRef(ref)
+	}
+
+	return clones
+}
+
+func cloneCollected[T any](values []T) []T {
+	if len(values) == 0 {
+		return nil
+	}
+
+	return slices.Clone(values)
 }
 
 func cloneSnapshot(snapshot Snapshot) Snapshot {

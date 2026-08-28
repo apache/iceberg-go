@@ -71,6 +71,28 @@ func BenchmarkPartitionBatchByKey(b *testing.B) {
 	}
 }
 
+func BenchmarkMaterializeDictionaryColumns(b *testing.B) {
+	const rows = 1024
+
+	for _, columns := range []int{1, 8, 64} {
+		record := newPartitionBatchBenchmarkRecord(columns, rows)
+		b.Run(fmt.Sprintf("no_dictionaries_%d_columns", columns), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for b.Loop() {
+				record.Retain()
+				materialized, err := materializeDictionaryColumns(context.Background(), record, arrow.Metadata{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				materialized.Release()
+			}
+		})
+		record.Release()
+	}
+}
+
 func newPartitionBatchBenchmarkRecord(columns, rows int) arrow.RecordBatch {
 	fields := make([]arrow.Field, columns)
 	arrays := make([]arrow.Array, columns)

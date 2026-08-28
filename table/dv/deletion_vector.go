@@ -19,11 +19,14 @@ package dv
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"math"
+	"slices"
 	"strconv"
 
 	"github.com/apache/iceberg-go"
@@ -53,6 +56,10 @@ const (
 	dvMagicSize  = 4 // magic field
 	dvCRCSize    = 4 // CRC-32 checksum
 	dvMinSize    = dvLengthSize + dvMagicSize + dvCRCSize
+
+	// maxCoalescedDVRangeSize caps a range only when it is extended with
+	// another blob. A single blob may still be up to DefaultMaxBlobSize.
+	maxCoalescedDVRangeSize int64 = 8 << 20
 )
 
 // DeserializeDV parses a deletion vector blob and returns a bitmap of deleted positions.
@@ -121,22 +128,42 @@ func DeserializeDV(data []byte, expectedCardinality int64) (*RoaringPositionBitm
 func SerializeDV(bitmap *RoaringPositionBitmap) ([]byte, error) {
 	bitmap.RunLengthEncode()
 
-	var bitmapBuf bytes.Buffer
-	if err := bitmap.Serialize(&bitmapBuf); err != nil {
+	serializedSize := bitmap.serializedSize()
+	innerLen := uint64(dvMagicSize) + serializedSize
+	if innerLen > math.MaxUint32 {
+		return nil, fmt.Errorf("deletion vector payload too large: %d bytes", innerLen)
+	}
+
+	totalSize := uint64(dvLengthSize+dvMagicSize+dvCRCSize) + serializedSize
+	if totalSize > uint64(math.MaxInt) {
+		return nil, fmt.Errorf("deletion vector serialized size %d exceeds maximum supported size %d", totalSize, math.MaxInt)
+	}
+
+	var buf bytes.Buffer
+	buf.Grow(int(totalSize))
+
+	var header [dvLengthSize + dvMagicSize]byte
+	binary.LittleEndian.PutUint32(header[dvLengthSize:], DVMagicNumber)
+	_, _ = buf.Write(header[:])
+
+	if err := bitmap.Serialize(&buf); err != nil {
 		return nil, fmt.Errorf("serialize roaring bitmap: %w", err)
 	}
 
-	bitmapBytes := bitmapBuf.Bytes()
-	innerLen := dvMagicSize + len(bitmapBytes)
-	totalSize := dvLengthSize + innerLen + dvCRCSize
-	out := make([]byte, totalSize)
+	bitmapDataEnd := buf.Len()
+	innerLen = uint64(bitmapDataEnd - dvLengthSize)
+	if innerLen > math.MaxUint32 {
+		return nil, fmt.Errorf("deletion vector payload too large: %d bytes", innerLen)
+	}
 
-	binary.BigEndian.PutUint32(out[0:dvLengthSize], uint32(innerLen))
-	binary.LittleEndian.PutUint32(out[dvLengthSize:dvLengthSize+dvMagicSize], DVMagicNumber)
-	copy(out[dvLengthSize+dvMagicSize:], bitmapBytes)
+	crc := crc32.ChecksumIEEE(buf.Bytes()[dvLengthSize:bitmapDataEnd])
 
-	crc := crc32.ChecksumIEEE(out[dvLengthSize : totalSize-dvCRCSize])
-	binary.BigEndian.PutUint32(out[totalSize-dvCRCSize:], crc)
+	var trailer [dvCRCSize]byte
+	binary.BigEndian.PutUint32(trailer[:], crc)
+	_, _ = buf.Write(trailer[:])
+
+	out := buf.Bytes()
+	binary.BigEndian.PutUint32(out[:dvLengthSize], uint32(innerLen))
 
 	return out, nil
 }
@@ -227,7 +254,14 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 	defer f.Close()
 
 	blobsByOffset := indexBlobMetadataByOffset(reader.Blobs())
-	bitmaps := make([]*RoaringPositionBitmap, len(dvFiles))
+	type dvBlobRead struct {
+		index               int
+		blob                puffin.BlobMetadata
+		offset              int64
+		manifestCardinality int64
+	}
+
+	reads := make([]dvBlobRead, len(dvFiles))
 	for i, dvFile := range dvFiles {
 		_, _, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(dvFile)
 		offset, size := *contentOffset, *contentSize
@@ -235,10 +269,59 @@ func ReadDVs(fs iceio.IO, dvFiles []iceberg.DataFile) ([]*RoaringPositionBitmap,
 		if err != nil {
 			return nil, fmt.Errorf("%w: DV file %s: %w", ErrInvalidDeletionVector, dvFile.FilePath(), err)
 		}
-		bitmaps[i], err = readDV(reader, blob, dvFile, offset, manifestReferencedDataFile)
+
+		manifestCardinality, err := validateDVBlobMetadata(blob, dvFile, offset, manifestReferencedDataFile)
 		if err != nil {
 			return nil, err
 		}
+
+		reads[i] = dvBlobRead{
+			index:               i,
+			blob:                blob,
+			offset:              offset,
+			manifestCardinality: manifestCardinality,
+		}
+	}
+
+	slices.SortFunc(reads, func(a, b dvBlobRead) int {
+		return cmp.Compare(a.offset, b.offset)
+	})
+
+	bitmaps := make([]*RoaringPositionBitmap, len(dvFiles))
+	for start := 0; start < len(reads); {
+		end := start + 1
+		rangeStart := reads[start].offset
+		rangeEnd := rangeStart + reads[start].blob.Length
+
+		for end < len(reads) {
+			next := reads[end]
+			nextEnd := next.offset + next.blob.Length
+			// Only coalesce contiguous or overlapping blobs. Gaps are left as
+			// separate reads so the range does not fetch unrelated bytes.
+			if next.offset > rangeEnd || nextEnd-rangeStart > maxCoalescedDVRangeSize {
+				break
+			}
+
+			rangeEnd = max(rangeEnd, nextEnd)
+			end++
+		}
+
+		rangeData := make([]byte, rangeEnd-rangeStart)
+		if _, err := reader.ReadAt(rangeData, rangeStart); err != nil {
+			return nil, fmt.Errorf("read DV blob range at offset %d: %w", rangeStart, err)
+		}
+
+		for _, read := range reads[start:end] {
+			blobStart := read.offset - rangeStart
+			blobEnd := blobStart + read.blob.Length
+			bitmap, err := DeserializeDV(rangeData[blobStart:blobEnd], read.manifestCardinality)
+			if err != nil {
+				return nil, fmt.Errorf("deserialize DV blob at offset %d: %w", read.offset, err)
+			}
+			bitmaps[read.index] = bitmap
+		}
+
+		start = end
 	}
 
 	return bitmaps, nil
@@ -282,22 +365,36 @@ func openDVReader(fs iceio.IO, filePath string) (*puffin.Reader, iceio.File, err
 }
 
 func readDV(reader *puffin.Reader, blob puffin.BlobMetadata, dvFile iceberg.DataFile, offset int64, manifestReferencedDataFile *string) (*RoaringPositionBitmap, error) {
+	manifestCardinality, err := validateDVBlobMetadata(blob, dvFile, offset, manifestReferencedDataFile)
+	if err != nil {
+		return nil, err
+	}
+
+	blobData := make([]byte, blob.Length)
+	if _, err := reader.ReadAt(blobData, offset); err != nil {
+		return nil, fmt.Errorf("read DV blob at offset %d: %w", offset, err)
+	}
+
+	return DeserializeDV(blobData, manifestCardinality)
+}
+
+func validateDVBlobMetadata(blob puffin.BlobMetadata, dvFile iceberg.DataFile, offset int64, manifestReferencedDataFile *string) (int64, error) {
 	if blob.Type != puffin.BlobTypeDeletionVector {
-		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d has type %q, expected %q", ErrInvalidDeletionVector,
+		return 0, fmt.Errorf("%w: DV file %s: blob at offset %d has type %q, expected %q", ErrInvalidDeletionVector,
 			dvFile.FilePath(), offset, blob.Type, puffin.BlobTypeDeletionVector)
 	}
 	if blob.CompressionCodec != nil && *blob.CompressionCodec != "" {
-		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d uses unsupported compression codec %q",
+		return 0, fmt.Errorf("%w: DV file %s: blob at offset %d uses unsupported compression codec %q",
 			ErrInvalidDeletionVector, dvFile.FilePath(), offset, *blob.CompressionCodec)
 	}
 
 	referencedDataFile, ok := blob.Properties[dvReferencedDataFileProperty]
 	if !ok || referencedDataFile == "" {
-		return nil, fmt.Errorf("%w: DV file %s: blob at offset %d missing or empty %s property", ErrInvalidDeletionVector,
+		return 0, fmt.Errorf("%w: DV file %s: blob at offset %d missing or empty %s property", ErrInvalidDeletionVector,
 			dvFile.FilePath(), offset, dvReferencedDataFileProperty)
 	}
 	if referencedDataFile != *manifestReferencedDataFile {
-		return nil, fmt.Errorf("%w: DV file %s: manifest referenced_data_file %q does not match puffin %s %q", ErrInvalidDeletionVector,
+		return 0, fmt.Errorf("%w: DV file %s: manifest referenced_data_file %q does not match puffin %s %q", ErrInvalidDeletionVector,
 			dvFile.FilePath(), *manifestReferencedDataFile, dvReferencedDataFileProperty, referencedDataFile)
 	}
 
@@ -310,7 +407,7 @@ func readDV(reader *puffin.Reader, blob puffin.BlobMetadata, dvFile iceberg.Data
 	// mandated property; when present it is a second source to cross-check.
 	puffinCardinality, hasPuffinCardinality, err := blobCardinality(blob)
 	if err != nil {
-		return nil, fmt.Errorf("DV file %s: %w", dvFile.FilePath(), err)
+		return 0, fmt.Errorf("DV file %s: %w", dvFile.FilePath(), err)
 	}
 
 	// When both sources are available they must agree. A disagreement means a
@@ -318,7 +415,7 @@ func readDV(reader *puffin.Reader, blob puffin.BlobMetadata, dvFile iceberg.Data
 	// (e.g. a stale record_count after an incremental merge against a freshly
 	// written blob) — fail fast rather than silently trusting one over the other.
 	if hasPuffinCardinality && manifestCardinality != puffinCardinality {
-		return nil, fmt.Errorf("DV file %s: manifest record_count %d disagrees with puffin cardinality property %d",
+		return 0, fmt.Errorf("DV file %s: manifest record_count %d disagrees with puffin cardinality property %d",
 			dvFile.FilePath(), manifestCardinality, puffinCardinality)
 	}
 
@@ -331,15 +428,7 @@ func readDV(reader *puffin.Reader, blob puffin.BlobMetadata, dvFile iceberg.Data
 			"dv_file", dvFile.FilePath(), "offset", offset)
 	}
 
-	blobData := make([]byte, blob.Length)
-	if _, err := reader.ReadAt(blobData, offset); err != nil {
-		return nil, fmt.Errorf("read DV blob at offset %d: %w", offset, err)
-	}
-
-	// Validate the decoded bitmap against the manifest record_count (always
-	// present, including zero). When the puffin property is present it has
-	// already been confirmed to agree with this value above.
-	return DeserializeDV(blobData, manifestCardinality)
+	return manifestCardinality, nil
 }
 
 func indexBlobMetadataByOffset(blobs []puffin.BlobMetadata) map[int64]puffin.BlobMetadata {

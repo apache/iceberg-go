@@ -405,6 +405,15 @@ func TestTruncateVariantBound(t *testing.T) {
 			wantUpper: strings.Repeat("a", 7) + "b",
 		},
 		{
+			name:      "unicode string truncates at rune boundaries",
+			typ:       iceberg.PrimitiveTypes.String,
+			lower:     iceberg.NewLiteral("ééé"),
+			upper:     iceberg.NewLiteral("ééé"),
+			truncLen:  2,
+			wantLower: "éé",
+			wantUpper: "éê",
+		},
+		{
 			name:      "string upper dropped when it cannot be incremented",
 			typ:       iceberg.PrimitiveTypes.String,
 			lower:     iceberg.NewLiteral(strings.Repeat("\U0010FFFF", 40)),
