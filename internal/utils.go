@@ -178,18 +178,24 @@ func (s *SlicePacker[T]) Pack(items []T, weightFunc func(T) int64) [][]T {
 }
 
 func (s *SlicePacker[T]) PackEnd(items []T, weightFunc func(T) int64) [][]T {
-	items = slices.Clone(items)
-	slices.Reverse(items)
-	packed := s.Pack(items, weightFunc)
+	packed := slices.Collect(PackingIterator(func(yield func(T) bool) {
+		for i := len(items); i > 0; i-- {
+			if !yield(items[i-1]) {
+				return
+			}
+		}
+	}, s.TargetWeight, s.Lookback, weightFunc, s.LargestBinFirst))
 	slices.Reverse(packed)
 
-	result := make([][]T, 0, len(packed))
 	for _, items := range packed {
 		slices.Reverse(items)
-		result = append(result, items)
 	}
 
-	return result
+	if packed == nil {
+		return make([][]T, 0)
+	}
+
+	return packed
 }
 
 type CountingWriter struct {
