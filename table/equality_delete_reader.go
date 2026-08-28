@@ -93,6 +93,54 @@ func indexArrowFields(schema *iceberg.Schema) arrowFieldRefsByID {
 	return refs
 }
 
+type requestedArrowFieldResolver struct {
+	requested map[int]struct{}
+	refs      arrowFieldRefsByID
+	path      []int
+	pathBuf   [8]int
+}
+
+func (r *requestedArrowFieldResolver) visit(fields []iceberg.NestedField) {
+	for i, field := range fields {
+		parentLen := len(r.path)
+		r.path = append(r.path, i)
+
+		if _, ok := r.requested[field.ID]; ok {
+			r.refs[field.ID] = append(r.refs[field.ID], arrowFieldRef{path: slices.Clone(r.path)})
+		}
+
+		if nested, ok := field.Type.(*iceberg.StructType); ok {
+			r.visit(nested.FieldList)
+		}
+
+		r.path = r.path[:parentLen]
+	}
+}
+
+// resolveArrowFieldsByID resolves paths only for the requested field IDs.
+// It walks the schema using borrowed fields and keeps one reusable path stack,
+// copying a path only when it matches an equality field.
+func resolveArrowFieldsByID(schema *iceberg.Schema, fieldIDs []int) arrowFieldRefsByID {
+	refs := make(arrowFieldRefsByID, len(fieldIDs))
+	if schema == nil || len(fieldIDs) == 0 {
+		return refs
+	}
+
+	requested := make(map[int]struct{}, len(fieldIDs))
+	for _, fieldID := range fieldIDs {
+		requested[fieldID] = struct{}{}
+	}
+
+	resolver := requestedArrowFieldResolver{
+		requested: requested,
+		refs:      refs,
+	}
+	resolver.path = resolver.pathBuf[:0]
+	resolver.visit(schema.FieldsRef(iceinternal.SchemaRef{}))
+
+	return refs
+}
+
 // indexArrowFieldsByMetadata is used for delete files whose Arrow fields carry
 // IDs directly, before any name mapping is needed.
 func indexArrowFieldsByMetadata(schema *arrow.Schema) arrowFieldRefsByID {
@@ -111,6 +159,61 @@ func indexArrowFieldsByMetadata(schema *arrow.Schema) arrowFieldRefsByID {
 		}
 	}
 	visit(schema.Fields(), nil)
+
+	return refs
+}
+
+type requestedArrowMetadataFieldResolver struct {
+	requested map[int]struct{}
+	refs      arrowFieldRefsByID
+	path      []int
+	pathBuf   [8]int
+}
+
+func (r *requestedArrowMetadataFieldResolver) visitField(field arrow.Field, index int) {
+	parentLen := len(r.path)
+	r.path = append(r.path, index)
+
+	if id := getFieldID(field); id != nil {
+		if _, ok := r.requested[*id]; ok {
+			r.refs[*id] = append(r.refs[*id], arrowFieldRef{path: slices.Clone(r.path)})
+		}
+	}
+
+	if nested, ok := field.Type.(*arrow.StructType); ok {
+		r.visitStruct(nested)
+	}
+
+	r.path = r.path[:parentLen]
+}
+
+func (r *requestedArrowMetadataFieldResolver) visitStruct(schema *arrow.StructType) {
+	for i := range schema.NumFields() {
+		r.visitField(schema.Field(i), i)
+	}
+}
+
+// resolveArrowFieldsByMetadata resolves paths only for requested field IDs in
+// an Arrow schema whose fields carry Iceberg IDs in metadata.
+func resolveArrowFieldsByMetadata(schema *arrow.Schema, fieldIDs []int) arrowFieldRefsByID {
+	refs := make(arrowFieldRefsByID, len(fieldIDs))
+	if schema == nil || len(fieldIDs) == 0 {
+		return refs
+	}
+
+	requested := make(map[int]struct{}, len(fieldIDs))
+	for _, fieldID := range fieldIDs {
+		requested[fieldID] = struct{}{}
+	}
+
+	resolver := requestedArrowMetadataFieldResolver{
+		requested: requested,
+		refs:      refs,
+	}
+	resolver.path = resolver.pathBuf[:0]
+	for i := range schema.NumFields() {
+		resolver.visitField(schema.Field(i), i)
+	}
 
 	return refs
 }
@@ -448,9 +551,9 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 
 	var fieldRefsByID arrowFieldRefsByID
 	if hasFieldIDs {
-		fieldRefsByID = indexArrowFieldsByMetadata(projectedSchema)
+		fieldRefsByID = resolveArrowFieldsByMetadata(projectedSchema, fieldIDs)
 	} else {
-		fieldRefsByID = indexArrowFields(fileSchema)
+		fieldRefsByID = resolveArrowFieldsByID(fileSchema, fieldIDs)
 	}
 
 	// Resolve projected field paths from field IDs.
@@ -792,14 +895,25 @@ func makeColEncoder(arr arrow.Array) colEncoder {
 // switches. Each delete set is applied independently because sets may have
 // different field IDs.
 func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*equalityDeleteSet, fileSchema *iceberg.Schema, dataFilePath string) (recProcessFn, error) {
-	fieldRefsByID := indexArrowFields(fileSchema)
-	fieldRefs := make([][]arrowFieldRef, len(eqDeleteSets))
-	for i, eqDel := range eqDeleteSets {
+	requestedFieldIDs := make([]int, 0)
+	requestedFieldIDSet := make(map[int]struct{})
+	for _, eqDel := range eqDeleteSets {
 		if len(eqDel.fieldIDs) != len(eqDel.colNames) {
 			return nil, fmt.Errorf("%w: equality delete set has %d field IDs and %d column names",
 				iceberg.ErrInvalidArgument, len(eqDel.fieldIDs), len(eqDel.colNames))
 		}
 
+		for _, fieldID := range eqDel.fieldIDs {
+			if _, ok := requestedFieldIDSet[fieldID]; !ok {
+				requestedFieldIDSet[fieldID] = struct{}{}
+				requestedFieldIDs = append(requestedFieldIDs, fieldID)
+			}
+		}
+	}
+
+	fieldRefsByID := resolveArrowFieldsByID(fileSchema, requestedFieldIDs)
+	fieldRefs := make([][]arrowFieldRef, len(eqDeleteSets))
+	for i, eqDel := range eqDeleteSets {
 		fieldRefs[i] = make([]arrowFieldRef, len(eqDel.fieldIDs))
 		for fieldIdx, fieldID := range eqDel.fieldIDs {
 			ref, err := resolveArrowField(fieldRefsByID, fieldID, eqDel.colNames[fieldIdx], dataFilePath)

@@ -278,6 +278,12 @@ func (s *Schema) asStructRef() StructType { return StructType{FieldList: s.field
 func (s *Schema) NumFields() int          { return len(s.fields) }
 func (s *Schema) Field(i int) NestedField { return cloneField(s.fields[i]) }
 func (s *Schema) Fields() []NestedField   { return cloneFields(s.fields) }
+
+// FieldsRef returns the schema-owned fields for trusted internal callers.
+// The returned slice and everything reachable through the fields must be
+// treated as read-only.
+func (s *Schema) FieldsRef(_ internal.SchemaRef) []NestedField { return s.fields }
+
 func (s *Schema) FieldIDs() []int {
 	idx, _ := s.lazyNameToID()
 

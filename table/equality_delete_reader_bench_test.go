@@ -324,3 +324,109 @@ func BenchmarkProcessEqualityDeletesNoMatchInt(b *testing.B) {
 func BenchmarkProcessEqualityDeletesNoMatchString(b *testing.B) {
 	benchEqDeletesForFile(b, buildBenchRecordString, buildBenchDeleteSetStringNoMatch, benchStringFileSchema())
 }
+
+func BenchmarkResolveEqualityDeleteFieldPaths(b *testing.B) {
+	for _, fieldCount := range []int{32, 256, 2_048} {
+		for _, keySize := range []int{1, 2, 8} {
+			for _, position := range []string{"front", "middle", "end"} {
+				b.Run(fmt.Sprintf("fields=%d/key=%d/position=%s", fieldCount, keySize, position), func(b *testing.B) {
+					schema := benchmarkEqualityDeleteSchema(fieldCount)
+					fieldIDs := benchmarkEqualityDeleteFieldIDs(fieldCount, keySize, position)
+
+					b.ReportAllocs()
+					b.ReportMetric(float64(fieldCount), "schema_fields")
+					b.ReportMetric(float64(keySize), "equality_fields")
+					b.ResetTimer()
+
+					for b.Loop() {
+						refs := resolveArrowFieldsByID(schema, fieldIDs)
+						metadataBuilderBenchmarkSink = len(refs) + len(refs[fieldIDs[0]])
+					}
+				})
+			}
+		}
+	}
+}
+
+func BenchmarkResolveEqualityDeleteNestedFieldPaths(b *testing.B) {
+	schema, fieldID := benchmarkNestedEqualityDeleteSchema(8, 3)
+	fieldIDs := []int{fieldID}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		refs := resolveArrowFieldsByID(schema, fieldIDs)
+		metadataBuilderBenchmarkSink = len(refs) + len(refs[fieldID][0].path)
+	}
+}
+
+func benchmarkEqualityDeleteSchema(fieldCount int) *iceberg.Schema {
+	fields := make([]iceberg.NestedField, fieldCount)
+	for i := range fields {
+		fields[i] = iceberg.NestedField{
+			ID:       i + 1,
+			Name:     fmt.Sprintf("field_%d", i+1),
+			Type:     iceberg.PrimitiveTypes.Int64,
+			Required: true,
+		}
+	}
+
+	return iceberg.NewSchema(0, fields...)
+}
+
+func benchmarkEqualityDeleteFieldIDs(fieldCount, keySize int, position string) []int {
+	start := 1
+	switch position {
+	case "middle":
+		start = (fieldCount-keySize)/2 + 1
+	case "end":
+		start = fieldCount - keySize + 1
+	}
+
+	fieldIDs := make([]int, keySize)
+	for i := range fieldIDs {
+		fieldIDs[i] = start + i
+	}
+
+	return fieldIDs
+}
+
+func benchmarkNestedEqualityDeleteSchema(width, depth int) (*iceberg.Schema, int) {
+	nextID := 1
+	lastLeafID := 0
+	var buildStruct func(int) *iceberg.StructType
+	buildStruct = func(level int) *iceberg.StructType {
+		fields := make([]iceberg.NestedField, width)
+		for i := range fields {
+			fieldID := nextID
+			nextID++
+			field := iceberg.NestedField{
+				ID:   fieldID,
+				Name: fmt.Sprintf("nested_%d", fieldID),
+			}
+			if level == 0 {
+				field.Type = iceberg.PrimitiveTypes.Int64
+				lastLeafID = fieldID
+			} else {
+				field.Type = buildStruct(level - 1)
+			}
+			fields[i] = field
+		}
+
+		return &iceberg.StructType{FieldList: fields}
+	}
+
+	fields := make([]iceberg.NestedField, width)
+	for i := range fields {
+		fieldID := nextID
+		nextID++
+		fields[i] = iceberg.NestedField{
+			ID:   fieldID,
+			Name: fmt.Sprintf("root_%d", fieldID),
+			Type: buildStruct(depth - 1),
+		}
+	}
+
+	return iceberg.NewSchema(0, fields...), lastLeafID
+}
