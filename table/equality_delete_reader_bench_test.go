@@ -38,8 +38,19 @@ import (
 )
 
 func BenchmarkReadEqualityDeleteFile(b *testing.B) {
-	for _, numRows := range []int{10_000, 100_000} {
-		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
+	for _, benchmarkCase := range []struct {
+		name       string
+		numRows    int
+		uniqueRows int
+	}{
+		{name: "unique", numRows: 10_000, uniqueRows: 10_000},
+		{name: "duplicate-heavy", numRows: 10_000, uniqueRows: 100},
+		{name: "unique", numRows: 100_000, uniqueRows: 100_000},
+		{name: "duplicate-heavy", numRows: 100_000, uniqueRows: 100},
+	} {
+		b.Run(fmt.Sprintf("rows=%d/%s", benchmarkCase.numRows, benchmarkCase.name), func(b *testing.B) {
+			numRows := benchmarkCase.numRows
+			uniqueRows := benchmarkCase.uniqueRows
 			tableSchema := iceberg.NewSchema(0,
 				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
@@ -58,8 +69,9 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 			payloadBuilder := builder.Field(2).(*array.StringBuilder)
 			payload := strings.Repeat("payload-", 64)
 			for i := range numRows {
-				idBuilder.Append(int64(i))
-				nameBuilder.Append(fmt.Sprintf("user-%08d", i))
+				key := i % uniqueRows
+				idBuilder.Append(int64(key))
+				nameBuilder.Append(fmt.Sprintf("user-%08d", key))
 				payloadBuilder.Append(payload)
 			}
 			rec := builder.NewRecordBatch()
@@ -105,8 +117,8 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 						if err != nil {
 							b.Fatal(err)
 						}
-						if len(keys) != numRows {
-							b.Fatalf("got %d keys, want %d", len(keys), numRows)
+						if len(keys) != uniqueRows {
+							b.Fatalf("got %d keys, want %d", len(keys), uniqueRows)
 						}
 					}
 				})

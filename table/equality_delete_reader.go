@@ -480,7 +480,7 @@ func readEqualityDeleteFile(ctx context.Context, fs iceio.IO, tableSchema *icebe
 	}
 	defer recRdr.Release()
 
-	keys = make(set[string])
+	keys = make(set[string], min(dataFile.Count(), int64(16384)))
 	var keyBuf bytes.Buffer
 
 	for recRdr.Next() {
