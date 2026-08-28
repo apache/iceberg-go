@@ -901,16 +901,6 @@ func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, t
 	return nil
 }
 
-func addEqualityDeleteFieldIDs(invariants *arrowScanInvariants, eqDeleteSets map[int][]*equalityDeleteSet) {
-	for _, deleteSets := range eqDeleteSets {
-		for _, deleteSet := range deleteSets {
-			for _, id := range deleteSet.fieldIDs {
-				invariants.projectedIDs[id] = struct{}{}
-			}
-		}
-	}
-}
-
 type enumeratedRecord struct {
 	Record tblutils.Enumerated[arrow.RecordBatch]
 	Task   tblutils.Enumerated[FileScanTask]
@@ -1799,59 +1789,78 @@ func createIterator(ctx context.Context, numWorkers uint, records <-chan enumera
 	}
 }
 
-func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, eqDeleteSets map[int][]*equalityDeleteSet, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
-	extSet := substrait.NewExtensionSet()
+func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks []FileScanTask, deletesPerFile perFilePosDeletes, dvBitmaps perFileDVBitmaps, equalityDeleteLoader *lazyEqualityDeleteLoader, invariants *arrowScanInvariants) iter.Seq2[arrow.RecordBatch, error] {
+	return func(yield func(arrow.RecordBatch, error) bool) {
+		extSet := substrait.NewExtensionSet()
 
-	ctx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
-	taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
+		scanCtx, cancel := context.WithCancelCause(exprs.WithExtensionIDSet(ctx, extSet))
+		taskChan := make(chan tblutils.Enumerated[FileScanTask], len(tasks))
 
-	// numWorkers := 1
-	numWorkers := min(as.concurrency, len(tasks))
-	records := make(chan enumeratedRecord, numWorkers)
+		// numWorkers := 1
+		numWorkers := min(as.concurrency, len(tasks))
+		records := make(chan enumeratedRecord, numWorkers)
 
-	var wg sync.WaitGroup
-	wg.Add(numWorkers)
-	for range numWorkers {
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		for range numWorkers {
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-scanCtx.Done():
+						return
+					case task, ok := <-taskChan:
+						if !ok {
+							return
+						}
+						if scanCtx.Err() != nil {
+							return
+						}
+
+						filePath := task.Value.File.FilePath()
+						eqDeleteSets, err := equalityDeleteLoader.load(scanCtx, task.Value)
+						if err != nil {
+							records <- enumeratedRecord{Task: task, Err: err}
+							cancel(err)
+
+							return
+						}
+
+						if err := as.recordsFromTask(scanCtx, task, records,
+							deletesPerFile[filePath],
+							dvBitmaps[filePath],
+							eqDeleteSets,
+							invariants); err != nil {
+							cancel(err)
+
+							return
+						}
+					}
+				}
+			}()
+		}
+
 		go func() {
-			defer wg.Done()
-			for {
+			defer func() {
+				close(taskChan)
+				wg.Wait()
+				close(records)
+			}()
+
+			for i, t := range tasks {
 				select {
-				case <-ctx.Done():
+				case <-scanCtx.Done():
 					return
-				case task, ok := <-taskChan:
-					if !ok {
-						return
-					}
-
-					filePath := task.Value.File.FilePath()
-					if err := as.recordsFromTask(ctx, task, records,
-						deletesPerFile[filePath],
-						dvBitmaps[filePath],
-						eqDeleteSets[task.Index],
-						invariants); err != nil {
-						cancel(err)
-
-						return
-					}
+				case taskChan <- tblutils.Enumerated[FileScanTask]{
+					Value: t, Index: i, Last: i == len(tasks)-1,
+				}:
 				}
 			}
 		}()
+
+		createIterator(scanCtx, uint(numWorkers), records, deletesPerFile,
+			cancel, as.rowLimit)(yield)
 	}
-
-	go func() {
-		for i, t := range tasks {
-			taskChan <- tblutils.Enumerated[FileScanTask]{
-				Value: t, Index: i, Last: i == len(tasks)-1,
-			}
-		}
-		close(taskChan)
-
-		wg.Wait()
-		close(records)
-	}()
-
-	return createIterator(ctx, uint(numWorkers), records, deletesPerFile,
-		cancel, as.rowLimit)
 }
 
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
@@ -1905,15 +1914,15 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		return nil, nil, err
 	}
 
-	eqDeleteSets, err := readAllEqualityDeleteFiles(ctx, as.fs,
-		invariants.tableSchema, invariants.nameMapping, tasks, as.concurrency)
+	equalityDeleteLoader, err := newLazyEqualityDeleteLoader(
+		as.fs, invariants.tableSchema, invariants.nameMapping, tasks)
 	if err != nil {
-		// Positional deletes were fully loaded; release them before aborting.
 		releasePerFilePosDeletes(deletesPerFile)
 
 		return nil, nil, err
 	}
-	addEqualityDeleteFieldIDs(invariants, eqDeleteSets)
+	equalityDeleteLoader.addFieldIDs(invariants.projectedIDs)
 
-	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks, deletesPerFile, dvBitmaps, eqDeleteSets, invariants), nil
+	return resultSchema, as.recordBatchesFromTasksAndDeletes(ctx, tasks,
+		deletesPerFile, dvBitmaps, equalityDeleteLoader, invariants), nil
 }

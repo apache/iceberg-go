@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"unsafe"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -198,6 +199,176 @@ func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDel
 	}
 }
 
+type lazyEqualityDeleteLoader struct {
+	fs           iceio.IO
+	tableSchema  *iceberg.Schema
+	nameMapping  iceberg.NameMapping
+	files        map[string]*lazyEqualityDeleteFile
+	combinations sync.Map
+}
+
+type lazyEqualityDeleteFile struct {
+	id       int
+	dataFile iceberg.DataFile
+	fieldIDs []int
+
+	once sync.Once
+	set  *equalityDeleteFileSet
+	err  error
+}
+
+type lazyEqualityDeleteCombination struct {
+	once sync.Once
+	set  *equalityDeleteSet
+}
+
+func newLazyEqualityDeleteLoader(
+	fs iceio.IO,
+	tableSchema *iceberg.Schema,
+	nameMapping iceberg.NameMapping,
+	tasks []FileScanTask,
+) (*lazyEqualityDeleteLoader, error) {
+	loader := &lazyEqualityDeleteLoader{
+		fs:          fs,
+		tableSchema: tableSchema,
+		nameMapping: nameMapping,
+		files:       make(map[string]*lazyEqualityDeleteFile),
+	}
+
+	for _, task := range tasks {
+		for _, dataFile := range task.EqualityDeleteFiles {
+			if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
+				continue
+			}
+
+			fieldIDs := dataFile.EqualityFieldIDs()
+			if len(fieldIDs) == 0 {
+				return nil, fmt.Errorf("%w: equality delete file %s", ErrEmptyEqualityFieldIDs, dataFile.FilePath())
+			}
+
+			path := dataFile.FilePath()
+			if _, ok := loader.files[path]; ok {
+				continue
+			}
+
+			loader.files[path] = &lazyEqualityDeleteFile{
+				id:       len(loader.files),
+				dataFile: dataFile,
+				fieldIDs: fieldIDs,
+			}
+		}
+	}
+
+	if len(loader.files) == 0 {
+		return nil, nil
+	}
+
+	return loader, nil
+}
+
+func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
+	if l == nil {
+		return
+	}
+
+	for _, file := range l.files {
+		for _, fieldID := range file.fieldIDs {
+			idset[fieldID] = struct{}{}
+		}
+	}
+}
+
+func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqualityDeleteFile) (*equalityDeleteFileSet, error) {
+	file.once.Do(func() {
+		keys, colNames, err := readEqualityDeleteFile(
+			ctx, l.fs, l.tableSchema, l.nameMapping, file.dataFile, file.fieldIDs)
+		if err != nil {
+			file.err = err
+
+			return
+		}
+
+		file.set = newEqualityDeleteFileSet(file.id, &equalityDeleteSet{
+			fieldIDs: file.fieldIDs,
+			colNames: colNames,
+			keys:     keys,
+		})
+	})
+
+	return file.set, file.err
+}
+
+func (l *lazyEqualityDeleteLoader) combine(files []*equalityDeleteFileSet) *equalityDeleteSet {
+	files = normalizeEqualityDeleteFiles(files)
+	if len(files) == 1 {
+		return files[0].equalityDeleteSet
+	}
+
+	key := equalityDeleteSetCombinationKey(files)
+	entryValue, _ := l.combinations.LoadOrStore(key, &lazyEqualityDeleteCombination{})
+	entry := entryValue.(*lazyEqualityDeleteCombination)
+	entry.once.Do(func() {
+		entry.set = mergeEqualityDeleteSets(files)
+	})
+
+	return entry.set
+}
+
+func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) ([]*equalityDeleteSet, error) {
+	if l == nil || len(task.EqualityDeleteFiles) == 0 {
+		return nil, nil
+	}
+	if len(task.EqualityDeleteFiles) == 1 {
+		dataFile := task.EqualityDeleteFiles[0]
+		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
+			return nil, nil
+		}
+
+		file, ok := l.files[dataFile.FilePath()]
+		if !ok {
+			return nil, nil
+		}
+
+		fileSet, err := l.loadFile(ctx, file)
+		if err != nil {
+			return nil, err
+		}
+		if len(fileSet.keys) == 0 {
+			return nil, nil
+		}
+		return []*equalityDeleteSet{fileSet.equalityDeleteSet}, nil
+	}
+
+	perFile := make(map[string]*equalityDeleteFileSet, len(task.EqualityDeleteFiles))
+	for _, dataFile := range task.EqualityDeleteFiles {
+		if dataFile.ContentType() != iceberg.EntryContentEqDeletes {
+			continue
+		}
+
+		path := dataFile.FilePath()
+		if _, seen := perFile[path]; seen {
+			continue
+		}
+
+		file, ok := l.files[path]
+		if !ok {
+			continue
+		}
+
+		fileSet, err := l.loadFile(ctx, file)
+		if err != nil {
+			return nil, err
+		}
+		perFile[path] = fileSet
+	}
+
+	if len(perFile) == 0 {
+		return nil, nil
+	}
+
+	return buildEqualityDeleteSetsForTask(task, perFile, l.combine), nil
+}
+
 // readAllEqualityDeleteFiles reads all unique equality delete files from
 // the tasks and builds per-task delete key sets. Returns nil if there are
 // no equality deletes. Delete files with different equality field IDs are
@@ -301,59 +472,12 @@ func buildEqualityDeleteSetsPerTask(
 	// File IDs are sufficient as the cache key because each ID identifies one
 	// immutable delete set with a fixed equality-field group for this call.
 	sharedSets := make(map[string]*equalityDeleteSet)
+	combine := func(files []*equalityDeleteFileSet) *equalityDeleteSet {
+		return equalityDeleteSetForFiles(files, sharedSets)
+	}
+
 	for i, t := range tasks {
-		if len(t.EqualityDeleteFiles) == 0 {
-			continue
-		}
-
-		var (
-			groupKey   string
-			groupFiles []*equalityDeleteFileSet
-			groups     map[string][]*equalityDeleteFileSet
-		)
-
-		for _, d := range t.EqualityDeleteFiles {
-			dk, ok := perFile[d.FilePath()]
-			if !ok {
-				continue
-			}
-
-			if groups != nil {
-				groups[dk.groupKey] = append(groups[dk.groupKey], dk)
-			} else if len(groupFiles) == 0 {
-				groupKey = dk.groupKey
-				groupFiles = append(groupFiles, dk)
-			} else if dk.groupKey != groupKey {
-				groups = make(map[string][]*equalityDeleteFileSet, 2)
-				groups[groupKey] = groupFiles
-				groupFiles = nil
-				groups[dk.groupKey] = append(groups[dk.groupKey], dk)
-			} else {
-				groupFiles = append(groupFiles, dk)
-			}
-		}
-
-		if groups == nil {
-			if len(groupFiles) == 0 {
-				continue
-			}
-
-			deleteSet := equalityDeleteSetForFiles(groupFiles, sharedSets)
-			if len(deleteSet.keys) > 0 {
-				perTask[i] = []*equalityDeleteSet{deleteSet}
-			}
-
-			continue
-		}
-
-		sets := make([]*equalityDeleteSet, 0, len(groups))
-		for _, files := range groups {
-			deleteSet := equalityDeleteSetForFiles(files, sharedSets)
-			if len(deleteSet.keys) > 0 {
-				sets = append(sets, deleteSet)
-			}
-		}
-
+		sets := buildEqualityDeleteSetsForTask(t, perFile, combine)
 		if len(sets) > 0 {
 			perTask[i] = sets
 		}
@@ -362,30 +486,106 @@ func buildEqualityDeleteSetsPerTask(
 	return perTask
 }
 
+func buildEqualityDeleteSetsForTask(
+	task FileScanTask,
+	perFile map[string]*equalityDeleteFileSet,
+	combine func([]*equalityDeleteFileSet) *equalityDeleteSet,
+) []*equalityDeleteSet {
+	if len(task.EqualityDeleteFiles) == 0 {
+		return nil
+	}
+
+	var (
+		groupKey   string
+		groupFiles []*equalityDeleteFileSet
+		groups     map[string][]*equalityDeleteFileSet
+	)
+
+	for _, dataFile := range task.EqualityDeleteFiles {
+		fileSet, ok := perFile[dataFile.FilePath()]
+		if !ok {
+			continue
+		}
+
+		if groups != nil {
+			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
+		} else if len(groupFiles) == 0 {
+			groupKey = fileSet.groupKey
+			groupFiles = append(groupFiles, fileSet)
+		} else if fileSet.groupKey != groupKey {
+			groups = make(map[string][]*equalityDeleteFileSet, 2)
+			groups[groupKey] = groupFiles
+			groupFiles = nil
+			groups[fileSet.groupKey] = append(groups[fileSet.groupKey], fileSet)
+		} else {
+			groupFiles = append(groupFiles, fileSet)
+		}
+	}
+
+	if groups == nil {
+		if len(groupFiles) == 0 {
+			return nil
+		}
+
+		deleteSet := combine(groupFiles)
+		if len(deleteSet.keys) == 0 {
+			return nil
+		}
+
+		return []*equalityDeleteSet{deleteSet}
+	}
+
+	sets := make([]*equalityDeleteSet, 0, len(groups))
+	for _, files := range groups {
+		deleteSet := combine(files)
+		if len(deleteSet.keys) > 0 {
+			sets = append(sets, deleteSet)
+		}
+	}
+
+	return sets
+}
+
 func equalityDeleteSetForFiles(
 	files []*equalityDeleteFileSet,
 	sharedSets map[string]*equalityDeleteSet,
 ) *equalityDeleteSet {
-	slices.SortFunc(files, func(a, b *equalityDeleteFileSet) int {
-		return cmp.Compare(a.id, b.id)
-	})
-	files = slices.CompactFunc(files, func(a, b *equalityDeleteFileSet) bool {
-		return a.id == b.id
-	})
-
+	files = normalizeEqualityDeleteFiles(files)
 	if len(files) == 1 {
 		return files[0].equalityDeleteSet
 	}
 
-	combinationKey := make([]byte, 0, len(files)*8)
-	for _, file := range files {
-		combinationKey = binary.LittleEndian.AppendUint64(combinationKey, uint64(file.id))
-	}
-	key := string(combinationKey)
+	key := equalityDeleteSetCombinationKey(files)
 	if deleteSet, ok := sharedSets[key]; ok {
 		return deleteSet
 	}
 
+	deleteSet := mergeEqualityDeleteSets(files)
+	sharedSets[key] = deleteSet
+
+	return deleteSet
+}
+
+func normalizeEqualityDeleteFiles(files []*equalityDeleteFileSet) []*equalityDeleteFileSet {
+	slices.SortFunc(files, func(a, b *equalityDeleteFileSet) int {
+		return cmp.Compare(a.id, b.id)
+	})
+
+	return slices.CompactFunc(files, func(a, b *equalityDeleteFileSet) bool {
+		return a.id == b.id
+	})
+}
+
+func equalityDeleteSetCombinationKey(files []*equalityDeleteFileSet) string {
+	combinationKey := make([]byte, 0, len(files)*8)
+	for _, file := range files {
+		combinationKey = binary.LittleEndian.AppendUint64(combinationKey, uint64(file.id))
+	}
+
+	return string(combinationKey)
+}
+
+func mergeEqualityDeleteSets(files []*equalityDeleteFileSet) *equalityDeleteSet {
 	deleteSet := &equalityDeleteSet{
 		keys:     make(set[string]),
 		fieldIDs: files[0].fieldIDs,
@@ -396,8 +596,6 @@ func equalityDeleteSetForFiles(
 			deleteSet.keys[key] = struct{}{}
 		}
 	}
-
-	sharedSets[key] = deleteSet
 
 	return deleteSet
 }
