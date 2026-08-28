@@ -2451,23 +2451,6 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	return &out
 }
 
-func avroPartitionData(input map[int]any, logicalTypes map[int]string, fixedSizes map[int]int) (map[int]any, error) {
-	out := make(map[int]any)
-	for k, v := range input {
-		if logical, ok := logicalTypes[k]; ok {
-			converted, err := convertLogicalTypeValue(v, logical, fixedSizes[k])
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert partition field %d: %w", k, err)
-			}
-			out[k] = converted
-		} else {
-			out[k] = v
-		}
-	}
-
-	return out, nil
-}
-
 func convertLogicalTypeValue(v any, logicalType string, fixedSize int) (any, error) {
 	switch logicalType {
 	case atype.Date:
