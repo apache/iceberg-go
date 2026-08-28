@@ -1803,6 +1803,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
+	if ret.Version() != formatVersion {
+		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
+			ErrInvalidMetadataFormatVersion, formatVersion, ret.Version())
+	}
 
 	return ret, nil
 }

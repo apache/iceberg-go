@@ -84,3 +84,16 @@ func TestParseMetadataBytesAssignsMissingPartitionFieldIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T) {
+	data := strings.Replace(
+		ExampleTableMetadataV2,
+		`"format-version": 2,`,
+		`"format-version": 1, "FORMAT-VERSION": 2,`,
+		1,
+	)
+	data = strings.Replace(data, `"last-sequence-number": 34,`, "", 1)
+
+	_, err := ParseMetadataBytes([]byte(data))
+	require.ErrorIs(t, err, ErrInvalidMetadataFormatVersion)
+}
