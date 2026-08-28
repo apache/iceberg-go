@@ -76,6 +76,7 @@ type dataWriterInvariants struct {
 	rowGroupBytes int64
 	spec          iceberg.PartitionSpec
 	extension     string
+	arrowSchema   *arrow.Schema
 	schemaOpts    SchemaOptions
 }
 
@@ -152,6 +153,13 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 			return nil, err
 		}
 	}
+	arrowSchema, err := SchemaToArrowSchemaWithOptions(w.fileSchema, ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.props,
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	w.invariants = dataWriterInvariants{
 		statsCols:     statsCols,
@@ -159,6 +167,7 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		rowGroupBytes: rowGroupBytes,
 		spec:          *currentSpec,
 		extension:     strings.ToLower(string(w.fileFormat)),
+		arrowSchema:   arrowSchema,
 		schemaOpts: SchemaOptions{
 			DowncastTimestamp: true,
 			IncludeFieldIDs:   true,
@@ -185,8 +194,8 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 
 	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {
-		rec, err := ToRequestedSchema(ctx, w.fileSchema,
-			task.Schema, b, w.invariants.schemaOpts)
+		rec, err := toRequestedSchema(ctx, w.fileSchema,
+			task.Schema, b, w.invariants.schemaOpts, w.invariants.arrowSchema)
 		if err != nil {
 			return nil, err
 		}
