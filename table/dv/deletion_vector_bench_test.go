@@ -17,7 +17,16 @@
 
 package dv
 
-import "testing"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/puffin"
+)
 
 var benchmarkSerializedDV []byte
 
@@ -62,4 +71,84 @@ func BenchmarkSerializeDV(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkReadDVs(b *testing.B) {
+	for _, numDVs := range []int{2, 16, 64} {
+		b.Run(fmt.Sprintf("dvs=%d", numDVs), func(b *testing.B) {
+			files := benchmarkDVFiles(b, numDVs)
+			fs := &countingReadIO{base: iceio.LocalFS{}}
+
+			b.ReportAllocs()
+			for b.Loop() {
+				fs.reset()
+				bitmaps, err := ReadDVs(fs, files)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(bitmaps) != numDVs {
+					b.Fatalf("got %d bitmaps, want %d", len(bitmaps), numDVs)
+				}
+			}
+			b.ReportMetric(float64(fs.reads), "range-reads/op")
+		})
+	}
+}
+
+func benchmarkDVFiles(b *testing.B, numDVs int) []iceberg.DataFile {
+	b.Helper()
+
+	path := filepath.Join(b.TempDir(), "deletion-vectors.puffin")
+	f, err := os.Create(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	writer, err := puffin.NewWriter(f)
+	if err != nil {
+		_ = f.Close()
+		b.Fatal(err)
+	}
+
+	files := make([]iceberg.DataFile, numDVs)
+	for i := range numDVs {
+		bitmap := NewRoaringPositionBitmap()
+		bitmap.Set(uint64(i))
+		data, err := SerializeDV(bitmap)
+		if err != nil {
+			_ = f.Close()
+			b.Fatal(err)
+		}
+
+		referencedDataFile := fmt.Sprintf("data-%03d.parquet", i)
+		meta, err := writer.AddBlob(puffin.BlobMetadataInput{
+			Type:           puffin.BlobTypeDeletionVector,
+			SnapshotID:     -1,
+			SequenceNumber: -1,
+			Fields:         []int32{2147483546},
+			Properties: map[string]string{
+				dvReferencedDataFileProperty: referencedDataFile,
+				dvCardinalityProperty:        "1",
+			},
+		}, data)
+		if err != nil {
+			_ = f.Close()
+			b.Fatal(err)
+		}
+
+		offset, size := meta.Offset, meta.Length
+		file := newDVTestFile(path, 1, &offset, &size)
+		file.referencedDataFile = strPtr(referencedDataFile)
+		files[i] = file
+	}
+
+	if err := writer.Finish(); err != nil {
+		_ = f.Close()
+		b.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	return files
 }
