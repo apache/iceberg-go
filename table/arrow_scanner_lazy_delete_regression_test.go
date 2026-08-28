@@ -366,6 +366,7 @@ func TestCreateIteratorStopsWhenConsumerStops(t *testing.T) {
 			if err == nil && record != nil {
 				record.Release()
 			}
+
 			break
 		}
 		close(closed)
