@@ -213,6 +213,55 @@ func benchmarkComplexBoundFilter(b *testing.B, schema *iceberg.Schema) iceberg.B
 	return bound
 }
 
+var benchmarkCompiledFilterPlansSink *compiledFileFilterPlans
+
+func BenchmarkArrowScanFilterPlanSetup(b *testing.B) {
+	schema := benchmarkScanSchema(8)
+	filter := benchmarkComplexBoundFilter(b, schema)
+
+	b.Run("recompile_each_file", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			recordPlan, err := compileFileFilterPlan(schema, filter, true, true, false)
+			if err != nil {
+				b.Fatal(err)
+			}
+			pruningPlan, err := compileFileFilterPlan(schema, filter, true, false, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkCompiledFilterPlansSink = &compiledFileFilterPlans{
+				record:  recordPlan,
+				pruning: pruningPlan,
+			}
+		}
+	})
+
+	b.Run("cache_hit", func(b *testing.B) {
+		scan := &arrowScan{
+			boundRowFilter:  filter,
+			rowGroupFilter:  filter,
+			filterSchema:    schema,
+			projectedSchema: schema,
+			caseSensitive:   true,
+		}
+		if _, err := scan.cachedFileFilterPlans(schema, true); err != nil {
+			b.Fatal(err)
+		}
+
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			plans, err := scan.cachedFileFilterPlans(schema, true)
+			if err != nil {
+				b.Fatal(err)
+			}
+			benchmarkCompiledFilterPlansSink = plans
+		}
+	})
+}
+
 func BenchmarkArrowScanAddTaskProjectedFieldIDs(b *testing.B) {
 	schema := benchmarkScanSchema(8)
 	filter := benchmarkComplexBoundFilter(b, schema)
