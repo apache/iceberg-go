@@ -1553,19 +1553,30 @@ func (b *MetadataBuilder) RemovePartitionSpecs(ints []int) error {
 		return nil
 	}
 
-	removedIDs := make(map[int]struct{}, len(ints))
-	for _, id := range ints {
-		removedIDs[id] = struct{}{}
+	var removedIDs map[int]struct{}
+	if len(ints) > 1 {
+		removedIDs = make(map[int]struct{}, len(ints))
+		for _, id := range ints {
+			removedIDs[id] = struct{}{}
+		}
+	}
+	containsID := func(id int) bool {
+		if removedIDs == nil {
+			return id == ints[0]
+		}
+		_, ok := removedIDs[id]
+
+		return ok
 	}
 
-	if _, ok := removedIDs[b.defaultSpecID]; ok {
+	if containsID(b.defaultSpecID) {
 		return fmt.Errorf("%w: can't remove default partition spec with id %d", iceberg.ErrInvalidArgument, b.defaultSpecID)
 	}
 
 	newSpecs := make([]iceberg.PartitionSpec, 0, len(b.specs))
 	removed := make([]int, 0, len(ints))
 	for _, spec := range b.specs {
-		if _, ok := removedIDs[spec.ID()]; ok {
+		if containsID(spec.ID()) {
 			removed = append(removed, spec.ID())
 
 			continue
@@ -1587,18 +1598,29 @@ func (b *MetadataBuilder) RemoveSchemas(ints []int) error {
 		return nil
 	}
 
-	removedIDs := make(map[int]struct{}, len(ints))
-	for _, id := range ints {
-		removedIDs[id] = struct{}{}
+	var removedIDs map[int]struct{}
+	if len(ints) > 1 {
+		removedIDs = make(map[int]struct{}, len(ints))
+		for _, id := range ints {
+			removedIDs[id] = struct{}{}
+		}
+	}
+	containsID := func(id int) bool {
+		if removedIDs == nil {
+			return id == ints[0]
+		}
+		_, ok := removedIDs[id]
+
+		return ok
 	}
 
-	if _, ok := removedIDs[b.currentSchemaID]; ok {
+	if containsID(b.currentSchemaID) {
 		return fmt.Errorf("%w: can't remove current schema with id %d", iceberg.ErrInvalidArgument, b.currentSchemaID)
 	}
 
 	removed := make([]int, 0, len(ints))
 	b.schemaList = slices.DeleteFunc(b.schemaList, func(s *iceberg.Schema) bool {
-		if _, ok := removedIDs[s.ID]; ok {
+		if containsID(s.ID) {
 			removed = append(removed, s.ID)
 
 			return true
