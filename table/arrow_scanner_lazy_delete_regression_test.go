@@ -238,6 +238,7 @@ func TestArrowScanDefersPositionDeleteReadsUntilIteration(t *testing.T) {
 			record.Release()
 		}
 		iterErr = err
+
 		break
 	}
 	require.Error(t, iterErr, "iteration should reach the missing data file after loading its delete")
@@ -273,6 +274,7 @@ func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
 	for record, err := range itr {
 		require.NoError(t, err)
 		record.Release()
+
 		break
 	}
 }
