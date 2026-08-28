@@ -709,9 +709,17 @@ func newPositionDeleteRowGroupTester(targets map[string]struct{}) (*tblutils.Par
 	for path := range targets {
 		paths = append(paths, path)
 	}
-	slices.Sort(paths)
 
-	filter := iceberg.IsIn(iceberg.Reference("file_path"), paths...)
+	var filter iceberg.BooleanExpression
+	if len(paths) == 1 {
+		// A single target is the common case. EqualTo avoids building the
+		// set literal used by IsIn and gives the stats/bloom planners the
+		// simpler predicate directly.
+		filter = iceberg.EqualTo(iceberg.Reference("file_path"), paths[0])
+	} else {
+		slices.Sort(paths)
+		filter = iceberg.IsIn(iceberg.Reference("file_path"), paths...)
+	}
 	filter, err := iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
 	if err != nil {
 		return nil, err
