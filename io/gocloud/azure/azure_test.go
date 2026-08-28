@@ -23,6 +23,10 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/fake"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,26 +40,25 @@ func TestCreateAzureBucketDefaultCredentialCalled(t *testing.T) {
 	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
 	assert.NoError(t, err)
 
-	props := map[string]string{}
+	defaultCredentialCalled := false
+	credentialFactories := azureCredentialFactories{
+		newDefaultCredential: func(*azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error) {
+			defaultCredentialCalled = true
 
-	bucket, err := createAzureBucket(ctx, parsedURL, props)
-	if err != nil {
-		// If bucket creation fails, it should be with a DefaultAzureCredential error
-		assert.Contains(t, err.Error(), "DefaultAzureCredential",
-			"Expected DefaultAzureCredential error but got: %v", err)
-		t.Logf("DefaultAzureCredential path was taken and failed at creation: %v", err)
+			return &fake.TokenCredential{}, nil
+		},
+		newManagedIdentity: func(*azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error) {
+			t.Fatal("managed identity credential factory should not be called")
 
-		return
+			return nil, nil
+		},
 	}
 
-	// If bucket creation succeeds, verify we can't actually use it without proper auth
-	assert.NotNil(t, bucket, "Bucket should be created when DefaultAzureCredential client creation succeeds")
+	bucket, err := createAzureBucketWithCredentialFactories(ctx, parsedURL, nil, credentialFactories)
 
-	// Test that actual operations fail with auth errors against the fake account
-	iter := bucket.List(nil)
-	_, err = iter.Next(ctx)
-
-	assert.Error(t, err, "Expected List to return an error when List is called")
+	require.NoError(t, err)
+	assert.NotNil(t, bucket)
+	assert.True(t, defaultCredentialCalled)
 }
 
 func TestCreateAzureBucketDefaultCredentialEmptyBucketName(t *testing.T) {
@@ -81,20 +84,28 @@ func TestCreateAzureBucketManagedIdentityCredentialCalled(t *testing.T) {
 	parsedURL, err := url.Parse("abfs://container@testaccount.dfs.core.windows.net/path")
 	assert.NoError(t, err)
 
-	// NewManagedIdentityCredential never fails at construction, so bucket creation always succeeds.
-	bucket, err := createAzureBucket(ctx, parsedURL, map[string]string{
-		"adls.auth.managed-identity.enabled": "true",
-	})
-	assert.NoError(t, err)
-	assert.NotNil(t, bucket)
+	managedIdentityCalled := false
+	credentialFactories := azureCredentialFactories{
+		newDefaultCredential: func(*azidentity.DefaultAzureCredentialOptions) (azcore.TokenCredential, error) {
+			t.Fatal("default credential factory should not be called")
 
-	iter := bucket.List(nil)
-	_, err = iter.Next(ctx)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "ManagedIdentityCredential",
-		"Expected ManagedIdentityCredential error but got: %v", err)
-	assert.NotContains(t, err.Error(), "DefaultAzureCredential",
-		"managed-identity path should not fall back to DefaultAzureCredential: %v", err)
+			return nil, nil
+		},
+		newManagedIdentity: func(opts *azidentity.ManagedIdentityCredentialOptions) (azcore.TokenCredential, error) {
+			managedIdentityCalled = true
+			require.Nil(t, opts)
+
+			return &fake.TokenCredential{}, nil
+		},
+	}
+
+	bucket, err := createAzureBucketWithCredentialFactories(ctx, parsedURL, map[string]string{
+		icebergio.ADLSManagedIdentityEnabled: "true",
+	}, credentialFactories)
+
+	require.NoError(t, err)
+	assert.NotNil(t, bucket)
+	assert.True(t, managedIdentityCalled)
 }
 
 func TestCreateAzureBucketSharedKeyMissingAccountKey(t *testing.T) {
