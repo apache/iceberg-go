@@ -54,8 +54,9 @@ const (
 var PositionalDeleteArrowSchema, _ = SchemaToArrowSchema(iceberg.PositionalDeleteSchema, nil, true, false)
 
 type (
-	positionDeletes   = []*arrow.Chunked
-	perFilePosDeletes = map[string]positionDeletes
+	positionDeletes      = []*arrow.Chunked
+	perFilePosDeletes    = map[string]positionDeletes
+	perDeleteFileTargets = map[string]map[string]struct{}
 )
 
 // releasePerFilePosDeletes releases every Arrow chunk in a positional-delete
@@ -79,6 +80,7 @@ func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
 	deletesPerFile := make(perFilePosDeletes)
 	uniqueDeletes := make(map[string]iceberg.DataFile)
+	targetsByDelete := make(perDeleteFileTargets)
 
 	for _, t := range tasks {
 		for _, d := range t.DeleteFiles {
@@ -86,9 +88,27 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 				continue
 			}
 
-			if _, ok := uniqueDeletes[d.FilePath()]; !ok {
-				uniqueDeletes[d.FilePath()] = d
+			deletePath := d.FilePath()
+			if _, ok := uniqueDeletes[deletePath]; !ok {
+				uniqueDeletes[deletePath] = d
 			}
+
+			targets, ok := targetsByDelete[deletePath]
+			if !ok {
+				targets = make(map[string]struct{})
+				targetsByDelete[deletePath] = targets
+			}
+			// A nil target set means that at least one task did not carry a
+			// usable data-file path. Keep the old whole-file read in that case.
+			if targets == nil {
+				continue
+			}
+			if t.File == nil || t.File.FilePath() == "" {
+				targetsByDelete[deletePath] = nil
+
+				continue
+			}
+			targets[t.File.FilePath()] = struct{}{}
 		}
 	}
 
@@ -107,7 +127,7 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 		defer close(perFileChan)
 		for _, v := range uniqueDeletes {
 			g.Go(func() error {
-				deletes, err := readDeletes(gctx, fs, v)
+				deletes, err := readDeletesForPaths(gctx, fs, v, targetsByDelete[v.FilePath()])
 				if err != nil {
 					return err
 				}
@@ -366,12 +386,14 @@ func (c *posDeleteCursor) next() (int64, bool) {
 
 type posDeleteAccumulator struct {
 	mem      memory.Allocator
+	targets  map[string]struct{}
 	builders map[string]*array.Int64Builder
 }
 
-func newPosDeleteAccumulator(ctx context.Context) *posDeleteAccumulator {
+func newPosDeleteAccumulator(ctx context.Context, targets map[string]struct{}) *posDeleteAccumulator {
 	return &posDeleteAccumulator{
 		mem:      compute.GetAllocator(ctx),
+		targets:  targets,
 		builders: make(map[string]*array.Int64Builder),
 	}
 }
@@ -472,6 +494,12 @@ func (a *posDeleteAccumulator) appendFilePathChunk(ctx context.Context, filePath
 		}
 
 		path := paths.Value(i)
+		if a.targets != nil {
+			if _, ok := a.targets[path]; !ok {
+				continue
+			}
+		}
+
 		builder, ok := a.builders[path]
 		if !ok {
 			path = strings.Clone(path)
@@ -533,7 +561,7 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 }
 
 func groupPosDeletesByFilePath(ctx context.Context, filePathCol, posCol *arrow.Chunked) (results map[string]*arrow.Chunked, err error) {
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, nil)
 	defer func() {
 		if err != nil {
 			acc.release()
@@ -607,7 +635,13 @@ func releasePosDeletes(deletes map[string]*arrow.Chunked) {
 	}
 }
 
-func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
+func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (map[string]*arrow.Chunked, error) {
+	return readDeletesForPaths(ctx, fs, dataFile, nil)
+}
+
+func readDeletesForPaths(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile,
+	targets map[string]struct{},
+) (_ map[string]*arrow.Chunked, err error) {
 	src, err := tblutils.GetFile(ctx, fs, dataFile, true)
 	if err != nil {
 		return nil, err
@@ -629,7 +663,12 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 		return nil, err
 	}
 
-	records, err := rdr.GetRecords(ctx, columns, nil)
+	tester, err := newPositionDeleteRowGroupTester(targets)
+	if err != nil {
+		return nil, err
+	}
+
+	records, err := rdr.GetRecords(ctx, columns, tester)
 	if err != nil {
 		return nil, err
 	}
@@ -637,7 +676,7 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	// string values, so independent dictionaries across batches are safe.
 	defer records.Release()
 
-	acc := newPosDeleteAccumulator(ctx)
+	acc := newPosDeleteAccumulator(ctx, targets)
 	defer func() {
 		// Returning an error assigns the named return value before deferred
 		// functions run, which releases builders on every error path.
@@ -659,6 +698,38 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 
 	return acc.finish(), nil
+}
+
+func newPositionDeleteRowGroupTester(targets map[string]struct{}) (*tblutils.ParquetRowGroupTester, error) {
+	if len(targets) == 0 || len(targets) > inPredicateLimit {
+		return nil, nil
+	}
+
+	paths := make([]string, 0, len(targets))
+	for path := range targets {
+		paths = append(paths, path)
+	}
+	slices.Sort(paths)
+
+	filter := iceberg.IsIn(iceberg.Reference("file_path"), paths...)
+	filter, err := iceberg.BindExpr(iceberg.PositionalDeleteSchema, filter, true)
+	if err != nil {
+		return nil, err
+	}
+
+	statsFn, err := newParquetRowGroupStatsEvaluator(iceberg.PositionalDeleteSchema, filter, false)
+	if err != nil {
+		return nil, err
+	}
+	bloomPreds, err := newBloomFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tblutils.ParquetRowGroupTester{
+		StatsFn:    statsFn,
+		BloomPreds: bloomPreds,
+	}, nil
 }
 
 func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {

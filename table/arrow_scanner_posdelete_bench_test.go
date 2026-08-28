@@ -35,6 +35,113 @@ import (
 	tblutils "github.com/apache/iceberg-go/table/internal"
 )
 
+func BenchmarkReadDeletesWithFilePathFilter(b *testing.B) {
+	const (
+		numPaths    = 1_000
+		rowsPerPath = 1_024
+	)
+
+	memFS, deleteFile, pathNames := benchmarkPositionDeleteFileWithPaths(b, numPaths, rowsPerPath)
+	ctx := tblutils.WithTableProperties(context.Background(), iceberg.Properties{
+		ParquetBatchSizeKey: "65536",
+	})
+
+	for _, targetCount := range []int{1, 10, 100, 1_000} {
+		b.Run(fmt.Sprintf("targets=%d", targetCount), func(b *testing.B) {
+			targets := make(map[string]struct{}, targetCount)
+			for _, path := range pathNames[:targetCount] {
+				targets[path] = struct{}{}
+			}
+
+			b.Run("all paths", func(b *testing.B) {
+				benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, nil)
+			})
+			b.Run("target paths", func(b *testing.B) {
+				benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, targets)
+			})
+		})
+	}
+}
+
+func benchmarkReadDeletesWithFilePathFilter(
+	b *testing.B,
+	ctx context.Context,
+	fs iceio.IO,
+	dataFile iceberg.DataFile,
+	targets map[string]struct{},
+) {
+	b.Helper()
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		deletes, err := readDeletesForPaths(ctx, fs, dataFile, targets)
+		if err != nil {
+			b.Fatal(err)
+		}
+		releasePosDeletes(deletes)
+	}
+}
+
+func benchmarkPositionDeleteFileWithPaths(b *testing.B, numPaths, rowsPerPath int) (*iceio.MemFS, iceberg.DataFile, []string) {
+	b.Helper()
+
+	mem := memory.DefaultAllocator
+	pathNames := make([]string, numPaths)
+	for i := range numPaths {
+		pathNames[i] = fmt.Sprintf("mem://bucket/data/data-%04d.parquet", i)
+	}
+
+	pathBuilder := array.NewStringBuilder(mem)
+	posBuilder := array.NewInt64Builder(mem)
+	for pathIdx, path := range pathNames {
+		for pos := range rowsPerPath {
+			pathBuilder.Append(path)
+			posBuilder.Append(int64(pathIdx*rowsPerPath + pos))
+		}
+	}
+	paths := pathBuilder.NewStringArray()
+	pathBuilder.Release()
+	positions := posBuilder.NewInt64Array()
+	posBuilder.Release()
+	record := array.NewRecordBatch(PositionalDeleteArrowSchema,
+		[]arrow.Array{paths, positions}, int64(numPaths*rowsPerPath))
+	paths.Release()
+	positions.Release()
+	defer record.Release()
+	tbl := array.NewTableFromRecords(PositionalDeleteArrowSchema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+
+	deletePath := "mem://bucket/deletes/file-path-filter-benchmark.parquet"
+	memFS := iceio.NewMemFS()
+	fw, err := memFS.Create(deletePath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := pqarrow.WriteTable(tbl, fw, int64(rowsPerPath),
+		parquet.NewWriterProperties(
+			parquet.WithStats(true),
+			parquet.WithMaxRowGroupLength(int64(rowsPerPath)),
+		),
+		pqarrow.DefaultWriterProps()); err != nil {
+		_ = fw.Close()
+		b.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil,
+		int64(numPaths*rowsPerPath), 128)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return memFS, builder.Build(), pathNames
+}
+
 func BenchmarkReadDeletesProjected(b *testing.B) {
 	for _, numRows := range []int{100_000, 1_000_000} {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
