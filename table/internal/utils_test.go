@@ -78,6 +78,8 @@ func TestTruncateUpperBoundString(t *testing.T) {
 		{name: "preceding scalar", value: "\uD7FEx", truncate: 1, expected: "\uD7FF"},
 		{name: "carry past maximal suffix", value: string([]rune{'a', utf8.MaxRune, utf8.MaxRune, 'x'}), truncate: 3, expected: "b"},
 		{name: "carry to maximal scalar", value: string([]rune{utf8.MaxRune - 1, utf8.MaxRune, 'x'}), truncate: 2, expected: string([]rune{utf8.MaxRune})},
+		{name: "no truncation", value: "ab", truncate: 2, expected: "ab"},
+		{name: "zero width", value: "ab", truncate: 0, expected: ""},
 		// U+10FFFF U+10FFFF NUL has no greater valid Unicode prefix.
 		{name: "all maximal", value: "\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", truncate: 2, expected: ""},
 	}
