@@ -1824,7 +1824,7 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 		return batch.Task.Index < 0
 	}
 
-	sequenced := tblutils.MakeSequencedChan(uint(numWorkers), records,
+	sequenced := tblutils.MakeSequencedChanWithDiscard(uint(numWorkers), records,
 		func(left, right *enumeratedRecord) bool {
 			switch {
 			case isBeforeAny(*left):
@@ -1850,7 +1850,11 @@ func createIteratorWithCleanup(ctx context.Context, numWorkers uint, records <-c
 				return next.Task.Index == prev.Task.Index+1 &&
 					prev.Record.Last && next.Record.Index == 0
 			}
-		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}})
+		}, enumeratedRecord{Task: tblutils.Enumerated[FileScanTask]{Index: -1}}, func(rec enumeratedRecord) {
+			if rec.Record.Value != nil {
+				rec.Record.Value.Release()
+			}
+		})
 
 	totalRowCount := int64(0)
 
@@ -1973,6 +1977,12 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 		}
 
 		go func() {
+			defer func() {
+				close(taskChan)
+				wg.Wait()
+				close(records)
+			}()
+
 			for i, t := range tasks {
 				select {
 				case <-scanCtx.Done():
@@ -1982,10 +1992,6 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 				}:
 				}
 			}
-			close(taskChan)
-
-			wg.Wait()
-			close(records)
 		}()
 
 		var cleanup func()

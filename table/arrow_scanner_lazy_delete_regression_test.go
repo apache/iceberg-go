@@ -19,9 +19,11 @@ package table
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/compute"
@@ -276,5 +278,102 @@ func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
 		record.Release()
 
 		break
+	}
+}
+
+func TestArrowScanPreCancelledIteratorTearsDownProducer(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(context.Canceled)
+
+	scan := &arrowScan{concurrency: 1, rowLimit: -1}
+	tasks := []FileScanTask{{
+		File: newLazyDataFile(t, "mem://bucket/data/pre-cancelled.parquet"),
+	}}
+	records := scan.recordBatchesFromTasksAndDeletes(ctx, tasks, nil, nil, nil, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		var iterErr error
+		for _, err := range records {
+			if err != nil {
+				iterErr = err
+			}
+		}
+		done <- iterErr
+	}()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("pre-cancelled scan iterator did not terminate")
+	}
+}
+
+func TestCreateIteratorReleasesOutOfOrderBatchAfterError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	expectedErr := errors.New("position delete load failed")
+	records := make(chan enumeratedRecord, 2)
+	records <- enumeratedRecord{
+		Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: checkedInt64RecordBatch(mem, 1),
+			Index: 0,
+			Last:  true,
+		},
+		Task: internal.Enumerated[FileScanTask]{Index: 1, Last: true},
+	}
+	records <- enumeratedRecord{
+		Task: internal.Enumerated[FileScanTask]{Index: 0},
+		Err:  expectedErr,
+	}
+	close(records)
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	var gotErr error
+	for _, err := range createIteratorWithCleanup(ctx, 2, records, nil, cancel, 0, nil) {
+		gotErr = err
+	}
+
+	require.ErrorIs(t, gotErr, expectedErr)
+}
+
+func TestCreateIteratorStopsWhenConsumerStops(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	records := make(chan enumeratedRecord, 1)
+	records <- enumeratedRecord{
+		Record: internal.Enumerated[arrow.RecordBatch]{
+			Value: checkedInt64RecordBatch(mem, 1),
+			Index: 0,
+			Last:  true,
+		},
+		Task: internal.Enumerated[FileScanTask]{Index: 0, Last: true},
+	}
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer func() { cancel(nil) }()
+	closed := make(chan struct{})
+	go func() {
+		<-ctx.Done()
+		close(records)
+	}()
+
+	go func() {
+		for record, err := range createIteratorWithCleanup(ctx, 1, records, nil, cancel, 0, nil) {
+			if err == nil && record != nil {
+				record.Release()
+			}
+			break
+		}
+		close(closed)
+	}()
+
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("iterator did not stop after consumer termination")
 	}
 }
