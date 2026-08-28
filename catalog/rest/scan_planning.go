@@ -41,6 +41,7 @@ import (
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -50,6 +51,11 @@ var _ table.ScanPlanner = (*Catalog)(nil)
 // Compile-time proof that the REST catalog exposes the optional full-capability
 // extension used by table.Scan's auto planning mode.
 var _ table.FullRemoteScanPlanner = (*Catalog)(nil)
+
+// remoteScanTaskFetchConcurrency bounds in-flight fetchScanTasks requests for
+// each frontier. Keeping frontiers separate preserves breadth-first response
+// ordering while allowing independent plan-task handles to fetch concurrently.
+const remoteScanTaskFetchConcurrency = 8
 
 // ErrPlanExpired is returned when polling a plan that the server no longer
 // knows about: a fetchPlanningResult 404 whose error.type is exactly
@@ -294,32 +300,70 @@ func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Propert
 }
 
 // collectScanTasks expands plan-task handles into their task envelopes, walking
-// the fanout: a fetchScanTasks response can itself return more plan-tasks. A
-// handle is fetched at most once; a server that re-issues one would otherwise
-// loop forever. The envelope boundaries are retained because delete-file
-// references are local to each response.
+// the fanout: a fetchScanTasks response can itself return more plan-tasks. Each
+// frontier is fetched concurrently, but its responses are appended in handle
+// order so completion timing cannot change the result order. A handle is
+// fetched at most once; a server that re-issues one would otherwise loop
+// forever. The envelope boundaries are retained because delete-file references
+// are local to each response.
 func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
 	envelopes := []ScanTasks{tasks}
 
-	queue := append([]string(nil), tasks.PlanTasks...)
-	seen := make(map[string]bool, len(queue))
-	for len(queue) > 0 {
-		handle := queue[0]
-		queue = queue[1:]
-		if seen[handle] {
-			continue
+	frontier := append([]string(nil), tasks.PlanTasks...)
+	seen := make(map[string]bool, len(frontier))
+	for len(frontier) > 0 {
+		handles := make([]string, 0, len(frontier))
+		for _, handle := range frontier {
+			if seen[handle] {
+				continue
+			}
+			seen[handle] = true
+			handles = append(handles, handle)
 		}
-		seen[handle] = true
 
-		resp, err := r.FetchScanTasks(ctx, ident, FetchScanTasksRequest{PlanTask: handle})
+		responses, err := r.fetchScanTaskFrontier(ctx, ident, handles)
 		if err != nil {
 			return nil, err
 		}
-		envelopes = append(envelopes, resp.ScanTasks)
-		queue = append(queue, resp.PlanTasks...)
+
+		nextFrontier := make([]string, 0)
+		for _, response := range responses {
+			envelopes = append(envelopes, response.ScanTasks)
+			nextFrontier = append(nextFrontier, response.PlanTasks...)
+		}
+		frontier = nextFrontier
 	}
 
 	return envelopes, nil
+}
+
+func (r *Catalog) fetchScanTaskFrontier(
+	ctx context.Context,
+	ident table.Identifier,
+	handles []string,
+) ([]FetchScanTasksResponse, error) {
+	responses := make([]FetchScanTasksResponse, len(handles))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(remoteScanTaskFetchConcurrency)
+
+	for i, handle := range handles {
+		group.Go(func() error {
+			response, err := r.FetchScanTasks(groupCtx, ident, FetchScanTasksRequest{PlanTask: handle})
+			if err != nil {
+				return err
+			}
+
+			responses[i] = response
+
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	return responses, nil
 }
 
 // remoteScanTasks decodes each server task envelope into domain FileScanTasks.

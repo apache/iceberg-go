@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1243,6 +1244,152 @@ func TestPlanFilesExpandsPlanTasks(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, result.Tasks)
 	assert.Equal(t, []string{"h1", "h2"}, fetched)
+}
+
+func TestCollectScanTasksFetchesFrontierConcurrentlyInOrder(t *testing.T) {
+	t.Parallel()
+
+	h1Started := make(chan struct{})
+	h2Started := make(chan struct{})
+	releaseH1 := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseH1) }) }
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
+			switch body.PlanTask {
+			case "h1":
+				close(h1Started)
+				<-releaseH1
+				_, _ = w.Write([]byte(`{"file-scan-tasks":[{"data-file":{"file-path":"h1"}}]}`))
+			case "h2":
+				close(h2Started)
+				_, _ = w.Write([]byte(`{"file-scan-tasks":[{"data-file":{"file-path":"h2"}}]}`))
+			default:
+				http.Error(w, "unexpected plan task", http.StatusBadRequest)
+			}
+		})
+	})
+	t.Cleanup(release)
+
+	type outcome struct {
+		envelopes []ScanTasks
+		err       error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+			PlanTasks: []string{"h1", "h2"},
+		})
+		done <- outcome{envelopes: envelopes, err: err}
+	}()
+
+	for name, started := range map[string]<-chan struct{}{
+		"h1": h1Started,
+		"h2": h2Started,
+	} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s to start", name)
+		}
+	}
+
+	release()
+	select {
+	case result := <-done:
+		require.NoError(t, result.err)
+		require.Len(t, result.envelopes, 3)
+		require.Len(t, result.envelopes[1].FileScanTasks, 1)
+		require.Len(t, result.envelopes[2].FileScanTasks, 1)
+		require.NotNil(t, result.envelopes[1].FileScanTasks[0].DataFile)
+		require.NotNil(t, result.envelopes[2].FileScanTasks[0].DataFile)
+		assert.Equal(t, "h1", result.envelopes[1].FileScanTasks[0].DataFile.FilePath)
+		assert.Equal(t, "h2", result.envelopes[2].FileScanTasks[0].DataFile.FilePath)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for frontier fetches")
+	}
+}
+
+func TestCollectScanTasksBoundsFrontierConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const handleCount = remoteScanTaskFetchConcurrency + 1
+	started := make(chan string, handleCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	finish := func() { releaseOnce.Do(func() { close(release) }) }
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+
+			started <- body.PlanTask
+			<-release
+			_, _ = w.Write([]byte(`{"file-scan-tasks":[]}`))
+		})
+	})
+	t.Cleanup(finish)
+
+	handles := make([]string, handleCount)
+	for i := range handles {
+		handles[i] = fmt.Sprintf("h%d", i)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+			PlanTasks: handles,
+		})
+		done <- err
+	}()
+
+	for range remoteScanTaskFetchConcurrency {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for bounded frontier workers")
+		}
+	}
+
+	select {
+	case handle := <-started:
+		t.Fatalf("frontier exceeded concurrency limit with %s", handle)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	finishOne := func() {
+		select {
+		case release <- struct{}{}:
+		case <-time.After(time.Second):
+			t.Fatal("timed out releasing a frontier worker")
+		}
+	}
+	finishOne()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out starting the queued frontier handle")
+	}
+	finish()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for bounded frontier fetches")
+	}
 }
 
 // TestPlanFilesFanoutCycleTerminates guards the seen-set: a server that re-issues
