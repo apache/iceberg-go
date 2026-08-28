@@ -69,13 +69,12 @@ func ParseTransform(s string) (Transform, error) {
 		return TruncateTransform{Width: n}, nil
 	}
 
-	lower := strings.ToLower(s)
-	if lower != s {
-		if transform, ok := parseSimpleTransform(lower); ok {
+	if hasASCIICaseDifference(s) {
+		if transform, ok := parseSimpleTransformFold(s); ok {
 			return transform, nil
 		}
 
-		if n, matched := parseTransformWidth(lower, "bucket["); matched {
+		if n, matched := parseTransformWidthFold(s, "bucket["); matched {
 			if n == 0 {
 				return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 			}
@@ -83,7 +82,7 @@ func ParseTransform(s string) (Transform, error) {
 			return BucketTransform{NumBuckets: n}, nil
 		}
 
-		if n, matched := parseTransformWidth(lower, "truncate["); matched {
+		if n, matched := parseTransformWidthFold(s, "truncate["); matched {
 			if n == 0 {
 				return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 			}
@@ -96,6 +95,35 @@ func ParseTransform(s string) (Transform, error) {
 	// filtering instead of failing. Keep the original string, case and all, so it
 	// round-trips; Equals stays byte-for-byte, matching Java's UnknownTransform.
 	return UnknownTransform{name: s}, nil
+}
+
+func hasASCIICaseDifference(s string) bool {
+	for i := range s {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+
+	return false
+}
+
+func parseSimpleTransformFold(s string) (Transform, bool) {
+	switch {
+	case strings.EqualFold(s, "identity"):
+		return IdentityTransform{}, true
+	case strings.EqualFold(s, "void"):
+		return VoidTransform{}, true
+	case strings.EqualFold(s, "year"):
+		return YearTransform{}, true
+	case strings.EqualFold(s, "month"):
+		return MonthTransform{}, true
+	case strings.EqualFold(s, "day"):
+		return DayTransform{}, true
+	case strings.EqualFold(s, "hour"):
+		return HourTransform{}, true
+	default:
+		return nil, false
+	}
 }
 
 func parseSimpleTransform(s string) (Transform, bool) {
@@ -135,6 +163,44 @@ func parseTransformWidth(s, prefix string) (int, bool) {
 	}
 
 	return n, true
+}
+
+func parseTransformWidthFold(s, prefix string) (int, bool) {
+	if !hasPrefixFold(s, prefix) || len(s) <= len(prefix)+1 || s[len(s)-1] != ']' {
+		return 0, false
+	}
+
+	width := s[len(prefix) : len(s)-1]
+	for i := range width {
+		if width[i] < '0' || width[i] > '9' {
+			return 0, false
+		}
+	}
+
+	n, err := strconv.Atoi(width)
+	if err != nil || n <= 0 || n > math.MaxInt32 {
+		return 0, true
+	}
+
+	return n, true
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+
+	for i := range prefix {
+		got := s[i]
+		if got >= 'A' && got <= 'Z' {
+			got += 'a' - 'A'
+		}
+		if got != prefix[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Transform is an interface for the various Transformation types
