@@ -373,6 +373,37 @@ func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
 	require.Len(t, builder.specs, 1)
 }
 
+func TestRemovePartitionSpecsPreservesStoredOrderAndIgnoresDuplicates(t *testing.T) {
+	builder := MetadataBuilder{
+		specs: []iceberg.PartitionSpec{
+			iceberg.NewPartitionSpecID(4),
+			iceberg.NewPartitionSpecID(1),
+			iceberg.NewPartitionSpecID(7),
+		},
+		defaultSpecID: 99,
+	}
+
+	require.NoError(t, builder.RemovePartitionSpecs([]int{7, 1, 7, 123}))
+	require.Len(t, builder.specs, 1)
+	require.Equal(t, 4, builder.specs[0].ID())
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, []int{1, 7}, builder.updates[0].(*removeSpecUpdate).SpecIds)
+}
+
+func TestRemovePartitionSpecsProtectsDefaultSpecBeforeMutation(t *testing.T) {
+	builder := MetadataBuilder{
+		specs: []iceberg.PartitionSpec{
+			iceberg.NewPartitionSpecID(1),
+			iceberg.NewPartitionSpecID(2),
+		},
+		defaultSpecID: 2,
+	}
+
+	require.ErrorContains(t, builder.RemovePartitionSpecs([]int{1, 2, 2}), "can't remove default partition spec with id 2")
+	require.Equal(t, []int{1, 2}, []int{builder.specs[0].ID(), builder.specs[1].ID()})
+	require.Empty(t, builder.updates)
+}
+
 func TestSetDefaultPartitionSpec(t *testing.T) {
 	builder := builderWithoutChanges(2)
 	curSchema, err := builder.GetSchemaByID(builder.currentSchemaID)
@@ -1775,6 +1806,37 @@ func TestRemoveSchemasNoMatchDoesNotUpdate(t *testing.T) {
 	require.NoError(t, builder.RemoveSchemas([]int{99, 100}))
 	require.Empty(t, builder.updates)
 	require.Len(t, builder.schemaList, 2)
+}
+
+func TestRemoveSchemasPreservesStoredOrderAndIgnoresDuplicates(t *testing.T) {
+	builder := MetadataBuilder{
+		schemaList: []*iceberg.Schema{
+			iceberg.NewSchema(4),
+			iceberg.NewSchema(1),
+			iceberg.NewSchema(7),
+		},
+		currentSchemaID: 99,
+	}
+
+	require.NoError(t, builder.RemoveSchemas([]int{7, 1, 7, 123}))
+	require.Len(t, builder.schemaList, 1)
+	require.Equal(t, 4, builder.schemaList[0].ID)
+	require.Len(t, builder.updates, 1)
+	require.Equal(t, []int{1, 7}, builder.updates[0].(*removeSchemasUpdate).SchemaIDs)
+}
+
+func TestRemoveSchemasProtectsCurrentSchemaBeforeMutation(t *testing.T) {
+	builder := MetadataBuilder{
+		schemaList: []*iceberg.Schema{
+			iceberg.NewSchema(1),
+			iceberg.NewSchema(2),
+		},
+		currentSchemaID: 2,
+	}
+
+	require.ErrorContains(t, builder.RemoveSchemas([]int{1, 2, 2}), "can't remove current schema with id 2")
+	require.Equal(t, []int{1, 2}, []int{builder.schemaList[0].ID, builder.schemaList[1].ID})
+	require.Empty(t, builder.updates)
 }
 
 // Java: TestTableMetadata.testUpdateSchema
