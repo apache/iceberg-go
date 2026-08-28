@@ -83,6 +83,7 @@ type rewriteManifestsCfg struct {
 	targetSizeBytes int64
 	specID          *int
 	predicate       func(iceberg.ManifestFile) bool
+	clusterBy       func(iceberg.DataFile) any
 }
 
 // RewriteManifestsOpt configures [Transaction.RewriteManifests].
@@ -108,6 +109,14 @@ func WithRewriteSpecID(id int) RewriteManifestsOpt {
 // Manifests that don't match are left untouched.
 func WithRewriteManifestPredicate(pred func(iceberg.ManifestFile) bool) RewriteManifestsOpt {
 	return func(c *rewriteManifestsCfg) { c.predicate = pred }
+}
+
+// WithRewriteManifestClusterBy groups rewritten data files by the key returned
+// by clusterBy. Files with the same key and partition spec are written to the
+// same manifest until the target size is reached, after which another manifest
+// is started for that key. The key must be non-nil and comparable.
+func WithRewriteManifestClusterBy(clusterBy func(iceberg.DataFile) any) RewriteManifestsOpt {
+	return func(c *rewriteManifestsCfg) { c.clusterBy = clusterBy }
 }
 
 // rewriteManifests is a producer that merges small data manifests into
@@ -180,6 +189,7 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 		targetSizeBytes: r.cfg.targetSizeBytes,
 		minCountToMerge: 1,    // force a merge regardless of count
 		mergeEnabled:    true, // explicit op ignores commit.manifest-merge.enabled
+		clusterBy:       r.cfg.clusterBy,
 		snap:            r.base,
 	}
 	merged, err := mgr.mergeManifests(toRewrite)
@@ -344,9 +354,11 @@ func manifestActiveFiles(fs iceio.IO, manifests []iceberg.ManifestFile) (int64, 
 // rewrites metadata only; no data files are read or written. Delete manifests
 // are left untouched.
 //
-// Manifests are clustered by size only (bin-packed toward the target size);
-// clustering by partition or sort key, which Java exposes via clusterBy, is a
-// future extension.
+// By default, manifests are clustered by size only (bin-packed toward the
+// target size). With WithRewriteManifestClusterBy, entries are grouped by the
+// returned key and partition spec before the same target-size rolling is
+// applied. This can reduce planning time when the key matches common query
+// filters, because each manifest contains fewer unrelated partition values.
 //
 // On a V3 table each rewrite advances next-row-id by the eligible manifests'
 // row count even though no rows are written, so running it on a cadence

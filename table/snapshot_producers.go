@@ -354,6 +354,7 @@ type manifestMergeManager struct {
 	minCountToMerge  int
 	mergeEnabled     bool
 	mergeConcurrency int
+	clusterBy        func(iceberg.DataFile) any
 	snap             *snapshotProducer
 }
 
@@ -500,6 +501,9 @@ func (m *manifestMergeManager) removeOrphans(input, output []iceberg.ManifestFil
 func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	if !m.mergeEnabled || len(manifests) == 0 {
 		return manifests, nil
+	}
+	if m.clusterBy != nil {
+		return m.clusterManifests(manifests)
 	}
 
 	first := manifests[0]

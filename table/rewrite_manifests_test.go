@@ -163,6 +163,103 @@ func TestRewriteManifests(t *testing.T) {
 	assert.Equal(t, wantFiles, activeFiles(t, after), "rewrite must preserve the data file count")
 }
 
+// TestRewriteManifestsClusterBy keeps files with the same user-provided key in
+// separate manifests, even when their input manifests were interleaved.
+func TestRewriteManifestsClusterBy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fs := iceio.LocalFS{}
+
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, iceberg.Properties{
+			table.ManifestMergeEnabledKey: "false",
+		})
+	require.NoError(t, err)
+
+	cat := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "clustered"}, meta, dir+"/metadata/00000.json",
+		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", 6)
+
+	clusterKey := func(df iceberg.DataFile) any {
+		if strings.HasSuffix(df.FilePath(), "-0.parquet") ||
+			strings.HasSuffix(df.FilePath(), "-2.parquet") ||
+			strings.HasSuffix(df.FilePath(), "-4.parquet") {
+			return "even"
+		}
+
+		return "odd"
+	}
+
+	txn := tbl.NewTransaction()
+	res, err := txn.RewriteManifests(ctx, table.WithRewriteManifestClusterBy(clusterKey))
+	require.NoError(t, err)
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Len(t, res.AddedManifests, 2)
+	assert.Len(t, res.RewrittenManifests, 6)
+
+	manifests, err := tbl.CurrentSnapshot().Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, manifests, 2)
+	for _, manifest := range manifests {
+		entries, err := manifest.FetchEntries(fs, true)
+		require.NoError(t, err)
+		require.NotEmpty(t, entries)
+
+		want := clusterKey(entries[0].DataFile())
+		for _, entry := range entries {
+			assert.Equal(t, iceberg.EntryStatusEXISTING, entry.Status(),
+				"clustered rewrite should write live files as existing")
+		}
+		for _, entry := range entries[1:] {
+			assert.Equal(t, want, clusterKey(entry.DataFile()),
+				"a clustered manifest must not mix cluster keys")
+		}
+	}
+}
+
+// TestRewriteManifestsClusterByRollsAtTargetSize verifies that one cluster key
+// can produce multiple manifests when its writer reaches the target size.
+func TestRewriteManifestsClusterByRollsAtTargetSize(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	fs := iceio.LocalFS{}
+
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, iceberg.Properties{
+			table.ManifestMergeEnabledKey: "false",
+		})
+	require.NoError(t, err)
+
+	cat := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "clustered_roll"}, meta, dir+"/metadata/00000.json",
+		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", 3)
+
+	txn := tbl.NewTransaction()
+	res, err := txn.RewriteManifests(ctx,
+		table.WithManifestTargetSize(1),
+		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any { return "same" }),
+	)
+	require.NoError(t, err)
+	tbl, err = txn.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Len(t, res.AddedManifests, 3)
+	assert.Len(t, res.RewrittenManifests, 3)
+
+	manifests, err := tbl.CurrentSnapshot().Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, manifests, 3)
+	for _, manifest := range manifests {
+		entries, err := manifest.FetchEntries(fs, true)
+		require.NoError(t, err)
+		assert.Len(t, entries, 1, "target size should roll the single cluster key")
+	}
+}
+
 // TestRewriteManifestsMultipleBins forces a small target size so the merge emits
 // more than one output manifest — the manifests-created > 1 path the default
 // target size (far larger than any test manifest) never exercises.
