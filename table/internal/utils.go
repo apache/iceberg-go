@@ -559,21 +559,42 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 	}
 }
 
-func TruncateUpperBoundText(s string, trunc int) string {
-	if trunc >= utf8.RuneCountInString(s) {
-		return s
-	}
-
-	result := []rune(s)[:trunc]
-	for i := len(result) - 1; i >= 0; i-- {
-		if next, ok := nextValidRune(result[i]); ok {
-			result[i] = next
-
-			return string(result[:i+1])
+// truncateString returns the prefix containing at most width UTF-8 code
+// points. The boolean is true when the input was actually truncated.
+func truncateString(s string, width int) (string, bool) {
+	for idx := range s {
+		if width == 0 {
+			return s[:idx], true
 		}
+
+		width--
 	}
 
-	return ""
+	return s, false
+}
+
+func TruncateUpperBoundText(s string, trunc int) string {
+	result, _ := truncateUpperBoundText(s, trunc)
+
+	return result
+}
+
+func truncateUpperBoundText(s string, trunc int) (string, bool) {
+	result, truncated := truncateString(s, trunc)
+	if !truncated {
+		return s, false
+	}
+
+	for len(result) > 0 {
+		r, size := utf8.DecodeLastRuneInString(result)
+		if next, ok := nextValidRune(r); ok {
+			return result[:len(result)-size] + string(next), true
+		}
+
+		result = result[:len(result)-size]
+	}
+
+	return "", true
 }
 
 func nextValidRune(r rune) (rune, bool) {
@@ -588,6 +609,11 @@ func nextValidRune(r rune) (rune, bool) {
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
+	if trunc < 0 {
+		// A negative width cannot describe a prefix. Keep the original bound
+		// instead of panicking on the slice expression below.
+		return slices.Clone(val)
+	}
 	if trunc >= len(val) {
 		return slices.Clone(val)
 	}
