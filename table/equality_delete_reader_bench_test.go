@@ -275,7 +275,7 @@ func newEqualityDeleteLoadingBenchmarkInput(b *testing.B) equalityDeleteLoadingB
 	for i := range deleteFileCount {
 		path := fmt.Sprintf("mem://benchmark-lazy-equality/delete-%04d.parquet", i)
 		if i > 0 {
-			if err := fs.MemFS.WriteFile(path, contents); err != nil {
+			if err := fs.WriteFile(path, contents); err != nil {
 				b.Fatal(err)
 			}
 		}

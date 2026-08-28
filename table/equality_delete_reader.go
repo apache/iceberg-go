@@ -336,6 +336,7 @@ func (l *lazyEqualityDeleteLoader) load(ctx context.Context, task FileScanTask) 
 		if len(fileSet.keys) == 0 {
 			return nil, nil
 		}
+
 		return []*equalityDeleteSet{fileSet.equalityDeleteSet}, nil
 	}
 
