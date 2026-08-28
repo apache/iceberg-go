@@ -63,6 +63,8 @@ type writerFactory struct {
 	writeProps       any
 	rowGroupBytes    int64
 	statsCols        map[int]tblutils.StatisticsCollector
+	colMapping       map[string]int
+	variantFieldIDs  map[int]struct{}
 	currentSpec      iceberg.PartitionSpec
 	fileFormat       iceberg.FileFormat
 	format           tblutils.FileFormat
@@ -218,6 +220,16 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		}
 	}
 
+	if f.fileFormat == iceberg.ParquetFile {
+		f.colMapping, err = f.format.PathToIDMapping(f.fileSchema)
+		if err != nil {
+			stopCount()
+
+			return nil, err
+		}
+		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
+	}
+
 	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
 	if err != nil {
 		stopCount()
@@ -287,6 +299,8 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,
 		StatsCols:        w.statsCols,
+		ColMapping:       w.colMapping,
+		VariantFieldIDs:  w.variantFieldIDs,
 		WriteProps:       w.writeProps,
 		RowGroupBytes:    w.rowGroupBytes,
 		Spec:             w.currentSpec,

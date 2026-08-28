@@ -507,6 +507,7 @@ type ParquetFileWriter struct {
 	info             WriteFileInfo
 	partition        map[int]any
 	colMapping       map[string]int
+	variantFieldIDs  map[int]struct{}
 	geoCols          []geoColumn
 	geoNormalizeCols []int
 	geoAccs          map[int]*geoBoundsAccumulator
@@ -595,11 +596,19 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		return nil, err
 	}
 
-	colMapping, err := p.PathToIDMapping(info.FileSchema)
-	if err != nil {
-		fw.Close()
+	colMapping := info.ColMapping
+	if colMapping == nil {
+		colMapping, err = p.PathToIDMapping(info.FileSchema)
+		if err != nil {
+			fw.Close()
 
-		return nil, err
+			return nil, err
+		}
+	}
+
+	variantFieldIDs := info.VariantFieldIDs
+	if variantFieldIDs == nil {
+		variantFieldIDs = VariantFieldIDsFromSchema(info.FileSchema)
 	}
 
 	counter := &internal.CountingWriter{W: fw}
@@ -642,6 +651,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		info:             info,
 		partition:        partitionValues,
 		colMapping:       colMapping,
+		variantFieldIDs:  variantFieldIDs,
 		geoCols:          geoCols,
 		geoNormalizeCols: geoNormalizeCols,
 		geoAccs:          geoAccs,
@@ -1125,7 +1135,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema), w.arrowSchema)
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, w.variantFieldIDs, w.arrowSchema)
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	if err = w.applyGeoBounds(stats); err != nil {
