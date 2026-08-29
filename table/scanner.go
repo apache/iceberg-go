@@ -1093,7 +1093,6 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			continue
 		}
 
-		manifestIndex, mf := manifestIndex, mf
 		g.Go(func() error {
 			fs, err := manifestIO.acquire(gctx)
 			if err != nil {

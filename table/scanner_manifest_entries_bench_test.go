@@ -97,7 +97,6 @@ func collectManifestEntryBatches(entries []iceberg.ManifestEntry, manifestCount,
 	var g errgroup.Group
 	g.SetLimit(min(concurrency, manifestCount))
 	for manifestIndex := range manifestCount {
-		manifestIndex := manifestIndex
 		g.Go(func() error {
 			manifestEntries := append(make([]iceberg.ManifestEntry, 0, len(entries)), entries...)
 			classified, err := classifyManifestEntries(manifestEntries)
@@ -105,6 +104,7 @@ func collectManifestEntryBatches(entries []iceberg.ManifestEntry, manifestCount,
 				return err
 			}
 			results[manifestIndex] = classified
+
 			return nil
 		})
 	}
