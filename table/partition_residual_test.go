@@ -22,7 +22,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
@@ -36,6 +40,9 @@ func partitionResidualTestSchema() *iceberg.Schema {
 		},
 		iceberg.NestedField{
 			ID: 2, Name: "amount", Type: iceberg.PrimitiveTypes.Int64,
+		},
+		iceberg.NestedField{
+			ID: 3, Name: "payload", Type: iceberg.PrimitiveTypes.String,
 		},
 	)
 }
@@ -205,17 +212,24 @@ func TestPlanFilesLocalSetsIdentityPartitionResidual(t *testing.T) {
 	spec := partitionResidualTestSpec(iceberg.IdentityTransform{})
 	metadata, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, nil)
 	require.NoError(t, err)
+	fs := iceio.NewMemFS()
+	dataPath := tableLocation + "/data/file.parquet"
+	dataSize := writePartitionResidualParquet(t, fs, dataPath, schema, `[
+		{"tenant_id":"acme","amount":50,"payload":"low"},
+		{"tenant_id":"acme","amount":150,"payload":"keep"},
+		{"tenant_id":"acme","amount":250,"payload":"high"}
+	]`)
 
 	dataFileBuilder, err := iceberg.NewDataFileBuilder(
 		spec,
 		iceberg.EntryContentData,
-		tableLocation+"/data/file.parquet",
+		dataPath,
 		iceberg.ParquetFile,
 		map[int]any{1000: "acme"},
 		nil,
 		nil,
-		1,
-		1024,
+		3,
+		dataSize,
 	)
 	require.NoError(t, err)
 
@@ -240,13 +254,12 @@ func TestPlanFilesLocalSetsIdentityPartitionResidual(t *testing.T) {
 		[]iceberg.ManifestFile{manifest},
 	))
 
-	fs := iceio.NewMemFS()
 	require.NoError(t, fs.WriteFile(manifestPath, manifestBuffer.Bytes()))
 	require.NoError(t, fs.WriteFile(manifestListPath, manifestListBuffer.Bytes()))
 
 	metadataBuilder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
-	schemaID := schema.ID
+	schemaID := metadata.CurrentSchema().ID
 	require.NoError(t, metadataBuilder.AddSnapshot(&Snapshot{
 		SnapshotID:     snapshotID,
 		SequenceNumber: 1,
@@ -270,7 +283,8 @@ func TestPlanFilesLocalSetsIdentityPartitionResidual(t *testing.T) {
 		iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme"),
 		iceberg.GreaterThan(iceberg.Reference("amount"), int64(100)),
 	)
-	tasks, err := tbl.Scan(WithRowFilter(filter)).PlanFiles(ctx)
+	scan := tbl.Scan(WithRowFilter(filter), WithSelectedFields("payload"))
+	tasks, err := scan.PlanFiles(ctx)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.NotNil(t, tasks[0].Residual)
@@ -280,6 +294,54 @@ func TestPlanFilesLocalSetsIdentityPartitionResidual(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, tasks[0].Residual.Equals(want),
 		"expected %s, got %s", want, tasks[0].Residual)
+
+	resultSchema, records, err := scan.ReadTasks(ctx, tasks)
+	require.NoError(t, err)
+	require.Equal(t, 1, resultSchema.NumFields())
+	require.Equal(t, "payload", resultSchema.Field(0).Name)
+
+	var payloads []string
+	for record, err := range records {
+		require.NoError(t, err)
+		values := record.Column(0).(*array.String)
+		for i := range values.Len() {
+			payloads = append(payloads, values.Value(i))
+		}
+		record.Release()
+	}
+	assert.Equal(t, []string{"keep", "high"}, payloads)
+}
+
+func writePartitionResidualParquet(
+	t *testing.T,
+	fs *iceio.MemFS,
+	path string,
+	schema *iceberg.Schema,
+	jsonData string,
+) int64 {
+	t.Helper()
+
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	record := mustLoadRecordBatchFromJSON(arrowSchema, jsonData)
+	defer record.Release()
+
+	tbl := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+
+	writer, err := fs.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, writer, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()))
+	require.NoError(t, writer.Close())
+
+	file, err := fs.Open(path)
+	require.NoError(t, err)
+	defer file.Close()
+	info, err := file.Stat()
+	require.NoError(t, err)
+
+	return info.Size()
 }
 
 var partitionResidualBenchmarkSink iceberg.BooleanExpression

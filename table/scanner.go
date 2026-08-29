@@ -1461,7 +1461,7 @@ type FileScanTask struct {
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
-	// for this task. Remote planners may simplify the original filter using
+	// for this task. Local or remote planners may simplify the original filter using
 	// file metadata; nil means the caller did not provide a task residual.
 	// ReadTasks applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression

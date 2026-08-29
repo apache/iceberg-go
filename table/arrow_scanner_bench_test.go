@@ -298,3 +298,158 @@ func BenchmarkArrowScanAddTaskProjectedFieldIDs(b *testing.B) {
 		})
 	}
 }
+
+var benchmarkTaskResidualRows int64
+
+func BenchmarkArrowScanTaskResidual(b *testing.B) {
+	const rowCount = 32_768
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "tenant_id", Type: iceberg.PrimitiveTypes.String},
+		iceberg.NestedField{ID: 2, Name: "amount", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 3, Name: "payload", Type: iceberg.PrimitiveTypes.String},
+	)
+	projectedSchema, err := schema.Select(true, "payload")
+	if err != nil {
+		b.Fatal(err)
+	}
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://benchmark/identity-residual", nil,
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+	record := mustLoadRecordBatchFromJSON(arrowSchema, benchmarkTaskResidualJSON(rowCount))
+	defer record.Release()
+	arrowTable := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
+	defer arrowTable.Release()
+
+	dataPath := "mem://benchmark/identity-residual/data.parquet"
+	fs := iceio.NewMemFS()
+	writer, err := fs.Create(dataPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := pqarrow.WriteTable(arrowTable, writer, record.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps()); err != nil {
+		b.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		b.Fatal(err)
+	}
+	file, err := fs.Open(dataPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	fileInfo, err := file.Stat()
+	if closeErr := file.Close(); err != nil {
+		b.Fatal(err)
+	} else if closeErr != nil {
+		b.Fatal(closeErr)
+	}
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		dataPath,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		rowCount,
+		fileInfo.Size(),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	task := FileScanTask{
+		File:   dataFileBuilder.Build(),
+		Start:  0,
+		Length: fileInfo.Size(),
+	}
+	tasks := []FileScanTask{task}
+
+	identityFilter := iceberg.EqualTo(iceberg.Reference("tenant_id"), "acme")
+	mixedFilter := iceberg.NewAnd(
+		identityFilter,
+		iceberg.GreaterThan(iceberg.Reference("amount"), int64(100)),
+	)
+	mixedResidual := iceberg.GreaterThan(iceberg.Reference("amount"), int64(100))
+	for _, tc := range []struct {
+		name         string
+		filter       iceberg.BooleanExpression
+		residual     iceberg.BooleanExpression
+		expectedRows int64
+	}{
+		{name: "identity_only/original_filter", filter: identityFilter, expectedRows: rowCount},
+		{name: "identity_only/always_true_residual", filter: identityFilter, residual: iceberg.AlwaysTrue{}, expectedRows: rowCount},
+		{name: "mixed/original_filter", filter: mixedFilter, expectedRows: rowCount / 2},
+		{name: "mixed/amount_residual", filter: mixedFilter, residual: mixedResidual, expectedRows: rowCount / 2},
+	} {
+		boundFilter, err := iceberg.BindExpr(schema, tc.filter, true)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		b.Run(tc.name, func(b *testing.B) {
+			tasks[0].Residual = tc.residual
+			b.ReportAllocs()
+			b.ReportMetric(float64(rowCount), "rows/op")
+			b.ResetTimer()
+			for b.Loop() {
+				scan := &arrowScan{
+					metadata:        metadata,
+					fs:              fs,
+					scanSchema:      schema,
+					projectedSchema: projectedSchema,
+					boundRowFilter:  boundFilter,
+					caseSensitive:   true,
+					rowLimit:        -1,
+					concurrency:     1,
+				}
+				_, records, err := scan.GetRecords(b.Context(), tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				var rows int64
+				for record, err := range records {
+					if err != nil {
+						b.Fatal(err)
+					}
+					rows += int64(record.NumRows())
+					record.Release()
+				}
+				if rows != tc.expectedRows {
+					b.Fatalf("unexpected row count: got %d, want %d", rows, tc.expectedRows)
+				}
+				benchmarkTaskResidualRows = rows
+			}
+		})
+	}
+}
+
+func benchmarkTaskResidualJSON(rowCount int) string {
+	var result strings.Builder
+	result.Grow(rowCount * 64)
+	result.WriteByte('[')
+	for i := range rowCount {
+		if i > 0 {
+			result.WriteByte(',')
+		}
+		amount := 50
+		if i%2 != 0 {
+			amount = 150
+		}
+		fmt.Fprintf(&result, `{"tenant_id":"acme","amount":%d,"payload":"payload-%d"}`,
+			amount, i)
+	}
+	result.WriteByte(']')
+
+	return result.String()
+}
