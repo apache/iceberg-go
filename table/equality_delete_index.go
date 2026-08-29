@@ -40,8 +40,9 @@ type equalityDeleteIndex struct {
 }
 
 type equalityDeleteIndexEntry struct {
-	entry  iceberg.ManifestEntry
-	fields []equalityDeleteFieldMetrics
+	file        iceberg.DataFile
+	sequenceNum int64
+	fields      []equalityDeleteFieldMetrics
 }
 
 type equalityDeleteRangeKind uint8
@@ -362,14 +363,17 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 
 func newEqualityDeleteIndexEntry(
 	entry iceberg.ManifestEntry,
+	dataFile iceberg.DataFile,
 	schema *iceberg.Schema,
 ) equalityDeleteIndexEntry {
-	indexed := equalityDeleteIndexEntry{entry: entry}
+	indexed := equalityDeleteIndexEntry{
+		file:        dataFile,
+		sequenceNum: entry.SequenceNum(),
+	}
 	if schema == nil {
 		return indexed
 	}
 
-	dataFile := entry.DataFile()
 	_, _, _, fieldIDs := dataFileCollections(dataFile)
 	if len(fieldIDs) == 0 {
 		return indexed
@@ -463,7 +467,7 @@ func buildEqualityDeleteIndex(
 	unpartitionedBySpecID := make(map[int32]bool)
 	for _, entry := range entries {
 		df := entry.DataFile()
-		indexedEntry := newEqualityDeleteIndexEntry(entry, schema)
+		partition := dataFilePartition(df)
 		isUnpartitioned, ok := unpartitionedBySpecID[df.SpecID()]
 		if !ok {
 			spec := specs.PartitionSpecByID(int(df.SpecID()))
@@ -474,13 +478,17 @@ func buildEqualityDeleteIndex(
 			isUnpartitioned = spec.IsUnpartitioned()
 			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
 		}
+		indexedFile, err := compactDeleteFileForIndex(df, partition, df.EqualityFieldIDs())
+		if err != nil {
+			return nil, err
+		}
+		indexedEntry := newEqualityDeleteIndexEntry(entry, indexedFile, schema)
 		if isUnpartitioned {
 			idx.global = append(idx.global, indexedEntry)
 
 			continue
 		}
 
-		partition := dataFilePartition(df)
 		key, err := newEqualityDeletePartitionKey(df.SpecID(), partition)
 		if err != nil {
 			return nil, fmt.Errorf("indexing equality delete file %s: %w", df.FilePath(), err)
@@ -493,7 +501,7 @@ func buildEqualityDeleteIndex(
 
 	sortBySequence := func(entries []equalityDeleteIndexEntry) {
 		slices.SortStableFunc(entries, func(a, b equalityDeleteIndexEntry) int {
-			return cmp.Compare(a.entry.SequenceNum(), b.entry.SequenceNum())
+			return cmp.Compare(a.sequenceNum, b.sequenceNum)
 		})
 	}
 	sortBySequence(idx.global)
@@ -545,14 +553,14 @@ func appendEqualityDeletesAfter(
 	dataStats *equalityDeleteDataFileStats,
 ) []iceberg.DataFile {
 	start := sort.Search(len(entries), func(i int) bool {
-		return entries[i].entry.SequenceNum() > dataSeqNum
+		return entries[i].sequenceNum > dataSeqNum
 	})
 	for _, entry := range entries[start:] {
 		if !equalityDeleteCanContainData(dataStats, entry.fields) {
 			continue
 		}
 
-		out = append(out, entry.entry.DataFile())
+		out = append(out, entry.file)
 	}
 
 	return out
