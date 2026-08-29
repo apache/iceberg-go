@@ -124,3 +124,45 @@ func (fs *benchmarkDelayIO) Open(name string) (iceio.File, error) {
 
 	return f, nil
 }
+
+// BenchmarkPurgeFilesNonBulkDeletion measures the bounded fallback used when
+// the filesystem does not implement BulkRemovableIO. The delay models the
+// round trip to a remote object store; the zero-delay cases show the worker
+// pool overhead on local-style deletes.
+func BenchmarkPurgeFilesNonBulkDeletion(b *testing.B) {
+	for _, fileCount := range []int{100, 1_000, 10_000} {
+		files := make([]string, fileCount)
+		for i := range files {
+			files[i] = fmt.Sprintf("s3://bucket/table/data/file-%d.parquet", i)
+		}
+
+		for _, delay := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond} {
+			for _, concurrency := range []int{1, 4, 16} {
+				b.Run(fmt.Sprintf("files=%d/delay=%s/concurrency=%d", fileCount, delay, concurrency), func(b *testing.B) {
+					deleteFunc := func(string) error {
+						time.Sleep(delay)
+
+						return nil
+					}
+
+					b.ReportAllocs()
+					b.ReportMetric(float64(fileCount), "files/op")
+					b.ResetTimer()
+					for b.Loop() {
+						deleted, err := deleteFilesParallel(
+							context.Background(),
+							files,
+							concurrency,
+							deleteFunc,
+							func(string, error) error { return nil },
+						)
+						if err != nil {
+							b.Fatal(err)
+						}
+						orphanCleanupBenchmarkSink = deleted[len(deleted)-1]
+					}
+				})
+			}
+		}
+	}
+}

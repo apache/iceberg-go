@@ -22,9 +22,11 @@ import (
 	"errors"
 	"fmt"
 	stdfs "io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1567,6 +1569,7 @@ func TestDeleteFilesEmpty(t *testing.T) {
 
 // mockPlainIO implements only IO, without optional delete or listing capabilities.
 type mockPlainIO struct {
+	mu      sync.Mutex
 	removed []string
 }
 
@@ -1575,6 +1578,9 @@ func (m *mockPlainIO) Open(string) (io.File, error) {
 }
 
 func (m *mockPlainIO) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.removed = append(m.removed, name)
 
 	return nil
@@ -1615,6 +1621,194 @@ func (m mockFileInfo) Mode() stdfs.FileMode { return m.mode }
 func (m mockFileInfo) ModTime() time.Time   { return m.modTime }
 func (m mockFileInfo) IsDir() bool          { return m.mode.IsDir() }
 func (m mockFileInfo) Sys() any             { return nil }
+
+type purgeDeleteTrackingIO struct {
+	mockListableIO
+
+	targetActive int
+	reached      chan struct{}
+	release      chan struct{}
+
+	mu          sync.Mutex
+	active      int
+	maxActive   int
+	removed     []string
+	reachedOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func (m *purgeDeleteTrackingIO) Remove(name string) error {
+	m.mu.Lock()
+	m.active++
+	if m.active > m.maxActive {
+		m.maxActive = m.active
+	}
+	if m.targetActive > 0 && m.active >= m.targetActive {
+		m.reachedOnce.Do(func() { close(m.reached) })
+	}
+	m.mu.Unlock()
+
+	if m.targetActive > 0 {
+		<-m.release
+	}
+
+	m.mu.Lock()
+	m.active--
+	m.removed = append(m.removed, name)
+	m.mu.Unlock()
+
+	return nil
+}
+
+func (m *purgeDeleteTrackingIO) MaxActive() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.maxActive
+}
+
+func (m *purgeDeleteTrackingIO) Release() {
+	m.releaseOnce.Do(func() { close(m.release) })
+}
+
+func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
+	const (
+		firstPath   = "s3://bucket/table/first.parquet"
+		missingPath = "s3://bucket/table/missing.parquet"
+		slowPath    = "s3://bucket/table/slow.parquet"
+		fastPath    = "s3://bucket/table/fast.parquet"
+	)
+
+	slowErr := errors.New("slow removal failed")
+	fastErr := errors.New("fast removal failed")
+	files := []string{firstPath, missingPath, slowPath, fastPath}
+	var mu sync.Mutex
+	calls := make(map[string]int)
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		4,
+		func(path string) error {
+			mu.Lock()
+			calls[path]++
+			mu.Unlock()
+
+			var err error
+			switch path {
+			case missingPath:
+				err = stdfs.ErrNotExist
+			case slowPath:
+				time.Sleep(10 * time.Millisecond)
+
+				err = slowErr
+			case fastPath:
+				err = fastErr
+			}
+			if os.IsNotExist(err) {
+				return nil
+			}
+
+			return err
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	assert.Equal(t, []string{firstPath, missingPath}, deleted)
+	require.ErrorIs(t, err, slowErr)
+	require.ErrorIs(t, err, fastErr)
+	assert.NotContains(t, err.Error(), missingPath)
+	assert.Less(t, strings.Index(err.Error(), slowPath), strings.Index(err.Error(), fastPath))
+
+	mu.Lock()
+	assert.Equal(t, map[string]int{
+		firstPath:   1,
+		missingPath: 1,
+		slowPath:    1,
+		fastPath:    1,
+	}, calls)
+	mu.Unlock()
+}
+
+func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	called := false
+	_, err := deleteFilesParallel(
+		ctx,
+		[]string{"s3://bucket/table/file.parquet"},
+		4,
+		func(string) error {
+			called = true
+
+			return nil
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called)
+}
+
+func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
+	maxWorkers := runtime.GOMAXPROCS(0)
+	if maxWorkers < 2 {
+		t.Skip("parallel deletion requires at least two workers")
+	}
+
+	const fileCount = 16
+	entries := make([]mockWalkEntry, 0, fileCount)
+	for i := range fileCount {
+		entries = append(entries, mockWalkEntry{
+			path: fmt.Sprintf("s3://bucket/table/data/file-%02d.parquet", i),
+			info: mockFileInfo{name: fmt.Sprintf("file-%02d.parquet", i)},
+		})
+	}
+
+	fsys := &purgeDeleteTrackingIO{
+		mockListableIO: mockListableIO{entries: entries},
+		targetActive:   2,
+		reached:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+
+	meta, err := NewMetadata(
+		iceberg.NewSchema(0),
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"s3://bucket/table",
+		iceberg.Properties{},
+	)
+	require.NoError(t, err)
+	tbl := New(
+		Identifier{"db", "tbl"},
+		meta,
+		"s3://bucket/table/metadata/v1.metadata.json",
+		testFSF(fsys),
+		nil,
+	)
+
+	done := make(chan error, 1)
+	go func() { done <- tbl.PurgeFiles(context.Background()) }()
+
+	select {
+	case <-fsys.reached:
+	case <-time.After(5 * time.Second):
+		fsys.Release()
+		<-done
+		t.Fatal("non-bulk purge deletion did not reach two concurrent removals")
+	}
+	fsys.Release()
+
+	require.NoError(t, <-done)
+	assert.Greater(t, fsys.MaxActive(), 1)
+	assert.LessOrEqual(t, fsys.MaxActive(), maxWorkers)
+}
 
 func TestPurgeFilesSkipsDataFilesForMalformedGCEnabled(t *testing.T) {
 	const orphanDataPath = "s3://bucket/table/data/orphan.parquet"
