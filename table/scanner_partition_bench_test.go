@@ -24,7 +24,107 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-var partitionEvaluatorBenchmarkSink int
+var (
+	partitionEvaluatorBenchmarkSink  int
+	partitionProjectionBenchmarkSink int
+)
+
+func BenchmarkPartitionProjectionPlanning(b *testing.B) {
+	for _, specCount := range []int{8, 64, 256} {
+		scan, schema := benchmarkPartitionProjectionScan(b, specCount)
+		b.Run(fmt.Sprintf("specs=%d", specCount), func(b *testing.B) {
+			b.Run("separate_caches", func(b *testing.B) {
+				benchmarkPartitionProjectionPhases(b, scan, schema, specCount, false)
+			})
+			b.Run("shared_cache", func(b *testing.B) {
+				benchmarkPartitionProjectionPhases(b, scan, schema, specCount, true)
+			})
+		})
+	}
+}
+
+func benchmarkPartitionProjectionPhases(
+	b *testing.B,
+	scan *Scan,
+	schema *iceberg.Schema,
+	specCount int,
+	shared bool,
+) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	var projectionBuilds int64
+	newPartitionFilters := func() *keyDefaultMapErr[int, iceberg.BooleanExpression] {
+		return newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+			projectionBuilds++
+
+			return buildPartitionProjection(specID, scan.metadata, schema, scan.rowFilter, scan.caseSensitive)
+		})
+	}
+
+	for b.Loop() {
+		manifestFilters := newPartitionFilters()
+		partitionFilters := manifestFilters
+		if !shared {
+			partitionFilters = newPartitionFilters()
+		}
+
+		manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
+			return buildManifestEvaluator(specID, scan.metadata, schema, manifestFilters, scan.caseSensitive)
+		})
+		for specID := range specCount {
+			if _, err := manifestEvaluators.Get(specID); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
+			return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
+		})
+		for specID := range specCount {
+			if _, err := partitionEvaluators.Get(specID); err != nil {
+				b.Fatal(err)
+			}
+		}
+
+		partitionProjectionBenchmarkSink = len(manifestFilters.data) + len(partitionFilters.data)
+	}
+
+	b.StopTimer()
+	b.ReportMetric(float64(projectionBuilds)/float64(b.N), "projection-builds/op")
+}
+
+func benchmarkPartitionProjectionScan(b *testing.B, specCount int) (*Scan, *iceberg.Schema) {
+	b.Helper()
+
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	specs := make([]iceberg.PartitionSpec, specCount)
+	for specID := range specCount {
+		specs[specID] = iceberg.NewPartitionSpecID(specID, iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000 + specID,
+			Name:      fmt.Sprintf("id_%d", specID),
+			Transform: iceberg.IdentityTransform{},
+		})
+	}
+
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		SchemaList:      []*iceberg.Schema{schema},
+		CurrentSchemaID: schema.ID,
+		Specs:           specs,
+	}}
+
+	return &Scan{
+		metadata: metadata,
+		rowFilter: iceberg.NewAnd(
+			iceberg.EqualTo(iceberg.Reference("id"), int32(7)),
+			iceberg.GreaterThanEqual(iceberg.Reference("payload"), "a"),
+		),
+		caseSensitive: true,
+	}, schema
+}
 
 func BenchmarkPartitionEvaluator(b *testing.B) {
 	for _, fieldCount := range []int{1, 8, 32} {
