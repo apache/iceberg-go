@@ -172,14 +172,11 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifests, err := snapshot.Manifests(manifestListFS)
+		manifestSet, err := planningScan.manifestSet(ctx, snapshot, fs)
 		if err != nil {
 			return nil, err
 		}
-		for _, manifest := range manifests {
-			if manifest.ManifestContent() != iceberg.ManifestContentData {
-				continue
-			}
+		for _, manifest := range manifestSet.dataManifests() {
 			if _, ok := appendSnapshots[manifest.SnapshotID()]; !ok {
 				continue
 			}

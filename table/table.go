@@ -104,6 +104,7 @@ type Table struct {
 	metadataLocation string
 	cat              CatalogIO
 	fsF              FSysF
+	manifestCache    *snapshotManifestCache
 	planner          ScanPlanner
 	// scanPlanningIOProps are the table-scoped FileIO properties supplied by a
 	// catalog load response. They are separate from metadata properties because
@@ -235,6 +236,10 @@ func (t *Table) Refresh(ctx context.Context) error {
 	t.metadata = fresh.metadata
 	t.fsF = fresh.fsF
 	t.metadataLocation = fresh.metadataLocation
+	t.manifestCache = fresh.manifestCache
+	if t.manifestCache == nil {
+		t.manifestCache = newSnapshotManifestCache()
+	}
 	t.planner = fresh.planner
 	t.scanPlanningIOProps = maps.Clone(fresh.scanPlanningIOProps)
 	// Only inherit the catalog-derived reporter when the caller hasn't set one
@@ -388,10 +393,11 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 						return nil
 					}
 
-					manifests, err := snapshots[i].Manifests(fs)
+					manifestSet, err := t.manifestCache.get(groupCtx, snapshots[i], fs)
 					if err != nil {
 						return err
 					}
+					manifests := manifestSet.allManifests()
 
 					select {
 					case ch <- list{Index: i, Value: manifests, Last: i == n-1}:
@@ -1310,6 +1316,7 @@ func (t Table) Scan(opts ...ScanOption) *Scan {
 		metadata:            t.metadata,
 		metadataLocation:    t.metadataLocation,
 		ioF:                 t.fsF,
+		manifestCache:       t.manifestCache,
 		planner:             t.planner,
 		scanPlanningIOProps: maps.Clone(t.scanPlanningIOProps),
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
@@ -1398,6 +1405,7 @@ func New(ident Identifier, meta Metadata, metadataLocation string, fsF FSysF, ca
 		metadata:         meta,
 		metadataLocation: metadataLocation,
 		fsF:              fsF,
+		manifestCache:    newSnapshotManifestCache(),
 		cat:              cat,
 		planner:          planner,
 		reporter:         metrics.NopReporter{},

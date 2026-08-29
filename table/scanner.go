@@ -471,6 +471,7 @@ type Scan struct {
 	metadata            Metadata
 	metadataLocation    string
 	ioF                 FSysF
+	manifestCache       *snapshotManifestCache
 	planner             ScanPlanner
 	scanPlanningIOProps iceberg.Properties
 	planningMode        ScanPlanningMode
@@ -970,12 +971,21 @@ func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(fs)
+	manifestSet, err := scan.manifestSet(ctx, *snap, fs)
 	if err != nil {
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestList, schema, acc, partitionFilters)
+	return scan.filterManifestsWithSchema(manifestSet.allManifests(), schema, acc, partitionFilters)
+}
+
+func (scan *Scan) manifestSet(
+	ctx context.Context,
+	snapshot Snapshot,
+	fio io.IO,
+) (snapshotManifestSet, error) {
+	return scan.manifestCache.get(ctx, snapshot, fio)
+>>>>>>> 90c4371 (perf(table): cache snapshot manifests across scans)
 }
 
 // filterManifestsWithSchema applies partition-summary pruning to an existing
