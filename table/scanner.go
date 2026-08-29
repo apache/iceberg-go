@@ -918,6 +918,17 @@ func (scan *Scan) filterManifestsWithSchema(
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate manifest %s: %w", mf.FilePath(), err)
 		}
+		// Has*Files returns true for unknown counts, so this only skips manifests
+		// known to contain no added or existing (live) entries.
+		if use && !mf.HasAddedFiles() && !mf.HasExistingFiles() {
+			if isDelete {
+				acc.skippedDeleteManifests++
+			} else {
+				acc.skippedDataManifests++
+			}
+
+			continue
+		}
 		if use {
 			if isDelete {
 				acc.scannedDeleteManifests++

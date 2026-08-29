@@ -877,15 +877,18 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 
 	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
 		Build()
 	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
 		Build()
 	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(1, 1).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
 		Build()
 
@@ -932,6 +935,125 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
 	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
 	assert.Len(t, filtered, 2, "only the overlapping manifests survive partition-spec filtering")
+}
+
+func TestFilterManifestsWithSchemaSkipsKnownEmptyManifests(t *testing.T) {
+	schema := simpleSchema()
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"mem://empty-manifest-filter",
+		nil,
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+	}
+	knownEmptyData := iceberg.NewManifestFile(2, "data-empty.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(2).
+		Build()
+	knownEmptyDelete := iceberg.NewManifestFile(2, "delete-empty.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentDeletes).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(1).
+		Build()
+	unknownCounts := iceberg.NewManifestFile(2, "data-unknown.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(-1).
+		ExistingFiles(-1).
+		Build()
+	live := iceberg.NewManifestFile(2, "data-live.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(0).
+		ExistingFiles(1).
+		Build()
+
+	var acc scanMetricsAccumulator
+	filtered, err := scan.filterManifestsWithSchema(
+		[]iceberg.ManifestFile{knownEmptyData, knownEmptyDelete, unknownCounts, live},
+		schema,
+		&acc,
+	)
+	require.NoError(t, err)
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "data-unknown.avro", filtered[0].FilePath())
+	assert.Equal(t, "data-live.avro", filtered[1].FilePath())
+
+	assert.Equal(t, int64(3), acc.totalDataManifests)
+	assert.Equal(t, int64(1), acc.totalDeleteManifests)
+	assert.Equal(t, int64(2), acc.scannedDataManifests)
+	assert.Equal(t, int64(1), acc.skippedDataManifests)
+	assert.Equal(t, int64(0), acc.scannedDeleteManifests)
+	assert.Equal(t, int64(1), acc.skippedDeleteManifests)
+	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
+	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
+}
+
+func TestPlanFilesSkipsKnownEmptyManifestsBeforeOpening(t *testing.T) {
+	const (
+		tableLocation    = "mem://empty-manifest-plan"
+		snapshotID       = int64(1)
+		manifestListPath = tableLocation + "/metadata/snap-1.avro"
+	)
+
+	fs := newTrackingCallsIO()
+	schema := simpleSchema()
+	spec := iceberg.NewPartitionSpec()
+	metadata, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	dataPath := tableLocation + "/metadata/data-empty.avro"
+	deletePath := tableLocation + "/metadata/delete-empty.avro"
+	dataManifest := iceberg.NewManifestFile(2, dataPath, 100, int32(spec.ID()), snapshotID).
+		Content(iceberg.ManifestContentData).
+		SequenceNum(1, 1).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(2).
+		Build()
+	deleteManifest := iceberg.NewManifestFile(2, deletePath, 100, int32(spec.ID()), snapshotID).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(1).
+		Build()
+
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{dataManifest, deleteManifest}))
+	require.NoError(t, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	schemaID := metadata.CurrentSchema().ID
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: sequenceNumber,
+		TimestampMs:    metadata.LastUpdatedMillis() + 1,
+		ManifestList:   manifestListPath,
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	built, err := builder.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "empty-manifest-plan"}, built, tableLocation+"/metadata/metadata.json", testFSF(fs), nil)
+	tasks, err := tbl.Scan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, fs.openCount[dataPath])
+	assert.Zero(t, fs.openCount[deletePath])
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
@@ -1763,6 +1885,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 		manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
 			Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}}).
 			SequenceNum(1, 1).
+			AddedFiles(1).
 			Build()
 
 		var listBytes bytes.Buffer
