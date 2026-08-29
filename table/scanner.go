@@ -1258,7 +1258,6 @@ func (scan *Scan) planDataManifestTasks(
 			continue
 		}
 
-		index, manifest := index, manifest
 		g.Go(func() error {
 			fs, err := scan.ioF(gctx)
 			if err != nil {

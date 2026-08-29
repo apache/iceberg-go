@@ -39,8 +39,7 @@ func BenchmarkPlanDataManifestTasks(b *testing.B) {
 		{manifestCount: 8, entryCount: 10_000},
 	} {
 		b.Run(fmt.Sprintf("manifests=%d/entries=%d", workload.manifestCount, workload.entryCount), func(b *testing.B) {
-			scan, schema, manifests, posDeleteIndex, dvIndex, eqDeleteIndex :=
-				newPlanTasksBenchmarkFixture(b, workload.manifestCount, workload.entryCount)
+			scan, schema, manifests, posDeleteIndex, dvIndex, eqDeleteIndex := newPlanTasksBenchmarkFixture(b, workload.manifestCount, workload.entryCount)
 
 			for _, mode := range []struct {
 				name string
