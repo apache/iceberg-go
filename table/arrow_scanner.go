@@ -869,7 +869,10 @@ func (as *arrowScan) projectedFieldIDs(rowFilter iceberg.BooleanExpression, equa
 }
 
 func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowScanInvariants, error) {
-	projectedIDs, err := as.projectedFieldIDs(as.boundRowFilter, nil)
+	// Filter columns are added per task below. A local task may have a
+	// partition-elided residual that no longer references the original filter
+	// fields.
+	projectedIDs, err := as.projectedFieldIDs(nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -883,6 +886,18 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 }
 
 func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, tasks []FileScanTask) error {
+	// Tasks without a residual still use the scan's original filter. Add those
+	// fields once, then add only the actual residual fields for other tasks.
+	for _, task := range tasks {
+		if task.Residual == nil {
+			if err := addFilterFieldIDs(invariants.projectedIDs, as.boundRowFilter); err != nil {
+				return err
+			}
+
+			break
+		}
+	}
+
 	for _, task := range tasks {
 		if task.Residual == nil {
 			continue

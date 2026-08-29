@@ -149,7 +149,7 @@ func TestArrowScanSnapshotsInvariants(t *testing.T) {
 	assert.Equal(t, 1, metadata.nameMappingCalls)
 }
 
-func TestArrowScanAddTaskProjectedFieldIDsSkipsNilResiduals(t *testing.T) {
+func TestArrowScanAddTaskProjectedFieldIDsUsesTaskResiduals(t *testing.T) {
 	schema := iceberg.NewSchema(1,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
 		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
@@ -162,9 +162,9 @@ func TestArrowScanAddTaskProjectedFieldIDsSkipsNilResiduals(t *testing.T) {
 		scanSchema:     schema,
 		boundRowFilter: boundFilter,
 	}
-	invariants := &arrowScanInvariants{projectedIDs: set[int]{1: {}}}
+	invariants := &arrowScanInvariants{projectedIDs: set[int]{}}
 	tasks := []FileScanTask{
-		{},
+		{Residual: iceberg.AlwaysTrue{}},
 		{Residual: iceberg.EqualTo(iceberg.Reference("data"), "value")},
 		{},
 	}
@@ -172,6 +172,37 @@ func TestArrowScanAddTaskProjectedFieldIDsSkipsNilResiduals(t *testing.T) {
 	err = scanner.addTaskProjectedFieldIDs(invariants, tasks)
 	require.NoError(t, err)
 	assert.Equal(t, set[int]{1: {}, 2: {}}, invariants.projectedIDs)
+}
+
+func TestArrowScanInvariantsStartWithRequestedFields(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+	)
+	projected, err := schema.Select(true, "data")
+	require.NoError(t, err)
+	metadata, err := NewMetadata(
+		schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "mem://test/table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	boundFilter, err := iceberg.BindExpr(schema,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(1)), true)
+	require.NoError(t, err)
+
+	scanner := &arrowScan{
+		metadata:        metadata,
+		scanSchema:      schema,
+		projectedSchema: projected,
+		boundRowFilter:  boundFilter,
+	}
+	invariants, err := scanner.scanInvariants(metadata.Properties())
+	require.NoError(t, err)
+	assert.Equal(t, set[int]{2: {}}, invariants.projectedIDs)
+
+	err = scanner.addTaskProjectedFieldIDs(invariants, []FileScanTask{{Residual: iceberg.AlwaysTrue{}}})
+	require.NoError(t, err)
+	assert.Equal(t, set[int]{2: {}}, invariants.projectedIDs)
 }
 
 func TestEnrichRecordsWithPosDeleteFields(t *testing.T) {
