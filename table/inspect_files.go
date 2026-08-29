@@ -135,10 +135,11 @@ func (i InspectTable) manifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
-	manifests, err := snapshot.Manifests(fs)
+	manifestSet, err := i.tbl.manifestCache.get(ctx, *snapshot, fs)
 	if err != nil {
 		return nil, err
 	}
+	manifests := manifestSet.allManifests()
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
@@ -184,13 +185,13 @@ func (i InspectTable) allManifestEntryReader(
 
 					return
 				}
-				snapshotManifests, err := snapshot.Manifests(fs)
+				manifestSet, err := i.tbl.manifestCache.get(ctx, snapshot, fs)
 				if err != nil {
 					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
 
 					return
 				}
-				for _, manifest := range snapshotManifests {
+				for _, manifest := range manifestSet.allManifests() {
 					if _, ok := seen[manifest.FilePath()]; ok {
 						continue
 					}
