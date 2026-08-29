@@ -100,8 +100,7 @@ func compactDeleteFileForIndex(
 		builder.EqualityFieldIDs(equalityFieldIDs)
 	}
 
-	sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize :=
-		iceberginternal.BorrowedDataFilePointers(file)
+	sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(file)
 	if sortOrderID != nil {
 		builder.SortOrderID(*sortOrderID)
 	}

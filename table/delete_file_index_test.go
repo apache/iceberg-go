@@ -136,7 +136,7 @@ func TestCompactDeleteFileForIndexPreservesReadMetadata(t *testing.T) {
 	)
 	require.NoError(t, err)
 	builder.ColumnSizes(map[int]int64{1: 22})
-	builder.DistinctValueCounts(map[int]int64{1: 2})
+	builder.DistinctValueCounts(map[int]int64{1: 2}) //nolint:staticcheck // SA1019: deliberate use of deprecated setter to verify it is not retained by compacted index files
 	builder.KeyMetadata([]byte("key"))
 	builder.SplitOffsets([]int64{4, 8})
 	builder.EqualityFieldIDs([]int{1, 2})
