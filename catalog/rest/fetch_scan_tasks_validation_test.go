@@ -1,0 +1,67 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+package rest
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestFetchScanTasksResponseRejectsInvalidShape(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"null plan-tasks":            `{"plan-tasks":null}`,
+		"null file-scan-tasks":       `{"file-scan-tasks":null}`,
+		"delete-files without tasks": `{"plan-tasks":[],"delete-files":[{"content":"position-deletes"}]}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var resp FetchScanTasksResponse
+			err := json.Unmarshal([]byte(payload), &resp)
+			require.ErrorIs(t, err, ErrRESTError)
+		})
+	}
+}
+
+func TestFetchScanTasksResponseAcceptsPresentEmptyTaskField(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"no task fields":        `{}`,
+		"empty plan-tasks":      `{"plan-tasks":[]}`,
+		"empty file-scan-tasks": `{"file-scan-tasks":[]}`,
+		"empty delete-files":    `{"delete-files":[]}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var resp FetchScanTasksResponse
+			require.NoError(t, json.Unmarshal([]byte(payload), &resp))
+			assert.Empty(t, resp.PlanTasks)
+			assert.Empty(t, resp.FileScanTasks)
+			assert.Empty(t, resp.DeleteFiles)
+		})
+	}
+}

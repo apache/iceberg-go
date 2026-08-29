@@ -22,6 +22,7 @@ import (
 	"compress/flate"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -33,6 +34,9 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"github.com/twmb/avro"
 	"github.com/twmb/avro/atype"
@@ -486,10 +490,14 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	})
 	schema := NewSchema(0)
 
-	summaries, err := constructPartitionSummaries(spec, schema, []map[int]any{{1000: "historical-value"}})
+	stats, err := newPartitionSummaryStats(spec, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := stats.update(map[int]any{1000: "historical-value"}); err != nil {
+		t.Fatal(err)
+	}
+	summaries := stats.summaries()
 	if len(summaries) != 1 {
 		t.Fatalf("expected one partition summary, got %d", len(summaries))
 	}
@@ -498,6 +506,307 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	}
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
+func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value any
+		want  Literal
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool, value: true, want: NewLiteral(true)},
+		{name: "boolean from literal", typ: PrimitiveTypes.Bool, value: BoolLiteral(true), want: NewLiteral(true)},
+		{name: "int32 from int", typ: PrimitiveTypes.Int32, value: int(7), want: NewLiteral(int32(7))},
+		{name: "int32 from literal", typ: PrimitiveTypes.Int32, value: Int32Literal(7), want: NewLiteral(int32(7))},
+		{name: "int32 wraps overflowing int64", typ: PrimitiveTypes.Int32, value: int64(math.MaxInt32) + 1, want: NewLiteral(int32(math.MinInt32))},
+		{name: "int64 from int", typ: PrimitiveTypes.Int64, value: int(8), want: NewLiteral(int64(8))},
+		{name: "float32 from float64", typ: PrimitiveTypes.Float32, value: float64(1.5), want: NewLiteral(float32(1.5))},
+		{name: "float32 overflows to infinity", typ: PrimitiveTypes.Float32, value: float64(math.MaxFloat32) * 2, want: NewLiteral(float32(math.Inf(1)))},
+		{name: "float64 from int", typ: PrimitiveTypes.Float64, value: int(9), want: NewLiteral(float64(9))},
+		{name: "string from bytes", typ: PrimitiveTypes.String, value: []byte("east"), want: NewLiteral("east")},
+		{name: "string from literal", typ: PrimitiveTypes.String, value: StringLiteral("east"), want: NewLiteral("east")},
+		{name: "date from int32", typ: PrimitiveTypes.Date, value: int32(10), want: NewLiteral(Date(10))},
+		{name: "time from duration", typ: PrimitiveTypes.Time, value: time.Duration(11), want: NewLiteral(Time(11))},
+		{name: "timestamp from int64", typ: PrimitiveTypes.Timestamp, value: int64(12), want: NewLiteral(Timestamp(12))},
+		{name: "binary from string", typ: PrimitiveTypes.Binary, value: "shard", want: NewLiteral([]byte("shard"))},
+		{name: "fixed from bytes", typ: FixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
+		{
+			name:  "uuid from array",
+			typ:   PrimitiveTypes.UUID,
+			value: [16]byte{1, 2, 3, 4},
+			want:  NewLiteral(uuid.UUID{1, 2, 3, 4}),
+		},
+		{
+			name:  "decimal from decimal literal",
+			typ:   DecimalTypeOf(10, 2),
+			value: DecimalLiteral{Val: decimal128.FromI64(130), Scale: 2},
+			want:  NewLiteral(Decimal{Val: decimal128.FromI64(130), Scale: 2}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err != nil {
+				t.Fatal(err)
+			}
+
+			got := stats.toSummary()
+			if got.LowerBound == nil || got.UpperBound == nil {
+				t.Fatalf("expected bounds, got lower=%v upper=%v", got.LowerBound, got.UpperBound)
+			}
+
+			want, err := tt.want.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(*got.LowerBound, want) || !bytes.Equal(*got.UpperBound, want) {
+				t.Fatalf("got bounds (%v, %v), want (%v, %v)", *got.LowerBound, *got.UpperBound, want, want)
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsUnsupportedValues(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  PrimitiveType
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool},
+		{name: "int32", typ: PrimitiveTypes.Int32},
+		{name: "int64", typ: PrimitiveTypes.Int64},
+		{name: "float32", typ: PrimitiveTypes.Float32},
+		{name: "float64", typ: PrimitiveTypes.Float64},
+		{name: "string", typ: PrimitiveTypes.String},
+		{name: "date", typ: PrimitiveTypes.Date},
+		{name: "time", typ: PrimitiveTypes.Time},
+		{name: "timestamp", typ: PrimitiveTypes.Timestamp},
+		{name: "timestamp with timezone", typ: PrimitiveTypes.TimestampTz},
+		{name: "uuid", typ: PrimitiveTypes.UUID},
+		{name: "binary", typ: PrimitiveTypes.Binary},
+		{name: "fixed", typ: FixedTypeOf(5)},
+		{name: "decimal", typ: DecimalTypeOf(10, 2)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(struct{}{}); err == nil {
+				t.Fatal("expected unsupported value to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsSentinelLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value Literal
+	}{
+		{name: "int32 above max", typ: PrimitiveTypes.Int32, value: Int32AboveMaxLiteral()},
+		{name: "int32 below min", typ: PrimitiveTypes.Int32, value: Int32BelowMinLiteral()},
+		{name: "int64 above max", typ: PrimitiveTypes.Int64, value: Int64AboveMaxLiteral()},
+		{name: "int64 below min", typ: PrimitiveTypes.Int64, value: Int64BelowMinLiteral()},
+		{name: "float32 above max", typ: PrimitiveTypes.Float32, value: Float32AboveMaxLiteral()},
+		{name: "float32 below min", typ: PrimitiveTypes.Float32, value: Float32BelowMinLiteral()},
+		{name: "float64 above max", typ: PrimitiveTypes.Float64, value: Float64AboveMaxLiteral()},
+		{name: "float64 below min", typ: PrimitiveTypes.Float64, value: Float64BelowMinLiteral()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err == nil {
+				t.Fatal("expected sentinel literal to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsInvalidUUIDLengths(t *testing.T) {
+	for _, value := range [][]byte{make([]byte, len(uuid.UUID{})-1), make([]byte, len(uuid.UUID{})+1)} {
+		stats, err := newPartitionFieldStat(PrimitiveTypes.UUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stats.update(value); err == nil {
+			t.Fatalf("expected UUID with length %d to return an error", len(value))
+		}
+	}
+}
+
+func TestManifestWriterUpdatesPartitionSummariesIncrementally(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "region", Type: PrimitiveTypes.String},
+		NestedField{ID: 2, Name: "temperature", Type: PrimitiveTypes.Float64},
+		NestedField{ID: 3, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "region", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "temperature", Transform: IdentityTransform{}},
+		PartitionField{SourceIDs: []int{3}, FieldID: 1002, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+
+	newEntry := func(path string, partition map[int]any) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			partition,
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := []ManifestEntry{
+		newEntry("east.parquet", map[int]any{1000: "east", 1001: 1.0, 1002: []byte{2}}),
+		newEntry("null.parquet", map[int]any{1000: nil, 1001: math.NaN(), 1002: []byte{1}}),
+		newEntry("west.parquet", map[int]any{1000: "west", 1001: 3.0, 1002: []byte{3}}),
+	}
+	if err := writer.Add(entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Existing(entries[1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Delete(entries[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 3 {
+		t.Fatalf("expected three partition summaries, got %d", len(summaries))
+	}
+
+	assertSummary := func(index int, containsNull, containsNaN bool, lower, upper Literal) {
+		t.Helper()
+		lowerBytes, err := lower.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		upperBytes, err := upper.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		summary := summaries[index]
+		if summary.ContainsNull != containsNull || summary.ContainsNaN == nil || *summary.ContainsNaN != containsNaN {
+			t.Fatalf("summary %d flags = (%v, %v), want (%v, %v)", index, summary.ContainsNull, summary.ContainsNaN, containsNull, containsNaN)
+		}
+		if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, lowerBytes) {
+			t.Fatalf("summary %d lower bound = %v, want %v", index, summary.LowerBound, lowerBytes)
+		}
+		if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, upperBytes) {
+			t.Fatalf("summary %d upper bound = %v, want %v", index, summary.UpperBound, upperBytes)
+		}
+	}
+
+	assertSummary(0, true, false, NewLiteral("east"), NewLiteral("west"))
+	assertSummary(1, false, true, NewLiteral(1.0), NewLiteral(3.0))
+	assertSummary(2, false, false, NewLiteral([]byte{1}), NewLiteral([]byte{3}))
+}
+
+func TestManifestWriterCopiesBinaryPartitionSummaryBounds(t *testing.T) {
+	schema := NewSchema(0,
+		NestedField{ID: 1, Name: "shard", Type: PrimitiveTypes.Binary},
+	)
+	spec := NewPartitionSpec(
+		PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "shard", Transform: IdentityTransform{}},
+	)
+	snapshotID := int64(1234)
+	sequenceNumber := int64(1)
+	low := []byte{1}
+	high := []byte{2}
+
+	newEntry := func(path string, partition []byte) ManifestEntry {
+		builder, err := NewDataFileBuilder(
+			spec,
+			EntryContentData,
+			path,
+			ParquetFile,
+			map[int]any{1000: partition},
+			nil,
+			nil,
+			1,
+			1,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return NewManifestEntry(
+			EntryStatusADDED,
+			&snapshotID,
+			&sequenceNumber,
+			&sequenceNumber,
+			builder.Build(),
+		)
+	}
+
+	writer, err := NewManifestWriter(2, io.Discard, spec, schema, snapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("low.parquet", low)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Add(newEntry("high.parquet", high)); err != nil {
+		t.Fatal(err)
+	}
+
+	low[0] = 3
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summaries := manifest.Partitions()
+	if len(summaries) != 1 {
+		t.Fatalf("expected one partition summary, got %d", len(summaries))
+	}
+	summary := summaries[0]
+	if summary.LowerBound == nil || !bytes.Equal(*summary.LowerBound, []byte{1}) {
+		t.Fatalf("lower bound = %v, want [1]", summary.LowerBound)
+	}
+	if summary.UpperBound == nil || !bytes.Equal(*summary.UpperBound, []byte{2}) {
+		t.Fatalf("upper bound = %v, want [2]", summary.UpperBound)
 	}
 }
 
@@ -512,6 +821,41 @@ type ManifestTestSuite struct {
 
 	v3ManifestList    bytes.Buffer
 	v3ManifestEntries bytes.Buffer
+}
+
+type manifestFailingWriter struct {
+	err error
+}
+
+func (w manifestFailingWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type manifestCloseErrorCodec struct {
+	ocf.Codec
+	err error
+}
+
+func (c manifestCloseErrorCodec) Close() error {
+	return c.err
+}
+
+func (m *ManifestTestSuite) setManifestWriterCloseError(writer *ManifestWriter, closeErr error) {
+	m.T().Helper()
+
+	avroSchema := writer.writer.Schema()
+	m.Require().NoError(writer.writer.Close())
+
+	replacement, err := ocf.NewWriter(
+		io.Discard,
+		avroSchema,
+		ocf.WithCodec(manifestCloseErrorCodec{
+			Codec: ocf.DeflateCodec(flate.DefaultCompression),
+			err:   closeErr,
+		}),
+	)
+	m.Require().NoError(err)
+	writer.writer = replacement
 }
 
 func (m *ManifestTestSuite) writeManifestList() {
@@ -1026,6 +1370,23 @@ func (m *ManifestTestSuite) TestReadManifestListMissingFormatVersion() {
 	m.Empty(files) // the file has no entries, just headers
 }
 
+func (m *ManifestTestSuite) TestReadManifestListRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			fileSchema, err := internal.NewManifestFileSchema(2)
+			m.Require().NoError(err)
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, fileSchema,
+				ocf.WithMetadata(map[string][]byte{"format-version": []byte(strconv.Itoa(version))}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = ReadManifestList(&buf)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
+}
+
 // writeManifestNoFormatVersion writes a valid v1 manifest entry Avro file that
 // omits the "format-version" metadata key, simulating files produced by the Java
 // Iceberg library (format-version is optional for v1 per the Iceberg spec).
@@ -1077,6 +1438,34 @@ func (m *ManifestTestSuite) TestNewManifestReaderMissingFormatVersion() {
 	m.Require().NoError(err)
 	m.Equal(1, reader.Version())
 	m.NoError(reader.Close())
+}
+
+func (m *ManifestTestSuite) TestNewManifestReaderRejectsUnsupportedFormatVersion() {
+	for _, version := range []int{-1, 0, 4} {
+		m.Run(strconv.Itoa(version), func() {
+			spec := NewPartitionSpec()
+			partitionSchema, err := partitionTypeToAvroSchema(spec.PartitionType(testSchema))
+			m.Require().NoError(err)
+			entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 1)
+			m.Require().NoError(err)
+			schemaJSON, err := json.Marshal(testSchema)
+			m.Require().NoError(err)
+			var manifest bytes.Buffer
+			writer, err := ocf.NewWriter(&manifest, entrySchema, ocf.WithMetadata(map[string][]byte{
+				"format-version":    []byte(strconv.Itoa(version)),
+				"schema":            schemaJSON,
+				"schema-id":         []byte(strconv.Itoa(testSchema.ID)),
+				"partition-spec":    []byte("[]"),
+				"partition-spec-id": []byte("0"),
+				"content":           []byte("data"),
+			}))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Close())
+
+			_, err = NewManifestReader(&manifestFile{version: version}, &manifest)
+			m.ErrorContains(err, "unsupported manifest format version")
+		})
+	}
 }
 
 func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
@@ -1135,6 +1524,87 @@ func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritance() {
 	// Second entry gets previous + previous file's record_count.
 	m.Require().NotNil(entries[1].DataFile().FirstRowID())
 	m.EqualValues(1000+firstCount, *entries[1].DataFile().FirstRowID())
+}
+
+func (m *ManifestTestSuite) TestV3DataManifestFirstRowIDInheritanceRejectsInvalidRange() {
+	tests := []struct {
+		name          string
+		firstRowID    int64
+		recordCount   int64
+		errorContains string
+	}{
+		{name: "overflow", firstRowID: math.MaxInt64, recordCount: 1, errorContains: "overflows int64"},
+		{name: "negative record count", firstRowID: 0, recordCount: -1, errorContains: "record count must be non-negative"},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			partitionSpec := NewPartitionSpecID(1,
+				PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+			entry := &manifestEntry{
+				EntryStatus: EntryStatusADDED,
+				Snapshot:    &entrySnapshotID,
+				Data: &dataFile{
+					Content:          EntryContentData,
+					Path:             "/data/file.parquet",
+					Format:           ParquetFile,
+					PartitionData:    map[string]any{"x": int(1)},
+					RecordCount:      tt.recordCount,
+					FileSize:         1000,
+					BlockSizeInBytes: 64 * 1024,
+				},
+			}
+			var manifestBuf bytes.Buffer
+			_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+				entrySnapshotID, []ManifestEntry{entry})
+			m.Require().NoError(err)
+
+			file := &manifestFile{
+				version:         3,
+				Path:            "/manifest.avro",
+				Content:         ManifestContentData,
+				FirstRowIDValue: &tt.firstRowID,
+			}
+			_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+
+	m.Run("negative manifest first row ID with explicit entry ID", func() {
+		partitionSpec := NewPartitionSpecID(1,
+			PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "x", Transform: IdentityTransform{}})
+		entryFirstRowID := int64(0)
+		entry := &manifestEntry{
+			EntryStatus: EntryStatusADDED,
+			Snapshot:    &entrySnapshotID,
+			Data: &dataFile{
+				Content:          EntryContentData,
+				Path:             "/data/file.parquet",
+				Format:           ParquetFile,
+				PartitionData:    map[string]any{"x": int(1)},
+				RecordCount:      1,
+				FileSize:         1000,
+				BlockSizeInBytes: 64 * 1024,
+				FirstRowIDField:  &entryFirstRowID,
+			},
+		}
+		var manifestBuf bytes.Buffer
+		_, err := WriteManifest("/manifest.avro", &manifestBuf, 3, partitionSpec, testSchema,
+			entrySnapshotID, []ManifestEntry{entry})
+		m.Require().NoError(err)
+
+		negativeManifestFirstRowID := int64(-1)
+		file := &manifestFile{
+			version:         3,
+			Path:            "/manifest.avro",
+			Content:         ManifestContentData,
+			FirstRowIDValue: &negativeManifestFirstRowID,
+		}
+		_, err = ReadManifest(file, bytes.NewReader(manifestBuf.Bytes()), false)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.ErrorContains(err, "first row ID must be non-negative")
+	})
 }
 
 // TestV3DataManifestFirstRowIDInheritanceSkipsDeletedEntries verifies that a
@@ -1233,6 +1703,22 @@ func (m *ManifestTestSuite) TestWriteManifestV3() {
 		_, nextID, err := WriteManifestV3("/manifest.avro", &buf, 500, partitionSpec, testSchema, entrySnapshotID, entries)
 		m.Require().NoError(err)
 		m.EqualValues(520, nextID) // 500 + 10 + 10
+	})
+
+	m.Run("rejects negative first row ID", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3("/manifest.avro", &buf, -1, partitionSpec, testSchema, entrySnapshotID, entries)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("rejects next row ID overflow", func() {
+		var buf bytes.Buffer
+		_, _, err := WriteManifestV3(
+			"/manifest.avro", &buf, math.MaxInt64-count, partitionSpec, testSchema, entrySnapshotID, entries,
+		)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
 	})
 
 	m.Run("read inheritance from manifest", func() {
@@ -1861,6 +2347,84 @@ func (m *ManifestTestSuite) TestNewManifestReaderZstdManifestEntriesV2() {
 	m.Require().ErrorIs(err, io.EOF)
 }
 
+func (m *ManifestTestSuite) TestManifestReaderRejectsInvalidEntries() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+	invalidContentEntry := deleteEntry
+	invalidContentFile := cloneDataFileAvroFields(deleteFile)
+	invalidContentFile.Content = ManifestEntryContent(3)
+	invalidContentEntry.Data = invalidContentFile
+
+	tests := []struct {
+		name            string
+		manifestContent ManifestContent
+		entry           *manifestEntry
+		errorContains   string
+	}{
+		{
+			name:            "unknown status",
+			manifestContent: ManifestContentData,
+			entry: func() *manifestEntry {
+				entry := *manifestEntryV2Records[0]
+				entry.EntryStatus = ManifestEntryStatus(3)
+
+				return &entry
+			}(),
+			errorContains: "invalid status",
+		},
+		{
+			name:            "data file in delete manifest",
+			manifestContent: ManifestContentDeletes,
+			entry:           manifestEntryV2Records[0],
+			errorContains:   "data file found in delete manifest",
+		},
+		{
+			name:            "delete file in data manifest",
+			manifestContent: ManifestContentData,
+			entry:           &deleteEntry,
+			errorContains:   "delete file found in data manifest",
+		},
+		{
+			name:            "unknown content",
+			manifestContent: ManifestContentDeletes,
+			entry:           &invalidContentEntry,
+			errorContains:   "invalid content",
+		},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			mw := ManifestWriter{version: 2, spec: partitionSpec, schema: testSchema, content: tt.manifestContent}
+			metadata, err := mw.meta()
+			m.Require().NoError(err)
+
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, entrySchema,
+				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Encode(tt.entry))
+			m.Require().NoError(writer.Close())
+
+			manifest := &manifestFile{version: 2, SpecID: 1, Content: tt.manifestContent}
+			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
+			m.Require().NoError(err)
+			defer reader.Close()
+
+			_, err = reader.ReadEntry()
+			m.ErrorContains(err, tt.errorContains)
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
@@ -2089,6 +2653,204 @@ func (m *ManifestTestSuite) TestManifestWriterMeta() {
 	m.Require().NoError(err)
 	m.NotEqual("null", string(md["partition-spec"]))
 	m.Equal("[]", string(md["partition-spec"]))
+}
+
+func (m *ManifestTestSuite) TestManifestWriterContentConsistency() {
+	deleteEntry := *manifestEntryV2Records[0]
+	deleteFile := cloneDataFileAvroFields(deleteEntry.Data.(*dataFile))
+	deleteFile.Content = EntryContentEqDeletes
+	deleteEntry.Data = deleteFile
+
+	m.Run("manifest file inherits writer content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		manifest, err := writer.ToManifestFile("manifest.avro", int64(out.Len()))
+		m.Require().NoError(err)
+		m.Equal(ManifestContentDeletes, manifest.ManifestContent())
+	})
+
+	m.Run("rejects conflicting manifest file content", func() {
+		var out bytes.Buffer
+		writer, err := NewManifestWriter(2, &out, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.Require().NoError(writer.Add(&deleteEntry))
+
+		_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()),
+			WithManifestFileContent(ManifestContentData))
+		m.ErrorIs(err, ErrInvalidArgument)
+	})
+
+	m.Run("rejects data file in delete manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID,
+			WithManifestWriterContent(ManifestContentDeletes))
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(manifestEntryV2Records[0]), ErrInvalidArgument)
+	})
+
+	m.Run("rejects delete file in data manifest", func() {
+		writer, err := NewManifestWriter(2, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+		m.Require().NoError(err)
+		m.ErrorIs(writer.Add(&deleteEntry), ErrInvalidArgument)
+	})
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseIsTerminal() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+			writer, err := NewManifestWriter(version, &out, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorContains(writer.Add(manifestEntryV2Records[0]), "closed manifest writer")
+			m.Same(firstErr, writer.Close())
+
+			_, err = writer.ToManifestFile("manifest.avro", int64(out.Len()))
+			m.Same(firstErr, err)
+
+			manifest := NewManifestFile(
+				version,
+				"manifest.avro",
+				int64(out.Len()),
+				int32(UnpartitionedSpec.ID()),
+				snapshotID,
+			).Build()
+			entries, err := ReadManifest(manifest, bytes.NewReader(out.Bytes()), false)
+			m.Require().NoError(err)
+			m.Empty(entries)
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterSuccessfulCloseIsTerminal() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.NoError(writer.Close())
+			m.NoError(writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseAfterConstructionFailure() {
+	writeErr := errors.New("write failed")
+
+	writer, err := NewManifestWriter(
+		2,
+		manifestFailingWriter{err: writeErr},
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+	)
+	m.Require().ErrorIs(err, writeErr)
+	m.Require().NotNil(writer)
+
+	var closeErr error
+	m.NotPanics(func() {
+		closeErr = writer.Close()
+	})
+	m.ErrorIs(closeErr, ErrEmptyManifest)
+
+	m.Same(closeErr, writer.Close())
+}
+
+func (m *ManifestTestSuite) TestEmptyManifestWriterCloseJoinsUnderlyingError() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(
+				version,
+				io.Discard,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+			)
+			m.Require().NoError(err)
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().ErrorIs(firstErr, ErrEmptyManifest)
+			m.ErrorIs(firstErr, underlyingErr)
+			m.EqualError(
+				firstErr,
+				"empty manifest file has been written\nunderlying close failed",
+			)
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCloseAfterAddEntryFailure() {
+	entries := map[int]ManifestEntry{
+		1: manifestEntryV1Records[0],
+		2: manifestEntryV2Records[0],
+		3: manifestEntryV3Records[0],
+	}
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			writer, err := NewManifestWriter(version, io.Discard, *UnpartitionedSpec, testSchema, snapshotID)
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Add(entries[version]))
+
+			m.Require().Error(writer.addEntry(&manifestEntry{EntryStatus: ManifestEntryStatus(-1)}))
+
+			underlyingErr := errors.New("underlying close failed")
+			m.setManifestWriterCloseError(writer, underlyingErr)
+
+			firstErr := writer.Close()
+			m.Require().Same(underlyingErr, firstErr)
+			m.False(errors.Is(firstErr, ErrEmptyManifest))
+			m.Same(firstErr, writer.Close())
+		})
+	}
+}
+
+func (m *ManifestTestSuite) TestWriteManifestEmptyErrorIsNotDuplicated() {
+	for _, version := range []int{1, 2, 3} {
+		m.Run("v"+strconv.Itoa(version), func() {
+			var out bytes.Buffer
+
+			_, err := WriteManifest(
+				"manifest.avro",
+				&out,
+				version,
+				*UnpartitionedSpec,
+				testSchema,
+				snapshotID,
+				nil,
+			)
+			m.ErrorIs(err, ErrEmptyManifest)
+			m.Same(ErrEmptyManifest, err)
+		})
+	}
+
+	var out bytes.Buffer
+	_, _, err := WriteManifestV3(
+		"manifest.avro",
+		&out,
+		0,
+		*UnpartitionedSpec,
+		testSchema,
+		snapshotID,
+		nil,
+	)
+	m.ErrorIs(err, ErrEmptyManifest)
+	m.Same(ErrEmptyManifest, err)
 }
 
 func TestReadManifestDecodesNilLogicalPartitionValueFromNullableUnion(t *testing.T) {
@@ -2430,6 +3192,82 @@ func (m *ManifestTestSuite) TestV3ManifestListWriterRowIDTracking() {
 	m.Require().NoError(err)
 }
 
+func (m *ManifestTestSuite) TestV3ManifestListWriterRejectsInvalidRowIDRanges() {
+	m.Run("negative first row ID", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, -1, nil)
+		m.Nil(writer)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "first row ID must be non-negative")
+	})
+
+	m.Run("negative row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative.avro", 100, 1, snapshotID).AddedRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("negative existing row count", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 0, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "negative-existing.avro", 100, 1, snapshotID).ExistingRows(-2).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "row counts must be non-negative")
+	})
+
+	m.Run("overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("existing row count overflow", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, math.MaxInt64, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "overflow-existing.avro", 100, 1, snapshotID).ExistingRows(1).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(math.MaxInt64, *writer.NextRowID())
+	})
+
+	m.Run("later validation failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 10, nil)
+		m.Require().NoError(err)
+		manifest := NewManifestFile(3, "other-snapshot.avro", 100, 1, snapshotID+1).AddedRows(5).Build()
+		err = writer.AddManifests([]ManifestFile{manifest})
+		m.Require().ErrorContains(err, "unassigned sequence number")
+		m.EqualValues(10, *writer.NextRowID())
+	})
+
+	m.Run("batch failure leaves cursor unchanged", func() {
+		var buf bytes.Buffer
+		startRowID := int64(math.MaxInt64 - 5)
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, startRowID, nil)
+		m.Require().NoError(err)
+		manifests := []ManifestFile{
+			NewManifestFile(3, "valid.avro", 100, 1, snapshotID).AddedRows(5).Build(),
+			NewManifestFile(3, "overflow.avro", 100, 1, snapshotID).AddedRows(1).Build(),
+		}
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorContains(err, "overflows int64")
+		m.EqualValues(startRowID, *writer.NextRowID())
+	})
+}
+
 func (m *ManifestTestSuite) TestV3ManifestListWriterAssignedRowIDDelta() {
 	// Assigned row-id delta = sum of (existing+added) for all data manifests in list.
 	var buf bytes.Buffer
@@ -2689,9 +3527,50 @@ func (m *ManifestTestSuite) TestManifestWriterDoesNotCommitStateOnEncodeError() 
 	m.Zero(writer.existingRows)
 	m.Zero(writer.deletedFiles)
 	m.Zero(writer.deletedRows)
-	m.Empty(writer.partitions)
+	m.NoError(writer.partitionStatsErr)
+	m.Equal([]FieldSummary{{ContainsNaN: &falseBool}}, writer.partitionStats.summaries())
 	m.Equal(int64(-1), writer.minSeqNum)
 	m.Equal(originalPartitionData, dataFile.PartitionData)
+}
+
+func (m *ManifestTestSuite) TestManifestWriterCopiesBorrowedPartitionSummaryBounds() {
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	partitionSpec := NewPartitionSpecID(
+		1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "part", Transform: IdentityTransform{}},
+	)
+	partition := []byte{0x01, 0x02}
+	builder, err := NewDataFileBuilder(
+		partitionSpec,
+		EntryContentData,
+		"s3://bucket/ns/table/data/file.parquet",
+		ParquetFile,
+		map[int]any{1000: partition},
+		nil,
+		nil,
+		1,
+		10,
+	)
+	m.Require().NoError(err)
+
+	seqNum := int64(1)
+	entry := NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+	writer, err := NewManifestWriter(2, io.Discard, partitionSpec, schema, snapshotID)
+	m.Require().NoError(err)
+	m.Require().NoError(writer.Add(entry))
+
+	borrowed := entry.DataFile().(*dataFile).DataFilePartitionRef(internal.DataFileRef{})
+	borrowed[1000].([]byte)[0] = 0xff
+	borrowed[1000] = []byte{0xff, 0xff}
+
+	manifest, err := writer.ToManifestFile("manifest.avro", 0)
+	m.Require().NoError(err)
+	summaries := manifest.Partitions()
+	m.Require().Len(summaries, 1)
+	m.Require().NotNil(summaries[0].LowerBound)
+	m.Require().NotNil(summaries[0].UpperBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].LowerBound)
+	m.Equal([]byte{0x01, 0x02}, *summaries[0].UpperBound)
 }
 
 func newDatePartitionManifestEntry(t *testing.T, partitionSpec PartitionSpec, snapshotID int64, partitionValue any) ManifestEntry {
@@ -2950,23 +3829,243 @@ func (m *ManifestTestSuite) TestManifestEntryPresentEmptyListSurvivesRewrite() {
 	// manifest-list partitions field (*[]FieldSummary); split_offsets is *[]int64,
 	// an array of primitives. Cover both so the record-element case (the one that
 	// actually broke for partitions) is guarded here too.
-	built := builder.SplitOffsets([]int64{}).ColumnSizes(map[int]int64{}).Build()
+	built := builder.
+		ColumnSizes(map[int]int64{}).
+		ValueCounts(map[int]int64{}).
+		NullValueCounts(map[int]int64{}).
+		NaNValueCounts(map[int]int64{}).
+		LowerBoundValues(map[int][]byte{}).
+		UpperBoundValues(map[int][]byte{}).
+		KeyMetadata([]byte{}).
+		SplitOffsets([]int64{}).
+		EqualityFieldIDs([]int{}).
+		Build()
 	m.Require().NotNil(built.(*dataFile).Splits, "builder should keep split_offsets present")
 	m.Require().NotNil(built.(*dataFile).ColSizes, "builder should keep column_sizes present")
 
 	// First round trip mirrors reading an existing manifest: a present-empty
 	// array decodes to a non-nil pointer over a nil slice.
 	first := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, built).SequenceNum(1).Build())
-	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
 	m.Require().NotNil(first.ColSizes, "decoded column_sizes must stay present, not null")
+	m.Require().NotNil(first.ValCounts, "decoded value_counts must stay present, not null")
+	m.Require().NotNil(first.NullCounts, "decoded null_value_counts must stay present, not null")
+	m.Require().NotNil(first.NaNCounts, "decoded nan_value_counts must stay present, not null")
+	m.Require().NotNil(first.LowerBounds, "decoded lower_bounds must stay present, not null")
+	m.Require().NotNil(first.UpperBounds, "decoded upper_bounds must stay present, not null")
+	m.Require().NotNil(first.Key, "decoded key_metadata must stay present, not null")
+	m.Require().NotNil(first.Splits, "decoded split_offsets must stay present, not null")
+	m.Require().NotNil(first.EqualityIDs, "decoded equality_ids must stay present, not null")
 
 	// Re-encoding the decoded entry is what a manifest rewrite/merge does. The
 	// present-empty lists must not collapse to null here.
 	second := writeAndRead(NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, first).SequenceNum(1).Build())
+	m.Require().NotNil(second.ColSizes,
+		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.ValCounts,
+		"present-empty value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NullCounts,
+		"present-empty null_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.NaNCounts,
+		"present-empty nan_value_counts must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.LowerBounds,
+		"present-empty lower_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.UpperBounds,
+		"present-empty upper_bounds must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.Key,
+		"present-empty key_metadata must survive a decode -> re-encode rewrite as a present value")
 	m.Require().NotNil(second.Splits,
 		"present-empty split_offsets must survive a decode -> re-encode rewrite as a present array")
 	m.Require().NotNil(second.ColSizes,
 		"present-empty column_sizes must survive a decode -> re-encode rewrite as a present array")
+	m.Require().NotNil(second.EqualityIDs,
+		"present-empty equality_ids must survive a decode -> re-encode rewrite as a present array")
+}
+
+func (m *ManifestTestSuite) TestDataFileMetadataIsIsolatedFromExternalMutation() {
+	partition := []byte{0x01, 0x02}
+	partitionData := map[int]any{1000: partition}
+	spec := NewPartitionSpec(PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{}})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		partitionData, nil, nil, 1, 10)
+	m.Require().NoError(err)
+
+	columnSizes := map[int]int64{1: 10}
+	valueCounts := map[int]int64{1: 2}
+	nullCounts := map[int]int64{1: 1}
+	nanCounts := map[int]int64{1: 0}
+	distinctCounts := map[int]int64{1: 2}
+	lower := map[int][]byte{1: {0x03, 0x04}}
+	upper := map[int][]byte{1: {0x05, 0x06}}
+	key := []byte{0x07, 0x08}
+	splits := []int64{10, 20}
+	equalityIDs := []int{1, 2}
+
+	dataFile := builder.
+		ColumnSizes(columnSizes).
+		ValueCounts(valueCounts).
+		NullValueCounts(nullCounts).
+		NaNValueCounts(nanCounts).
+		DistinctValueCounts(distinctCounts).
+		LowerBoundValues(lower).
+		UpperBoundValues(upper).
+		KeyMetadata(key).
+		SplitOffsets(splits).
+		EqualityFieldIDs(equalityIDs).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+
+	partition[0], lower[1][0], upper[1][0], key[0], splits[0], equalityIDs[0] = 0xff, 0xff, 0xff, 0xff, 99, 99
+	partitionData[1000] = []byte{0xff}
+	columnSizes[1], valueCounts[1], nullCounts[1], nanCounts[1], distinctCounts[1] = 99, 99, 99, 99, 99
+
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
+	dataFile.Partition()[1000].([]byte)[0] = 0xff
+	dataFile.ColumnSizes()[1] = 99
+	dataFile.ValueCounts()[1] = 99
+	dataFile.NullValueCounts()[1] = 99
+	dataFile.NaNValueCounts()[1] = 99
+	dataFile.DistinctValueCounts()[1] = 99
+	dataFile.LowerBoundValues()[1][0] = 0xff
+	dataFile.UpperBoundValues()[1][0] = 0xff
+	dataFile.KeyMetadata()[0] = 0xff
+	dataFile.SplitOffsets()[0] = 99
+	dataFile.EqualityFieldIDs()[0] = 99
+	*dataFile.SortOrderID() = 99
+	*dataFile.FirstRowID() = 99
+	*dataFile.ReferencedDataFile() = "changed"
+	*dataFile.ContentOffset() = 99
+	*dataFile.ContentSizeInBytes() = 99
+
+	m.Equal([]byte{0x01, 0x02}, dataFile.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, dataFile.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, dataFile.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, dataFile.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, dataFile.NaNValueCounts())
+	m.Equal(map[int]int64{1: 2}, dataFile.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, dataFile.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, dataFile.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, dataFile.KeyMetadata())
+	m.Equal([]int64{10, 20}, dataFile.SplitOffsets())
+	m.Equal([]int{1, 2}, dataFile.EqualityFieldIDs())
+	m.Equal(3, *dataFile.SortOrderID())
+	m.Equal(int64(4), *dataFile.FirstRowID())
+	m.Equal("data.parquet", *dataFile.ReferencedDataFile())
+	m.Equal(int64(5), *dataFile.ContentOffset())
+	m.Equal(int64(6), *dataFile.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDecodedDataFileMetadataIsIsolatedFromSourceAndGetterMutation() {
+	partition := []byte{0x01, 0x02}
+	lower := []byte{0x03, 0x04}
+	upper := []byte{0x05, 0x06}
+	spec := NewPartitionSpec(PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: IdentityTransform{},
+	})
+	schema := NewSchema(1, NestedField{ID: 1, Name: "part", Type: PrimitiveTypes.Binary})
+	builder, err := NewDataFileBuilder(spec, EntryContentData, "s3://bucket/file.parquet", ParquetFile,
+		map[int]any{1000: partition}, nil, nil, 1, 10)
+	m.Require().NoError(err)
+	dataFile := builder.
+		ColumnSizes(map[int]int64{1: 10}).
+		ValueCounts(map[int]int64{1: 2}).
+		NullValueCounts(map[int]int64{1: 1}).
+		NaNValueCounts(map[int]int64{1: 0}).
+		LowerBoundValues(map[int][]byte{1: lower}).
+		UpperBoundValues(map[int][]byte{1: upper}).
+		KeyMetadata([]byte{0x07, 0x08}).
+		SplitOffsets([]int64{10, 20}).
+		EqualityFieldIDs([]int{1, 2}).
+		SortOrderID(3).
+		FirstRowID(4).
+		ReferencedDataFile("data.parquet").
+		ContentOffset(5).
+		ContentSizeInBytes(6).
+		Build()
+
+	var buf bytes.Buffer
+	manifest, err := WriteManifest("/manifest.avro", &buf, 3, spec, schema, snapshotID,
+		[]ManifestEntry{NewManifestEntryBuilder(EntryStatusADDED, &snapshotID, dataFile).SequenceNum(1).Build()})
+	m.Require().NoError(err)
+	encoded := buf.Bytes()
+	entries, err := ReadManifest(manifest, bytes.NewReader(encoded), false)
+	m.Require().NoError(err)
+	m.Require().Len(entries, 1)
+	decoded := entries[0].DataFile()
+
+	for i := range encoded {
+		encoded[i] = ^encoded[i]
+	}
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
+
+	partitionResult := decoded.Partition()
+	columnSizesResult := decoded.ColumnSizes()
+	valueCountsResult := decoded.ValueCounts()
+	nullCountsResult := decoded.NullValueCounts()
+	nanCountsResult := decoded.NaNValueCounts()
+	lowerResult := decoded.LowerBoundValues()
+	upperResult := decoded.UpperBoundValues()
+	keyResult := decoded.KeyMetadata()
+	splitsResult := decoded.SplitOffsets()
+	equalityIDsResult := decoded.EqualityFieldIDs()
+	partitionResult[1000].([]byte)[0] = 0xff
+	columnSizesResult[1] = 99
+	valueCountsResult[1] = 99
+	nullCountsResult[1] = 99
+	nanCountsResult[1] = 99
+	lowerResult[1][0] = 0xff
+	upperResult[1][0] = 0xff
+	keyResult[0] = 0xff
+	splitsResult[0] = 99
+	equalityIDsResult[0] = 99
+	*decoded.SortOrderID() = 99
+	*decoded.FirstRowID() = 99
+	*decoded.ReferencedDataFile() = "changed"
+	*decoded.ContentOffset() = 99
+	*decoded.ContentSizeInBytes() = 99
+	m.Equal([]byte{0x01, 0x02}, decoded.Partition()[1000])
+	m.Equal(map[int]int64{1: 10}, decoded.ColumnSizes())
+	m.Equal(map[int]int64{1: 2}, decoded.ValueCounts())
+	m.Equal(map[int]int64{1: 1}, decoded.NullValueCounts())
+	m.Equal(map[int]int64{1: 0}, decoded.NaNValueCounts())
+	m.Empty(decoded.DistinctValueCounts())
+	m.Equal([]byte{0x03, 0x04}, decoded.LowerBoundValues()[1])
+	m.Equal([]byte{0x05, 0x06}, decoded.UpperBoundValues()[1])
+	m.Equal([]byte{0x07, 0x08}, decoded.KeyMetadata())
+	m.Equal([]int64{10, 20}, decoded.SplitOffsets())
+	m.Equal([]int{1, 2}, decoded.EqualityFieldIDs())
+	m.Equal(3, *decoded.SortOrderID())
+	m.Equal(int64(4), *decoded.FirstRowID())
+	m.Equal("data.parquet", *decoded.ReferencedDataFile())
+	m.Equal(int64(5), *decoded.ContentOffset())
+	m.Equal(int64(6), *decoded.ContentSizeInBytes())
+}
+
+func (m *ManifestTestSuite) TestDataFileCloneHelpersPreserveNilAndEmptyState() {
+	m.Nil(clonePartitionMap(nil))
+	m.NotNil(clonePartitionMap(map[int]any{}))
+	m.Nil(cloneByteMap(nil))
+	m.NotNil(cloneByteMap(map[int][]byte{}))
+	m.Nil(mapToAvroColMapClonedBytes(nil))
+	m.NotNil(mapToAvroColMapClonedBytes(map[int][]byte{}))
 }
 
 func (m *ManifestTestSuite) TestWriteManifestListClosesWriterOnError() {
@@ -3029,12 +4128,14 @@ func (m *ManifestTestSuite) TestManifestWriterPreservesMinSequenceNumberZero() {
 	oldSnapshot := int64(999)
 	entries := make([]ManifestEntry, len(manifestEntryV1Records))
 	for i, rec := range manifestEntryV1Records {
+		dataFile := cloneDataFileAvroFields(rec.DataFile().(*dataFile))
+		dataFile.Content = EntryContentData
 		entries[i] = NewManifestEntry(
 			EntryStatusEXISTING,
 			&oldSnapshot,
 			&seqZero,
 			&seqZero,
-			rec.DataFile(),
+			dataFile,
 		)
 	}
 
@@ -3088,6 +4189,76 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 	// assigned (assignment is data-only per the v3 ManifestListWriter rules).
 	m.Equal(ManifestContentDeletes, v2Entry.ManifestContent())
 	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
+}
+
+func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCounts() {
+	tests := []struct {
+		name         string
+		addedRows    int64
+		existingRows int64
+	}{
+		{name: "both row counts unknown", addedRows: -1, existingRows: -1},
+		{name: "only existing row count unknown", addedRows: 1, existingRows: -1},
+		{name: "only added row count unknown", addedRows: -1, existingRows: 1},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+			legacy.AddedRowsCount = tt.addedRows
+			legacy.ExistingRowsCount = tt.existingRows
+
+			var v1Buf bytes.Buffer
+			m.Require().NoError(
+				WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
+			manifests, err := ReadManifestList(&v1Buf)
+			m.Require().NoError(err)
+			m.Require().Len(manifests, 1)
+
+			var v3Buf bytes.Buffer
+			writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
+			m.Require().NoError(err)
+			err = writer.AddManifests(manifests)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.Require().ErrorContains(err, "cannot assign row-lineage IDs because at least one row count is unknown")
+			m.Require().ErrorContains(err, fmt.Sprintf("existing=%d added=%d", tt.existingRows, tt.addedRows))
+			m.Require().ErrorContains(err, legacy.Path)
+			m.Require().EqualValues(1000, *writer.NextRowID())
+			m.Require().NoError(writer.Close())
+		})
+	}
+
+	m.Run("mixed batch failure poisons writer", func() {
+		valid := *(manifestFileRecordsV1[0].(*manifestFile))
+		valid.Path = "valid.avro"
+		unknown := valid
+		unknown.Path = "unknown-counts.avro"
+		unknown.AddedRowsCount = -1
+		unknown.ExistingRowsCount = -1
+		manifests := []ManifestFile{&valid, &unknown}
+
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 1000, nil)
+		m.Require().NoError(err)
+
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, unknown.Path)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+
+		retryErr := writer.AddManifests([]ManifestFile{&valid})
+		m.Require().ErrorIs(retryErr, err)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+		// Close flushes the partial OCF so we can verify that retrying did not
+		// append a colliding row ID. The failed writer output must be discarded.
+		m.Require().NoError(writer.Close())
+
+		written, readErr := ReadManifestList(bytes.NewReader(buf.Bytes()))
+		m.Require().NoError(readErr)
+		m.Require().Len(written, 1, "the failed batch must not be reusable")
+		m.Require().NotNil(written[0].FirstRowID())
+		m.Require().EqualValues(1000, *written[0].FirstRowID())
+	})
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still
@@ -3556,4 +4727,168 @@ func (m *ManifestTestSuite) TestEntriesCloseErrorAsFinalPair() {
 	m.ErrorIs(errs[0], errCloseFinalPair,
 		"terminal error must equal or wrap the simulated close error")
 	m.Equal(1, file.closeCount, "file must be closed exactly once even when Close returns an error")
+}
+
+func contentTestSpec() PartitionSpec { return NewPartitionSpecID(1) }
+
+func contentTestSchema() *Schema {
+	return NewSchema(0, NestedField{ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true})
+}
+
+func contentTestEntry(t *testing.T, spec PartitionSpec, content ManifestEntryContent, path string) ManifestEntry {
+	t.Helper()
+
+	builder, err := NewDataFileBuilder(spec, content, path, ParquetFile, map[int]any{}, nil, nil, 1, 1024)
+	require.NoError(t, err)
+
+	snapshotID, seqNum := int64(1234), int64(1)
+
+	return NewManifestEntry(EntryStatusADDED, &snapshotID, &seqNum, &seqNum, builder.Build())
+}
+
+func writeContentManifest(t *testing.T, version int, entryContent ManifestEntryContent,
+	writerOpts []ManifestWriterOption, fileOpts []ManifestFileOption,
+) ([]byte, ManifestFile, error) {
+	t.Helper()
+
+	schema, spec := contentTestSchema(), contentTestSpec()
+
+	var buf bytes.Buffer
+	cnt := &internal.CountingWriter{W: &buf}
+	writer, err := NewManifestWriter(version, cnt, spec, schema, 1234, writerOpts...)
+	require.NoError(t, err)
+
+	require.NoError(t, writer.Add(contentTestEntry(t, spec, entryContent, "s3://bucket/ns/tbl/data/f.parquet")))
+	require.NoError(t, writer.Close())
+
+	mf, err := writer.ToManifestFile("s3://bucket/ns/tbl/metadata/m.avro", cnt.Count, fileOpts...)
+
+	return buf.Bytes(), mf, err
+}
+
+func TestToManifestFileInheritsWriterContent(t *testing.T) {
+	tests := []struct {
+		name         string
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+		want         ManifestContent
+	}{
+		{
+			name:         "defaults to data",
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+		{
+			name:         "inherits deletes without redundant option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching deletes option",
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentPosDeletes,
+			want:         ManifestContentDeletes,
+		},
+		{
+			name:         "explicit matching data option",
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentData,
+			want:         ManifestContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, mf, err := writeContentManifest(t, 2, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, mf.ManifestContent())
+
+			// remaining fields must keep the values ToManifestFile derives from the writer
+			assert.Equal(t, 2, mf.Version())
+			assert.Equal(t, "s3://bucket/ns/tbl/metadata/m.avro", mf.FilePath())
+			assert.Equal(t, int64(len(data)), mf.Length())
+			assert.Equal(t, int32(1), mf.PartitionSpecID())
+			assert.Equal(t, int64(1234), mf.SnapshotID())
+			assert.Equal(t, int64(-1), mf.SequenceNum())
+			assert.Equal(t, int64(1), mf.MinSequenceNum())
+			assert.Equal(t, int32(1), mf.AddedDataFiles())
+			assert.Zero(t, mf.ExistingDataFiles())
+			assert.Zero(t, mf.DeletedDataFiles())
+			assert.Equal(t, int64(1), mf.AddedRows())
+			assert.Zero(t, mf.ExistingRows())
+			assert.Zero(t, mf.DeletedRows())
+			assert.Empty(t, mf.Partitions())
+			assert.Nil(t, mf.KeyMetadata())
+			assert.Nil(t, mf.FirstRowID())
+
+			entries, err := ReadManifest(mf, bytes.NewReader(data), false)
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, tt.entryContent, entries[0].DataFile().ContentType())
+		})
+	}
+}
+
+func TestToManifestFileRejectsContentMismatch(t *testing.T) {
+	tests := []struct {
+		name         string
+		version      int
+		writerOpts   []ManifestWriterOption
+		fileOpts     []ManifestFileOption
+		entryContent ManifestEntryContent
+	}{
+		{
+			name:         "data writer with deletes option",
+			version:      2,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+		{
+			name:         "deletes writer with data option",
+			version:      2,
+			writerOpts:   []ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)},
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentData)},
+			entryContent: EntryContentPosDeletes,
+		},
+		{
+			// v1 has no delete manifests; NewManifestWriter rejects a deletes
+			// writer, and the file option must not smuggle one past that.
+			name:         "v1 writer with deletes option",
+			version:      1,
+			fileOpts:     []ManifestFileOption{WithManifestFileContent(ManifestContentDeletes)},
+			entryContent: EntryContentData,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, mf, err := writeContentManifest(t, tt.version, tt.entryContent, tt.writerOpts, tt.fileOpts)
+			require.ErrorIs(t, err, ErrInvalidArgument)
+			assert.ErrorContains(t, err, "does not match writer content")
+			assert.Nil(t, mf)
+		})
+	}
+}
+
+func TestManifestListRoundTripsDeleteManifestContent(t *testing.T) {
+	manifestData, mf, err := writeContentManifest(t, 2, EntryContentPosDeletes,
+		[]ManifestWriterOption{WithManifestWriterContent(ManifestContentDeletes)}, nil)
+	require.NoError(t, err)
+
+	var listBuf bytes.Buffer
+	seqNum := int64(1)
+	require.NoError(t, WriteManifestList(2, &listBuf, 1234, nil, &seqNum, 0, []ManifestFile{mf}))
+
+	files, err := ReadManifestList(bytes.NewReader(listBuf.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, ManifestContentDeletes, files[0].ManifestContent())
+
+	entries, err := ReadManifest(files[0], bytes.NewReader(manifestData), false)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, EntryContentPosDeletes, entries[0].DataFile().ContentType())
 }

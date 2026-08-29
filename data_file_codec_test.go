@@ -187,7 +187,7 @@ func snapshotAvroFields(d *dataFile) map[string]any {
 	out := make(map[string]any)
 	v := reflect.ValueOf(d).Elem()
 	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		f := t.Field(i)
 		if _, ok := f.Tag.Lookup("avro"); !ok {
 			continue
@@ -216,7 +216,7 @@ func deepCopyReflect(src reflect.Value) reflect.Value {
 			return src
 		}
 		dst := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
-		for i := 0; i < src.Len(); i++ {
+		for i := range src.Len() {
 			dst.Index(i).Set(deepCopyReflect(src.Index(i)))
 		}
 
@@ -234,7 +234,7 @@ func deepCopyReflect(src reflect.Value) reflect.Value {
 		return dst
 	case reflect.Struct:
 		dst := reflect.New(src.Type()).Elem()
-		for i := 0; i < src.NumField(); i++ {
+		for i := range src.NumField() {
 			if dst.Field(i).CanSet() {
 				dst.Field(i).Set(deepCopyReflect(src.Field(i)))
 			}

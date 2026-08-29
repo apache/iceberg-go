@@ -216,6 +216,105 @@ func TestBooleanExprVisitor(t *testing.T) {
 	}, result)
 }
 
+type evaluatorVisitor struct {
+	values  map[string]bool
+	visited []string
+}
+
+func (e *evaluatorVisitor) VisitTrue() bool {
+	e.visited = append(e.visited, "true")
+
+	return true
+}
+
+func (e *evaluatorVisitor) VisitFalse() bool {
+	e.visited = append(e.visited, "false")
+
+	return false
+}
+
+func (e *evaluatorVisitor) VisitNot(child bool) bool { return !child }
+
+func (e *evaluatorVisitor) VisitAnd(left, right bool) bool {
+	e.visited = append(e.visited, "and")
+
+	return left && right
+}
+
+func (e *evaluatorVisitor) VisitOr(left, right bool) bool {
+	e.visited = append(e.visited, "or")
+
+	return left || right
+}
+
+func (e *evaluatorVisitor) VisitUnbound(pred iceberg.UnboundPredicate) bool {
+	ref := pred.Term().(iceberg.Reference)
+	e.visited = append(e.visited, string(ref))
+
+	return e.values[string(ref)]
+}
+
+func (*evaluatorVisitor) VisitBound(iceberg.BoundPredicate) bool {
+	panic("unexpected bound predicate")
+}
+
+func TestVisitExprEvaluatorShortCircuits(t *testing.T) {
+	tests := []struct {
+		name    string
+		expr    iceberg.BooleanExpression
+		values  map[string]bool
+		result  bool
+		visited []string
+	}{
+		{
+			name: "and when left is false",
+			expr: iceberg.NewAnd(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": false, "right": true},
+			result:  false,
+			visited: []string{"left", "false"},
+		},
+		{
+			name: "or when left is true",
+			expr: iceberg.NewOr(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": true, "right": false},
+			result:  true,
+			visited: []string{"left", "true"},
+		},
+		{
+			name: "and when left is true",
+			expr: iceberg.NewAnd(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": true, "right": false},
+			result:  false,
+			visited: []string{"left", "right", "and"},
+		},
+		{
+			name: "or when left is false",
+			expr: iceberg.NewOr(
+				iceberg.EqualTo(iceberg.Reference("left"), int32(1)),
+				iceberg.EqualTo(iceberg.Reference("right"), int32(1))),
+			values:  map[string]bool{"left": false, "right": true},
+			result:  true,
+			visited: []string{"left", "right", "or"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			visitor := &evaluatorVisitor{values: tt.values}
+			result, err := iceberg.VisitExprEvaluator(tt.expr, visitor)
+			require.NoError(t, err)
+			assert.Equal(t, tt.result, result)
+			assert.Equal(t, tt.visited, visitor.visited)
+		})
+	}
+}
+
 func TestBindVisitorAlready(t *testing.T) {
 	bound, err := iceberg.EqualTo(iceberg.Reference("foo"), "hello").
 		Bind(tableSchemaSimple, false)
@@ -242,6 +341,265 @@ func TestAlwaysExprBinding(t *testing.T) {
 			bound, err := iceberg.BindExpr(tableSchemaSimple, tt.expr, true)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, bound)
+		})
+	}
+}
+
+func TestTranslateColumnNamesMissingFieldInitialDefault(t *testing.T) {
+	ref := iceberg.Reference("missing_col")
+	tests := []struct {
+		name     string
+		field    iceberg.NestedField
+		expr     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{
+			name: "matching equality",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.EqualTo(ref, int32(42)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "mismatching equality",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.EqualTo(ref, int32(7)),
+			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "matching set",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.IsIn(ref, int32(7), int32(42)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "is null with non-null default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "not null with non-null default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+				InitialDefault: float64(42),
+			},
+			expr:     iceberg.NotNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching binary metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: "000102ff",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{0, 1, 2, 0xff}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching fixed metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: "010203",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching legacy base64 metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: "AAEC/w==",
+			},
+			expr:     iceberg.EqualTo(ref, []byte{0, 1, 2, 0xff}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching native byte default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: []byte{1, 2, 3},
+			},
+			expr:     iceberg.EqualTo(ref, []byte{1, 2, 3}),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching numeric date default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Date,
+				InitialDefault: iceberg.Date(1),
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Date(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching ISO date default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Date,
+				InitialDefault: "1970-01-02",
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Date(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching timestamp metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Timestamp,
+				InitialDefault: "1970-01-01T00:00:00.000001",
+			},
+			expr:     iceberg.EqualTo(ref, iceberg.Timestamp(1)),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching boolean metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Bool,
+				InitialDefault: true,
+			},
+			expr:     iceberg.EqualTo(ref, true),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching UUID metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.UUID,
+				InitialDefault: "f79c3e09-677c-4bbd-a479-512f87f77acf",
+			},
+			expr:     iceberg.EqualTo(ref, "f79c3e09-677c-4bbd-a479-512f87f77acf"),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "matching decimal metadata default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.DecimalTypeOf(9, 2),
+				InitialDefault: "12.34",
+			},
+			expr:     iceberg.EqualTo(ref, "12.34"),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "is null without default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "equality without default",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Int32,
+			},
+			expr:     iceberg.EqualTo(ref, int32(42)),
+			expected: iceberg.AlwaysFalse{},
+		},
+		{
+			name: "geometry default fails open",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.GeometryType{},
+				InitialDefault: "POINT (30 10)",
+			},
+			expr:     iceberg.IsNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+		{
+			name: "geography default fails open",
+			field: iceberg.NestedField{
+				ID: 2, Name: "missing_col", Type: iceberg.GeographyType{},
+				InitialDefault: "POINT (30 10)",
+			},
+			expr:     iceberg.NotNull(ref),
+			expected: iceberg.AlwaysTrue{},
+		},
+	}
+
+	fileSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "existing_col", Type: iceberg.PrimitiveTypes.String},
+	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(iceberg.NewSchema(1, tt.field), tt.expr, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			assert.Truef(t, translated.Equals(tt.expected), "expected %s, got %s", tt.expected, translated)
+		})
+	}
+}
+
+func TestTranslateColumnNamesInitialDefaultErrorContext(t *testing.T) {
+	field := iceberg.NestedField{
+		ID: 2, Name: "missing_col", Type: iceberg.PrimitiveTypes.Binary,
+		InitialDefault: "GG",
+	}
+	bound, err := iceberg.BindExpr(
+		iceberg.NewSchema(1, field),
+		iceberg.EqualTo(iceberg.Reference("missing_col"), []byte{1}),
+		true,
+	)
+	require.NoError(t, err)
+
+	_, err = iceberg.TranslateColumnNames(bound, iceberg.NewSchema(1))
+	require.ErrorContains(t, err, `initial-default for column "missing_col" (id 2)`)
+	require.ErrorContains(t, err, "invalid hex")
+}
+
+func TestTranslateColumnNamesNestedInitialDefaultDoesNotAssumeParentPresent(t *testing.T) {
+	currentSchema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+				{
+					ID: 3, Name: "country", Type: iceberg.PrimitiveTypes.String,
+					InitialDefault: "US",
+				},
+			},
+		},
+	})
+	fileSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "location", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{
+				{ID: 2, Name: "city", Type: iceberg.PrimitiveTypes.String},
+			},
+		},
+	})
+
+	for _, expr := range []struct {
+		name        string
+		filter      iceberg.BooleanExpression
+		invalidFold iceberg.BooleanExpression
+	}{
+		{
+			name:        "matching default",
+			filter:      iceberg.EqualTo(iceberg.Reference("location.country"), "US"),
+			invalidFold: iceberg.AlwaysTrue{},
+		},
+		{
+			name:        "is null",
+			filter:      iceberg.IsNull(iceberg.Reference("location.country")),
+			invalidFold: iceberg.AlwaysFalse{},
+		},
+	} {
+		t.Run(expr.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(currentSchema, expr.filter, true)
+			require.NoError(t, err)
+
+			translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+			require.NoError(t, err)
+			require.False(t, translated.Equals(expr.invalidFold),
+				"a nested default is not constant when its parent can be null")
 		})
 	}
 }
@@ -735,6 +1093,54 @@ func TestEvaluatorCmpTypes(t *testing.T) {
 			assert.Equal(t, tt.exp, res)
 		})
 	}
+}
+
+func TestEvaluatorTransformTerms(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	transform := iceberg.BucketTransform{NumBuckets: 100}
+	term := iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))
+	bucketed := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.Int32Literal(7),
+	})
+	bucket := bucketed.Val.(iceberg.TypedLiteral[int32]).Value()
+
+	tests := []struct {
+		name string
+		expr iceberg.BooleanExpression
+		want bool
+	}{
+		{name: "is null", expr: iceberg.IsNull(term), want: false},
+		{name: "not null", expr: iceberg.NotNull(term), want: true},
+		{name: "equal", expr: iceberg.EqualTo(term, bucket), want: true},
+		{name: "in", expr: iceberg.IsIn(term, bucket, bucket+1), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eval, err := iceberg.ExpressionEvaluator(schema, tt.expr, true)
+			require.NoError(t, err)
+
+			got, err := eval(rowOf(int32(7)))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestEvaluatorDayTransform(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "ts", Type: iceberg.PrimitiveTypes.Timestamp},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.DayTransform{}, iceberg.Reference("ts"))
+	eval, err := iceberg.ExpressionEvaluator(schema, iceberg.EqualTo(term, iceberg.Date(0)), true)
+	require.NoError(t, err)
+
+	matched, err := eval(rowOf(iceberg.Timestamp(0)))
+	require.NoError(t, err)
+	assert.True(t, matched)
 }
 
 func TestRewriteNot(t *testing.T) {

@@ -79,6 +79,60 @@ func TestRefTypes(t *testing.T) {
 	}
 }
 
+func TestNestedReferencesPreserveBoundPath(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 3, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+			{ID: 4, Name: "address", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+				{ID: 5, Name: "zip", Type: iceberg.PrimitiveTypes.String},
+			}}},
+		}}},
+	)
+
+	tests := []struct {
+		name      string
+		predicate iceberg.UnboundPredicate
+		expected  string
+	}{
+		{
+			name:      "customer.id",
+			predicate: iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)),
+			expected:  ".field(1).field(0)",
+		},
+		{
+			name:      "customer.address.zip",
+			predicate: iceberg.EqualTo(iceberg.Reference("customer.address.zip"), "12345"),
+			expected:  ".field(1).field(1).field(0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := tt.predicate.Bind(sc, true)
+			require.NoError(t, err)
+
+			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			require.NoError(t, err)
+			assert.Contains(t, converted.String(), tt.expected)
+		})
+	}
+}
+
+func TestNestedReferenceWithoutTopLevelLeafName(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "customer", Type: &iceberg.StructType{FieldList: []iceberg.NestedField{
+			{ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		}}},
+	)
+	bound, err := iceberg.EqualTo(iceberg.Reference("customer.id"), int64(123)).Bind(sc, true)
+	require.NoError(t, err)
+
+	_, converted, err := substrait.ConvertExpr(sc, bound, true)
+	require.NoError(t, err)
+	assert.Contains(t, converted.String(), ".field(0).field(0)")
+}
+
 var (
 	tableSchemaSimple = iceberg.NewSchemaWithIdentifiers(1,
 		[]int{2},
@@ -133,6 +187,85 @@ func TestExprs(t *testing.T) {
 			_, result, err := substrait.ConvertExpr(tt.schema, bound, true)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result.String())
+		})
+	}
+}
+
+func TestTransformPredicatesAreRejected(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+	predicates := []iceberg.UnboundPredicate{
+		iceberg.IsNull(term),
+		iceberg.EqualTo(term, "boo"),
+		iceberg.IsIn(term, "boo", "bar").(iceberg.UnboundPredicate),
+	}
+
+	for _, predicate := range predicates {
+		bound, err := predicate.Bind(sc, true)
+		require.NoError(t, err)
+
+		_, _, err = substrait.ConvertExpr(sc, bound, true)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+		assert.ErrorContains(t, err, "transformed terms")
+	}
+}
+
+func TestNanosecondTimestampLiterals(t *testing.T) {
+	tests := []struct {
+		name      string
+		fieldType iceberg.Type
+		predicate iceberg.BooleanExpression
+		wantExpr  string
+	}{
+		{
+			name:      "timestamp equality",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(123456789)),
+			wantExpr:  "equal(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.123456789)) => boolean?",
+		},
+		{
+			name:      "timestamp with timezone equality before epoch",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.EqualTo(iceberg.Reference("ts"), iceberg.TimestampNano(-123456789)),
+			wantExpr:  "equal(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.876543211Z)) => boolean?",
+		},
+		{
+			name:      "timestamp in",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.IsIn(iceberg.Reference("ts"), iceberg.TimestampNano(1), iceberg.TimestampNano(1001)),
+			wantExpr:  "is_in(.field(0) => precision_timestamp?<9>, list<precision_timestamp<9>>([precision_timestamp<9>(1970-01-01 00:00:00.000000001) precision_timestamp<9>(1970-01-01 00:00:00.000001001)])) => boolean?",
+		},
+		{
+			name:      "timestamp with timezone not in",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.NotIn(iceberg.Reference("ts"), iceberg.TimestampNano(-1), iceberg.TimestampNano(1001)),
+			wantExpr:  "not(is_in(.field(0) => precision_timestamp_tz?<9>, list<precision_timestamp_tz<9>>([precision_timestamp_tz<9>(1969-12-31T23:59:59.999999999Z) precision_timestamp_tz<9>(1970-01-01T00:00:00.000001001Z)])) => boolean?) => boolean?",
+		},
+		{
+			name:      "timestamp greater than",
+			fieldType: iceberg.PrimitiveTypes.TimestampNs,
+			predicate: iceberg.GreaterThan(iceberg.Reference("ts"), iceberg.TimestampNano(42)),
+			wantExpr:  "gt(.field(0) => precision_timestamp?<9>, precision_timestamp<9>(1970-01-01 00:00:00.000000042)) => boolean?",
+		},
+		{
+			name:      "timestamp with timezone less than",
+			fieldType: iceberg.PrimitiveTypes.TimestampTzNs,
+			predicate: iceberg.LessThan(iceberg.Reference("ts"), iceberg.TimestampNano(-42)),
+			wantExpr:  "lt(.field(0) => precision_timestamp_tz?<9>, precision_timestamp_tz<9>(1969-12-31T23:59:59.999999958Z)) => boolean?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "ts", Type: tt.fieldType})
+			bound, err := iceberg.BindExpr(sc, tt.predicate, true)
+			require.NoError(t, err)
+
+			_, converted, err := substrait.ConvertExpr(sc, bound, true)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantExpr, converted.String())
 		})
 	}
 }

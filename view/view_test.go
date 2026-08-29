@@ -145,3 +145,15 @@ func TestCreateViewReturnsMetadataCloseError(t *testing.T) {
 	require.EqualError(t, err, "error on close")
 	require.Nil(t, createdView)
 }
+
+func (t *ViewTestSuite) TestIdentifierReturnsDefensiveCopy() {
+	identifier := []string{"namespace", "view"}
+	vw := New(identifier, nil, "metadata.json")
+
+	identifier[0] = "changed-input"
+	t.Equal([]string{"namespace", "view"}, vw.Identifier())
+
+	returned := vw.Identifier()
+	returned[1] = "changed-output"
+	t.Equal([]string{"namespace", "view"}, vw.Identifier())
+}

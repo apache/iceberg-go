@@ -184,6 +184,22 @@ func TestSortOrderReturnsDefensiveCopies(t *testing.T) {
 	assert.Equal(t, 1, seen)
 }
 
+// Unknown sort transforms are tolerated on write, matching Java (canTransform
+// stays true and nothing rejects them).
+func TestNewSortOrderAcceptsUnknownTransform(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	require.NoError(t, err)
+
+	order, err := table.NewSortOrder(1, []table.SortField{{
+		SourceIDs: []int{19},
+		Transform: unknown,
+		NullOrder: table.NullsFirst,
+		Direction: table.SortASC,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, unknown, order.Field(0).Transform)
+}
+
 func TestSortOrderCheckCompatibilityWithValidTransform(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -206,6 +222,45 @@ func TestSortOrderUnmarshalRejectsZeroSourceID(t *testing.T) {
 	assert.ErrorContains(t, err, "source ID must be positive: 0")
 }
 
+// Spark numbers root fields from zero when converting a schema for a
+// create-table request (SparkTypeToType.struct), so `WRITE ORDERED BY` on the
+// first column sends source-id 0. The unbound order accepts it; the ID is
+// remapped by name when the order is bound to the fresh schema.
+func TestUnboundSortOrderUnmarshalAcceptsZeroSourceID(t *testing.T) {
+	var sortOrder table.UnboundSortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
+	require.Equal(t, 1, sortOrder.Len())
+	for _, field := range sortOrder.Fields() {
+		assert.Equal(t, 0, field.SourceID())
+	}
+
+	roundTripped, err := json.Marshal(sortOrder)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`, string(roundTripped))
+}
+
+func TestUnboundSortOrderUnmarshalRejectsNegativeSourceID(t *testing.T) {
+	var sortOrder table.UnboundSortOrder
+	err := json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": -1, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortSourceID)
+	assert.ErrorContains(t, err, "source ID must be non-negative: -1")
+}
+
+// A placeholder source ID that never gets remapped is still caught at binding time.
+func TestUnboundSortOrderCheckCompatibilityRejectsZeroSourceID(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	var sortOrder table.UnboundSortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 1, "fields": [{"source-id": 0, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &sortOrder))
+
+	err := sortOrder.CheckCompatibility(schema)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortSourceID)
+	assert.ErrorContains(t, err, "source ID must be positive: 0")
+}
+
 func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T) {
 	schema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 19, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -218,13 +273,61 @@ func TestSortOrderCheckCompatibilityRejectsMissingSourceIDInSchema(t *testing.T)
 	assert.ErrorContains(t, err, "sort field with source id 999 not found in schema")
 }
 
-func TestUnmarshalSortOrderDefaults(t *testing.T) {
-	var order table.SortOrder
-	require.NoError(t, json.Unmarshal([]byte(`{"fields": []}`), &order))
-	assert.Equal(t, table.UnsortedSortOrder, order)
+func TestUnmarshalSortOrderRequiresOrderID(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		jsonData string
+	}{
+		{name: "missing", jsonData: `{"fields": []}`},
+		{name: "null", jsonData: `{"order-id": null, "fields": []}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var order table.SortOrder
+			err := json.Unmarshal([]byte(tt.jsonData), &order)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "missing required 'order-id' key in JSON")
+		})
+	}
+}
 
-	require.NoError(t, json.Unmarshal([]byte(`{"fields": [{"source-id": 19, "transform": "identity", "direction": "asc", "null-order": "nulls-first"}]}`), &order))
-	assert.Equal(t, table.InitialSortOrderID, order.OrderID())
+func TestUnmarshalSortOrderRequiresFields(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		jsonData string
+	}{
+		{name: "missing", jsonData: `{"order-id": 0}`},
+		{name: "null", jsonData: `{"order-id": 0, "fields": null}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var order table.SortOrder
+			err := json.Unmarshal([]byte(tt.jsonData), &order)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.ErrorContains(t, err, "missing required 'fields' key in JSON")
+		})
+	}
+}
+
+func TestUnmarshalSortOrderAcceptsExplicitUnsortedOrder(t *testing.T) {
+	var order table.SortOrder
+	require.NoError(t, json.Unmarshal([]byte(`{"order-id": 0, "fields": []}`), &order))
+	assert.Equal(t, table.UnsortedSortOrder, order)
+}
+
+func TestUnmarshalSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	var order table.SortOrder
+	err := json.Unmarshal([]byte(`{"order-id": 1, "fields": []}`), &order)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
+}
+
+func TestNewSortOrderRejectsNonzeroIDForEmptyFields(t *testing.T) {
+	_, err := table.NewSortOrder(1, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrInvalidSortOrderID)
+	assert.ErrorContains(t, err, "requires at least one sort field")
 }
 
 func TestUnmarshalSortOrderRejectsInvalidSourceIDs(t *testing.T) {
@@ -304,8 +407,10 @@ func TestUnmarshalInvalidSortNullOrder(t *testing.T) {
 	assert.ErrorIs(t, err, table.ErrInvalidNullOrder)
 }
 
-func TestUnmarshalInvalidSortTransform(t *testing.T) {
-	badJson := `{
+// v3 readers must load sort orders that use unknown transforms, preserving
+// them for round-trip rather than failing.
+func TestUnmarshalUnknownSortTransform(t *testing.T) {
+	j := `{
 		"order-id": 22,
 		"fields": [
 			{"source-id": 19, "transform": "foobar", "direction": "asc", "null-order": "nulls-first"},
@@ -315,8 +420,209 @@ func TestUnmarshalInvalidSortTransform(t *testing.T) {
 	}`
 
 	var order table.SortOrder
+	err := json.Unmarshal([]byte(j), &order)
+	require.NoError(t, err)
+	require.Equal(t, 3, order.Len())
+
+	first := order.Field(0)
+	_, ok := first.Transform.(iceberg.UnknownTransform)
+	assert.True(t, ok, "unknown transform should parse to UnknownTransform")
+	assert.Equal(t, "foobar", first.Transform.String())
+}
+
+// A malformed known sort transform still errors.
+func TestUnmarshalInvalidSortTransform(t *testing.T) {
+	badJson := `{
+		"order-id": 22,
+		"fields": [
+			{"source-id": 25, "transform": "bucket[0]", "direction": "desc", "null-order": "nulls-last"}
+		]
+	}`
+
+	var order table.SortOrder
 	err := json.Unmarshal([]byte(badJson), &order)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+}
+
+func TestSortFieldUnmarshalPreservesStateOnError(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{
+			name: "invalid transform",
+			data: `{"source-id":1,"transform":"bucket[0]","direction":"asc","null-order":"nulls-first"}`,
+		},
+		{
+			name: "non-positive source ID",
+			data: `{"source-id":0,"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+		},
+		{
+			name: "invalid direction",
+			data: `{"source-id":1,"transform":"identity","direction":"not-a-direction","null-order":"nulls-first"}`,
+		},
+		{
+			name: "invalid null order",
+			data: `{"source-id":1,"transform":"identity","direction":"asc","null-order":"not-a-null-order"}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			initial := table.SortField{
+				SourceIDs: []int{7},
+				Transform: iceberg.IdentityTransform{},
+				Direction: table.SortDESC,
+				NullOrder: table.NullsLast,
+			}
+			field := initial
+			field.SourceIDs = []int{7}
+			require.Error(t, json.Unmarshal([]byte(test.data), &field))
+			assert.Equal(t, initial, field)
+		})
+	}
+}
+
+func TestSortFieldUnmarshalJSON(t *testing.T) {
+	var field table.SortField
+	require.Error(t, json.Unmarshal([]byte(`[1, 2]`), &field))
+}
+
+func TestSortFieldUnmarshalPreservesJSONFieldPresence(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr error
+		message string
+	}{
+		{
+			name:    "null source-id is present",
+			data:    `{"source-id":null,"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			wantErr: table.ErrInvalidSortSourceID,
+			message: "source ID must be positive: 0",
+		},
+		{
+			name:    "null source-ids is present",
+			data:    `{"source-ids":null,"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			wantErr: table.ErrInvalidSortSourceID,
+			message: "source-ids must not be empty",
+		},
+		{
+			name:    "both null source fields are present",
+			data:    `{"source-id":null,"source-ids":null,"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			message: "sort field cannot contain both source-id and source-ids",
+		},
+		{
+			name:    "null transform is present",
+			data:    `{"source-id":1,"transform":null,"direction":"asc","null-order":"nulls-first"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "sort field requires a transform",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field table.SortField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			}
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestSortFieldUnmarshalPreservesValidationPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr error
+		message string
+	}{
+		{
+			name:    "mixed-case source ID is not recognized",
+			data:    `{"Source-Id":1,"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			wantErr: table.ErrInvalidSortSourceID,
+			message: "exactly one of source-id or source-ids is required",
+		},
+		{
+			name:    "mixed-case transform is not recognized",
+			data:    `{"source-id":1,"TRANSFORM":"identity","direction":"asc","null-order":"nulls-first"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "sort field requires a transform",
+		},
+		{
+			name:    "both source fields precede an invalid direction",
+			data:    `{"source-id":1,"source-ids":[2],"transform":"identity","direction":1,"null-order":"nulls-first"}`,
+			message: "sort field cannot contain both source-id and source-ids",
+		},
+		{
+			name:    "missing transform precedes an invalid direction",
+			data:    `{"source-id":1,"transform":null,"direction":1,"null-order":"nulls-first"}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "sort field requires a transform",
+		},
+		{
+			name:    "missing transform precedes an invalid null order",
+			data:    `{"source-id":1,"transform":null,"direction":"asc","null-order":1}`,
+			wantErr: iceberg.ErrInvalidTransform,
+			message: "sort field requires a transform",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field table.SortField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.Error(t, err)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			}
+			assert.ErrorContains(t, err, tt.message)
+		})
+	}
+}
+
+func TestSortFieldUnmarshalIncludesJSONFieldInTypeErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		data  string
+		field string
+	}{
+		{
+			name:  "source ID",
+			data:  `{"source-id":"x","transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			field: "source-id",
+		},
+		{
+			name:  "source IDs",
+			data:  `{"source-ids":["x"],"transform":"identity","direction":"asc","null-order":"nulls-first"}`,
+			field: "source-ids",
+		},
+		{
+			name:  "transform",
+			data:  `{"source-id":1,"transform":1,"direction":"asc","null-order":"nulls-first"}`,
+			field: "transform",
+		},
+		{
+			name:  "direction",
+			data:  `{"source-id":1,"transform":"identity","direction":1,"null-order":"nulls-first"}`,
+			field: "direction",
+		},
+		{
+			name:  "null order",
+			data:  `{"source-id":1,"transform":"identity","direction":"asc","null-order":1}`,
+			field: "null-order",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var field table.SortField
+			err := json.Unmarshal([]byte(tt.data), &field)
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "."+tt.field)
+		})
+	}
 }
 
 func TestSortFieldMultiArgSourceIDs(t *testing.T) {

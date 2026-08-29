@@ -18,6 +18,9 @@
 package main
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -380,6 +383,258 @@ func TestCLIExplicitMissingConfigFailsBeforeCatalogInit(t *testing.T) {
 	assert.Equal(t, 1, exitErr.ExitCode())
 	assert.Contains(t, string(out), "configuration error")
 	assert.Contains(t, string(out), path)
+}
+
+func TestCLIAcceptsMixedCaseCatalogType(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a subprocess")
+	}
+
+	restMux := http.NewServeMux()
+	restMux.HandleFunc("/v1/config", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"defaults":{},"overrides":{},"endpoints":["GET /v1/{prefix}/namespaces"]}`))
+	})
+	restMux.HandleFunc("/v1/namespaces", func(w http.ResponseWriter, req *http.Request) {
+		require.Equal(t, http.MethodGet, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"namespaces":[]}`))
+	})
+	restSrv := httptest.NewServer(restMux)
+	defer restSrv.Close()
+
+	glueMux := http.NewServeMux()
+	glueMux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		_, _ = w.Write([]byte(`{"DatabaseList":[]}`))
+	})
+	glueSrv := httptest.NewServer(glueMux)
+	defer glueSrv.Close()
+
+	hadoopWarehouse := t.TempDir()
+
+	sqlWarehouse := t.TempDir()
+	sqlDB := filepath.Join(t.TempDir(), "catalog.db")
+	sqlURI := "file:" + sqlDB
+	sqlWarehouseURI := "file://" + sqlWarehouse
+
+	// A raw TCP listener stands in for a Hive metastore: the CLI only needs to
+	// get far enough to open a connection to prove "HIVE"/"Hive" were recognized
+	// as the Hive catalog type. It has no Thrift handshake, so the command still
+	// fails, but with an EOF/protocol error rather than "unrecognized catalog type".
+	hiveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer hiveLn.Close()
+	go func() {
+		for {
+			conn, err := hiveLn.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	hiveURI := "thrift://" + hiveLn.Addr().String()
+
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+		// wantErr is set for cases where the catalog type is recognized but the
+		// backend call itself is expected to fail (e.g. no real Hive metastore
+		// behind the raw TCP listener).
+		wantErr bool
+		// wantUnrecognized is set only for catalog type values that must still be
+		// rejected outright, to keep that failure mode distinguishable from
+		// wantErr above.
+		wantUnrecognized bool
+		// wantContains, when set with wantErr, asserts a substring of stderr/stdout
+		// so "not implemented" failures stay distinguishable from other errors.
+		wantContains string
+	}{
+		{
+			name: "rest lowercase",
+			args: []string{"list", "--catalog", "rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest uppercase",
+			args: []string{"list", "--catalog", "REST", "--uri", restSrv.URL},
+		},
+		{
+			name: "rest mixed case",
+			args: []string{"list", "--catalog", "Rest", "--uri", restSrv.URL},
+		},
+		{
+			name: "glue uppercase",
+			args: []string{"list", "--catalog", "GLUE"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "glue mixed case",
+			args: []string{"list", "--catalog", "Glue"},
+			env: []string{
+				"AWS_ENDPOINT_URL=" + glueSrv.URL,
+				"AWS_ACCESS_KEY_ID=test",
+				"AWS_SECRET_ACCESS_KEY=test",
+				"AWS_REGION=us-east-1",
+			},
+		},
+		{
+			name: "hadoop uppercase",
+			args: []string{"list", "--catalog", "HADOOP", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name: "hadoop mixed case",
+			args: []string{"list", "--catalog", "Hadoop", "--warehouse", hadoopWarehouse},
+		},
+		{
+			name:    "hive uppercase",
+			args:    []string{"list", "--catalog", "HIVE", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name:    "hive mixed case",
+			args:    []string{"list", "--catalog", "Hive", "--uri", hiveURI},
+			wantErr: true,
+		},
+		{
+			name: "sql lowercase",
+			args: []string{
+				"list", "--catalog", "sql",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			name: "sql uppercase",
+			args: []string{
+				"list", "--catalog", "SQL",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			name: "sql mixed case",
+			args: []string{
+				"list", "--catalog", "Sql",
+				"--uri", sqlURI,
+				"--sql-driver", "sqliteshim",
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+		},
+		{
+			// Missing --sql-driver must reach the SQL registrar (catalog.Load),
+			// not fail as an unrecognized catalog type.
+			name: "sql without sql-driver reaches registrar",
+			args: []string{
+				"list", "--catalog", "sql",
+				"--uri", sqlURI,
+				"--sql-dialect", "sqlite",
+				"--warehouse", sqlWarehouseURI,
+			},
+			wantErr:      true,
+			wantContains: "must provide driver",
+		},
+		{
+			name:         "dynamodb is recognized but not implemented",
+			args:         []string{"list", "--catalog", "dynamodb"},
+			wantErr:      true,
+			wantContains: "dynamodb catalog is not implemented",
+		},
+		{
+			name:         "dynamodb uppercase is recognized but not implemented",
+			args:         []string{"list", "--catalog", "DYNAMODB"},
+			wantErr:      true,
+			wantContains: "dynamodb catalog is not implemented",
+		},
+		{
+			name:             "unknown catalog type is still rejected",
+			args:             []string{"list", "--catalog", "RESTX", "--uri", restSrv.URL},
+			wantUnrecognized: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tt.args...)
+			cmd.Env = append(os.Environ(), icebergCLISubprocessEnv+"=1")
+			cmd.Env = append(cmd.Env, tt.env...)
+			out, err := cmd.CombinedOutput()
+
+			if tt.wantUnrecognized {
+				require.Error(t, err, "output: %s", out)
+				require.Contains(t, string(out), "unrecognized catalog type")
+
+				return
+			}
+
+			if tt.wantErr {
+				require.Error(t, err, "output: %s", out)
+				require.NotContains(t, string(out), "unrecognized catalog type")
+				if tt.wantContains != "" {
+					require.Contains(t, string(out), tt.wantContains)
+				}
+
+				return
+			}
+
+			require.NoError(t, err, "output: %s", out)
+		})
+	}
+}
+
+func TestMergeConfSQLOptions(t *testing.T) {
+	fileCfg := &config.CatalogConfig{
+		CatalogType: "sql",
+		URI:         "file:from-config.db",
+		Warehouse:   "file:///tmp/from-config-wh",
+		Credential:  "config-credential",
+		SQLDriver:   "sqliteshim",
+		SQLDialect:  "sqlite",
+	}
+
+	t.Run("file values applied when flags absent", func(t *testing.T) {
+		var a Args
+		mergeConf(fileCfg, &a, map[string]bool{})
+		assert.Equal(t, "sql", a.Catalog)
+		assert.Equal(t, "file:from-config.db", a.URI)
+		assert.Equal(t, "file:///tmp/from-config-wh", a.Warehouse)
+		assert.Equal(t, "config-credential", a.Credential)
+		assert.Equal(t, "sqliteshim", a.SQLDriver)
+		assert.Equal(t, "sqlite", a.SQLDialect)
+	})
+
+	t.Run("explicit flags win over file", func(t *testing.T) {
+		a := Args{
+			Catalog:    "rest",
+			URI:        "file:cli.db",
+			Warehouse:  "file:///tmp/cli-wh",
+			Credential: "cli-credential",
+			SQLDriver:  "mysql",
+			SQLDialect: "mysql",
+		}
+		mergeConf(fileCfg, &a, map[string]bool{
+			"catalog": true, "uri": true, "warehouse": true, "credential": true,
+			"sql-driver": true, "sql-dialect": true,
+		})
+		assert.Equal(t, "rest", a.Catalog)
+		assert.Equal(t, "file:cli.db", a.URI)
+		assert.Equal(t, "file:///tmp/cli-wh", a.Warehouse)
+		assert.Equal(t, "cli-credential", a.Credential)
+		assert.Equal(t, "mysql", a.SQLDriver)
+		assert.Equal(t, "mysql", a.SQLDialect)
+	})
 }
 
 func TestMergeConfAwsProfile(t *testing.T) {

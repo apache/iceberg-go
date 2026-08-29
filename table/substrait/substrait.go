@@ -21,6 +21,7 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"strings"
 	"unsafe"
 
@@ -51,9 +52,10 @@ func NewExtensionSet() exprs.ExtensionIDSet {
 	return exprs.NewExtensionSetDefault(expr.NewEmptyExtensionRegistry(collection))
 }
 
-// ConvertExpr binds the provided expression to the given schema and converts it to a
-// substrait expression so that it can be utilized for computation.
-func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensitive bool) (*expr.ExtensionRegistry, expr.Expression, error) {
+// ConvertExpr converts a bound expression to a Substrait expression so that it can
+// be utilized for computation. Case sensitivity is applied when binding; the third
+// argument is retained for API compatibility.
+func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, _ bool) (*expr.ExtensionRegistry, expr.Expression, error) {
 	base, err := ConvertSchema(schema)
 	if err != nil {
 		return nil, nil, err
@@ -62,10 +64,7 @@ func ConvertExpr(schema *iceberg.Schema, e iceberg.BooleanExpression, caseSensit
 	reg := expr.NewEmptyExtensionRegistry(collection)
 
 	bldr := expr.ExprBuilder{Reg: reg, BaseSchema: types.NewRecordTypeFromStruct(base.Struct)}
-	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{
-		bldr: bldr, schema: schema,
-		caseSensitive: caseSensitive,
-	})
+	b, err := iceberg.VisitExpr(e, &toSubstraitExpr{bldr: bldr})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,9 +212,7 @@ var (
 )
 
 type toSubstraitExpr struct {
-	schema        *iceberg.Schema
-	bldr          expr.ExprBuilder
-	caseSensitive bool
+	bldr expr.ExprBuilder
 }
 
 func (t *toSubstraitExpr) VisitTrue() expr.Builder {
@@ -245,6 +242,10 @@ func (t *toSubstraitExpr) VisitUnbound(iceberg.UnboundPredicate) expr.Builder {
 }
 
 func (t *toSubstraitExpr) VisitBound(pred iceberg.BoundPredicate) expr.Builder {
+	if _, ok := pred.Term().(*iceberg.BoundTransform); ok {
+		panic(fmt.Errorf("%w: transformed terms cannot be converted to substrait", iceberg.ErrNotImplemented))
+	}
+
 	return iceberg.VisitBoundPredicate(pred, t)
 }
 
@@ -318,6 +319,16 @@ func toSubstraitLiteral(typ iceberg.Type, lit iceberg.Literal) expr.Literal {
 		}
 
 		return toPrimitiveSubstraitLiteral(types.Timestamp(lit))
+	case iceberg.TimestampNsLiteral:
+		if typ.Equals(iceberg.PrimitiveTypes.TimestampTzNs) {
+			return expr.NewPrecisionTimestampTzLiteral(
+				int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+			)
+		}
+
+		return expr.NewPrecisionTimestampLiteral(
+			int64(lit), types.PrecisionNanoSeconds, types.NullabilityRequired,
+		)
 	case iceberg.DateLiteral:
 		return toPrimitiveSubstraitLiteral(types.Date(lit))
 	case iceberg.TimeLiteral:
@@ -339,6 +350,10 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 		return nil
 	}
 
+	sort.Slice(lits, func(i, j int) bool {
+		return lits[i].String() < lits[j].String()
+	})
+
 	out := make([]expr.Literal, len(lits))
 	for i, l := range lits {
 		out[i] = toSubstraitLiteral(typ, l)
@@ -348,12 +363,7 @@ func toSubstraitLiteralSet(typ iceberg.Type, lits []iceberg.Literal) expr.ListLi
 }
 
 func (t *toSubstraitExpr) getRef(ref iceberg.BoundReference) expr.Reference {
-	updatedRef, err := iceberg.Reference(ref.Field().Name).Bind(t.schema, t.caseSensitive)
-	if err != nil {
-		panic(err)
-	}
-
-	path := updatedRef.Ref().PosPath()
+	path := ref.PosPath()
 	out := expr.NewStructFieldRef(int32(path[0]))
 	if len(path) == 1 {
 		return out

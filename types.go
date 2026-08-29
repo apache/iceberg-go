@@ -33,10 +33,10 @@ import (
 )
 
 var (
-	regexFromBrackets = regexp.MustCompile(`^\w+\[(\d+)\]$`)
-	decimalRegex      = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
-	geometryRegex     = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
-	geographyRegex    = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
+	fixedRegex     = regexp.MustCompile(`^fixed\[(\d+)\]$`)
+	decimalRegex   = regexp.MustCompile(`^decimal\(\s*(\d+)\s*,\s*(\d+)\s*\)$`)
+	geometryRegex  = regexp.MustCompile(`(?i)^geometry\s*(?:\(\s*([^),]+?)\s*\))?$`)
+	geographyRegex = regexp.MustCompile(`(?i)^geography\s*(?:\(\s*([^\s,)]+)\s*(?:,\s*(\w+)\s*)?\))?$`)
 )
 
 type Properties map[string]string
@@ -196,7 +196,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 		default:
 			switch {
 			case strings.HasPrefix(typename, "fixed"):
-				matches := regexFromBrackets.FindStringSubmatch(typename)
+				matches := fixedRegex.FindStringSubmatch(typename)
 				if len(matches) != 2 {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
@@ -248,7 +248,7 @@ func (t *typeIFace) UnmarshalJSON(b []byte) error {
 					return fmt.Errorf("%w: %s", ErrInvalidTypeString, typename)
 				}
 
-				crs := defaultGeoCRS
+				crs := DefaultGeoCRS
 				if matches[1] != "" {
 					crs = strings.TrimSpace(matches[1])
 				}
@@ -332,42 +332,84 @@ func (n *NestedField) Equals(other NestedField) bool {
 }
 
 func (n NestedField) MarshalJSON() ([]byte, error) {
-	type Alias NestedField
+	var initialDefault, writeDefault *any
+	if n.InitialDefault != nil {
+		value := defaultValueToJSON(n.Type, n.InitialDefault)
+		initialDefault = &value
+	}
+	if n.WriteDefault != nil {
+		value := defaultValueToJSON(n.Type, n.WriteDefault)
+		writeDefault = &value
+	}
 
 	return json.Marshal(struct {
-		Type *typeIFace `json:"type"`
-		*Alias
-	}{Type: &typeIFace{n.Type}, Alias: (*Alias)(&n)})
+		Type           *typeIFace `json:"type"`
+		ID             int        `json:"id"`
+		Name           string     `json:"name"`
+		Required       bool       `json:"required"`
+		Doc            string     `json:"doc,omitempty"`
+		InitialDefault *any       `json:"initial-default,omitempty"`
+		WriteDefault   *any       `json:"write-default,omitempty"`
+	}{
+		Type: &typeIFace{n.Type},
+		ID:   n.ID, Name: n.Name, Required: n.Required, Doc: n.Doc,
+		InitialDefault: initialDefault, WriteDefault: writeDefault,
+	})
+}
+
+func defaultValueToJSON(typ Type, value any) any {
+	switch typ.(type) {
+	case BinaryType, FixedType:
+		switch value := value.(type) {
+		case []byte:
+			return internal.EncodeDefaultBytes(value)
+		case BinaryLiteral:
+			return internal.EncodeDefaultBytes(value)
+		case FixedLiteral:
+			return internal.EncodeDefaultBytes(value)
+		}
+	}
+
+	return value
 }
 
 func (n *NestedField) UnmarshalJSON(b []byte) error {
 	type Alias NestedField
+	var next NestedField
 	aux := struct {
-		ID   *int      `json:"id"`
-		Type typeIFace `json:"type"`
+		ID       *int      `json:"id"`
+		Required *bool     `json:"required"`
+		Type     typeIFace `json:"type"`
 		*Alias
 	}{
-		Alias: (*Alias)(n),
+		Alias: (*Alias)(&next),
 	}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	n.Type = aux.Type.Type
+	next.Type = aux.Type.Type
 
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'id' key in JSON", ErrInvalidSchema)
 	}
-	n.ID = *aux.ID
+	next.ID = *aux.ID
 
-	if n.Name == "" {
+	if next.Name == "" {
 		return fmt.Errorf("%w: field is missing required 'name' key in JSON", ErrInvalidSchema)
 	}
 
-	if n.Type == nil {
-		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, n.Name)
+	if next.Type == nil {
+		return fmt.Errorf("%w: field %q is missing required 'type' key in JSON", ErrInvalidSchema, next.Name)
 	}
+
+	if aux.Required == nil {
+		return fmt.Errorf("%w: field is missing required 'required' key in JSON", ErrInvalidSchema)
+	}
+	next.Required = *aux.Required
+
+	*n = next
 
 	return nil
 }
@@ -472,7 +514,7 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	aux := struct {
 		ID   *int      `json:"element-id"`
 		Elem typeIFace `json:"element"`
-		Req  bool      `json:"element-required"`
+		Req  *bool     `json:"element-required"`
 	}{}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
@@ -481,10 +523,16 @@ func (l *ListType) UnmarshalJSON(b []byte) error {
 	if aux.ID == nil {
 		return fmt.Errorf("%w: field is missing required 'element-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Elem.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'element' key in JSON", ErrInvalidSchema)
+	}
+	if aux.Req == nil {
+		return fmt.Errorf("%w: field is missing required 'element-required' key in JSON", ErrInvalidSchema)
+	}
 
 	l.ElementID = *aux.ID
 	l.Element = aux.Elem.Type
-	l.ElementRequired = aux.Req
+	l.ElementRequired = *aux.Req
 
 	return nil
 }
@@ -567,18 +615,23 @@ func (m *MapType) UnmarshalJSON(b []byte) error {
 	if aux.KeyID == nil {
 		return fmt.Errorf("%w: field is missing required 'key-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Key.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'key' key in JSON", ErrInvalidSchema)
+	}
 
 	if aux.ValueID == nil {
 		return fmt.Errorf("%w: field is missing required 'value-id' key in JSON", ErrInvalidSchema)
 	}
+	if aux.Value.Type == nil {
+		return fmt.Errorf("%w: field is missing required 'value' key in JSON", ErrInvalidSchema)
+	}
+	if aux.ValueReq == nil {
+		return fmt.Errorf("%w: field is missing required 'value-required' key in JSON", ErrInvalidSchema)
+	}
 
 	m.KeyID, m.KeyType = *aux.KeyID, aux.Key.Type
 	m.ValueID, m.ValueType = *aux.ValueID, aux.Value.Type
-	if aux.ValueReq == nil {
-		m.ValueRequired = true
-	} else {
-		m.ValueRequired = *aux.ValueReq
-	}
+	m.ValueRequired = *aux.ValueReq
 
 	return nil
 }
@@ -633,6 +686,9 @@ func validateDecimalPrecisionScale(precision, scale int) error {
 	}
 	if scale < 0 {
 		return fmt.Errorf("invalid scale %d: must be greater than or equal to 0", scale)
+	}
+	if scale > precision {
+		return fmt.Errorf("invalid scale %d: must be less than or equal to precision %d", scale, precision)
 	}
 
 	return nil
@@ -799,7 +855,7 @@ func (t TimestampNano) ToTime() time.Time {
 }
 
 func (t TimestampNano) ToMicros() Timestamp {
-	return Timestamp(int64(t) / 1000)
+	return Timestamp(internal.FloorDiv(int64(t), 1000))
 }
 
 func (t TimestampNano) ToDate() Date {
@@ -925,7 +981,10 @@ func (VariantType) Equals(other Type) bool {
 func (VariantType) Type() string   { return "variant" }
 func (VariantType) String() string { return "variant" }
 
-const defaultGeoCRS = "OGC:CRS84"
+// DefaultGeoCRS is the CRS of the geometry and geography types when no CRS is
+// given; a Parquet GEOMETRY or GEOGRAPHY logical type without a CRS means the
+// same value.
+const DefaultGeoCRS = "OGC:CRS84"
 
 type GeometryType struct {
 	crs string
@@ -936,7 +995,7 @@ func GeometryTypeOf(crs string) (GeometryType, error) {
 		return GeometryType{}, fmt.Errorf("%w: invalid CRS: (empty string)", ErrInvalidTypeString)
 	}
 	crs = strings.TrimSpace(crs)
-	if crs == defaultGeoCRS {
+	if crs == DefaultGeoCRS {
 		return GeometryType{}, nil
 	}
 
@@ -945,7 +1004,7 @@ func GeometryTypeOf(crs string) (GeometryType, error) {
 
 func (g GeometryType) CRS() string {
 	if g.crs == "" {
-		return defaultGeoCRS
+		return DefaultGeoCRS
 	}
 
 	return g.crs
@@ -1000,7 +1059,7 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 	}
 	crs = strings.TrimSpace(crs)
 	normalizedCRS := crs
-	if normalizedCRS == defaultGeoCRS {
+	if normalizedCRS == DefaultGeoCRS {
 		normalizedCRS = ""
 	}
 
@@ -1018,7 +1077,7 @@ func GeographyTypeOf(crs string, algorithm string) (GeographyType, error) {
 
 func (g GeographyType) CRS() string {
 	if g.crs == "" {
-		return defaultGeoCRS
+		return DefaultGeoCRS
 	}
 
 	return g.crs
@@ -1053,7 +1112,7 @@ func (g GeographyType) Type() string {
 		return fmt.Sprintf("geography(%s)", g.crs)
 	}
 	if !hasCRS && hasAlgo {
-		return fmt.Sprintf("geography(%s, %s)", defaultGeoCRS, g.algorithm)
+		return fmt.Sprintf("geography(%s, %s)", DefaultGeoCRS, g.algorithm)
 	}
 
 	return fmt.Sprintf("geography(%s, %s)", g.crs, g.algorithm)

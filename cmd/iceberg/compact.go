@@ -146,7 +146,8 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 					rewrittenSet[task.File.FilePath()] = struct{}{}
 				}
 			}
-			deadEqDeletes, err := compaction.CollectDeadEqualityDeletes(ctx, fs, snap, rewrittenSet)
+			deadEqDeletes, err := compaction.CollectDeadEqualityDeletesWithSpecs(
+				ctx, fs, tbl.Metadata(), snap, rewrittenSet)
 			if err != nil {
 				output.Error(fmt.Errorf("collect dead equality deletes: %w", err))
 				os.Exit(1)
@@ -164,8 +165,16 @@ func compactRun(ctx context.Context, output Output, tbl *table.Table, plan compa
 		os.Exit(1)
 	}
 
-	if _, err := tx.Commit(ctx); err != nil {
-		output.Error(fmt.Errorf("commit failed: %w", err))
+	if !cfg.partialProgress {
+		if _, err := tx.Commit(ctx); err != nil {
+			output.Error(fmt.Errorf("commit failed: %w", err))
+			os.Exit(1)
+		}
+	}
+	if len(result.FailedGroups) > 0 {
+		failure := result.FailedGroups[0]
+		output.Error(fmt.Errorf("compaction failed for %d group(s); first group %q: %w",
+			len(result.FailedGroups), failure.PartitionKey, failure.Err))
 		os.Exit(1)
 	}
 

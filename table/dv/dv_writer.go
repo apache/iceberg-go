@@ -202,8 +202,8 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 			SequenceNumber: -1,
 			Fields:         []int32{},
 			Properties: map[string]string{
-				dvCardinalityProperty:  strconv.FormatInt(cardinality, 10),
-				"referenced-data-file": dataFilePath,
+				dvCardinalityProperty:        strconv.FormatInt(cardinality, 10),
+				dvReferencedDataFileProperty: dataFilePath,
 			},
 		}, dvBytes)
 		if err != nil {
@@ -223,10 +223,6 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 	}
 
 	fileBytes := buf.Bytes()
-	if err := w.fs.WriteFile(location, fileBytes); err != nil {
-		return nil, fmt.Errorf("write DV puffin file: %w", err)
-	}
-
 	fileSize := int64(len(fileBytes))
 
 	dataFiles := make([]iceberg.DataFile, 0, len(results))
@@ -258,6 +254,10 @@ func (w *DVWriter) Flush(_ context.Context, location string) ([]iceberg.DataFile
 			Build()
 
 		dataFiles = append(dataFiles, df)
+	}
+
+	if err := w.fs.WriteFile(location, fileBytes); err != nil {
+		return nil, fmt.Errorf("write DV puffin file: %w", err)
 	}
 
 	w.entries = make(map[string]*dvEntry)

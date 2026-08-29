@@ -432,6 +432,20 @@ func TestUnmarshalExpressionErrors(t *testing.T) {
 	}
 }
 
+func TestUnmarshalBooleanExpressionRejectsTrailingData(t *testing.T) {
+	for _, input := range []string{
+		`true false`,
+		`false null`,
+		`true{}`,
+		`false garbage`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			_, err := iceberg.ParseExpr([]byte(input), nil)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
 // TestExpressionTransformTermRoundTrip covers a residual filter whose term is a
 // partition transform, e.g. a Java server's bucket[100](id) <= 50.
 func TestExpressionTransformTermRoundTrip(t *testing.T) {
@@ -457,10 +471,23 @@ func TestExpressionTransformTermRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Truef(t, parsed.Equals(reparsed), "want %s, got %s", parsed, reparsed)
 
-	// Binding a predicate over a transform term isn't supported yet, but it must
-	// fail cleanly rather than panic.
-	_, err = iceberg.BindExpr(schema, parsed, true)
-	require.ErrorIs(t, err, iceberg.ErrNotImplemented)
+	// Transform terms bind like regular terms and can be evaluated against rows.
+	bound, err := iceberg.BindExpr(schema, parsed, true)
+	require.NoError(t, err)
+	assert.IsType(t, iceberg.PrimitiveTypes.Int32, bound.(iceberg.BoundPredicate).Term().Type())
+
+	transform := iceberg.BucketTransform{NumBuckets: 100}
+	bucketed := transform.Apply(iceberg.Optional[iceberg.Literal]{
+		Valid: true,
+		Val:   iceberg.Int32Literal(7),
+	})
+	bucketedValue := bucketed.Val.(iceberg.TypedLiteral[int32]).Value()
+	eval, err := iceberg.ExpressionEvaluator(schema, iceberg.EqualTo(
+		iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), bucketedValue), true)
+	require.NoError(t, err)
+	matched, err := eval(rowOf(int32(7)))
+	require.NoError(t, err)
+	assert.True(t, matched)
 }
 
 // TestUnboundTransformBind checks the transform term itself binds to a
@@ -475,12 +502,93 @@ func TestUnboundTransformBind(t *testing.T) {
 	assert.True(t, bound.Type().Equals(iceberg.PrimitiveTypes.Int32))
 }
 
-// TestUnmarshalExpressionTransformTermInvalid rejects an unparseable transform
+func TestTransformTermPointerEqualityAndProjection(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	transform := &iceberg.BucketTransform{NumBuckets: 16}
+	pointerTerm := iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))
+	valueTerm := iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16}, iceberg.Reference("id"))
+
+	assert.True(t, pointerTerm.Equals(pointerTerm))
+	assert.True(t, pointerTerm.Equals(valueTerm))
+	assert.True(t, valueTerm.Equals(pointerTerm))
+
+	bound, err := iceberg.BindExpr(schema, iceberg.EqualTo(pointerTerm, int32(1)), true)
+	require.NoError(t, err)
+	assert.True(t, bound.Equals(bound))
+
+	predicate, ok := bound.(iceberg.BoundPredicate)
+	require.True(t, ok)
+	projected, err := transform.Project("id_bucket", predicate)
+	require.NoError(t, err)
+	require.NotNil(t, projected)
+	assert.True(t, iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(1)).Equals(projected))
+}
+
+func TestUnboundTransformBindRejectsNilTransform(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{name: "nil interface", transform: nil},
+		{name: "typed nil pointer", transform: (*iceberg.BucketTransform)(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := iceberg.NewUnboundTransform(tt.transform, iceberg.Reference("id"))
+
+			bound, err := term.Bind(schema, true)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "transform cannot be nil")
+			assert.Nil(t, bound)
+		})
+	}
+}
+
+func TestUnboundTransformNilTransformMethodsAreSafe(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{name: "nil interface", transform: nil},
+		{name: "typed nil pointer", transform: (*iceberg.BucketTransform)(nil)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			term := iceberg.NewUnboundTransform(tt.transform, iceberg.Reference("id"))
+
+			assert.NotPanics(t, func() { _ = term.String() })
+			assert.True(t, term.Equals(term))
+
+			_, err := json.Marshal(term)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "transform cannot be nil")
+		})
+	}
+}
+
+// TestUnmarshalExpressionTransformTermInvalid rejects an invalid transform
 // string rather than panicking or binding nonsense.
 func TestUnmarshalExpressionTransformTermInvalid(t *testing.T) {
 	_, err := iceberg.ParseExpr(
-		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bogus[16]","term":"id"},"value":1}`), nil)
+		[]byte(`{"type":"eq","term":{"type":"transform","transform":"bucket[0]","term":"id"},"value":1}`), nil)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "cannot parse transform term")
+}
+
+// An unknown transform parses fine, but a filter expression over one can't be
+// evaluated, so the term is rejected rather than silently mis-bound.
+func TestUnmarshalExpressionTransformTermUnknown(t *testing.T) {
+	_, err := iceberg.ParseExpr(
+		[]byte(`{"type":"eq","term":{"type":"transform","transform":"custom_transform[42]","term":"id"},"value":1}`), nil)
+	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+	require.ErrorContains(t, err, "unknown transform in expression term")
 }
 
 // TestUnmarshalExpressionFixedLength rejects a fixed value whose decoded length

@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"math"
 	"path/filepath"
 	"testing"
@@ -238,9 +240,7 @@ func newConflictTestMetadataWithProps(t *testing.T, branchHead *int64, extraProp
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	props := iceberg.Properties{PropertyFormatVersion: "2"}
-	for k, v := range extraProps {
-		props[k] = v
-	}
+	maps.Copy(props, extraProps)
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/conflict-test", props)
 	require.NoError(t, err)
 
@@ -493,17 +493,17 @@ func TestReferencedDataFilePath(t *testing.T) {
 	})
 }
 
-// mustPartitionConflictKey unwraps partitionConflictKey for test
+// mustCanonicalPartitionKey unwraps canonicalPartitionKey for test
 // tuples that only contain supported value types.
-func mustPartitionConflictKey(t *testing.T, specID int32, partition map[int]any) string {
+func mustCanonicalPartitionKey(t *testing.T, specID int32, partition map[int]any) string {
 	t.Helper()
-	key, err := partitionConflictKey(specID, partition)
+	key, err := canonicalPartitionKey(specID, partition)
 	require.NoError(t, err)
 
 	return key
 }
 
-func TestPartitionConflictKey(t *testing.T) {
+func TestCanonicalPartitionKey(t *testing.T) {
 	sampleUUID := uuid.MustParse("12345678-9abc-def0-1234-56789abcdef0")
 	dec := iceberg.Decimal{Val: decimal128.FromI64(12345), Scale: 2}
 	decOther := iceberg.Decimal{Val: decimal128.FromI64(12346), Scale: 2}
@@ -533,8 +533,8 @@ func TestPartitionConflictKey(t *testing.T) {
 	for _, tt := range equal {
 		t.Run("equal/"+tt.name, func(t *testing.T) {
 			assert.Equal(t,
-				mustPartitionConflictKey(t, 0, tt.a),
-				mustPartitionConflictKey(t, 0, tt.b))
+				mustCanonicalPartitionKey(t, 0, tt.a),
+				mustCanonicalPartitionKey(t, 0, tt.b))
 		})
 	}
 
@@ -564,27 +564,43 @@ func TestPartitionConflictKey(t *testing.T) {
 	for _, tt := range distinct {
 		t.Run("distinct/"+tt.name, func(t *testing.T) {
 			assert.NotEqual(t,
-				mustPartitionConflictKey(t, 0, tt.a),
-				mustPartitionConflictKey(t, 0, tt.b))
+				mustCanonicalPartitionKey(t, 0, tt.a),
+				mustCanonicalPartitionKey(t, 0, tt.b))
 		})
 	}
 
 	t.Run("different spec ids never collide", func(t *testing.T) {
 		tuple := map[int]any{1: int32(1), 2: "x"}
 		assert.NotEqual(t,
-			mustPartitionConflictKey(t, 0, tuple),
-			mustPartitionConflictKey(t, 1, tuple))
+			mustCanonicalPartitionKey(t, 0, tuple),
+			mustCanonicalPartitionKey(t, 1, tuple))
 		assert.NotEqual(t,
-			mustPartitionConflictKey(t, 0, nil),
-			mustPartitionConflictKey(t, 1, nil))
+			mustCanonicalPartitionKey(t, 0, nil),
+			mustCanonicalPartitionKey(t, 1, nil))
 	})
 
 	t.Run("unsupported types fail closed", func(t *testing.T) {
 		for _, v := range []any{struct{}{}, time.Now()} {
-			_, err := partitionConflictKey(0, map[int]any{1: v})
+			_, err := canonicalPartitionKey(0, map[int]any{1: v})
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "unsupported partition value type")
 		}
+	})
+
+	t.Run("wide partition uses fallback storage", func(t *testing.T) {
+		first := make(map[int]any, 16)
+		second := make(map[int]any, 16)
+		for id := 1; id <= 16; id++ {
+			value := fmt.Sprintf("field-%d-012345678901234567890123456789", id)
+			first[id] = value
+		}
+		for id := 16; id >= 1; id-- {
+			second[id] = first[id]
+		}
+
+		assert.Equal(t,
+			mustCanonicalPartitionKey(t, 0, first),
+			mustCanonicalPartitionKey(t, 0, second))
 	})
 }
 
@@ -700,7 +716,7 @@ func TestValidateNoNewDeletesForRewrittenFiles_EqDeleteAlwaysConflicts(t *testin
 
 // TestValidateNoNewDeletesForRewrittenFiles_UnsupportedPartitionType
 // pins the fail-closed contract: a rewritten file whose partition
-// carries a value type outside partitionConflictKey's closed set must
+// carries a value type outside canonicalPartitionKey's closed set must
 // fail the validation loudly instead of silently skipping the file.
 // Only the rewritten side is testable — the delete side is decoded
 // from real Avro manifests whose value domain is exactly the closed
@@ -734,6 +750,110 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, nil))
 }
 
+func TestValidateAddedDataFilesMatchingFilterUsesFileMetrics(t *testing.T) {
+	tests := []struct {
+		name         string
+		lower, upper int64
+		wantConflict bool
+	}{
+		{name: "bounds cannot match", lower: 100, upper: 200, wantConflict: false},
+		{name: "bounds may match", lower: 1, upper: 10, wantConflict: true},
+		{name: "exact bound matches", lower: 5, upper: 5, wantConflict: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			baseID := int64(1)
+			concID := int64(2)
+			base := newConflictTestMetadata(t, &baseID)
+			mf := writeTestMetricsManifest(t, dir, base.CurrentSchema(), concID, tt.lower, tt.upper)
+			listPath := writeTestManifestList(t, dir, concID, []iceberg.ManifestFile{mf})
+			ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
+
+			err := validateAddedDataFilesMatchingFilter(ctx,
+				iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+			if tt.wantConflict {
+				require.ErrorIs(t, err, ErrConflictingDataFiles)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateAddedDataFilesMatchingFilterWithMissingBounds(t *testing.T) {
+	dir := t.TempDir()
+	baseID := int64(1)
+	concID := int64(2)
+	base := newConflictTestMetadata(t, &baseID)
+	mf := writeTestMetricsManifestWithoutBounds(t, dir, base.CurrentSchema(), concID)
+	listPath := writeTestManifestList(t, dir, concID, []iceberg.ManifestFile{mf})
+	ctx := buildPartitionedContext(t, base, listPath, baseID, concID)
+
+	err := validateAddedDataFilesMatchingFilter(ctx,
+		iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+	require.ErrorIs(t, err, ErrConflictingDataFiles,
+		"missing bounds must not make a data file look non-conflicting")
+}
+
+func writeTestMetricsManifest(t *testing.T, dir string, schema *iceberg.Schema, snapshotID, lower, upper int64) iceberg.ManifestFile {
+	t.Helper()
+	lowerBytes, err := iceberg.Int64Literal(lower).MarshalBinary()
+	require.NoError(t, err)
+	upperBytes, err := iceberg.Int64Literal(upper).MarshalBinary()
+	require.NoError(t, err)
+
+	return writeTestMetricsManifestWithValues(t, dir, schema, snapshotID,
+		map[int][]byte{1: lowerBytes}, map[int][]byte{1: upperBytes})
+}
+
+func writeTestMetricsManifestWithoutBounds(t *testing.T, dir string, schema *iceberg.Schema, snapshotID int64) iceberg.ManifestFile {
+	t.Helper()
+
+	return writeTestMetricsManifestWithValues(t, dir, schema, snapshotID, nil, nil)
+}
+
+func writeTestMetricsManifestWithValues(
+	t *testing.T,
+	dir string,
+	schema *iceberg.Schema,
+	snapshotID int64,
+	lowerBounds, upperBounds map[int][]byte,
+) iceberg.ManifestFile {
+	t.Helper()
+	spec := *iceberg.UnpartitionedSpec
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentData, filepath.Join(dir, "data.parquet"), iceberg.ParquetFile,
+		nil, nil, nil, 10, 1024,
+	)
+	require.NoError(t, err)
+	if lowerBounds != nil {
+		builder = builder.LowerBoundValues(lowerBounds)
+	}
+	if upperBounds != nil {
+		builder = builder.UpperBoundValues(upperBounds)
+	}
+	df := builder.Build()
+	entry := iceberg.NewManifestEntryBuilder(iceberg.EntryStatusADDED, &snapshotID, df).
+		SequenceNum(1).
+		Build()
+
+	manifestPath := filepath.Join(dir, "metrics-manifest.avro")
+	var buf bytes.Buffer
+	mf, err := iceberg.WriteManifest(manifestPath, &buf, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry})
+	require.NoError(t, err)
+	fs := iceio.LocalFS{}
+	out, err := fs.Create(manifestPath)
+	require.NoError(t, err)
+	_, err = out.Write(buf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, out.Close())
+
+	return mf
+}
+
 func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	// Under snapshot isolation the validator is a no-op — it must not
 	// even attempt to enumerate concurrent snapshots.
@@ -743,4 +863,171 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
+}
+
+type conflictValidationStatIO struct {
+	*trackingCallsIO
+}
+
+func (c *conflictValidationStatIO) Stat(name string) (fs.FileInfo, error) {
+	data, ok := c.files[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+
+	return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+}
+
+func TestConflictValidationReusesSharedManifestReads(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list-1.avro")
+	sharedManifestListPath := filepath.Join(dir, "manifest-list-2.avro")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 1, manifestPath, filepath.Join(dir, "data.parquet"))
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+	writeManifestList(t, tio.trackingIO, snapshotID+1, sharedManifestListPath, []iceberg.ManifestFile{mf})
+
+	ctx := &conflictContext{
+		fs: &conflictValidationStatIO{trackingCallsIO: tio},
+		concurrent: []Snapshot{
+			{SnapshotID: snapshotID, ManifestList: manifestListPath},
+			{SnapshotID: snapshotID + 1, ManifestList: sharedManifestListPath},
+		},
+	}
+
+	var visited int
+	visit := func(Snapshot, iceberg.ManifestEntry) error {
+		visited++
+
+		return nil
+	}
+	for range 2 {
+		require.NoError(t, ctx.forEachAddedEntry(iceberg.ManifestContentData, visit))
+	}
+
+	assert.Equal(t, 2, visited)
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 1, tio.openCount[sharedManifestListPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictValidationCachesFullyReadManifestAfterEarlyExit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list.avro")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 1, manifestPath, filepath.Join(dir, "data.parquet"))
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+	ctx := &conflictContext{
+		fs:         &conflictValidationStatIO{trackingCallsIO: tio},
+		concurrent: []Snapshot{{SnapshotID: snapshotID, ManifestList: manifestListPath}},
+	}
+
+	stop := errors.New("stop validation")
+	err := ctx.forEachAddedEntry(iceberg.ManifestContentData, func(Snapshot, iceberg.ManifestEntry) error {
+		return stop
+	})
+	require.ErrorIs(t, err, stop)
+
+	require.NoError(t, ctx.forEachAddedEntry(iceberg.ManifestContentData, func(Snapshot, iceberg.ManifestEntry) error {
+		return nil
+	}))
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictValidationSharesManifestAfterDataFileEarlyExit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	dir := filepath.ToSlash(t.TempDir())
+	baseID := int64(1)
+	snapshotID := int64(2)
+	manifestPath := filepath.Join(dir, "manifest.avro")
+	manifestListPath := filepath.Join(dir, "manifest-list.avro")
+	dataPath := filepath.Join(dir, "data.parquet")
+
+	mf := writeManifest(t, tio.trackingIO, snapshotID, 2, manifestPath, dataPath)
+	writeManifestList(t, tio.trackingIO, snapshotID, manifestListPath, []iceberg.ManifestFile{mf})
+
+	base := newConflictTestMetadata(t, &baseID)
+	builder, err := MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	concSnapshot := Snapshot{
+		SnapshotID:       snapshotID,
+		ParentSnapshotID: &baseID,
+		SequenceNumber:   2,
+		TimestampMs:      base.LastUpdatedMillis() + 2,
+		ManifestList:     manifestListPath,
+		Summary:          &Summary{Operation: OpAppend},
+	}
+	require.NoError(t, builder.AddSnapshot(&concSnapshot))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	current, err := builder.Build()
+	require.NoError(t, err)
+
+	ctx, err := newConflictContext(
+		base,
+		current,
+		MainBranch,
+		&conflictValidationStatIO{trackingCallsIO: tio},
+		true,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, validateDataFilesExist(ctx, []string{dataPath}))
+	err = validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{})
+	require.ErrorIs(t, err, ErrConflictingDataFiles)
+
+	assert.Equal(t, 1, tio.openCount[manifestListPath])
+	assert.Equal(t, 1, tio.openCount[manifestPath])
+}
+
+func TestConflictManifestIODoesNotCachePartialRead(t *testing.T) {
+	tio := newTrackingCallsIO()
+	manifestPath := "manifest.avro"
+	tio.files[manifestPath] = []byte("abc")
+	cache := newConflictManifestIO(&conflictValidationStatIO{trackingCallsIO: tio})
+
+	f, err := cache.Open(manifestPath)
+	require.NoError(t, err)
+	buf := make([]byte, 1)
+	_, err = f.Read(buf)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	assert.NotContains(t, cache.files, manifestPath)
+}
+
+func TestConflictManifestIOIsReadOnly(t *testing.T) {
+	tio := newTrackingCallsIO()
+	cache := newConflictManifestIO(tio)
+
+	err := cache.Remove("manifest.avro")
+	require.Error(t, err)
+	assert.Zero(t, tio.removeCount["manifest.avro"])
+}
+
+func TestConflictManifestIOStopsCachingAtByteLimit(t *testing.T) {
+	tio := newTrackingCallsIO()
+	manifestPath := "manifest.avro"
+	tio.files[manifestPath] = []byte("ab")
+	cache := &conflictManifestIO{
+		base:        &conflictValidationStatIO{trackingCallsIO: tio},
+		files:       make(map[string][]byte),
+		cachedBytes: maxConflictManifestCacheBytes - 1,
+	}
+
+	f, err := cache.Open(manifestPath)
+	require.NoError(t, err)
+	buf := make([]byte, 2)
+	_, err = f.Read(buf)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	assert.NotContains(t, cache.files, manifestPath)
+	assert.Equal(t, int64(maxConflictManifestCacheBytes-1), cache.cachedBytes)
 }

@@ -65,6 +65,7 @@ func clusteredPartitionedWrite(
 			currentRec          partitionRecord
 			currentWriter       *RollingDataWriter
 			completedPartitions = make(closedPartitionSet)
+			extractionPlan      *partitionExtractionPlan
 		)
 
 		closeCurrentWriter := func() error {
@@ -113,7 +114,7 @@ func clusteredPartitionedWrite(
 			}
 			defer subBatch.Release()
 
-			if currentWriter == nil || !slices.Equal(currentRec, part.partitionRec) {
+			if currentWriter == nil || !partitionRecordsEqual(currentRec, part.partitionRec) {
 				if err := closeCurrentWriter(); err != nil {
 					return err
 				}
@@ -144,7 +145,16 @@ func clusteredPartitionedWrite(
 				return
 			}
 
-			partitions, err := getRecordPartitions(spec, schema, rec)
+			if extractionPlan == nil {
+				extractionPlan, err = newPartitionExtractionPlan(spec, schema, rec.Schema())
+				if err != nil {
+					fail(err)
+
+					return
+				}
+			}
+
+			partitions, err := extractionPlan.getRecordPartitions(rec)
 			if err != nil {
 				fail(err)
 
@@ -213,10 +223,11 @@ type closedPartitionSet map[any]closedPartitionSet
 func (s closedPartitionSet) add(rec partitionRecord) {
 	node := s
 	for _, part := range rec {
-		next, ok := node[part]
+		key := comparablePartitionKey(part)
+		next, ok := node[key]
 		if !ok {
 			next = make(closedPartitionSet)
-			node[part] = next
+			node[key] = next
 		}
 		node = next
 	}
@@ -225,7 +236,7 @@ func (s closedPartitionSet) add(rec partitionRecord) {
 func (s closedPartitionSet) contains(rec partitionRecord) bool {
 	node := s
 	for _, part := range rec {
-		next, ok := node[part]
+		next, ok := node[comparablePartitionKey(part)]
 		if !ok {
 			return false
 		}

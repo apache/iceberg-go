@@ -43,6 +43,8 @@ import (
 // streaming goroutine has already stopped.
 var ErrWriterClosed = errors.New("writer is closed")
 
+const rollingDataWriterQueueCapacity = 64
+
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
@@ -61,6 +63,8 @@ type writerFactory struct {
 	writeProps       any
 	rowGroupBytes    int64
 	statsCols        map[int]tblutils.StatisticsCollector
+	colMapping       map[string]int
+	variantFieldIDs  map[int]struct{}
 	currentSpec      iceberg.PartitionSpec
 	fileFormat       iceberg.FileFormat
 	format           tblutils.FileFormat
@@ -152,14 +156,24 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 
 		return nil, err
 	}
+	if fileFormat == iceberg.ParquetFile {
+		if err := tblutils.ValidateParquetWriteProperties(meta.props); err != nil {
+			stopCount()
+
+			return nil, err
+		}
+	}
 
 	format := tblutils.GetFileFormat(fileFormat)
 
-	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(meta.props)
-	if err != nil {
-		stopCount()
+	var rowGroupTargetSizeBytes int64
+	if fileFormat == iceberg.ParquetFile {
+		rowGroupTargetSizeBytes, err = tblutils.ParquetRowGroupTargetSizeBytes(meta.props)
+		if err != nil {
+			stopCount()
 
-		return nil, err
+			return nil, err
+		}
 	}
 
 	arrowSchema, err := SchemaToArrowSchemaWithOptions(fileSchema, ArrowSchemaOptions{
@@ -206,6 +220,16 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 		}
 	}
 
+	if f.fileFormat == iceberg.ParquetFile {
+		f.colMapping, err = f.format.PathToIDMapping(f.fileSchema)
+		if err != nil {
+			stopCount()
+
+			return nil, err
+		}
+		f.variantFieldIDs = tblutils.VariantFieldIDsFromSchema(f.fileSchema)
+	}
+
 	f.statsCols, err = computeStatsPlan(f.fileSchema, meta.props)
 	if err != nil {
 		stopCount()
@@ -229,10 +253,7 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	// Shred top-level variant columns on data writes only.
-	f.shredBufferRows = meta.props.GetInt(ParquetVariantBufferSizeKey, ParquetVariantBufferSizeDefault)
-	if f.shredBufferRows < 1 {
-		f.shredBufferRows = 1
-	}
+	f.shredBufferRows = max(meta.props.GetInt(ParquetVariantBufferSizeKey, ParquetVariantBufferSizeDefault), 1)
 	if f.content == iceberg.EntryContentData &&
 		meta.props.GetBool(ParquetShredVariantsKey, ParquetShredVariantsDefault) {
 		for _, fld := range f.fileSchema.Fields() {
@@ -278,6 +299,8 @@ func (w *writerFactory) openFileWriter(ctx context.Context, partitionPath string
 		FileSchema:       w.fileSchema,
 		FileName:         filePath,
 		StatsCols:        w.statsCols,
+		ColMapping:       w.colMapping,
+		VariantFieldIDs:  w.variantFieldIDs,
 		WriteProps:       w.writeProps,
 		RowGroupBytes:    w.rowGroupBytes,
 		Spec:             w.currentSpec,
@@ -319,6 +342,15 @@ type RollingDataWriter struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 	closeRecordCh   sync.Once
+
+	// sendMu forms a barrier between Add (read lock) and stream's shutdown
+	// drain (write lock). While an Add holds the read lock its check of
+	// noMoreSends and its enqueue are atomic with respect to the drain: once
+	// the drain holds the write lock and sets noMoreSends, no Add can be
+	// mid-enqueue and none can start one, so the drain releases every record
+	// that will ever reach recordCh.
+	sendMu      sync.RWMutex
+	noMoreSends bool
 }
 
 func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) *RollingDataWriter {
@@ -327,7 +359,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 	writer := &RollingDataWriter{
 		partitionKey:    partition,
 		partitionID:     partitionID,
-		recordCh:        make(chan arrow.RecordBatch, 64),
+		recordCh:        make(chan arrow.RecordBatch, rollingDataWriterQueueCapacity),
 		errorCh:         make(chan error, 1),
 		factory:         w,
 		partitionValues: partitionValues,
@@ -342,9 +374,19 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, partition stri
 }
 
 func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partition string, partitionValues map[int]any, outputDataFilesCh chan<- iceberg.DataFile) (*RollingDataWriter, error) {
+	if existing, ok := w.writers.Load(partition); ok {
+		if writer, ok := existing.(*RollingDataWriter); ok {
+			return writer, nil
+		}
+
+		return nil, fmt.Errorf("invalid writer type for partition: %s", partition)
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Recheck after acquiring the lock in case another goroutine created the
+	// writer while this goroutine was waiting.
 	if existing, ok := w.writers.Load(partition); ok {
 		if writer, ok := existing.(*RollingDataWriter); ok {
 			return writer, nil
@@ -361,6 +403,16 @@ func (w *writerFactory) getOrCreateRollingDataWriter(ctx context.Context, partit
 
 // Add appends a record to the writer's buffer.
 func (r *RollingDataWriter) Add(record arrow.RecordBatch) error {
+	// Read lock held across the whole check-and-enqueue so it is atomic with
+	// stream's shutdown (which takes the write lock): once noMoreSends is set
+	// this returns before retaining, so nothing is enqueued into a dead channel.
+	r.sendMu.RLock()
+	defer r.sendMu.RUnlock()
+
+	if r.noMoreSends {
+		return ErrWriterClosed
+	}
+
 	record.Retain()
 	select {
 	case r.recordCh <- record:
@@ -388,6 +440,13 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 
 	var currentWriter tblutils.FileWriter
 	var fileArrowSchema *arrow.Schema // per-file shredded schema; nil => factory default
+
+	// Set only when stream reaches the end of its input and finalizes without
+	// error. The cleanup defer uses it to skip cancelling ctx on the success
+	// path — cancellation is an error-exit signal that unblocks parked senders,
+	// and on the clean path there are none (input is closed after all senders
+	// finish), so the barrier's write lock is uncontended anyway.
+	exitedCleanly := false
 
 	// bootstrap buffer of converted batches, held until inference runs.
 	var buf []arrow.RecordBatch
@@ -422,6 +481,33 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		releaseBuf()
 		if currentWriter != nil {
 			_ = currentWriter.Abort()
+		}
+		// Release anything producers left buffered in recordCh, behind a hard
+		// barrier with in-flight Add calls (see sendMu). On the error exit,
+		// cancel first so a send parked on a full channel unblocks via
+		// ctx.Done() and drops its read lock; the clean exit has no parked
+		// senders (closeInput ran after all senders finished), so skip the
+		// cancel. Then the write lock — which waits out every active Add — plus
+		// noMoreSends makes the buffered set final, and the drain releases it.
+		// recordCh is not closed here: another goroutine may close it via
+		// closeInput (the drain's !ok case ends the loop then), and closing
+		// under a live sender could panic.
+		if !exitedCleanly {
+			r.cancel()
+		}
+		r.sendMu.Lock()
+		defer r.sendMu.Unlock()
+		r.noMoreSends = true
+		for {
+			select {
+			case record, ok := <-r.recordCh:
+				if !ok {
+					return
+				}
+				record.Release()
+			default:
+				return
+			}
 		}
 	}()
 
@@ -523,13 +609,13 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	}
 
 	for record := range r.recordCh {
-		converted, err := ToRequestedSchema(r.ctx, r.factory.fileSchema,
+		converted, err := toRequestedSchema(r.ctx, r.factory.fileSchema,
 			r.factory.taskSchema, record, SchemaOptions{
 				DowncastTimestamp: true,
 				IncludeFieldIDs:   true,
 				UseWriteDefault:   true,
 				TableProperties:   r.factory.tableProps,
-			})
+			}, r.factory.arrowSchema)
 		record.Release()
 		if err != nil {
 			r.sendError(err)
@@ -624,7 +710,10 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 	}
 	if err := closeWriter(); err != nil {
 		r.sendError(err)
+
+		return
 	}
+	exitedCleanly = true
 }
 
 // inferShreddingFromBatches infers the inner type per top-level variant column, keyed
@@ -635,7 +724,7 @@ func inferShreddingFromBatches(buf []arrow.RecordBatch, limit int) map[int]arrow
 	}
 
 	inferred := make(map[int]arrow.DataType)
-	for col := 0; col < int(buf[0].NumCols()); col++ {
+	for col := range int(buf[0].NumCols()) {
 		if _, ok := buf[0].Column(col).(*extensions.VariantArray); !ok {
 			continue
 		}

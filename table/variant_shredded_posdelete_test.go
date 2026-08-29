@@ -41,7 +41,7 @@ func TestShreddedVariantSurvivesPositionalDelete(t *testing.T) {
 		arrow.Field{Name: "a", Type: arrow.PrimitiveTypes.Int64},
 	))
 	bldr := extensions.NewVariantBuilder(mem, shredded)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(i), "city": "NYC"}))
 		v, err := b.Build()

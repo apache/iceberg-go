@@ -15,18 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// This file is a PROPOSED public API surface for REST server-side scan
-// planning (apache/iceberg-go#1178). It defines the table-side seam — the
-// option, request/result types, and the ScanPlanner interface (implemented by
-// catalog/rest) — so it can be reviewed as Go rather than prose.
-// WithScanPlanningMode records the requested mode on the Scan; the delegation
-// skeleton rejects unavailable remote planning so the exported option is not a
-// silent no-op if this surface is released before the full implementation lands.
+// This file contains the table-side seam for REST server-side scan planning
+// (apache/iceberg-go#1178): the scan option, request/result types, and the
+// ScanPlanner interface implemented by catalog/rest.
 
 package table
 
 import (
 	"context"
+	"io"
 
 	"github.com/apache/iceberg-go"
 	icebergio "github.com/apache/iceberg-go/io"
@@ -51,13 +48,13 @@ const (
 	// ScanPlanningRemote requires a planner that advertises remote capability
 	// and fails loudly if remote planning is unavailable.
 	ScanPlanningRemote ScanPlanningMode = "remote"
-	// ScanPlanningAuto uses remote planning when available and allowed by the
-	// table config, otherwise falls back to local.
+	// ScanPlanningAuto uses remote planning when available, otherwise it falls
+	// back to local.
 	ScanPlanningAuto ScanPlanningMode = "auto"
 )
 
 // WithScanPlanningMode sets the scan-planning mode for a scan. The default is
-// ScanPlanningLocal unless the REST table config requires server planning.
+// ScanPlanningLocal.
 func WithScanPlanningMode(mode ScanPlanningMode) ScanOption {
 	return func(scan *Scan) { scan.planningMode = mode }
 }
@@ -81,20 +78,28 @@ type ScanPlanningMetadata interface {
 // narrowed planner view, so callers can pass a table.Metadata directly.
 var _ ScanPlanningMetadata = (Metadata)(nil)
 
+// Compile-time guard that Scan exposes the lifecycle contract as io.Closer.
+var _ io.Closer = (*Scan)(nil)
+
 // ScanPlanningRequest is the input a Scan hands to a ScanPlanner. It carries
 // the resolved scan state a planner needs without depending on catalog/rest.
 //
-// Open question (epic OQ4): when the table has evolved, UseSnapshotSchema must
-// pin which schema binds a returned residual and the partition decode: the
-// snapshot's schema (via schema-id), kept separate from each file's partition
-// spec-id. Incremental scans (start/end snapshot) are deferred to a later
-// phase; point-in-time SnapshotID lands first.
+// Schema is the schema resolved for this scan. It is kept separate from
+// Metadata.CurrentSchema because a historical/tag scan may use a snapshot
+// schema while a branch scan uses the table schema. Planners should use this
+// same schema for filter binding and returned residual decoding.
 type ScanPlanningRequest struct {
 	Identifier Identifier
 	// Metadata is the narrowed planner view of table metadata (see
 	// ScanPlanningMetadata); MetadataLocation is kept separate.
 	Metadata         ScanPlanningMetadata
+	Schema           *iceberg.Schema
 	MetadataLocation string
+	// FileIOProperties are the table-scoped properties used to build the
+	// table's normal FileIO. A remote planner can overlay plan-scoped
+	// credentials on these properties without serializing them into the plan
+	// request.
+	FileIOProperties iceberg.Properties
 	SnapshotID       *int64
 	SelectedFields   []string
 	RowFilter        iceberg.BooleanExpression
@@ -110,16 +115,22 @@ type ScanPlanningRequest struct {
 }
 
 // PlanIO lazily loads the FileIO used to read a planned scan and closes any
-// resources it holds (e.g. plan-scoped credentials) once reading is done. Nil
-// means the scan keeps using the table's normal FileIO. Remote planners may
-// return a PlanIO backed by plan-scoped storage credentials.
+// resources it holds (e.g. plan-scoped credentials) once the plan is replaced.
+// Nil means the scan keeps using the table's normal FileIO. Remote planners may
+// return a PlanIO backed by plan-scoped storage credentials. Implementations
+// must use a comparable dynamic type with stable identity, normally a pointer.
 //
 // Delivery contract (OQ1): a returned ScanPlanningResult.IO is stored on the
-// Scan that planned it; ReadTasks then loads from it instead of the table's
-// FileIO and closes it after the returned iterator finishes. This ties a
-// plan-scoped scan to the PlanFiles -> ReadTasks sequence on one Scan — tasks
-// from a remote plan must be read by the Scan that produced them, and a Scan
-// carrying plan-scoped IO is not safe for concurrent PlanFiles/ReadTasks.
+// Scan that planned it; every ReadTasks call loads from it instead of the
+// table's FileIO. Replacing the plan releases that Scan's ownership; the old IO
+// closes after its remaining scan owners and active record iterators finish.
+// Call Scan.Close when the scan is no longer needed, including when planning
+// succeeds but its tasks are not read. Close is idempotent and waits for active
+// ReadTasks iterators before the plan IO is closed.
+// This ties a plan-scoped scan to PlanFiles -> ReadTasks: tasks from a remote
+// plan must be read by the Scan that produced them or one of its derived scans.
+// A Scan carrying plan-scoped IO is not safe for concurrent PlanFiles or
+// ReadTasks calls, but consuming an existing iterator while replanning is safe.
 type PlanIO interface {
 	Load(context.Context) (icebergio.IO, error)
 	Close() error
@@ -134,15 +145,25 @@ type ScanPlanningResult struct {
 // ScanPlanner plans scans for a table. rest.Catalog implements it; non-REST
 // catalogs leave it nil and planning stays local.
 //
-// SupportsRemoteScanPlanning reports whether the planner can complete a remote
-// plan end-to-end for the requested scan.
+// SupportsRemoteScanPlanning reports whether the planner can submit a remote
+// plan for the requested scan. A planner with separate continuation
+// capabilities can implement FullRemoteScanPlanner so auto mode can require
+// the complete remote scan flow.
 type ScanPlanner interface {
 	SupportsRemoteScanPlanning() bool
 	PlanFiles(context.Context, ScanPlanningRequest) (ScanPlanningResult, error)
 }
 
-// Scan integration, added here as a delegation skeleton and completed in the
-// scanner-delegation phase:
+// FullRemoteScanPlanner is an optional capability extension for ScanPlanner.
+// A planner that exposes separate submission and continuation capabilities can
+// implement SupportsFullRemoteScanPlanning so auto mode only selects it when
+// the complete remote scan flow is available. Planners that do not implement
+// this extension retain the original ScanPlanner behavior.
+type FullRemoteScanPlanner interface {
+	SupportsFullRemoteScanPlanning() bool
+}
+
+// Scan integration:
 //
 //	type Scan struct {
 //		// ...existing fields...

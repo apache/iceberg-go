@@ -29,11 +29,13 @@ var (
 	ErrInvalidFormatVersion    = fmt.Errorf("%w: invalid format version", ErrInvalidArgument)
 	ErrInvalidSchema           = errors.New("invalid schema")
 	ErrInvalidPartitionSpec    = errors.New("invalid partition spec")
+	ErrEmptyManifest           = errors.New("empty manifest file has been written")
 	ErrInvalidTransform        = errors.New("invalid transform syntax")
 	ErrType                    = errors.New("type error")
 	ErrBadCast                 = errors.New("could not cast value")
 	ErrBadLiteral              = errors.New("invalid literal value")
 	ErrInvalidBinSerialization = errors.New("invalid binary serialization")
+	ErrInvalidFixedLength      = errors.New("invalid fixed literal length")
 	ErrResolve                 = errors.New("cannot resolve type")
 	// ErrBBoxNotSerializable is returned when marshaling a geospatial bbox
 	// predicate to REST expression JSON: bbox predicates exist only for local

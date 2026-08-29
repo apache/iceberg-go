@@ -380,8 +380,18 @@ func (u *UpdateSchema) deleteColumn(path []string) error {
 		return fmt.Errorf("field that has additions cannot be deleted: %s", fullName)
 	}
 
-	if _, ok := u.updates[field.ID]; ok {
-		return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+	// u.updates is keyed by parent ID, then by the field's own ID, so a
+	// field's own pending update lives under its parent's map
+	parentID := u.findParentID(field.ID)
+	if upds, ok := u.updates[parentID]; ok {
+		if _, ok := upds[field.ID]; ok {
+			return fmt.Errorf("field that has updates cannot be deleted: %s", fullName)
+		}
+	}
+	for _, move := range u.moves[parentID] {
+		if move.RelativeTo == field.ID {
+			return fmt.Errorf("field that is used as a move target cannot be deleted: %s", fullName)
+		}
 	}
 
 	delete(u.identifierFieldNames, fullName)
@@ -488,6 +498,15 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 			if field.Required && !u.allowIncompatibleChanges {
 				return fmt.Errorf("cannot change default value of required column to nil: %s", fullName)
 			}
+		} else {
+			// Validate the new write-default against the column's (possibly promoted) type.
+			effectiveType := field.Type
+			if update.FieldType.Valid {
+				effectiveType = update.FieldType.Val
+			}
+			if err := validateDefaultValue(effectiveType, update.WriteDefault.Val.Any()); err != nil {
+				return fmt.Errorf("invalid write-default for %s: %w", fullName, err)
+			}
 		}
 	}
 
@@ -509,7 +528,13 @@ func (u *UpdateSchema) updateColumn(path []string, update ColumnUpdate) error {
 		updatedField.Required = update.Required.Val
 	}
 	if update.WriteDefault.Valid {
-		updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		// A nil literal clears the write-default;
+		// Calling Any() on it would dereference a nil interface and panic.
+		if update.WriteDefault.Val == nil {
+			updatedField.WriteDefault = nil
+		} else {
+			updatedField.WriteDefault = update.WriteDefault.Val.Any()
+		}
 	}
 	if update.Doc.Valid {
 		updatedField.Doc = update.Doc.Val
@@ -606,6 +631,9 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 		if relativeToFieldID == fieldID {
 			return fmt.Errorf("cannot move a field to itself: %s", fullName)
 		}
+		if u.isDeleted(relativeToFieldID) {
+			return fmt.Errorf("field that has been deleted cannot be used as a move target: %s", relativeToFullName)
+		}
 
 		if u.findParentID(relativeToFieldID) != parentID {
 			return fmt.Errorf("relative to field is not a child of the parent: %s", relativeToFullName)
@@ -624,11 +652,16 @@ func (u *UpdateSchema) moveColumn(op MoveOp, path []string, relativeTo []string)
 }
 
 func (u *UpdateSchema) SetIdentifierField(paths [][]string) *UpdateSchema {
-	identifierFieldNames := make(map[string]struct{})
-	for _, path := range paths {
-		identifierFieldNames[strings.Join(path, ".")] = struct{}{}
-	}
-	u.identifierFieldNames = identifierFieldNames
+	// Defer the mutation so it runs during Apply() in the order it was chained.
+	u.ops = append(u.ops, func() error {
+		identifierFieldNames := make(map[string]struct{})
+		for _, path := range paths {
+			identifierFieldNames[strings.Join(path, ".")] = struct{}{}
+		}
+		u.identifierFieldNames = identifierFieldNames
+
+		return nil
+	})
 
 	return u
 }
@@ -1131,6 +1164,12 @@ func (u *UpdateSchema) Apply() (*iceberg.Schema, error) {
 		identifierFieldIDs = append(identifierFieldIDs, field.ID)
 	}
 
+	// u.identifierFieldNames is a map, so the iteration above yields the ids in a
+	// non-deterministic order. Thus, sorting them to produce a canonical ordering:
+	// Schema.Equals compares IdentifierFieldIDs positionally, so,
+	// an unsorted slice would make otherwise-identical schemas compare unequal at random.
+	slices.Sort(identifierFieldIDs)
+
 	meta, err := u.txn.txnMeta()
 	if err != nil {
 		return nil, err
@@ -1349,7 +1388,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 			}
 		}
 		if !found {
-			continue
+			panic(fmt.Errorf("cannot move field %d: field not found", move.FieldID))
 		}
 
 		reordered = append(reordered[:fieldIndex], reordered[fieldIndex+1:]...)
@@ -1369,7 +1408,7 @@ func moveFields(fields []iceberg.NestedField, moves []move) []iceberg.NestedFiel
 				}
 			}
 			if !found {
-				continue
+				panic(fmt.Errorf("cannot move field %d: target field %d not found", move.FieldID, move.RelativeTo))
 			}
 
 			if move.Op == MoveOpBefore {

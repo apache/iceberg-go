@@ -18,6 +18,7 @@
 package table
 
 import (
+	"context"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,9 +29,73 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/table/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPositionDeleteColumnIndices(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		fields            []arrow.Field
+		wantFilePathIndex int
+		wantPosIndex      int
+		wantErr           string
+	}{
+		{name: "valid", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantPosIndex: 1},
+		{name: "valid with row", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "row", Type: arrow.BinaryTypes.String}}, wantPosIndex: 1},
+		{name: "valid reversed", fields: []arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "file_path", Type: arrow.BinaryTypes.String}}, wantFilePathIndex: 1},
+		{name: "missing file_path", fields: []arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "missing pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}}, wantErr: `exactly one "pos" column, found 0`},
+		{name: "missing both", fields: nil, wantErr: `exactly one "file_path" column, found 0`},
+		{name: "duplicate pos", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "pos" column, found 2`},
+		{name: "duplicate file_path", fields: []arrow.Field{{Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "file_path", Type: arrow.BinaryTypes.String}, {Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, wantErr: `exactly one "file_path" column, found 2`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			filePathIndex, posIndex, err := positionDeleteColumnIndices(arrow.NewSchema(test.fields, nil))
+			if test.wantErr != "" {
+				require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+				require.ErrorContains(t, err, test.wantErr)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantFilePathIndex, filePathIndex)
+			assert.Equal(t, test.wantPosIndex, posIndex)
+		})
+	}
+}
+
+func TestReadDeletesRejectsMissingFilePath(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	ctx := compute.WithAllocator(t.Context(), mem)
+	defer mem.AssertSize(t, 0)
+
+	deleteSchema := arrow.NewSchema([]arrow.Field{{Name: "pos", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	deletePath := "mem://bucket/deletes/missing-file-path.parquet"
+	rec := mustLoadRecordBatchFromJSON(deleteSchema, `[{"pos": 1}]`)
+	defer rec.Release()
+	tbl := array.NewTableFromRecords(deleteSchema, []arrow.RecordBatch{rec})
+	defer tbl.Release()
+
+	memFS := iceio.NewMemFS()
+	fw, err := memFS.Create(deletePath)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, fw, rec.NumRows(),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()))
+	require.NoError(t, fw.Close())
+
+	deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 1, 128))
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Nil(t, deletes)
+	assert.Contains(t, err.Error(), `exactly one "file_path" column, found 0`)
+}
 
 func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	for _, tc := range []struct {
@@ -146,6 +211,181 @@ func TestGroupPosDeletesByFilePathSupportsStringLayouts(t *testing.T) {
 	}
 }
 
+func TestGroupPosDeletesByFilePathPreservesRepeatedPositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem,
+		"file-a.parquet", "file-b.parquet", "file-a.parquet", "file-c.parquet", "file-b.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 7, 8, 7, 9, 8)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+
+	assert.Equal(t, []int64{7, 7}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{8, 8}, int64Values(got["file-b.parquet"]))
+	assert.Equal(t, []int64{9}, int64Values(got["file-c.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathHandlesDifferentChunkBoundaries(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathA := stringArray(mem, "file-a.parquet", "file-b.parquet", "file-a.parquet")
+	defer filePathA.Release()
+	filePathB := stringArray(mem, "file-c.parquet")
+	defer filePathB.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathA, filePathB})
+	defer filePathCol.Release()
+
+	posA := int64Array(mem, 1, 2)
+	defer posA.Release()
+	posB := int64Array(mem, 3, 4)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+
+	assert.Equal(t, []int64{1, 3}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{2}, int64Values(got["file-b.parquet"]))
+	assert.Equal(t, []int64{4}, int64Values(got["file-c.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathSkipsEmptyPositionChunks(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet", "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+
+	empty := int64Array(mem)
+	defer empty.Release()
+	posA := int64Array(mem, 10)
+	defer posA.Release()
+	posB := int64Array(mem, 20, 30)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{empty, posA, posB})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+
+	assert.Equal(t, []int64{10, 30}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{20}, int64Values(got["file-b.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathRejectsMismatchedLengths(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "file_path and pos columns have different lengths: 2 and 1")
+}
+
+func TestGroupPosDeletesByFilePathRejectsNegativePositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, -1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "negative pos -1")
+}
+
+func TestGroupPosDeletesByFilePathOwnsResults(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem, "file-a.parquet", "file-b.parquet")
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	posArr := int64Array(mem, 3, 5)
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	releaseInputs := func() {
+		if filePathCol != nil {
+			filePathCol.Release()
+			filePathCol = nil
+		}
+		if filePathArr != nil {
+			filePathArr.Release()
+			filePathArr = nil
+		}
+		if posCol != nil {
+			posCol.Release()
+			posCol = nil
+		}
+		if posArr != nil {
+			posArr.Release()
+			posArr = nil
+		}
+	}
+	defer releaseInputs()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	defer releasePosDeletes(got)
+	releaseInputs()
+
+	assert.Equal(t, []int64{3}, int64Values(got["file-a.parquet"]))
+	assert.Equal(t, []int64{5}, int64Values(got["file-b.parquet"]))
+}
+
+func TestGroupPosDeletesByFilePathHandlesEmptyInput(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	filePathArr := stringArray(mem)
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	got, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+	assert.Empty(t, got)
+}
+
 func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -253,6 +493,102 @@ func TestGroupPosDeletesByFilePathRejectsUnsupportedFilePathLayout(t *testing.T)
 	}
 }
 
+func TestGroupPosDeletesByFilePathHonorsCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(t.Context(), mem)
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	filePathArr := stringArray(mem, "file-a.parquet")
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, 1)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+type cancelAfterErrContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterErrContext) Err() error {
+	if c.remaining == 0 {
+		return context.Canceled
+	}
+	c.remaining--
+
+	return nil
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterCancellation(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	baseCtx := compute.WithAllocator(t.Context(), mem)
+	ctx := &cancelAfterErrContext{Context: baseCtx, remaining: 3}
+	const numRows = positionalDeleteCancellationCheckInterval + 1
+
+	filePaths := make([]string, numRows)
+	positions := make([]int64, numRows)
+	for i := range numRows {
+		filePaths[i] = "file-a.parquet"
+		positions[i] = int64(i)
+	}
+	filePathArr := stringArray(mem, filePaths...)
+	defer filePathArr.Release()
+	filePathCol := arrow.NewChunked(arrow.BinaryTypes.String, []arrow.Array{filePathArr})
+	defer filePathCol.Release()
+	posArr := int64Array(mem, positions...)
+	defer posArr.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGroupPosDeletesByFilePathReleasesBuildersAfterError(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	dict := nullableStringArray(mem, "file-a.parquet", "")
+	defer dict.Release()
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int32,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	idxA := int32Array(mem, 0)
+	defer idxA.Release()
+	filePathA := array.NewDictionaryArray(dictType, idxA, dict)
+	defer filePathA.Release()
+	idxB := int32Array(mem, 1)
+	defer idxB.Release()
+	filePathB := array.NewDictionaryArray(dictType, idxB, dict)
+	defer filePathB.Release()
+	filePathCol := arrow.NewChunked(dictType, []arrow.Array{filePathA, filePathB})
+	defer filePathCol.Release()
+
+	posA := int64Array(mem, 1)
+	defer posA.Release()
+	posB := int64Array(mem, 2)
+	defer posB.Release()
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posA, posB})
+	defer posCol.Release()
+
+	_, err := groupPosDeletesByFilePath(ctx, filePathCol, posCol)
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "null file_path dictionary value")
+}
+
 func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {
 	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer mem.AssertSize(t, 0)
@@ -266,6 +602,39 @@ func TestCollectPosDeletePositionsRejectsUnsupportedPosType(t *testing.T) {
 	_, err := collectPosDeletePositions(positionDeletes{posCol})
 	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.Contains(t, err.Error(), "unsupported pos column type")
+}
+
+func TestCollectPosDeletePositionsRejectsNegativePositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	posArr := int64Array(mem, -1)
+	defer posArr.Release()
+
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := collectPosDeletePositions(positionDeletes{posCol})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "negative pos -1")
+}
+
+func TestCollectPosDeletePositionsRejectsNullPositions(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	bldr := array.NewInt64Builder(mem)
+	bldr.AppendNull()
+	posArr := bldr.NewInt64Array()
+	bldr.Release()
+	defer posArr.Release()
+
+	posCol := arrow.NewChunked(arrow.PrimitiveTypes.Int64, []arrow.Array{posArr})
+	defer posCol.Release()
+
+	_, err := collectPosDeletePositions(positionDeletes{posCol})
+	require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Contains(t, err.Error(), "null pos in position delete file")
 }
 
 func TestReadDeletesRejectsNullPos(t *testing.T) {
@@ -345,6 +714,118 @@ func TestProcessPositionalDeletesAcrossBatches(t *testing.T) {
 
 		out.Release()
 	}
+}
+
+func TestProcessPositionalDeletesNoOpRetainsBatch(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+	defer mem.AssertSize(t, 0)
+
+	ctx := compute.WithAllocator(t.Context(), mem)
+	batch := checkedInt64RecordBatch(mem, 0, 1, 2)
+
+	process := processPositionalDeletes(ctx, set[int64]{99: {}}, (&rowPositionSource{}).cursor())
+	out, err := process(batch)
+	require.NoError(t, err)
+	assert.Same(t, batch, out)
+	out.Release()
+}
+
+func TestProcessPositionalDeletes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deletes   set[int64]
+		spans     []internal.RowGroupSpan
+		batches   [][]int64
+		expecteds [][]int64
+	}{
+		{
+			name:      "zero deletes",
+			deletes:   set[int64]{},
+			batches:   [][]int64{{0, 1, 2}},
+			expecteds: [][]int64{{0, 1, 2}},
+		},
+		{
+			name:      "first deletion",
+			deletes:   set[int64]{0: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{1, 2, 3}},
+		},
+		{
+			name:      "middle deletion",
+			deletes:   set[int64]{2: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{0, 1, 3}},
+		},
+		{
+			name:      "last deletion",
+			deletes:   set[int64]{3: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{0, 1, 2}},
+		},
+		{
+			name:      "all but last row deleted",
+			deletes:   set[int64]{0: {}, 1: {}, 2: {}},
+			batches:   [][]int64{{0, 1, 2, 3}},
+			expecteds: [][]int64{{3}},
+		},
+		{
+			name:      "batch boundary deletion",
+			deletes:   set[int64]{4: {}},
+			batches:   [][]int64{{0, 1, 2, 3}, {4, 5, 6}},
+			expecteds: [][]int64{{0, 1, 2, 3}, {5, 6}},
+		},
+		{
+			name:      "all rows deleted",
+			deletes:   set[int64]{0: {}, 1: {}, 2: {}},
+			batches:   [][]int64{{0, 1}, {2}},
+			expecteds: [][]int64{{}, {}},
+		},
+		{
+			name:    "pruned row group positions",
+			deletes: set[int64]{4: {}},
+			spans: []internal.RowGroupSpan{
+				{FirstRowPos: 0, NumRows: 2},
+				{FirstRowPos: 4, NumRows: 2},
+			},
+			batches:   [][]int64{{0, 1}, {4, 5}},
+			expecteds: [][]int64{{0, 1}, {5}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			defer mem.AssertSize(t, 0)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			process := processPositionalDeletes(ctx, tc.deletes, (&rowPositionSource{spans: tc.spans}).cursor())
+
+			for i, values := range tc.batches {
+				batch := checkedInt64RecordBatch(mem, values...)
+				out, err := process(batch)
+				require.NoErrorf(t, err, "batch %d", i)
+				got := out.Column(0).(*array.Int64).Int64Values()
+				if len(tc.expecteds[i]) == 0 {
+					assert.Empty(t, got)
+				} else {
+					assert.Equal(t, tc.expecteds[i], got)
+				}
+				out.Release()
+			}
+		})
+	}
+}
+
+func checkedInt64RecordBatch(mem memory.Allocator, values ...int64) arrow.RecordBatch {
+	bldr := array.NewInt64Builder(mem)
+	defer bldr.Release()
+	bldr.AppendValues(values, nil)
+
+	col := bldr.NewArray()
+	defer col.Release()
+
+	schema := arrow.NewSchema([]arrow.Field{{
+		Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: false,
+	}}, nil)
+
+	return array.NewRecordBatch(schema, []arrow.Array{col}, int64(len(values)))
 }
 
 func stringArray(mem memory.Allocator, values ...string) *array.String {

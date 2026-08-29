@@ -823,6 +823,36 @@ func (*ProjectionTestSuite) idSpec() iceberg.PartitionSpec {
 	)
 }
 
+func (p *ProjectionTestSuite) unknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
+// Both fields partition the same column: the bucket field still prunes, the
+// unknown one contributes nothing.
+func (p *ProjectionTestSuite) bucketAndUnknownSpec() iceberg.PartitionSpec {
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	p.Require().NoError(err)
+
+	return iceberg.NewPartitionSpec(
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1000,
+			Transform: iceberg.BucketTransform{NumBuckets: 4}, Name: "id_bucket",
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{1}, FieldID: 1001,
+			Transform: unknown, Name: "id_custom",
+		},
+	)
+}
+
 func (*ProjectionTestSuite) bucketSpec() iceberg.PartitionSpec {
 	return iceberg.NewPartitionSpec(
 		iceberg.PartitionField{
@@ -1155,6 +1185,26 @@ func (p *ProjectionTestSuite) TestProjectionCaseInsensitive() {
 	expr, err := project(iceberg.NotNull(iceberg.Reference("ID")))
 	p.Require().NoError(err)
 	p.True(expr.Equals(iceberg.NotNull(iceberg.Reference("id_part"))))
+}
+
+// Unknown partition transforms must not prune: Project returns nil, which
+// projects to AlwaysTrue.
+func (p *ProjectionTestSuite) TestUnknownTransformProjection() {
+	project := newInclusiveProjection(p.schema(), p.unknownSpec(), true)
+	expr, err := project(iceberg.LessThan(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.Equal(iceberg.AlwaysTrue{}, expr)
+}
+
+// An unknown field alongside a usable one must not disable the usable one's
+// pruning, and must not add a term of its own.
+func (p *ProjectionTestSuite) TestMixedSpecUnknownTransformProjection() {
+	spec := p.bucketAndUnknownSpec()
+	project := newInclusiveProjection(p.schema(), spec, true)
+
+	expr, err := project(iceberg.EqualTo(iceberg.Reference("id"), int64(5)))
+	p.Require().NoError(err)
+	p.True(expr.Equals(iceberg.EqualTo(iceberg.Reference("id_bucket"), int32(3))))
 }
 
 func (p *ProjectionTestSuite) TestProjectEmptySpec() {
@@ -1880,6 +1930,7 @@ func (suite *InclusiveMetricsTestSuite) TestInMetrics() {
 		{iceberg.IsIn(ref, IntMinValue-1, IntMinValue), true, "should read: id equal to lower bound"},
 		{iceberg.IsIn(ref, IntMaxValue-4, IntMaxValue-3), true, "should read: id between upper and lower bounds"},
 		{iceberg.IsIn(ref, IntMaxValue, IntMaxValue+1), true, "should read: id equal to upper bound"},
+		{iceberg.IsIn(ref, int64(IntMaxValue), int64(math.MaxInt32)+1), true, "should read: ignore value outside int32 range"},
 		{iceberg.IsIn(ref, IntMaxValue+1, IntMaxValue+2), false, "should skip: id above upper bound"},
 		{iceberg.IsIn(ref, IntMaxValue+6, IntMaxValue+7), false, "should skip: id above upper bound"},
 		{iceberg.IsIn(iceberg.Reference("all_nulls"), "abc", "def"), false, "should skip: in on all nulls column"},
@@ -2972,6 +3023,7 @@ func (suite *StrictMetricsTestSuite) TestNotInMetrics() {
 		{iceberg.NotIn(ref, IntMinValue-1, IntMinValue), false, "should skip: some values may be == 30"},
 		{iceberg.NotIn(ref, IntMaxValue-4, IntMaxValue-3), false, "should skip: some value may be == 75 or == 76"},
 		{iceberg.NotIn(ref, IntMaxValue, IntMaxValue+1), false, "should skip: some value may be == 79"},
+		{iceberg.NotIn(ref, int64(IntMaxValue), int64(IntMaxValue-1), int64(math.MaxInt32)+1), false, "should skip: in-range values remain after ignoring value outside int32 range"},
 		{iceberg.NotIn(ref, IntMaxValue+1, IntMaxValue+2), true, "should read: no values == 80 or == 81"},
 		{iceberg.NotIn(iceberg.Reference("always_5"), int32(5), int32(6)), false, "should skip: all values == 5"},
 		{iceberg.NotIn(iceberg.Reference("all_nulls"), "abc", "def"), true, "should read: notIn on all nulls column"},
@@ -2994,6 +3046,59 @@ func TestEvaluators(t *testing.T) {
 	suite.Run(t, &ProjectionTestSuite{})
 	suite.Run(t, &InclusiveMetricsTestSuite{})
 	suite.Run(t, &StrictMetricsTestSuite{})
+}
+
+func TestMetricsEvaluatorsKeepTransformedTerms(t *testing.T) {
+	categoryMin, err := iceberg.StringLiteral("books").MarshalBinary()
+	require.NoError(t, err)
+	categoryMax := append([]byte(nil), categoryMin...)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	file := &mockDataFile{
+		count:       1,
+		valueCounts: map[int]int64{1: 1},
+		nullCounts:  map[int]int64{1: 0},
+		lowerBounds: map[int][]byte{1: categoryMin},
+		upperBounds: map[int][]byte{1: categoryMax},
+	}
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+
+	inclusive, err := newInclusiveMetricsEvaluator(schema, iceberg.EqualTo(term, "boo"), true, true)
+	require.NoError(t, err)
+	keep, err := inclusive(file)
+	require.NoError(t, err)
+	assert.True(t, keep)
+
+	strict, err := newStrictMetricsEvaluator(schema, iceberg.NotEqualTo(term, "boo"), true, true)
+	require.NoError(t, err)
+	mustMatch, err := strict(file)
+	require.NoError(t, err)
+	assert.False(t, mustMatch)
+}
+
+func TestManifestEvaluatorKeepsTransformedTerms(t *testing.T) {
+	lower, err := iceberg.StringLiteral("books").MarshalBinary()
+	require.NoError(t, err)
+	upper := append([]byte(nil), lower...)
+
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "category", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("category"))
+	bound, err := iceberg.BindExpr(schema, iceberg.EqualTo(term, "boo"), true)
+	require.NoError(t, err)
+
+	visitor := &manifestEvalVisitor{
+		partitionFields: []iceberg.FieldSummary{{
+			LowerBound: &lower,
+			UpperBound: &upper,
+		}},
+	}
+	keep, err := iceberg.VisitExprEvaluator(bound, visitor)
+	require.NoError(t, err)
+	assert.True(t, keep)
 }
 
 func TestGetCmpLiteralRejectsGeo(t *testing.T) {
@@ -3062,9 +3167,7 @@ func TestBloomPredicateCollector(t *testing.T) {
 	)
 
 	bind := func(expr iceberg.BooleanExpression) iceberg.BooleanExpression {
-		rewritten, err := iceberg.RewriteNotExpr(expr)
-		require.NoError(t, err)
-		bound, err := iceberg.BindExpr(sc, rewritten, true)
+		bound, err := iceberg.BindExpr(sc, expr, true)
 		require.NoError(t, err)
 
 		return bound
@@ -3108,6 +3211,34 @@ func TestBloomPredicateCollector(t *testing.T) {
 		assert.Empty(t, preds)
 	})
 
+	t.Run("NOT(NotEqual) is normalized to Equal", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotEqualTo(iceberg.Reference("id"), int64(42))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 1)
+	})
+
+	t.Run("NOT(NotIn) is normalized to In", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.NotIn(iceberg.Reference("id"), int64(1), int64(2))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		require.Len(t, preds, 1)
+		assert.Equal(t, 1, preds[0].FieldID)
+		assert.Len(t, preds[0].PhysBytes, 2)
+	})
+
+	t.Run("NOT(Equal) remains unsupported", func(t *testing.T) {
+		expr := bind(iceberg.NewNot(
+			iceberg.EqualTo(iceberg.Reference("id"), int64(42))))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
 	t.Run("AlwaysTrue returns nil", func(t *testing.T) {
 		preds, err := newBloomFilterPredicates(iceberg.AlwaysTrue{})
 		require.NoError(t, err)
@@ -3116,6 +3247,14 @@ func TestBloomPredicateCollector(t *testing.T) {
 
 	t.Run("range predicate returns nil", func(t *testing.T) {
 		expr := bind(iceberg.GreaterThan(iceberg.Reference("id"), int64(5)))
+		preds, err := newBloomFilterPredicates(expr)
+		require.NoError(t, err)
+		assert.Empty(t, preds)
+	})
+
+	t.Run("transform predicate returns nil", func(t *testing.T) {
+		term := iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 3}, iceberg.Reference("name"))
+		expr := bind(iceberg.EqualTo(term, "ali"))
 		preds, err := newBloomFilterPredicates(expr)
 		require.NoError(t, err)
 		assert.Empty(t, preds)

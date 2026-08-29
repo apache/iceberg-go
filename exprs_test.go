@@ -19,6 +19,7 @@ package iceberg_test
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -28,6 +29,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type containsBoundSetVisitor struct {
+	FooBoundExprVisitor
+	needle iceberg.Literal
+	found  bool
+}
+
+func (v *containsBoundSetVisitor) VisitIn(_ iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) []string {
+	v.found = literals.Contains(v.needle)
+	literals.Add(iceberg.NewLiteral("visitor-injected"))
+
+	return nil
+}
 
 type ExprA struct{}
 
@@ -118,6 +132,30 @@ func TestUnaryExpr(t *testing.T) {
 
 			assert.True(t, n1.Equals(iceberg.AlwaysFalse{}))
 			assert.True(t, n2.Equals(iceberg.AlwaysTrue{}))
+		})
+
+		t.Run("transform terms do not use source nullability", func(t *testing.T) {
+			voidID := iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+
+			isNull, err := iceberg.IsNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, isNull.Equals(iceberg.AlwaysTrue{}))
+
+			voidID = iceberg.NewUnboundTransform(iceberg.VoidTransform{}, iceberg.Reference("a"))
+			notNull, err := iceberg.NotNull(voidID).Bind(sc3, true)
+			require.NoError(t, err)
+			assert.True(t, notNull.Equals(iceberg.AlwaysFalse{}))
+		})
+
+		t.Run("nested transforms are rejected", func(t *testing.T) {
+			nested := iceberg.NewUnboundTransform(
+				iceberg.BucketTransform{NumBuckets: 16},
+				iceberg.NewUnboundTransform(iceberg.TruncateTransform{Width: 4}, iceberg.Reference("a")),
+			)
+
+			_, err := nested.Bind(sc, true)
+			assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			assert.Contains(t, err.Error(), "direct reference")
 		})
 	})
 
@@ -230,7 +268,7 @@ func TestRefTypes(t *testing.T) {
 	}
 
 	t.Run("bind term", func(t *testing.T) {
-		for i := 0; i < sc.NumFields(); i++ {
+		for i := range sc.NumFields() {
 			fld := sc.Field(i)
 			t.Run(fld.Type.String(), func(t *testing.T) {
 				ref, err := iceberg.Reference(fld.Name).Bind(sc, true)
@@ -243,7 +281,7 @@ func TestRefTypes(t *testing.T) {
 	})
 
 	t.Run("bind unary", func(t *testing.T) {
-		for i := 0; i < sc.NumFields(); i++ {
+		for i := range sc.NumFields() {
 			fld := sc.Field(i)
 			t.Run(fld.Type.String(), func(t *testing.T) {
 				b, err := iceberg.IsNull(iceberg.Reference(fld.Name)).Bind(sc, true)
@@ -470,6 +508,101 @@ func TestInNotInSimplifications(t *testing.T) {
 		assert.Equal(t, 2, bsp.Literals().Len())
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("hello")))
 		assert.True(t, bsp.Literals().Contains(iceberg.NewLiteral("world")))
+	})
+
+	t.Run("bound literals are isolated", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+
+		bsp := bound.(iceberg.BoundSetPredicate)
+		literals := bsp.Literals()
+		literals.Add(iceberg.NewLiteral("injected"))
+
+		assert.Equal(t, 2, bsp.Literals().Len())
+		assert.False(t, bsp.Literals().Contains(iceberg.NewLiteral("injected")))
+	})
+
+	t.Run("bound literal values are isolated", func(t *testing.T) {
+		geometry, err := iceberg.GeometryTypeOf("srid:4326")
+		require.NoError(t, err)
+		geography, err := iceberg.GeographyTypeOf("srid:4326", "spherical")
+		require.NoError(t, err)
+
+		tests := []struct {
+			name string
+			typ  iceberg.Type
+			lits func([]byte, []byte) []iceberg.Literal
+		}{
+			{
+				name: "binary",
+				typ:  iceberg.PrimitiveTypes.Binary,
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "fixed",
+				typ:  iceberg.FixedTypeOf(16),
+				lits: func(first, second []byte) []iceberg.Literal {
+					return []iceberg.Literal{iceberg.NewLiteral(first), iceberg.NewLiteral(second)}
+				},
+			},
+			{
+				name: "geometry",
+				typ:  geometry,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geometry, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geometry, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+			{
+				name: "geography",
+				typ:  geography,
+				lits: func(first, second []byte) []iceberg.Literal {
+					firstLit, err := iceberg.LiteralFromBytes(geography, first)
+					require.NoError(t, err)
+					secondLit, err := iceberg.LiteralFromBytes(geography, second)
+					require.NoError(t, err)
+
+					return []iceberg.Literal{firstLit, secondLit}
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				first := []byte("0123456789abcdef")
+				second := []byte("fedcba9876543210")
+				expected := slices.Clone(first)
+				isin := iceberg.SetPredicate(iceberg.OpIn, iceberg.Reference("value"), tt.lits(first, second))
+				schema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "value", Type: tt.typ})
+
+				bound, err := isin.(iceberg.UnboundPredicate).Bind(schema, true)
+				require.NoError(t, err)
+				first[0] = 0xff
+
+				expectedLiteral, err := iceberg.LiteralFromBytes(tt.typ, expected)
+				require.NoError(t, err)
+				assert.True(t, bound.(iceberg.BoundSetPredicate).Literals().Contains(expectedLiteral))
+			})
+		}
+	})
+
+	t.Run("bound predicate visitors receive detached literals", func(t *testing.T) {
+		isin := iceberg.IsIn(iceberg.Reference("foo"), "hello", "world")
+		bound, err := isin.(iceberg.UnboundPredicate).Bind(tableSchemaSimple, true)
+		require.NoError(t, err)
+		predicate := bound.(iceberg.BoundPredicate)
+		visitor := &containsBoundSetVisitor{needle: iceberg.NewLiteral("hello")}
+
+		iceberg.VisitBoundPredicate(predicate, visitor)
+		assert.True(t, visitor.found)
+		assert.Equal(t, 2, predicate.(iceberg.BoundSetPredicate).Literals().Len())
 	})
 
 	t.Run("bind dedup to eq", func(t *testing.T) {
@@ -888,6 +1021,66 @@ func TestBindAboveBelowIntMax(t *testing.T) {
 			assert.Equal(t, tt.exp, b)
 		})
 	}
+
+	t.Run("set predicates", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			pred     iceberg.BooleanExpression
+			expected iceberg.BooleanExpression
+		}{
+			{"int in mixed range", iceberg.IsIn(ref, int64(34), above, below), iceberg.EqualTo(ref, int32(34))},
+			{"int not in mixed range", iceberg.NotIn(ref, int64(34), above, below), iceberg.NotEqualTo(ref, int32(34))},
+			{"int in mixed range set", iceberg.IsIn(ref, int64(34), int64(35), above, below), iceberg.IsIn(ref, int32(34), int32(35))},
+			{"int in outside range", iceberg.IsIn(ref, above, below), iceberg.AlwaysFalse{}},
+			{"int not in outside range", iceberg.NotIn(ref, above, below), iceberg.AlwaysTrue{}},
+			{"float in mixed range", iceberg.IsIn(ref2, float64(34), above2, below2), iceberg.EqualTo(ref2, float32(34))},
+			{"float not in mixed range", iceberg.NotIn(ref2, float64(34), above2, below2), iceberg.NotEqualTo(ref2, float32(34))},
+			{"float in outside range", iceberg.IsIn(ref2, above2, below2), iceberg.AlwaysFalse{}},
+			{"float not in outside range", iceberg.NotIn(ref2, above2, below2), iceberg.AlwaysTrue{}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				bound, err := iceberg.BindExpr(sc, tt.pred, true)
+				require.NoError(t, err)
+				wantBound, err := iceberg.BindExpr(sc, tt.expected, true)
+				require.NoError(t, err)
+				assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
+			})
+		}
+	})
+}
+
+func TestBindOutOfRangeDate(t *testing.T) {
+	sc := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "d", Type: iceberg.PrimitiveTypes.Date},
+	)
+
+	ref := iceberg.Reference("d")
+	above, below := int64(math.MaxInt32)+1, int64(math.MinInt32)-1
+
+	tests := []struct {
+		name     string
+		pred     iceberg.BooleanExpression
+		expected iceberg.BooleanExpression
+	}{
+		{"eq above max", iceberg.EqualTo(ref, above), iceberg.AlwaysFalse{}},
+		{"eq below min", iceberg.EqualTo(ref, below), iceberg.AlwaysFalse{}},
+		{"neq above max", iceberg.NotEqualTo(ref, above), iceberg.AlwaysTrue{}},
+		{"in mixed range", iceberg.IsIn(ref, int64(34), above, below), iceberg.EqualTo(ref, iceberg.Date(34))},
+		{"in outside range", iceberg.IsIn(ref, above, below), iceberg.AlwaysFalse{}},
+		{"not in outside range", iceberg.NotIn(ref, above, below), iceberg.AlwaysTrue{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bound, err := iceberg.BindExpr(sc, tt.pred, true)
+			require.NoError(t, err)
+			wantBound, err := iceberg.BindExpr(sc, tt.expected, true)
+			require.NoError(t, err)
+			assert.True(t, wantBound.Equals(bound), "expected %s, got %s", wantBound, bound)
+		})
+	}
 }
 
 func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
@@ -905,4 +1098,22 @@ func TestVariantBoundLiteralRejectionMessage(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	assert.ErrorContains(t, err, "ordered predicates are not supported on variant fields")
+}
+
+func TestUnknownTransformCannotBindAsPredicate(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+	)
+	transform, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+
+	tests := []iceberg.UnboundPredicate{
+		iceberg.IsNull(iceberg.NewUnboundTransform(transform, iceberg.Reference("id"))),
+		iceberg.EqualTo(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1)),
+		iceberg.IsIn(iceberg.NewUnboundTransform(transform, iceberg.Reference("id")), int32(1), int32(2)).(iceberg.UnboundPredicate),
+	}
+	for _, pred := range tests {
+		_, err := pred.Bind(schema, true)
+		require.ErrorIs(t, err, iceberg.ErrNotImplemented, pred)
+	}
 }

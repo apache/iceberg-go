@@ -23,6 +23,7 @@ import (
 	"iter"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -207,6 +208,44 @@ func (s *WriteRecordsTestSuite) TestWriteRecordsResolvesProjJSONCRSFromTableProp
 	s.Equal("projjson:geo.crs", readGeom.CRS())
 }
 
+func (s *WriteRecordsTestSuite) TestUnknownPartitionTransformRejected() {
+	loc := filepath.ToSlash(s.T().TempDir())
+
+	unknown, err := iceberg.ParseTransform("custom_transform[42]")
+	s.Require().NoError(err)
+
+	iceSch := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: false},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String, Required: false},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: iceberg.PartitionDataIDStart,
+		Name: "id_custom", Transform: unknown,
+	})
+	meta, err := table.NewMetadata(iceSch, &spec, table.UnsortedSortOrder, loc, iceberg.Properties{})
+	s.Require().NoError(err)
+	tbl := table.New(
+		table.Identifier{"test", "unknown_spec"}, meta,
+		filepath.Join(loc, "metadata", "v1.metadata.json"),
+		func(ctx context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil },
+		nil,
+	)
+
+	schema := s.arrowSchema()
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		rec := s.buildRecords(schema, 10)
+		defer rec.Release()
+		yield(rec, nil)
+	}
+
+	var got error
+	for _, err := range table.WriteRecords(s.ctx, tbl, schema, records) {
+		got = err
+	}
+	s.Require().ErrorIs(got, iceberg.ErrInvalidTransform)
+	s.ErrorContains(got, "custom_transform[42]")
+}
+
 func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {
 	loc := filepath.ToSlash(s.T().TempDir())
 	tbl := s.newTable(loc)
@@ -231,6 +270,63 @@ func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {
 
 	s.Greater(len(dataFiles), 1)
 	s.Equal(int64(1000), totalRows)
+}
+
+func (s *WriteRecordsTestSuite) TestEarlyStopCancelsRecordProduction() {
+	tests := []struct {
+		name        string
+		partitioned bool
+	}{
+		{name: "unpartitioned"},
+		{name: "partitioned", partitioned: true},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			loc := filepath.ToSlash(s.T().TempDir())
+			iceSch := iceberg.NewSchema(1,
+				iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+				iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+			)
+			spec := iceberg.NewPartitionSpec()
+			if tt.partitioned {
+				spec = iceberg.NewPartitionSpec(iceberg.PartitionField{
+					SourceIDs: []int{1}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+				})
+			}
+			meta, err := table.NewMetadata(iceSch, &spec, table.UnsortedSortOrder, loc, iceberg.Properties{})
+			s.Require().NoError(err)
+			tbl := table.New(
+				table.Identifier{"test", tt.name}, meta, filepath.Join(loc, "metadata", "v1.metadata.json"),
+				func(context.Context) (iceio.IO, error) { return iceio.LocalFS{}, nil }, nil,
+			)
+
+			schema := s.arrowSchema()
+			var produced atomic.Int32
+			records := func(yield func(arrow.RecordBatch, error) bool) {
+				for range 1000 {
+					produced.Add(1)
+					record := s.buildRecords(schema, 100)
+					accepted := yield(record, nil)
+					if !accepted {
+						return
+					}
+				}
+			}
+
+			for df, writeErr := range table.WriteRecords(
+				s.ctx, tbl, schema, records, table.WithTargetFileSize(1), table.WithMaxWriteWorkers(1),
+			) {
+				s.Require().NoError(writeErr)
+				s.Require().NotNil(df)
+
+				break
+			}
+
+			s.Positive(produced.Load())
+			s.Less(produced.Load(), int32(100))
+		})
+	}
 }
 
 func (s *WriteRecordsTestSuite) TestWithWriteUUID() {

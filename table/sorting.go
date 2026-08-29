@@ -51,6 +51,15 @@ var (
 	ErrInvalidNullOrder     = errors.New("invalid null order, must be 'nulls-first' or 'nulls-last'")
 )
 
+// orderBinding tells the decoder whether the sort order it reads is already
+// bound to a schema, which decides how strictly source IDs are validated.
+type orderBinding bool
+
+const (
+	boundOrder   orderBinding = true
+	unboundOrder orderBinding = false
+)
+
 // SortField describes a field used in a sort order definition.
 type SortField struct {
 	// SourceIDs contains the source column ids from the table's schema.
@@ -132,6 +141,10 @@ func (s SortField) MarshalJSON() ([]byte, error) {
 }
 
 func (s *SortField) UnmarshalJSON(b []byte) error {
+	return s.unmarshal(b, boundOrder)
+}
+
+func (s *SortField) unmarshal(b []byte, binding orderBinding) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return fmt.Errorf("%w: failed to unmarshal sort field", err)
@@ -146,66 +159,111 @@ func (s *SortField) UnmarshalJSON(b []byte) error {
 		return fmt.Errorf("%w: exactly one of source-id or source-ids is required", ErrInvalidSortSourceID)
 	}
 
-	aux := struct {
-		SourceID        int           `json:"source-id"`
-		SourceIDs       []int         `json:"source-ids,omitempty"`
-		TransformString string        `json:"transform"`
-		Direction       SortDirection `json:"direction"`
-		NullOrder       NullOrder     `json:"null-order"`
-	}{}
+	transformJSON, hasTransform := raw["transform"]
+	if !hasTransform || string(transformJSON) == "null" {
+		return fmt.Errorf("%w: sort field requires a transform", iceberg.ErrInvalidTransform)
+	}
 
-	if err := json.Unmarshal(b, &aux); err != nil {
+	var sourceID int
+	if hasSourceID {
+		if err := unmarshalJSONField(raw["source-id"], "source-id", &sourceID); err != nil {
+			return err
+		}
+	}
+	var sourceIDs []int
+	if hasSourceIDs {
+		if err := unmarshalJSONField(raw["source-ids"], "source-ids", &sourceIDs); err != nil {
+			return err
+		}
+	}
+	var transformString string
+	if err := unmarshalJSONField(transformJSON, "transform", &transformString); err != nil {
 		return err
 	}
-
-	s.Direction = aux.Direction
-	s.NullOrder = aux.NullOrder
-
-	if hasSourceIDs {
-		s.SourceIDs = aux.SourceIDs
-	} else {
-		s.SourceIDs = []int{aux.SourceID}
+	var direction SortDirection
+	if directionJSON, ok := raw["direction"]; ok {
+		if err := unmarshalJSONField(directionJSON, "direction", &direction); err != nil {
+			return err
+		}
+	}
+	var nullOrder NullOrder
+	if nullOrderJSON, ok := raw["null-order"]; ok {
+		if err := unmarshalJSONField(nullOrderJSON, "null-order", &nullOrder); err != nil {
+			return err
+		}
 	}
 
-	if err := validateSortSourceIDs(s.SourceIDs); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidSortSourceID, err)
+	next := SortField{
+		Direction: direction,
+		NullOrder: nullOrder,
+	}
+
+	if hasSourceIDs {
+		next.SourceIDs = sourceIDs
+	} else {
+		next.SourceIDs = []int{sourceID}
+	}
+
+	if err := validateSortSourceIDs(next.SourceIDs, binding); err != nil {
+		return err
 	}
 
 	var err error
-	if s.Transform, err = iceberg.ParseTransform(aux.TransformString); err != nil {
+	if next.Transform, err = iceberg.ParseTransform(transformString); err != nil {
 		return err
 	}
 
-	switch s.Direction {
+	switch next.Direction {
 	case SortASC, SortDESC:
 	default:
 		return ErrInvalidSortDirection
 	}
 
-	switch s.NullOrder {
+	switch next.NullOrder {
 	case NullsFirst, NullsLast:
 	default:
 		return ErrInvalidNullOrder
 	}
 
+	*s = next
+
 	return nil
 }
 
-func validateSortSourceID(id int) error {
-	if id <= 0 {
-		return fmt.Errorf("source ID must be positive: %d", id)
+// Source IDs are schema field IDs, and therefore positive, once an order is
+// bound to a schema. Unbound orders carry client placeholders that start at zero.
+func validateSortSourceID(id int, binding orderBinding) error {
+	if binding == boundOrder && id <= 0 {
+		return fmt.Errorf("%w: source ID must be positive: %d", ErrInvalidSortSourceID, id)
+	}
+	if id < 0 {
+		return fmt.Errorf("%w: source ID must be non-negative: %d", ErrInvalidSortSourceID, id)
 	}
 
 	return nil
 }
 
-func validateSortSourceIDs(ids []int) error {
+func unmarshalJSONField(data json.RawMessage, field string, value any) error {
+	if err := json.Unmarshal(data, value); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			typeErr.Struct = ""
+			typeErr.Field = field
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func validateSortSourceIDs(ids []int, binding orderBinding) error {
 	if len(ids) == 0 {
-		return errors.New("source-ids must not be empty")
+		return fmt.Errorf("%w: source-ids must not be empty", ErrInvalidSortSourceID)
 	}
 
 	for _, id := range ids {
-		if err := validateSortSourceID(id); err != nil {
+		if err := validateSortSourceID(id, binding); err != nil {
 			return err
 		}
 	}
@@ -231,6 +289,35 @@ type SortOrder struct {
 	fields  []SortField
 }
 
+// UnboundSortOrder decodes a sort order whose source IDs have not yet been
+// resolved against the schema that decides them, so unlike bound field IDs they
+// need not be positive. Two wire forms arrive this way:
+//
+//   - A create-table request's write order, which carries the client's
+//     placeholder source IDs rather than table field IDs. A client numbers those
+//     placeholders however it likes: Spark numbers the columns of a new table
+//     from zero, so sorting by the first column arrives as source-id 0. Binding
+//     the embedded order to the schema the client sent resolves them.
+//   - An add-sort-order commit payload, which applying the update checks against
+//     the table's current schema.
+//
+// Decoding unbound defers the check rather than dropping it: every source ID
+// must still resolve in the schema it is checked against, and no transform is
+// exempt, so an order the schema cannot satisfy is rejected when the update is
+// applied.
+//
+// Use SortOrder for orders read from table metadata, where source IDs are bound
+// field IDs and must be positive. Catalog implementations should decode both the
+// REST create-table request's write order and an add-sort-order commit payload
+// into this type.
+type UnboundSortOrder struct {
+	SortOrder
+}
+
+func (u *UnboundSortOrder) UnmarshalJSON(b []byte) error {
+	return u.unmarshal(b, unboundOrder)
+}
+
 func (s SortOrder) OrderID() int {
 	return s.orderID
 }
@@ -249,6 +336,13 @@ func (s SortOrder) Len() int {
 	return len(s.fields)
 }
 
+// Field returns a copy of the sort field at index i, like Fields does, so a
+// caller can't reach the sort order's internals through SortField.SourceIDs.
+// It panics if i is out of range.
+func (s SortOrder) Field(i int) SortField {
+	return cloneSortField(s.fields[i])
+}
+
 func (s SortOrder) MarshalJSON() ([]byte, error) {
 	type Alias struct {
 		OrderID int         `json:"order-id"`
@@ -262,26 +356,35 @@ func (s SortOrder) MarshalJSON() ([]byte, error) {
 }
 
 func (s *SortOrder) UnmarshalJSON(b []byte) error {
-	type Alias struct {
-		OrderID int         `json:"order-id"`
-		Fields  []SortField `json:"fields"`
-	}
-	aux := Alias{-1, nil}
+	return s.unmarshal(b, boundOrder)
+}
+
+func (s *SortOrder) unmarshal(b []byte, binding orderBinding) error {
+	aux := struct {
+		OrderID *int               `json:"order-id"`
+		Fields  *[]json.RawMessage `json:"fields"`
+	}{}
 
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 
-	if len(aux.Fields) == 0 && aux.OrderID == -1 {
-		aux.Fields = []SortField{}
-		aux.OrderID = 0
+	if aux.OrderID == nil {
+		return fmt.Errorf("%w: sort order is missing required 'order-id' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	if aux.OrderID == -1 {
-		aux.OrderID = InitialSortOrderID
+	if aux.Fields == nil {
+		return fmt.Errorf("%w: sort order is missing required 'fields' key in JSON", iceberg.ErrInvalidArgument)
 	}
 
-	newOrder, err := newSortOrder(aux.OrderID, aux.Fields, false)
+	fields := make([]SortField, len(*aux.Fields))
+	for i, rawField := range *aux.Fields {
+		if err := fields[i].unmarshal(rawField, binding); err != nil {
+			return err
+		}
+	}
+
+	newOrder, err := newSortOrder(*aux.OrderID, fields, false)
 	if err != nil {
 		return err
 	}
@@ -295,6 +398,7 @@ func (s *SortOrder) UnmarshalJSON(b []byte) error {
 //
 // The orderID must be greater than or equal to 0.
 // If orderID is 0, no fields can be passed, this is equal to UnsortedSortOrder.
+// If fields is empty, orderID must be 0.
 // Fields need to have non-nil Transform, valid Direction and NullOrder values,
 // and non-empty source IDs.
 func NewSortOrder(orderID int, fields []SortField) (SortOrder, error) {
@@ -309,6 +413,10 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 
 	if orderID == 0 && len(fields) != 0 {
 		return SortOrder{}, fmt.Errorf("%w: sort order ID 0 is reserved for unsorted order", ErrInvalidSortOrderID)
+	}
+
+	if orderID != UnsortedSortOrderID && len(fields) == 0 {
+		return SortOrder{}, fmt.Errorf("%w: sort order ID %d requires at least one sort field", ErrInvalidSortOrderID, orderID)
 	}
 
 	if fields == nil {
@@ -330,9 +438,8 @@ func newSortOrder(orderID int, fields []SortField, validateSourceIDs bool) (Sort
 			return SortOrder{}, fmt.Errorf("%w: sort field at index %d", ErrInvalidNullOrder, idx)
 		}
 		if validateSourceIDs {
-			if err := validateSortSourceIDs(field.SourceIDs); err != nil {
-				return SortOrder{}, fmt.Errorf("%w: sort field at index %d has invalid source IDs: %v",
-					ErrInvalidSortSourceID, idx, err)
+			if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
+				return SortOrder{}, fmt.Errorf("sort field at index %d has invalid source IDs: %w", idx, err)
 			}
 		}
 	}
@@ -377,8 +484,8 @@ func (s *SortOrder) CheckCompatibility(schema *iceberg.Schema) error {
 			return fmt.Errorf("%w: sort field with source id %d has no transform", ErrInvalidTransform, field.SourceID())
 		}
 
-		if err := validateSortSourceIDs(field.SourceIDs); err != nil {
-			return fmt.Errorf("%w: sort field has invalid source IDs: %v", ErrInvalidSortSourceID, err)
+		if err := validateSortSourceIDs(field.SourceIDs, boundOrder); err != nil {
+			return fmt.Errorf("sort field has invalid source IDs: %w", err)
 		}
 
 		var firstField iceberg.NestedField

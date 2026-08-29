@@ -23,6 +23,9 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"math/bits"
+	"slices"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -31,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/internal"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -42,6 +46,11 @@ type partitionedFanoutWriter struct {
 	schema        *iceberg.Schema
 	itr           iter.Seq2[arrow.RecordBatch, error]
 	writerFactory *writerFactory
+	// Equality-delete inputs may contain partition columns omitted from the output schema,
+	// so compile from the first actual batch and share the immutable plan across workers.
+	planOnce sync.Once
+	plan     *partitionExtractionPlan
+	planErr  error
 }
 
 // PartitionInfo holds the row indices and partition values for a specific partition,
@@ -54,8 +63,83 @@ type partitionInfo struct {
 
 type partitionFieldInfo struct {
 	sourceField iceberg.PartitionField
+	sourceName  string
 	fieldID     int
 	sourceType  iceberg.Type
+	columnIndex int
+	valueAt     func(arrow.Array, int) (any, error)
+}
+
+type partitionExtractionPlan struct {
+	spec         iceberg.PartitionSpec
+	schema       *iceberg.Schema
+	recordSchema *arrow.Schema
+	fields       []partitionFieldInfo
+}
+
+type (
+	binaryPartitionKey  string
+	float32PartitionKey uint32
+	float64PartitionKey uint64
+)
+
+const (
+	// Canonical NaN payloads make all NaNs of the same width compare equal.
+	// The width-specific key types preserve float width, while using raw bits
+	// intentionally keeps -0.0 and +0.0 distinct.
+	canonicalFloat32NaNBits uint32 = 0x7fc00000
+	canonicalFloat64NaNBits uint64 = 0x7ff8000000000000
+)
+
+func comparablePartitionKey(value any) any {
+	switch value := value.(type) {
+	case []byte:
+		return binaryPartitionKey(value)
+	case float32:
+		rawBits := math.Float32bits(value)
+		if math.IsNaN(float64(value)) {
+			rawBits = canonicalFloat32NaNBits
+		}
+
+		return float32PartitionKey(rawBits)
+	case float64:
+		rawBits := math.Float64bits(value)
+		if math.IsNaN(value) {
+			rawBits = canonicalFloat64NaNBits
+		}
+
+		return float64PartitionKey(rawBits)
+	}
+
+	return value
+}
+
+func partitionValuesEqual(left, right any) bool {
+	// Supported partition values are primitive literals; []byte is converted to
+	// a string key and float values are converted to comparable width-aware keys
+	// above. The default branch preserves comparable scalar values.
+	return comparablePartitionKey(left) == comparablePartitionKey(right)
+}
+
+func partitionRecordsEqual(left, right partitionRecord) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if !partitionValuesEqual(left[i], right[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func clonePartitionValue(value any) any {
+	if bytes, ok := value.([]byte); ok {
+		return slices.Clone(bytes)
+	}
+
+	return value
 }
 
 // NewPartitionedFanoutWriter creates a new PartitionedFanoutWriter with the specified
@@ -80,8 +164,13 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 	inputRecordsCh := make(chan arrow.RecordBatch, workers)
 	outputDataFilesCh := make(chan iceberg.DataFile, workers)
 
-	fanoutWorkers, fanoutCtx := errgroup.WithContext(ctx)
+	fanoutBaseCtx, fanoutCancel := context.WithCancel(ctx)
+	fanoutWorkers, fanoutCtx := errgroup.WithContext(fanoutBaseCtx)
 	writerCtx, writerCancel := context.WithCancel(ctx)
+	cancel := func() {
+		fanoutCancel()
+		writerCancel()
+	}
 	startRecordFeeder(fanoutCtx, p.itr, fanoutWorkers, inputRecordsCh)
 
 	for range workers {
@@ -90,7 +179,7 @@ func (p *partitionedFanoutWriter) Write(ctx context.Context, workers int) iter.S
 		})
 	}
 
-	return p.yieldDataFiles(fanoutWorkers, outputDataFilesCh, writerCancel)
+	return p.yieldDataFiles(fanoutWorkers, inputRecordsCh, outputDataFilesCh, cancel)
 }
 
 func startRecordFeeder(ctx context.Context, itr iter.Seq2[arrow.RecordBatch, error], fanoutWorkers *errgroup.Group, inputRecordsCh chan<- arrow.RecordBatch) {
@@ -175,32 +264,40 @@ func (p *partitionedFanoutWriter) processRecord(ctx context.Context, writerCtx c
 	return nil
 }
 
-func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, outputDataFilesCh chan iceberg.DataFile, writerCancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
+func (p *partitionedFanoutWriter) yieldDataFiles(fanoutWorkers *errgroup.Group, inputRecordsCh <-chan arrow.RecordBatch, outputDataFilesCh chan iceberg.DataFile, cancel context.CancelFunc) iter.Seq2[iceberg.DataFile, error] {
 	return yieldDataFiles(
 		p.writerFactory,
 		fanoutWorkers,
+		inputRecordsCh,
 		outputDataFilesCh,
 		p.writerFactory.closeAll,
 		p.writerFactory.abortAll,
-		writerCancel,
+		cancel,
 	)
 }
 
 func yieldDataFiles(
 	writerFactory *writerFactory,
 	fanoutWorkers *errgroup.Group,
+	inputRecordsCh <-chan arrow.RecordBatch,
 	outputDataFilesCh chan iceberg.DataFile,
 	closeAll func() error,
 	abortAll func(),
-	writerCancel context.CancelFunc,
+	cancel context.CancelFunc,
 ) iter.Seq2[iceberg.DataFile, error] {
 	// Use a channel to safely communicate the error from the goroutine
 	// to avoid a data race between writing err in the goroutine and reading it in the iterator.
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(outputDataFilesCh)
-		defer writerCancel()
+		defer cancel()
 		err := fanoutWorkers.Wait()
+		// Wait includes the feeder, which closes inputRecordsCh, so draining cannot
+		// block. Any remaining batches were retained by the feeder but never dequeued;
+		// workers release dequeued batches themselves.
+		for record := range inputRecordsCh {
+			record.Release()
+		}
 		if err != nil {
 			abortAll()
 		} else {
@@ -211,10 +308,15 @@ func yieldDataFiles(
 	}()
 
 	return func(yield func(iceberg.DataFile, error) bool) {
+		// LIFO defer order matters: cancel signals the producer first
+		// (synchronous, instant), then the drain pulls outputDataFilesCh so
+		// any in-flight stream send can complete and the producer's
+		// closeAll / fanoutWorkers.Wait paths unblock.
 		defer func() {
 			for range outputDataFilesCh {
 			}
 		}()
+		defer cancel()
 
 		// Yield data files as they arrive - no error yet since goroutine is still running
 		for f := range outputDataFilesCh {
@@ -231,15 +333,27 @@ func yieldDataFiles(
 }
 
 func (p *partitionedFanoutWriter) getPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
-	return getRecordPartitions(p.partitionSpec, p.schema, record)
+	p.planOnce.Do(func() {
+		p.plan, p.planErr = newPartitionExtractionPlan(p.partitionSpec, p.schema, record.Schema())
+	})
+	if p.planErr != nil {
+		return nil, p.planErr
+	}
+
+	return p.plan.getRecordPartitions(record)
 }
 
 func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, record arrow.RecordBatch) ([]*partitionInfo, error) {
-	partitionMap := newPartitionMapNode()
-	partitionFields := spec.PartitionType(schema).FieldList
-	partitionRec := make(partitionRecord, len(partitionFields))
+	plan, err := newPartitionExtractionPlan(spec, schema, record.Schema())
+	if err != nil {
+		return nil, err
+	}
 
-	partitionColumns := make([]arrow.Array, len(partitionFields))
+	return plan.getRecordPartitions(record)
+}
+
+func newPartitionExtractionPlan(spec iceberg.PartitionSpec, schema *iceberg.Schema, recordSchema *arrow.Schema) (*partitionExtractionPlan, error) {
+	partitionFields := spec.PartitionType(schema).FieldList
 	partitionFieldsInfo := make([]partitionFieldInfo, len(partitionFields))
 	specFieldsByID := make(map[int]iceberg.PartitionField, spec.NumFields())
 	for _, field := range spec.Fields() {
@@ -247,6 +361,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 	}
 
 	for i, partitionField := range partitionFields {
+		partitionFieldsInfo[i].columnIndex = -1
 		sourceField, ok := specFieldsByID[partitionField.ID]
 		if !ok {
 			return nil, fmt.Errorf("failed to find partition field ID %d in spec", partitionField.ID)
@@ -256,7 +371,7 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		if !ok {
 			continue
 		}
-		colIndices := record.Schema().FieldIndices(colName)
+		colIndices := recordSchema.FieldIndices(colName)
 		if len(colIndices) == 0 {
 			return nil, fmt.Errorf("failed to find source column %q in record schema", colName)
 		}
@@ -264,42 +379,168 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 		if !ok {
 			return nil, fmt.Errorf("failed to find type for source field ID %d in schema", sourceField.SourceID())
 		}
-		partitionColumns[i] = record.Column(colIndices[0])
 		partitionFieldsInfo[i] = partitionFieldInfo{
 			sourceField: sourceField,
+			sourceName:  colName,
 			fieldID:     sourceField.FieldID,
 			sourceType:  sourceType,
+			columnIndex: colIndices[0],
+			valueAt:     bindPartitionValue(sourceField.Transform, sourceType),
+		}
+	}
+
+	return &partitionExtractionPlan{
+		spec:         spec,
+		schema:       schema,
+		recordSchema: recordSchema,
+		fields:       partitionFieldsInfo,
+	}, nil
+}
+
+func (p *partitionExtractionPlan) getRecordPartitions(record arrow.RecordBatch) ([]*partitionInfo, error) {
+	// Preserve support for iterators whose batch schema changes. The usual path compares
+	// schema pointers; equivalent independently-built schemas also reuse the plan.
+	if !p.matchesSchema(record.Schema()) {
+		plan, err := newPartitionExtractionPlan(p.spec, p.schema, record.Schema())
+		if err != nil {
+			return nil, err
+		}
+
+		return plan.getRecordPartitions(record)
+	}
+
+	partitionMap := newPartitionMapNode()
+	partitionRec := make(partitionRecord, len(p.fields))
+	partitionColumns := make([]arrow.Array, len(p.fields))
+	for i, fieldInfo := range p.fields {
+		if fieldInfo.columnIndex >= 0 {
+			partitionColumns[i] = record.Column(fieldInfo.columnIndex)
 		}
 	}
 
 	for row := range record.NumRows() {
-		for i := range partitionFields {
+		for i, fieldInfo := range p.fields {
 			col := partitionColumns[i]
 			if col != nil && !col.IsNull(int(row)) {
-				fieldInfo := partitionFieldsInfo[i]
-				sourceField := fieldInfo.sourceField
-				val, err := getArrowValueAsIcebergLiteral(col, int(row), fieldInfo.sourceType)
+				value, err := fieldInfo.valueAt(col, int(row))
 				if err != nil {
-					return nil, fmt.Errorf("failed to get arrow values as iceberg literal: %w", err)
+					return nil, fmt.Errorf(
+						"failed to convert source column %q (field ID %d) from Arrow type %s to Iceberg type %s: %w",
+						fieldInfo.sourceName,
+						fieldInfo.sourceField.SourceID(),
+						col.DataType(),
+						fieldInfo.sourceType,
+						err,
+					)
 				}
 
-				transformedLiteral := sourceField.Transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: val})
-				if transformedLiteral.Valid {
-					partitionRec[i] = transformedLiteral.Val.Any()
-				} else {
-					partitionRec[i] = nil
-				}
+				partitionRec[i] = value
 			} else {
 				partitionRec[i] = nil
 			}
 		}
 
 		// Get or create partition info for this partition key
-		partVal := partitionMap.getOrCreate(partitionRec, partitionFieldsInfo)
+		partVal := partitionMap.getOrCreate(partitionRec, p.fields, record.NumRows())
 		partVal.rows = append(partVal.rows, row)
 	}
 
 	return partitionMap.collectPartitions(), nil
+}
+
+func (p *partitionExtractionPlan) matchesSchema(recordSchema *arrow.Schema) bool {
+	return recordSchema == p.recordSchema || recordSchema.Equal(p.recordSchema)
+}
+
+func bindPartitionValue(transform iceberg.Transform, sourceType iceberg.Type) func(arrow.Array, int) (any, error) {
+	bound, ok := bindPartitionTransform(transform, sourceType)
+	if !ok {
+		return func(column arrow.Array, row int) (any, error) {
+			value, err := getArrowValueAsIcebergLiteral(column, row, sourceType)
+			if err != nil {
+				return nil, err
+			}
+			if value == nil {
+				return nil, nil
+			}
+
+			transformed := transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: value})
+			if !transformed.Valid {
+				return nil, nil
+			}
+
+			return transformed.Val.Any(), nil
+		}
+	}
+
+	return func(column arrow.Array, row int) (any, error) {
+		value, err := getArrowValueAsIcebergValue(column, row, sourceType)
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			return nil, nil
+		}
+
+		return bound(value), nil
+	}
+}
+
+func bindPartitionTransform(transform iceberg.Transform, sourceType iceberg.Type) (func(any) any, bool) {
+	optionalInt := func(transformer func(any) iceberg.Optional[int32]) func(any) any {
+		return func(value any) any {
+			transformed := transformer(value)
+			if !transformed.Valid {
+				return nil
+			}
+
+			return transformed.Val
+		}
+	}
+	optionalDate := func(transformer func(any) iceberg.Optional[int32]) func(any) any {
+		return func(value any) any {
+			transformed := transformer(value)
+			if !transformed.Valid {
+				return nil
+			}
+
+			return iceberg.Date(transformed.Val)
+		}
+	}
+
+	switch typed := transform.(type) {
+	case iceberg.IdentityTransform:
+		return func(value any) any { return value }, true
+	case iceberg.VoidTransform:
+		return func(any) any { return nil }, true
+	case iceberg.BucketTransform:
+		if !typed.CanTransform(sourceType) {
+			break
+		}
+
+		return optionalInt(typed.Transformer(sourceType)), true
+	case iceberg.TruncateTransform:
+		transformer, err := typed.Transformer(sourceType)
+		if err == nil {
+			return transformer, true
+		}
+	case iceberg.UnknownTransform:
+		return func(any) any { return nil }, true
+	}
+
+	// Year, month, and hour transforms bind through TimeTransform.
+	if typed, ok := transform.(iceberg.TimeTransform); ok {
+		transformer, err := typed.Transformer(sourceType)
+		if err == nil {
+			if _, ok := transform.(iceberg.DayTransform); ok {
+				return optionalDate(transformer), true
+			}
+
+			return optionalInt(transformer), true
+		}
+	}
+
+	return nil, false
 }
 
 // partitionMapNode represents a simple tree structure for storing partitionInfo.
@@ -308,27 +549,29 @@ func getRecordPartitions(spec iceberg.PartitionSpec, schema *iceberg.Schema, rec
 // is in the order of the partition spec.
 // The value is either a *partitionMapNode or a *partitionInfo.
 type partitionMapNode struct {
-	children  map[any]any
-	leafCount int
+	children map[any]any
+	// partitionCount is maintained by the root node for the current batch and
+	// sizes the single result slice returned by collectPartitions.
+	partitionCount int
 }
 
 func newPartitionMapNode() *partitionMapNode {
 	return &partitionMapNode{
-		children:  make(map[any]any),
-		leafCount: 0,
+		children: make(map[any]any),
 	}
 }
 
 // getOrCreate navigates the tree and returns the partitionInfo for the given partition key,
 // creating nodes along the way if they don't exist
-func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo) *partitionInfo {
+func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo []partitionFieldInfo, numRows int64) *partitionInfo {
 	// Navigate through all but the last partition field
 	node := n
 	for _, part := range partitionRec[:len(partitionRec)-1] {
-		val, ok := node.children[part]
+		key := comparablePartitionKey(part)
+		val, ok := node.children[key]
 		if !ok {
 			newNode := newPartitionMapNode()
-			node.children[part] = newNode
+			node.children[key] = newNode
 			node = newNode
 		} else {
 			node = val.(*partitionMapNode)
@@ -336,7 +579,7 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	}
 
 	// Last level stores the actual partitionInfo
-	lastKey := partitionRec[len(partitionRec)-1]
+	lastKey := comparablePartitionKey(partitionRec[len(partitionRec)-1])
 	partVal, ok := node.children[lastKey].(*partitionInfo)
 	if ok {
 		return partVal
@@ -348,19 +591,41 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 	// Copy partitionRec values so they don't get overwritten
 	partRecCopy := make(partitionRecord, len(partitionRec))
 	for i := range partitionRec {
-		partitionValues[fieldInfo[i].fieldID] = partitionRec[i]
-		partRecCopy[i] = partitionRec[i]
+		value := clonePartitionValue(partitionRec[i])
+		partitionValues[fieldInfo[i].fieldID] = value
+		partRecCopy[i] = value
 	}
 
 	partVal = &partitionInfo{
-		rows:            make([]int64, 0, 128), // modest starting capacity
+		rows:            make([]int64, 0, initialPartitionRowCapacity(numRows, n.partitionCount)),
 		partitionValues: partitionValues,
 		partitionRec:    partRecCopy,
 	}
 	node.children[lastKey] = partVal
-	node.leafCount++
+	n.partitionCount++
 
 	return partVal
+}
+
+const maxInitialPartitionRowCapacity = 128
+
+func initialPartitionRowCapacity(numRows int64, partitionCount int) int {
+	if numRows <= 0 || partitionCount < 0 || int64(partitionCount) >= numRows {
+		return 1
+	}
+
+	estimatedRows := numRows / int64(partitionCount+1)
+	if estimatedRows < 1 {
+		return 1
+	}
+	if estimatedRows > maxInitialPartitionRowCapacity {
+		return maxInitialPartitionRowCapacity
+	}
+
+	// Use power-of-two capacities so a late-discovered partition grows through
+	// the old 128-row allocation instead of jumping past it from a capacity
+	// such as 127.
+	return 1 << bits.Len64(uint64(estimatedRows-1))
 }
 
 // collectPartitions returns every partitionInfo in the tree in
@@ -368,13 +633,18 @@ func (n *partitionMapNode) getOrCreate(partitionRec partitionRecord, fieldInfo [
 // the clustered writer, whose revisit check would otherwise depend on
 // Go's randomized map iteration) must sort the result themselves.
 func (n *partitionMapNode) collectPartitions() []*partitionInfo {
-	result := make([]*partitionInfo, 0, n.leafCount)
+	result := make([]*partitionInfo, 0, n.partitionCount)
+
+	return n.appendPartitions(result)
+}
+
+func (n *partitionMapNode) appendPartitions(result []*partitionInfo) []*partitionInfo {
 	for _, v := range n.children {
 		switch node := v.(type) {
 		case *partitionInfo:
 			result = append(result, node)
 		case *partitionMapNode:
-			result = append(result, node.collectPartitions()...)
+			result = node.appendPartitions(result)
 		}
 	}
 
@@ -387,12 +657,35 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 	mem := compute.GetAllocator(ctx)
 
 	return func(record arrow.RecordBatch, rowIndices []int64) (arrow.RecordBatch, error) {
+		if len(rowIndices) == 0 && record.NumRows() == 0 {
+			record.Retain()
+
+			return record, nil
+		}
+
+		if start, end, ok := contiguousRowRange(rowIndices, record.NumRows()); ok {
+			if start == 0 && end == record.NumRows() {
+				record.Retain()
+
+				return record, nil
+			}
+
+			if contiguousSliceHasBoundedRetention(start, end, record.NumRows()) && recordHasRowBoundedStorage(record) {
+				return record.NewSlice(start, end), nil
+			}
+		}
+
 		bldr := array.NewInt64Builder(mem)
 		defer bldr.Release()
 
 		bldr.AppendValues(rowIndices, nil)
 		rowIndicesArr := bldr.NewInt64Array()
 		defer rowIndicesArr.Release()
+
+		recordMetadata := arrow.Metadata{}
+		if recordWithMetadata, ok := record.(arrow.RecordBatchWithMetadata); ok {
+			recordMetadata = recordWithMetadata.Metadata()
+		}
 
 		partitionedRecord, err := compute.Take(
 			ctx,
@@ -404,11 +697,303 @@ func partitionBatchByKey(ctx context.Context) partitionBatchFn {
 			return nil, err
 		}
 
-		return partitionedRecord.(*compute.RecordDatum).Value, nil
+		return materializeDictionaryColumns(ctx, partitionedRecord.(*compute.RecordDatum).Value, recordMetadata)
 	}
 }
 
+// materializeDictionaryColumns removes dictionary values that are not referenced
+// by a partial result. Arrow's Take kernel copies dictionary indices but reuses
+// the complete dictionary, which can otherwise retain a large variable-width
+// buffer in a rolling writer queue.
+func materializeDictionaryColumns(ctx context.Context, record arrow.RecordBatch, recordMetadata arrow.Metadata) (arrow.RecordBatch, error) {
+	var columns []arrow.Array
+	var fields []arrow.Field
+	var materialized []arrow.Array
+
+	for i, column := range record.Columns() {
+		values, changed, err := materializeDictionaryArray(ctx, column)
+		if err != nil {
+			for _, materializedColumn := range materialized {
+				materializedColumn.Release()
+			}
+			record.Release()
+
+			return nil, err
+		}
+		if !changed {
+			continue
+		}
+
+		if columns == nil {
+			columns = slices.Clone(record.Columns())
+			fields = record.Schema().Fields()
+			materialized = make([]arrow.Array, 0, 1)
+		}
+
+		columns[i] = values
+		fields[i].Type = values.DataType()
+		materialized = append(materialized, values)
+	}
+
+	if columns == nil {
+		return record, nil
+	}
+
+	metadata := record.Schema().Metadata()
+	result := array.NewRecordBatchWithMetadata(arrow.NewSchema(fields, &metadata), columns, record.NumRows(), recordMetadata)
+	for _, materializedColumn := range materialized {
+		materializedColumn.Release()
+	}
+	record.Release()
+
+	return result, nil
+}
+
+// materializeDictionaryArray removes dictionaries recursively from the nested
+// array types used by Iceberg schemas. A dictionary array is decoded by taking
+// its selected logical values, while nested arrays are rebuilt only when one of
+// their children changes.
+func materializeDictionaryArray(ctx context.Context, input arrow.Array) (arrow.Array, bool, error) {
+	if input.DataType().ID() == arrow.DICTIONARY {
+		dictionary := input.(*array.Dictionary)
+		values, err := compute.TakeArray(ctx, dictionary.Dictionary(), dictionary.Indices())
+		if err != nil {
+			return nil, false, err
+		}
+
+		materializedValues, _, err := materializeDictionaryArray(ctx, values)
+		if err != nil {
+			values.Release()
+
+			return nil, false, err
+		}
+		if materializedValues != values {
+			values.Release()
+			values = materializedValues
+		}
+
+		return values, true, nil
+	}
+
+	dataType := input.DataType()
+	switch dataType.ID() {
+	case arrow.STRUCT, arrow.LIST, arrow.LARGE_LIST, arrow.FIXED_SIZE_LIST, arrow.MAP:
+	default:
+		return input, false, nil
+	}
+
+	data := input.Data()
+	children := make([]arrow.Array, len(data.Children()))
+	changed := false
+	for i, childData := range data.Children() {
+		child := array.MakeFromData(childData)
+		materializedChild, childChanged, err := materializeDictionaryArray(ctx, child)
+		if err != nil {
+			child.Release()
+			for _, materializedChild := range children {
+				if materializedChild != nil {
+					materializedChild.Release()
+				}
+			}
+
+			return nil, false, err
+		}
+
+		if childChanged {
+			child.Release()
+			child = materializedChild
+			changed = true
+		}
+		children[i] = child
+	}
+
+	if !changed {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return input, false, nil
+	}
+
+	newType, err := nestedArrayTypeWithChildren(dataType, children)
+	if err != nil {
+		for _, child := range children {
+			child.Release()
+		}
+
+		return nil, false, err
+	}
+
+	childData := make([]arrow.ArrayData, len(children))
+	for i, child := range children {
+		childData[i] = child.Data()
+	}
+	newData := array.NewData(newType, data.Len(), data.Buffers(), childData, data.NullN(), data.Offset())
+	result := array.MakeFromData(newData)
+	newData.Release()
+	for _, child := range children {
+		child.Release()
+	}
+
+	return result, true, nil
+}
+
+func nestedArrayTypeWithChildren(dataType arrow.DataType, children []arrow.Array) (arrow.DataType, error) {
+	switch dataType := dataType.(type) {
+	case *arrow.StructType:
+		fields := dataType.Fields()
+		if len(fields) != len(children) {
+			return nil, fmt.Errorf("struct has %d fields but %d children", len(fields), len(children))
+		}
+		for i, child := range children {
+			fields[i].Type = child.DataType()
+		}
+
+		return arrow.StructOf(fields...), nil
+	case *arrow.ListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.ListOfField(field), nil
+	case *arrow.LargeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("large list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.LargeListOfField(field), nil
+	case *arrow.FixedSizeListType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("fixed-size list has %d children", len(children))
+		}
+		field := dataType.ElemField()
+		field.Type = children[0].DataType()
+
+		return arrow.FixedSizeListOfField(dataType.Len(), field), nil
+	case *arrow.MapType:
+		if len(children) != 1 {
+			return nil, fmt.Errorf("map has %d children", len(children))
+		}
+		entryType, ok := children[0].DataType().(*arrow.StructType)
+		if !ok || entryType.NumFields() != 2 {
+			return nil, fmt.Errorf("map child has type %s, want a two-field struct", children[0].DataType())
+		}
+
+		result := arrow.MapOfFields(entryType.Field(0), entryType.Field(1))
+		result.KeysSorted = dataType.KeysSorted
+
+		return result, nil
+	default:
+		return nil, fmt.Errorf("unsupported nested array type %s", dataType)
+	}
+}
+
+// recordHasRowBoundedStorage reports whether a partial zero-copy slice retains
+// buffers whose size is bounded by the number of rows. Fixed-width arrays have
+// row-bounded value and validity buffers. Dictionary arrays are excluded even
+// though their indices are fixed-width because their dictionary values are not.
+func recordHasRowBoundedStorage(record arrow.RecordBatch) bool {
+	for _, column := range record.Columns() {
+		dataType := column.Data().DataType()
+		if dataType.ID() == arrow.DICTIONARY {
+			return false
+		}
+		if _, ok := dataType.(arrow.FixedWidthDataType); !ok {
+			return false
+		}
+	}
+
+	return true
+}
+
+// contiguousSliceHasBoundedRetention reports whether a partial zero-copy slice
+// retains no more than twice as many input rows as it returns. This bound is
+// meaningful only for records whose storage is row-bounded.
+func contiguousSliceHasBoundedRetention(start, end, numRows int64) bool {
+	selectedRows := end - start
+
+	return selectedRows >= numRows-selectedRows
+}
+
+func contiguousRowRange(rowIndices []int64, numRows int64) (start, end int64, ok bool) {
+	if len(rowIndices) == 0 {
+		return 0, 0, false
+	}
+
+	start = rowIndices[0]
+	length := int64(len(rowIndices))
+	if start < 0 || length > numRows || start > numRows-length {
+		return 0, 0, false
+	}
+
+	for offset, row := range rowIndices[1:] {
+		if row != start+int64(offset)+1 {
+			return 0, 0, false
+		}
+	}
+
+	return start, start + length, true
+}
+
 func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
+	value, err := getArrowValueAsIcebergValue(column, row, sourceType)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, nil
+	}
+
+	literal, err := partitionLiteralFromValue(value)
+	if err != nil {
+		return nil, err
+	}
+	switch sourceType.(type) {
+	case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		return literal.To(sourceType)
+	default:
+		return literal, nil
+	}
+}
+
+func partitionLiteralFromValue(value any) (iceberg.Literal, error) {
+	switch value := value.(type) {
+	case bool:
+		return iceberg.NewLiteral(value), nil
+	case int32:
+		return iceberg.NewLiteral(value), nil
+	case int64:
+		return iceberg.NewLiteral(value), nil
+	case float32:
+		return iceberg.NewLiteral(value), nil
+	case float64:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Date:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Time:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Timestamp:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.TimestampNano:
+		return iceberg.NewLiteral(value), nil
+	case string:
+		return iceberg.NewLiteral(value), nil
+	case []byte:
+		return iceberg.NewLiteral(value), nil
+	case uuid.UUID:
+		return iceberg.NewLiteral(value), nil
+	case iceberg.Decimal:
+		return iceberg.NewLiteral(value), nil
+	default:
+		return nil, fmt.Errorf("unsupported Iceberg literal value type: %T", value)
+	}
+}
+
+func getArrowValueAsIcebergValue(column arrow.Array, row int, sourceType iceberg.Type) (any, error) {
 	if column.IsNull(row) {
 		return nil, nil
 	}
@@ -416,33 +1001,33 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	switch arr := column.(type) {
 	case *array.Date32:
 
-		return iceberg.NewLiteral(iceberg.Date(arr.Value(row))), nil
+		return iceberg.Date(arr.Value(row)), nil
 	case *array.Time64:
 		dt, ok := arr.DataType().(*arrow.Time64Type)
 		if !ok || dt.Unit != arrow.Microsecond {
 			return nil, fmt.Errorf("%w: unsupported arrow type for conversion - %s", iceberg.ErrInvalidSchema, arr.DataType())
 		}
 
-		return iceberg.NewLiteral(iceberg.Time(arr.Value(row))), nil
+		return iceberg.Time(arr.Value(row)), nil
 	case *array.Timestamp:
 
-		return timestampLiteralFromArrow(arr, row, sourceType)
+		return timestampValueFromArrow(arr, row, sourceType)
 	case *array.Decimal32:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal32Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *array.Decimal64:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
-			Val:   decimal128.FromU64(uint64(val)),
+			Val:   decimal128.FromI64(int64(val)),
 			Scale: int(arr.DataType().(*arrow.Decimal64Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *array.Decimal128:
 		val := arr.Value(row)
 		dec := iceberg.Decimal{
@@ -450,56 +1035,69 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 			Scale: int(arr.DataType().(*arrow.Decimal128Type).Scale),
 		}
 
-		return iceberg.NewLiteral(dec), nil
+		return dec, nil
 	case *extensions.UUIDArray:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 
 	case *array.String:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.LargeString:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int64:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int32:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Int16:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Int8:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint64:
 
-		return iceberg.NewLiteral(int64(arr.Value(row))), nil
+		return int64(arr.Value(row)), nil
 	case *array.Uint32:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint16:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Uint8:
 
-		return iceberg.NewLiteral(int32(arr.Value(row))), nil
+		return int32(arr.Value(row)), nil
 	case *array.Float32:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Float64:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Boolean:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.Binary:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
 	case *array.LargeBinary:
 
-		return iceberg.NewLiteral(arr.Value(row)), nil
+		return arr.Value(row), nil
+	case *array.FixedSizeBinary:
+		switch sourceType.(type) {
+		case iceberg.BinaryType, iceberg.FixedType, iceberg.UUIDType:
+		default:
+			return nil, fmt.Errorf("%w: cannot convert Arrow %s to Iceberg type %v", iceberg.ErrInvalidSchema, arr.DataType(), sourceType)
+		}
+
+		literal, err := iceberg.NewLiteral(arr.Value(row)).To(sourceType)
+		if err != nil {
+			return nil, err
+		}
+
+		return literal.Any(), nil
 
 	default:
 		val := column.GetOneForMarshal(row)
@@ -508,7 +1106,7 @@ func getArrowValueAsIcebergLiteral(column arrow.Array, row int, sourceType icebe
 	}
 }
 
-func timestampLiteralFromArrow(arr *array.Timestamp, row int, sourceType iceberg.Type) (iceberg.Literal, error) {
+func timestampValueFromArrow(arr *array.Timestamp, row int, sourceType iceberg.Type) (any, error) {
 	timestampType := arr.DataType().(*arrow.TimestampType)
 	value := int64(arr.Value(row))
 
@@ -519,14 +1117,14 @@ func timestampLiteralFromArrow(arr *array.Timestamp, row int, sourceType iceberg
 			return nil, err
 		}
 
-		return iceberg.NewLiteral(iceberg.Timestamp(micros)), nil
+		return iceberg.Timestamp(micros), nil
 	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
 		nanos, err := arrowTimestampToNanos(value, timestampType.Unit)
 		if err != nil {
 			return nil, err
 		}
 
-		return iceberg.NewLiteral(iceberg.TimestampNano(nanos)), nil
+		return iceberg.TimestampNano(nanos), nil
 	default:
 		return nil, fmt.Errorf("cannot convert arrow timestamp to iceberg literal for source type %v", sourceType)
 	}

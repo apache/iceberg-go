@@ -24,18 +24,50 @@ import (
 	"runtime/debug"
 )
 
-var version string
+const (
+	icebergModulePath = "github.com/apache/iceberg-go"
+	unknownVersion    = "(unknown version)"
+)
 
-func init() {
-	version = "(unknown version)"
-	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "(devel)" {
-			version = info.Main.Version
+var version = detectVersion()
+
+func detectVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return unknownVersion
+	}
+
+	return versionFromBuildInfo(info)
+}
+
+func versionFromBuildInfo(info *debug.BuildInfo) string {
+	if info.Main.Path == icebergModulePath {
+		return moduleVersion(&info.Main)
+	}
+
+	for _, dep := range info.Deps {
+		if dep != nil && dep.Path == icebergModulePath {
+			return moduleVersion(dep)
 		}
 	}
+
+	return unknownVersion
+}
+
+func moduleVersion(module *debug.Module) string {
+	if module.Replace != nil {
+		module = module.Replace
+	}
+	if module.Version == "" || module.Version == "(devel)" {
+		return unknownVersion
+	}
+
+	return module.Version
 }
 
 func Version() string { return version }
+
+func fullVersion() string { return "Apache Iceberg Go " + Version() }
 
 // Optional represents a typed value that could be null
 type Optional[T any] struct {
@@ -88,7 +120,7 @@ var lzseed = maphash.MakeSeed()
 type literalSet map[any]struct{ orig Literal }
 
 func newLiteralSet(vals ...Literal) Set[Literal] {
-	s := literalSet{}
+	s := make(literalSet, len(vals))
 	for _, v := range vals {
 		s.addliteral(v)
 	}

@@ -43,7 +43,7 @@ func (e endpoint) String() string { return e.method + " " + e.path }
 // nparams is the number of "{...}" placeholders reqPath expects.
 func (e endpoint) nparams() int {
 	n := 0
-	for _, s := range strings.Split(strings.TrimPrefix(e.path, pathPrefix+"/"), "/") {
+	for s := range strings.SplitSeq(strings.TrimPrefix(e.path, pathPrefix+"/"), "/") {
 		if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
 			n++
 		}

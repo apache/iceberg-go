@@ -64,8 +64,22 @@ type defaultDataFileWriter struct {
 	format           tblutils.FileFormat
 	props            iceberg.Properties
 	content          iceberg.ManifestEntryContent
-	meta             *MetadataBuilder
 	equalityFieldIDs []int
+	invariants       dataWriterInvariants
+}
+
+// dataWriterInvariants contains the write configuration shared by every task
+// handled by a defaultDataFileWriter.
+type dataWriterInvariants struct {
+	statsCols       map[int]tblutils.StatisticsCollector
+	colMapping      map[string]int
+	variantFieldIDs map[int]struct{}
+	writeProps      any
+	rowGroupBytes   int64
+	spec            iceberg.PartitionSpec
+	extension       string
+	arrowSchema     *arrow.Schema
+	schemaOpts      SchemaOptions
 }
 
 type dataFileWriterOption func(writer *defaultDataFileWriter)
@@ -105,6 +119,11 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 	if err != nil {
 		return nil, err
 	}
+	if fileFormat == iceberg.ParquetFile {
+		if err := tblutils.ValidateParquetWriteProperties(props); err != nil {
+			return nil, err
+		}
+	}
 
 	w := defaultDataFileWriter{
 		loc:        locProvider,
@@ -114,10 +133,61 @@ func newDataFileWriter(rootLocation string, fs io.WriteFileIO, meta *MetadataBui
 		format:     tblutils.GetFileFormat(fileFormat),
 		content:    iceberg.EntryContentData,
 		props:      props,
-		meta:       meta,
 	}
 	for _, apply := range opts {
 		apply(&w)
+	}
+
+	statsCols, err := computeStatsPlan(w.fileSchema, meta.props)
+	if err != nil {
+		return nil, err
+	}
+
+	currentSpec, err := meta.CurrentSpec()
+	if err != nil {
+		return nil, err
+	}
+
+	var rowGroupBytes int64
+	if w.fileFormat == iceberg.ParquetFile {
+		rowGroupBytes, err = tblutils.ParquetRowGroupTargetSizeBytes(w.props)
+		if err != nil {
+			return nil, err
+		}
+	}
+	arrowSchema, err := SchemaToArrowSchemaWithOptions(w.fileSchema, ArrowSchemaOptions{
+		IncludeFieldIDs: true,
+		TableProperties: meta.props,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var colMapping map[string]int
+	var variantFieldIDs map[int]struct{}
+	if w.fileFormat == iceberg.ParquetFile {
+		colMapping, err = w.format.PathToIDMapping(w.fileSchema)
+		if err != nil {
+			return nil, err
+		}
+		variantFieldIDs = tblutils.VariantFieldIDsFromSchema(w.fileSchema)
+	}
+
+	w.invariants = dataWriterInvariants{
+		statsCols:       statsCols,
+		colMapping:      colMapping,
+		variantFieldIDs: variantFieldIDs,
+		writeProps:      w.format.GetWriteProperties(w.props),
+		rowGroupBytes:   rowGroupBytes,
+		spec:            *currentSpec,
+		extension:       strings.ToLower(string(w.fileFormat)),
+		arrowSchema:     arrowSchema,
+		schemaOpts: SchemaOptions{
+			DowncastTimestamp: true,
+			IncludeFieldIDs:   true,
+			UseWriteDefault:   true,
+			TableProperties:   meta.props,
+		},
 	}
 
 	return &w, nil
@@ -138,13 +208,8 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 
 	batches := make([]arrow.RecordBatch, len(task.Batches))
 	for i, b := range task.Batches {
-		rec, err := ToRequestedSchema(ctx, w.fileSchema,
-			task.Schema, b, SchemaOptions{
-				DowncastTimestamp: true,
-				IncludeFieldIDs:   true,
-				UseWriteDefault:   true,
-				TableProperties:   w.meta.props,
-			})
+		rec, err := toRequestedSchema(ctx, w.fileSchema,
+			task.Schema, b, w.invariants.schemaOpts, w.invariants.arrowSchema)
 		if err != nil {
 			return nil, err
 		}
@@ -152,32 +217,19 @@ func (w *defaultDataFileWriter) writeFile(ctx context.Context, partitionValues m
 		defer rec.Release()
 	}
 
-	statsCols, err := computeStatsPlan(w.fileSchema, w.meta.props)
-	if err != nil {
-		return nil, err
-	}
-
 	filePath := w.loc.NewDataLocation(
-		task.GenerateDataFileName(strings.ToLower(string(w.fileFormat))))
-
-	currentSpec, err := w.meta.CurrentSpec()
-	if err != nil {
-		return nil, err
-	}
-
-	rowGroupTargetSizeBytes, err := tblutils.ParquetRowGroupTargetSizeBytes(w.props)
-	if err != nil {
-		return nil, err
-	}
+		task.GenerateDataFileName(w.invariants.extension))
 
 	return w.format.WriteDataFile(ctx, w.fs, partitionValues, tblutils.WriteFileInfo{
 		FileSchema:       w.fileSchema,
 		Content:          w.content,
 		FileName:         filePath,
-		StatsCols:        statsCols,
-		WriteProps:       w.format.GetWriteProperties(w.props),
-		RowGroupBytes:    rowGroupTargetSizeBytes,
-		Spec:             *currentSpec,
+		StatsCols:        w.invariants.statsCols,
+		ColMapping:       w.invariants.colMapping,
+		VariantFieldIDs:  w.invariants.variantFieldIDs,
+		WriteProps:       w.invariants.writeProps,
+		RowGroupBytes:    w.invariants.rowGroupBytes,
+		Spec:             w.invariants.spec,
 		EqualityFieldIDs: w.equalityFieldIDs,
 		SortOrderID:      task.SortOrderID,
 	}, batches)

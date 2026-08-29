@@ -25,6 +25,7 @@ package table
 // end-to-end once PR 2.5 adds refresh-and-replay.
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -57,9 +58,7 @@ func newValidateTestTxn(t *testing.T, props iceberg.Properties) *Transaction {
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
 	)
 	mergedProps := iceberg.Properties{PropertyFormatVersion: "2"}
-	for k, v := range props {
-		mergedProps[k] = v
-	}
+	maps.Copy(mergedProps, props)
 	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder, "file:///tmp/validate-test", mergedProps)
 	require.NoError(t, err)
 

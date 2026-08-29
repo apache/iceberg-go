@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"regexp"
 	"runtime"
 	"slices"
@@ -35,6 +36,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	"github.com/twmb/avro/atype"
 	"golang.org/x/sync/errgroup"
 )
@@ -159,13 +161,22 @@ func PartitionRecordValue(field iceberg.PartitionField, val iceberg.Literal, sch
 		return ret, nil
 	}
 
-	f, ok := schema.FindFieldByID(field.SourceID())
+	f, ok := schema.FindFieldByIDRef(field.SourceID(), iceberginternal.SchemaRef{})
 	if !ok {
 		return ret, fmt.Errorf("%w: could not find source field in schema for %s",
 			iceberg.ErrInvalidSchema, field.String())
 	}
 
-	out, err := val.To(f.Type)
+	return partitionRecordValue(val, f.Type)
+}
+
+func partitionRecordValue(val iceberg.Literal, sourceType iceberg.Type) (iceberg.Optional[iceberg.Literal], error) {
+	var ret iceberg.Optional[iceberg.Literal]
+	if val == nil {
+		return ret, nil
+	}
+
+	out, err := val.To(sourceType)
 	if err != nil {
 		return ret, err
 	}
@@ -221,8 +232,22 @@ func (d *DataFileStatistics) PartitionValue(field iceberg.PartitionField, sc *ic
 		return nil
 	}
 
-	lowerRec := must(PartitionRecordValue(field, agg.Min(), sc))
-	upperRec := must(PartitionRecordValue(field, agg.Max(), sc))
+	sourceField, ok := sc.FindFieldByIDRef(field.SourceID(), iceberginternal.SchemaRef{})
+	if !ok {
+		panic(fmt.Errorf("%w: could not find source field in schema for %s",
+			iceberg.ErrInvalidSchema, field.String()))
+	}
+
+	return d.partitionValueWithSourceType(field, agg, sourceField.Type)
+}
+
+func (d *DataFileStatistics) partitionValueWithSourceType(field iceberg.PartitionField, agg StatsAgg, sourceType iceberg.Type) any {
+	if agg == nil {
+		return nil
+	}
+
+	lowerRec := must(partitionRecordValue(agg.Min(), sourceType))
+	upperRec := must(partitionRecordValue(agg.Max(), sourceType))
 
 	lowerT := field.Transform.Apply(lowerRec)
 	upperT := field.Transform.Apply(upperRec)
@@ -270,18 +295,25 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	if !opts.Spec.Equals(*iceberg.UnpartitionedSpec) {
 		fieldIDToPartitionData = make(map[int]any)
 		for _, field := range opts.Spec.Fields() {
+			sourceField, sourceFieldFound := opts.Schema.FindFieldByIDRef(
+				field.SourceID(), iceberginternal.SchemaRef{})
 			partitionVal := opts.PartitionValues[field.FieldID]
 			switch {
 			case partitionVal != nil:
 				// prioritizing caller-supplied value.
 				fieldIDToPartitionData[field.FieldID] = partitionVal
+			case field.Transform.PreservesOrder() && sourceFieldFound:
+				fieldIDToPartitionData[field.FieldID] = d.partitionValueWithSourceType(
+					field, d.ColAggs[field.SourceID()], sourceField.Type)
 			case field.Transform.PreservesOrder():
+				// Preserve the existing error path for an invalid schema. This branch
+				// is not part of the valid hot path because sourceFieldFound is false.
 				fieldIDToPartitionData[field.FieldID] = d.PartitionValue(field, opts.Schema)
 			default:
 				fieldIDToPartitionData[field.FieldID] = nil
 			}
 
-			if sourceField, ok := opts.Schema.FindFieldByID(field.SourceID()); ok {
+			if sourceFieldFound {
 				resultType := field.Transform.ResultType(sourceField.Type)
 
 				switch resultType.(type) {
@@ -322,12 +354,8 @@ func (d *DataFileStatistics) ToDataFile(opts DataFileOpts) iceberg.DataFile {
 	}
 
 	// Variant bounds are serialized objects keyed by the parent variant field id.
-	for fieldID, b := range d.VariantLowerBounds {
-		lowerBounds[fieldID] = b
-	}
-	for fieldID, b := range d.VariantUpperBounds {
-		upperBounds[fieldID] = b
-	}
+	maps.Copy(lowerBounds, d.VariantLowerBounds)
+	maps.Copy(upperBounds, d.VariantUpperBounds)
 
 	if len(lowerBounds) > 0 {
 		bldr.LowerBoundValues(lowerBounds)
@@ -531,25 +559,61 @@ func (s *statsAggregator[T]) MaxAsBytes() ([]byte, error) {
 	}
 }
 
-func TruncateUpperBoundText(s string, trunc int) string {
-	if trunc >= utf8.RuneCountInString(s) {
-		return s
-	}
-
-	result := []rune(s)[:trunc]
-	for i := len(result) - 1; i >= 0; i-- {
-		next := result[i] + 1
-		if utf8.ValidRune(next) {
-			result[i] = next
-
-			return string(result)
+// truncateString returns the prefix containing at most width UTF-8 code
+// points. The boolean is true when the input was actually truncated.
+func truncateString(s string, width int) (string, bool) {
+	for idx := range s {
+		if width == 0 {
+			return s[:idx], true
 		}
+
+		width--
 	}
 
-	return ""
+	return s, false
+}
+
+func TruncateUpperBoundText(s string, trunc int) string {
+	result, _ := truncateUpperBoundText(s, trunc)
+
+	return result
+}
+
+func truncateUpperBoundText(s string, trunc int) (string, bool) {
+	result, truncated := truncateString(s, trunc)
+	if !truncated {
+		return s, false
+	}
+
+	for len(result) > 0 {
+		r, size := utf8.DecodeLastRuneInString(result)
+		if next, ok := nextValidRune(r); ok {
+			return result[:len(result)-size] + string(next), true
+		}
+
+		result = result[:len(result)-size]
+	}
+
+	return "", true
+}
+
+func nextValidRune(r rune) (rune, bool) {
+	switch {
+	case r == '\uD7FF':
+		return '\uE000', true
+	case r >= utf8.MaxRune:
+		return 0, false
+	default:
+		return r + 1, true
+	}
 }
 
 func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
+	if trunc < 0 {
+		// A negative width cannot describe a prefix. Keep the original bound
+		// instead of panicking on the slice expression below.
+		return slices.Clone(val)
+	}
 	if trunc >= len(val) {
 		return slices.Clone(val)
 	}

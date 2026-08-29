@@ -20,8 +20,10 @@ LICENSE
 NOTICE
 go.sum
 build
+CLAUDE.md
 rat-results.txt
 operation_string.go
+duckdb_v3_manifest_list.avro
 empty-puffin-uncompressed.bin
 sample-metric-data-uncompressed.bin
 sample-metric-data-compressed-zstd.bin

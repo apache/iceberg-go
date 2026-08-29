@@ -174,6 +174,114 @@ func buildPartitionedContext(
 	return ctx
 }
 
+type countingPartitionConflictMetadata struct {
+	Metadata
+	specOverrides        map[int]*iceberg.PartitionSpec
+	currentSchemaCalls   int
+	partitionSpecIDCalls int
+}
+
+func (m *countingPartitionConflictMetadata) CurrentSchema() *iceberg.Schema {
+	m.currentSchemaCalls++
+
+	return m.Metadata.CurrentSchema()
+}
+
+func (m *countingPartitionConflictMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	m.partitionSpecIDCalls++
+	if spec, ok := m.specOverrides[id]; ok {
+		return spec
+	}
+
+	return m.Metadata.PartitionSpecByID(id)
+}
+
+func equalityDeleteTestFile(
+	t *testing.T,
+	spec iceberg.PartitionSpec,
+	path string,
+	partition map[int]any,
+) iceberg.DataFile {
+	t.Helper()
+
+	builder, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentEqDeletes,
+		path,
+		iceberg.ParquetFile,
+		partition,
+		nil,
+		nil,
+		1,
+		1024,
+	)
+	require.NoError(t, err)
+
+	return builder.Build()
+}
+
+func TestEqDeletePartitionsToFilterDeduplicatesPartitions(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	meta := partitionedConflictMeta(t, schema, 2, nil)
+	spec := meta.PartitionSpec()
+	fieldID := spec.Field(0).FieldID
+	countingMeta := &countingPartitionConflictMetadata{Metadata: meta}
+
+	files := []iceberg.DataFile{
+		equalityDeleteTestFile(t, spec, "eq-us-1.parquet", map[int]any{fieldID: "us-east-1"}),
+		equalityDeleteTestFile(t, spec, "eq-us-2.parquet", map[int]any{fieldID: "us-east-1"}),
+		equalityDeleteTestFile(t, spec, "eq-eu.parquet", map[int]any{fieldID: "eu-west-1"}),
+		equalityDeleteTestFile(t, spec, "eq-us-3.parquet", map[int]any{fieldID: "us-east-1"}),
+	}
+
+	filter, err := eqDeletePartitionsToFilter(files, countingMeta)
+	require.NoError(t, err)
+
+	expected := iceberg.NewOr(
+		iceberg.EqualTo(iceberg.Reference("region"), "us-east-1"),
+		iceberg.EqualTo(iceberg.Reference("region"), "eu-west-1"),
+	)
+	assert.True(t, filter.Equals(expected), "duplicate equality-delete partitions should produce one filter term")
+	assert.Equal(t, 1, countingMeta.currentSchemaCalls,
+		"the current schema should be cloned once per filter")
+	assert.Equal(t, 1, countingMeta.partitionSpecIDCalls,
+		"each partition spec should be resolved once per filter")
+}
+
+func TestEqDeletePartitionsToFilterKeepsSpecIDsDistinct(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "region", Type: iceberg.PrimitiveTypes.String, Required: true},
+	)
+	meta := partitionedConflictMeta(t, schema, 1, nil)
+	specA := meta.PartitionSpec()
+	specB := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		FieldID:   specA.Field(0).FieldID,
+		SourceIDs: []int{1},
+		Name:      "region_v2",
+		Transform: iceberg.IdentityTransform{},
+	})
+	countingMeta := &countingPartitionConflictMetadata{
+		Metadata:      meta,
+		specOverrides: map[int]*iceberg.PartitionSpec{specB.ID(): &specB},
+	}
+
+	files := []iceberg.DataFile{
+		equalityDeleteTestFile(t, specA, "eq-a.parquet", map[int]any{specA.Field(0).FieldID: "us-east-1"}),
+		equalityDeleteTestFile(t, specB, "eq-b.parquet", map[int]any{specB.Field(0).FieldID: "us-east-1"}),
+	}
+
+	filter, err := eqDeletePartitionsToFilter(files, countingMeta)
+	require.NoError(t, err)
+
+	leaf := iceberg.EqualTo(iceberg.Reference("region"), "us-east-1")
+	expected := iceberg.NewOr(leaf, leaf)
+	assert.True(t, filter.Equals(expected),
+		"identical partition values under different specs must remain separate terms")
+}
+
 // ---------------------------------------------------------------------------
 // validateNoConflictingDataFilesInPartitions short-circuit paths
 // ---------------------------------------------------------------------------

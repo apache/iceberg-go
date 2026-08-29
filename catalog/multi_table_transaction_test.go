@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -276,4 +277,155 @@ func TestCommitAndReloadPartialFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "reload table")
 	// First table was loaded successfully before the second failed.
 	assert.Len(t, tables, 1)
+}
+
+func mtxTableWithHead(t *testing.T, name string, headID, childID int64) (*table.Table, table.Metadata) {
+	t.Helper()
+
+	base := mtxTestTable(t, "db", name).Metadata()
+	withHead := mtxGraftSnapshot(t, base, headID, nil)
+	advanced := mtxGraftSnapshot(t, withHead, childID, &headID)
+
+	return table.New(table.Identifier{"db", name}, withHead, "", nil, nil), advanced
+}
+
+func mtxGraftSnapshot(t *testing.T, base table.Metadata, id int64, parent *int64) table.Metadata {
+	t.Helper()
+
+	builder, err := table.MetadataBuilderFromBase(base, "")
+	require.NoError(t, err)
+	require.NoError(t, builder.AddSnapshot(&table.Snapshot{
+		SnapshotID:       id,
+		ParentSnapshotID: parent,
+		SequenceNumber:   base.LastSequenceNumber() + 1,
+		TimestampMs:      base.LastUpdatedMillis() + 1,
+		Summary:          &table.Summary{Operation: table.OpAppend},
+	}))
+	require.NoError(t, builder.SetSnapshotRef(table.MainBranch, id, table.BranchRef))
+	out, err := builder.Build()
+	require.NoError(t, err)
+
+	return out
+}
+
+// Why: with a distinct head per table, a shared or missing assertion would still let one table's concurrent writer through.
+func TestMultiTableTransactionFencesEachBranchHead(t *testing.T) {
+	tbl1, advanced1 := mtxTableWithHead(t, "t1", 100, 101)
+	tbl2, advanced2 := mtxTableWithHead(t, "t2", 200, 201)
+
+	stub := &stubCatalog{}
+	mtx := &MultiTableTransaction{cat: stub}
+
+	for _, tbl := range []*table.Table{tbl1, tbl2} {
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.SetProperties(map[string]string{"offsets": "42"}))
+		require.NoError(t, mtx.AddTransaction(tx))
+	}
+
+	require.NoError(t, mtx.Commit(t.Context()))
+	require.Len(t, stub.commits, 1)
+	require.Len(t, stub.commits[0], 2)
+
+	cases := []struct {
+		commit   table.TableCommit
+		base     table.Metadata
+		advanced table.Metadata
+	}{
+		{stub.commits[0][0], tbl1.Metadata(), advanced1},
+		{stub.commits[0][1], tbl2.Metadata(), advanced2},
+	}
+
+	for _, tc := range cases {
+		name := tc.commit.Identifier[len(tc.commit.Identifier)-1]
+		t.Run(name, func(t *testing.T) {
+			var refReqs int
+			for _, req := range tc.commit.Requirements {
+				if req.GetType() != "assert-ref-snapshot-id" {
+					continue
+				}
+				refReqs++
+				assert.NoError(t, req.Validate(tc.base),
+					"the assertion must hold against the state the writer read")
+				assert.Error(t, req.Validate(tc.advanced),
+					"a concurrent commit on main must fail the assertion")
+			}
+			assert.Equal(t, 1, refReqs, "expected exactly one snapshot-id assertion for main")
+		})
+	}
+}
+
+type validatingStubCatalog struct {
+	metadata map[string]table.Metadata
+	calls    int
+}
+
+func (s *validatingStubCatalog) CommitTransaction(_ context.Context, commits []table.TableCommit) error {
+	s.calls++
+	for _, c := range commits {
+		meta := s.metadata[strings.Join(c.Identifier, ".")]
+		for _, req := range c.Requirements {
+			if err := req.Validate(meta); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// Why: the branch fence only pays off if the catalog rejects a payload built against a head
+// another writer has since moved.
+func TestMultiTableTransactionFailsAfterConcurrentAdvance(t *testing.T) {
+	tbl, advanced := mtxTableWithHead(t, "t1", 100, 101)
+
+	cat := &validatingStubCatalog{metadata: map[string]table.Metadata{"db.t1": advanced}}
+	mtx := &MultiTableTransaction{cat: cat}
+
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.SetProperties(map[string]string{"offsets": "42"}))
+	require.NoError(t, mtx.AddTransaction(tx))
+
+	err := mtx.Commit(t.Context())
+	require.Error(t, err, "a moved branch head must fail the atomic batch")
+	assert.ErrorContains(t, err, "has changed")
+	assert.Equal(t, 1, cat.calls)
+}
+
+// Why: a catalog may reject a table change with no updates, which would fail the whole batch
+// over an entry that changes nothing.
+func TestMultiTableTransactionSkipsTransactionsWithoutUpdates(t *testing.T) {
+	t.Run("empty transactions are left out of the request", func(t *testing.T) {
+		stub := &stubCatalog{}
+		mtx := &MultiTableTransaction{cat: stub}
+
+		empty := mtxTestTable(t, "db", "t1").NewTransaction()
+		require.NoError(t, mtx.AddTransaction(empty))
+
+		staged := mtxTestTable(t, "db", "t2").NewTransaction()
+		require.NoError(t, staged.SetProperties(map[string]string{"k": "v"}))
+		require.NoError(t, mtx.AddTransaction(staged))
+
+		require.NoError(t, mtx.Commit(t.Context()))
+		require.Len(t, stub.commits, 1)
+		require.Len(t, stub.commits[0], 1, "only the transaction with updates is submitted")
+		assert.Equal(t, table.Identifier{"db", "t2"}, stub.commits[0][0].Identifier)
+
+		_, err := empty.TableCommit()
+		assert.ErrorContains(t, err, "already been committed",
+			"a skipped transaction is still marked committed")
+	})
+
+	t.Run("a batch with nothing to send makes no request", func(t *testing.T) {
+		stub := &stubCatalog{}
+		mtx := &MultiTableTransaction{cat: stub}
+
+		tx := mtxTestTable(t, "db", "t1").NewTransaction()
+		require.NoError(t, mtx.AddTransaction(tx))
+
+		require.NoError(t, mtx.Commit(t.Context()))
+		assert.Empty(t, stub.commits, "no table change means no request")
+
+		_, err := tx.TableCommit()
+		assert.ErrorContains(t, err, "already been committed")
+	})
 }

@@ -36,7 +36,7 @@ All V1 features are supported. V1 is the format-version baseline.
 | Sequence numbers | Supported |
 | Manifest entry status (added / existing / deleted) | Supported |
 | Positional deletes | Supported (read + write) |
-| Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta` |
+| Equality deletes | Supported (read + write). Write via `Transaction.WriteEqualityDeletes`; row-level commits via `Transaction.NewRowDelta`; delete-only CDC via `Transaction.CommitEqualityDeletes` |
 | Partition spec evolution | Supported |
 | Sort order enforcement on write | Supported (PR [#1157](https://github.com/apache/iceberg-go/pull/1157), closes [#833](https://github.com/apache/iceberg-go/issues/833)) |
 | `ReplaceDataFiles` using `OpReplace` | Pending ([#841](https://github.com/apache/iceberg-go/issues/841)) |
@@ -130,3 +130,17 @@ As long as the FileSystem is supported and the Catalog supports altering the tab
 | Write Pos Delete     |     X     |
 | Write Eq Delete      |     X     |
 | Row Delta            |     X     |
+
+## Metrics reporting
+
+Iceberg's Metrics Reporting API is supported. Reporting is opt-in (default no-op). See [Metrics Reporting](./metrics-reporting.md).
+
+| Feature | Status |
+|---|---|
+| `ScanReport` (scan-planning metrics) | Supported |
+| `CommitReport` (commit metrics) | Supported |
+| Built-in reporters (nop, logging, in-memory, combine) | Supported |
+| Reporter selection via `metrics-reporter-impl` + registry | Supported |
+| REST `/metrics` reporter (opt-in POST to catalog) | Supported |
+| OpenTelemetry reporter (`metrics/otel`) | Supported (experimental; tracks Java [apache/iceberg#16250](https://github.com/apache/iceberg/pull/16250)) |
+| `ScanReport.filter` as structured Expression JSON | Supported (sanitized; falls back to always-true) |

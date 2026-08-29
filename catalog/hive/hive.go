@@ -150,7 +150,13 @@ func (c *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 		for _, tableName := range tableNames {
 			tbl, err := c.client.GetTable(ctx, database, tableName)
 			if err != nil {
-				continue
+				if isNoSuchObjectError(err) {
+					continue
+				}
+
+				yield(table.Identifier{}, fmt.Errorf("failed to load table %s.%s while listing: %w", database, tableName, err))
+
+				return
 			}
 			if isIcebergTable(tbl) {
 				if !yield(TableIdentifier(database, tableName), nil) {
@@ -293,7 +299,7 @@ func (c *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 			return nil, fmt.Errorf("%w: %s.%s", catalog.ErrTableAlreadyExists, database, tableName)
 		}
 
-		return nil, fmt.Errorf("failed to register table %s.%s: %s", database, tableName, err)
+		return nil, fmt.Errorf("failed to register table %s.%s: %w", database, tableName, err)
 	}
 
 	return c.LoadTable(ctx, identifier)
@@ -376,9 +382,7 @@ func (c *Catalog) CreateView(ctx context.Context, identifier table.Identifier, v
 
 	viewProps := make(map[string]string)
 	if cfg.Properties != nil {
-		for k, v := range cfg.Properties {
-			viewProps[k] = v
-		}
+		maps.Copy(viewProps, cfg.Properties)
 	}
 
 	hiveTbl := constructHiveViewTable(database, viewName, loc, createdView.MetadataLocation(), freshSchema, viewSQL, viewProps)
@@ -417,7 +421,7 @@ func sqlFromVersion(v *view.Version) (string, error) {
 	return "", errors.New("view version has no SQL representation")
 }
 
-func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
+func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) (err error) {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return err
@@ -428,7 +432,13 @@ func (c *Catalog) DropTable(ctx context.Context, identifier table.Identifier) er
 		return fmt.Errorf("%w: failed to acquire lock for %s.%s: %w", table.ErrCommitFailed, database, tableName, err)
 	}
 	defer func() {
-		_ = lock.Release(ctx)
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after dropping %s.%s: %v", database, tableName, releaseErr)
+			}
+		}
 	}()
 
 	// Re-read after acquiring the lock so drop cannot act on table state that a
@@ -464,7 +474,7 @@ func (c *Catalog) PurgeTable(ctx context.Context, identifier table.Identifier) e
 	return nil
 }
 
-func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*table.Table, error) {
+func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (_ *table.Table, err error) {
 	fromDB, fromTable, err := identifierToTableName(from)
 	if err != nil {
 		return nil, err
@@ -502,7 +512,13 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 			table.ErrCommitFailed, fromDB, fromTable, toDB, toTable, err)
 	}
 	defer func() {
-		_ = lock.Release(ctx)
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after renaming %s.%s to %s.%s: %v", fromDB, fromTable, toDB, toTable, releaseErr)
+			}
+		}
 	}()
 
 	hiveTbl, err := c.getIcebergTable(ctx, fromDB, fromTable)
@@ -533,7 +549,7 @@ func (c *Catalog) RenameTable(ctx context.Context, from, to table.Identifier) (*
 	return c.LoadTable(ctx, to)
 }
 
-func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (table.Metadata, string, error) {
+func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, requirements []table.Requirement, updates []table.Update) (_ table.Metadata, _ string, err error) {
 	database, tableName, err := identifierToTableName(identifier)
 	if err != nil {
 		return nil, "", err
@@ -548,7 +564,13 @@ func (c *Catalog) CommitTable(ctx context.Context, identifier table.Identifier, 
 			table.ErrCommitFailed, database, tableName, err)
 	}
 	defer func() {
-		_ = lock.Release(ctx)
+		if releaseErr := lock.releaseForCleanup(ctx); releaseErr != nil {
+			if err != nil {
+				err = errors.Join(err, releaseErr)
+			} else {
+				log.Printf("WARNING: failed to release Hive lock after committing %s.%s: %v", database, tableName, releaseErr)
+			}
+		}
 	}()
 
 	currentHiveTbl, err := c.client.GetTable(ctx, database, tableName)
@@ -657,8 +679,13 @@ func (c *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 		for _, viewName := range viewNames {
 			tbl, err := c.client.GetTable(ctx, database, viewName)
 			if err != nil {
-				// Skip tables we fail to load, mirroring table listing behavior.
-				continue
+				if isNoSuchObjectError(err) {
+					continue
+				}
+
+				yield(table.Identifier{}, fmt.Errorf("failed to load view %s.%s while listing: %w", database, viewName, err))
+
+				return
 			}
 			if isIcebergView(tbl) {
 				if !yield(TableIdentifier(database, viewName), nil) {
@@ -1009,11 +1036,12 @@ func isNoSuchObjectError(err error) bool {
 		return false
 	}
 
-	errStr := err.Error()
+	var noSuchObjectErr *hive_metastore.NoSuchObjectException
+	if errors.As(err, &noSuchObjectErr) {
+		return true
+	}
 
-	return strings.Contains(errStr, "NoSuchObjectException") ||
-		strings.Contains(errStr, "not found") ||
-		strings.Contains(errStr, "does not exist")
+	return strings.Contains(err.Error(), "NoSuchObjectException")
 }
 
 func isAlreadyExistsError(err error) bool {

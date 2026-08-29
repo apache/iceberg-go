@@ -22,7 +22,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sort"
+	"iter"
+	"maps"
+	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/apache/arrow-go/v18/arrow/bitutil"
@@ -54,14 +56,56 @@ func NewRoaringPositionBitmap() *RoaringPositionBitmap {
 
 // Set marks a position in the bitmap.
 func (b *RoaringPositionBitmap) Set(pos uint64) {
-	key := uint32(pos >> 32)
-	low := uint32(pos)
+	b.bucket(uint32(pos >> 32)).Add(uint32(pos))
+}
+
+// SetRange marks every position in [startInclusive, endExclusive), like Java's
+// setRange. An empty or inverted range is a no-op (no mutator on this type
+// panics or reports errors).
+func (b *RoaringPositionBitmap) SetRange(startInclusive, endExclusive uint64) {
+	if startInclusive >= endExclusive {
+		return
+	}
+
+	// Bucket off the last included position: a range ending exactly on a
+	// bucket boundary must not allocate an empty bitmap for the bucket above.
+	lastPos := endExclusive - 1
+	startKey, endKey := uint32(startInclusive>>32), uint32(lastPos>>32)
+
+	// roaring's AddRange is [start, end) over 32-bit values but takes uint64
+	// bounds so that a whole bucket can be expressed as [0, 1<<32).
+	if startKey == endKey {
+		b.bucket(startKey).AddRange(uint64(uint32(startInclusive)), uint64(uint32(lastPos))+1)
+
+		return
+	}
+
+	b.bucket(startKey).AddRange(uint64(uint32(startInclusive)), 1<<32)
+	for key := startKey + 1; key < endKey; key++ {
+		b.bucket(key).AddRange(0, 1<<32)
+	}
+	b.bucket(endKey).AddRange(0, uint64(uint32(lastPos))+1)
+}
+
+// RunLengthEncode re-encodes each bucket's containers as runs wherever runs
+// are more compact, like Java's runLengthEncode. Membership and cardinality
+// are unchanged.
+func (b *RoaringPositionBitmap) RunLengthEncode() {
+	for _, bm := range b.bitmaps {
+		bm.RunOptimize()
+	}
+}
+
+// bucket returns the 32-bit bitmap holding the low bits for key, allocating it
+// on first use.
+func (b *RoaringPositionBitmap) bucket(key uint32) *roaring.Bitmap {
 	bm, ok := b.bitmaps[key]
 	if !ok {
 		bm = roaring.New()
 		b.bitmaps[key] = bm
 	}
-	bm.Add(low)
+
+	return bm
 }
 
 // Or merges every position set in other into b. Buckets present only in
@@ -95,6 +139,28 @@ func (b *RoaringPositionBitmap) Contains(pos uint64) bool {
 	return bm.Contains(low)
 }
 
+// Positions returns an iterator over every set position in ascending
+// order. The positions yielded are the same 64-bit values passed to Set,
+// mirroring Java's RoaringPositionBitmap#forEach.
+//
+// The bitmap must not be modified while iterating: the key set is
+// captured up front while each bucket is consulted lazily, so a
+// concurrent or re-entrant Set/Or produces an inconsistent view (as
+// with the rest of the type, which is not safe for concurrent use).
+func (b *RoaringPositionBitmap) Positions() iter.Seq[uint64] {
+	return func(yield func(uint64) bool) {
+		for _, key := range slices.Sorted(maps.Keys(b.bitmaps)) {
+			high := uint64(key) << 32
+			it := b.bitmaps[key].Iterator()
+			for it.HasNext() {
+				if !yield(high | uint64(it.Next())) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // IsEmpty returns true if no positions are set. Returns true both for the
 // no-bucket case and for the (currently impossible-via-public-API) case
 // where a bucket exists but its inner roaring bitmap has zero cardinality
@@ -126,7 +192,7 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 			keys = append(keys, k)
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 
 	if err := binary.Write(w, binary.LittleEndian, int64(len(keys))); err != nil {
 		return fmt.Errorf("write bitmap count: %w", err)
@@ -141,6 +207,20 @@ func (b *RoaringPositionBitmap) Serialize(w io.Writer) error {
 	}
 
 	return nil
+}
+
+// serializedSize returns the exact size of the portable bitmap encoding after
+// RunLengthEncode has been called. Empty buckets are omitted by Serialize and
+// therefore do not contribute.
+func (b *RoaringPositionBitmap) serializedSize() uint64 {
+	size := uint64(8) // bitmap count
+	for _, bm := range b.bitmaps {
+		if bm.GetCardinality() > 0 {
+			size += 4 + bm.GetSerializedSizeInBytes() // bucket key + bitmap
+		}
+	}
+
+	return size
 }
 
 // DeserializeRoaringPositionBitmap reads a bitmap from the Iceberg portable format.
@@ -179,6 +259,9 @@ func DeserializeRoaringPositionBitmap(data []byte) (*RoaringPositionBitmap, erro
 		lastKey = key
 		hasLastKey = true
 	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("trailing data after bitmaps: %d bytes", r.Len())
+	}
 
 	return b, nil
 }
@@ -212,18 +295,36 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 	memory.Set(out, 0xFF)
 
 	for key, bm := range b.bitmaps {
-		bucketBitBase := int64(key) << 32
-		if bucketBitBase >= length {
+		bucketBitBase := uint64(key) << 32
+		if bucketBitBase >= uint64(length) {
 			continue
 		}
+		bucketBits := uint64(length) - bucketBitBase
+		if bucketBits > 1<<32 {
+			bucketBits = 1 << 32
+		}
+		if bm.CardinalityInRange(0, bucketBits) < bm.DenseSize() {
+			it := bm.Iterator()
+			for it.HasNext() {
+				pos := uint64(it.Next())
+				if pos >= bucketBits {
+					break
+				}
+				globalPos := bucketBitBase + pos
+				out[globalPos>>3] &^= byte(1 << (globalPos & 7))
+			}
+
+			continue
+		}
+
 		dense := bm.ToDense()
 		if len(dense) == 0 {
 			continue
 		}
 		// Cap the bucket's bit range to what fits in `length`.
-		bucketBits := int64(len(dense)) * 64
-		if bucketBitBase+bucketBits > length {
-			bucketBits = length - bucketBitBase
+		bucketBits = uint64(len(dense)) * 64
+		if bucketBits > uint64(length)-bucketBitBase {
+			bucketBits = uint64(length) - bucketBitBase
 		}
 		// bucketBitBase = key << 32 is always 8-byte-aligned, so the
 		// BitmapWordWriter runs with offset=0 internally. The trailing-byte
@@ -231,16 +332,13 @@ func (b *RoaringPositionBitmap) KeepMaskBytes(length int64) []byte {
 		// validBits=8 path is byte-aligned only when offset == 0.
 		wr := bitutil.NewBitmapWordWriter(out, int(bucketBitBase), int(bucketBits))
 		full := int(bucketBits / 64)
-		for i := 0; i < full; i++ {
+		for i := range full {
 			wr.PutNextWord(^dense[i])
 		}
 		if rem := int(bucketBits & 63); rem > 0 {
 			last := ^dense[full]
 			for rem > 0 {
-				valid := 8
-				if rem < 8 {
-					valid = rem
-				}
+				valid := min(rem, 8)
 				wr.PutNextTrailingByte(byte(last), valid)
 				last >>= 8
 				rem -= valid

@@ -29,11 +29,14 @@ import (
 	"hash"
 	"io"
 	"iter"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/apache/iceberg-go"
@@ -97,6 +100,7 @@ const (
 	keyTlsSkipVerify   = "rest.tls.skip-verify"
 
 	keyViewEndpointsSupported = "view-endpoints-supported"
+	keySnapshotLoadingMode    = "snapshot-loading-mode"
 )
 
 var (
@@ -113,6 +117,19 @@ var (
 	ErrCommitFailed       = fmt.Errorf("%w: %w", ErrRESTError, table.ErrCommitFailed)
 	ErrCommitStateUnknown = fmt.Errorf("%w: commit failed due to unknown reason", ErrRESTError)
 	ErrOAuthError         = fmt.Errorf("%w: oauth error", ErrRESTError)
+)
+
+// SnapshotMode controls which snapshots are included in a loadTable response.
+type SnapshotMode string
+
+const (
+	// SnapshotModeAll requests all currently valid snapshots (server default).
+	SnapshotModeAll SnapshotMode = "all"
+	// SnapshotModeRefs requests only snapshots that are referenced by at least one named branch or tag.
+	// The server omits unreferenced historical snapshots, which reduces response size for tables
+	// with long snapshot histories. Note: time-travel to a snapshot not referenced by any branch
+	// or tag will fail, as that snapshot will not be present in the returned metadata.
+	SnapshotModeRefs SnapshotMode = "refs"
 )
 
 func init() {
@@ -206,6 +223,12 @@ func (t *loadTableResponse) UnmarshalJSON(b []byte) (err error) {
 	return err
 }
 
+// createTableRequest is the create-table wire format. This client only encodes
+// it, from a spec and order already bound to the schema being sent. Source IDs
+// a server decodes refer to the schema in the same request, under whatever
+// numbering the client chose, so they need not be positive: decode into
+// iceberg.UnboundPartitionSpec and table.UnboundSortOrder, then bind through
+// table.NewMetadata (see #1664).
 type createTableRequest struct {
 	Name          string                 `json:"name"`
 	Schema        *iceberg.Schema        `json:"schema"`
@@ -262,7 +285,18 @@ func (s *sessionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// Authorization header by supplying its own. Do not reorder this before the
 	// default-header loop.
 	if s.authManager != nil && r.Context().Value(skipOAuth) == nil {
-		k, v, err := s.authManager.AuthHeader()
+		var (
+			k, v string
+			err  error
+		)
+		// Prefer the context-aware path so the request deadline also bounds auth,
+		// falling back to the context-free method for managers that do not
+		// implement ContextAuthManager.
+		if cm, ok := s.authManager.(ContextAuthManager); ok {
+			k, v, err = cm.AuthHeaderWithContext(r.Context())
+		} else {
+			k, v, err = s.authManager.AuthHeader()
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -329,6 +363,7 @@ type reqConfig struct {
 	errorTypeOverride map[string]error
 	allowNoContent    bool
 	requireBody       bool
+	queryParams       url.Values
 }
 
 type reqOption func(*reqConfig)
@@ -382,6 +417,16 @@ func requireBody() reqOption {
 	return func(c *reqConfig) { c.requireBody = true }
 }
 
+// Appends query parameters to the request.
+func withQueryParams(params url.Values) reqOption {
+	return func(c *reqConfig) {
+		if c.queryParams == nil {
+			c.queryParams = make(url.Values, len(params))
+		}
+		maps.Copy(c.queryParams, params)
+	}
+}
+
 func newReqConfig(opts []reqOption) reqConfig {
 	var cfg reqConfig
 	for _, opt := range opts {
@@ -420,7 +465,17 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		rsp *http.Response
 	)
 
-	uri := baseURI.JoinPath(path...).String()
+	u := baseURI.JoinPath(path...)
+	if len(cfg.queryParams) > 0 {
+		q := u.Query()
+		for k, vs := range cfg.queryParams {
+			for _, v := range vs {
+				q.Add(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
+	uri := u.String()
 	ctx = withSuppressedHeadersCtx(ctx, cfg.suppressHeaders)
 	if req, err = http.NewRequestWithContext(ctx, method, uri, nil); err != nil {
 		return ret, err
@@ -447,8 +502,8 @@ func do[T any](ctx context.Context, method string, baseURI *url.URL, path []stri
 		return ret, err
 	}
 
-	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
-		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		return ret, err
 	}
 
 	return ret, err
@@ -515,11 +570,37 @@ func doPost[Payload, Result any](ctx context.Context, baseURI *url.URL, path []s
 		return ret, err
 	}
 
-	if err = json.NewDecoder(rsp.Body).Decode(&ret); err != nil {
-		return ret, fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	if err = decodeJSONResponse(rsp.Body, &ret); err != nil {
+		return ret, err
 	}
 
 	return ret, err
+}
+
+func decodeJSONResponse(body io.Reader, dst any) error {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(dst); err != nil {
+		return fmt.Errorf("%w: error decoding json payload: `%s`", ErrRESTError, err.Error())
+	}
+
+	if err := rejectTrailingJSON(decoder); err != nil {
+		return fmt.Errorf("%w: %s", ErrRESTError, err)
+	}
+
+	return nil
+}
+
+func rejectTrailingJSON(decoder *json.Decoder) error {
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return errors.New("response contains multiple JSON values")
+		}
+
+		return fmt.Errorf("error decoding trailing json payload: `%s`", err.Error())
+	}
+
+	return nil
 }
 
 func setRequestHeaders(req *http.Request, headers map[string]string) {
@@ -545,13 +626,21 @@ func handleNon200(rsp *http.Response, override map[int]error, typeOverride map[s
 			Error: &e,
 		}
 
-		decErr := json.NewDecoder(rsp.Body).Decode(&payload)
+		decoder := json.NewDecoder(rsp.Body)
+		decErr := decoder.Decode(&payload)
+		if decErr == nil {
+			decErr = rejectTrailingJSON(decoder)
+		}
 		if decErr != nil && decErr != io.EOF {
 			// Preserve the HTTP metadata even when the server returned a non-JSON
 			// error page. Callers such as WaitForPlan still need the status to apply
-			// transport-level retry policy; the wrapping sentinel retains the prior
-			// ErrRESTError classification for malformed error payloads.
+			// transport-level retry policy. A status the caller mapped keeps that
+			// classification (e.g. an ambiguous commit 5xx stays ErrCommitStateUnknown)
+			// even when a proxy garbled the body; unmapped statuses keep ErrRESTError.
 			e.wrapping = ErrRESTError
+			if statusErr, ok := override[rsp.StatusCode]; ok {
+				e.wrapping = statusErr
+			}
 
 			return fmt.Errorf("%w: failed to decode error response: %s", e, decErr.Error())
 		}
@@ -766,6 +855,11 @@ var _ catalog.PurgeableTable = (*Catalog)(nil)
 type Catalog struct {
 	baseURI *url.URL
 	cl      *http.Client
+	// closeSession releases transports owned by the catalog. Caller-provided
+	// transports are excluded when the session is constructed.
+	closeSession     func()
+	closeSessionOnce sync.Once
+	closeErr         error
 
 	name string
 	// Retained catalog properties are reused for table/view IO and may carry
@@ -774,6 +868,7 @@ type Catalog struct {
 	endpoints endpointSet
 
 	namespaceSeparator string
+	snapshotMode       SnapshotMode
 
 	// reporter builds and caches the catalog's metrics reporter once, so it is
 	// constructed per-catalog rather than per table load. Released by Close.
@@ -784,6 +879,12 @@ type Catalog struct {
 	// metrics-reporter-impl cannot select (or, via an unregistered name, break)
 	// a reporter the client never asked for.
 	reporterProps iceberg.Properties
+	// metricsDispatcher POSTs scan/commit reports to the server's metrics
+	// endpoint on a bounded worker pool shared across this catalog's table
+	// reporters. It is nil unless the client opted in (reportMetricsEnabled, read
+	// from reporterProps) and the server advertises the endpoint. Owned here and
+	// closed by Close.
+	metricsDispatcher *metricsDispatcher
 }
 
 func newCatalogFromProps(ctx context.Context, name string, uri string, p iceberg.Properties) (*Catalog, error) {
@@ -817,6 +918,13 @@ func NewCatalog(ctx context.Context, name, uri string, opts ...Option) (*Catalog
 
 	return r, nil
 }
+
+// defaultOAuthTimeout bounds a single OAuth token-refresh request made by the
+// built-in Oauth2AuthManager. oauth2's TokenSource.Token() takes no context, so
+// this Timeout on the refresh client is what keeps a stalled or black-holing
+// token endpoint from blocking auth — and therefore any request that triggers a
+// refresh, including asynchronous metrics reports — indefinitely.
+const defaultOAuthTimeout = 60 * time.Second
 
 // setupOAuthManager creates an Oauth2AuthManager based on the provided options.
 // It uses golang.org/x/oauth2 for token management, caching, and thread-safe refresh.
@@ -874,11 +982,12 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 	// Add skip oauth so we don't get in cycles trying to refresh the token
 	ctx := context.WithValue(context.Background(), skipOAuth, true)
 
-	// If a separate TLS config is provided for the OAuth2 server, create a
-	// dedicated HTTP client for token requests instead of reusing the catalog
-	// client. This is needed when the OAuth2 server is a different host with
-	// different TLS requirements.
-	oauthClient := cl
+	// Token refresh uses a client with a Timeout so a stalled token endpoint
+	// cannot block auth forever (oauth2's Token() takes no context). By default
+	// this reuses the catalog client's transport — preserving its TLS, proxy and
+	// header behavior — but as a distinct *http.Client so the Timeout applies to
+	// refresh alone and not to ordinary catalog requests.
+	oauthClient := &http.Client{Transport: cl.Transport, Timeout: defaultOAuthTimeout}
 	var closeIdleConnections func()
 	if opts.oauthTLSConfig != nil {
 		transport := &http.Transport{
@@ -887,6 +996,7 @@ func setupOAuthManager(r *Catalog, cl *http.Client, opts *options) (AuthManager,
 		}
 		oauthClient = &http.Client{
 			Transport: transport,
+			Timeout:   defaultOAuthTimeout,
 		}
 		closeIdleConnections = transport.CloseIdleConnections
 	}
@@ -914,7 +1024,7 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		return err
 	}
 
-	r.cl, _, err = r.createSession(ctx, ops)
+	r.cl, r.closeSession, err = r.createSession(ctx, ops)
 	if err != nil {
 		return err
 	}
@@ -922,6 +1032,24 @@ func (r *Catalog) init(ctx context.Context, ops *options, uri string) error {
 		r.baseURI = r.baseURI.JoinPath(ops.prefix)
 	}
 	r.props = toProps(ops)
+
+	// Stand up the metrics dispatcher only when the client opted in and the
+	// server advertises the endpoint. Enablement of outbound telemetry is read
+	// from the client-supplied properties alone (see reporterProps): a server
+	// must never be able to turn on reporting the client never asked for.
+	//
+	// Disabling, however, is always safe, so an explicit server-side false is
+	// honored: r.props is the merged config (server defaults < client < server
+	// overrides), so an override setting the key false resolves to false here and
+	// suppresses a client that opted in — matching how a Java client resolves it
+	// and letting an operator switch reporting off fleet-wide. A mere server
+	// default cannot flip off a client opt-in, since client props beat defaults in
+	// the merge.
+	if reportMetricsEnabled(r.reporterProps) && reportMetricsEnabled(r.props) &&
+		r.endpoints.check(endpointReportMetrics) == nil {
+		r.metricsDispatcher = newMetricsDispatcher(
+			metricsDispatchWorkers, metricsDispatchQueueSize, reportMetricsTimeout(r.reporterProps), nil)
+	}
 
 	return nil
 }
@@ -933,14 +1061,20 @@ func (r *Catalog) createSession(ctx context.Context, opts *options) (*http.Clien
 	var cleanupFuncs []func()
 	if opts.transport != nil {
 		baseTransport = opts.transport
+	} else if opts.transportFactory != nil {
+		var cleanup func()
+		baseTransport, cleanup = opts.transportFactory(opts.tlsConfig)
+		if cleanup != nil {
+			cleanupFuncs = append(cleanupFuncs, cleanup)
+		}
 	} else {
 		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: opts.tlsConfig}
 		baseTransport = transport
 		cleanupFuncs = append(cleanupFuncs, transport.CloseIdleConnections)
 	}
 	cleanup := func() {
-		for i := len(cleanupFuncs) - 1; i >= 0; i-- {
-			cleanupFuncs[i]()
+		for _, cleanupFunc := range slices.Backward(cleanupFuncs) {
+			cleanupFunc()
 		}
 	}
 
@@ -1042,6 +1176,11 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 	maps.Copy(cfg, rsp.Overrides)
 
 	r.namespaceSeparator = cfg.Get(keyNamespaceSeparator, defaultNamespaceSeparator)
+	r.snapshotMode = SnapshotMode(cfg.Get(keySnapshotLoadingMode, ""))
+	if r.snapshotMode != "" && r.snapshotMode != SnapshotModeAll && r.snapshotMode != SnapshotModeRefs {
+		return nil, fmt.Errorf("%w: invalid %s %q (want %q or %q)",
+			ErrRESTError, keySnapshotLoadingMode, r.snapshotMode, SnapshotModeAll, SnapshotModeRefs)
+	}
 
 	// Negotiate capabilities from the endpoints the server advertises, falling
 	// back to a backward-compatible default set when none are provided.
@@ -1066,23 +1205,57 @@ func (r *Catalog) fetchConfig(ctx context.Context, opts *options) (*options, err
 func (r *Catalog) Name() string              { return r.name }
 func (r *Catalog) CatalogType() catalog.Type { return catalog.REST }
 
-// Close releases the catalog's metrics reporter. The REST catalog does not own
-// the lifetime of the HTTP client it was configured with, so only the reporter
-// is released. Callers holding a [catalog.Catalog] can reach this via a
+// Close drains idle connections from transports created by the catalog and
+// releases its metrics reporter. Closing the metrics dispatcher cancels any
+// in-flight reports and drains its workers so outbound telemetry stops.
+// Caller-provided transports remain caller-owned. Close is safe to call more
+// than once. Callers holding a [catalog.Catalog] can reach this via a
 // [catalog.Closer] type assertion.
-func (r *Catalog) Close() error { return r.reporter.Close() }
+func (r *Catalog) Close() error {
+	r.closeSessionOnce.Do(func() {
+		if r.closeSession != nil {
+			r.closeSession()
+		}
+		if r.metricsDispatcher != nil {
+			r.metricsDispatcher.close()
+		}
+		r.closeErr = r.reporter.Close()
+	})
+
+	return r.closeErr
+}
 
 var _ catalog.Closer = (*Catalog)(nil)
 
-func checkValidNamespace(ident table.Identifier) error {
-	if len(ident) < 1 {
-		return fmt.Errorf("%w: empty namespace identifier", catalog.ErrNoSuchNamespace)
+func (r *Catalog) checkValidNamespace(ident table.Identifier) error {
+	if err := catalog.ValidateNamespaceIdentifier(ident); err != nil {
+		return err
+	}
+
+	separator := r.decodedNamespaceSeparator()
+	if separator == "" {
+		return nil
+	}
+
+	for _, part := range ident {
+		if strings.Contains(part, separator) {
+			return fmt.Errorf("%w: namespace component %q contains the namespace separator %q in %v",
+				catalog.ErrNoSuchNamespace, part, separator, strings.Join(ident, "."))
+		}
 	}
 
 	return nil
 }
 
-func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, metadata table.Metadata, loc string, config iceberg.Properties, credsVended bool) (*table.Table, error) {
+func (r *Catalog) tableFromResponse(
+	_ context.Context,
+	identifier []string,
+	metadata table.Metadata,
+	loc string,
+	config iceberg.Properties,
+	scanPlanningConfig iceberg.Properties,
+	credsVended bool,
+) (*table.Table, error) {
 	var fsF func(context.Context) (iceio.IO, error)
 	if credsVended {
 		refresher := &vendedCredentialRefresher{
@@ -1109,6 +1282,28 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize metrics reporter: %w", err)
 	}
+	// Opt-in: POST scan/commit reports to the catalog's metrics endpoint via the
+	// catalog-owned dispatcher. It is non-nil only when the client enabled
+	// reporting and the server advertises the endpoint (see init).
+	if r.metricsDispatcher != nil {
+		if ns, tbl, idErr := r.splitIdentForPath(identifier); idErr != nil {
+			// Unreachable for a valid identifier that already loaded above, but if it
+			// ever regresses, log why the REST reporter was dropped rather than let
+			// metrics silently vanish with no signal.
+			slog.Debug("iceberg: skipping REST metrics reporter, cannot split identifier",
+				"error", idErr)
+		} else if path, pErr := endpointReportMetrics.reqPath(ns, tbl); pErr != nil {
+			slog.Debug("iceberg: skipping REST metrics reporter, cannot build metrics path",
+				"error", pErr)
+		} else {
+			reporter = metrics.Combine(reporter, &restMetricsReporter{
+				baseURI:    r.baseURI,
+				cl:         r.cl,
+				path:       path,
+				dispatcher: r.metricsDispatcher,
+			})
+		}
+	}
 
 	return table.New(
 		identifier,
@@ -1117,6 +1312,7 @@ func (r *Catalog) tableFromResponse(_ context.Context, identifier []string, meta
 		fsF,
 		r,
 		table.WithMetricsReporter(reporter),
+		table.WithScanPlanningIOProperties(scanPlanningConfig),
 	), nil
 }
 
@@ -1189,7 +1385,7 @@ func (r *Catalog) ListTables(ctx context.Context, namespace table.Identifier) it
 }
 
 func (r *Catalog) listTablesPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
@@ -1248,16 +1444,20 @@ func (r *Catalog) encodeNamespace(namespace table.Identifier) string {
 	return strings.Join(encoded, r.nsSeparator())
 }
 
+func (r *Catalog) decodedNamespaceSeparator() string {
+	sep, err := url.PathUnescape(r.nsSeparator())
+	if err != nil {
+		return r.nsSeparator()
+	}
+
+	return sep
+}
+
 // namespaceToQueryParam joins the raw namespace levels with the decoded
 // separator for use as a query-parameter value, which the HTTP layer then
 // percent-encodes. Mirrors RESTUtil.namespaceToQueryParam in Java.
 func (r *Catalog) namespaceToQueryParam(namespace table.Identifier) string {
-	sep, err := url.PathUnescape(r.nsSeparator())
-	if err != nil {
-		sep = r.nsSeparator()
-	}
-
-	return strings.Join(namespace, sep)
+	return strings.Join(namespace, r.decodedNamespaceSeparator())
 }
 
 func (r *Catalog) splitIdentForPath(ident table.Identifier) (string, string, error) {
@@ -1348,10 +1548,11 @@ func (r *Catalog) CreateTable(ctx context.Context, identifier table.Identifier, 
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
 }
 
 // commitStagedCreate performs the second phase of a staged table
@@ -1563,13 +1764,23 @@ func (r *Catalog) RegisterTable(ctx context.Context, identifier table.Identifier
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
 }
 
+// LoadTable loads a table from the catalog. It implements [catalog.Catalog].
+// When snapshot-loading-mode is set to "refs" in the catalog properties, only
+// snapshots referenced by a named branch or tag are included in the response.
+// Callers that need to time-travel to an unreferenced snapshot should use
+// snapshot-loading-mode "all" or omit the property entirely.
 func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*table.Table, error) {
+	return r.loadTableWithMode(ctx, identifier, r.snapshotMode)
+}
+
+func (r *Catalog) loadTableWithMode(ctx context.Context, identifier table.Identifier, mode SnapshotMode) (*table.Table, error) {
 	if err := r.endpoints.check(endpointLoadTable); err != nil {
 		return nil, err
 	}
@@ -1584,8 +1795,13 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 		return nil, err
 	}
 
+	var opts []reqOption
+	if mode != "" {
+		opts = append(opts, withQueryParams(url.Values{"snapshots": {string(mode)}}))
+	}
+
 	ret, err := doGet[loadTableResponse](ctx, r.baseURI, path,
-		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable})
+		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchTable}, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1593,10 +1809,11 @@ func (r *Catalog) LoadTable(ctx context.Context, identifier table.Identifier) (*
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 	maps.Copy(config, ret.Config)
+	scanPlanningConfig := maps.Clone(config)
 	credsVended := len(ret.StorageCredentials) > 0
 	maps.Copy(config, resolveStorageCredentials(ret.StorageCredentials, ret.MetadataLoc))
 
-	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, credsVended)
+	return r.tableFromResponse(ctx, identifier, ret.Metadata, ret.MetadataLoc, config, scanPlanningConfig, credsVended)
 }
 
 func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requirements []table.Requirement, updates []table.Update) (*table.Table, error) {
@@ -1640,7 +1857,7 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	config := maps.Clone(r.props)
 	maps.Copy(config, ret.Metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config, false)
+	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config, config, false)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {
@@ -1738,7 +1955,7 @@ func (r *Catalog) CreateNamespace(ctx context.Context, namespace table.Identifie
 		return err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
@@ -1760,7 +1977,7 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 		return err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return err
 	}
 
@@ -1770,7 +1987,10 @@ func (r *Catalog) DropNamespace(ctx context.Context, namespace table.Identifier)
 	}
 
 	_, err = doDelete[struct{}](ctx, r.baseURI, path,
-		r.cl, map[int]error{http.StatusNotFound: catalog.ErrNoSuchNamespace})
+		r.cl, map[int]error{
+			http.StatusNotFound: catalog.ErrNoSuchNamespace,
+			http.StatusConflict: catalog.ErrNamespaceNotEmpty,
+		})
 
 	return err
 }
@@ -1795,6 +2015,12 @@ func (r *Catalog) ListNamespaces(ctx context.Context, parent table.Identifier) (
 }
 
 func (r *Catalog) listNamespacesPage(ctx context.Context, parent table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
+	if len(parent) != 0 {
+		if err := r.checkValidNamespace(parent); err != nil {
+			return nil, "", err
+		}
+	}
+
 	// Unsupported listing yields an empty result rather than an error.
 	if !r.endpoints.allowed(endpointListNamespaces) {
 		return nil, "", nil
@@ -1839,7 +2065,7 @@ func (r *Catalog) LoadNamespaceProperties(ctx context.Context, namespace table.I
 		return nil, err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, err
 	}
 
@@ -1869,7 +2095,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return catalog.PropertiesUpdateSummary{}, err
 	}
 
@@ -1890,7 +2116,7 @@ func (r *Catalog) UpdateNamespaceProperties(ctx context.Context, namespace table
 }
 
 func (r *Catalog) CheckNamespaceExists(ctx context.Context, namespace table.Identifier) (bool, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return false, err
 	}
 
@@ -1983,7 +2209,7 @@ func (r *Catalog) ListViews(ctx context.Context, namespace table.Identifier) ite
 }
 
 func (r *Catalog) listViewsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.
@@ -2387,7 +2613,7 @@ func (r *Catalog) ListFunctions(ctx context.Context, namespace table.Identifier)
 }
 
 func (r *Catalog) listFunctionsPage(ctx context.Context, namespace table.Identifier, pageToken string, pageSize int) ([]table.Identifier, string, error) {
-	if err := checkValidNamespace(namespace); err != nil {
+	if err := r.checkValidNamespace(namespace); err != nil {
 		return nil, "", err
 	}
 	// Unsupported listing yields an empty result rather than an error.

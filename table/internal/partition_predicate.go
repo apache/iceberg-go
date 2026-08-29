@@ -30,7 +30,7 @@ import (
 
 // BuildPartitionMatchPredicate constructs a BooleanExpression matching all rows
 // that belong to any of the given partitions. It is the core of dynamic
-// partition overwrite (see https://github.com/apache/iceberg-go/issues/1215):
+// partition overwrite (see https://github.com/apache/iceberg-go/issues/1216):
 // the returned expression selects the existing data to delete before the new
 // data is appended.
 //

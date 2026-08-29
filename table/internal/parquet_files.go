@@ -33,6 +33,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/bitutil"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
@@ -50,25 +51,44 @@ import (
 )
 
 const (
-	ParquetRowGroupSizeBytesKey              = "write.parquet.row-group-size-bytes"
-	ParquetRowGroupSizeBytesDefault          = 128 * 1024 * 1024 // 128 MB
-	ParquetRowGroupLimitKey                  = "write.parquet.row-group-limit"
-	ParquetRowGroupLimitDefault              = 1048576
-	ParquetPageSizeBytesKey                  = "write.parquet.page-size-bytes"
-	ParquetPageSizeBytesDefault              = 1024 * 1024 // 1 MB
-	ParquetPageRowLimitKey                   = "write.parquet.page-row-limit"
-	ParquetPageRowLimitDefault               = 20000
-	ParquetDictSizeBytesKey                  = "write.parquet.dict-size-bytes"
-	ParquetDictSizeBytesDefault              = 2 * 1024 * 1024 // 2 MB
-	ParquetPageVersionKey                    = "write.parquet.page-version"
-	ParquetPageVersionDefault                = "2"
-	ParquetCompressionKey                    = "write.parquet.compression-codec"
-	ParquetCompressionDefault                = "zstd"
-	ParquetCompressionLevelKey               = "write.parquet.compression-level"
-	ParquetCompressionLevelDefault           = -1
-	ParquetBloomFilterMaxBytesKey            = "write.parquet.bloom-filter-max-bytes"
-	ParquetBloomFilterMaxBytesDefault        = 1024 * 1024
+	ParquetRowGroupSizeBytesKey       = "write.parquet.row-group-size-bytes"
+	ParquetRowGroupSizeBytesDefault   = 128 * 1024 * 1024 // 128 MB
+	ParquetRowGroupLimitKey           = "write.parquet.row-group-limit"
+	ParquetRowGroupLimitDefault       = 1048576
+	ParquetPageSizeBytesKey           = "write.parquet.page-size-bytes"
+	ParquetPageSizeBytesDefault       = 1024 * 1024 // 1 MB
+	ParquetPageRowLimitKey            = "write.parquet.page-row-limit"
+	ParquetPageRowLimitDefault        = 20000
+	ParquetDictSizeBytesKey           = "write.parquet.dict-size-bytes"
+	ParquetDictSizeBytesDefault       = 2 * 1024 * 1024 // 2 MB
+	ParquetPageVersionKey             = "write.parquet.page-version"
+	ParquetPageVersionDefault         = "2"
+	ParquetCompressionKey             = "write.parquet.compression-codec"
+	ParquetCompressionDefault         = "zstd"
+	ParquetCompressionLevelKey        = "write.parquet.compression-level"
+	ParquetCompressionLevelDefault    = -1
+	ParquetBloomFilterMaxBytesKey     = "write.parquet.bloom-filter-max-bytes"
+	ParquetBloomFilterMaxBytesDefault = 1024 * 1024
+	// These bounds mirror Arrow's public bloom-filter writer-property constraint.
+	parquetBloomFilterMaxBytesMin            = 32
+	parquetBloomFilterMaxBytesMax            = 128 * 1024 * 1024
 	ParquetBloomFilterColumnEnabledKeyPrefix = "write.parquet.bloom-filter-enabled.column"
+
+	// These bounds mirror the compression libraries used by Arrow's Parquet
+	// writers. -1 is the shared default level and is included in each range.
+	parquetGzipCompressionLevelMin   = -3
+	parquetGzipCompressionLevelMax   = 9
+	parquetZstdCompressionLevelMin   = -5
+	parquetZstdCompressionLevelMax   = 22
+	parquetBrotliCompressionLevelMin = 0
+	parquetBrotliCompressionLevelMax = 11
+
+	// Deliberately not namespaced under write.parquet: this is the parquet-mr key
+	// Iceberg Java reads straight from the table properties, so a table carrying
+	// it gets the same dictionary behavior from either implementation.
+	ParquetDictEnabledKey                     = "parquet.enable.dictionary"
+	ParquetDictEnabledDefault                 = true
+	ParquetDictEncodingColumnEnabledKeyPrefix = "write.parquet.dict-encoding-enabled.column"
 
 	ParquetShredVariantsKey     = "write.parquet.shred-variants"
 	ParquetShredVariantsDefault = false
@@ -260,7 +280,6 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 	}
 
 	writerProps := []parquet.WriterProperty{
-		parquet.WithDictionaryDefault(false),
 		parquet.WithMaxRowGroupLength(int64(props.GetInt(ParquetRowGroupLimitKey,
 			ParquetRowGroupLimitDefault))),
 		parquet.WithDataPageSize(int64(props.GetInt(ParquetPageSizeBytesKey,
@@ -314,14 +333,120 @@ func (parquetFormat) GetWriteProperties(props iceberg.Properties) any {
 		if !ok || colName == "" {
 			continue
 		}
-		// EqualFold matches Java's Boolean.parseBoolean: only "true"
-		// (case-insensitive) is true; anything else, including "1" or
-		// "yes", is false. strconv.ParseBool behaves differently ("1" → true).
-		enabled := strings.EqualFold(val, "true")
-		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, enabled))
+		writerProps = append(writerProps, parquet.WithBloomFilterEnabledFor(colName, javaBool(val)))
+	}
+
+	// Dictionary encoding is on unless parquet.enable.dictionary disables it;
+	// write.parquet.dict-encoding-enabled.column.<col-name> overrides per column.
+	dictEnabled := ParquetDictEnabledDefault
+	if val, ok := props[ParquetDictEnabledKey]; ok {
+		dictEnabled = javaBool(val)
+	}
+	writerProps = append(writerProps, parquet.WithDictionaryDefault(dictEnabled))
+
+	// The suffix is matched against the Parquet physical column path, not the
+	// Iceberg field name. These differ for nested fields (Iceberg `items.element`
+	// is `items.list.element` in Parquet), so a per-column override on one of
+	// those has no effect. Same for the bloom filter prefix above.
+	prefix = ParquetDictEncodingColumnEnabledKeyPrefix + "."
+	for key, val := range props {
+		colName, ok := strings.CutPrefix(key, prefix)
+		if !ok || colName == "" {
+			continue
+		}
+		writerProps = append(writerProps, parquet.WithDictionaryFor(colName, javaBool(val)))
 	}
 
 	return writerProps
+}
+
+// javaBool matches Java's Boolean.parseBoolean, which Iceberg's Java writer uses
+// for these properties: only "true" (case-insensitive) is true; anything else,
+// including "1" and "yes", is false. strconv.ParseBool differs ("1" → true).
+func javaBool(val string) bool {
+	return strings.EqualFold(val, "true")
+}
+
+func ValidateParquetWriteProperties(props iceberg.Properties) error {
+	// A missing property uses the writer default, but an explicitly configured
+	// empty value is invalid. This keeps validation from silently accepting a
+	// value that GetInt would otherwise replace with its default.
+	for _, key := range []string{
+		ParquetRowGroupSizeBytesKey,
+		ParquetRowGroupLimitKey,
+		ParquetPageSizeBytesKey,
+		ParquetPageRowLimitKey,
+		ParquetDictSizeBytesKey,
+		ParquetBloomFilterMaxBytesKey,
+	} {
+		value, ok := props[key]
+		if !ok {
+			continue
+		}
+
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument, key, value, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf("%w: %s must be greater than 0, got %d", iceberg.ErrInvalidArgument, key, parsed)
+		}
+		if key == ParquetBloomFilterMaxBytesKey &&
+			(parsed < parquetBloomFilterMaxBytesMin || parsed > parquetBloomFilterMaxBytesMax) {
+			return fmt.Errorf("%w: %s must be between %d and %d bytes, got %d",
+				iceberg.ErrInvalidArgument, key, parquetBloomFilterMaxBytesMin, parquetBloomFilterMaxBytesMax, parsed)
+		}
+		// Row-group size is kept as int64 all the way through the writer. The
+		// other values are passed to Arrow APIs that take int and therefore
+		// must fit the platform's int range.
+		if key != ParquetRowGroupSizeBytesKey && strconv.IntSize == 32 && parsed > int64(^uint(0)>>1) {
+			return fmt.Errorf("%w: %s value %d exceeds int range", iceberg.ErrInvalidArgument, key, parsed)
+		}
+	}
+
+	if value, ok := props[ParquetCompressionLevelKey]; ok {
+		level, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("%w: invalid %s value %q: %v", iceberg.ErrInvalidArgument,
+				ParquetCompressionLevelKey, value, err)
+		}
+
+		compression := props.Get(ParquetCompressionKey, ParquetCompressionDefault)
+		if err := validateParquetCompressionLevel(compression, level); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func validateParquetCompressionLevel(compression string, level int) error {
+	min, max := 0, 0
+	switch compression {
+	case "gzip":
+		min, max = parquetGzipCompressionLevelMin, parquetGzipCompressionLevelMax
+	case "zstd":
+		min, max = parquetZstdCompressionLevelMin, parquetZstdCompressionLevelMax
+	case "brotli":
+		// Brotli uses -1 as the Iceberg default even though its underlying
+		// library accepts explicit qualities only in the 0..11 range.
+		if level == ParquetCompressionLevelDefault {
+			return nil
+		}
+		min, max = parquetBrotliCompressionLevelMin, parquetBrotliCompressionLevelMax
+	default:
+		// The remaining codecs do not expose a tunable level in Arrow's
+		// streaming writers, so the value is ignored after it is parsed.
+		return nil
+	}
+
+	if level < min || level > max {
+		return fmt.Errorf("%w: invalid %s value %d for %s; supported range is %d..%d (or %d for the default)",
+			iceberg.ErrInvalidArgument, ParquetCompressionLevelKey, level, compression, min, max,
+			ParquetCompressionLevelDefault)
+	}
+
+	return nil
 }
 
 // ParquetRowGroupTargetSizeBytes returns the configured uncompressed row-group
@@ -373,18 +498,21 @@ func writeDataFileBatches(w FileWriter, batches []arrow.RecordBatch) (iceberg.Da
 // lifecycle. It writes Arrow record batches to a Parquet file and tracks bytes
 // written for rolling file decisions.
 type ParquetFileWriter struct {
-	pqWriter      *pqarrow.FileWriter
-	counter       *internal.CountingWriter
-	fileCloser    io.Closer
-	fs            iceio.WriteFileIO
-	format        parquetFormat
-	info          WriteFileInfo
-	partition     map[int]any
-	colMapping    map[string]int
-	geoCols       []geoColumn
-	geoAccs       map[int]*geoBoundsAccumulator
-	arrowSchema   *arrow.Schema
-	rowGroupBytes int64
+	pqWriter         *pqarrow.FileWriter
+	counter          *internal.CountingWriter
+	fileCloser       io.Closer
+	mem              memory.Allocator
+	fs               iceio.WriteFileIO
+	format           parquetFormat
+	info             WriteFileInfo
+	partition        map[int]any
+	colMapping       map[string]int
+	variantFieldIDs  map[int]struct{}
+	geoCols          []geoColumn
+	geoNormalizeCols []int
+	geoAccs          map[int]*geoBoundsAccumulator
+	arrowSchema      *arrow.Schema
+	rowGroupBytes    int64
 }
 
 // geoColumn locates a top-level geometry/geography column: its position in the
@@ -414,6 +542,40 @@ func collectGeoColumns(sc *arrow.Schema, colMapping map[string]int) []geoColumn 
 	return result
 }
 
+// collectGeoNormalizationColumns finds top-level columns whose supported Arrow
+// container types can contain a GeoArrow WKB value. The result is computed once
+// per writer so batches without geo columns take a constant-time fast path.
+func collectGeoNormalizationColumns(sc *arrow.Schema) []int {
+	var result []int
+	for i, f := range sc.Fields() {
+		if arrowTypeContainsWKB(f.Type) {
+			result = append(result, i)
+		}
+	}
+
+	return result
+}
+
+func arrowTypeContainsWKB(dt arrow.DataType) bool {
+	// Keep this traversal in sync with normalizeNestedArrayReachable. The table
+	// write path does not currently pass dictionary- or run-end-encoded WKB
+	// arrays; supporting those inputs requires unwrapping them in both places.
+	switch t := dt.(type) {
+	case *geoarrow.WKBType:
+		return true
+	case *arrow.StructType:
+		for _, field := range t.Fields() {
+			if arrowTypeContainsWKB(field.Type) {
+				return true
+			}
+		}
+	case *arrow.ListType, *arrow.LargeListType, *arrow.FixedSizeListType, *arrow.MapType:
+		return arrowTypeContainsWKB(dt.(arrow.ListLikeType).Elem())
+	}
+
+	return false
+}
+
 // NewFileWriter creates a ParquetFileWriter that writes batches to a single
 // Parquet file. Call Write to append batches, BytesWritten to check actual
 // compressed file size, and Close to finalize and get the resulting DataFile.
@@ -434,11 +596,19 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		return nil, err
 	}
 
-	colMapping, err := p.PathToIDMapping(info.FileSchema)
-	if err != nil {
-		fw.Close()
+	colMapping := info.ColMapping
+	if colMapping == nil {
+		colMapping, err = p.PathToIDMapping(info.FileSchema)
+		if err != nil {
+			fw.Close()
 
-		return nil, err
+			return nil, err
+		}
+	}
+
+	variantFieldIDs := info.VariantFieldIDs
+	if variantFieldIDs == nil {
+		variantFieldIDs = VariantFieldIDsFromSchema(info.FileSchema)
 	}
 
 	counter := &internal.CountingWriter{W: fw}
@@ -459,6 +629,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	geoCols := collectGeoColumns(arrowSchema, colMapping)
+	geoNormalizeCols := collectGeoNormalizationColumns(arrowSchema)
 	geoAccs := make(map[int]*geoBoundsAccumulator, len(geoCols))
 	for _, gc := range geoCols {
 		// The accumulator must know whether the column is geometry or geography
@@ -471,18 +642,21 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 	}
 
 	return &ParquetFileWriter{
-		pqWriter:      writer,
-		counter:       counter,
-		fileCloser:    fw,
-		fs:            fs,
-		format:        p,
-		info:          info,
-		partition:     partitionValues,
-		colMapping:    colMapping,
-		geoCols:       geoCols,
-		geoAccs:       geoAccs,
-		arrowSchema:   arrowSchema,
-		rowGroupBytes: rowGroupTargetSizeBytes,
+		pqWriter:         writer,
+		counter:          counter,
+		fileCloser:       fw,
+		mem:              mem,
+		fs:               fs,
+		format:           p,
+		info:             info,
+		partition:        partitionValues,
+		colMapping:       colMapping,
+		variantFieldIDs:  variantFieldIDs,
+		geoCols:          geoCols,
+		geoNormalizeCols: geoNormalizeCols,
+		geoAccs:          geoAccs,
+		arrowSchema:      arrowSchema,
+		rowGroupBytes:    rowGroupTargetSizeBytes,
 	}, nil
 }
 
@@ -542,21 +716,29 @@ func getWriteProperties(writeProps any, arrowSchema *arrow.Schema) (*parquet.Wri
 
 // Write appends a record batch to the Parquet file.
 func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
-	if err := w.accumulateGeoBounds(batch); err != nil {
+	writeBatch, err := w.normalizeGeoBatch(batch)
+	if err != nil {
+		return err
+	}
+	if writeBatch != batch {
+		defer writeBatch.Release()
+	}
+
+	if err := w.accumulateGeoBounds(writeBatch); err != nil {
 		return err
 	}
 
 	// Rotate before writing the next non-empty batch. Rotating immediately after
 	// crossing the target would leave an empty trailing row group when the file
 	// is closed without another write.
-	if batch.NumRows() > 0 &&
+	if writeBatch.NumRows() > 0 &&
 		w.pqWriter.RowGroupTotalBytesWritten() >= w.rowGroupBytes {
 		if err := w.pqWriter.NewBufferedRowGroupChecked(); err != nil {
 			return err
 		}
 	}
 
-	return w.pqWriter.WriteBuffered(batch)
+	return w.pqWriter.WriteBuffered(writeBatch)
 }
 
 // wkbStorage is the subset of the binary Arrow arrays that back a geoarrow WKB
@@ -564,6 +746,341 @@ func (w *ParquetFileWriter) Write(batch arrow.RecordBatch) error {
 type wkbStorage interface {
 	arrow.Array
 	Value(int) []byte
+}
+
+func (w *ParquetFileWriter) normalizeGeoBatch(batch arrow.RecordBatch) (arrow.RecordBatch, error) {
+	if len(w.geoNormalizeCols) == 0 {
+		return batch, nil
+	}
+
+	columns := make(map[int]arrow.Array, len(w.geoNormalizeCols))
+	for _, idx := range w.geoNormalizeCols {
+		if idx >= int(batch.NumCols()) {
+			continue
+		}
+
+		normalized, changed, err := normalizeNestedArray(batch.Column(idx), w.mem)
+		if err != nil {
+			for _, col := range columns {
+				col.Release()
+			}
+
+			return nil, fmt.Errorf("normalizing geo values for column %d: %w", idx, err)
+		}
+		if changed {
+			columns[idx] = normalized
+		}
+	}
+
+	if len(columns) == 0 {
+		return batch, nil
+	}
+
+	resultColumns := slices.Clone(batch.Columns())
+	for idx, col := range columns {
+		resultColumns[idx] = col
+	}
+	result := array.NewRecordBatch(batch.Schema(), resultColumns, batch.NumRows())
+	for _, col := range columns {
+		col.Release()
+	}
+
+	return result, nil
+}
+
+// normalizeNestedArray walks an Arrow array and replaces only nested WKB values
+// that use EWKB encoding. Changed nested containers are rebuilt from their
+// logical values with offset zero, so materialized children cannot be sliced a
+// second time by an enclosing Arrow container. Recursive calls carry an
+// optional reachability mask so values hidden by nullable ancestors are copied
+// without being decoded. Such unreachable child slots may retain EWKB or
+// malformed bytes, which is safe because they cannot be observed through the
+// containing null value.
+func normalizeNestedArray(arr arrow.Array, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeNestedArrayReachable(arr, nil, mem)
+}
+
+func normalizeNestedArrayReachable(arr arrow.Array, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	if active != nil && !hasReachableValues(active) {
+		return nil, false, nil
+	}
+
+	if ext, ok := arr.(array.ExtensionArray); ok {
+		if _, ok := ext.ExtensionType().(*geoarrow.WKBType); !ok {
+			return nil, false, nil
+		}
+
+		return normalizeWKBArrayReachable(ext, active, mem)
+	}
+
+	// The table write path currently supplies unencoded nested arrays.
+	switch nested := arr.(type) {
+	case *array.Struct:
+		return normalizeStruct(nested, active, mem)
+
+	case *array.Map:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewMapData(data)
+		})
+
+	case *array.List:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewListData(data)
+		})
+
+	case *array.LargeList:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewLargeListData(data)
+		})
+
+	case *array.FixedSizeList:
+		return normalizeListChild(nested, active, mem, func(data arrow.ArrayData) arrow.Array {
+			return array.NewFixedSizeListData(data)
+		})
+	}
+
+	return nil, false, nil
+}
+
+func isReachable(active []bool, idx int) bool {
+	return active == nil || active[idx]
+}
+
+func hasReachableValues(active []bool) bool {
+	for _, reachable := range active {
+		if reachable {
+			return true
+		}
+	}
+
+	return false
+}
+
+func reachableWithValidity(active []bool, arr arrow.Array) []bool {
+	if arr.NullN() == 0 {
+		return active
+	}
+
+	reachable := make([]bool, arr.Len())
+	for i := range reachable {
+		reachable[i] = isReachable(active, i) && arr.IsValid(i)
+	}
+
+	return reachable
+}
+
+func normalizeStruct(nested *array.Struct, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	children := make([]arrow.ArrayData, nested.NumField())
+	changedChildren := make([]arrow.Array, 0, len(children))
+	childActive := reachableWithValidity(active, nested)
+	for idx := range children {
+		field := nested.Field(idx)
+		children[idx] = field.Data()
+		normalized, changed, err := normalizeNestedArrayReachable(field, childActive, mem)
+		if err != nil {
+			for _, changedChild := range changedChildren {
+				changedChild.Release()
+			}
+
+			return nil, false, err
+		}
+		if changed {
+			children[idx] = normalized.Data()
+			changedChildren = append(changedChildren, normalized)
+		}
+	}
+	if len(changedChildren) == 0 {
+		return nil, false, nil
+	}
+	defer func() {
+		for _, changedChild := range changedChildren {
+			changedChild.Release()
+		}
+	}()
+
+	validity, nulls := rebasedValidity(nested, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(nested.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	} else {
+		buffers[0] = validity
+	}
+	data := array.NewData(nested.DataType(), nested.Len(), buffers, children, nulls, 0)
+	result := array.NewStructData(data)
+	data.Release()
+
+	return result, true, nil
+}
+
+func normalizeListChild(list array.ListLike, active []bool, mem memory.Allocator,
+	newArray func(arrow.ArrayData) arrow.Array,
+) (arrow.Array, bool, error) {
+	if list.Len() == 0 {
+		return nil, false, nil
+	}
+
+	start, _ := list.ValueOffsets(0)
+	_, end := list.ValueOffsets(list.Len() - 1)
+	if start == end {
+		return nil, false, nil
+	}
+
+	childActive := make([]bool, int(end-start))
+	for i := range list.Len() {
+		rowStart, rowEnd := list.ValueOffsets(i)
+		if !isReachable(active, i) || list.IsNull(i) {
+			continue
+		}
+		for j := rowStart; j < rowEnd; j++ {
+			childActive[int(j-start)] = true
+		}
+	}
+	if !hasReachableValues(childActive) {
+		return nil, false, nil
+	}
+
+	values := array.NewSlice(list.ListValues(), start, end)
+	defer values.Release()
+	normalized, changed, err := normalizeNestedArrayReachable(values, childActive, mem)
+	if err != nil || !changed {
+		return nil, false, err
+	}
+	defer normalized.Release()
+
+	children := slices.Clone(list.Data().Children())
+	children[0] = normalized.Data()
+
+	validity, nulls := rebasedValidity(list, mem)
+	if validity != nil {
+		defer validity.Release()
+	}
+	buffers := slices.Clone(list.Data().Buffers())
+	if len(buffers) == 0 {
+		buffers = []*memory.Buffer{validity}
+	}
+	buffers[0] = validity
+	if list.DataType().ID() != arrow.FIXED_SIZE_LIST {
+		offsets, err := rebasedListOffsets(list, start, mem)
+		if err != nil {
+			return nil, false, err
+		}
+		defer offsets.Release()
+		if len(buffers) < 2 {
+			return nil, false, errors.New("list array has no offsets buffer")
+		}
+		buffers[1] = offsets
+	}
+
+	newData := array.NewData(list.DataType(), list.Len(), buffers, children, nulls, 0)
+	result := newArray(newData)
+	newData.Release()
+
+	return result, true, nil
+}
+
+func rebasedValidity(arr arrow.Array, mem memory.Allocator) (*memory.Buffer, int) {
+	nulls := arr.NullN()
+	if nulls == 0 {
+		return nil, 0
+	}
+
+	data := mem.Allocate(int(bitutil.BytesForBits(int64(arr.Len()))))
+	for i := range data {
+		data[i] = 0
+	}
+	for i := range arr.Len() {
+		if arr.IsValid(i) {
+			bitutil.SetBit(data, i)
+		}
+	}
+
+	return memory.NewBufferWithAllocator(data, mem), nulls
+}
+
+func rebasedListOffsets(list array.ListLike, first int64, mem memory.Allocator) (*memory.Buffer, error) {
+	var (
+		data []byte
+		set  func(int, int64)
+	)
+	switch list.DataType().ID() {
+	case arrow.LIST, arrow.MAP:
+		data = mem.Allocate((list.Len() + 1) * 4)
+		offsets := arrow.Int32Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = int32(value)
+		}
+	case arrow.LARGE_LIST:
+		data = mem.Allocate((list.Len() + 1) * 8)
+		offsets := arrow.Int64Traits.CastFromBytes(data)
+		set = func(idx int, value int64) {
+			offsets[idx] = value
+		}
+	default:
+		return nil, fmt.Errorf("unsupported list type %s", list.DataType())
+	}
+
+	buffer := memory.NewBufferWithAllocator(data, mem)
+	for i := range list.Len() {
+		start, end := list.ValueOffsets(i)
+		set(i, start-first)
+		set(i+1, end-first)
+	}
+
+	return buffer, nil
+}
+
+func normalizeWKBArray(ext array.ExtensionArray, mem memory.Allocator) (arrow.Array, bool, error) {
+	return normalizeWKBArrayReachable(ext, nil, mem)
+}
+
+func normalizeWKBArrayReachable(ext array.ExtensionArray, active []bool, mem memory.Allocator) (arrow.Array, bool, error) {
+	storage, ok := ext.Storage().(wkbStorage)
+	if !ok {
+		return nil, false, nil
+	}
+
+	needsNormalization := false
+	for i := range storage.Len() {
+		if isReachable(active, i) && !storage.IsNull(i) && isEWKB(storage.Value(i)) {
+			needsNormalization = true
+
+			break
+		}
+	}
+	if !needsNormalization {
+		return nil, false, nil
+	}
+
+	builder := array.NewBinaryBuilder(mem, storage.DataType().(arrow.BinaryDataType))
+	defer builder.Release()
+
+	for i := range storage.Len() {
+		if storage.IsNull(i) {
+			builder.AppendNull()
+
+			continue
+		}
+		if !isReachable(active, i) || !isEWKB(storage.Value(i)) {
+			builder.Append(storage.Value(i))
+
+			continue
+		}
+
+		value, err := normalizeWKB(storage.Value(i))
+		if err != nil {
+			return nil, false, err
+		}
+		builder.Append(value)
+	}
+
+	normalizedStorage := builder.NewArray()
+	normalized := array.NewExtensionArrayWithStorage(ext.ExtensionType(), normalizedStorage)
+	normalizedStorage.Release()
+
+	return normalized, true, nil
 }
 
 // accumulateGeoBounds extends the per-field bounding boxes with the WKB values
@@ -618,7 +1135,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema), w.arrowSchema)
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, w.variantFieldIDs, w.arrowSchema)
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	if err = w.applyGeoBounds(stats); err != nil {
@@ -871,8 +1388,72 @@ func (w wrappedDecByteArrayStats) Max() iceberg.Decimal {
 	return iceberg.Decimal{Val: dec, Scale: w.scale}
 }
 
+// parquetStatsColumn contains the immutable per-file resolution needed to
+// interpret a physical Parquet column's statistics. The row-group metadata
+// still carries the values that are accumulated, but the path-to-field lookup
+// is independent of the row group and is done once from the resolved schema.
+type parquetStatsColumn struct {
+	path         string
+	fieldID      int
+	statsCol     StatisticsCollector
+	variantChild bool
+	skipStats    bool
+	resolveErr   error
+}
+
+func resolveParquetStatsColumns(meta *metadata.FileMetaData, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}) []parquetStatsColumn {
+	columns := make([]parquetStatsColumn, meta.Schema.NumColumns())
+	for pos := range meta.Schema.NumColumns() {
+		column := meta.Schema.Column(pos)
+		columnPath := column.ColumnPath()
+		descriptor := parquetStatsColumn{path: column.Path()}
+
+		fieldID, ok := colMapping[descriptor.path]
+		if !ok {
+			// Variant sub-columns (metadata, value, typed_value children) have
+			// no Iceberg field ID (spec: "must not be assigned field IDs").
+			// Walk up the resolved path once to find a variant ancestor.
+			for depth := len(columnPath) - 1; depth >= 1; depth-- {
+				ancestorPath := strings.Join(columnPath[:depth], ".")
+				if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
+					_, descriptor.variantChild = variantFieldIDs[ancestorID]
+
+					break
+				}
+			}
+			if !descriptor.variantChild {
+				descriptor.resolveErr = fmt.Errorf("column chunk %q not found in column mapping", columnPath)
+			}
+
+			columns[pos] = descriptor
+
+			continue
+		}
+
+		descriptor.fieldID = fieldID
+		statsCol, ok := statsCols[fieldID]
+		if !ok {
+			// Only the reserved row-lineage metadata columns (_row_id,
+			// _last_updated_sequence_number) may legitimately appear in a file
+			// without a metrics-plan entry. Writers materialize them without
+			// adding them to the table schema, so skip them entirely.
+			if iceberg.IsMetadataColumn(fieldID) {
+				descriptor.skipStats = true
+			} else {
+				descriptor.resolveErr = fmt.Errorf("field id %d (column %q) not found in the metrics plan", fieldID, descriptor.path)
+			}
+		} else {
+			descriptor.statsCol = statsCol
+		}
+		columns[pos] = descriptor
+	}
+
+	return columns
+}
+
 func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]StatisticsCollector, colMapping map[string]int, variantFieldIDs map[int]struct{}, arrowSchema *arrow.Schema) *DataFileStatistics {
 	pqmeta := meta.(*metadata.FileMetaData)
+	columns := resolveParquetStatsColumns(pqmeta, statsCols, colMapping, variantFieldIDs)
 	var (
 		colSizes        = make(map[int]int64)
 		valueCounts     = make(map[int]int64)
@@ -899,38 +1480,24 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		}
 
 		for pos := range rowGroup.NumColumns() {
+			column := columns[pos]
+			if column.resolveErr != nil {
+				if _, err = rowGroup.ColumnChunk(pos); err != nil {
+					panic(err)
+				}
+
+				panic(column.resolveErr)
+			}
+			if column.variantChild || column.skipStats || column.statsCol.Mode.Typ == MetricModeNone {
+				continue
+			}
+
+			fieldID, statsCol := column.fieldID, column.statsCol
 			colChunk, err = rowGroup.ColumnChunk(pos)
 			if err != nil {
 				panic(err)
 			}
 
-			fieldID, ok := colMapping[colChunk.PathInSchema().String()]
-			if !ok {
-				// Variant sub-columns (metadata, value, typed_value children) have no
-				// Iceberg field ID (spec: "must not be assigned field IDs"). Walk up
-				// the path hierarchy to find a variant ancestor.
-				path := colChunk.PathInSchema()
-				found := false
-				for depth := len(path) - 1; depth >= 1; depth-- {
-					ancestorPath := strings.Join(path[:depth], ".")
-					if ancestorID, hasAncestor := colMapping[ancestorPath]; hasAncestor {
-						if _, isVariant := variantFieldIDs[ancestorID]; isVariant {
-							found = true
-						}
-
-						break
-					}
-				}
-				if found {
-					continue
-				}
-
-				panic(fmt.Errorf("column chunk %q not found in column mapping", colChunk.PathInSchema()))
-			}
-			statsCol := statsCols[fieldID]
-			if statsCol.Mode.Typ == MetricModeNone {
-				continue
-			}
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}
@@ -1007,7 +1574,7 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		return ok
 	})
 
-	vlo, vup := p.collectVariantBounds(pqmeta, arrowSchema, colMapping, statsCols)
+	vlo, vup := p.collectVariantBoundsWithColumns(pqmeta, arrowSchema, colMapping, statsCols, columns)
 
 	return &DataFileStatistics{
 		RecordCount:        pqmeta.GetNumRows(),
@@ -1073,6 +1640,16 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 		return nil, nil
 	}
 
+	columns := resolveParquetStatsColumns(meta, statsCols, colMapping, nil)
+
+	return p.collectVariantBoundsWithColumns(meta, arrowSchema, colMapping, statsCols, columns)
+}
+
+func (p parquetFormat) collectVariantBoundsWithColumns(meta *metadata.FileMetaData, arrowSchema *arrow.Schema, colMapping map[string]int, statsCols map[int]StatisticsCollector, columns []parquetStatsColumn) (lower, upper map[int][]byte) {
+	if arrowSchema == nil {
+		return nil, nil
+	}
+
 	type leafAgg struct {
 		leaf     variantLeaf
 		parentID int
@@ -1115,7 +1692,7 @@ func (p parquetFormat) collectVariantBounds(meta *metadata.FileMetaData, arrowSc
 			if err != nil {
 				continue
 			}
-			path := cc.PathInSchema().String()
+			path := columns[pos].path
 
 			if _, isResidual := residualParent[path]; isResidual {
 				// Non-null residual entries invalidate the bound unless they are all variant-null.
@@ -1338,7 +1915,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 func buildFieldIDToColIdx(meta *metadata.FileMetaData) map[int]int {
 	sc := meta.Schema
 	result := make(map[int]int, sc.NumColumns())
-	for i := 0; i < sc.NumColumns(); i++ {
+	for i := range sc.NumColumns() {
 		fieldID := int(sc.Column(i).SchemaNode().FieldID())
 		result[fieldID] = i
 	}
@@ -1550,7 +2127,7 @@ func getFieldID(f arrow.Field) *int {
 	}
 
 	id, err := strconv.Atoi(fieldIDStr)
-	if err != nil {
+	if err != nil || id <= 0 {
 		return nil
 	}
 
@@ -1566,14 +2143,16 @@ type pruneParquetSchema struct {
 }
 
 func (p *pruneParquetSchema) fieldID(field arrow.Field, mapping *iceberg.MappedField) int {
+	// Embedded Parquet field IDs are authoritative. Name mappings are only a
+	// fallback for files and fields that do not carry their own IDs.
+	if id := getFieldID(field); id != nil {
+		return *id
+	}
+
 	if mapping != nil {
 		if mapping.FieldID != nil {
 			return *mapping.FieldID
 		}
-	}
-
-	if id := getFieldID(field); id != nil {
-		return *id
 	}
 
 	panic(fmt.Errorf("%w: cannot convert %s to Iceberg field, missing field_id",

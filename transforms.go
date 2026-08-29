@@ -44,25 +44,38 @@ var (
 
 // ParseTransform takes the string representation of a transform as
 // defined in the iceberg spec, and produces the appropriate Transform
-// object or an error if the string is not a valid transform string.
+// object. Strings that don't name a known transform yield an
+// UnknownTransform rather than an error, so that v3 tables using transforms
+// this implementation doesn't recognize can still be read. This mirrors Java's
+// Transforms.fromString: only a bucket/truncate whose width parses as a number
+// but is out of range (e.g. bucket[0]) is an error; anything else that doesn't
+// match the width pattern, like bucket[-1], is an unknown transform.
 func ParseTransform(s string) (Transform, error) {
-	s = strings.ToLower(s)
-
-	if matches := bucketTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
-		n, err := strconv.Atoi(matches[1])
-		if err == nil && n > 0 && n <= math.MaxInt32 {
-			return BucketTransform{NumBuckets: n}, nil
-		}
+	if s == "" {
+		return nil, fmt.Errorf("%w: empty transform", ErrInvalidTransform)
 	}
 
-	if matches := truncateTransformRegex.FindStringSubmatch(s); len(matches) == 2 {
+	lower := strings.ToLower(s)
+
+	if matches := bucketTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
 		n, err := strconv.Atoi(matches[1])
-		if err == nil && n > 0 && n <= math.MaxInt32 {
-			return TruncateTransform{Width: n}, nil
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
 		}
+
+		return BucketTransform{NumBuckets: n}, nil
 	}
 
-	switch s {
+	if matches := truncateTransformRegex.FindStringSubmatch(lower); len(matches) == 2 {
+		n, err := strconv.Atoi(matches[1])
+		if err != nil || n <= 0 || n > math.MaxInt32 {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
+		}
+
+		return TruncateTransform{Width: n}, nil
+	}
+
+	switch lower {
 	case "identity":
 		return IdentityTransform{}, nil
 	case "void":
@@ -77,7 +90,10 @@ func ParseTransform(s string) (Transform, error) {
 		return HourTransform{}, nil
 	}
 
-	return nil, fmt.Errorf("%w: %s", ErrInvalidTransform, s)
+	// Unknown transform: v3 readers must load these and ignore them when
+	// filtering instead of failing. Keep the original string, case and all, so it
+	// round-trips; Equals stays byte-for-byte, matching Java's UnknownTransform.
+	return UnknownTransform{name: s}, nil
 }
 
 // Transform is an interface for the various Transformation types
@@ -122,9 +138,14 @@ func (IdentityTransform) ResultType(t Type) Type { return t }
 func (IdentityTransform) PreservesOrder() bool   { return true }
 
 func (IdentityTransform) Equals(other Transform) bool {
-	_, ok := other.(IdentityTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case IdentityTransform:
+		return true
+	case *IdentityTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (IdentityTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -193,7 +214,7 @@ func (t IdentityTransform) Project(name string, pred BoundPredicate) (UnboundPre
 	case BoundLiteralPredicate:
 		return p.AsUnbound(Reference(name), p.Literal()), nil
 	case BoundSetPredicate:
-		return p.AsUnbound(Reference(name), p.Literals().Members()), nil
+		return p.AsUnbound(Reference(name), boundSetLiteralsForVisit(p).Members()), nil
 	}
 
 	return nil, nil
@@ -213,9 +234,14 @@ func (VoidTransform) ResultType(t Type) Type { return t }
 func (VoidTransform) PreservesOrder() bool   { return false }
 
 func (VoidTransform) Equals(other Transform) bool {
-	_, ok := other.(VoidTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case VoidTransform:
+		return true
+	case *VoidTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (VoidTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -227,6 +253,70 @@ func (VoidTransform) ToHumanStr(any) string { return "null" }
 func (VoidTransform) ToHumanStrType(Type, any) string { return "null" }
 
 func (VoidTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
+	return nil, nil
+}
+
+// UnknownTransform is a placeholder for a partition or sort transform that
+// this implementation doesn't recognize. The v3 spec requires readers to load
+// tables that use unknown transforms and to ignore those fields when
+// filtering; writers must not commit a partition spec that uses one.
+type UnknownTransform struct {
+	name string
+}
+
+// MarshalText rejects the zero value. UnknownTransform{} is a legal composite
+// literal outside this package, and an empty name would serialize to
+// "transform": "" -- metadata that can't be read back.
+func (t UnknownTransform) MarshalText() ([]byte, error) {
+	if t.name == "" {
+		return nil, fmt.Errorf("%w: unknown transform has no name", ErrInvalidTransform)
+	}
+
+	return []byte(t.name), nil
+}
+
+func (t UnknownTransform) String() string { return t.name }
+
+// CanTransform always returns true: compatibility with a source type is
+// unverifiable for an unknown transform, not verified. Callers such as
+// SortOrder.CheckCompatibility therefore accept any source type here.
+func (UnknownTransform) CanTransform(Type) bool { return true }
+
+// ResultType is unknown, so report string, matching the Java reference.
+func (UnknownTransform) ResultType(Type) Type { return StringType{} }
+
+func (UnknownTransform) PreservesOrder() bool { return false }
+
+func (t UnknownTransform) Equals(other Transform) bool {
+	switch rhs := other.(type) {
+	case UnknownTransform:
+		return t.name == rhs.name
+	case *UnknownTransform:
+		return rhs != nil && t.name == rhs.name
+	default:
+		return false
+	}
+}
+
+// Apply can't be evaluated for an unknown transform.
+func (UnknownTransform) Apply(Optional[Literal]) Optional[Literal] {
+	return Optional[Literal]{}
+}
+
+// ToHumanStr renders the value, not the transform name. Java's
+// Transform#toHumanString default does the same and UnknownTransform doesn't
+// override it. Returning the name would be constant for a spec field, which
+// collapses distinct partitions into one PartitionToPath key.
+func (UnknownTransform) ToHumanStr(val any) string {
+	return IdentityTransform{}.ToHumanStr(val)
+}
+
+func (UnknownTransform) ToHumanStrType(typ Type, val any) string {
+	return IdentityTransform{}.ToHumanStrType(typ, val)
+}
+
+// Project returns nil so scans don't prune on an unknown partition field.
+func (UnknownTransform) Project(string, BoundPredicate) (UnboundPredicate, error) {
 	return nil, nil
 }
 
@@ -300,13 +390,37 @@ func hashTimestampNano(v any) uint32 {
 	return hashHelperInt[int64](micros)
 }
 
-func (t BucketTransform) Equals(other Transform) bool {
-	rhs, ok := other.(BucketTransform)
-	if !ok {
-		return false
+func hashDecimal(v Decimal) uint32 {
+	// Decimal bucket transforms hash the minimum two's-complement
+	// big-endian representation of the unscaled value. Keep the full
+	// decimal128 value on the stack and trim only redundant sign bytes.
+	var buf [16]byte
+	binary.BigEndian.PutUint64(buf[:8], uint64(v.Val.HighBits()))
+	binary.BigEndian.PutUint64(buf[8:], v.Val.LowBits())
+
+	start := 0
+	if v.Val.Sign() >= 0 {
+		for start < len(buf)-1 && buf[start] == 0 && buf[start+1]&0x80 == 0 {
+			start++
+		}
+	} else {
+		for start < len(buf)-1 && buf[start] == 0xff && buf[start+1]&0x80 != 0 {
+			start++
+		}
 	}
 
-	return t.NumBuckets == rhs.NumBuckets
+	return murmur3.Sum32(buf[start:])
+}
+
+func (t BucketTransform) Equals(other Transform) bool {
+	switch rhs := other.(type) {
+	case BucketTransform:
+		return t.NumBuckets == rhs.NumBuckets
+	case *BucketTransform:
+		return rhs != nil && t.NumBuckets == rhs.NumBuckets
+	default:
+		return false
+	}
 }
 
 func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
@@ -326,8 +440,7 @@ func (t BucketTransform) Apply(value Optional[Literal]) Optional[Literal] {
 	case UUIDLiteral:
 		hash = murmur3.Sum32(v[:])
 	case DecimalLiteral:
-		b, _ := v.MarshalBinary()
-		hash = murmur3.Sum32(b)
+		hash = hashDecimal(Decimal(v))
 	case Int32Literal:
 		hash = hashHelperInt[int64](int64(v))
 	case Int64Literal:
@@ -376,9 +489,7 @@ func (t BucketTransform) Transformer(src Type) func(any) Optional[int32] {
 		h = hashTimestampNano
 	case DecimalType:
 		h = func(v any) uint32 {
-			b, _ := DecimalLiteral(v.(Decimal)).MarshalBinary()
-
-			return murmur3.Sum32(b)
+			return hashDecimal(v.(Decimal))
 		}
 	case StringType, FixedType, BinaryType:
 		h = func(v any) uint32 {
@@ -500,12 +611,14 @@ func (TruncateTransform) CanTransform(t Type) bool {
 func (TruncateTransform) ResultType(t Type) Type { return t }
 func (TruncateTransform) PreservesOrder() bool   { return true }
 func (t TruncateTransform) Equals(other Transform) bool {
-	rhs, ok := other.(TruncateTransform)
-	if !ok {
+	switch rhs := other.(type) {
+	case TruncateTransform:
+		return t.Width == rhs.Width
+	case *TruncateTransform:
+		return rhs != nil && t.Width == rhs.Width
+	default:
 		return false
 	}
-
-	return t.Width == rhs.Width
 }
 
 func (t TruncateTransform) Transformer(src Type) (func(any) any, error) {
@@ -761,9 +874,14 @@ func (YearTransform) ResultType(Type) Type                { return PrimitiveType
 func (YearTransform) PreservesOrder() bool                { return true }
 
 func (YearTransform) Equals(other Transform) bool {
-	_, ok := other.(YearTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case YearTransform:
+		return true
+	case *YearTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (YearTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -858,9 +976,14 @@ func (MonthTransform) ResultType(Type) Type                { return PrimitiveTyp
 func (MonthTransform) PreservesOrder() bool                { return true }
 
 func (MonthTransform) Equals(other Transform) bool {
-	_, ok := other.(MonthTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case MonthTransform:
+		return true
+	case *MonthTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (MonthTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -967,9 +1090,14 @@ func (DayTransform) ResultType(Type) Type                { return PrimitiveTypes
 func (DayTransform) PreservesOrder() bool                { return true }
 
 func (DayTransform) Equals(other Transform) bool {
-	_, ok := other.(DayTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case DayTransform:
+		return true
+	case *DayTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (DayTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -1020,25 +1148,30 @@ func (DayTransform) Apply(value Optional[Literal]) (out Optional[Literal]) {
 
 	switch v := value.Val.(type) {
 	case DateLiteral:
-		out.Valid, out.Val = true, Int32Literal(v)
+		out.Valid, out.Val = true, v
 	case TimestampLiteral:
-		out.Valid, out.Val = true, Int32Literal(Timestamp(v).ToDate())
+		out.Valid, out.Val = true, DateLiteral(Timestamp(v).ToDate())
 	case TimestampNsLiteral:
-		out.Valid, out.Val = true, Int32Literal(TimestampNano(v).ToDate())
+		out.Valid, out.Val = true, DateLiteral(TimestampNano(v).ToDate())
 	}
 
 	return out
 }
 
 func (DayTransform) ToHumanStr(val any) string {
+	var days int32
 	switch v := val.(type) {
+	case Date:
+		days = int32(v)
 	case int32:
-		tm := epochTM.AddDate(0, 0, int(v))
-
-		return tm.Format("2006-01-02")
+		days = v
 	default:
 		return "null"
 	}
+
+	tm := epochTM.AddDate(0, 0, int(days))
+
+	return tm.Format("2006-01-02")
 }
 
 func (t DayTransform) ToHumanStrType(_ Type, val any) string {
@@ -1070,9 +1203,14 @@ func (HourTransform) ResultType(Type) Type { return PrimitiveTypes.Int32 }
 func (HourTransform) PreservesOrder() bool { return true }
 
 func (HourTransform) Equals(other Transform) bool {
-	_, ok := other.(HourTransform)
-
-	return ok
+	switch rhs := other.(type) {
+	case HourTransform:
+		return true
+	case *HourTransform:
+		return rhs != nil
+	default:
+		return false
+	}
 }
 
 func (HourTransform) Transformer(src Type) (func(any) Optional[int32], error) {
@@ -1147,13 +1285,14 @@ func (t HourTransform) Project(name string, pred BoundPredicate) (UnboundPredica
 }
 
 func removeTransform(partName string, pred BoundPredicate) (UnboundPredicate, error) {
+	ref := Reference(partName)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
-		return p.AsUnbound(Reference(partName)), nil
+		return UnaryPredicate(p.Op(), ref), nil
 	case BoundLiteralPredicate:
-		return p.AsUnbound(Reference(partName), p.Literal()), nil
+		return LiteralPredicate(p.Op(), ref, p.Literal()), nil
 	case BoundSetPredicate:
-		return p.AsUnbound(Reference(partName), p.Literals().Members()), nil
+		return SetPredicate(p.Op(), ref, boundSetLiteralsForVisit(p).Members()).(UnboundPredicate), nil
 	}
 
 	return nil, fmt.Errorf("%w: cannot replace transform in unknown predicate: %s",
@@ -1220,19 +1359,29 @@ func truncateNumber[T LiteralType](name string, pred BoundLiteralPredicate, fn f
 	boundary, ok := pred.Literal().(NumericLiteral)
 	if !ok {
 		return nil, fmt.Errorf("%w: expected numeric literal, got %s",
-			ErrInvalidArgument, boundary.Type())
+			ErrInvalidArgument, pred.Literal().Type())
 	}
 
 	switch pred.Op() {
 	case OpLT:
+		adjusted := boundary.Decrement()
+		if _, ok := adjusted.(BelowMinLiteral); ok {
+			return nil, nil
+		}
+
 		return LiteralPredicate(OpLTEQ, Reference(name),
-			transformLiteral(fn, boundary.Decrement())), nil
+			transformLiteral(fn, adjusted)), nil
 	case OpLTEQ:
 		return LiteralPredicate(OpLTEQ, Reference(name),
 			transformLiteral(fn, boundary)), nil
 	case OpGT:
+		adjusted := boundary.Increment()
+		if _, ok := adjusted.(AboveMaxLiteral); ok {
+			return nil, nil
+		}
+
 		return LiteralPredicate(OpGTEQ, Reference(name),
-			transformLiteral(fn, boundary.Increment())), nil
+			transformLiteral(fn, adjusted)), nil
 	case OpGTEQ:
 		return LiteralPredicate(OpGTEQ, Reference(name),
 			transformLiteral(fn, boundary)), nil
@@ -1279,7 +1428,7 @@ func literalLen(lit Literal) int {
 }
 
 func setApplyTransform[T LiteralType](name string, pred BoundSetPredicate, fn func(any) Optional[T]) UnboundPredicate {
-	lits := pred.Literals().Members()
+	lits := boundSetLiteralsForVisit(pred).Members()
 	for i, l := range lits {
 		lits[i] = transformLiteral(fn, l)
 	}

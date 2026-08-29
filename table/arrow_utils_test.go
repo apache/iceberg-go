@@ -19,8 +19,8 @@ package table_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -32,6 +32,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/arrow-go/v18/parquet/schema"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
 	"github.com/apache/iceberg-go/table"
@@ -55,7 +59,7 @@ func TestArrowToIceberg(t *testing.T) {
 		{&arrow.FixedSizeBinaryType{ByteWidth: 0}, iceberg.FixedTypeOf(0), true, ""},
 		{&arrow.FixedSizeBinaryType{ByteWidth: 23}, iceberg.FixedTypeOf(23), true, ""},
 		{&arrow.Decimal32Type{Precision: 8, Scale: 2}, iceberg.DecimalTypeOf(8, 2), false, ""},
-		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, iceberg.DecimalTypeOf(8, 9), false, ""},
+		{&arrow.Decimal32Type{Precision: 8, Scale: 9}, nil, false, "invalid scale 9: must be less than or equal to precision 8"},
 		{&arrow.Decimal64Type{Precision: 15, Scale: 14}, iceberg.DecimalTypeOf(15, 14), false, ""},
 		{&arrow.Decimal128Type{Precision: 26, Scale: 20}, iceberg.DecimalTypeOf(26, 20), true, ""},
 		{&arrow.Decimal256Type{Precision: 8, Scale: 9}, nil, false, "unsupported arrow type for conversion - decimal256(8, 9)"},
@@ -522,12 +526,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84"}`,
 		},
-		// Geometry with srid:0 should result in an unset (omitted) CRS
-		{
-			name:             "geometry_srid_0",
-			ice:              geomSRID0,
-			geoarrowMetaJSON: `{}`,
-		},
 		// Geometry with custom CRSes (authority:code and partial projjson)
 		{
 			name:             "geometry_epsg_4267",
@@ -571,12 +569,6 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              geogThomas,
 			geoarrowMetaJSON: `{"crs":"OGC:CRS84","edges":"thomas"}`,
 		},
-		// Geography with srid:0 should result in an unset (omitted) CRS and spherical edges
-		{
-			name:             "geography_srid_0",
-			ice:              geogSRID0,
-			geoarrowMetaJSON: `{"edges":"spherical"}`,
-		},
 		// Geography with custom CRSes (authority:code and partial projjson)
 		{
 			name:             "geography_epsg_4267",
@@ -589,6 +581,18 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              geomSRID,
 			geoarrowMetaJSON: `{"crs":"4326", "crs_type":"srid"}`,
 		},
+		// srid:0 means an unknown CRS, which must be written explicitly: an omitted
+		// CRS means OGC:CRS84 per the Parquet geospatial spec.
+		{
+			name:             "geometry_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		{
+			name:             "geography_srid_0",
+			ice:              geogSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+		},
 	}
 
 	// The following tests focus on edge cases and pinning specific behavior for read case
@@ -598,9 +602,9 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		geoarrowMetaJSON string
 	}{
 		{
-			// Pin that a present crs_type without CRS still follows the srid:0 default.
-			name:             "geometry_srid_0_with_crs_type",
-			ice:              geomSRID0,
+			// Pin that a present crs_type without CRS still follows the default CRS.
+			name:             "geometry_no_crs_with_crs_type",
+			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{"crs_type":"authority_code"}`,
 		},
 		{
@@ -631,10 +635,10 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 		},
 
 		// Translated from arrow-rs geo logical type read tests (https://github.com/apache/arrow-rs/pull/10065)
-		// Geometry with no CRS should be GEOMETRY(srid:0)
+		// An omitted CRS means the default CRS, so this is plain GEOMETRY
 		{
 			name:             "geometry_no_crs",
-			ice:              geomSRID0,
+			ice:              defaultGeometry,
 			geoarrowMetaJSON: `{}`,
 		},
 		// Geometry with string CRS
@@ -676,11 +680,29 @@ func TestIcebergGeoTypesToArrowSchema(t *testing.T) {
 			ice:              iceberg.GeometryType{},
 			geoarrowMetaJSON: `{"crs":{"id":{"authority":"OGC","code":"CRS84"}}}`,
 		},
-		// Geography with no CRS, spherical edges
+		// An explicit srid CRS is preserved; only an absent CRS means the default
+		{
+			name:             "geometry_explicit_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		// A writer that stores the srid already prefixed keeps a single prefix
+		{
+			name:             "geometry_prefixed_srid_0",
+			ice:              geomSRID0,
+			geoarrowMetaJSON: `{"crs":"srid:0","crs_type":"srid"}`,
+		},
+		// Geography with no CRS, spherical edges: both are the Iceberg defaults
 		{
 			name:             "geography_no_crs_spherical",
-			ice:              geogSRID0,
+			ice:              iceberg.GeographyType{},
 			geoarrowMetaJSON: `{"edges":"spherical"}`,
+		},
+		// Geography with no CRS keeps its explicit edge algorithm
+		{
+			name:             "geography_no_crs_karney",
+			ice:              geogKarneyDefaultCRS,
+			geoarrowMetaJSON: `{"edges":"karney"}`,
 		},
 		// Geography with OGC:CRS84 and spherical edges
 		{
@@ -1011,7 +1033,7 @@ func TestVariantArrayBuilderLargeValues(t *testing.T) {
 
 	const objFields = 40
 	obj := make(map[string]any, objFields)
-	for i := 0; i < objFields; i++ {
+	for i := range objFields {
 		obj["k"+strconv.Itoa(i)] = int64(i)
 	}
 	bldr.Append(mkVariant(obj))
@@ -1381,6 +1403,196 @@ func TestToRequestedSchemaListLargeTypeCoercion(t *testing.T) {
 	})
 }
 
+func TestToRequestedSchemaListOfStructNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	elemStruct := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("2")},
+	)
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "nested", Type: arrow.ListOfField(arrow.Field{
+			Name: "element", Type: elemStruct, Nullable: false, Metadata: fieldIDMeta("3"),
+		}), Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	lb := bldr.Field(0).(*array.ListBuilder)
+	sb := lb.ValueBuilder().(*array.StructBuilder)
+	lb.Append(true)
+	sb.Append(true)
+	sb.FieldBuilder(0).(*array.Int32Builder).Append(42)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "nested", Type: &iceberg.ListType{
+			ElementID: 3, Element: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 2, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				},
+			}, ElementRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	list := converted.Column(0).(*array.List)
+	require.Equal(t, 1, list.Len())
+	elems := list.ListValues().(*array.Struct)
+	require.Equal(t, 1, elems.Len())
+	assert.Equal(t, int32(42), elems.Field(0).(*array.Int32).Value(0))
+}
+
+func TestToRequestedSchemaMapStructValueNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	valStruct := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("3")},
+	)
+	mapType := arrow.MapOfWithMetadata(arrow.BinaryTypes.String, fieldIDMeta("2"), valStruct, fieldIDMeta("4"))
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "m", Type: mapType, Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	mb := bldr.Field(0).(*array.MapBuilder)
+	kb := mb.KeyBuilder().(*array.StringBuilder)
+	vb := mb.ItemBuilder().(*array.StructBuilder)
+	mb.Append(true)
+	kb.Append("k")
+	vb.Append(true)
+	vb.FieldBuilder(0).(*array.Int32Builder).Append(7)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: iceberg.PrimitiveTypes.String,
+			ValueID: 4, ValueType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "x", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+				},
+			}, ValueRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	m := converted.Column(0).(*array.Map)
+	require.Equal(t, 1, m.Keys().Len())
+	assert.Equal(t, "k", m.Keys().(*array.String).Value(0))
+	vals := m.Items().(*array.Struct)
+	require.Equal(t, 1, vals.Len())
+	assert.Equal(t, int32(7), vals.Field(0).(*array.Int32).Value(0))
+}
+
+func TestToRequestedSchemaMapStructKeyNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	keyStruct := arrow.StructOf(
+		arrow.Field{Name: "k", Type: arrow.BinaryTypes.String, Nullable: false, Metadata: fieldIDMeta("3")},
+	)
+	mapType := arrow.MapOfWithMetadata(keyStruct, fieldIDMeta("2"), arrow.PrimitiveTypes.Int32, fieldIDMeta("4"))
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "m", Type: mapType, Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	mb := bldr.Field(0).(*array.MapBuilder)
+	kb := mb.KeyBuilder().(*array.StructBuilder)
+	vb := mb.ItemBuilder().(*array.Int32Builder)
+	mb.Append(true)
+	kb.Append(true)
+	kb.FieldBuilder(0).(*array.StringBuilder).Append("k")
+	vb.Append(7)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "m", Type: &iceberg.MapType{
+			KeyID: 2, KeyType: &iceberg.StructType{
+				FieldList: []iceberg.NestedField{
+					{ID: 3, Name: "k", Type: iceberg.PrimitiveTypes.String, Required: true},
+				},
+			},
+			ValueID: 4, ValueType: iceberg.PrimitiveTypes.Int32, ValueRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	m := converted.Column(0).(*array.Map)
+	keys := m.Keys().(*array.Struct)
+	require.Equal(t, 1, keys.Len())
+	assert.Equal(t, "k", keys.Field(0).(*array.String).Value(0))
+	vals := m.Items().(*array.Int32)
+	require.Equal(t, 1, vals.Len())
+	assert.Equal(t, int32(7), vals.Value(0))
+}
+
+func TestToRequestedSchemaListOfListNoLeak(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	innerList := arrow.ListOfField(arrow.Field{
+		Name: "element", Type: arrow.PrimitiveTypes.Int32, Nullable: false, Metadata: fieldIDMeta("3"),
+	})
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "nested", Type: arrow.ListOfField(arrow.Field{
+			Name: "element", Type: innerList, Nullable: false, Metadata: fieldIDMeta("2"),
+		}), Nullable: false, Metadata: fieldIDMeta("1")},
+	}, nil)
+
+	bldr := array.NewRecordBuilder(mem, arrowSchema)
+	defer bldr.Release()
+	outerLb := bldr.Field(0).(*array.ListBuilder)
+	innerLb := outerLb.ValueBuilder().(*array.ListBuilder)
+	ib := innerLb.ValueBuilder().(*array.Int32Builder)
+	outerLb.Append(true)
+	innerLb.Append(true)
+	ib.Append(9)
+
+	rec := bldr.NewRecordBatch()
+	defer rec.Release()
+
+	icesc := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "nested", Type: &iceberg.ListType{
+			ElementID: 2, Element: &iceberg.ListType{
+				ElementID: 3, Element: iceberg.PrimitiveTypes.Int32, ElementRequired: true,
+			}, ElementRequired: true,
+		}, Required: false},
+	)
+
+	converted, err := table.ToRequestedSchema(ctx, icesc, icesc, rec, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer converted.Release()
+
+	outer := converted.Column(0).(*array.List)
+	require.Equal(t, 1, outer.Len())
+	inner := outer.ListValues().(*array.List)
+	require.Equal(t, 1, inner.Len())
+	assert.Equal(t, int32(9), inner.ListValues().(*array.Int32).Value(0))
+}
+
 func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	ctx := context.Background()
 	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
@@ -1418,7 +1630,7 @@ func TestToRequestedSchemaWriteDefaults(t *testing.T) {
 	require.Equal(t, arrow.DATE32, dateCol.DataType().ID(), "expected date32 column, got %s", dateCol.DataType())
 	require.Equal(t, 3, dateCol.Len())
 	dateArr := dateCol.(*array.Date32)
-	for i := 0; i < dateArr.Len(); i++ {
+	for i := range dateArr.Len() {
 		assert.Equal(t, arrow.Date32(1234), dateArr.Value(i), "row %d should have write-default value", i)
 	}
 }
@@ -1461,7 +1673,7 @@ func TestToRequestedSchemaRequiredFieldWithWriteDefault(t *testing.T) {
 	require.Equal(t, arrow.INT64, catCol.DataType().ID())
 	require.Equal(t, 3, catCol.Len())
 	int64Arr := catCol.(*array.Int64)
-	for i := 0; i < int64Arr.Len(); i++ {
+	for i := range int64Arr.Len() {
 		assert.Equal(t, int64(42), int64Arr.Value(i), "row %d should have write-default value", i)
 	}
 }
@@ -1538,7 +1750,7 @@ func TestToRequestedSchemaRequiredFieldWithInitialDefault(t *testing.T) {
 	require.Equal(t, arrow.INT64, catCol.DataType().ID())
 	require.Equal(t, 3, catCol.Len())
 	int64Arr := catCol.(*array.Int64)
-	for i := 0; i < int64Arr.Len(); i++ {
+	for i := range int64Arr.Len() {
 		assert.Equal(t, int64(99), int64Arr.Value(i), "row %d should have initial-default value", i)
 	}
 }
@@ -1580,7 +1792,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIME64, col.DataType().ID())
 				timeArr := col.(*array.Time64)
-				for i := 0; i < timeArr.Len(); i++ {
+				for i := range timeArr.Len() {
 					assert.Equal(t, arrow.Time64(5000000), timeArr.Value(i), "row %d", i)
 				}
 			},
@@ -1594,7 +1806,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				tsArr := col.(*array.Timestamp)
-				for i := 0; i < tsArr.Len(); i++ {
+				for i := range tsArr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), tsArr.Value(i), "row %d", i)
 				}
 			},
@@ -1609,7 +1821,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
 				uuidArr := col.(*extensions.UUIDArray)
 				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
-				for i := 0; i < uuidArr.Len(); i++ {
+				for i := range uuidArr.Len() {
 					assert.Equal(t, expected, uuidArr.Value(i), "row %d", i)
 				}
 			},
@@ -1623,7 +1835,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
 				decArr := col.(*array.Decimal128)
-				for i := 0; i < decArr.Len(); i++ {
+				for i := range decArr.Len() {
 					assert.Equal(t, decimal128.New(0, 12345), decArr.Value(i), "row %d", i)
 				}
 			},
@@ -1637,7 +1849,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BOOL, col.DataType().ID())
 				boolArr := col.(*array.Boolean)
-				for i := 0; i < boolArr.Len(); i++ {
+				for i := range boolArr.Len() {
 					assert.True(t, boolArr.Value(i), "row %d", i)
 				}
 			},
@@ -1650,7 +1862,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			},
 			check: func(t *testing.T, col arrow.Array) {
 				strArr := col.(*array.String)
-				for i := 0; i < strArr.Len(); i++ {
+				for i := range strArr.Len() {
 					assert.Equal(t, "hello", strArr.Value(i), "row %d", i)
 				}
 			},
@@ -1665,7 +1877,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(999), arr.Value(i), "row %d: should use write-default (999), not initial-default (100)", i)
 				}
 			},
@@ -1680,7 +1892,7 @@ func TestToRequestedSchemaWriteDefaultsTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1750,7 +1962,7 @@ func TestToRequestedSchemaInitialDefaults(t *testing.T) {
 	require.Equal(t, arrow.DATE32, dateCol.DataType().ID(), "expected date32 column, got %s", dateCol.DataType())
 	require.Equal(t, 3, dateCol.Len())
 	dateArr := dateCol.(*array.Date32)
-	for i := 0; i < dateArr.Len(); i++ {
+	for i := range dateArr.Len() {
 		assert.Equal(t, arrow.Date32(1234), dateArr.Value(i), "row %d should have initial-default value", i)
 	}
 }
@@ -1795,7 +2007,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1809,7 +2021,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIME64, col.DataType().ID())
 				arr := col.(*array.Time64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1823,7 +2035,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1838,7 +2050,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
 				arr := col.(*extensions.UUIDArray)
 				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, expected, arr.Value(i), "row %d", i)
 				}
 			},
@@ -1852,7 +2064,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
 				arr := col.(*array.Decimal128)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, decimal128.New(0, 12345), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1866,7 +2078,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BOOL, col.DataType().ID())
 				arr := col.(*array.Boolean)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.True(t, arr.Value(i), "row %d", i)
 				}
 			},
@@ -1879,7 +2091,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			},
 			check: func(t *testing.T, col arrow.Array) {
 				arr := col.(*array.String)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
 				}
 			},
@@ -1893,7 +2105,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BINARY, col.DataType().ID())
 				arr := col.(*array.Binary)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1907,7 +2119,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT32, col.DataType().ID())
 				arr := col.(*array.Int32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1921,7 +2133,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT64, col.DataType().ID())
 				arr := col.(*array.Int64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int64(9999), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1936,7 +2148,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(100), arr.Value(i), "row %d: should use initial-default (100), not write-default (999)", i)
 				}
 			},
@@ -1951,7 +2163,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
 				}
 			},
@@ -1965,7 +2177,7 @@ func TestToRequestedSchemaInitialDefaultTypes(t *testing.T) {
 			},
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
-				for i := 0; i < col.Len(); i++ {
+				for i := range col.Len() {
 					assert.True(t, col.IsNull(i), "row %d should be null", i)
 				}
 			},
@@ -2041,7 +2253,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2052,7 +2264,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIME64, col.DataType().ID())
 				arr := col.(*array.Time64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2063,7 +2275,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2074,7 +2286,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2085,7 +2297,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2096,7 +2308,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2108,7 +2320,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
 				arr := col.(*extensions.UUIDArray)
 				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, expected, arr.Value(i), "row %d", i)
 				}
 			},
@@ -2120,30 +2332,50 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
 				arr := col.(*array.Decimal128)
 				expected := decimal128.FromI64(12345)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, expected, arr.Value(i), "row %d", i)
 				}
 			},
 		},
 		{
-			name:      "binary as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "binary as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BINARY, col.DataType().ID())
 				arr := col.(*array.Binary)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
 				}
 			},
 		},
 		{
-			name:      "fixed as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"initial-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "fixed as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"initial-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
 				arr := col.(*array.FixedSizeBinary)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as legacy base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"initial-default":"aGVsbG8="}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Binary)
+				for i := range arr.Len() {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "fixed uses legacy base64 when hex width differs",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[6]","required":false,"initial-default":"deadbeef"}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.FixedSizeBinary)
+				for i := range arr.Len() {
+					assert.Equal(t, []byte{0x75, 0xe6, 0x9d, 0x6d, 0xe7, 0x9f}, arr.Value(i), "row %d", i)
 				}
 			},
 		},
@@ -2153,7 +2385,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BOOL, col.DataType().ID())
 				arr := col.(*array.Boolean)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.True(t, arr.Value(i), "row %d", i)
 				}
 			},
@@ -2164,7 +2396,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT32, col.DataType().ID())
 				arr := col.(*array.Int32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2175,7 +2407,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT64, col.DataType().ID())
 				arr := col.(*array.Int64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int64(42), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2186,7 +2418,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FLOAT32, col.DataType().ID())
 				arr := col.(*array.Float32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.InDelta(t, float32(3.14), arr.Value(i), 0.001, "row %d", i)
 				}
 			},
@@ -2197,7 +2429,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FLOAT64, col.DataType().ID())
 				arr := col.(*array.Float64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.InDelta(t, float64(3.14), arr.Value(i), 0.0001, "row %d", i)
 				}
 			},
@@ -2207,7 +2439,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			fieldJSON: `{"id":2,"name":"s","type":"string","required":false,"initial-default":"hello"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				arr := col.(*array.String)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
 				}
 			},
@@ -2219,7 +2451,7 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(100), arr.Value(i), "row %d: should use initial-default (100), not write-default (999)", i)
 				}
 			},
@@ -2248,6 +2480,44 @@ func TestToRequestedSchemaInitialDefaultJSONRoundTrip(t *testing.T) {
 			require.EqualValues(t, 2, result.NumCols())
 			tt.check(t, result.Column(1))
 		})
+	}
+}
+
+func TestInitialDefaultFilterProjectionConsistency(t *testing.T) {
+	var field iceberg.NestedField
+	require.NoError(t, json.Unmarshal([]byte(
+		`{"id":2,"name":"data","type":"binary","required":false,"initial-default":"000102ff"}`,
+	), &field))
+
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true},
+	)
+	requestedSchema := iceberg.NewSchema(1, fileSchema.Field(0), field)
+	bound, err := iceberg.BindExpr(requestedSchema,
+		iceberg.EqualTo(iceberg.Reference("data"), []byte{0, 1, 2, 0xff}), true)
+	require.NoError(t, err)
+	translated, err := iceberg.TranslateColumnNames(bound, fileSchema)
+	require.NoError(t, err)
+	require.True(t, translated.Equals(iceberg.AlwaysTrue{}), "matching default must retain the rows")
+
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: false,
+		Metadata: arrow.MetadataFrom(map[string]string{table.ArrowParquetFieldIDKey: "1"}),
+	}}, nil)
+	builder := array.NewRecordBuilder(mem, arrowSchema)
+	builder.Field(0).(*array.Int32Builder).AppendValues([]int32{1, 2}, nil)
+	record := builder.NewRecordBatch()
+	builder.Release()
+	defer record.Release()
+
+	projected, err := table.ToRequestedSchema(t.Context(), requestedSchema, fileSchema, record, table.SchemaOptions{})
+	require.NoError(t, err)
+	defer projected.Release()
+	values := projected.Column(1).(*array.Binary)
+	for i := range values.Len() {
+		assert.Equal(t, []byte{0, 1, 2, 0xff}, values.Value(i), "row %d", i)
 	}
 }
 
@@ -2298,7 +2568,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.DATE32, col.DataType().ID())
 				arr := col.(*array.Date32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Date32(1234), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2309,7 +2579,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIME64, col.DataType().ID())
 				arr := col.(*array.Time64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Time64(5000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2320,7 +2590,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2331,7 +2601,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2342,7 +2612,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2354,7 +2624,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 				require.Equal(t, arrow.EXTENSION, col.DataType().ID())
 				arr := col.(*extensions.UUIDArray)
 				expected := uuid.MustParse("f79c3e09-677c-4bbd-a479-512f87f77acf")
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, expected, arr.Value(i), "row %d", i)
 				}
 			},
@@ -2366,29 +2636,39 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 				require.Equal(t, arrow.DECIMAL128, col.DataType().ID())
 				arr := col.(*array.Decimal128)
 				expected := decimal128.FromI64(12345)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, expected, arr.Value(i), "row %d", i)
 				}
 			},
 		},
 		{
-			name:      "binary as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "binary as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BINARY, col.DataType().ID())
 				arr := col.(*array.Binary)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
 				}
 			},
 		},
 		{
-			name:      "fixed as base64 string",
-			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"write-default":"` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}`,
+			name:      "fixed as hex string",
+			fieldJSON: `{"id":2,"name":"data","type":"fixed[5]","required":false,"write-default":"68656c6c6f"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FIXED_SIZE_BINARY, col.DataType().ID())
 				arr := col.(*array.FixedSizeBinary)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
+					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
+				}
+			},
+		},
+		{
+			name:      "binary as legacy base64 string",
+			fieldJSON: `{"id":2,"name":"data","type":"binary","required":false,"write-default":"aGVsbG8="}`,
+			check: func(t *testing.T, col arrow.Array) {
+				arr := col.(*array.Binary)
+				for i := range arr.Len() {
 					assert.Equal(t, []byte("hello"), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2399,7 +2679,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.TIMESTAMP, col.DataType().ID())
 				arr := col.(*array.Timestamp)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, arrow.Timestamp(1700000000000000000), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2410,7 +2690,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.BOOL, col.DataType().ID())
 				arr := col.(*array.Boolean)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.True(t, arr.Value(i), "row %d", i)
 				}
 			},
@@ -2421,7 +2701,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT32, col.DataType().ID())
 				arr := col.(*array.Int32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int32(42), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2432,7 +2712,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.INT64, col.DataType().ID())
 				arr := col.(*array.Int64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, int64(42), arr.Value(i), "row %d", i)
 				}
 			},
@@ -2443,7 +2723,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FLOAT32, col.DataType().ID())
 				arr := col.(*array.Float32)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.InDelta(t, float32(3.14), arr.Value(i), 0.001, "row %d", i)
 				}
 			},
@@ -2454,7 +2734,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			check: func(t *testing.T, col arrow.Array) {
 				require.Equal(t, arrow.FLOAT64, col.DataType().ID())
 				arr := col.(*array.Float64)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.InDelta(t, float64(3.14), arr.Value(i), 0.0001, "row %d", i)
 				}
 			},
@@ -2464,7 +2744,7 @@ func TestToRequestedSchemaWriteDefaultJSONRoundTrip(t *testing.T) {
 			fieldJSON: `{"id":2,"name":"s","type":"string","required":false,"write-default":"hello"}`,
 			check: func(t *testing.T, col arrow.Array) {
 				arr := col.(*array.String)
-				for i := 0; i < arr.Len(); i++ {
+				for i := range arr.Len() {
 					assert.Equal(t, "hello", arr.Value(i), "row %d", i)
 				}
 			},
@@ -2554,4 +2834,606 @@ func TestToRequestedSchemaMissingNestedFieldID(t *testing.T) {
 		},
 	}, nil)
 	require.True(t, targetSchema.Equal(rec2.Schema()), "Schema is not perfectly equal")
+}
+
+// Some writers tag a non-PROJJSON CRS as an SRID, while the Iceberg schema
+// resolves the same CRS as an authority code. Both describe the same WKB
+// payload, so projection must not attempt a value cast.
+func sridWKBType(t *testing.T, storage arrow.DataType, crs string, edges geoarrow.EdgeInterpolation) arrow.ExtensionType {
+	t.Helper()
+
+	meta := geoarrow.Metadata{
+		CRS:     jsonCRS(crs),
+		CRSType: geoarrow.CRSTypeSRID,
+		Edges:   edges,
+	}
+
+	switch storage.ID() {
+	case arrow.BINARY:
+		return geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(meta))
+	case arrow.LARGE_BINARY:
+		return geoarrow.NewWKBType(geoarrow.WKBWithLargeBinaryStorage(), geoarrow.WKBWithMetadata(meta))
+	default:
+		t.Fatalf("unsupported WKB storage type %s", storage)
+
+		return nil
+	}
+}
+
+func newExtensionArrayOverBinary(t *testing.T, mem memory.Allocator, dt arrow.ExtensionType, values [][]byte) arrow.Array {
+	t.Helper()
+
+	bldr := array.NewBinaryBuilder(mem, dt.StorageType().(arrow.BinaryDataType))
+	defer bldr.Release()
+
+	for _, v := range values {
+		if v == nil {
+			bldr.AppendNull()
+
+			continue
+		}
+		bldr.Append(v)
+	}
+
+	storage := bldr.NewArray()
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(dt, storage)
+}
+
+func binaryValueAt(t *testing.T, arr arrow.Array, i int) []byte {
+	t.Helper()
+
+	switch a := arr.(type) {
+	case *array.Binary:
+		return a.Value(i)
+	case *array.LargeBinary:
+		return a.Value(i)
+	default:
+		t.Fatalf("expected binary-like array, got %T", arr)
+
+		return nil
+	}
+}
+
+func singleColumnRecord(field arrow.Field, arr arrow.Array) arrow.RecordBatch {
+	sc := arrow.NewSchema([]arrow.Field{field}, nil)
+
+	return array.NewRecordBatch(sc, []arrow.Array{arr}, int64(arr.Len()))
+}
+
+// wkbPointRows returns POINT(1 2), NULL and POINT(3 4) as little-endian WKB.
+func wkbPointRows() [][]byte {
+	return [][]byte{
+		{
+			0x01, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+		},
+		nil,
+		{
+			0x01, 0x01, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x40,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x40,
+		},
+	}
+}
+
+func TestToRequestedSchemaGeoExtensionRewrap(t *testing.T) {
+	values := wkbPointRows()
+
+	geography, err := iceberg.GeographyTypeOf("OGC:CRS84", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		icebergType   iceberg.Type
+		sourceStorage arrow.DataType
+		sourceEdges   geoarrow.EdgeInterpolation
+		useLargeTypes bool
+	}{
+		{
+			name:          "geometry_metadata_only",
+			icebergType:   iceberg.GeometryType{},
+			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgePlanar,
+		},
+		{
+			name:          "geometry_storage_width_mismatch",
+			icebergType:   iceberg.GeometryType{},
+			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgePlanar,
+			useLargeTypes: true,
+		},
+		{
+			name:          "geography_spherical_metadata_only",
+			icebergType:   geography,
+			sourceStorage: arrow.BinaryTypes.Binary,
+			sourceEdges:   geoarrow.EdgeSpherical,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := sridWKBType(t, tt.sourceStorage, "OGC:CRS84", tt.sourceEdges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			sc := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			opts := table.SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: tt.useLargeTypes}
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, sc, sc, rec, opts)
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowTypeWithOptions(tt.icebergType, table.ArrowSchemaOptions{
+				IncludeFieldIDs: opts.IncludeFieldIDs,
+				UseLargeTypes:   opts.UseLargeTypes,
+			})
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			gotStorage := got.Storage()
+			require.Equal(t, len(values), gotStorage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, gotStorage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, gotStorage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, gotStorage, i))
+			}
+
+			if arrow.TypeEqual(tt.sourceStorage, got.DataType().(arrow.ExtensionType).StorageType()) {
+				srcBufs := source.(array.ExtensionArray).Storage().Data().Buffers()
+				gotBufs := gotStorage.Data().Buffers()
+				require.Equal(t, len(srcBufs), len(gotBufs))
+
+				for i := range srcBufs {
+					assert.Same(t, srcBufs[i], gotBufs[i], "buffer %d should be shared", i)
+				}
+			}
+		})
+	}
+}
+
+func TestToRequestedSchemaMismatchedExtensionNameNotRewrapped(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	sourceType := extensions.NewUUIDType()
+	bldr := array.NewExtensionBuilder(mem, sourceType)
+	defer bldr.Release()
+	bldr.AppendNull()
+
+	source := bldr.NewArray()
+	defer source.Release()
+
+	rec := singleColumnRecord(arrow.Field{
+		Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+	}, source)
+	defer rec.Release()
+
+	sc := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false,
+	})
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	_, err := table.ToRequestedSchema(ctx, sc, sc, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	// The failure comes from Arrow's cast internals, whose message is not a
+	// stable surface; what matters is that mismatched extension names are not
+	// silently rewrapped.
+	require.Error(t, err)
+}
+
+// absentCRSWKBType returns the geoarrow.wkb type a reader reconstructs for a
+// column whose stored GeoArrow metadata carries no CRS. Omitted edges mean
+// planar, so the geography cases must state their edge algorithm.
+func absentCRSWKBType(edges geoarrow.EdgeInterpolation) arrow.ExtensionType {
+	return geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(),
+		geoarrow.WKBWithMetadata(geoarrow.Metadata{Edges: edges}))
+}
+
+func TestArrowGeoAbsentCRSMetadataToIcebergDefaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		edges    geoarrow.EdgeInterpolation
+		want     iceberg.Type
+		wantType string
+	}{
+		{
+			name:     "geometry_crs_omitted",
+			want:     iceberg.GeometryType{},
+			wantType: "geometry",
+		},
+		{
+			name:     "geography_crs_omitted",
+			edges:    geoarrow.EdgeSpherical,
+			want:     iceberg.GeographyType{},
+			wantType: "geography",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dt := absentCRSWKBType(tt.edges)
+
+			sc, err := table.ArrowSchemaToIceberg(arrow.NewSchema([]arrow.Field{{
+				Name: "geom", Type: dt, Nullable: true, Metadata: fieldIDMeta("1"),
+			}}, nil), false, nil)
+			require.NoError(t, err)
+
+			field, ok := sc.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantType, field.Type.String())
+			assert.True(t, tt.want.Equals(field.Type), "expected %s, got %s", tt.want, field.Type)
+		})
+	}
+}
+
+func TestToRequestedSchemaGeoAbsentCRSProjection(t *testing.T) {
+	values := wkbPointRows()
+
+	tests := []struct {
+		name        string
+		edges       geoarrow.EdgeInterpolation
+		icebergType iceberg.Type
+	}{
+		{
+			name:        "geometry_crs_omitted",
+			icebergType: iceberg.GeometryType{},
+		},
+		{
+			name:        "geography_crs_omitted",
+			edges:       geoarrow.EdgeSpherical,
+			icebergType: iceberg.GeographyType{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := absentCRSWKBType(tt.edges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			storage := got.Storage()
+			require.Equal(t, len(values), storage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, storage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, storage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, storage, i))
+			}
+		})
+	}
+}
+
+// roundTripWKBType returns the Arrow type a reader reconstructs for a column
+// written from icebergType, i.e. what a table sees reading its own files.
+func roundTripWKBType(t *testing.T, icebergType iceberg.Type) arrow.ExtensionType {
+	t.Helper()
+
+	written, err := table.TypeToArrowType(icebergType, true, false)
+	require.NoError(t, err)
+
+	wkb, ok := written.(*geoarrow.WKBType)
+	require.True(t, ok, "expected geoarrow.wkb, got %T", written)
+
+	dt, err := geoarrow.NewWKBType().Deserialize(wkb.StorageType(), wkb.Serialize())
+	require.NoError(t, err)
+
+	return dt
+}
+
+func TestToRequestedSchemaGeoSRID0Projection(t *testing.T) {
+	values := wkbPointRows()
+
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		icebergType iceberg.Type
+		wantType    string
+	}{
+		{
+			name:        "geometry_srid_0",
+			icebergType: geomSRID0,
+			wantType:    "geometry(srid:0)",
+		},
+		{
+			name:        "geography_srid_0",
+			icebergType: geogSRID0,
+			wantType:    "geography(srid:0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := roundTripWKBType(t, tt.icebergType)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, values)
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			fileField, ok := fileSchema.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantType, fileField.Type.String())
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			out, err := table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.NoError(t, err)
+			defer out.Release()
+
+			want, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			got, ok := out.Column(0).(array.ExtensionArray)
+			require.True(t, ok, "expected extension array, got %T", out.Column(0))
+			assert.True(t, arrow.TypeEqual(want, got.DataType()), "expected: %s\ngot: %s", want, got.DataType())
+
+			storage := got.Storage()
+			require.Equal(t, len(values), storage.Len())
+
+			for i, v := range values {
+				if v == nil {
+					assert.True(t, storage.IsNull(i), "row %d should be null", i)
+
+					continue
+				}
+				require.False(t, storage.IsNull(i), "row %d should not be null", i)
+				assert.Equal(t, v, binaryValueAt(t, storage, i))
+			}
+		})
+	}
+}
+
+func TestToRequestedSchemaGeoMismatchedCRSFails(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+
+	sourceType := geoarrow.NewWKBType(geoarrow.WKBWithBinaryStorage(), geoarrow.WKBWithMetadata(geoarrow.Metadata{
+		CRS:     jsonCRS("EPSG:3857"),
+		CRSType: geoarrow.CRSTypeAuthorityCode,
+	}))
+	source := newExtensionArrayOverBinary(t, mem, sourceType, wkbPointRows())
+	defer source.Release()
+
+	rec := singleColumnRecord(arrow.Field{
+		Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+	}, source)
+	defer rec.Release()
+
+	fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+	require.NoError(t, err)
+
+	fileField, ok := fileSchema.FindFieldByID(1)
+	require.True(t, ok)
+	require.Equal(t, "geometry(EPSG:3857)", fileField.Type.String())
+
+	requested := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "geom", Type: iceberg.GeometryType{}, Required: false,
+	})
+
+	ctx := compute.WithAllocator(context.Background(), mem)
+	_, err = table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "cannot promote geometry(EPSG:3857) to geometry")
+}
+
+// A file whose CRS is absent reads as the default CRS, so a table declaring
+// srid:0 rejects it: CRS is not a promotable difference under the Iceberg spec.
+func TestToRequestedSchemaGeoAbsentCRSAgainstSRID0SchemaFails(t *testing.T) {
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		edges       geoarrow.EdgeInterpolation
+		icebergType iceberg.Type
+		wantErr     string
+	}{
+		{
+			name:        "geometry_crs_omitted",
+			icebergType: geomSRID0,
+			wantErr:     "cannot promote geometry to geometry(srid:0)",
+		},
+		{
+			name:        "geography_crs_omitted",
+			edges:       geoarrow.EdgeSpherical,
+			icebergType: geogSRID0,
+			wantErr:     "cannot promote geography to geography(srid:0)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+			defer mem.AssertSize(t, 0)
+
+			sourceType := absentCRSWKBType(tt.edges)
+			source := newExtensionArrayOverBinary(t, mem, sourceType, wkbPointRows())
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: sourceType, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			fileSchema, err := table.ArrowSchemaToIceberg(rec.Schema(), false, nil)
+			require.NoError(t, err)
+
+			requested := iceberg.NewSchema(0, iceberg.NestedField{
+				ID: 1, Name: "geom", Type: tt.icebergType, Required: false,
+			})
+
+			ctx := compute.WithAllocator(context.Background(), mem)
+			_, err = table.ToRequestedSchema(ctx, requested, fileSchema, rec, table.SchemaOptions{IncludeFieldIDs: true})
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// TestGeoTypeParquetRoundTrip pins the CRS a geo column carries on the Parquet
+// wire. arrow-go writes no GEOMETRY or GEOGRAPHY logical type, so the CRS
+// travels in the GeoArrow metadata of the stored Arrow schema.
+func TestGeoTypeParquetRoundTrip(t *testing.T) {
+	geomSRID0, err := iceberg.GeometryTypeOf("srid:0")
+	require.NoError(t, err)
+	geogSRID0, err := iceberg.GeographyTypeOf("srid:0", "spherical")
+	require.NoError(t, err)
+	geomSRID, err := iceberg.GeometryTypeOf("srid:4326")
+	require.NoError(t, err)
+	geomEPSG3857, err := iceberg.GeometryTypeOf("EPSG:3857")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name             string
+		icebergType      iceberg.Type
+		geoarrowMetaJSON string
+	}{
+		{
+			name:             "geometry_default_crs",
+			icebergType:      iceberg.GeometryType{},
+			geoarrowMetaJSON: `{"crs":"OGC:CRS84","crs_type":"authority_code"}`,
+		},
+		{
+			name:             "geometry_srid_0",
+			icebergType:      geomSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid"}`,
+		},
+		{
+			name:             "geography_srid_0",
+			icebergType:      geogSRID0,
+			geoarrowMetaJSON: `{"crs":"0","crs_type":"srid","edges":"spherical"}`,
+		},
+		{
+			name:             "geometry_srid_4326",
+			icebergType:      geomSRID,
+			geoarrowMetaJSON: `{"crs":"4326","crs_type":"srid"}`,
+		},
+		{
+			name:             "geometry_authority_code",
+			icebergType:      geomEPSG3857,
+			geoarrowMetaJSON: `{"crs":"EPSG:3857","crs_type":"authority_code"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := memory.NewGoAllocator()
+
+			dt, err := table.TypeToArrowType(tt.icebergType, true, false)
+			require.NoError(t, err)
+
+			wkb, ok := dt.(*geoarrow.WKBType)
+			require.True(t, ok, "expected geoarrow.wkb, got %T", dt)
+			assert.JSONEq(t, tt.geoarrowMetaJSON, wkb.Serialize())
+
+			source := newExtensionArrayOverBinary(t, mem, wkb, wkbPointRows())
+			defer source.Release()
+
+			rec := singleColumnRecord(arrow.Field{
+				Name: "geom", Type: wkb, Nullable: true, Metadata: fieldIDMeta("1"),
+			}, source)
+			defer rec.Release()
+
+			var buf bytes.Buffer
+			writer, err := pqarrow.NewFileWriter(rec.Schema(), &buf,
+				parquet.NewWriterProperties(parquet.WithAllocator(mem)),
+				pqarrow.NewArrowWriterProperties(pqarrow.WithAllocator(mem), pqarrow.WithStoreSchema()))
+			require.NoError(t, err)
+			require.NoError(t, writer.Write(rec))
+			require.NoError(t, writer.Close())
+
+			rdr, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+			require.NoError(t, err)
+			defer rdr.Close()
+
+			// Revisit the CRS spelling once arrow-go emits the geo logical types:
+			// the Parquet CRS field takes the prefixed srid:<id> form.
+			logical := rdr.MetaData().Schema.Column(0).LogicalType()
+			assert.True(t, logical.Equals(schema.NoLogicalType{}), "unexpected logical type %s", logical)
+
+			arrRdr, err := pqarrow.NewFileReader(rdr, pqarrow.ArrowReadProperties{}, mem)
+			require.NoError(t, err)
+
+			readSchema, err := arrRdr.Schema()
+			require.NoError(t, err)
+
+			readIceberg, err := table.ArrowSchemaToIceberg(readSchema, false, nil)
+			require.NoError(t, err)
+
+			field, ok := readIceberg.FindFieldByID(1)
+			require.True(t, ok)
+			assert.Equal(t, tt.icebergType.String(), field.Type.String())
+			assert.True(t, tt.icebergType.Equals(field.Type), "expected %s, got %s", tt.icebergType, field.Type)
+		})
+	}
 }

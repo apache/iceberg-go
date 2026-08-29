@@ -19,6 +19,7 @@ package table_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -60,11 +61,15 @@ func TestRewriteDataFilesRemovesDeletionVectors(t *testing.T) {
 			groups, rewritten := planDVCompaction(t, tbl, dvTarget)
 
 			rtx := tbl.NewTransaction()
-			_, err := rtx.RewriteDataFiles(ctx, groups,
+			result, err := rtx.RewriteDataFiles(ctx, groups,
 				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
 			require.NoError(t, err)
-			tbl, err = rtx.Commit(ctx)
-			require.NoError(t, err)
+			if partialProgress {
+				tbl = result.Table
+			} else {
+				tbl, err = rtx.Commit(ctx)
+				require.NoError(t, err)
+			}
 
 			assertRowCount(t, tbl, 3) // DV applied during the rewrite; id=1 stays gone
 			assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten),
@@ -94,11 +99,15 @@ func TestRewriteDataFilesPreservesRowIDThroughDeletionVector(t *testing.T) {
 
 			groups, _ := planDVCompaction(t, tbl, dvTarget)
 			rtx := tbl.NewTransaction()
-			_, err := rtx.RewriteDataFiles(ctx, groups,
+			result, err := rtx.RewriteDataFiles(ctx, groups,
 				table.RewriteDataFilesOptions{PartialProgress: partialProgress})
 			require.NoError(t, err)
-			tbl, err = rtx.Commit(ctx)
-			require.NoError(t, err)
+			if partialProgress {
+				tbl = result.Table
+			} else {
+				tbl, err = rtx.Commit(ctx)
+				require.NoError(t, err)
+			}
 
 			assert.Equal(t, before, rowIDByID(t, tbl),
 				"_row_id must be preserved for survivors when a deletion vector is applied during compaction")
@@ -172,6 +181,131 @@ func TestRewriteFilesApplyResultRemovesDeletionVectors(t *testing.T) {
 		"coordinator commit must remove deletion vectors for rewritten data files")
 	assert.Equal(t, before, rowIDByID(t, tbl),
 		"the coordinator path must preserve survivors' _row_id")
+}
+
+func TestRewriteFiles_ExplicitDeleteRewriteIgnoresAutomaticDVRemoval(t *testing.T) {
+	ctx := context.Background()
+	tbl, dvTarget := seedV3TableWithDV(t)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id": 99}]`)
+
+	var oldEquality iceberg.DataFile
+	var oldEqualitySequence int64
+	manifests, err := tbl.CurrentSnapshot().Manifests(iceio.LocalFS{})
+	require.NoError(t, err)
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentDeletes {
+			continue
+		}
+		for entry, err := range manifest.Entries(iceio.LocalFS{}, false) {
+			require.NoError(t, err)
+			if entry.Status() == iceberg.EntryStatusDELETED || entry.DataFile().ContentType() != iceberg.EntryContentEqDeletes {
+				continue
+			}
+			oldEquality = entry.DataFile()
+			oldEqualitySequence = entry.SequenceNum()
+		}
+	}
+	require.NotNil(t, oldEquality)
+
+	groups, rewritten := planDVCompaction(t, tbl, dvTarget)
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	for _, group := range groups {
+		result, err := table.ExecuteCompactionGroup(ctx, tbl, group)
+		require.NoError(t, err)
+		rewrite.ApplyResult(result)
+	}
+
+	newEqualityPath := tbl.Location() + "/data/replacement-equality-delete.parquet"
+	newEquality := newEqDeleteFile(t, newEqualityPath)
+	rewrite.DeleteFile(oldEquality).
+		AddDeleteFileWithDataSequenceNumber(newEquality, oldEqualitySequence)
+	require.NoError(t, rewrite.Commit(ctx),
+		"automatic DV cleanup must not be treated as part of the explicit equality-delete rewrite")
+	tbl, err = tx.Commit(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, oldEqualitySequence, deleteFileSequence(t, tbl, newEqualityPath))
+	assert.Empty(t, deleteEntriesReferencing(t, tbl, rewritten))
+	assertRowCount(t, tbl, 3)
+}
+
+func TestRewriteFiles_DataSequenceNumberKeepsDVApplicableToReplacement(t *testing.T) {
+	tbl := newReplaceFilesTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	oldDataPath := tbl.Location() + "/data/old-data.parquet"
+	writeParquetFile(t, oldDataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{oldDataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	oldData := tasks[0].File
+	oldDataSequence := fileDataSequence(t, tbl, oldDataPath)
+
+	oldDeletePath := tbl.Location() + "/data/old-pos-delete.parquet"
+	writeParquetFile(t, oldDeletePath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path":%q,"pos":0}]`, oldDataPath))
+	oldDeleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		oldDeletePath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	oldDelete := oldDeleteBuilder.Build()
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.NewRowDelta(nil).AddDeletes(oldDelete).Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	oldDeleteSequence := fileDataSequence(t, tbl, oldDeletePath)
+
+	tx = tbl.NewTransaction()
+	require.NoError(t, tx.UpgradeFormatVersion(3))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	newDataPath := tbl.Location() + "/data/replacement-data.parquet"
+	writeParquetFile(t, newDataPath, arrowSc, `[{"id":1,"data":"a"},{"id":2,"data":"b"}]`)
+	newDataBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		newDataPath, iceberg.ParquetFile, nil, nil, nil, 2, 256)
+	require.NoError(t, err)
+	newData := newDataBuilder.FirstRowID(0).Build()
+
+	writer := dv.NewDVWriter(iceio.LocalFS{}, unpartitionedSpecByID)
+	require.NoError(t, writer.Add(newDataPath, []int64{0}, 0, nil))
+	newDVs, err := writer.Flush(t.Context(), tbl.Location()+"/data/replacement-dv.puffin")
+	require.NoError(t, err)
+	require.Len(t, newDVs, 1)
+
+	tx = tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil).
+		DeleteFile(oldData).
+		DeleteFile(oldDelete).
+		AddDataFile(newData).
+		AddDeleteFileWithDataSequenceNumber(newDVs[0], oldDeleteSequence)
+	err = rewrite.Commit(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not apply to referenced data file")
+
+	tx = tbl.NewTransaction()
+	rewrite = tx.NewRewrite(nil).
+		DeleteFile(oldData).
+		DeleteFile(oldDelete).
+		AddDataFile(newData).
+		AddDeleteFileWithDataSequenceNumber(newDVs[0], oldDeleteSequence).
+		DataSequenceNumber(oldDataSequence)
+	require.NoError(t, rewrite.Commit(t.Context()))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, oldDataSequence, fileDataSequence(t, tbl, newDataPath))
+	assert.Equal(t, oldDeleteSequence, fileDataSequence(t, tbl, newDVs[0].FilePath()))
+	assert.Equal(t, []int64{2}, scanIDs(t, tbl),
+		"the deletion vector must remain applicable to the replacement data file")
 }
 
 // TestRewriteDataFilesPreservesSiblingDeletionVector pins the granularity of DV

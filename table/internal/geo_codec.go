@@ -24,7 +24,9 @@ import (
 
 	"github.com/apache/iceberg-go"
 	"github.com/twpayne/go-geom"
+	"github.com/twpayne/go-geom/encoding/ewkb"
 	"github.com/twpayne/go-geom/encoding/wkb"
+	"github.com/twpayne/go-geom/encoding/wkbcommon"
 )
 
 // Geo bounding box dimension indices. X is longitude/easting, Y is
@@ -37,6 +39,8 @@ const (
 	geoDimM
 	geoNumDims
 )
+
+var wkbEmptyPointOption = wkbcommon.WKBOptionEmptyPointHandling(wkbcommon.EmptyPointHandlingNaN)
 
 // geoBoundsAccumulator computes a geospatial bounding box from a stream of WKB
 // values. Iceberg stores geometry/geography column bounds using the single-value
@@ -75,9 +79,9 @@ func newGeoBoundsAccumulator(isGeography bool) *geoBoundsAccumulator {
 }
 
 // AddWKB unmarshals a single WKB value and extends the bounding box with its
-// coordinates.
+// coordinates. Both ISO WKB and EWKB values are accepted (see decodeWKB).
 func (a *geoBoundsAccumulator) AddWKB(data []byte) error {
-	g, err := wkb.Unmarshal(data)
+	g, err := decodeWKB(data)
 	if err != nil {
 		return err
 	}
@@ -85,6 +89,84 @@ func (a *geoBoundsAccumulator) AddWKB(data []byte) error {
 	a.extend(g)
 
 	return nil
+}
+
+// EWKB dimension and SRID flags, carried in the high bits of the WKB type word.
+const (
+	ewkbFlagZ    uint32 = 0x80000000
+	ewkbFlagM    uint32 = 0x40000000
+	ewkbFlagSRID uint32 = 0x20000000
+	ewkbFlags           = ewkbFlagZ | ewkbFlagM | ewkbFlagSRID
+)
+
+// WKB byte-order markers, the first byte of every WKB value.
+const (
+	wkbBigEndian    = 0
+	wkbLittleEndian = 1
+)
+
+// decodeWKB decodes a geospatial value for statistics purposes, accepting both
+// encodings found in the wild. Iceberg prescribes ISO WKB, which encodes the
+// dimension in the type value itself (PointZ = 1001); some writers instead emit
+// EWKB, which flags Z/M in the high bits of the type word and may embed an SRID
+// after it. Both yield the same coordinates, so bounds do not depend on the
+// encoding.
+func decodeWKB(data []byte) (geom.T, error) {
+	if isEWKB(data) {
+		return ewkb.Unmarshal(data)
+	}
+
+	// ISO empty points use NaN coordinates; keep them as empty geometries so the
+	// bounds accumulator can skip them instead of rejecting the value.
+	return wkb.Unmarshal(data, wkbEmptyPointOption)
+}
+
+func normalizeWKB(data []byte) ([]byte, error) {
+	if !isEWKB(data) {
+		return data, nil
+	}
+
+	// EWKB decoding already preserves empty-point NaNs; the explicit option is
+	// needed on the ISO marshal side so those coordinates remain an empty point.
+	g, err := ewkb.Unmarshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	var order binary.ByteOrder = binary.LittleEndian
+	if data[0] == wkbBigEndian {
+		order = binary.BigEndian
+	}
+
+	return wkb.Marshal(g, order, wkbEmptyPointOption)
+}
+
+// isEWKB reports whether data's type word carries EWKB flags. The two decoders
+// are not interchangeable: the ISO decoder rejects flagged type words, and the
+// EWKB decoder rejects the ISO dimension offsets (it reads 1001 as an unknown
+// type rather than PointZ), so the flags select which one applies. Values too
+// short to hold a type word are left to the ISO decoder to reject.
+//
+// A 2D EWKB value without an SRID carries no flags, so it is reported as ISO and
+// decoded by the ISO decoder. That is correct because the two encodings are
+// byte-identical for plain 2D geometries; do not tighten the heuristic to claim
+// such values as EWKB.
+func isEWKB(data []byte) bool {
+	if len(data) < 5 {
+		return false
+	}
+
+	var typeWord uint32
+	switch data[0] {
+	case wkbBigEndian:
+		typeWord = binary.BigEndian.Uint32(data[1:5])
+	case wkbLittleEndian:
+		typeWord = binary.LittleEndian.Uint32(data[1:5])
+	default:
+		return false
+	}
+
+	return typeWord&ewkbFlags != 0
 }
 
 // extend walks every coordinate of g, recursing into geometry collections,

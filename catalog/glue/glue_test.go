@@ -50,6 +50,40 @@ import (
 
 var errGluePurgeRemove = errors.New("glue purge remove failed")
 
+func TestLoadAWSConfigRejectsIncompleteStaticCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		props iceberg.Properties
+		err   string
+	}{
+		{"access key only", iceberg.Properties{AccessKeyID: "access"}, "glue.access-key-id and glue.secret-access-key must be configured together"},
+		{"secret key only", iceberg.Properties{SecretAccessKey: "secret"}, "glue.access-key-id and glue.secret-access-key must be configured together"},
+		{"session token only", iceberg.Properties{SessionToken: "token"}, "glue.session-token requires glue.access-key-id and glue.secret-access-key"},
+		{"access key and token", iceberg.Properties{AccessKeyID: "access", SessionToken: "token"}, "glue.access-key-id and glue.secret-access-key must be configured together"},
+		{"secret key and token", iceberg.Properties{SecretAccessKey: "secret", SessionToken: "token"}, "glue.access-key-id and glue.secret-access-key must be configured together"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := toAwsConfig(context.Background(), tt.props)
+			require.ErrorContains(t, err, tt.err)
+		})
+	}
+
+	cfg, err := toAwsConfig(context.Background(), iceberg.Properties{
+		AccessKeyID: "access", SecretAccessKey: "secret", SessionToken: "token",
+	})
+	require.NoError(t, err)
+	creds, err := cfg.Credentials.Retrieve(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "access", creds.AccessKeyID)
+	require.Equal(t, "secret", creds.SecretAccessKey)
+	require.Equal(t, "token", creds.SessionToken)
+}
+
 type mockGlueClient struct {
 	mock.Mock
 }
@@ -2215,8 +2249,8 @@ func cleanupTable(t *testing.T, ctlg catalog.Catalog, tbIdent table.Identifier, 
 	if testTable != nil {
 		s3Client := s3.NewFromConfig(awsCfg)
 		metadataLoc := testTable.MetadataLocation()
-		if strings.HasPrefix(metadataLoc, "s3://") {
-			parts := strings.SplitN(strings.TrimPrefix(metadataLoc, "s3://"), "/", 2)
+		if after, ok := strings.CutPrefix(metadataLoc, "s3://"); ok {
+			parts := strings.SplitN(after, "/", 2)
 			if len(parts) == 2 {
 				bucket := parts[0]
 				key := parts[1]

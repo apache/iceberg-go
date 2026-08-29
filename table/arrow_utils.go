@@ -20,7 +20,6 @@ package table
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -870,7 +869,7 @@ func (a arrowAccessor) FieldPartner(partnerStruct arrow.Array, fieldID int, _ st
 		return nil
 	}
 
-	field, ok := a.fileSchema.FindFieldByID(fieldID)
+	field, ok := a.fileSchema.FindFieldByIDRef(fieldID, internal.SchemaRef{})
 	if !ok {
 		return nil
 	}
@@ -1000,9 +999,13 @@ func defaultToScalar(v any, t iceberg.Type, dt arrow.DataType) scalar.Scalar {
 
 			return s
 		case string:
-			b, err := base64.StdEncoding.DecodeString(val)
+			fixedLen := -1
+			if fixed, ok := t.(iceberg.FixedType); ok {
+				fixedLen = fixed.Len()
+			}
+			b, err := internal.DecodeDefaultBytes(val, fixedLen)
 			if err != nil {
-				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot base64-decode string %q: %w", t, val, err))
+				panic(fmt.Errorf("write-default binary/fixed (iceberg type %s): cannot decode string %q: %w", t, val, err))
 			}
 			s, err := scalar.MakeScalarParam(b, dt)
 			if err != nil {
@@ -1044,13 +1047,15 @@ func defaultToArray(v any, t iceberg.Type, dt arrow.DataType, n int, alloc memor
 }
 
 type arrowProjectionVisitor struct {
-	ctx                 context.Context
-	fileSchema          *iceberg.Schema
-	tableProperties     iceberg.Properties
-	includeFieldIDs     bool
-	downcastNsTimestamp bool
-	useLargeTypes       bool
-	useWriteDefault     bool
+	ctx                  context.Context
+	fileSchema           *iceberg.Schema
+	tableProperties      iceberg.Properties
+	formatVersion        int
+	includeFieldIDs      bool
+	downcastNsTimestamp  bool
+	useLargeTypes        bool
+	useWriteDefault      bool
+	allowMissingRequired bool
 }
 
 func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType {
@@ -1062,7 +1067,7 @@ func (a *arrowProjectionVisitor) typeToArrowType(t iceberg.Type) arrow.DataType 
 }
 
 func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals arrow.Array) arrow.Array {
-	fileField, ok := a.fileSchema.FindFieldByID(field.ID)
+	fileField, ok := a.fileSchema.FindFieldByIDRef(field.ID, internal.SchemaRef{})
 	if !ok {
 		panic(fmt.Errorf("could not find field id %d in schema", field.ID))
 	}
@@ -1076,8 +1081,13 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	if !field.Type.Equals(typ) {
 		if !canDowncastTimestampPrecision(fileField.Type, field.Type, a.downcastNsTimestamp) {
-			promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
-			targetType := a.typeToArrowType(promoted)
+			var targetType arrow.DataType
+			if a.formatVersion >= 3 && canPromoteDateToTimestamp(fileField.Type, field.Type) {
+				targetType = a.typeToArrowType(field.Type)
+			} else {
+				promoted := retOrPanic(iceberg.PromoteType(fileField.Type, field.Type))
+				targetType = a.typeToArrowType(promoted)
+			}
 			if !a.useLargeTypes {
 				targetType = retOrPanic(ensureSmallArrowTypes(targetType))
 			}
@@ -1089,6 +1099,10 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 
 	targetType := a.typeToArrowType(field.Type)
 	if !arrow.TypeEqual(targetType, vals.DataType()) {
+		if out, ok := a.rewrapExtension(targetType, vals); ok {
+			return out
+		}
+
 		switch field.Type.(type) {
 		case iceberg.TimestampType:
 			tt, tgtok := targetType.(*arrow.TimestampType)
@@ -1131,6 +1145,38 @@ func (a *arrowProjectionVisitor) castIfNeeded(field iceberg.NestedField, vals ar
 	return vals
 }
 
+// rewrapExtension re-wraps vals in targetType when both are extension types
+// with the same extension name but differing extension parameters, returning
+// false when the types are not such a pair. Arrow's compute layer has no
+// extension-to-extension cast kernel, and the values are already in the
+// extension's storage encoding, so only the storage array is cast and that only
+// when the storage types differ. This is safe only because a shared extension
+// name implies the storage payload is interpretation-compatible: parameters may
+// differ, the encoded values do not.
+func (a *arrowProjectionVisitor) rewrapExtension(targetType arrow.DataType, vals arrow.Array) (arrow.Array, bool) {
+	tgtExt, ok := targetType.(arrow.ExtensionType)
+	if !ok {
+		return nil, false
+	}
+
+	srcExt, ok := vals.DataType().(arrow.ExtensionType)
+	if !ok || srcExt.ExtensionName() != tgtExt.ExtensionName() {
+		return nil, false
+	}
+
+	if arrow.TypeEqual(srcExt.StorageType(), tgtExt.StorageType()) {
+		return array.NewExtensionArrayWithStorage(tgtExt,
+			vals.(array.ExtensionArray).Storage()), true
+	}
+
+	storage := retOrPanic(compute.CastArray(a.ctx,
+		vals.(array.ExtensionArray).Storage(),
+		compute.SafeCastOptions(tgtExt.StorageType())))
+	defer storage.Release()
+
+	return array.NewExtensionArrayWithStorage(tgtExt, storage), true
+}
+
 func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool) bool {
 	if !enabled {
 		return false
@@ -1145,6 +1191,19 @@ func canDowncastTimestampPrecision(fileType, readType iceberg.Type, enabled bool
 		_, ok := readType.(iceberg.TimestampTzType)
 
 		return ok
+	default:
+		return false
+	}
+}
+
+func canPromoteDateToTimestamp(fileType, readType iceberg.Type) bool {
+	if _, ok := fileType.(iceberg.DateType); !ok {
+		return false
+	}
+
+	switch readType.(type) {
+	case iceberg.TimestampType, iceberg.TimestampNsType:
+		return true
 	default:
 		return false
 	}
@@ -1193,6 +1252,16 @@ func (a *arrowProjectionVisitor) Schema(_ *iceberg.Schema, _ arrow.Array, result
 	return result
 }
 
+func ownsChildResult(arr arrow.Array) bool {
+	if arr == nil {
+		return false
+	}
+
+	_, nested := arr.DataType().(arrow.NestedType)
+
+	return nested
+}
+
 func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.Array, fieldResults []arrow.Array) arrow.Array {
 	if structArr == nil {
 		return nil
@@ -1203,7 +1272,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 	for i, field := range st.FieldList {
 		arr := fieldResults[i]
 		if arr != nil {
-			if _, ok := arr.DataType().(arrow.NestedType); ok {
+			if ownsChildResult(arr) {
 				defer arr.Release()
 			}
 
@@ -1220,7 +1289,7 @@ func (a *arrowProjectionVisitor) Struct(st iceberg.StructType, structArr arrow.A
 				arr = defaultToArray(field.WriteDefault, field.Type, dt, structArr.Len(), alloc)
 			case field.InitialDefault != nil && !a.useWriteDefault:
 				arr = defaultToArray(field.InitialDefault, field.Type, dt, structArr.Len(), alloc)
-			case !field.Required:
+			case !field.Required || a.allowMissingRequired:
 				arr = array.MakeArrayOfNull(alloc, dt, structArr.Len())
 			default:
 				panic(fmt.Errorf("%w: required field is missing and has no default value: %s",
@@ -1260,6 +1329,10 @@ func (a *arrowProjectionVisitor) Field(_ iceberg.NestedField, _ arrow.Array, fie
 }
 
 func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.Array, valArr arrow.Array) arrow.Array {
+	if ownsChildResult(valArr) {
+		defer valArr.Release()
+	}
+
 	arr, ok := listArr.(array.ListLike)
 	if !ok || valArr == nil {
 		return nil
@@ -1306,6 +1379,14 @@ func (a *arrowProjectionVisitor) List(listType iceberg.ListType, listArr arrow.A
 }
 
 func (a *arrowProjectionVisitor) Map(m iceberg.MapType, mapArray, keyResult, valResult arrow.Array) arrow.Array {
+	if ownsChildResult(keyResult) {
+		defer keyResult.Release()
+	}
+
+	if ownsChildResult(valResult) {
+		defer valResult.Release()
+	}
+
 	if keyResult == nil || valResult == nil {
 		return nil
 	}
@@ -1350,7 +1431,8 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 	}
 	// UnshredVariant returns a caller-owned array whose ref is balanced by
 	// castIfNeeded's Retain/Release. This holds only because VariantType is not
-	// an arrow.NestedType; if it were, Struct would also Release and double-free.
+	// an arrow.NestedType; if it were, ownsChildResult would report true and the
+	// parent Struct/List/Map would Release and double-free.
 	// The checked-allocator leak tests guard this invariant.
 	out, err := extensions.UnshredVariant(varr, compute.GetAllocator(a.ctx))
 	if err != nil {
@@ -1363,27 +1445,45 @@ func (a *arrowProjectionVisitor) Variant(_ iceberg.VariantType, arr arrow.Array)
 // SchemaOptions controls the behaviour of ToRequestedSchema.
 type SchemaOptions struct {
 	DowncastTimestamp bool
-	IncludeFieldIDs   bool
-	UseLargeTypes     bool
-	UseWriteDefault   bool
-	TableProperties   iceberg.Properties
+	// FormatVersion enables format-version-specific read promotions.
+	FormatVersion        int
+	IncludeFieldIDs      bool
+	UseLargeTypes        bool
+	UseWriteDefault      bool
+	AllowMissingRequired bool
+	TableProperties      iceberg.Properties
 }
 
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
 func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions) (arrow.RecordBatch, error) {
+	return toRequestedSchema(ctx, requested, fileSchema, batch, opts, nil)
+}
+
+// toRequestedSchema is the internal write-path variant of ToRequestedSchema.
+// When targetArrowSchema is provided, an exact Arrow schema match can reuse the
+// input batch without walking the Iceberg schema or rebuilding any arrays.
+func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema) (arrow.RecordBatch, error) {
+	if targetArrowSchema != nil && arrowSchemaEqual(batch.Schema(), targetArrowSchema) {
+		batch.Retain()
+
+		return batch, nil
+	}
+
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
 	result, err := iceberg.VisitSchemaWithPartner[arrow.Array, arrow.Array](requested, st,
 		&arrowProjectionVisitor{
-			ctx:                 ctx,
-			fileSchema:          fileSchema,
-			tableProperties:     opts.TableProperties,
-			includeFieldIDs:     opts.IncludeFieldIDs,
-			downcastNsTimestamp: opts.DowncastTimestamp,
-			useLargeTypes:       opts.UseLargeTypes,
-			useWriteDefault:     opts.UseWriteDefault,
+			ctx:                  ctx,
+			fileSchema:           fileSchema,
+			tableProperties:      opts.TableProperties,
+			formatVersion:        opts.FormatVersion,
+			includeFieldIDs:      opts.IncludeFieldIDs,
+			downcastNsTimestamp:  opts.DowncastTimestamp,
+			useLargeTypes:        opts.UseLargeTypes,
+			useWriteDefault:      opts.UseWriteDefault,
+			allowMissingRequired: opts.AllowMissingRequired,
 		}, arrowAccessor{fileSchema: fileSchema})
 	if err != nil {
 		return nil, err
@@ -1392,6 +1492,16 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	result.Release()
 
 	return out, nil
+}
+
+func arrowSchemaEqual(left, right *arrow.Schema) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	// Schema.Equal ignores top-level metadata. Full projection strips it, so
+	// guard it here; otherwise the fast path would preserve metadata projection drops.
+	return left.Equal(right) && left.Metadata().Equal(right.Metadata())
 }
 
 type schemaCompatVisitor struct {
@@ -1679,6 +1789,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 		return nil, fmt.Errorf("%w: cannot add files without a current spec", err)
 	}
 
+	if err := checkNoUnknownTransform(partitionSpec); err != nil {
+		return nil, err
+	}
+
 	currentSchema, currentSpec := meta.CurrentSchema(), *partitionSpec
 
 	dataFiles := make([]iceberg.DataFile, len(filePaths))
@@ -1697,7 +1811,10 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 				}
 			}()
 
-			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, meta.props)
+			// Pass 0 so AddFiles does not claim sort_order_id on files
+			// it did not write (#1184). Callers that know the file's
+			// sort layout use FileToDataFile with an explicit id.
+			dataFiles[i] = fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, 0, meta.props)
 
 			return nil
 		})
@@ -1710,9 +1827,30 @@ func filesToDataFiles(ctx context.Context, fileIO iceio.IO, meta *MetadataBuilde
 	return dataFiles, nil
 }
 
-// fileToDataFile builds a DataFile for a pre-existing file. The caller cannot
-// convey its sort layout, so no sort_order_id is claimed.
-func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, props iceberg.Properties) iceberg.DataFile {
+// FileToDataFile builds a DataFile for an existing parquet file at
+// filePath, reading its footer to populate record count, file size,
+// column sizes, value/null counts and lower/upper bounds, and to infer
+// partition values for order-preserving transforms. sortOrderID is
+// stamped onto the DataFile so callers converting foreign parquet
+// footers can convey the file's sort layout (spec data-file field
+// sort_order_id); pass 0 to make no claim. Panics from the unexported
+// conversion are recovered into an error.
+func FileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) (df iceberg.DataFile, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			switch e := r.(type) {
+			case error:
+				err = fmt.Errorf("error encountered during file conversion: %w", e)
+			default:
+				err = fmt.Errorf("error encountered during file conversion: %v", e)
+			}
+		}
+	}()
+
+	return fileToDataFile(ctx, fileIO, filePath, currentSchema, currentSpec, sortOrderID, props), nil
+}
+
+func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, currentSchema *iceberg.Schema, currentSpec iceberg.PartitionSpec, sortOrderID int, props iceberg.Properties) iceberg.DataFile {
 	format := tblutils.FormatFromFileName(filePath)
 	rdr := must(format.Open(ctx, fileIO, filePath))
 	defer rdr.Close()
@@ -1759,6 +1897,7 @@ func fileToDataFile(ctx context.Context, fileIO iceio.IO, filePath string, curre
 		Content:         iceberg.EntryContentData,
 		FileSize:        rdr.SourceFileSize(),
 		PartitionValues: partitionValues,
+		SortOrderID:     sortOrderID,
 	})
 }
 
@@ -1801,7 +1940,54 @@ type recordWritingArgs struct {
 	existingDVs map[string]*dv.RoaringPositionBitmap
 }
 
+// checkNoUnknownTransform rejects writes against a spec containing an unknown
+// partition transform. We can't compute partition values for it, so writing
+// would produce null values under a field=<transform-name> dir that Java and
+// PyIceberg can't read. The spec forbids committing against such a spec.
+func checkNoUnknownTransform(spec *iceberg.PartitionSpec) error {
+	if spec == nil {
+		return nil
+	}
+	for _, f := range spec.Fields() {
+		if _, ok := f.Transform.(iceberg.UnknownTransform); ok {
+			return fmt.Errorf("%w: cannot write to a partition spec with unknown transform: %s", iceberg.ErrInvalidTransform, f.Transform)
+		}
+	}
+
+	return nil
+}
+
+// checkNoUnknownTransformInSpecs applies checkNoUnknownTransform to every spec
+// the given data files were written under. Delete writes target existing files,
+// so the relevant spec is each file's own, which may be an older one.
+func checkNoUnknownTransformInSpecs(meta Metadata, partitionContextByFilePath map[string]partitionContext) error {
+	seen := make(map[int32]struct{}, len(partitionContextByFilePath))
+	for _, pCtx := range partitionContextByFilePath {
+		if _, ok := seen[pCtx.specID]; ok {
+			continue
+		}
+		seen[pCtx.specID] = struct{}{}
+		if err := checkNoUnknownTransform(meta.PartitionSpecByID(int(pCtx.specID))); err != nil {
+			return err
+		}
+	}
+
+	currentSpec := meta.PartitionSpec()
+
+	return checkNoUnknownTransform(&currentSpec)
+}
+
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {
+	spec, err := meta.CurrentSpec()
+	if err == nil {
+		err = checkNoUnknownTransform(spec)
+	}
+	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
 	if args.counter == nil {
 		args.counter = internal.Counter(0)
 	}
@@ -1866,12 +2052,13 @@ func recordsToDataFiles(ctx context.Context, rootLocation string, meta *Metadata
 func unpartitionedWrite(ctx context.Context, factory *writerFactory, records iter.Seq2[arrow.RecordBatch, error]) iter.Seq2[iceberg.DataFile, error] {
 	outputCh := make(chan iceberg.DataFile, 1)
 	errCh := make(chan error, 1)
+	writerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
 		defer close(outputCh)
 		defer factory.stopCount()
 
-		writer := factory.newRollingDataWriter(ctx, "", nil, outputCh)
+		writer := factory.newRollingDataWriter(writerCtx, "", nil, outputCh)
 		for rec, err := range records {
 			if err != nil {
 				errCh <- err
@@ -1880,6 +2067,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 
 				return
 			}
+
 			if err := writer.Add(rec); err != nil {
 				errCh <- err
 				close(errCh)
@@ -1899,6 +2087,7 @@ func unpartitionedWrite(ctx context.Context, factory *writerFactory, records ite
 			for range outputCh {
 			}
 		}()
+		defer cancel()
 		for df := range outputCh {
 			if !yield(df, nil) {
 				return
@@ -1937,6 +2126,15 @@ func positionDeleteRecordsToDataFiles(ctx context.Context, rootLocation string, 
 
 	latestMetadata, err := meta.Build()
 	if err != nil {
+		return func(yield func(iceberg.DataFile, error) bool) {
+			yield(nil, err)
+		}
+	}
+
+	// Check the specs the targeted data files were written under, not just the
+	// current one: a table that has since evolved past the unknown transform
+	// still reaches this path through its historic specs.
+	if err := checkNoUnknownTransformInSpecs(latestMetadata, partitionContextByFilePath); err != nil {
 		return func(yield func(iceberg.DataFile, error) bool) {
 			yield(nil, err)
 		}
@@ -2144,9 +2342,12 @@ func isWKT2CRSString(crs string) bool {
 	return false
 }
 
+// geoArrowCRSToIcebergCRS maps GeoArrow CRS metadata to an Iceberg CRS string.
+// Absent CRS metadata means the default CRS OGC:CRS84, matching the Parquet
+// geospatial spec and Iceberg's default geometry/geography types.
 func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 	if len(meta.CRS) == 0 {
-		return "srid:0", nil
+		return iceberg.DefaultGeoCRS, nil
 	}
 
 	switch {
@@ -2160,8 +2361,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errors.New("unsupported CRS: empty string CRS")
 		}
 
-		if strings.EqualFold(crs, "OGC:CRS84") || strings.EqualFold(crs, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(crs, iceberg.DefaultGeoCRS) || strings.EqualFold(crs, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		switch meta.CRSType {
@@ -2178,6 +2379,11 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 			return "", errWKT2CRSNotSupported
 		}
 		if meta.CRSType == geoarrow.CRSTypeSRID {
+			// Some writers store the identifier already prefixed; don't prefix twice.
+			if strings.HasPrefix(strings.ToLower(crs), "srid:") {
+				return crs, nil
+			}
+
 			return "srid:" + crs, nil
 		}
 
@@ -2235,8 +2441,8 @@ func geoArrowCRSToIcebergCRS(meta geoarrow.Metadata) (string, error) {
 		}
 
 		authorityCode := authority + ":" + code
-		if strings.EqualFold(authorityCode, "OGC:CRS84") || strings.EqualFold(authorityCode, "EPSG:4326") {
-			return "OGC:CRS84", nil
+		if strings.EqualFold(authorityCode, iceberg.DefaultGeoCRS) || strings.EqualFold(authorityCode, "EPSG:4326") {
+			return iceberg.DefaultGeoCRS, nil
 		}
 
 		return authorityCode, nil
@@ -2301,10 +2507,6 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 	if strings.HasPrefix(lowerCRS, "srid:") {
 		id := crs[len("srid:"):]
 
-		if id == "0" {
-			return geoarrow.NewMetadata(), nil // srid:0 maps to omitted GeoArrow CRS
-		}
-
 		raw, _ := json.Marshal(id) //nolint:errcheck // Marshalling a string can't fail
 
 		return geoarrow.Metadata{
@@ -2343,7 +2545,7 @@ func icebergCRSToGeoArrowMetadata(crs string, props iceberg.Properties) (geoarro
 
 	if lowerCRS == "epsg:4326" {
 		// collapse EPSG:4326 to OGC:CRS84
-		raw, _ = json.Marshal("OGC:CRS84") //nolint:errcheck // Marshalling a string can't fail
+		raw, _ = json.Marshal(iceberg.DefaultGeoCRS) //nolint:errcheck // Marshalling a string can't fail
 	} else {
 		raw, _ = json.Marshal(crs) //nolint:errcheck // Marshalling a string can't fail
 	}

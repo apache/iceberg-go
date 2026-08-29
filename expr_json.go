@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sort"
 	"strings"
@@ -114,8 +116,8 @@ type transformNode struct {
 //
 // Transform terms (e.g. {"type":"transform","transform":"bucket[16]","term":"id"})
 // parse into an UnboundTransform. The term resolves its result type against the
-// schema; binding a full predicate over a transform term to the typed bound
-// machinery is not yet supported.
+// schema, and a full predicate over a transform term can be bound and evaluated
+// against rows.
 func ParseExpr(data []byte, schema *Schema) (BooleanExpression, error) {
 	return parseExpr(json.RawMessage(data), schema, true)
 }
@@ -291,6 +293,13 @@ func (b *BoundTransform) MarshalJSON() ([]byte, error) {
 }
 
 func (u *UnboundTransform) MarshalJSON() ([]byte, error) {
+	if u == nil {
+		return nil, fmt.Errorf("%w: cannot serialize a nil transform term", ErrInvalidArgument)
+	}
+	if isNilTransform(u.transform) {
+		return nil, fmt.Errorf("%w: transform cannot be nil", ErrInvalidArgument)
+	}
+
 	ref, ok := u.term.(Reference)
 	if !ok {
 		return nil, fmt.Errorf("%w: cannot serialize transform over a non-reference term", ErrInvalidArgument)
@@ -488,8 +497,21 @@ func decodeExpr(raw json.RawMessage, schema *Schema, caseSensitive bool) (Boolea
 // without inspecting bytes by hand.
 func firstToken(raw json.RawMessage) (json.Token, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := tok.(bool); ok {
+		if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("trailing data after boolean expression")
+			}
 
-	return dec.Token()
+			return nil, err
+		}
+	}
+
+	return tok, nil
 }
 
 func decodePredicate(op Operation, node exprNode, schema *Schema, caseSensitive bool) (BooleanExpression, error) {
@@ -578,6 +600,11 @@ func decodeTerm(raw json.RawMessage) (UnboundTerm, error) {
 		tf, err := ParseTransform(t.Transform)
 		if err != nil {
 			return nil, fmt.Errorf("%w: cannot parse transform term: %s", ErrInvalidArgument, err)
+		}
+		// Unknown transforms are tolerated in partition/sort metadata, but a
+		// filter expression referencing one can't be evaluated.
+		if isUnknownTransform(tf) {
+			return nil, fmt.Errorf("%w: unknown transform in expression term: %s", ErrInvalidArgument, t.Transform)
 		}
 
 		return NewUnboundTransform(tf, Reference(t.Term)), nil

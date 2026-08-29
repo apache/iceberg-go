@@ -24,6 +24,7 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
@@ -66,9 +67,36 @@ func TestMetricsModePairs(t *testing.T) {
 }
 
 func TestTruncateUpperBoundString(t *testing.T) {
-	assert.Equal(t, "ab", internal.TruncateUpperBoundText("aaaa", 2))
-	// \u10FFFF\u10FFFF\x00
-	assert.Equal(t, "", internal.TruncateUpperBoundText("\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", 2))
+	tests := []struct {
+		name     string
+		value    string
+		truncate int
+		expected string
+	}{
+		{name: "increment", value: "aaaa", truncate: 2, expected: "ab"},
+		{name: "surrogate gap", value: "\uD7FFx", truncate: 1, expected: "\uE000"},
+		{name: "preceding scalar", value: "\uD7FEx", truncate: 1, expected: "\uD7FF"},
+		{name: "carry past maximal suffix", value: string([]rune{'a', utf8.MaxRune, utf8.MaxRune, 'x'}), truncate: 3, expected: "b"},
+		{name: "carry to maximal scalar", value: string([]rune{utf8.MaxRune - 1, utf8.MaxRune, 'x'}), truncate: 2, expected: string([]rune{utf8.MaxRune})},
+		{name: "no truncation", value: "ab", truncate: 2, expected: "ab"},
+		{name: "zero width", value: "ab", truncate: 0, expected: ""},
+		// U+10FFFF U+10FFFF NUL has no greater valid Unicode prefix.
+		{name: "all maximal", value: "\xf4\x8f\xbf\xbf\xf4\x8f\xbf\xbf\x00", truncate: 2, expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := internal.TruncateUpperBoundText(tt.value, tt.truncate)
+			assert.Equal(t, tt.expected, got)
+
+			if got != "" {
+				require.True(t, utf8.ValidString(got))
+				if tt.truncate < utf8.RuneCountInString(tt.value) {
+					require.Greater(t, bytes.Compare([]byte(got), []byte(tt.value)), 0)
+				}
+			}
+		})
+	}
 }
 
 func TestTruncateUpperBoundBinary(t *testing.T) {
@@ -82,6 +110,7 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
 		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
 		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
+		{"negative width keeps bound", []byte{0x01, 0x02}, -1, []byte{0x01, 0x02}},
 	}
 
 	for _, tt := range tests {

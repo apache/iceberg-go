@@ -50,7 +50,7 @@ func TestTypesBasic(t *testing.T) {
 		{"fixed[0]", iceberg.FixedTypeOf(0)},
 		{"fixed[5]", iceberg.FixedTypeOf(5)},
 		{"decimal(9, 4)", iceberg.DecimalTypeOf(9, 4)},
-		{"decimal(5, 7)", iceberg.DecimalTypeOf(5, 7)},
+		{"decimal(5, 5)", iceberg.DecimalTypeOf(5, 5)},
 	}
 
 	for _, tt := range tests {
@@ -96,6 +96,14 @@ func TestFixedTypeInvalidParse(t *testing.T) {
 			data: `{"id": 1, "name": "f", "type": "fixed[0]junk", "required": true}`,
 		},
 		{
+			name: "malformed prefix",
+			data: `{"id": 1, "name": "f", "type": "fixedfoo[16]", "required": true}`,
+		},
+		{
+			name: "malformed short prefix",
+			data: `{"id": 1, "name": "f", "type": "fixedx[5]", "required": true}`,
+		},
+		{
 			name: "overflow",
 			data: `{"id": 1, "name": "f", "type": "fixed[99999999999999999999]", "required": true}`,
 		},
@@ -139,9 +147,12 @@ func TestDecimalType(t *testing.T) {
 		assert.PanicsWithError(t, "invalid argument: invalid precision 39: must be less than or equal to 38", func() {
 			iceberg.DecimalTypeOf(39, 0)
 		})
-		assert.Equal(t, "decimal(10, 11)", iceberg.DecimalTypeOf(10, 11).String())
+		assert.Equal(t, "decimal(10, 10)", iceberg.DecimalTypeOf(10, 10).String())
 		assert.PanicsWithError(t, "invalid argument: invalid scale -1: must be greater than or equal to 0", func() {
 			iceberg.DecimalTypeOf(10, -1)
+		})
+		assert.PanicsWithError(t, "invalid argument: invalid scale 6: must be less than or equal to precision 5", func() {
+			iceberg.DecimalTypeOf(5, 6)
 		})
 	})
 }
@@ -166,6 +177,10 @@ func TestDecimalTypeInvalidParse(t *testing.T) {
 		{
 			name: "precision too large",
 			data: `{"id": 1, "name": "d", "type": "decimal(39,2)", "required": true}`,
+		},
+		{
+			name: "scale greater than precision",
+			data: `{"id": 1, "name": "d", "type": "decimal(5,6)", "required": true}`,
 		},
 	}
 
@@ -235,6 +250,14 @@ func TestListType(t *testing.T) {
 	assert.True(t, typ.Equals(&actual))
 }
 
+func TestListTypeUnmarshalRequiresElement(t *testing.T) {
+	var typ iceberg.ListType
+	err := json.Unmarshal([]byte(`{"element-id": 1, "element-required": false}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'element' key")
+}
+
 func TestMapType(t *testing.T) {
 	typ := &iceberg.MapType{
 		KeyID:         1,
@@ -263,6 +286,22 @@ func TestMapType(t *testing.T) {
 	var actual iceberg.MapType
 	require.NoError(t, json.Unmarshal(out, &actual))
 	assert.True(t, typ.Equals(&actual))
+}
+
+func TestMapTypeUnmarshalRequiresKey(t *testing.T) {
+	var typ iceberg.MapType
+	err := json.Unmarshal([]byte(`{"key-id": 1, "value-id": 2, "value": "string"}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'key' key")
+}
+
+func TestMapTypeUnmarshalRequiresValue(t *testing.T) {
+	var typ iceberg.MapType
+	err := json.Unmarshal([]byte(`{"key-id": 1, "key": "string", "value-id": 2}`), &typ)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'value' key")
 }
 
 var NonParameterizedTypes = []iceberg.Type{
@@ -612,6 +651,50 @@ func TestNestedFieldUnmarshalMissingName(t *testing.T) {
 	assert.ErrorContains(t, err, "missing required 'name'")
 }
 
+func TestNestedFieldUnmarshalMissingRequired(t *testing.T) {
+	data := []byte(`{"id":1,"name":"col","type":"string"}`)
+
+	var f iceberg.NestedField
+	err := json.Unmarshal(data, &f)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'required'")
+}
+
+func TestNestedFieldUnmarshalMissingRequiredPreservesState(t *testing.T) {
+	field := iceberg.NestedField{
+		ID:             7,
+		Name:           "old",
+		Type:           iceberg.PrimitiveTypes.Int32,
+		Required:       true,
+		Doc:            "old doc",
+		InitialDefault: "old initial default",
+		WriteDefault:   "old write default",
+	}
+	original := field
+
+	err := json.Unmarshal([]byte(`{"id":1,"name":"new","type":"string"}`), &field)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.Equal(t, original, field)
+}
+
+func TestListTypeUnmarshalMissingElementRequired(t *testing.T) {
+	data := []byte(`{"type":"list","element-id":1,"element":"string"}`)
+
+	var list iceberg.ListType
+	err := json.Unmarshal(data, &list)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'element-required'")
+}
+
+func TestMapTypeUnmarshalMissingValueRequired(t *testing.T) {
+	data := []byte(`{"type":"map","key-id":1,"key":"string","value-id":2,"value":"string"}`)
+
+	var m iceberg.MapType
+	err := json.Unmarshal(data, &m)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+	assert.ErrorContains(t, err, "missing required 'value-required'")
+}
+
 func TestNestedFieldUnmarshalZeroIDIsValid(t *testing.T) {
 	// id:0 is a valid field ID — should NOT be treated as a missing key
 	data := []byte(`{"id":0,"name":"col","type":"string","required":false}`)
@@ -642,6 +725,48 @@ func TestNestedFieldUnmarshalWrongTypeKey(t *testing.T) {
 	err := json.Unmarshal(data, &f)
 	assert.ErrorIs(t, err, iceberg.ErrInvalidSchema)
 	assert.ErrorContains(t, err, "missing required 'type'")
+}
+
+func TestNestedFieldMarshalBinaryDefaultsAsHex(t *testing.T) {
+	tests := []struct {
+		name     string
+		field    iceberg.NestedField
+		expected string
+	}{
+		{
+			name: "binary",
+			field: iceberg.NestedField{
+				ID: 1, Name: "data", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: []byte{0, 1, 2, 0xff},
+				WriteDefault:   iceberg.BinaryLiteral{0xde, 0xad},
+			},
+			expected: `{"id":1,"name":"data","required":false,"initial-default":"000102ff","write-default":"dead","type":"binary"}`,
+		},
+		{
+			name: "fixed",
+			field: iceberg.NestedField{
+				ID: 2, Name: "fixed", Type: iceberg.FixedTypeOf(3),
+				InitialDefault: iceberg.FixedLiteral{1, 2, 3},
+			},
+			expected: `{"id":2,"name":"fixed","required":false,"initial-default":"010203","type":"fixed[3]"}`,
+		},
+		{
+			name: "empty binary",
+			field: iceberg.NestedField{
+				ID: 3, Name: "empty", Type: iceberg.PrimitiveTypes.Binary,
+				InitialDefault: []byte{},
+			},
+			expected: `{"id":3,"name":"empty","required":false,"initial-default":"","type":"binary"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := json.Marshal(tt.field)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.expected, string(actual))
+		})
+	}
 }
 
 func TestTypeIFaceMarshalJSONNilType(t *testing.T) {

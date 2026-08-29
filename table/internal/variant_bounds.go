@@ -23,7 +23,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/decimal"
@@ -165,11 +164,14 @@ func truncateVariantBound(it iceberg.PrimitiveType, lo, hi iceberg.Literal, trun
 	}
 	switch it.(type) {
 	case iceberg.StringType:
-		if s := lo.Any().(string); utf8.RuneCountInString(s) > truncLen {
-			lo = iceberg.StringLiteral(string([]rune(s)[:truncLen]))
+		s := lo.Any().(string)
+		if truncated, ok := truncateString(s, truncLen); ok {
+			lo = iceberg.StringLiteral(strings.Clone(truncated))
 		}
-		if s := hi.Any().(string); utf8.RuneCountInString(s) > truncLen {
-			if up := TruncateUpperBoundText(s, truncLen); up != "" {
+
+		s = hi.Any().(string)
+		if up, truncated := truncateUpperBoundText(s, truncLen); truncated {
+			if up != "" {
 				hi = iceberg.StringLiteral(up)
 			} else {
 				hi = nil

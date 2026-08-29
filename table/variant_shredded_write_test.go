@@ -89,7 +89,7 @@ func payloadHasTypedValue(t *testing.T, path string) bool {
 	require.GreaterOrEqual(t, idx, 0, "payload field must exist")
 	payload, ok := root.Field(idx).(*pqschema.GroupNode)
 	require.True(t, ok, "payload must be a group node")
-	for i := 0; i < payload.NumFields(); i++ {
+	for i := range payload.NumFields() {
 		if payload.Field(i).Name() == "typed_value" {
 			return true
 		}
@@ -110,7 +110,7 @@ func payloadAValues(t *testing.T, path string) []int64 {
 	defer tbl.Release()
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	out := make([]int64, 0, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		j, err := v.MarshalJSON()
@@ -139,7 +139,7 @@ func payloadTypedValuePhysicalType(t *testing.T, path string) parquet.Type {
 
 	root := pf.MetaData().Schema.Root()
 	payload := root.Field(root.FieldIndexByName("payload")).(*pqschema.GroupNode)
-	for i := 0; i < payload.NumFields(); i++ {
+	for i := range payload.NumFields() {
 		if tv, ok := payload.Field(i).(*pqschema.PrimitiveNode); ok && tv.Name() == "typed_value" {
 			return tv.PhysicalType()
 		}
@@ -235,7 +235,7 @@ func TestShreddedVariantWriteRoundTrip(t *testing.T) {
 
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, 8, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		j, err := v.MarshalJSON()
@@ -340,7 +340,7 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 	defer pb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		pb.Append(int64(i % 2)) // partition values 0 and 1
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i), "b": "row"}))
@@ -390,7 +390,7 @@ func TestShreddedVariantPartitionedWrite(t *testing.T) {
 		}
 	}
 	require.Len(t, seen, 8, "all 8 rows present across the partition files")
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
 }
@@ -413,7 +413,7 @@ func TestShreddedVariantPartitionedDecimalRace(t *testing.T) {
 		defer pb.Release()
 		vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 		defer vb.Release()
-		for i := 0; i < nPart*4; i++ {
+		for i := range nPart * 4 {
 			pb.Append(int64(i % nPart))
 			var b variant.Builder
 			require.NoError(t, b.AppendDecimal4(2, decimal.Decimal32(12345))) // shreds to Decimal128
@@ -494,7 +494,7 @@ func writeScalarVariantTable(t *testing.T, build func(*variant.Builder) error, n
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idb.Append(int64(i))
 		vb.Append(mk())
 	}
@@ -566,7 +566,7 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 
 			col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 			require.Equal(t, 6, col.Len())
-			for i := 0; i < col.Len(); i++ {
+			for i := range col.Len() {
 				v, err := col.Value(i)
 				require.NoError(t, err)
 				got, err := v.MarshalJSON()
@@ -578,8 +578,8 @@ func TestShreddedVariantWriteScalarTypes(t *testing.T) {
 }
 
 // TestShreddedVariantWriteMixedTypeField writes an object field that is int64 in most
-// rows and string in a few. Inference shreds it as int64 (the majority); the minority
-// string rows must round-trip through the unshredded residual, not be dropped.
+// rows and string in a few. The mixed field is not uniform, so it is not shredded at
+// all; every row must still round-trip through the unshredded value.
 func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	mem := memory.DefaultAllocator
 	iceSchema := iceberg.NewSchema(0,
@@ -594,7 +594,7 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		if i < nRows-nStr {
@@ -633,7 +633,8 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 		files = append(files, df)
 	}
 	require.Len(t, files, 1)
-	assert.True(t, payloadHasTypedValue(t, files[0].FilePath()), "f shreds as int64 (majority)")
+	assert.False(t, payloadHasTypedValue(t, files[0].FilePath()),
+		"mixed-type field is not uniform, so payload must not shred")
 
 	p := strings.TrimPrefix(files[0].FilePath(), "file://")
 	f, err := os.Open(p)
@@ -644,7 +645,7 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 	defer tbl.Release()
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, nRows, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		got, err := v.MarshalJSON()
@@ -656,10 +657,10 @@ func TestShreddedVariantWriteMixedTypeField(t *testing.T) {
 		assert.JSONEqf(t, want, string(got), "row %d (mixed-type minority must round-trip)", i)
 	}
 
-	// f shreds as int64 but the string rows land in the residual value column, so its
-	// typed stats do not cover all values: the bound must be dropped (Java value() rule).
+	// The mixed-type field is not shredded, so there is no typed_value to derive stats
+	// from: the field must not emit a variant bound.
 	_, hasLower := files[0].LowerBoundValues()[2]
-	assert.False(t, hasLower, "partial-shred field must not emit a variant bound")
+	assert.False(t, hasLower, "unshredded field must not emit a variant bound")
 }
 
 // TestShreddedVariantWriteRowConservation verifies every row survives bootstrap ->
@@ -731,7 +732,7 @@ func TestShreddedVariantWriteRowConservation(t *testing.T) {
 		idCol := tbl.Column(tbl.Schema().FieldIndices("id")[0]).Data()
 		for _, ch := range idCol.Chunks() {
 			chunk := ch.(*array.Int64)
-			for r := 0; r < chunk.Len(); r++ {
+			for r := range chunk.Len() {
 				seen[chunk.Value(r)]++
 			}
 		}
@@ -741,7 +742,7 @@ func TestShreddedVariantWriteRowConservation(t *testing.T) {
 
 	require.Greater(t, files, 1, "tiny target should roll into multiple files")
 	require.Len(t, seen, total, "every distinct row id must appear")
-	for i := int64(0); i < total; i++ {
+	for i := range int64(total) {
 		assert.Equalf(t, 1, seen[i], "row id %d must appear exactly once (no loss/duplication)", i)
 	}
 }
@@ -769,7 +770,7 @@ func TestShreddedVariantWriteLargeDecimal(t *testing.T) {
 
 	col := tbl.Column(tbl.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
 	require.Equal(t, 6, col.Len())
-	for i := 0; i < col.Len(); i++ {
+	for i := range col.Len() {
 		v, err := col.Value(i)
 		require.NoError(t, err)
 		got, err := v.MarshalJSON()
@@ -789,7 +790,7 @@ func columnPhysicalType(t *testing.T, path, name string) parquet.Type {
 	require.NoError(t, err)
 	defer pf.Close()
 	sc := pf.MetaData().Schema
-	for i := 0; i < sc.NumColumns(); i++ {
+	for i := range sc.NumColumns() {
 		if col := sc.Column(i); col.Name() == name {
 			return col.PhysicalType()
 		}
@@ -958,7 +959,7 @@ func TestShreddedVariantClusteredWrite(t *testing.T) {
 	defer pb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		pb.Append(int64(i / 4)) // clustered: 0,0,0,0,1,1,1,1
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"a": int64(5_000_000_000 + i), "b": "row"}))
@@ -1005,7 +1006,7 @@ func TestShreddedVariantClusteredWrite(t *testing.T) {
 		}
 	}
 	require.Len(t, seen, 8, "all 8 rows present across the partition files")
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		assert.Equalf(t, 1, seen[int64(5_000_000_000+i)], "row a=%d present exactly once", 5_000_000_000+i)
 	}
 }
@@ -1060,7 +1061,7 @@ func TestShreddedVariantWriteLargeBootstrapBatch(t *testing.T) {
 		idCol := tbl.Column(tbl.Schema().FieldIndices("id")[0]).Data()
 		for _, ch := range idCol.Chunks() {
 			chunk := ch.(*array.Int64)
-			for r := 0; r < chunk.Len(); r++ {
+			for r := range chunk.Len() {
 				seen[chunk.Value(r)]++
 			}
 		}
@@ -1070,7 +1071,7 @@ func TestShreddedVariantWriteLargeBootstrapBatch(t *testing.T) {
 	// Bounded buffer -> many files; whole-batch buffering would yield exactly one.
 	assert.Greater(t, files, 1, "large batch must split across files, not buffer whole")
 	require.Len(t, seen, nRows, "all rows present across files")
-	for i := int64(0); i < nRows; i++ {
+	for i := range int64(nRows) {
 		assert.Equalf(t, 1, seen[i], "row id %d present exactly once", i)
 	}
 }
@@ -1093,7 +1094,7 @@ func TestInferShreddingSkipsUndecodable(t *testing.T) {
 	defer sb.Release()
 	metaB := sb.FieldBuilder(0).(*array.BinaryBuilder)
 	valB := sb.FieldBuilder(1).(*array.BinaryBuilder)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sb.Append(true)
 		metaB.Append(metaBytes)
 		valB.Append(valBytes)
@@ -1241,7 +1242,7 @@ func TestShreddedVariantExtractResidualScan(t *testing.T) {
 	require.NoError(t, err)
 
 	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
-	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema)
+	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema, as.boundRowFilter)
 	require.NoError(t, err)
 	require.False(t, skip)
 	require.NotNil(t, fn)
@@ -1296,7 +1297,7 @@ func TestNonShreddedVariantExtractResidualScan(t *testing.T) {
 	require.NoError(t, err)
 
 	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
-	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema)
+	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema, as.boundRowFilter)
 	require.NoError(t, err)
 	require.False(t, skip)
 	require.NotNil(t, fn)
@@ -1345,7 +1346,7 @@ func TestShreddedVariantExtractResidualNoLeak(t *testing.T) {
 	ctx := compute.WithAllocator(context.Background(), checked)
 
 	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
-	fn, _, err := as.getRecordFilter(ctx, fileSchema)
+	fn, _, err := as.getRecordFilter(ctx, fileSchema, as.boundRowFilter)
 	require.NoError(t, err)
 	require.NotNil(t, fn)
 
@@ -1401,7 +1402,7 @@ func TestVariantExtractResidualCombined(t *testing.T) {
 			require.NoError(t, err)
 
 			as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
-			fn, _, err := as.getRecordFilter(context.Background(), fileSchema)
+			fn, _, err := as.getRecordFilter(context.Background(), fileSchema, as.boundRowFilter)
 			require.NoError(t, err)
 			require.NotNil(t, fn)
 
@@ -1430,7 +1431,7 @@ func TestShreddedVariantWriteNullFieldKeepsBound(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		if i < nRows-nNull {
@@ -1500,7 +1501,7 @@ func TestShreddedVariantWriteFloatBound(t *testing.T) {
 	defer idb.Release()
 	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
 	defer vb.Release()
-	for i := 0; i < nRows; i++ {
+	for i := range nRows {
 		idb.Append(int64(i))
 		var b variant.Builder
 		require.NoError(t, b.Append(map[string]any{"g": 1.5 + float64(i)}))
@@ -1730,7 +1731,7 @@ func runResidual(t *testing.T, rec arrow.RecordBatch, fileSchema *iceberg.Schema
 	bound, err := iceberg.BindExpr(fileSchema, expr, true)
 	require.NoError(t, err)
 	as := &arrowScan{boundRowFilter: bound, caseSensitive: true}
-	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema)
+	fn, skip, err := as.getRecordFilter(context.Background(), fileSchema, as.boundRowFilter)
 	require.NoError(t, err)
 	require.False(t, skip)
 	require.NotNil(t, fn)
@@ -1807,14 +1808,14 @@ func TestVariantExtractResidualAbsentColumn(t *testing.T) {
 	// EQ over an absent column: nothing can match -> skip the whole file.
 	eq, err := iceberg.BindExpr(full, iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5))), true)
 	require.NoError(t, err)
-	_, skip, err := (&arrowScan{boundRowFilter: eq, caseSensitive: true}).getRecordFilter(context.Background(), noPayload)
+	_, skip, err := (&arrowScan{boundRowFilter: eq, caseSensitive: true}).getRecordFilter(context.Background(), noPayload, eq)
 	require.NoError(t, err)
 	assert.True(t, skip, "EQ on an absent variant column skips the file")
 
 	// IsNull over an absent column: the path is null everywhere -> keep every row (fn nil, no skip).
 	isNull, err := iceberg.BindExpr(full, iceberg.IsNull(ext), true)
 	require.NoError(t, err)
-	fn, skip, err := (&arrowScan{boundRowFilter: isNull, caseSensitive: true}).getRecordFilter(context.Background(), noPayload)
+	fn, skip, err := (&arrowScan{boundRowFilter: isNull, caseSensitive: true}).getRecordFilter(context.Background(), noPayload, isNull)
 	require.NoError(t, err)
 	assert.False(t, skip)
 	assert.Nil(t, fn, "IsNull on an absent variant column keeps every row")

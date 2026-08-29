@@ -51,12 +51,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/apache/iceberg-go"
+	iceberginternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
@@ -167,11 +170,11 @@ var (
 // concurrent commits and validators return nil without reading
 // manifests.
 //
-// conflictContext is immutable once constructed — do NOT reuse the
-// same context across retry attempts that re-fetch catalog state,
-// because the cached concurrent-snapshot walk becomes stale. There
-// is deliberately no Refresh or mutator method; a refresh must flow
-// as a fresh call to newConflictContext(newBase, newCurrent, ...).
+// The metadata and concurrent-snapshot walk are fixed once constructed — do
+// NOT reuse the same context across retry attempts that re-fetch catalog
+// state, because both the walk and its read caches would become stale. There
+// is deliberately no Refresh or mutator method; a refresh must flow as a
+// fresh call to newConflictContext(newBase, newCurrent, ...).
 type conflictContext struct {
 	current       Metadata
 	branch        string
@@ -180,6 +183,223 @@ type conflictContext struct {
 
 	// Resolved once; subsequent validator calls reuse the walk.
 	concurrent []Snapshot
+
+	// Lazily caches raw manifest bytes for this validation attempt. The
+	// cache is intentionally scoped to the context because all validators
+	// inspect the same immutable metadata snapshot, while ManifestFile.Entries
+	// still performs descriptor-specific inheritance for each logical read.
+	manifestIO *conflictManifestIO
+
+	// Parsed manifest-list descriptors are also shared across validators.
+	manifestLists map[int64]conflictManifestList
+}
+
+type conflictManifestList struct {
+	manifests []iceberg.ManifestFile
+	err       error
+}
+
+const maxConflictManifestCacheBytes = 64 << 20
+
+var errConflictManifestIOReadOnly = errors.New("conflict manifest IO is read-only")
+
+// conflictManifestIO is a read-through cache used only while conflict
+// validators inspect one conflictContext. Manifest files are immutable after
+// they are committed, so the same path can be safely served from the cached
+// bytes to later validators without reopening the backing object store.
+//
+// The cache stores raw bytes instead of decoded entries. The first read still
+// streams from the backing IO and is recorded only when it has consumed the
+// size reported by Stat, so an early validator exit does not cache a partial
+// manifest. The cache is bounded per validation attempt; reads after the
+// bound fall through to the backing IO. Later reads stream decoded entries
+// from completed bytes and let each ManifestFile descriptor apply its own
+// inheritance metadata.
+type conflictManifestIO struct {
+	base        iceio.IO
+	files       map[string][]byte
+	cachedBytes int64
+}
+
+func newConflictManifestIO(base iceio.IO) *conflictManifestIO {
+	return &conflictManifestIO{
+		base:  base,
+		files: make(map[string][]byte),
+	}
+}
+
+func (c *conflictManifestIO) Open(name string) (iceio.File, error) {
+	if data, ok := c.files[name]; ok {
+		return newConflictManifestFile(name, data), nil
+	}
+
+	f, err := c.base.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	if c.cachedBytes >= maxConflictManifestCacheBytes {
+		return f, nil
+	}
+
+	info, statErr := f.Stat()
+	if statErr != nil || info == nil || info.Size() < 0 {
+		if statIO, ok := c.base.(iceio.StatIO); ok {
+			info, statErr = statIO.Stat(name)
+		}
+	}
+	if statErr != nil || info == nil || info.Size() < 0 {
+		return f, nil
+	}
+
+	return &conflictManifestRecordingFile{
+		base:         f,
+		cache:        c,
+		name:         name,
+		expectedSize: info.Size(),
+		cacheLimit:   maxConflictManifestCacheBytes - c.cachedBytes,
+		cacheable:    true,
+		complete:     info.Size() == 0,
+	}, nil
+}
+
+func (c *conflictManifestIO) Remove(string) error {
+	return errConflictManifestIOReadOnly
+}
+
+func (c *conflictManifestIO) Stat(name string) (fs.FileInfo, error) {
+	if data, ok := c.files[name]; ok {
+		return conflictManifestFileInfo{name: name, size: int64(len(data))}, nil
+	}
+
+	if statIO, ok := c.base.(iceio.StatIO); ok {
+		return statIO.Stat(name)
+	}
+
+	f, err := c.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return f.Stat()
+}
+
+type conflictManifestFile struct {
+	*bytes.Reader
+	name string
+	size int64
+}
+
+func newConflictManifestFile(name string, data []byte) *conflictManifestFile {
+	return &conflictManifestFile{
+		Reader: bytes.NewReader(data),
+		name:   name,
+		size:   int64(len(data)),
+	}
+}
+
+func (f *conflictManifestFile) Close() error { return nil }
+
+func (f *conflictManifestFile) Stat() (fs.FileInfo, error) {
+	return conflictManifestFileInfo{name: f.name, size: f.size}, nil
+}
+
+type conflictManifestRecordingFile struct {
+	base         iceio.File
+	cache        *conflictManifestIO
+	name         string
+	expectedSize int64
+	cacheLimit   int64
+	data         []byte
+	cacheable    bool
+	complete     bool
+}
+
+func (f *conflictManifestRecordingFile) Read(p []byte) (int, error) {
+	n, err := f.base.Read(p)
+	if f.cacheable && n > 0 {
+		if int64(len(f.data))+int64(n) > f.cacheLimit {
+			f.cacheable = false
+			f.data = nil
+		} else {
+			f.data = append(f.data, p[:n]...)
+			f.complete = int64(len(f.data)) == f.expectedSize
+		}
+	}
+
+	return n, err
+}
+
+func (f *conflictManifestRecordingFile) ReadAt(p []byte, offset int64) (int, error) {
+	f.disableCaching()
+
+	return f.base.ReadAt(p, offset)
+}
+
+func (f *conflictManifestRecordingFile) Seek(offset int64, whence int) (int64, error) {
+	f.disableCaching()
+
+	return f.base.Seek(offset, whence)
+}
+
+func (f *conflictManifestRecordingFile) Stat() (fs.FileInfo, error) {
+	return f.base.Stat()
+}
+
+func (f *conflictManifestRecordingFile) Close() error {
+	err := f.base.Close()
+	if err == nil && f.cacheable && f.complete && int64(len(f.data)) == f.expectedSize {
+		f.cache.files[f.name] = f.data
+		f.cache.cachedBytes += int64(len(f.data))
+	}
+
+	return err
+}
+
+func (f *conflictManifestRecordingFile) disableCaching() {
+	f.cacheable = false
+	f.complete = false
+	f.data = nil
+}
+
+var (
+	_ iceio.IO   = (*conflictManifestIO)(nil)
+	_ iceio.File = (*conflictManifestFile)(nil)
+	_ iceio.File = (*conflictManifestRecordingFile)(nil)
+)
+
+type conflictManifestFileInfo struct {
+	name string
+	size int64
+}
+
+func (f conflictManifestFileInfo) Name() string       { return f.name }
+func (f conflictManifestFileInfo) Size() int64        { return f.size }
+func (f conflictManifestFileInfo) Mode() fs.FileMode  { return 0 }
+func (f conflictManifestFileInfo) ModTime() time.Time { return time.Time{} }
+func (f conflictManifestFileInfo) IsDir() bool        { return false }
+func (f conflictManifestFileInfo) Sys() any           { return nil }
+
+func (c *conflictContext) manifestReadIO() *conflictManifestIO {
+	if c.manifestIO == nil {
+		c.manifestIO = newConflictManifestIO(c.fs)
+	}
+
+	return c.manifestIO
+}
+
+func (c *conflictContext) manifestsFor(snap Snapshot) ([]iceberg.ManifestFile, error) {
+	if c.manifestLists == nil {
+		c.manifestLists = make(map[int64]conflictManifestList)
+	}
+	if cached, ok := c.manifestLists[snap.SnapshotID]; ok {
+		return cached.manifests, cached.err
+	}
+
+	manifests, err := snap.Manifests(c.fs)
+	c.manifestLists[snap.SnapshotID] = conflictManifestList{manifests: manifests, err: err}
+
+	return manifests, err
 }
 
 // newConflictContext builds a validation context for the given
@@ -258,20 +478,30 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 // The visitor returns early if the callback returns a non-nil error.
 func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, visit func(Snapshot, iceberg.ManifestEntry) error) error {
 	for _, snap := range c.concurrent {
-		for entry, err := range snap.entries(c.fs, content) {
-			if err != nil {
-				return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
-			}
-			if entry.Status() != iceberg.EntryStatusADDED {
+		manifests, err := c.manifestsFor(snap)
+		if err != nil {
+			return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+		}
+		for _, mf := range manifests {
+			if content >= 0 && mf.ManifestContent() != content {
 				continue
 			}
-			if entry.SnapshotID() != snap.SnapshotID {
-				// Entry was inherited from a prior snapshot and is
-				// not attributable to this concurrent commit.
-				continue
-			}
-			if err := visit(snap, entry); err != nil {
-				return err
+
+			for entry, err := range mf.Entries(c.manifestReadIO(), false) {
+				if err != nil {
+					return fmt.Errorf("loading entries for concurrent snapshot %d: %w", snap.SnapshotID, err)
+				}
+				if entry.Status() != iceberg.EntryStatusADDED {
+					continue
+				}
+				if entry.SnapshotID() != snap.SnapshotID {
+					// Entry was inherited from a prior snapshot and is
+					// not attributable to this concurrent commit.
+					continue
+				}
+				if err := visit(snap, entry); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -316,22 +546,29 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
 	}
 
-	for entry, err := range head.entries(ctx.fs, iceberg.ManifestContentData) {
-		if err != nil {
-			return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
-		}
-		// A DELETED entry means the file was removed (e.g. rewritten by a
-		// concurrent compaction); it is no longer live data a pos-delete can
-		// apply to, so it does not satisfy existence.
-		if entry.Status() == iceberg.EntryStatusDELETED {
+	manifests, err := ctx.manifestsFor(*head)
+	if err != nil {
+		return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
+	}
+	for _, mf := range manifests {
+		if mf.ManifestContent() != iceberg.ManifestContentData {
 			continue
 		}
-		path := entry.DataFile().FilePath()
-		if _, ok := needed[path]; ok {
-			delete(needed, path)
-			if len(needed) == 0 {
-				return nil
+		for entry, err := range mf.Entries(ctx.manifestReadIO(), false) {
+			if err != nil {
+				return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
 			}
+			// A DELETED entry means the file was removed (e.g. rewritten by a
+			// concurrent compaction); it is no longer live data a pos-delete can
+			// apply to, so it does not satisfy existence.
+			if entry.Status() == iceberg.EntryStatusDELETED {
+				continue
+			}
+			path := entry.DataFile().FilePath()
+			delete(needed, path)
+		}
+		if len(needed) == 0 {
+			return nil
 		}
 	}
 
@@ -358,7 +595,7 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 // predicate call this so that a concurrent append into the same
 // partition is rejected before the commit overwrites it.
 //
-// The check runs in two layers:
+// The check runs in three layers:
 //  1. A manifest-level partition-summary evaluator prunes manifests
 //     whose summaries cannot overlap the filter.
 //  2. Inside surviving manifests, every ADDED entry attributed to the
@@ -366,10 +603,8 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 //     evaluator on its partition tuple, so a manifest whose summary
 //     straddles the filter only triggers a conflict when at least
 //     one actual added file's partition value satisfies the filter.
-//
-// Per-file metric evaluation (a third pass in Java that refines
-// beyond partition for columns not in the spec) is TODO and tracked
-// under issue #830 follow-ups.
+//  3. The surviving files are evaluated against their column metrics so
+//     files whose bounds cannot match the filter are ignored.
 func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.BooleanExpression) error {
 	if len(ctx.concurrent) == 0 {
 		return nil
@@ -394,9 +629,17 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 	partitionEvals := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, ctx.current, ctx.current.CurrentSchema(), partitionFilters, ctx.caseSensitive)
 	})
+	// Eval copies each file's metrics into fresh evaluator state, so this
+	// evaluator can be reused across concurrent manifests.
+	// includeEmptyFiles=false is intentional: an empty file has no rows that
+	// can match the filter and must not create a conflict.
+	metricsEval, err := newInclusiveMetricsEvaluator(ctx.current.CurrentSchema(), filter, ctx.caseSensitive, false)
+	if err != nil {
+		return fmt.Errorf("failed to build metrics evaluator: %w", err)
+	}
 
 	for _, snap := range ctx.concurrent {
-		manifests, err := snap.Manifests(ctx.fs)
+		manifests, err := ctx.manifestsFor(snap)
 		if err != nil {
 			return fmt.Errorf("loading manifests for concurrent snapshot %d: %w", snap.SnapshotID, err)
 		}
@@ -421,7 +664,7 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
 			}
-			for e, err := range mf.Entries(ctx.fs, false) {
+			for e, err := range mf.Entries(ctx.manifestReadIO(), false) {
 				if err != nil {
 					return fmt.Errorf("reading entries from manifest %s: %w", mf.FilePath(), err)
 				}
@@ -431,6 +674,13 @@ func validateAddedDataFilesMatchingFilter(ctx *conflictContext, filter iceberg.B
 				matches, err := pEval(e.DataFile())
 				if err != nil {
 					return err
+				}
+				if !matches {
+					continue
+				}
+				matches, err = metricsEval(e.DataFile())
+				if err != nil {
+					return fmt.Errorf("evaluating metrics for data file %s: %w", e.DataFile().FilePath(), err)
 				}
 				if !matches {
 					continue
@@ -496,14 +746,24 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 	return validateNoConflictingDataFiles(ctx, filter, level)
 }
 
+type equalityDeletePartitionSpecInfo struct {
+	fields       map[int]iceberg.PartitionField
+	sourceFields map[int]equalityDeleteSourceFieldInfo
+}
+
+type equalityDeleteSourceFieldInfo struct {
+	name  string
+	found bool
+}
+
 // eqDeletePartitionsToFilter converts equality-delete data files into an
 // OR-of-ANDs BooleanExpression in row (source) space, suitable for passing
 // to validateAddedDataFilesMatchingFilter.
 //
-// For each eq-delete file it resolves each partition field ID to the source
-// schema field name via the file's partition spec, then builds an EqualTo
-// predicate using Reference(sourceFieldName). Multiple fields within one
-// partition are AND-ed; multiple eq-delete files are OR-ed.
+// For each distinct (spec ID, partition) tuple it resolves each partition
+// field ID to the source schema field name via the file's partition spec, then
+// builds an EqualTo predicate using Reference(sourceFieldName). Multiple
+// fields within one partition are AND-ed; multiple partitions are OR-ed.
 //
 // The resulting expression is projected per-concurrent-manifest's spec ID
 // inside validateAddedDataFilesMatchingFilter (via buildPartitionProjection),
@@ -515,21 +775,32 @@ func validateNoConflictingDataFilesInPartitions(ctx *conflictContext, eqDeleteFi
 // RowDelta.validate).
 func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceberg.BooleanExpression, error) {
 	terms := make([]iceberg.BooleanExpression, 0, len(files))
+	specInfoByID := make(map[int]*equalityDeletePartitionSpecInfo)
+	seen := make(map[string]struct{}, len(files))
+	var currentSchema *iceberg.Schema
+
 	for _, f := range files {
-		p := f.Partition()
+		p := iceberginternal.BorrowedDataFilePartition(f)
 		if len(p) == 0 {
 			return iceberg.AlwaysTrue{}, nil
 		}
 
-		spec := meta.PartitionSpecByID(int(f.SpecID()))
-		if spec == nil {
-			return nil, fmt.Errorf("partition spec ID %d not found in metadata", f.SpecID())
-		}
+		specID := int(f.SpecID())
+		specInfo, ok := specInfoByID[specID]
+		if !ok {
+			spec := meta.PartitionSpecByID(specID)
+			if spec == nil {
+				return nil, fmt.Errorf("partition spec ID %d not found in metadata", f.SpecID())
+			}
 
-		// Build partition field ID → PartitionField lookup for this spec.
-		partFieldByID := make(map[int]iceberg.PartitionField, spec.NumFields())
-		for _, pf := range spec.Fields() {
-			partFieldByID[pf.FieldID] = pf
+			specInfo = &equalityDeletePartitionSpecInfo{
+				fields:       make(map[int]iceberg.PartitionField, spec.NumFields()),
+				sourceFields: make(map[int]equalityDeleteSourceFieldInfo, spec.NumFields()),
+			}
+			for _, pf := range spec.Fields() {
+				specInfo.fields[pf.FieldID] = pf
+			}
+			specInfoByID[specID] = specInfo
 		}
 
 		// Sort partition field IDs for deterministic expression order.
@@ -547,7 +818,7 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 		// until a full PartitionSet-style partition-space approach is added.
 		identityOnly := true
 		for _, fid := range fieldIDs {
-			if pf, ok := partFieldByID[fid]; ok {
+			if pf, ok := specInfo.fields[fid]; ok {
 				if _, isIdentity := pf.Transform.(iceberg.IdentityTransform); !isIdentity {
 					identityOnly = false
 
@@ -556,37 +827,55 @@ func eqDeletePartitionsToFilter(files []iceberg.DataFile, meta Metadata) (iceber
 			}
 		}
 		if !identityOnly {
-			terms = append(terms, iceberg.AlwaysTrue{})
+			return iceberg.AlwaysTrue{}, nil
+		}
 
-			continue
+		// canonicalPartitionKey is injective for the supported partition values
+		// and includes the spec ID. If a custom Literal implementation is not
+		// part of that closed set, skip deduplication and let the existing literal
+		// conversion below preserve its behavior.
+		if key, err := canonicalPartitionKey(f.SpecID(), p); err == nil {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
 		}
 
 		conjuncts := make([]iceberg.BooleanExpression, 0, len(p))
 		for _, partFieldID := range fieldIDs {
-			pf, ok := partFieldByID[partFieldID]
+			pf, ok := specInfo.fields[partFieldID]
 			if !ok {
 				return nil, fmt.Errorf("partition field ID %d not found in spec %d", partFieldID, f.SpecID())
 			}
 
-			// Resolve to source schema field to obtain the Reference name.
-			sourceField, ok := meta.CurrentSchema().FindFieldByID(pf.SourceID())
-			if !ok {
+			// Resolve each source field at most once per partition spec. The
+			// current schema is cloned lazily, and only once for this filter.
+			sourceField, resolved := specInfo.sourceFields[partFieldID]
+			if !resolved {
+				if currentSchema == nil {
+					currentSchema = meta.CurrentSchema()
+				}
+				field, found := currentSchema.FindFieldByID(pf.SourceID())
+				sourceField = equalityDeleteSourceFieldInfo{name: field.Name, found: found}
+				specInfo.sourceFields[partFieldID] = sourceField
+			}
+			if !sourceField.found {
 				return nil, fmt.Errorf("source field ID %d (partition field %q) not found in schema", pf.SourceID(), pf.Name)
 			}
 
 			value := p[partFieldID]
 			if value == nil {
-				conjuncts = append(conjuncts, iceberg.IsNull(iceberg.Reference(sourceField.Name)))
+				conjuncts = append(conjuncts, iceberg.IsNull(iceberg.Reference(sourceField.name)))
 
 				continue
 			}
 
 			lit, err := internal.LiteralForPartitionValue(value)
 			if err != nil {
-				return nil, fmt.Errorf("partition field %q: %w", sourceField.Name, err)
+				return nil, fmt.Errorf("partition field %q: %w", sourceField.name, err)
 			}
 
-			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.Name), lit))
+			conjuncts = append(conjuncts, iceberg.LiteralPredicate(iceberg.OpEQ, iceberg.Reference(sourceField.name), lit))
 		}
 
 		if len(conjuncts) == 1 {
@@ -639,7 +928,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 	rewrittenPartitions := make(map[string]struct{}, len(rewrittenFiles))
 	for _, df := range rewrittenFiles {
 		rewrittenPaths[df.FilePath()] = struct{}{}
-		key, err := partitionConflictKey(df.SpecID(), df.Partition())
+		key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 		if err != nil {
 			return fmt.Errorf("building partition conflict key for rewritten file %s (spec %d): %w",
 				df.FilePath(), df.SpecID(), err)
@@ -660,7 +949,7 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 				return nil
 			}
 
-			key, err := partitionConflictKey(df.SpecID(), df.Partition())
+			key, err := canonicalPartitionKey(df.SpecID(), dataFilePartition(df))
 			if err != nil {
 				return fmt.Errorf("building partition conflict key for concurrent pos-delete %s (spec %d): %w",
 					df.FilePath(), df.SpecID(), err)
@@ -692,12 +981,13 @@ func validateNoNewDeletesForRewrittenFiles(ctx *conflictContext, rewrittenFiles 
 // can be determined), which callers must treat conservatively via a
 // partition-tuple match rather than skipping the delete.
 func referencedDataFilePath(df iceberg.DataFile) string {
-	if ref := df.ReferencedDataFile(); ref != nil {
+	if ref := iceberginternal.BorrowedDataFileReferencedDataFile(df); ref != nil && *ref != "" {
 		return *ref
 	}
 
-	lower := df.LowerBoundValues()[filePathFieldID]
-	upper := df.UpperBoundValues()[filePathFieldID]
+	lowerBounds, upperBounds := iceberginternal.BorrowedDataFileBounds(df)
+	lower := lowerBounds[filePathFieldID]
+	upper := upperBounds[filePathFieldID]
 	if len(lower) == 0 || !bytes.Equal(lower, upper) {
 		return ""
 	}
@@ -706,8 +996,12 @@ func referencedDataFilePath(df iceberg.DataFile) string {
 	if err != nil {
 		return ""
 	}
+	value, ok := lit.(iceberg.TypedLiteral[string])
+	if !ok {
+		return ""
+	}
 
-	return lit.(iceberg.TypedLiteral[string]).Value()
+	return value.Value()
 }
 
 // filePathFieldID is the reserved field ID of the file_path column in a
@@ -718,37 +1012,41 @@ var filePathFieldID = func() int {
 	return f.ID
 }()
 
-// partitionConflictKey returns a deterministic, injective string key
-// for a (specID, partition) tuple, used to detect overlap between a
-// partition-scoped delete and a rewritten data file. Partition values
-// are compared post-transform (direct equality), matching Java's
-// DeleteFileIndex — no transform-aware logic is needed because both
-// sides store the same post-transform representation.
+// canonicalPartitionKey returns a deterministic, injective string key for a
+// (specID, partition) tuple. Partition values are compared post-transform
+// (direct equality), matching Java's DeleteFileIndex — no transform-aware
+// logic is needed because both sides store the same post-transform
+// representation.
 //
 // Values are encoded type-normalized across the known Avro-decode and
-// write-side representations (see appendPartitionConflictValue):
+// write-side representations (see appendCanonicalPartitionValue):
 // integer-backed types are unified per field, so e.g. an int32 and an
-// iceberg.Date carrying the same day match. An unknown value type
-// fails the key build — and thereby the validation — rather than
-// falling back to a lossy formatting that could silently mismatch.
+// iceberg.Date carrying the same day match. An unknown value type fails the
+// key build rather than falling back to lossy formatting that could silently
+// mismatch.
 //
 // Different spec IDs never match, even with identical-looking tuples:
 // Java's DeleteFileIndex keys its PartitionMap by specId, and field IDs
 // are only meaningful within a single spec.
-func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
-	ids := make([]int, 0, len(partition))
+func canonicalPartitionKey(specID int32, partition map[int]any) (string, error) {
+	var idStorage [8]int
+	ids := idStorage[:0]
+	if len(partition) > len(idStorage) {
+		ids = make([]int, 0, len(partition))
+	}
 	for id := range partition {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 
-	buf := strconv.AppendInt(nil, int64(specID), 10)
+	var bufStorage [256]byte
+	buf := strconv.AppendInt(bufStorage[:0], int64(specID), 10)
 	buf = append(buf, '|')
 	for _, id := range ids {
 		buf = strconv.AppendInt(buf, int64(id), 10)
 		buf = append(buf, ':')
 		var err error
-		buf, err = appendPartitionConflictValue(buf, partition[id])
+		buf, err = appendCanonicalPartitionValue(buf, partition[id])
 		if err != nil {
 			return "", fmt.Errorf("partition field %d: %w", id, err)
 		}
@@ -758,7 +1056,7 @@ func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
 	return string(buf), nil
 }
 
-// appendPartitionConflictValue encodes one partition value into dst by
+// appendCanonicalPartitionValue encodes one partition value into dst by
 // semantic class, so different Go representations of the same logical
 // value produce the same bytes:
 //
@@ -772,7 +1070,7 @@ func partitionConflictKey(specID int32, partition map[int]any) (string, error) {
 //
 // String values are length-prefixed so keys stay injective for inputs
 // containing the field separators. Unknown types return an error.
-func appendPartitionConflictValue(dst []byte, v any) ([]byte, error) {
+func appendCanonicalPartitionValue(dst []byte, v any) ([]byte, error) {
 	switch v := v.(type) {
 	case nil:
 		return append(dst, 'z'), nil
@@ -805,15 +1103,15 @@ func appendPartitionConflictValue(dst []byte, v any) ([]byte, error) {
 	case uuid.UUID:
 		return hex.AppendEncode(append(dst, 'B', ':'), v[:]), nil
 	case iceberg.Decimal:
-		return appendDecimalConflictValue(dst, v), nil
+		return appendCanonicalPartitionDecimal(dst, v), nil
 	case iceberg.DecimalLiteral:
-		return appendDecimalConflictValue(dst, iceberg.Decimal(v)), nil
+		return appendCanonicalPartitionDecimal(dst, iceberg.Decimal(v)), nil
 	default:
-		return nil, fmt.Errorf("unsupported partition value type %T in conflict key", v)
+		return nil, fmt.Errorf("unsupported partition value type %T in canonical key", v)
 	}
 }
 
-func appendDecimalConflictValue(dst []byte, v iceberg.Decimal) []byte {
+func appendCanonicalPartitionDecimal(dst []byte, v iceberg.Decimal) []byte {
 	dst = strconv.AppendInt(append(dst, 'd', ':'), int64(v.Scale), 10)
 
 	return append(append(dst, ':'), v.Val.BigInt().String()...)

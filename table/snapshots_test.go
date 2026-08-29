@@ -18,10 +18,13 @@
 package table_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,6 +97,138 @@ func TestSerializeSnapshotWithProps(t *testing.T) {
 	}`, string(data))
 }
 
+func TestSerializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestLocations: []string{"s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["s3:/a/b/manifest-1.avro", "s3:/a/b/manifest-2.avro"]
+	}`, string(data))
+}
+
+func TestSerializeSnapshotWithEmptyEmbeddedManifestLocations(t *testing.T) {
+	var snapshot table.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": []
+	}`), &snapshot))
+	require.NotNil(t, snapshot.ManifestLocations)
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": []
+	}`, string(data))
+}
+
+func TestDeserializeSnapshotWithEmbeddedManifestLocations(t *testing.T) {
+	paths := []string{"mem://bucket/manifest-1.avro", "mem://bucket/manifest-2.avro"}
+	var snapshot table.Snapshot
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["mem://bucket/manifest-1.avro", "mem://bucket/manifest-2.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+
+	assert.Equal(t, paths, snapshot.ManifestLocations)
+	fs := iceio.NewMemFS()
+	require.NoError(t, fs.WriteFile(paths[0], []byte("manifest-one")))
+	require.NoError(t, fs.WriteFile(paths[1], []byte("manifest-two-longer")))
+
+	manifests, err := snapshot.Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, manifests, 2)
+	assert.Equal(t, paths[0], manifests[0].FilePath())
+	assert.Equal(t, paths[1], manifests[1].FilePath())
+	assert.Equal(t, 1, manifests[0].Version())
+	assert.Equal(t, int32(0), manifests[0].PartitionSpecID())
+	assert.Equal(t, int64(25), manifests[0].SnapshotID())
+	assert.Equal(t, int32(-1), manifests[0].AddedDataFiles())
+	assert.Equal(t, int64(len("manifest-one")), manifests[0].Length())
+	assert.Equal(t, int64(len("manifest-two-longer")), manifests[1].Length())
+
+	var manifestList bytes.Buffer
+	require.NoError(t, iceberg.WriteManifestList(1, &manifestList, snapshot.SnapshotID, nil, nil, 0, manifests))
+	writtenManifests, err := iceberg.ReadManifestList(bytes.NewReader(manifestList.Bytes()))
+	require.NoError(t, err)
+	require.Len(t, writtenManifests, 2)
+	assert.Equal(t, manifests[0].Length(), writtenManifests[0].Length())
+	assert.Equal(t, manifests[1].Length(), writtenManifests[1].Length())
+}
+
+func TestSnapshotUnmarshalEmbeddedManifestsReplacesManifestList(t *testing.T) {
+	snapshot := table.Snapshot{ManifestList: "old-manifest-list.avro"}
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifests": ["new-manifest.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Empty(t, snapshot.ManifestList)
+	assert.Equal(t, []string{"new-manifest.avro"}, snapshot.ManifestLocations)
+}
+
+func TestSnapshotUnmarshalManifestListReplacesEmbeddedManifests(t *testing.T) {
+	snapshot := table.Snapshot{ManifestLocations: []string{"old-manifest.avro"}}
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"sequence-number": 1,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "new-manifest-list.avro"
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "new-manifest-list.avro", snapshot.ManifestList)
+	assert.Nil(t, snapshot.ManifestLocations)
+}
+
+func TestSnapshotUnmarshalPrefersManifestListOverEmbeddedManifests(t *testing.T) {
+	var snapshot table.Snapshot
+
+	err := json.Unmarshal([]byte(`{
+		"snapshot-id": 25,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "new-manifest-list.avro",
+		"manifests": ["old-manifest.avro"]
+	}`), &snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "new-manifest-list.avro", snapshot.ManifestList)
+	assert.Nil(t, snapshot.ManifestLocations)
+}
+
+func TestSerializeSnapshotPrefersManifestListOverEmbeddedManifestLocations(t *testing.T) {
+	snapshot := table.Snapshot{
+		SnapshotID:        25,
+		TimestampMs:       1602638573590,
+		ManifestList:      "s3:/a/b/manifest-list.avro",
+		ManifestLocations: []string{"s3:/a/b/manifest.avro"},
+	}
+
+	data, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"snapshot-id": 25,
+		"sequence-number": 0,
+		"timestamp-ms": 1602638573590,
+		"manifest-list": "s3:/a/b/manifest-list.avro"
+	}`, string(data))
+}
+
 func TestMissingOperationDefaultsToOverwrite(t *testing.T) {
 	var summary table.Summary
 	err := json.Unmarshal([]byte(`{"foo": "bar"}`), &summary)
@@ -109,11 +244,27 @@ func TestEmptySummary(t *testing.T) {
 	assert.Empty(t, summary.Properties)
 }
 
-func TestInvalidOperation(t *testing.T) {
+func TestUnknownOperationIsPreserved(t *testing.T) {
 	var summary table.Summary
-	err := json.Unmarshal([]byte(`{"operation": "foobar"}`), &summary)
+	require.NoError(t, json.Unmarshal([]byte(`{"operation":"merge","foo":"bar"}`), &summary))
+	assert.Equal(t, table.Operation("merge"), summary.Operation)
+	assert.Equal(t, iceberg.Properties{"foo": "bar"}, summary.Properties)
+
+	encoded, err := json.Marshal(&summary)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"operation":"merge","foo":"bar"}`, string(encoded))
+}
+
+func TestEmptyOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":""}`), &summary)
 	assert.ErrorIs(t, err, table.ErrInvalidOperation)
-	assert.ErrorContains(t, err, "found 'foobar'")
+}
+
+func TestNullOperationIsInvalid(t *testing.T) {
+	var summary table.Summary
+	err := json.Unmarshal([]byte(`{"operation":null}`), &summary)
+	assert.ErrorIs(t, err, table.ErrInvalidOperation)
 }
 
 func TestSummaryEqualsHandlesNil(t *testing.T) {
@@ -270,4 +421,166 @@ func TestValidateRowLineage(t *testing.T) {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestSnapshotUnmarshalRequiresSnapshotIDAndTimestamp(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{
+			name:    "missing snapshot-id",
+			data:    `{"timestamp-ms": 1602638573590, "manifests": []}`,
+			wantErr: "snapshot-id is absent or null",
+		},
+		{
+			name:    "null snapshot-id",
+			data:    `{"snapshot-id": null, "timestamp-ms": 1602638573590, "manifests": []}`,
+			wantErr: "snapshot-id is absent or null",
+		},
+		{
+			name:    "missing timestamp-ms",
+			data:    `{"snapshot-id": 25, "manifests": []}`,
+			wantErr: "timestamp-ms is absent or null",
+		},
+		{
+			name:    "null timestamp-ms",
+			data:    `{"snapshot-id": 25, "timestamp-ms": null, "manifests": []}`,
+			wantErr: "timestamp-ms is absent or null",
+		},
+		{
+			name:    "both fields missing",
+			data:    `{"manifests": []}`,
+			wantErr: "snapshot-id is absent or null",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var snapshot table.Snapshot
+			err := json.Unmarshal([]byte(tt.data), &snapshot)
+			require.ErrorIs(t, err, table.ErrInvalidMetadata)
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+// Zero is a legal value for both fields, so presence must be tracked
+// separately from the decoded value.
+func TestSnapshotUnmarshalAcceptsExplicitZeroValues(t *testing.T) {
+	var snapshot table.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"snapshot-id": 0,
+		"timestamp-ms": 0,
+		"manifests": []
+	}`), &snapshot))
+
+	assert.Zero(t, snapshot.SnapshotID)
+	assert.Zero(t, snapshot.TimestampMs)
+	assert.NotNil(t, snapshot.ManifestLocations)
+}
+
+func TestSnapshotUnmarshalPreservesRequiredFields(t *testing.T) {
+	var snapshot table.Snapshot
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"snapshot-id": 1234,
+		"timestamp-ms": 5678,
+		"manifests": []
+	}`), &snapshot))
+
+	assert.Equal(t, int64(1234), snapshot.SnapshotID)
+	assert.Equal(t, int64(5678), snapshot.TimestampMs)
+}
+
+func TestSnapshotUnmarshalFailureLeavesSnapshotUnchanged(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "missing snapshot-id",
+			data: `{
+				"timestamp-ms": 1602638573590,
+				"manifest-list": "s3:/a/b/new.avro"
+			}`,
+		},
+		{
+			name: "missing timestamp-ms",
+			data: `{
+				"snapshot-id": 26,
+				"manifest-list": "s3:/a/b/new.avro"
+			}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := Snapshot()
+			original := Snapshot()
+
+			err := json.Unmarshal([]byte(tt.data), &snapshot)
+			require.ErrorIs(t, err, table.ErrInvalidMetadata)
+			assert.True(t, snapshot.Equals(original), "expected snapshot to be untouched, got %s", snapshot)
+			assert.Equal(t, original.ManifestList, snapshot.ManifestList)
+		})
+	}
+}
+
+// A null snapshot carries neither identity nor timestamp, so it is rejected
+// rather than decoded into a zero-value snapshot. Java's SnapshotParser also
+// rejects null, but at its earlier object-node precondition.
+func TestSnapshotUnmarshalRejectsNullDocument(t *testing.T) {
+	var snapshot table.Snapshot
+	err := json.Unmarshal([]byte(`null`), &snapshot)
+	require.ErrorIs(t, err, table.ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "snapshot-id is absent or null")
+}
+
+func TestParseMetadataRejectsSnapshotMissingRequiredFields(t *testing.T) {
+	raw, err := os.ReadFile("testdata/TableMetadataV2Valid.json")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		mutate  func(snapshots []any)
+		wantErr string
+	}{
+		{
+			name:    "missing snapshot-id",
+			mutate:  func(snapshots []any) { delete(snapshots[0].(map[string]any), "snapshot-id") },
+			wantErr: "invalid metadata: snapshot-id is absent or null",
+		},
+		{
+			name:    "missing timestamp-ms",
+			mutate:  func(snapshots []any) { delete(snapshots[0].(map[string]any), "timestamp-ms") },
+			wantErr: "invalid metadata: timestamp-ms is absent or null",
+		},
+		{
+			name:    "null snapshot",
+			mutate:  func(snapshots []any) { snapshots[0] = nil },
+			wantErr: "invalid metadata: snapshot-id is absent or null",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata map[string]any
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.UseNumber() // Preserve snapshot IDs larger than float64 can represent exactly.
+			require.NoError(t, decoder.Decode(&metadata))
+
+			snapshots, ok := metadata["snapshots"].([]any)
+			require.True(t, ok)
+			require.NotEmpty(t, snapshots)
+			tt.mutate(snapshots)
+
+			mutated, err := json.Marshal(metadata)
+			require.NoError(t, err)
+
+			_, err = table.ParseMetadataBytes(mutated)
+			require.ErrorIs(t, err, table.ErrInvalidMetadata)
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
 }
