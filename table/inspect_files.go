@@ -533,6 +533,7 @@ type inspectContentFileBuilder struct {
 	referencedDataFile *array.StringBuilder
 	contentOffset      *array.Int64Builder
 	contentSize        *array.Int64Builder
+	mapFieldIDs        []int
 }
 
 type inspectPartitionBuilder struct {
@@ -648,43 +649,45 @@ func newInspectContentFileBuilderFromFields(
 	return out, nil
 }
 
-func (b inspectContentFileBuilder) append(file iceberg.DataFile) error {
+func (b *inspectContentFileBuilder) append(file iceberg.DataFile) error {
 	b.content.Append(int32(file.ContentType()))
 	b.filePath.Append(file.FilePath())
 	b.fileFormat.Append(string(file.FileFormat()))
 	b.specID.Append(file.SpecID())
 
 	if b.partition != nil {
-		if err := b.partition.append(file.Partition()); err != nil {
+		if err := b.partition.append(dataFilePartition(file)); err != nil {
 			return err
 		}
 	}
 
 	b.recordCount.Append(file.Count())
 	b.fileSize.Append(file.FileSizeBytes())
-	if err := appendInspectInt64Map(b.columnSizes, file.ColumnSizes()); err != nil {
+	columnSizes, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
+	if err := appendInspectInt64Map(b.columnSizes, columnSizes, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.valueCounts, file.ValueCounts()); err != nil {
+	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStats(file)
+	if err := appendInspectInt64Map(b.valueCounts, valueCounts, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nullValueCounts, file.NullValueCounts()); err != nil {
+	if err := appendInspectInt64Map(b.nullValueCounts, nullCounts, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectInt64Map(b.nanValueCounts, file.NaNValueCounts()); err != nil {
+	if err := appendInspectInt64Map(b.nanValueCounts, nanCounts, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.lowerBounds, file.LowerBoundValues()); err != nil {
+	if err := appendInspectBinaryMap(b.lowerBounds, lowerBounds, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	if err := appendInspectBinaryMap(b.upperBounds, file.UpperBoundValues()); err != nil {
+	if err := appendInspectBinaryMap(b.upperBounds, upperBounds, &b.mapFieldIDs); err != nil {
 		return err
 	}
-	appendInspectBytes(b.keyMetadata, file.KeyMetadata())
-	if err := appendInspectInt64List(b.splitOffsets, file.SplitOffsets()); err != nil {
+	appendInspectBytes(b.keyMetadata, keyMetadata)
+	if err := appendInspectInt64List(b.splitOffsets, splitOffsets); err != nil {
 		return err
 	}
-	if err := appendInspectInt32List(b.equalityIDs, file.EqualityFieldIDs()); err != nil {
+	if err := appendInspectInt32List(b.equalityIDs, equalityFieldIDs); err != nil {
 		return err
 	}
 	if err := appendInspectOptionalInt32(b.sortOrderID, file.SortOrderID()); err != nil {
@@ -889,7 +892,7 @@ func inspectInt32Value(value int, name string) (int32, error) {
 	return int32(value), nil
 }
 
-func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) error {
+func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64, scratch *[]int) error {
 	if values == nil {
 		builder.AppendNull()
 
@@ -904,10 +907,11 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) erro
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want int64", builder.ItemBuilder())
 	}
-	ids := make([]int, 0, len(values))
+	ids := (*scratch)[:0]
 	for id := range values {
 		ids = append(ids, id)
 	}
+	*scratch = ids
 	sort.Ints(ids)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")
@@ -921,7 +925,7 @@ func appendInspectInt64Map(builder *array.MapBuilder, values map[int]int64) erro
 	return nil
 }
 
-func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) error {
+func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte, scratch *[]int) error {
 	if values == nil {
 		builder.AppendNull()
 
@@ -936,10 +940,11 @@ func appendInspectBinaryMap(builder *array.MapBuilder, values map[int][]byte) er
 	if !ok {
 		return fmt.Errorf("map item builder has type %T, want binary", builder.ItemBuilder())
 	}
-	ids := make([]int, 0, len(values))
+	ids := (*scratch)[:0]
 	for id := range values {
 		ids = append(ids, id)
 	}
+	*scratch = ids
 	sort.Ints(ids)
 	for _, id := range ids {
 		key, err := inspectInt32Value(id, "field ID")

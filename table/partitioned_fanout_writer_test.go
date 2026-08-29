@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	arrowdecimal "github.com/apache/arrow-go/v18/arrow/decimal"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
@@ -365,6 +366,128 @@ func (s *FanoutWriterTestSuite) TestNaNPartitionValuesUseStableKeys() {
 	s.Require().Len(partitions, 1)
 	s.Len(partitions[0].rows, 2)
 	s.True(math.IsNaN(partitions[0].partitionRec[0].(float64)))
+}
+
+func (s *FanoutWriterTestSuite) TestFloatPartitionValuesUseIcebergKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float64}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Copysign(0, -1)},
+		{0.0},
+		{math.Float64frombits(0x7ff8000000000001)},
+		{math.Float64frombits(0x7ff8000000000002)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float64})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByBits := make(map[uint64]int)
+	for _, partition := range partitions {
+		value := partition.partitionRec[0].(float64)
+		rowsByBits[math.Float64bits(value)] = len(partition.rows)
+	}
+	s.Equal(1, rowsByBits[math.Float64bits(math.Copysign(0, -1))])
+	s.Equal(1, rowsByBits[math.Float64bits(0)])
+	s.Equal(2, rowsByBits[math.Float64bits(math.Float64frombits(0x7ff8000000000001))])
+}
+
+func (s *FanoutWriterTestSuite) TestFloat32PartitionValuesUseIcebergKeys() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.PrimitiveTypes.Float32}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Float32frombits(0x80000000)},
+		{float32(0)},
+		{math.Float32frombits(0xffc00001)},
+		{math.Float32frombits(0x7fc00002)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1, iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Float32})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part", Transform: iceberg.IdentityTransform{},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByBits := make(map[uint32]int)
+	for _, partition := range partitions {
+		value := partition.partitionRec[0].(float32)
+		rowsByBits[math.Float32bits(value)] = len(partition.rows)
+	}
+	s.Equal(1, rowsByBits[0x80000000])
+	s.Equal(1, rowsByBits[0])
+	s.Equal(2, rowsByBits[0xffc00001])
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionMapUsesComparableKeysAtEveryLevel() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "first", Type: arrow.PrimitiveTypes.Float64},
+		{Name: "second", Type: arrow.PrimitiveTypes.Float64},
+	}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{
+		{math.Float64frombits(0x7ff8000000000001), math.Copysign(0, -1)},
+		{math.Float64frombits(0xfff8000000000001), math.Copysign(0, -1)},
+		{math.Float64frombits(0x7ff8000000000001), float64(0)},
+		{float64(0), math.Float64frombits(0x7ff8000000000001)},
+		{float64(0), math.Float64frombits(0xfff8000000000001)},
+	})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Float64},
+		iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Float64},
+	)
+	spec := iceberg.NewPartitionSpec(
+		iceberg.PartitionField{SourceIDs: []int{1}, FieldID: 1000, Name: "first", Transform: iceberg.IdentityTransform{}},
+		iceberg.PartitionField{SourceIDs: []int{2}, FieldID: 1001, Name: "second", Transform: iceberg.IdentityTransform{}},
+	)
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 3)
+
+	rowsByPartition := make([][]int64, 0, len(partitions))
+	for _, partition := range partitions {
+		rowsByPartition = append(rowsByPartition, partition.rows)
+	}
+	s.ElementsMatch([][]int64{{0, 1}, {2}, {3, 4}}, rowsByPartition)
+}
+
+func (s *FanoutWriterTestSuite) TestCollectPartitionsReturnsAllLeavesInOneResult() {
+	fieldInfo := []partitionFieldInfo{
+		{fieldID: 1000},
+		{fieldID: 1001},
+		{fieldID: 1002},
+	}
+	records := []partitionRecord{
+		{int32(0), int32(0), int32(0)},
+		{int32(0), int32(1), int32(0)},
+		{int32(1), int32(0), int32(0)},
+		{int32(1), int32(0), int32(1)},
+	}
+
+	tree := newPartitionMapNode()
+	for _, record := range records {
+		tree.getOrCreate(record, fieldInfo, int64(len(records)))
+	}
+
+	partitions := tree.collectPartitions()
+	s.Require().Len(partitions, len(records))
+	s.Equal(len(records), tree.partitionCount)
+	s.Equal(len(records), cap(partitions), "collection should use one exact result buffer")
+
+	got := make([]partitionRecord, 0, len(partitions))
+	for _, partition := range partitions {
+		got = append(got, partition.partitionRec)
+	}
+	s.ElementsMatch(records, got)
 }
 
 func (s *FanoutWriterTestSuite) TestBucketTransform() {
@@ -891,6 +1014,18 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyCopiesVariableWidthPartia
 	s.Equal([]string{"s", "s"}, []string{values.Value(0), values.Value(1)})
 }
 
+func (s *FanoutWriterTestSuite) TestMaterializeDictionaryColumnsReturnsOriginalRecordWithoutDictionaries() {
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64}}, nil)
+	record := s.createCustomTestRecord(arrSchema, [][]any{{int64(1)}, {int64(2)}})
+	defer record.Release()
+
+	record.Retain()
+	materialized, err := materializeDictionaryColumns(s.ctx, record, arrow.Metadata{})
+	s.Require().NoError(err)
+	s.Same(record, materialized)
+	materialized.Release()
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPartialSlices() {
 	largeValue := strings.Repeat("l", 16*1024)
 
@@ -933,6 +1068,52 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryPar
 	s.Require().True(ok)
 	s.Equal("metadata", recordMetadataValue)
 	values := partitioned.Column(0).(*array.String)
+	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyMaterializesDictionaryColumnsAcrossColumns() {
+	dictType := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int8,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	indexBuilder := array.NewInt8Builder(s.mem)
+	indexBuilder.AppendValues([]int8{0, 1, 1, 1}, nil)
+	indices := indexBuilder.NewInt8Array()
+	indexBuilder.Release()
+
+	dictBuilder := array.NewStringBuilder(s.mem)
+	dictBuilder.Append("large dictionary value")
+	dictBuilder.Append("small dictionary value")
+	dictionary := dictBuilder.NewStringArray()
+	dictBuilder.Release()
+
+	dict := array.NewDictionaryArray(dictType, indices, dictionary)
+	indices.Release()
+	dictionary.Release()
+
+	idBuilder := array.NewInt64Builder(s.mem)
+	idBuilder.AppendValues([]int64{10, 11, 12, 13}, nil)
+	ids := idBuilder.NewInt64Array()
+	idBuilder.Release()
+
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "value", Type: dictType},
+	}, nil)
+	record := array.NewRecordBatch(arrSchema, []arrow.Array{ids, dict}, 4)
+	ids.Release()
+	dict.Release()
+	defer record.Release()
+
+	partitioned, err := partitionBatchByKey(s.ctx)(record, []int64{2, 3})
+	s.Require().NoError(err)
+	defer partitioned.Release()
+
+	s.Equal(arrow.INT64, partitioned.Column(0).DataType().ID())
+	ids = partitioned.Column(0).(*array.Int64)
+	s.Equal([]int64{12, 13}, []int64{ids.Value(0), ids.Value(1)})
+	s.Equal(arrow.STRING, partitioned.Column(1).DataType().ID())
+	values := partitioned.Column(1).(*array.String)
 	s.Equal([]string{"small dictionary value", "small dictionary value"}, []string{values.Value(0), values.Value(1)})
 }
 
@@ -1164,6 +1345,41 @@ func (s *FanoutWriterTestSuite) TestPartitionedWriterReusesExtractionPlan() {
 	s.Same(firstPlan, writer.plan)
 }
 
+func (s *FanoutWriterTestSuite) TestPartitionedWriterRebuildsPlanForDivergentSchemas() {
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Int32},
+		iceberg.NestedField{ID: 2, Name: "value", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Transform: iceberg.IdentityTransform{}, Name: "part",
+	})
+
+	firstSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "part", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "value", Type: arrow.BinaryTypes.String},
+	}, nil)
+	firstRecord := s.createCustomTestRecord(firstSchema, [][]any{{int32(7), "first"}})
+	defer firstRecord.Release()
+
+	writer := newPartitionedFanoutWriter(spec, icebergSchema, nil, nil)
+	partitions, err := writer.getPartitions(firstRecord)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Equal(int32(7), partitions[0].partitionRec.Get(0))
+
+	secondSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "value", Type: arrow.BinaryTypes.String},
+		{Name: "part", Type: arrow.PrimitiveTypes.Int32},
+	}, nil)
+	secondRecord := s.createCustomTestRecord(secondSchema, [][]any{{"second", int32(8)}})
+	defer secondRecord.Release()
+
+	partitions, err = writer.getPartitions(secondRecord)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Equal(int32(8), partitions[0].partitionRec.Get(0))
+}
+
 func (s *FanoutWriterTestSuite) TestPartitionExtractionPlanMatchesSchema() {
 	icebergSchema := iceberg.NewSchema(0,
 		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Int32},
@@ -1378,6 +1594,309 @@ func (s *FanoutWriterTestSuite) TestPartitionBatchByKeyBoundsQueuedWriterMemory(
 	}
 
 	s.Less(peakBytes, fullBatchBytes*4, "queued partial batches should not retain complete input batches")
+}
+
+func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchGenericApply() {
+	unknown, err := iceberg.ParseTransform("custom-transform")
+	s.Require().NoError(err)
+
+	tests := []struct {
+		name       string
+		transform  iceberg.Transform
+		sourceType iceberg.Type
+		value      iceberg.Literal
+		fallback   bool
+	}{
+		{
+			name: "identity", transform: iceberg.IdentityTransform{},
+			sourceType: iceberg.PrimitiveTypes.Int64, value: iceberg.Int64Literal(34),
+		},
+		{
+			name: "void", transform: iceberg.VoidTransform{},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+		{
+			name: "bucket", transform: iceberg.BucketTransform{NumBuckets: 16},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+		{
+			name: "truncate", transform: iceberg.TruncateTransform{Width: 3},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abcdef"),
+		},
+		{
+			name: "year", transform: iceberg.YearTransform{},
+			sourceType: iceberg.PrimitiveTypes.Date, value: iceberg.DateLiteral(19_358),
+		},
+		{
+			name: "month", transform: iceberg.MonthTransform{},
+			sourceType: iceberg.PrimitiveTypes.Timestamp, value: iceberg.TimestampLiteral(1_672_531_200_000_000),
+		},
+		{
+			name: "day nanoseconds", transform: iceberg.DayTransform{},
+			sourceType: iceberg.PrimitiveTypes.TimestampNs, value: iceberg.TimestampNsLiteral(1_672_531_200_000_000_000),
+		},
+		{
+			name: "hour", transform: iceberg.HourTransform{},
+			sourceType: iceberg.PrimitiveTypes.Timestamp, value: iceberg.TimestampLiteral(1_672_531_200_000_000),
+		},
+		{
+			name: "invalid truncate fallback", transform: iceberg.TruncateTransform{Width: 0},
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"), fallback: true,
+		},
+		{
+			name: "unknown_transform", transform: unknown,
+			sourceType: iceberg.PrimitiveTypes.String, value: iceberg.StringLiteral("abc"),
+		},
+		{
+			name: "unsupported bucket source fallback", transform: iceberg.BucketTransform{NumBuckets: 16},
+			sourceType: iceberg.PrimitiveTypes.Bool, value: iceberg.BoolLiteral(true), fallback: true,
+		},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			expected := test.transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: test.value})
+			var expectedValue any
+			if expected.Valid {
+				expectedValue = expected.Val.Any()
+			}
+
+			bound, ok := bindPartitionTransform(test.transform, test.sourceType)
+			if test.fallback {
+				s.False(ok)
+
+				return
+			}
+
+			s.Require().True(ok)
+			s.Equal(expectedValue, bound(test.value.Any()))
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestBoundPartitionTransformsMatchArrowValues() {
+	buildDecimal := func() arrow.Array {
+		builder := array.NewDecimal128Builder(s.mem, &arrow.Decimal128Type{Precision: 10, Scale: 2})
+		for _, value := range []string{"-123.45", "67.89"} {
+			decimal, err := arrowdecimal.Decimal128FromString(value, 10, 2)
+			s.Require().NoError(err)
+			builder.Append(decimal)
+		}
+		result := builder.NewArray()
+		builder.Release()
+
+		return result
+	}
+
+	tests := []struct {
+		name       string
+		sourceType iceberg.Type
+		transform  iceberg.Transform
+		build      func() arrow.Array
+	}{
+		{
+			name:       "bucket int32",
+			sourceType: iceberg.PrimitiveTypes.Int32,
+			transform:  iceberg.BucketTransform{NumBuckets: 16},
+			build: func() arrow.Array {
+				builder := array.NewInt32Builder(s.mem)
+				builder.AppendValues([]int32{-7, 34}, nil)
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+		},
+		{
+			name:       "bucket date",
+			sourceType: iceberg.PrimitiveTypes.Date,
+			transform:  iceberg.BucketTransform{NumBuckets: 16},
+			build: func() arrow.Array {
+				builder := array.NewDate32Builder(s.mem)
+				builder.AppendValues([]arrow.Date32{-7, 19_358}, nil)
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+		},
+		{
+			name:       "bucket decimal",
+			sourceType: iceberg.DecimalTypeOf(10, 2),
+			transform:  iceberg.BucketTransform{NumBuckets: 16},
+			build:      buildDecimal,
+		},
+		{
+			name:       "truncate decimal",
+			sourceType: iceberg.DecimalTypeOf(10, 2),
+			transform:  iceberg.TruncateTransform{Width: 10},
+			build:      buildDecimal,
+		},
+		{
+			name:       "bucket uuid",
+			sourceType: iceberg.PrimitiveTypes.UUID,
+			transform:  iceberg.BucketTransform{NumBuckets: 16},
+			build: func() arrow.Array {
+				builder := extensions.NewUUIDBuilder(s.mem)
+				builder.Append(uuid.MustParse("12345678-9abc-def0-1234-56789abcdef0"))
+				builder.Append(uuid.MustParse("fedcba98-7654-3210-fedc-ba9876543210"))
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+		},
+		{
+			name:       "bucket fixed",
+			sourceType: iceberg.FixedTypeOf(4),
+			transform:  iceberg.BucketTransform{NumBuckets: 16},
+			build: func() arrow.Array {
+				builder := array.NewFixedSizeBinaryBuilder(s.mem, &arrow.FixedSizeBinaryType{ByteWidth: 4})
+				builder.Append([]byte{1, 2, 3, 4})
+				builder.Append([]byte{5, 6, 7, 8})
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+		},
+		{
+			name:       "truncate binary",
+			sourceType: iceberg.PrimitiveTypes.Binary,
+			transform:  iceberg.TruncateTransform{Width: 3},
+			build: func() arrow.Array {
+				builder := array.NewBinaryBuilder(s.mem, arrow.BinaryTypes.Binary)
+				builder.Append([]byte{1, 2, 3, 4})
+				builder.Append([]byte{5, 6})
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+		},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			column := test.build()
+			defer column.Release()
+
+			bound, ok := bindPartitionTransform(test.transform, test.sourceType)
+			s.Require().True(ok)
+			for row := range column.Len() {
+				nativeValue, err := getArrowValueAsIcebergValue(column, row, test.sourceType)
+				s.Require().NoError(err)
+				literalValue, err := getArrowValueAsIcebergLiteral(column, row, test.sourceType)
+				s.Require().NoError(err)
+
+				expected := test.transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: literalValue})
+				var expectedValue any
+				if expected.Valid {
+					expectedValue = expected.Val.Any()
+				}
+
+				s.Equal(expectedValue, bound(nativeValue), "row %d", row)
+			}
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestArrowDecimalValuesPreserveSign() {
+	tests := []struct {
+		name       string
+		sourceType iceberg.Type
+		build      func() arrow.Array
+		want       iceberg.Decimal
+	}{
+		{
+			name:       "decimal32",
+			sourceType: iceberg.DecimalTypeOf(8, 2),
+			build: func() arrow.Array {
+				builder := array.NewDecimal32Builder(s.mem, &arrow.Decimal32Type{Precision: 8, Scale: 2})
+				builder.Append(arrowdecimal.Decimal32(-1234))
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+			want: iceberg.Decimal{Val: decimal128.FromI64(-1234), Scale: 2},
+		},
+		{
+			name:       "decimal64",
+			sourceType: iceberg.DecimalTypeOf(18, 2),
+			build: func() arrow.Array {
+				builder := array.NewDecimal64Builder(s.mem, &arrow.Decimal64Type{Precision: 18, Scale: 2})
+				builder.Append(arrowdecimal.Decimal64(-1234))
+				result := builder.NewArray()
+				builder.Release()
+
+				return result
+			},
+			want: iceberg.Decimal{Val: decimal128.FromI64(-1234), Scale: 2},
+		},
+	}
+
+	for _, test := range tests {
+		s.Run(test.name, func() {
+			column := test.build()
+			defer column.Release()
+
+			value, err := getArrowValueAsIcebergValue(column, 0, test.sourceType)
+			s.Require().NoError(err)
+			s.Equal(test.want, value)
+		})
+	}
+}
+
+func (s *FanoutWriterTestSuite) TestBoundPartitionValueHandlesNull() {
+	builder := array.NewInt32Builder(s.mem)
+	builder.AppendNull()
+	column := builder.NewArray()
+	builder.Release()
+	defer column.Release()
+
+	valueAt := bindPartitionValue(iceberg.BucketTransform{NumBuckets: 16}, iceberg.PrimitiveTypes.Int32)
+	value, err := valueAt(column, 0)
+	s.Require().NoError(err)
+	s.Nil(value)
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForInvalidTransform() {
+	arrowSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.BinaryTypes.String}}, nil)
+	record := s.createCustomTestRecord(arrowSchema, [][]any{{"abc"}})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.String},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part",
+		Transform: iceberg.TruncateTransform{Width: 0},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Nil(partitions[0].partitionRec.Get(0))
+}
+
+func (s *FanoutWriterTestSuite) TestPartitionTransformBindingFallsBackForUnsupportedSource() {
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "part", Type: arrow.FixedWidthTypes.Boolean}}, nil)
+	record := s.createCustomTestRecord(arrSchema, [][]any{{true}})
+	defer record.Release()
+
+	icebergSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "part", Type: iceberg.PrimitiveTypes.Bool},
+	)
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "part",
+		Transform: iceberg.BucketTransform{NumBuckets: 16},
+	})
+
+	partitions, err := getRecordPartitions(spec, icebergSchema, record)
+	s.Require().NoError(err)
+	s.Require().Len(partitions, 1)
+	s.Nil(partitions[0].partitionRec.Get(0))
 }
 
 func (s *FanoutWriterTestSuite) TestVoidTransform() {

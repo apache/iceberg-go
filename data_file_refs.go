@@ -31,8 +31,7 @@ import "github.com/apache/iceberg-go/internal"
 // evaluators. ColumnSizes and DistinctValueCounts are excluded because the
 // evaluator does not read them, and cloning those maps would add work to the
 // hot path without changing its result. Partition has a separate borrowed
-// accessor because partition records are built once per file during scan
-// planning.
+// accessor because partition data is read during scan planning.
 func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	valueCounts map[int]int64,
 	nullCounts map[int]int64,
@@ -43,6 +42,27 @@ func (d *dataFile) DataFileStatsRef(_ internal.DataFileRef) (
 	d.initColumnStatsData()
 
 	return d.valCntMap, d.nullCntMap, d.nanCntMap, d.lowerBoundMap, d.upperBoundMap
+}
+
+func (d *dataFile) DataFileCollectionsRef(_ internal.DataFileRef) (
+	map[int]int64, []byte, []int64, []int,
+) {
+	d.initColumnStatsData()
+
+	var keyMetadata []byte
+	if d.Key != nil {
+		keyMetadata = *d.Key
+	}
+	var splitOffsets []int64
+	if d.Splits != nil {
+		splitOffsets = *d.Splits
+	}
+	var equalityFieldIDs []int
+	if d.EqualityIDs != nil {
+		equalityFieldIDs = *d.EqualityIDs
+	}
+
+	return d.colSizeMap, keyMetadata, splitOffsets, equalityFieldIDs
 }
 
 // DataFilePartitionRef returns the data file's partition map without copying.

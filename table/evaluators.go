@@ -111,6 +111,8 @@ func removeBoundCheck(bound iceberg.Literal, vals []iceberg.Literal, toDelete in
 		return removeBoundCmp[iceberg.Time](bound, vals, toDelete)
 	case iceberg.TimestampType, iceberg.TimestampTzType:
 		return removeBoundCmp[iceberg.Timestamp](bound, vals, toDelete)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return removeBoundCmp[iceberg.TimestampNano](bound, vals, toDelete)
 	case iceberg.BinaryType, iceberg.FixedType:
 		return removeBoundCmp[[]byte](bound, vals, toDelete)
 	case iceberg.StringType:
@@ -150,6 +152,8 @@ func allBoundCheck(bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want
 		return allBoundCmp[iceberg.Time](bound, set, want)
 	case iceberg.TimestampType, iceberg.TimestampTzType:
 		return allBoundCmp[iceberg.Timestamp](bound, set, want)
+	case iceberg.TimestampNsType, iceberg.TimestampTzNsType:
+		return allBoundCmp[iceberg.TimestampNano](bound, set, want)
 	case iceberg.BinaryType, iceberg.FixedType:
 		return allBoundCmp[[]byte](bound, set, want)
 	case iceberg.StringType:
@@ -163,6 +167,14 @@ func allBoundCheck(bound iceberg.Literal, set iceberg.Set[iceberg.Literal], want
 }
 
 func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal]) bool {
+	return m.visitIn(term, literals, nil, nil)
+}
+
+func (m *manifestEvalVisitor) VisitInWithExtrema(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
+	return m.visitIn(term, literals, minLit, maxLit)
+}
+
+func (m *manifestEvalVisitor) visitIn(term iceberg.BoundTerm, literals iceberg.Set[iceberg.Literal], minLit, maxLit iceberg.Literal) bool {
 	pos := term.Ref().Pos()
 	field := m.partitionFields[pos]
 
@@ -170,17 +182,22 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 		return rowsCannotMatch
 	}
 
-	if literals.Len() > inPredicateLimit {
-		return rowsMightMatch
-	}
-
 	lower, err := iceberg.LiteralFromBytes(term.Type(), *field.LowerBound)
 	if err != nil {
 		panic(err)
 	}
 
-	if allBoundCheck(lower, literals, 1) {
-		return rowsCannotMatch
+	if maxLit != nil {
+		if getCmpLiteral(lower)(lower, maxLit) > 0 {
+			return rowsCannotMatch
+		}
+	} else {
+		if literals.Len() > inPredicateLimit {
+			return rowsMightMatch
+		}
+		if allBoundCheck(lower, literals, 1) {
+			return rowsCannotMatch
+		}
 	}
 
 	if field.UpperBound != nil {
@@ -189,7 +206,11 @@ func (m *manifestEvalVisitor) VisitIn(term iceberg.BoundTerm, literals iceberg.S
 			panic(err)
 		}
 
-		if allBoundCheck(upper, literals, -1) {
+		if minLit != nil {
+			if getCmpLiteral(upper)(upper, minLit) < 0 {
+				return rowsCannotMatch
+			}
+		} else if allBoundCheck(upper, literals, -1) {
 			return rowsCannotMatch
 		}
 	}
@@ -281,6 +302,8 @@ func getCmpLiteral(boundary iceberg.Literal) func(iceberg.Literal, iceberg.Liter
 	case iceberg.TypedLiteral[iceberg.Time]:
 		return getCmp(l)
 	case iceberg.TypedLiteral[iceberg.Timestamp]:
+		return getCmp(l)
+	case iceberg.TypedLiteral[iceberg.TimestampNano]:
 		return getCmp(l)
 	case iceberg.TypedLiteral[[]byte]:
 		return getCmp(l)
@@ -749,10 +772,16 @@ func newParquetRowGroupStatsEvaluator(fileSchema *iceberg.Schema, expr iceberg.B
 		return nil, err
 	}
 
+	return newParquetRowGroupStatsEvaluatorFromRewritten(rewritten, includeEmptyFiles), nil
+}
+
+func newParquetRowGroupStatsEvaluatorFromRewritten(
+	expr iceberg.BooleanExpression, includeEmptyFiles bool,
+) func(*metadata.RowGroupMetaData, []int) (bool, error) {
 	return (&inclusiveMetricsEval{
 		includeEmptyFiles: includeEmptyFiles,
-		expr:              rewritten,
-	}).TestRowGroup, nil
+		expr:              expr,
+	}).TestRowGroup
 }
 
 type inclusiveMetricsEval struct {
@@ -766,11 +795,23 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 		return rowsCannotMatch, nil
 	}
 
-	m.valueCounts = make(map[int]int64)
-	m.nullCounts = make(map[int]int64)
+	if m.valueCounts == nil {
+		m.valueCounts = make(map[int]int64, len(colIndices))
+	} else {
+		clear(m.valueCounts)
+	}
+	if m.nullCounts == nil {
+		m.nullCounts = make(map[int]int64, len(colIndices))
+	} else {
+		clear(m.nullCounts)
+	}
 	m.nanCounts = nil
-	m.lowerBounds = make(map[int][]byte)
-	m.upperBounds = make(map[int][]byte)
+	if m.lowerBounds != nil {
+		clear(m.lowerBounds)
+	}
+	if m.upperBounds != nil {
+		clear(m.upperBounds)
+	}
 
 	for _, c := range colIndices {
 		colMeta, err := rgmeta.ColumnChunk(c)
@@ -797,6 +838,11 @@ func (m *inclusiveMetricsEval) TestRowGroup(rgmeta *metadata.RowGroupMetaData, c
 			m.nullCounts[fieldID] = stats.NullCount()
 		}
 		if stats.HasMinMax() {
+			if m.lowerBounds == nil {
+				// Lower and upper bounds are always allocated together.
+				m.lowerBounds = make(map[int][]byte, len(colIndices))
+				m.upperBounds = make(map[int][]byte, len(colIndices))
+			}
 			m.lowerBounds[fieldID] = stats.EncodeMin()
 			m.upperBounds[fieldID] = stats.EncodeMax()
 		}
@@ -1890,5 +1936,13 @@ func newBloomFilterPredicates(expr iceberg.BooleanExpression) ([]internal.RowGro
 		return nil, err
 	}
 
-	return iceberg.VisitExpr(rewritten, &bloomPredicateCollector{})
+	return newBloomFilterPredicatesFromRewritten(rewritten)
+}
+
+func newBloomFilterPredicatesFromRewritten(expr iceberg.BooleanExpression) ([]internal.RowGroupBloomPred, error) {
+	if expr == nil {
+		return nil, nil
+	}
+
+	return iceberg.VisitExpr(expr, &bloomPredicateCollector{})
 }

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/internal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -94,6 +95,70 @@ func newPositionalDeleteIndexDataEntry(
 
 	return iceberg.NewManifestEntry(
 		iceberg.EntryStatusADDED, nil, &sequenceNumber, nil, file)
+}
+
+type borrowedPartitionDataFile struct {
+	iceberg.DataFile
+	publicPartitionCalls   int
+	borrowedPartitionCalls int
+}
+
+func (f *borrowedPartitionDataFile) Partition() map[int]any {
+	f.publicPartitionCalls++
+
+	return f.DataFile.Partition()
+}
+
+func (f *borrowedPartitionDataFile) DataFilePartitionRef(_ internal.DataFileRef) map[int]any {
+	f.borrowedPartitionCalls++
+
+	return internal.BorrowedDataFilePartition(f.DataFile)
+}
+
+func newBorrowedPartitionDataFile(
+	t *testing.T,
+	contentType iceberg.ManifestEntryContent,
+	path string,
+	partition map[int]any,
+) *borrowedPartitionDataFile {
+	t.Helper()
+
+	spec := iceberg.NewPartitionSpecID(1, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "part",
+		Transform: iceberg.IdentityTransform{},
+	})
+	builder, err := iceberg.NewDataFileBuilder(
+		spec, contentType, path, iceberg.ParquetFile, partition, nil, nil, 1, 1)
+	require.NoError(t, err)
+
+	return &borrowedPartitionDataFile{DataFile: builder.Build()}
+}
+
+func TestPositionalDeleteIndexUsesBorrowedPartitions(t *testing.T) {
+	partition := map[int]any{1000: int32(7)}
+	deleteFile := newBorrowedPartitionDataFile(
+		t, iceberg.EntryContentPosDeletes, "delete.parquet", partition)
+	dataFile := newBorrowedPartitionDataFile(
+		t, iceberg.EntryContentData, "data.parquet", partition)
+	deleteSequence, dataSequence := int64(2), int64(1)
+	deleteEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &deleteSequence, nil, deleteFile)
+	dataEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &dataSequence, nil, dataFile)
+
+	idx, err := buildPositionalDeleteIndex([]iceberg.ManifestEntry{deleteEntry})
+	require.NoError(t, err)
+
+	matched, err := idx.forDataFile(dataEntry)
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	assert.Equal(t, "delete.parquet", matched[0].FilePath())
+	assert.Zero(t, deleteFile.publicPartitionCalls)
+	assert.Equal(t, 1, deleteFile.borrowedPartitionCalls)
+	assert.Zero(t, dataFile.publicPartitionCalls)
+	assert.Equal(t, 1, dataFile.borrowedPartitionCalls)
 }
 
 func TestPositionalDeleteIndexMatchesPathPartitionAndSequence(t *testing.T) {
@@ -282,6 +347,139 @@ func TestPositionalDeleteIndexPrunesPartitionEntriesUsingPathMetrics(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, []string{"matching-range.parquet", "no-metrics.parquet"},
 		positionalDeletePaths(matched))
+}
+
+func TestFilePathMayMatch(t *testing.T) {
+	const dataFilePath = "data-m.parquet"
+
+	tests := []struct {
+		name        string
+		count       int64
+		lower       []byte
+		upper       []byte
+		hasLower    bool
+		hasUpper    bool
+		valueCounts map[int]int64
+		nullCounts  map[int]int64
+		nanCounts   map[int]int64
+		want        bool
+	}{
+		{
+			name:     "empty file",
+			count:    0,
+			lower:    []byte(dataFilePath),
+			upper:    []byte(dataFilePath),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "exact bounds",
+			count:    1,
+			lower:    []byte(dataFilePath),
+			upper:    []byte(dataFilePath),
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "inside bounds",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			upper:    []byte("data-z.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "below lower bound",
+			count:    1,
+			lower:    []byte("data-n.parquet"),
+			upper:    []byte("data-z.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "above upper bound",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			upper:    []byte("data-l.parquet"),
+			hasLower: true,
+			hasUpper: true,
+			want:     false,
+		},
+		{
+			name:     "missing lower bound",
+			count:    1,
+			upper:    []byte("data-z.parquet"),
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:     "missing upper bound",
+			count:    1,
+			lower:    []byte("data-a.parquet"),
+			hasLower: true,
+			want:     true,
+		},
+		{
+			name:  "missing both bounds",
+			count: 1,
+			want:  true,
+		},
+		{
+			name:     "nil bounds are missing",
+			count:    1,
+			hasLower: true,
+			hasUpper: true,
+			want:     true,
+		},
+		{
+			name:        "null-only metadata",
+			count:       1,
+			lower:       []byte("data-a.parquet"),
+			upper:       []byte("data-z.parquet"),
+			hasLower:    true,
+			hasUpper:    true,
+			valueCounts: map[int]int64{filePathFieldID: 1},
+			nullCounts:  map[int]int64{filePathFieldID: 1},
+			want:        false,
+		},
+		{
+			name:        "nan-only metadata",
+			count:       1,
+			lower:       []byte("data-a.parquet"),
+			upper:       []byte("data-z.parquet"),
+			hasLower:    true,
+			hasUpper:    true,
+			valueCounts: map[int]int64{filePathFieldID: 1},
+			nanCounts:   map[int]int64{filePathFieldID: 1},
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lowerBounds, upperBounds map[int][]byte
+			if tt.hasLower {
+				lowerBounds = map[int][]byte{filePathFieldID: tt.lower}
+			}
+			if tt.hasUpper {
+				upperBounds = map[int][]byte{filePathFieldID: tt.upper}
+			}
+
+			file := &mockDataFile{
+				count:       tt.count,
+				valueCounts: tt.valueCounts,
+				nullCounts:  tt.nullCounts,
+				nanCounts:   tt.nanCounts,
+				lowerBounds: lowerBounds,
+				upperBounds: upperBounds,
+			}
+			assert.Equal(t, tt.want, filePathMayMatch(file, dataFilePath))
+		})
+	}
 }
 
 func TestPositionalDeleteIndexHandlesUnknownSequenceNumbers(t *testing.T) {

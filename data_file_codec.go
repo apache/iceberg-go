@@ -211,11 +211,7 @@ func cloneDataFileAvroFields(src *dataFile) *dataFile {
 // avro-friendly map the manifest-entry schema expects. Idempotent:
 // values already in primitive form pass through unchanged.
 func avroEncodePartitionData(idKeyed map[int]any, fields dataFileFieldMaps) (map[string]any, error) {
-	converted, err := avroPartitionData(idKeyed, fields.idToType, fields.idToFixedSize)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]any, len(converted))
+	out := make(map[string]any, len(fields.nameToID))
 	for name, id := range fields.nameToID {
 		if _, unknown := fields.unknownFieldIDs[id]; unknown {
 			// UnknownType has no value representation and is encoded as Avro
@@ -224,7 +220,17 @@ func avroEncodePartitionData(idKeyed map[int]any, fields dataFileFieldMaps) (map
 
 			continue
 		}
-		if v, ok := converted[id]; ok {
+		v, ok := idKeyed[id]
+		if !ok {
+			continue
+		}
+		if logical, ok := fields.idToType[id]; ok {
+			converted, err := convertLogicalTypeValue(v, logical, fields.idToFixedSize[id])
+			if err != nil {
+				return nil, fmt.Errorf("failed to convert partition field %d: %w", id, err)
+			}
+			out[name] = converted
+		} else {
 			out[name] = v
 		}
 	}

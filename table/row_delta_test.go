@@ -1427,3 +1427,164 @@ func assertRowCount(t *testing.T, tbl *table.Table, expected int64) {
 
 	assert.Equal(t, expected, total, "unexpected row count")
 }
+
+func unregisteredSpec() iceberg.PartitionSpec {
+	return iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "id_identity", Transform: iceberg.IdentityTransform{},
+	})
+}
+
+func buildPosDeleteFileForSpec(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
+	t.Helper()
+
+	b, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentPosDeletes,
+		path, iceberg.ParquetFile, partition, nil, nil, 5, 512)
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func buildDataFileForSpec(t *testing.T, spec iceberg.PartitionSpec, path string, partition map[int]any) iceberg.DataFile {
+	t.Helper()
+
+	b, err := iceberg.NewDataFileBuilder(
+		spec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, partition, nil, nil, 10, 1024)
+	require.NoError(t, err)
+
+	return b.Build()
+}
+
+func TestRowDeltaRejectsDeleteFileWithUnregisteredSpec(t *testing.T) {
+	tbl := newRowDeltaCommitTestTable(t)
+
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(buildPosDeleteFileForSpec(t, unregisteredSpec(),
+		"s3://bucket/data/pos-del.parquet", map[int]any{1000: int64(7)}))
+
+	err := rd.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+	assert.Nil(t, result.CurrentSnapshot(), "a rejected row delta must not produce a snapshot")
+}
+
+func TestRowDeltaRejectsDataFileWithUnregisteredSpec(t *testing.T) {
+	tbl := newRowDeltaCommitTestTable(t)
+
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddRows(buildDataFileForSpec(t, unregisteredSpec(),
+		"s3://bucket/data/insert.parquet", map[int]any{1000: int64(7)}))
+
+	err := rd.Commit(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, table.ErrPartitionSpecNotFound)
+	assert.ErrorContains(t, err, "99")
+}
+
+func TestRowDeltaWritesRegisteredNonDefaultSpec(t *testing.T) {
+	tbl := newRowDeltaCommitTestTable(t)
+
+	evolveTx := tbl.NewTransaction()
+	require.NoError(t, evolveTx.UpdateSpec(false).
+		AddField("id", iceberg.IdentityTransform{}, "id_identity").
+		Commit())
+	evolved, err := evolveTx.Commit(t.Context())
+	require.NoError(t, err)
+
+	spec := evolved.Metadata().PartitionSpec()
+	require.NotEqual(t, 0, spec.ID(), "spec evolution must register a new spec id")
+	require.Equal(t, 1, spec.NumFields())
+	fieldID := spec.Field(0).FieldID
+	partition := map[int]any{fieldID: int64(7)}
+
+	tx := evolved.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddRows(buildDataFileForSpec(t, spec, "s3://bucket/data/insert.parquet", partition))
+	rd.AddDeletes(buildPosDeleteFileForSpec(t, spec, "s3://bucket/data/pos-del.parquet", partition))
+	require.NoError(t, rd.Commit(t.Context()))
+
+	result, err := tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	snap := result.CurrentSnapshot()
+	require.NotNil(t, snap)
+
+	fs := iceio.LocalFS{}
+	manifests, err := snap.Manifests(fs)
+	require.NoError(t, err)
+	require.Len(t, manifests, 2)
+
+	for _, m := range manifests {
+		assert.Equal(t, int32(spec.ID()), m.PartitionSpecID(),
+			"manifest must declare the spec its entries were written under")
+		entries := 0
+		for e, err := range m.Entries(fs, true) {
+			require.NoError(t, err)
+			assert.Equal(t, int32(spec.ID()), e.DataFile().SpecID())
+			assert.Equal(t, int64(7), e.DataFile().Partition()[fieldID])
+			entries++
+		}
+		assert.Equal(t, 1, entries)
+	}
+}
+
+func TestRowDeltaMixedSpecCommitLeavesNoManifests(t *testing.T) {
+	validData := func() iceberg.DataFile { return buildDataFile(t, "s3://bucket/data/insert.parquet") }
+	validDelete := func() iceberg.DataFile { return buildPosDeleteFile(t, "s3://bucket/data/pos-del.parquet") }
+	orphanData := func() iceberg.DataFile {
+		return buildDataFileForSpec(t, unregisteredSpec(), "s3://bucket/data/orphan.parquet", map[int]any{1000: int64(7)})
+	}
+	orphanDelete := func() iceberg.DataFile {
+		return buildPosDeleteFileForSpec(t, unregisteredSpec(), "s3://bucket/data/orphan-del.parquet", map[int]any{1000: int64(7)})
+	}
+
+	tests := []struct {
+		name    string
+		rows    []iceberg.DataFile
+		deletes []iceberg.DataFile
+	}{
+		{"valid data with unregistered delete", []iceberg.DataFile{validData()}, []iceberg.DataFile{orphanDelete()}},
+		{"valid delete with unregistered data", []iceberg.DataFile{orphanData()}, []iceberg.DataFile{validDelete()}},
+		{"valid data group before unregistered one", []iceberg.DataFile{validData(), orphanData()}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tbl := newRowDeltaCommitTestTable(t)
+
+			tx := tbl.NewTransaction()
+			rd := tx.NewRowDelta(nil)
+			rd.AddRows(tt.rows...)
+			rd.AddDeletes(tt.deletes...)
+
+			err := rd.Commit(t.Context())
+			require.Error(t, err)
+			assert.ErrorIs(t, err, table.ErrPartitionSpecNotFound)
+			assert.Empty(t, writtenManifests(t, tbl.Location()),
+				"a rejected row delta must not leave manifests behind")
+
+			validTx := tbl.NewTransaction()
+			validRd := validTx.NewRowDelta(nil)
+			validRd.AddRows(validData())
+			require.NoError(t, validRd.Commit(t.Context()))
+			assert.NotEmpty(t, writtenManifests(t, tbl.Location()),
+				"the same probe must observe the manifests a successful commit writes")
+		})
+	}
+}
+
+func writtenManifests(t *testing.T, location string) []string {
+	t.Helper()
+
+	paths, err := filepath.Glob(filepath.Join(location, "metadata", "*.avro"))
+	require.NoError(t, err)
+
+	return paths
+}

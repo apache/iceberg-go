@@ -20,6 +20,7 @@ package rest
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -360,6 +361,18 @@ func TestVendedCredsServerExpiryUsedOnRefresh(t *testing.T) {
 	assert.Equal(t, serverExpiry.UnixMilli(), r.expiresAt.UnixMilli())
 }
 
+func TestParseCredentialExpirySupportsAccountScopedADLSKey(t *testing.T) {
+	t.Parallel()
+
+	want := time.Now().Add(time.Hour).Truncate(time.Millisecond)
+	got, ok := parseCredentialExpiry(iceberg.Properties{
+		keyAdlsSasExpiresAtMs + ".account.dfs.core.windows.net": strconv.FormatInt(want.UnixMilli(), 10),
+	})
+
+	require.True(t, ok)
+	assert.Equal(t, want, got)
+}
+
 func TestVendedCredsRefreshTriggeredWithinExpiryBuffer(t *testing.T) {
 	t.Parallel()
 
@@ -635,4 +648,283 @@ func TestResolveStorageCredentials(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestPrefixScopedIOUsesLongestCredentialPerLocation(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{"base": "yes"}, []StorageCredential{
+		{Prefix: "s3://metadata/table/", Config: iceberg.Properties{"credential": "metadata"}},
+		{Prefix: "s3://data/table/", Config: iceberg.Properties{"credential": "data"}},
+		{Prefix: "s3://data/table/private/", Config: iceberg.Properties{"credential": "private"}},
+	})
+
+	assert.Equal(t, "metadata", p.propertiesForLocation("s3://metadata/table/metadata.json")["credential"])
+	assert.Equal(t, "data", p.propertiesForLocation("s3://data/table/file.parquet")["credential"])
+	assert.Equal(t, "private", p.propertiesForLocation("s3://data/table/private/file.parquet")["credential"])
+	assert.Equal(t, "yes", p.propertiesForLocation("s3://other/table/file.parquet")["base"])
+}
+
+func TestPrefixScopedIOReplacesS3CredentialAtomically(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.S3EndpointURL:     "https://s3.local",
+		iceio.S3AccessKeyID:     "load-access",
+		iceio.S3SecretAccessKey: "load-secret",
+		iceio.S3SessionToken:    "load-token",
+		keyS3TokenExpiresAtMs:   "1000",
+	}, []StorageCredential{{
+		Prefix: "s3://bucket/data/",
+		Config: iceberg.Properties{
+			iceio.S3AccessKeyID:     "plan-access",
+			iceio.S3SecretAccessKey: "plan-secret",
+		},
+	}})
+
+	props := p.propertiesForLocation("s3://bucket/data/file.parquet")
+	assert.Equal(t, "https://s3.local", props[iceio.S3EndpointURL])
+	assert.Equal(t, "plan-access", props[iceio.S3AccessKeyID])
+	assert.Equal(t, "plan-secret", props[iceio.S3SecretAccessKey])
+	assert.NotContains(t, props, iceio.S3SessionToken)
+	assert.NotContains(t, props, keyS3TokenExpiresAtMs)
+}
+
+func TestPrefixScopedIODoesNotHoldLockDuringFilesystemLoad(t *testing.T) {
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+
+	iceio.Register("prefix-scoped-lock-test", func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		close(loadStarted)
+		<-releaseLoad
+
+		return iceio.LocalFS{}, nil
+	})
+	defer iceio.Unregister("prefix-scoped-lock-test")
+	defer release()
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := p.filesystemFor("prefix-scoped-lock-test://bucket/file.parquet")
+		loaded <- err
+	}()
+
+	<-loadStarted
+	lockAcquired := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		close(lockAcquired)
+		p.mu.Unlock()
+	}()
+
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("filesystem cache lock was held during filesystem loading")
+	}
+
+	release()
+	require.NoError(t, <-loaded)
+}
+
+type closeTrackingIO struct {
+	iceio.IO
+	closeCount *atomic.Int32
+}
+
+func (f *closeTrackingIO) Close() error {
+	f.closeCount.Add(1)
+
+	return nil
+}
+
+type blockingCloseIO struct {
+	iceio.IO
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (f *blockingCloseIO) Close() error {
+	close(f.started)
+	<-f.release
+
+	return nil
+}
+
+func TestPrefixScopedIOClosesFilesystemLostToCacheRace(t *testing.T) {
+	const scheme = "prefix-scoped-cache-race-test"
+
+	loadStarted := make(chan struct{}, 2)
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+	defer release()
+
+	var closeCount atomic.Int32
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		loadStarted <- struct{}{}
+		<-releaseLoad
+
+		return &closeTrackingIO{IO: iceio.LocalFS{}, closeCount: &closeCount}, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	type result struct {
+		fs  iceio.IO
+		err error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			fs, err := p.filesystemFor(scheme + "://bucket/file.parquet")
+			results <- result{fs: fs, err: err}
+		}()
+	}
+
+	for range 2 {
+		select {
+		case <-loadStarted:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for concurrent filesystem loads")
+		}
+	}
+	release()
+
+	var cached iceio.IO
+	for range 2 {
+		select {
+		case result := <-results:
+			require.NoError(t, result.err)
+			if cached == nil {
+				cached = result.fs
+			} else {
+				assert.Same(t, cached, result.fs)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for filesystem loads")
+		}
+	}
+
+	assert.Equal(t, int32(1), closeCount.Load(),
+		"the filesystem that lost the cache race must be closed")
+	require.NoError(t, p.Close())
+	assert.Equal(t, int32(2), closeCount.Load(),
+		"the cached filesystem must be closed when the scoped IO closes")
+}
+
+func TestPrefixScopedIOClosesFilesystemLoadedAfterClose(t *testing.T) {
+	const scheme = "prefix-scoped-close-during-load-test"
+
+	loadStarted := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLoad) }) }
+	defer release()
+
+	var closeCount atomic.Int32
+	iceio.Register(scheme, func(context.Context, *url.URL, map[string]string) (iceio.IO, error) {
+		close(loadStarted)
+		<-releaseLoad
+
+		return &closeTrackingIO{IO: iceio.LocalFS{}, closeCount: &closeCount}, nil
+	})
+	defer iceio.Unregister(scheme)
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := p.filesystemFor(scheme + "://bucket/file.parquet")
+		loaded <- err
+	}()
+
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem load")
+	}
+	require.NoError(t, p.Close())
+	release()
+
+	select {
+	case err := <-loaded:
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "prefix-scoped IO is closed")
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem load to finish")
+	}
+	assert.Equal(t, int32(1), closeCount.Load(),
+		"a filesystem loaded after Close must be closed before returning")
+}
+
+func TestPrefixScopedIODoesNotHoldLockDuringFilesystemClose(t *testing.T) {
+	t.Parallel()
+
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	defer release()
+
+	p := newPrefixScopedIO(context.Background(), nil, nil)
+	p.filesystems["cached"] = &blockingCloseIO{
+		IO:      iceio.LocalFS{},
+		started: closeStarted,
+		release: releaseClose,
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- p.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for filesystem close")
+	}
+
+	lockAcquired := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		close(lockAcquired)
+		p.mu.Unlock()
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(time.Second):
+		t.Fatal("filesystem cache lock was held during filesystem close")
+	}
+
+	release()
+	require.NoError(t, <-closeDone)
+}
+
+func TestPrefixScopedIODoesNotApplyCredentialOutsidePrefix(t *testing.T) {
+	t.Parallel()
+
+	p := newPrefixScopedIO(context.Background(), iceberg.Properties{
+		iceio.S3EndpointURL: "https://s3.local",
+	}, []StorageCredential{{
+		Prefix: "s3://bucket/data/",
+		Config: iceberg.Properties{
+			iceio.S3AccessKeyID:     "plan-access",
+			iceio.S3SecretAccessKey: "plan-secret",
+		},
+	}})
+
+	props := p.propertiesForLocation("s3://other-bucket/data/file.parquet")
+	assert.Equal(t, "https://s3.local", props[iceio.S3EndpointURL])
+	assert.NotContains(t, props, iceio.S3AccessKeyID)
+	assert.NotContains(t, props, iceio.S3SecretAccessKey)
+}
+
+func TestPrefixScopedIOPreservesReadContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p := newPrefixScopedIO(ctx, nil, nil)
+
+	cancel()
+	require.ErrorIs(t, p.ctx.Err(), context.Canceled)
 }

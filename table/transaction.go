@@ -323,6 +323,9 @@ func (t *Transaction) planningSnapshot(meta *MetadataBuilder) *Snapshot {
 	return meta.currentSnapshotForRef(t.branch)
 }
 
+// transactionRequirements returns the requirements a commit on branch must carry.
+// The result is always a fresh allocation, never aliasing reqs, so callers may append to it
+// while holding the transaction lock.
 func transactionRequirements(reqs []Requirement, branch string, base Metadata) []Requirement {
 	if branch == "" {
 		branch = MainBranch
@@ -451,6 +454,38 @@ func (t *Transaction) AssertRefSnapshotID(branch string) error {
 	}
 
 	return nil
+}
+
+// AssertDefaultShape registers requirements pinning the table's default
+// partition spec ID and default sort order ID at their values in the
+// transaction's base metadata, so a concurrent change to either fails
+// this commit instead of interleaving silently — the shape analogue of
+// AssertRefSnapshotID's explicit branch fence. It gives commits that
+// stage no shape change of their own (for example a properties-only
+// revision marker) the same serialization against concurrent spec or
+// sort-order evolutions that Java UpdateRequirements.forUpdateTable
+// registers for SetDefaultPartitionSpec / SetDefaultSortOrder, and that
+// UpdateSpec and ReplaceSortOrder already register for shape-changing
+// commits; when both are present they pin the same base values and
+// deduplicate.
+//
+// Register the fence BEFORE staging spec or sort-order changes:
+// requirements are validated against the staged metadata at
+// registration time, so a fence registered after the transaction moved
+// a default fails immediately. Unlike ref assertions the fence is never
+// rewritten by the retry loop's refresh-and-replay, and a transaction
+// with no updates never contacts the catalog, so the fence alone does
+// not force a commit.
+func (t *Transaction) AssertDefaultShape() error {
+	if _, err := t.txnMeta(); err != nil {
+		return err
+	}
+	meta := t.tbl.Metadata()
+
+	return t.apply(nil, []Requirement{
+		AssertDefaultSpecID(meta.DefaultPartitionSpec()),
+		AssertDefaultSortOrderID(meta.DefaultSortOrder()),
+	})
 }
 
 // RemoveProperties removes the given property keys from the table. Keys that
@@ -3175,7 +3210,10 @@ func (t *Transaction) Scan(opts ...ScanOption) (*Scan, error) {
 		metadata:         updatedMeta,
 		metadataLocation: t.tbl.metadataLocation,
 		ioF:              t.tbl.fsF,
-		planner:          t.tbl.planner,
+		// Catalog planners can only see committed table state, not metadata
+		// staged inside this transaction. Keep transaction scans local so auto
+		// mode cannot silently return stale tasks.
+		planner: nil,
 		// TODO(#1178 Phase 6): resolve scan-planning-mode table properties here.
 		planningMode:   ScanPlanningLocal,
 		rowFilter:      iceberg.AlwaysTrue{},
@@ -3214,6 +3252,7 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 			t.tbl.fsF,
 			t.tbl.cat,
 			withReporterState(t.tbl.reporter, t.tbl.reporterSet),
+			WithScanPlanningIOProperties(t.tbl.scanPlanningIOProps),
 		),
 	}, nil
 }

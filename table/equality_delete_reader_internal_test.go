@@ -583,30 +583,21 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 	deleteC := newEqualityDeleteSetAssemblyTestFile(t, "delete-c.parquet", []int{1})
 
 	perFile := map[string]*equalityDeleteFileSet{
-		deleteA.FilePath(): {
-			id: 0,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"a": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteB.FilePath(): {
-			id: 1,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"b": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteC.FilePath(): {
-			id: 2,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"c": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
+		deleteA.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
+			keys:     set[string]{"a": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteB.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
+			keys:     set[string]{"b": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteC.FilePath(): newEqualityDeleteFileSet(2, &equalityDeleteSet{
+			keys:     set[string]{"c": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
 	}
 
 	tasks := []FileScanTask{
@@ -632,38 +623,60 @@ func TestBuildEqualityDeleteSetsPerTaskSharesIdenticalSets(t *testing.T) {
 
 func TestBuildEqualityDeleteSetsPerTaskKeepsFieldGroupsSeparate(t *testing.T) {
 	deleteID := newEqualityDeleteSetAssemblyTestFile(t, "delete-id.parquet", []int{1})
+	deleteIDAgain := newEqualityDeleteSetAssemblyTestFile(t, "delete-id-again.parquet", []int{1})
 	deleteCategory := newEqualityDeleteSetAssemblyTestFile(t, "delete-category.parquet", []int{2})
 
 	perFile := map[string]*equalityDeleteFileSet{
-		deleteID.FilePath(): {
-			id: 0,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"id": {}},
-				fieldIDs: []int{1},
-				colNames: []string{"id"},
-			},
-		},
-		deleteCategory.FilePath(): {
-			id: 1,
-			equalityDeleteSet: &equalityDeleteSet{
-				keys:     set[string]{"category": {}},
-				fieldIDs: []int{2},
-				colNames: []string{"category"},
-			},
-		},
+		deleteID.FilePath(): newEqualityDeleteFileSet(0, &equalityDeleteSet{
+			keys:     set[string]{"id": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteIDAgain.FilePath(): newEqualityDeleteFileSet(1, &equalityDeleteSet{
+			keys:     set[string]{"id-again": {}},
+			fieldIDs: []int{1},
+			colNames: []string{"id"},
+		}),
+		deleteCategory.FilePath(): newEqualityDeleteFileSet(2, &equalityDeleteSet{
+			keys:     set[string]{"category": {}},
+			fieldIDs: []int{2},
+			colNames: []string{"category"},
+		}),
 	}
+
+	tasks := []FileScanTask{
+		// Two files accumulate under the first key before the second group
+		// promotes the fast path to a map.
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteID, deleteIDAgain, deleteCategory}},
+		// The first file for the original key arrives after promotion.
+		{EqualityDeleteFiles: []iceberg.DataFile{deleteID, deleteCategory, deleteIDAgain}},
+	}
+
+	perTask := buildEqualityDeleteSetsPerTask(tasks, perFile)
+	require.Len(t, perTask, len(tasks))
+
+	for taskIndex, wantIDs := range map[int]set[string]{
+		0: {"id": {}, "id-again": {}},
+		1: {"id": {}, "id-again": {}},
+	} {
+		setsByFieldID := make(map[int]*equalityDeleteSet)
+		for _, deleteSet := range perTask[taskIndex] {
+			setsByFieldID[deleteSet.fieldIDs[0]] = deleteSet
+		}
+
+		assert.Equal(t, wantIDs, setsByFieldID[1].keys)
+		assert.Equal(t, set[string]{"category": {}}, setsByFieldID[2].keys)
+	}
+}
+
+func TestBuildEqualityDeleteSetsPerTaskSkipsMissingDeleteFiles(t *testing.T) {
+	missing := newEqualityDeleteSetAssemblyTestFile(t, "missing-delete.parquet", []int{1})
 
 	perTask := buildEqualityDeleteSetsPerTask([]FileScanTask{{
-		EqualityDeleteFiles: []iceberg.DataFile{deleteID, deleteCategory},
-	}}, perFile)
-	require.Len(t, perTask[0], 2)
+		EqualityDeleteFiles: []iceberg.DataFile{missing},
+	}}, map[string]*equalityDeleteFileSet{})
 
-	setsByFieldID := make(map[int]*equalityDeleteSet)
-	for _, deleteSet := range perTask[0] {
-		setsByFieldID[deleteSet.fieldIDs[0]] = deleteSet
-	}
-	assert.Same(t, perFile[deleteID.FilePath()].equalityDeleteSet, setsByFieldID[1])
-	assert.Same(t, perFile[deleteCategory.FilePath()].equalityDeleteSet, setsByFieldID[2])
+	assert.Empty(t, perTask)
 }
 
 func newEqualityDeleteSetAssemblyTestFile(

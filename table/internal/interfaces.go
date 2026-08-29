@@ -119,6 +119,8 @@ type WriteFileInfo struct {
 	Spec             iceberg.PartitionSpec
 	FileName         string
 	StatsCols        map[int]StatisticsCollector
+	ColMapping       map[string]int
+	VariantFieldIDs  map[int]struct{}
 	WriteProps       any
 	RowGroupBytes    int64
 	Content          iceberg.ManifestEntryContent

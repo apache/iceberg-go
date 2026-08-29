@@ -22,6 +22,7 @@ import (
 	"compress/flate"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -33,6 +34,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -504,6 +506,144 @@ func TestConstructPartitionSummariesWithDroppedSource(t *testing.T) {
 	}
 	if summaries[0].LowerBound != nil || summaries[0].UpperBound != nil {
 		t.Fatal("expected the unknown partition field summary to omit bounds")
+	}
+}
+
+func TestPartitionFieldStatsAcceptsConvertibleValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value any
+		want  Literal
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool, value: true, want: NewLiteral(true)},
+		{name: "boolean from literal", typ: PrimitiveTypes.Bool, value: BoolLiteral(true), want: NewLiteral(true)},
+		{name: "int32 from int", typ: PrimitiveTypes.Int32, value: int(7), want: NewLiteral(int32(7))},
+		{name: "int32 from literal", typ: PrimitiveTypes.Int32, value: Int32Literal(7), want: NewLiteral(int32(7))},
+		{name: "int32 wraps overflowing int64", typ: PrimitiveTypes.Int32, value: int64(math.MaxInt32) + 1, want: NewLiteral(int32(math.MinInt32))},
+		{name: "int64 from int", typ: PrimitiveTypes.Int64, value: int(8), want: NewLiteral(int64(8))},
+		{name: "float32 from float64", typ: PrimitiveTypes.Float32, value: float64(1.5), want: NewLiteral(float32(1.5))},
+		{name: "float32 overflows to infinity", typ: PrimitiveTypes.Float32, value: float64(math.MaxFloat32) * 2, want: NewLiteral(float32(math.Inf(1)))},
+		{name: "float64 from int", typ: PrimitiveTypes.Float64, value: int(9), want: NewLiteral(float64(9))},
+		{name: "string from bytes", typ: PrimitiveTypes.String, value: []byte("east"), want: NewLiteral("east")},
+		{name: "string from literal", typ: PrimitiveTypes.String, value: StringLiteral("east"), want: NewLiteral("east")},
+		{name: "date from int32", typ: PrimitiveTypes.Date, value: int32(10), want: NewLiteral(Date(10))},
+		{name: "time from duration", typ: PrimitiveTypes.Time, value: time.Duration(11), want: NewLiteral(Time(11))},
+		{name: "timestamp from int64", typ: PrimitiveTypes.Timestamp, value: int64(12), want: NewLiteral(Timestamp(12))},
+		{name: "binary from string", typ: PrimitiveTypes.Binary, value: "shard", want: NewLiteral([]byte("shard"))},
+		{name: "fixed from bytes", typ: FixedTypeOf(5), value: "fixed", want: NewLiteral([]byte("fixed"))},
+		{
+			name:  "uuid from array",
+			typ:   PrimitiveTypes.UUID,
+			value: [16]byte{1, 2, 3, 4},
+			want:  NewLiteral(uuid.UUID{1, 2, 3, 4}),
+		},
+		{
+			name:  "decimal from decimal literal",
+			typ:   DecimalTypeOf(10, 2),
+			value: DecimalLiteral{Val: decimal128.FromI64(130), Scale: 2},
+			want:  NewLiteral(Decimal{Val: decimal128.FromI64(130), Scale: 2}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err != nil {
+				t.Fatal(err)
+			}
+
+			got := stats.toSummary()
+			if got.LowerBound == nil || got.UpperBound == nil {
+				t.Fatalf("expected bounds, got lower=%v upper=%v", got.LowerBound, got.UpperBound)
+			}
+
+			want, err := tt.want.MarshalBinary()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(*got.LowerBound, want) || !bytes.Equal(*got.UpperBound, want) {
+				t.Fatalf("got bounds (%v, %v), want (%v, %v)", *got.LowerBound, *got.UpperBound, want, want)
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsUnsupportedValues(t *testing.T) {
+	tests := []struct {
+		name string
+		typ  PrimitiveType
+	}{
+		{name: "boolean", typ: PrimitiveTypes.Bool},
+		{name: "int32", typ: PrimitiveTypes.Int32},
+		{name: "int64", typ: PrimitiveTypes.Int64},
+		{name: "float32", typ: PrimitiveTypes.Float32},
+		{name: "float64", typ: PrimitiveTypes.Float64},
+		{name: "string", typ: PrimitiveTypes.String},
+		{name: "date", typ: PrimitiveTypes.Date},
+		{name: "time", typ: PrimitiveTypes.Time},
+		{name: "timestamp", typ: PrimitiveTypes.Timestamp},
+		{name: "timestamp with timezone", typ: PrimitiveTypes.TimestampTz},
+		{name: "uuid", typ: PrimitiveTypes.UUID},
+		{name: "binary", typ: PrimitiveTypes.Binary},
+		{name: "fixed", typ: FixedTypeOf(5)},
+		{name: "decimal", typ: DecimalTypeOf(10, 2)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(struct{}{}); err == nil {
+				t.Fatal("expected unsupported value to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsSentinelLiterals(t *testing.T) {
+	tests := []struct {
+		name  string
+		typ   PrimitiveType
+		value Literal
+	}{
+		{name: "int32 above max", typ: PrimitiveTypes.Int32, value: Int32AboveMaxLiteral()},
+		{name: "int32 below min", typ: PrimitiveTypes.Int32, value: Int32BelowMinLiteral()},
+		{name: "int64 above max", typ: PrimitiveTypes.Int64, value: Int64AboveMaxLiteral()},
+		{name: "int64 below min", typ: PrimitiveTypes.Int64, value: Int64BelowMinLiteral()},
+		{name: "float32 above max", typ: PrimitiveTypes.Float32, value: Float32AboveMaxLiteral()},
+		{name: "float32 below min", typ: PrimitiveTypes.Float32, value: Float32BelowMinLiteral()},
+		{name: "float64 above max", typ: PrimitiveTypes.Float64, value: Float64AboveMaxLiteral()},
+		{name: "float64 below min", typ: PrimitiveTypes.Float64, value: Float64BelowMinLiteral()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stats, err := newPartitionFieldStat(tt.typ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := stats.update(tt.value); err == nil {
+				t.Fatal("expected sentinel literal to return an error")
+			}
+		})
+	}
+}
+
+func TestPartitionFieldStatsRejectsInvalidUUIDLengths(t *testing.T) {
+	for _, value := range [][]byte{make([]byte, len(uuid.UUID{})-1), make([]byte, len(uuid.UUID{})+1)} {
+		stats, err := newPartitionFieldStat(PrimitiveTypes.UUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := stats.update(value); err == nil {
+			t.Fatalf("expected UUID with length %d to return an error", len(value))
+		}
 	}
 }
 
@@ -4051,23 +4191,74 @@ func (m *ManifestTestSuite) TestV3ManifestListAcceptsV1AndV2Manifests() {
 	m.Nil(v2Entry.FirstRowID(), "delete manifests must not be assigned first_row_id")
 }
 
-func (m *ManifestTestSuite) TestV3ManifestListAssignsZeroForV1ManifestWithUnknownRowCounts() {
-	legacy := *(manifestFileRecordsV1[0].(*manifestFile))
-	legacy.AddedRowsCount = -1
-	legacy.ExistingRowsCount = -1
+func (m *ManifestTestSuite) TestV3ManifestListRejectsV1ManifestWithUnknownRowCounts() {
+	tests := []struct {
+		name         string
+		addedRows    int64
+		existingRows int64
+	}{
+		{name: "both row counts unknown", addedRows: -1, existingRows: -1},
+		{name: "only existing row count unknown", addedRows: 1, existingRows: -1},
+		{name: "only added row count unknown", addedRows: -1, existingRows: 1},
+	}
 
-	var v1Buf bytes.Buffer
-	m.Require().NoError(WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
-	manifests, err := ReadManifestList(&v1Buf)
-	m.Require().NoError(err)
-	m.Require().Len(manifests, 1)
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			legacy := *(manifestFileRecordsV1[0].(*manifestFile))
+			legacy.AddedRowsCount = tt.addedRows
+			legacy.ExistingRowsCount = tt.existingRows
 
-	var v3Buf bytes.Buffer
-	writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
-	m.Require().NoError(err)
-	m.Require().NoError(writer.AddManifests(manifests))
-	m.EqualValues(1000, *writer.NextRowID())
-	m.Require().NoError(writer.Close())
+			var v1Buf bytes.Buffer
+			m.Require().NoError(
+				WriteManifestList(1, &v1Buf, snapshotID, nil, nil, 0, []ManifestFile{&legacy}))
+			manifests, err := ReadManifestList(&v1Buf)
+			m.Require().NoError(err)
+			m.Require().Len(manifests, 1)
+
+			var v3Buf bytes.Buffer
+			writer, err := NewManifestListWriterV3(&v3Buf, snapshotID, 1, 1000, nil)
+			m.Require().NoError(err)
+			err = writer.AddManifests(manifests)
+			m.Require().ErrorIs(err, ErrInvalidArgument)
+			m.Require().ErrorContains(err, "cannot assign row-lineage IDs because at least one row count is unknown")
+			m.Require().ErrorContains(err, fmt.Sprintf("existing=%d added=%d", tt.existingRows, tt.addedRows))
+			m.Require().ErrorContains(err, legacy.Path)
+			m.Require().EqualValues(1000, *writer.NextRowID())
+			m.Require().NoError(writer.Close())
+		})
+	}
+
+	m.Run("mixed batch failure poisons writer", func() {
+		valid := *(manifestFileRecordsV1[0].(*manifestFile))
+		valid.Path = "valid.avro"
+		unknown := valid
+		unknown.Path = "unknown-counts.avro"
+		unknown.AddedRowsCount = -1
+		unknown.ExistingRowsCount = -1
+		manifests := []ManifestFile{&valid, &unknown}
+
+		var buf bytes.Buffer
+		writer, err := NewManifestListWriterV3(&buf, snapshotID, 1, 1000, nil)
+		m.Require().NoError(err)
+
+		err = writer.AddManifests(manifests)
+		m.Require().ErrorIs(err, ErrInvalidArgument)
+		m.Require().ErrorContains(err, unknown.Path)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+
+		retryErr := writer.AddManifests([]ManifestFile{&valid})
+		m.Require().ErrorIs(retryErr, err)
+		m.Require().EqualValues(1000, *writer.NextRowID())
+		// Close flushes the partial OCF so we can verify that retrying did not
+		// append a colliding row ID. The failed writer output must be discarded.
+		m.Require().NoError(writer.Close())
+
+		written, readErr := ReadManifestList(bytes.NewReader(buf.Bytes()))
+		m.Require().NoError(readErr)
+		m.Require().Len(written, 1, "the failed batch must not be reusable")
+		m.Require().NotNil(written[0].FirstRowID())
+		m.Require().EqualValues(1000, *written[0].FirstRowID())
+	})
 }
 
 // TestV2ManifestListRejectsV3Manifests confirms that a v2 manifest list still

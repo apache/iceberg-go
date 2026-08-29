@@ -788,11 +788,12 @@ type arrowScan struct {
 	// rowGroupFilter is used only for Parquet statistics and bloom-filter
 	// pruning. It lets callers keep boundRowFilter as AlwaysTrue while they
 	// must evaluate the real row filter after position-dependent enrichment.
-	rowGroupFilter iceberg.BooleanExpression
-	filterSchema   *iceberg.Schema
-	caseSensitive  bool
-	rowLimit       int64
-	options        iceberg.Properties
+	rowGroupFilter  iceberg.BooleanExpression
+	filterSchema    *iceberg.Schema
+	caseSensitive   bool
+	rowLimit        int64
+	options         iceberg.Properties
+	filterPlanCache compiledFileFilterPlanCache
 
 	useLargeTypes bool
 	concurrency   int
@@ -883,6 +884,10 @@ func (as *arrowScan) scanInvariants(tableProperties iceberg.Properties) (*arrowS
 
 func (as *arrowScan) addTaskProjectedFieldIDs(invariants *arrowScanInvariants, tasks []FileScanTask) error {
 	for _, task := range tasks {
+		if task.Residual == nil {
+			continue
+		}
+
 		rowFilter, err := as.rowFilterForTask(task)
 		if err != nil {
 			return err
@@ -949,32 +954,20 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 		return nil, false, nil
 	}
 
-	translatedFilter, err := iceberg.TranslateColumnNames(rowFilter, fileSchema)
+	plan, err := compileFileFilterPlan(fileSchema, rowFilter, as.caseSensitive, true, false)
 	if err != nil {
 		return nil, false, err
 	}
 
-	if translatedFilter.Equals(iceberg.AlwaysFalse{}) {
-		return nil, true, nil
+	return plan.recordProcessor(ctx), plan.dropFile, nil
+}
+
+func (as *arrowScan) getRecordFilterFromPlan(ctx context.Context, plan *compiledFileFilterPlan) (recProcessFn, bool, error) {
+	if plan == nil {
+		return nil, false, nil
 	}
 
-	translatedFilter, err = iceberg.BindExpr(fileSchema, translatedFilter, as.caseSensitive)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if !translatedFilter.Equals(iceberg.AlwaysTrue{}) {
-		extSet, recordFilter, err := substrait.ConvertExpr(fileSchema, translatedFilter, as.caseSensitive)
-		if err != nil {
-			return nil, false, err
-		}
-
-		ctx = exprs.WithExtensionIDSet(ctx, exprs.NewExtensionSetDefault(*extSet))
-
-		return filterRecords(ctx, recordFilter), false, nil
-	}
-
-	return nil, false, nil
+	return plan.recordProcessor(ctx), plan.dropFile, nil
 }
 
 type filterBindingState struct {
@@ -1306,6 +1299,21 @@ func (as *arrowScan) processRecords(
 	pipeline []recProcessFn,
 	posSource *rowPositionSource,
 	out chan<- enumeratedRecord,
+) error {
+	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
+}
+
+func (as *arrowScan) processRecordsWithPlans(
+	ctx context.Context,
+	task tblutils.Enumerated[FileScanTask],
+	fileSchema *iceberg.Schema,
+	rowFilter iceberg.BooleanExpression,
+	rdr tblutils.FileReader,
+	columns []int,
+	pipeline []recProcessFn,
+	posSource *rowPositionSource,
+	out chan<- enumeratedRecord,
+	plans *compiledFileFilterPlans,
 ) (err error) {
 	var (
 		testRowGroups any
@@ -1327,47 +1335,55 @@ func (as *arrowScan) processRecords(
 	// stays enabled.
 	switch {
 	case task.Value.File.FileFormat() == iceberg.ParquetFile:
-		logicalSchema := as.filterSchema
-		if logicalSchema == nil {
-			logicalSchema = as.projectedSchema
-		}
+		var tester *tblutils.ParquetRowGroupTester
+		if plans != nil && plans.pruning != nil {
+			tester = &tblutils.ParquetRowGroupTester{
+				StatsFn:    plans.pruning.statsEvaluator(),
+				BloomPreds: plans.pruning.bloomPreds,
+			}
+		} else {
+			logicalSchema := as.filterSchema
+			if logicalSchema == nil {
+				logicalSchema = as.projectedSchema
+			}
 
-		hasMissingDefault, err := pruningFilterHasMissingInitialDefault(
-			pruningFilter, logicalSchema, fileSchema)
-		if err != nil {
-			return err
-		}
-		if hasMissingDefault {
-			// TranslateColumnNames treats fields missing from the physical file
-			// as null. That is unsafe for fields added with a non-null
-			// initial-default because Iceberg materializes the default on read.
-			// Keep the actual row filter, but conservatively skip early pruning.
-			pruningFilter = iceberg.AlwaysTrue{}
-		}
+			hasMissingDefault, err := pruningFilterHasMissingInitialDefault(
+				pruningFilter, logicalSchema, fileSchema)
+			if err != nil {
+				return err
+			}
+			if hasMissingDefault {
+				// TranslateColumnNames treats fields missing from the physical file
+				// as null. That is unsafe for fields added with a non-null
+				// initial-default because Iceberg materializes the default on read.
+				// Keep the actual row filter, but conservatively skip early pruning.
+				pruningFilter = iceberg.AlwaysTrue{}
+			}
 
-		filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
-		if err != nil {
-			return err
-		}
+			filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
+			if err != nil {
+				return err
+			}
 
-		filePruningFilter, err = iceberg.BindExpr(fileSchema, filePruningFilter, as.caseSensitive)
-		if err != nil {
-			return err
-		}
+			filePruningFilter, err = iceberg.BindExpr(fileSchema, filePruningFilter, as.caseSensitive)
+			if err != nil {
+				return err
+			}
 
-		statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, filePruningFilter, false)
-		if err != nil {
-			return err
-		}
+			statsFn, err := newParquetRowGroupStatsEvaluator(fileSchema, filePruningFilter, false)
+			if err != nil {
+				return err
+			}
 
-		bloomPreds, err := newBloomFilterPredicates(filePruningFilter)
-		if err != nil {
-			return err
-		}
+			bloomPreds, err := newBloomFilterPredicates(filePruningFilter)
+			if err != nil {
+				return err
+			}
 
-		tester := &tblutils.ParquetRowGroupTester{
-			StatsFn:    statsFn,
-			BloomPreds: bloomPreds,
+			tester = &tblutils.ParquetRowGroupTester{
+				StatsFn:    statsFn,
+				BloomPreds: bloomPreds,
+			}
 		}
 		if posSource != nil {
 			tester.Survivors = &posSource.spans
@@ -1467,12 +1483,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 	}()
 
 	var (
-		rowFilter  iceberg.BooleanExpression
-		rdr        tblutils.FileReader
-		iceSchema  *iceberg.Schema
-		colIndices []int
-		filterFunc recProcessFn
-		dropFile   bool
+		rowFilter   iceberg.BooleanExpression
+		rdr         tblutils.FileReader
+		iceSchema   *iceberg.Schema
+		colIndices  []int
+		filterFunc  recProcessFn
+		dropFile    bool
+		filterPlans *compiledFileFilterPlans
 	)
 
 	rowFilter, err = as.rowFilterForTask(task.Value)
@@ -1485,6 +1502,13 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
+	if task.Value.Residual == nil {
+		filterPlans, err = as.cachedFileFilterPlans(
+			iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+		if err != nil {
+			return err
+		}
+	}
 
 	pipeline := make([]recProcessFn, 0, 4)
 
@@ -1557,7 +1581,11 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		pipeline = append(pipeline, eqFn)
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, rowFilter)
+	if filterPlans != nil {
+		filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
+	} else {
+		filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, rowFilter)
+	}
 	if err != nil {
 		return err
 	}
@@ -1588,7 +1616,7 @@ func (as *arrowScan) recordsFromTask(ctx context.Context, task tblutils.Enumerat
 		})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, out)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, rowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
 
 	return err
 }
@@ -1601,11 +1629,12 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 	}()
 
 	var (
-		rdr        tblutils.FileReader
-		iceSchema  *iceberg.Schema
-		colIndices []int
-		filterFunc recProcessFn
-		dropFile   bool
+		rdr         tblutils.FileReader
+		iceSchema   *iceberg.Schema
+		colIndices  []int
+		filterFunc  recProcessFn
+		dropFile    bool
+		filterPlans *compiledFileFilterPlans
 	)
 
 	iceSchema, colIndices, rdr, err = as.prepareToRead(ctx, task.Value.File, invariants)
@@ -1613,6 +1642,11 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return err
 	}
 	defer iceinternal.CheckedClose(rdr, &err)
+	filterPlans, err = as.cachedFileFilterPlans(
+		iceSchema, task.Value.File.FileFormat() == iceberg.ParquetFile)
+	if err != nil {
+		return err
+	}
 
 	fields := append(iceSchema.Fields(), iceberg.PositionalDeleteSchema.Fields()...)
 	enrichedIcebergSchema := iceberg.NewSchema(iceSchema.ID+1, fields...)
@@ -1634,7 +1668,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		pipeline = append(pipeline, processPositionalDeletes(ctx, deletes, posSource.cursor()))
 	}
 
-	filterFunc, dropFile, err = as.getRecordFilter(ctx, iceSchema, as.boundRowFilter)
+	filterFunc, dropFile, err = as.getRecordFilterFromPlan(ctx, filterPlans.record)
 	if err != nil {
 		return err
 	}
@@ -1662,7 +1696,7 @@ func (as *arrowScan) producePosDeletesFromTask(ctx context.Context, task tblutil
 		return ToRequestedSchema(ctx, iceberg.PositionalDeleteSchema, enrichedIcebergSchema, r, SchemaOptions{IncludeFieldIDs: true, UseLargeTypes: as.useLargeTypes})
 	})
 
-	err = as.processRecords(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, out)
+	err = as.processRecordsWithPlans(ctx, task, iceSchema, as.boundRowFilter, rdr, colIndices, pipeline, posSource, out, filterPlans)
 
 	return err
 }

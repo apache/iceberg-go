@@ -26,7 +26,6 @@ import (
 	"maps"
 	"math"
 	"math/big"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1199,7 +1198,24 @@ type partitionFieldStats[T LiteralType] struct {
 	min          *T
 	max          *T
 
-	cmp Comparator[T]
+	cmp     Comparator[T]
+	convert partitionValueConverter[T]
+}
+
+type partitionValueConverter[T LiteralType] func(any) (T, bool)
+
+func partitionLiteralValue(value any) (any, bool) {
+	switch value.(type) {
+	case AboveMaxLiteral, BelowMinLiteral:
+		return nil, false
+	}
+
+	literal, ok := value.(Literal)
+	if !ok {
+		return nil, false
+	}
+
+	return literal.Any(), true
 }
 
 // unknownPartitionFieldStats records null presence but omits bounds because
@@ -1222,38 +1238,333 @@ func (p *unknownPartitionFieldStats) update(any) error {
 	return nil
 }
 
+func makePartitionFieldStats[T LiteralType](convert partitionValueConverter[T]) fieldStats {
+	return &partitionFieldStats[T]{
+		cmp:     getComparator[T](),
+		convert: convert,
+	}
+}
+
+func convertPartitionBool(value any) (bool, bool) {
+	switch value := value.(type) {
+	case bool:
+		return value, true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionBool(literal)
+		}
+
+		return false, false
+	}
+}
+
+func convertPartitionInt32(value any) (int32, bool) {
+	switch value := value.(type) {
+	case int:
+		return int32(value), true
+	case int8:
+		return int32(value), true
+	case int16:
+		return int32(value), true
+	case int32:
+		return value, true
+	case int64:
+		return int32(value), true
+	case uint:
+		return int32(value), true
+	case uint8:
+		return int32(value), true
+	case uint16:
+		return int32(value), true
+	case uint32:
+		return int32(value), true
+	case uint64:
+		return int32(value), true
+	case uintptr:
+		return int32(value), true
+	case float32:
+		return int32(value), true
+	case float64:
+		return int32(value), true
+	case Date:
+		return int32(value), true
+	case Time:
+		return int32(value), true
+	case Timestamp:
+		return int32(value), true
+	case TimestampNano:
+		return int32(value), true
+	case time.Duration:
+		return int32(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionInt32(literal)
+		}
+
+		return 0, false
+	}
+}
+
+func convertPartitionInt64(value any) (int64, bool) {
+	switch value := value.(type) {
+	case int:
+		return int64(value), true
+	case int8:
+		return int64(value), true
+	case int16:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case int64:
+		return value, true
+	case uint:
+		return int64(value), true
+	case uint8:
+		return int64(value), true
+	case uint16:
+		return int64(value), true
+	case uint32:
+		return int64(value), true
+	case uint64:
+		return int64(value), true
+	case uintptr:
+		return int64(value), true
+	case float32:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	case Date:
+		return int64(value), true
+	case Time:
+		return int64(value), true
+	case Timestamp:
+		return int64(value), true
+	case TimestampNano:
+		return int64(value), true
+	case time.Duration:
+		return int64(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionInt64(literal)
+		}
+
+		return 0, false
+	}
+}
+
+func convertPartitionFloat32(value any) (float32, bool) {
+	switch value := value.(type) {
+	case int:
+		return float32(value), true
+	case int8:
+		return float32(value), true
+	case int16:
+		return float32(value), true
+	case int32:
+		return float32(value), true
+	case int64:
+		return float32(value), true
+	case uint:
+		return float32(value), true
+	case uint8:
+		return float32(value), true
+	case uint16:
+		return float32(value), true
+	case uint32:
+		return float32(value), true
+	case uint64:
+		return float32(value), true
+	case uintptr:
+		return float32(value), true
+	case float32:
+		return value, true
+	case float64:
+		return float32(value), true
+	case Date:
+		return float32(value), true
+	case Time:
+		return float32(value), true
+	case Timestamp:
+		return float32(value), true
+	case TimestampNano:
+		return float32(value), true
+	case time.Duration:
+		return float32(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionFloat32(literal)
+		}
+
+		return 0, false
+	}
+}
+
+func convertPartitionFloat64(value any) (float64, bool) {
+	switch value := value.(type) {
+	case int:
+		return float64(value), true
+	case int8:
+		return float64(value), true
+	case int16:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case uint:
+		return float64(value), true
+	case uint8:
+		return float64(value), true
+	case uint16:
+		return float64(value), true
+	case uint32:
+		return float64(value), true
+	case uint64:
+		return float64(value), true
+	case uintptr:
+		return float64(value), true
+	case float32:
+		return float64(value), true
+	case float64:
+		return value, true
+	case Date:
+		return float64(value), true
+	case Time:
+		return float64(value), true
+	case Timestamp:
+		return float64(value), true
+	case TimestampNano:
+		return float64(value), true
+	case time.Duration:
+		return float64(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionFloat64(literal)
+		}
+
+		return 0, false
+	}
+}
+
+func convertPartitionString(value any) (string, bool) {
+	switch value := value.(type) {
+	case string:
+		return value, true
+	case []byte:
+		return string(value), true
+	case []rune:
+		return string(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionString(literal)
+		}
+
+		return "", false
+	}
+}
+
+func convertPartitionBytes(value any) ([]byte, bool) {
+	switch value := value.(type) {
+	case []byte:
+		return value, true
+	case string:
+		return []byte(value), true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionBytes(literal)
+		}
+
+		return nil, false
+	}
+}
+
+func convertPartitionUUID(value any) (uuid.UUID, bool) {
+	switch value := value.(type) {
+	case uuid.UUID:
+		return value, true
+	case [16]byte:
+		return uuid.UUID(value), true
+	case []byte:
+		if len(value) != len(uuid.UUID{}) {
+			return uuid.UUID{}, false
+		}
+
+		var converted uuid.UUID
+		copy(converted[:], value)
+
+		return converted, true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionUUID(literal)
+		}
+
+		return uuid.UUID{}, false
+	}
+}
+
+func convertPartitionDecimal(value any) (Decimal, bool) {
+	switch value := value.(type) {
+	case Decimal:
+		return value, true
+	default:
+		if literal, ok := partitionLiteralValue(value); ok {
+			return convertPartitionDecimal(literal)
+		}
+
+		return Decimal{}, false
+	}
+}
+
+func convertPartitionDate(value any) (Date, bool) {
+	converted, ok := convertPartitionInt32(value)
+
+	return Date(converted), ok
+}
+
+func convertPartitionTime(value any) (Time, bool) {
+	converted, ok := convertPartitionInt64(value)
+
+	return Time(converted), ok
+}
+
+func convertPartitionTimestamp(value any) (Timestamp, bool) {
+	converted, ok := convertPartitionInt64(value)
+
+	return Timestamp(converted), ok
+}
+
 func newPartitionFieldStat(typ PrimitiveType) (fieldStats, error) {
 	switch typ.(type) {
 	case UnknownType:
 		return &unknownPartitionFieldStats{}, nil
 	case BooleanType:
-		return &partitionFieldStats[bool]{cmp: getComparator[bool]()}, nil
+		return makePartitionFieldStats[bool](convertPartitionBool), nil
 	case Int32Type:
-		return &partitionFieldStats[int32]{cmp: getComparator[int32]()}, nil
+		return makePartitionFieldStats[int32](convertPartitionInt32), nil
 	case Int64Type:
-		return &partitionFieldStats[int64]{cmp: getComparator[int64]()}, nil
+		return makePartitionFieldStats[int64](convertPartitionInt64), nil
 	case Float32Type:
-		return &partitionFieldStats[float32]{cmp: getComparator[float32]()}, nil
+		return makePartitionFieldStats[float32](convertPartitionFloat32), nil
 	case Float64Type:
-		return &partitionFieldStats[float64]{cmp: getComparator[float64]()}, nil
+		return makePartitionFieldStats[float64](convertPartitionFloat64), nil
 	case StringType:
-		return &partitionFieldStats[string]{cmp: getComparator[string]()}, nil
+		return makePartitionFieldStats[string](convertPartitionString), nil
 	case DateType:
-		return &partitionFieldStats[Date]{cmp: getComparator[Date]()}, nil
+		return makePartitionFieldStats[Date](convertPartitionDate), nil
 	case TimeType:
-		return &partitionFieldStats[Time]{cmp: getComparator[Time]()}, nil
+		return makePartitionFieldStats[Time](convertPartitionTime), nil
 	case TimestampType:
-		return &partitionFieldStats[Timestamp]{cmp: getComparator[Timestamp]()}, nil
+		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case TimestampTzType:
-		return &partitionFieldStats[Timestamp]{cmp: getComparator[Timestamp]()}, nil
+		return makePartitionFieldStats[Timestamp](convertPartitionTimestamp), nil
 	case UUIDType:
-		return &partitionFieldStats[uuid.UUID]{cmp: getComparator[uuid.UUID]()}, nil
+		return makePartitionFieldStats[uuid.UUID](convertPartitionUUID), nil
 	case BinaryType:
-		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}, nil
+		return makePartitionFieldStats[[]byte](convertPartitionBytes), nil
 	case FixedType:
-		return &partitionFieldStats[[]byte]{cmp: getComparator[[]byte]()}, nil
+		return makePartitionFieldStats[[]byte](convertPartitionBytes), nil
 	case DecimalType:
-		return &partitionFieldStats[Decimal]{cmp: getComparator[Decimal]()}, nil
+		return makePartitionFieldStats[Decimal](convertPartitionDecimal), nil
 	default:
 		return nil, fmt.Errorf("expected primitive type for partition type: %s", typ)
 	}
@@ -1293,13 +1604,11 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 		return err
 	}
 
-	var actualVal T
-	v := reflect.ValueOf(value)
-	if !v.CanConvert(reflect.TypeOf(actualVal)) {
+	actualVal, ok := p.convert(value)
+	if !ok {
 		return fmt.Errorf("expected type %T, got %T", actualVal, value)
 	}
 
-	actualVal = v.Convert(reflect.TypeOf(actualVal)).Interface().(T)
 	if data, ok := any(actualVal).([]byte); ok {
 		actualVal = any(slices.Clone(data)).(T)
 	}
@@ -1697,6 +2006,7 @@ type ManifestListWriter struct {
 	sequenceNumber   int64
 	writer           *ocf.Writer
 	nextRowID        *int64
+	failure          error
 }
 
 func NewManifestListWriterV1(out io.Writer, snapshotID int64, parentSnapshot *int64) (*ManifestListWriter, error) {
@@ -1770,11 +2080,9 @@ func advanceRowID(firstRowID, existingRows, addedRows int64) (int64, error) {
 	if firstRowID < 0 {
 		return 0, fmt.Errorf("%w: first row ID must be non-negative: %d", ErrInvalidArgument, firstRowID)
 	}
-	if existingRows == -1 {
-		existingRows = 0
-	}
-	if addedRows == -1 {
-		addedRows = 0
+	if existingRows == -1 || addedRows == -1 {
+		return 0, fmt.Errorf("%w: cannot assign row-lineage IDs because at least one row count is unknown (existing=%d added=%d); rewrite or compact the legacy manifest before upgrading to v3",
+			ErrInvalidArgument, existingRows, addedRows)
 	}
 	if existingRows < 0 || addedRows < 0 {
 		return 0, fmt.Errorf("%w: row counts must be non-negative: existing=%d added=%d",
@@ -1819,18 +2127,29 @@ func (m *ManifestListWriter) NextRowID() *int64 {
 	return m.nextRowID
 }
 
+// AddManifests appends manifest files to the list. If it returns an error, the
+// writer is poisoned: callers must close and discard it, and subsequent calls
+// return the original error.
 func (m *ManifestListWriter) AddManifests(files []ManifestFile) (err error) {
+	if m.failure != nil {
+		return m.failure
+	}
 	if len(files) == 0 {
 		return nil
 	}
-	if m.version == 3 && m.nextRowID != nil {
-		batchStartRowID := *m.nextRowID
-		defer func() {
-			if err != nil {
+	hasRowID := m.version == 3 && m.nextRowID != nil
+	var batchStartRowID int64
+	if hasRowID {
+		batchStartRowID = *m.nextRowID
+	}
+	defer func() {
+		if err != nil {
+			if hasRowID {
 				*m.nextRowID = batchStartRowID
 			}
-		}()
-	}
+			m.failure = err
+		}
+	}()
 
 	switch m.version {
 	case 1:
@@ -2130,23 +2449,6 @@ func mapToAvroColMap[K comparable, V any](m map[K]V) *[]colMap[K, V] {
 	}
 
 	return &out
-}
-
-func avroPartitionData(input map[int]any, logicalTypes map[int]string, fixedSizes map[int]int) (map[int]any, error) {
-	out := make(map[int]any)
-	for k, v := range input {
-		if logical, ok := logicalTypes[k]; ok {
-			converted, err := convertLogicalTypeValue(v, logical, fixedSizes[k])
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert partition field %d: %w", k, err)
-			}
-			out[k] = converted
-		} else {
-			out[k] = v
-		}
-	}
-
-	return out, nil
 }
 
 func convertLogicalTypeValue(v any, logicalType string, fixedSize int) (any, error) {
@@ -2775,12 +3077,12 @@ func NewDataFileBuilder(
 		)
 	}
 
-	if recordCount <= 0 {
-		return nil, fmt.Errorf("%w: record count must be greater than 0", ErrInvalidArgument)
+	if recordCount < 0 {
+		return nil, fmt.Errorf("%w: record count must be non-negative", ErrInvalidArgument)
 	}
 
-	if fileSize <= 0 {
-		return nil, fmt.Errorf("%w: file size must be greater than 0", ErrInvalidArgument)
+	if fileSize < 0 {
+		return nil, fmt.Errorf("%w: file size must be non-negative", ErrInvalidArgument)
 	}
 	partitionData := make(map[string]any)
 	fieldNameToID := make(map[string]int)

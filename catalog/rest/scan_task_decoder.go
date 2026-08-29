@@ -207,9 +207,11 @@ func DecodeScanTasks(
 				dvOwners[ref] = dataFile.FilePath()
 				// Derive referenced-data-file from the FileScanTask association
 				// when the server omits Java's optional extension field.
-				deleteFile, err = decodeRESTDeleteFile(wireDelete, metadata, dataFile.FilePath())
-				if err != nil {
-					return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, ref, err)
+				if wireDelete.ReferencedDataFile == nil {
+					deleteFile, err = decodeRESTDeleteFile(wireDelete, metadata, dataFile.FilePath())
+					if err != nil {
+						return nil, fmt.Errorf("%w: decoding scan tasks: delete-files[%d]: %w", ErrRESTError, ref, err)
+					}
 				}
 			}
 
@@ -348,8 +350,8 @@ func decodeRESTDeleteFile(
 			builder.ContentOffset(*wire.ContentOffset)
 		}
 		if wire.ContentSizeInBytes != nil {
-			if *wire.ContentSizeInBytes <= 0 {
-				return nil, fmt.Errorf("content-size-in-bytes must be positive: %d", *wire.ContentSizeInBytes)
+			if *wire.ContentSizeInBytes < 0 {
+				return nil, fmt.Errorf("content-size-in-bytes must be non-negative: %d", *wire.ContentSizeInBytes)
 			}
 			builder.ContentSizeInBytes(*wire.ContentSizeInBytes)
 		}
@@ -391,11 +393,11 @@ func contentFileBuilder(
 	if !ok || actualContent != expectedContent {
 		return nil, "", fmt.Errorf("content is %q, want %q", wire.Content, wantContent)
 	}
-	if wire.RecordCount <= 0 {
-		return nil, "", fmt.Errorf("record-count must be positive: %d", wire.RecordCount)
+	if wire.RecordCount < 0 {
+		return nil, "", fmt.Errorf("record-count must be non-negative: %d", wire.RecordCount)
 	}
-	if wire.FileSizeInBytes <= 0 {
-		return nil, "", fmt.Errorf("file-size-in-bytes must be positive: %d", wire.FileSizeInBytes)
+	if wire.FileSizeInBytes < 0 {
+		return nil, "", fmt.Errorf("file-size-in-bytes must be non-negative: %d", wire.FileSizeInBytes)
 	}
 
 	spec := metadata.PartitionSpecByID(wire.SpecID)
@@ -707,8 +709,11 @@ func decodeTaskResidual(
 	fallback iceberg.BooleanExpression,
 ) (iceberg.BooleanExpression, error) {
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	if len(trimmed) == 0 {
 		return fallback, nil
+	}
+	if bytes.Equal(trimmed, []byte("null")) {
+		return nil, errors.New("explicit null residual-filter is invalid")
 	}
 
 	// Accept the object spelling from the OpenAPI schema in addition to the

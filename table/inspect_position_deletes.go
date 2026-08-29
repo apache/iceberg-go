@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -103,6 +104,14 @@ type positionDeleteRecordAppender struct {
 	partitionIDByOld map[int]int
 	formatVersion    int
 	projection       positionDeleteProjectionOptions
+}
+
+type positionDeleteFileMeta struct {
+	partition      map[int]any
+	specID         int32
+	deleteFilePath string
+	contentOffset  *int64
+	contentSize    *int64
 }
 
 type positionDeleteProjectionOptions struct {
@@ -189,6 +198,43 @@ func (a positionDeleteRecordAppender) append(
 	deletedRow scalar.Scalar,
 	projected ...bool,
 ) error {
+	return a.appendPrepared(a.prepareFile(file), dataFilePath, pos, deletedRow, projected...)
+}
+
+func (a positionDeleteRecordAppender) prepareFile(file iceberg.DataFile) positionDeleteFileMeta {
+	meta := positionDeleteFileMeta{
+		specID:         file.SpecID(),
+		deleteFilePath: file.FilePath(),
+	}
+	if a.partition != nil {
+		borrowedPartition := dataFilePartition(file)
+		meta.partition = make(map[int]any, len(borrowedPartition))
+		for oldID, value := range borrowedPartition {
+			newID, ok := a.partitionIDByOld[oldID]
+			if !ok {
+				continue
+			}
+			if bytes, ok := value.([]byte); ok {
+				value = slices.Clone(bytes)
+			}
+			meta.partition[newID] = value
+		}
+	}
+	if a.formatVersion >= 3 || file.FileFormat() == iceberg.PuffinFile {
+		meta.contentOffset = file.ContentOffset()
+		meta.contentSize = positionDeleteContentSize(file)
+	}
+
+	return meta
+}
+
+func (a positionDeleteRecordAppender) appendPrepared(
+	meta positionDeleteFileMeta,
+	dataFilePath string,
+	pos int64,
+	deletedRow scalar.Scalar,
+	projected ...bool,
+) error {
 	a.filePath.Append(dataFilePath)
 	a.pos.Append(pos)
 	var err error
@@ -206,21 +252,15 @@ func (a positionDeleteRecordAppender) append(
 	}
 
 	if a.partition != nil {
-		partition := make(map[int]any, len(file.Partition()))
-		for oldID, value := range file.Partition() {
-			if newID, ok := a.partitionIDByOld[oldID]; ok {
-				partition[newID] = value
-			}
-		}
-		if err := a.partition.append(partition); err != nil {
+		if err := a.partition.append(meta.partition); err != nil {
 			return err
 		}
 	}
-	a.specID.Append(file.SpecID())
-	a.deleteFilePath.Append(file.FilePath())
+	a.specID.Append(meta.specID)
+	a.deleteFilePath.Append(meta.deleteFilePath)
 	if a.formatVersion >= 3 {
-		appendInspectOptionalInt64(a.contentOffset, file.ContentOffset())
-		appendInspectOptionalInt64(a.contentSize, positionDeleteContentSize(file))
+		appendInspectOptionalInt64(a.contentOffset, meta.contentOffset)
+		appendInspectOptionalInt64(a.contentSize, meta.contentSize)
 	}
 
 	return nil
@@ -482,8 +522,8 @@ func (i InspectTable) positionDeleteRecordReader(
 		yieldError := func(err error) {
 			_ = yield(nil, err)
 		}
-		appendRow := func(file iceberg.DataFile, path string, pos int64, deletedRow scalar.Scalar, projected bool) (bool, error) {
-			if err := appender.append(file, path, pos, deletedRow, projected); err != nil {
+		appendRow := func(meta positionDeleteFileMeta, path string, pos int64, deletedRow scalar.Scalar, projected bool) (bool, error) {
+			if err := appender.appendPrepared(meta, path, pos, deletedRow, projected); err != nil {
 				return false, err
 			}
 			rows++
@@ -523,9 +563,12 @@ func (i InspectTable) positionDeleteRecordReader(
 				var keepGoing bool
 				switch file.FileFormat() {
 				case iceberg.PuffinFile:
-					keepGoing, err = appendDeletionVectorRows(ctx, fs, file, appendRow)
+					meta := appender.prepareFile(file)
+					keepGoing, err = appendDeletionVectorRows(ctx, fs, file, meta, appendRow)
 				case iceberg.ParquetFile:
-					keepGoing, err = appendParquetPositionDeleteRows(ctx, fs, file, appendRow, appender.projection)
+					meta := appender.prepareFile(file)
+					keepGoing, err = appendParquetPositionDeleteRows(
+						ctx, fs, file, meta, appendRow, appender.projection)
 				default:
 					keepGoing = false
 					err = fmt.Errorf("%w: unsupported position delete file format %s",
@@ -551,12 +594,13 @@ func (i InspectTable) positionDeleteRecordReader(
 	})
 }
 
-type appendPositionDeleteRow func(iceberg.DataFile, string, int64, scalar.Scalar, bool) (bool, error)
+type appendPositionDeleteRow func(positionDeleteFileMeta, string, int64, scalar.Scalar, bool) (bool, error)
 
 func appendDeletionVectorRows(
 	ctx context.Context,
 	fs iceio.IO,
 	file iceberg.DataFile,
+	meta positionDeleteFileMeta,
 	appendRow appendPositionDeleteRow,
 ) (bool, error) {
 	referencedDataFile := file.ReferencedDataFile()
@@ -564,7 +608,7 @@ func appendDeletionVectorRows(
 		return false, fmt.Errorf("%w: deletion vector is missing referenced_data_file",
 			iceberg.ErrInvalidSchema)
 	}
-	if file.ContentOffset() == nil || file.ContentSizeInBytes() == nil {
+	if meta.contentOffset == nil || meta.contentSize == nil {
 		return false, fmt.Errorf("%w: deletion vector is missing content_offset/content_size_in_bytes",
 			iceberg.ErrInvalidSchema)
 	}
@@ -579,7 +623,7 @@ func appendDeletionVectorRows(
 		if position > math.MaxInt64 {
 			return false, fmt.Errorf("%w: deletion position %d exceeds int64", iceberg.ErrInvalidSchema, position)
 		}
-		keepGoing, err := appendRow(file, *referencedDataFile, int64(position), nil, false)
+		keepGoing, err := appendRow(meta, *referencedDataFile, int64(position), nil, false)
 		if err != nil || !keepGoing {
 			return keepGoing, err
 		}
@@ -592,6 +636,7 @@ func appendParquetPositionDeleteRows(
 	ctx context.Context,
 	fs iceio.IO,
 	file iceberg.DataFile,
+	meta positionDeleteFileMeta,
 	appendRow appendPositionDeleteRow,
 	options ...positionDeleteProjectionOptions,
 ) (keepGoing bool, err error) {
@@ -627,7 +672,7 @@ func appendParquetPositionDeleteRows(
 
 	for records.Next() {
 		continueReading, appendErr := appendPositionDeleteRecord(
-			ctx, file, records.RecordBatch(), appendRow, projection)
+			ctx, meta, records.RecordBatch(), appendRow, projection)
 		if appendErr != nil || !continueReading {
 			return continueReading, appendErr
 		}
@@ -641,7 +686,7 @@ func appendParquetPositionDeleteRows(
 
 func appendPositionDeleteRecord(
 	ctx context.Context,
-	file iceberg.DataFile,
+	meta positionDeleteFileMeta,
 	record arrow.RecordBatch,
 	appendRow appendPositionDeleteRow,
 	projection positionDeleteProjectionOptions,
@@ -715,7 +760,7 @@ func appendPositionDeleteRecord(
 			}
 		}
 		continueReading, appendErr := appendRow(
-			file, filePaths.Value(row), positions.Value(row), deletedRow, projected)
+			meta, filePaths.Value(row), positions.Value(row), deletedRow, projected)
 		releasePositionDeleteScalar(deletedRow)
 		if appendErr != nil || !continueReading {
 			return continueReading, appendErr

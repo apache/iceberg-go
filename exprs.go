@@ -1008,14 +1008,64 @@ func createBoundSetPredicate(op Operation, term BoundTerm, lits Set[Literal]) (B
 		ErrType, term.Type())
 }
 
-func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits Set[Literal]) *boundSetPredicate[T] {
-	return &boundSetPredicate[T]{op: op, term: term, lits: lits}
+func newBoundSetPredicate[T LiteralType](op Operation, term BoundTerm, lits literalSet) *boundSetPredicate[T] {
+	predicate := &boundSetPredicate[T]{op: op, term: term, lits: lits}
+	if op == OpIn {
+		predicate.minLiteral, predicate.maxLiteral, predicate.hasExtrema = literalSetExtrema[T](lits)
+	}
+
+	return predicate
 }
 
 type boundSetPredicate[T LiteralType] struct {
-	op   Operation
-	term BoundTerm
-	lits Set[Literal]
+	op         Operation
+	term       BoundTerm
+	lits       Set[Literal]
+	minLiteral Literal
+	maxLiteral Literal
+	hasExtrema bool
+}
+
+func literalSetExtrema[T LiteralType](lits literalSet) (minLit, maxLit Literal, ok bool) {
+	var (
+		cmp                Comparator[T]
+		minValue, maxValue T
+		valid              = true
+	)
+
+	lits.All(func(lit Literal) bool {
+		typed, typeOK := lit.(TypedLiteral[T])
+		if !typeOK {
+			valid = false
+
+			return false
+		}
+
+		value := typed.Value()
+		if !ok {
+			cmp = typed.Comparator()
+			minLit, maxLit = lit, lit
+			minValue, maxValue = value, value
+			ok = true
+
+			return true
+		}
+
+		if cmp(value, minValue) < 0 {
+			minLit, minValue = lit, value
+		}
+		if cmp(value, maxValue) > 0 {
+			maxLit, maxValue = lit, value
+		}
+
+		return true
+	})
+
+	if !valid {
+		return nil, nil, false
+	}
+
+	return minLit, maxLit, ok
 }
 
 func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
@@ -1031,7 +1081,8 @@ func (bsp *boundSetPredicate[T]) Equals(other BooleanExpression) bool {
 func (bsp *boundSetPredicate[T]) Op() Operation { return bsp.op }
 func (bsp *boundSetPredicate[T]) Negate() BooleanExpression {
 	return &boundSetPredicate[T]{
-		op: bsp.op.Negate(), term: bsp.term,
+		op:   bsp.op.Negate(),
+		term: bsp.term,
 		lits: bsp.lits,
 	}
 }

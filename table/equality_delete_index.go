@@ -20,7 +20,6 @@ package table
 import (
 	"cmp"
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 
@@ -50,11 +49,9 @@ type equalityDeletePartitionKey struct {
 
 type (
 	equalityDeleteIntegerPartitionValue int64
-	equalityDeleteFloatPartitionValue   uint64
 	equalityDeleteStringPartitionValue  string
 	equalityDeleteEncodedPartitionValue string
 	equalityDeleteBinaryPartitionValue  string
-	equalityDeleteNaNPartitionValue     struct{}
 	equalityDeleteNilPartitionValue     struct{}
 )
 
@@ -106,19 +103,10 @@ func comparableEqualityDeletePartitionValue(value any) (any, error) {
 		return equalityDeleteIntegerPartitionValue(value), nil
 	case iceberg.TimestampNano:
 		return equalityDeleteIntegerPartitionValue(value), nil
-	case float32:
-		value64 := float64(value)
-		if math.IsNaN(value64) {
-			return equalityDeleteNaNPartitionValue{}, nil
-		}
-
-		return equalityDeleteFloatPartitionValue(math.Float64bits(value64)), nil
-	case float64:
-		if math.IsNaN(value) {
-			return equalityDeleteNaNPartitionValue{}, nil
-		}
-
-		return equalityDeleteFloatPartitionValue(math.Float64bits(value)), nil
+	case float32, float64:
+		// Keep equality-delete indexing aligned with writer partition keys:
+		// canonicalize NaNs within each width and preserve signed zero.
+		return comparablePartitionKey(value), nil
 	case string:
 		return equalityDeleteStringPartitionValue(value), nil
 	case []byte:
@@ -159,7 +147,7 @@ func buildEqualityDeleteIndex(
 			continue
 		}
 
-		partition := df.Partition()
+		partition := dataFilePartition(df)
 		key, err := newEqualityDeletePartitionKey(df.SpecID(), partition)
 		if err != nil {
 			return nil, fmt.Errorf("indexing equality delete file %s: %w", df.FilePath(), err)
@@ -194,7 +182,7 @@ func (idx *equalityDeleteIndex) forDataFile(dataEntry iceberg.ManifestEntry) ([]
 	partitionEntries := []iceberg.ManifestEntry(nil)
 	if len(idx.byPartition) > 0 {
 		dataFile := dataEntry.DataFile()
-		partition := dataFile.Partition()
+		partition := dataFilePartition(dataFile)
 		if len(partition) > 0 {
 			key, err := newEqualityDeletePartitionKey(dataFile.SpecID(), partition)
 			if err != nil {

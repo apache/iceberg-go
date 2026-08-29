@@ -1457,6 +1457,19 @@ type SchemaOptions struct {
 // ToRequestedSchema will construct a new record batch matching the requested iceberg schema
 // casting columns if necessary as appropriate.
 func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions) (arrow.RecordBatch, error) {
+	return toRequestedSchema(ctx, requested, fileSchema, batch, opts, nil)
+}
+
+// toRequestedSchema is the internal write-path variant of ToRequestedSchema.
+// When targetArrowSchema is provided, an exact Arrow schema match can reuse the
+// input batch without walking the Iceberg schema or rebuilding any arrays.
+func toRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schema, batch arrow.RecordBatch, opts SchemaOptions, targetArrowSchema *arrow.Schema) (arrow.RecordBatch, error) {
+	if targetArrowSchema != nil && arrowSchemaEqual(batch.Schema(), targetArrowSchema) {
+		batch.Retain()
+
+		return batch, nil
+	}
+
 	st := array.RecordToStructArray(batch)
 	defer st.Release()
 
@@ -1479,6 +1492,16 @@ func ToRequestedSchema(ctx context.Context, requested, fileSchema *iceberg.Schem
 	result.Release()
 
 	return out, nil
+}
+
+func arrowSchemaEqual(left, right *arrow.Schema) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+
+	// Schema.Equal ignores top-level metadata. Full projection strips it, so
+	// guard it here; otherwise the fast path would preserve metadata projection drops.
+	return left.Equal(right) && left.Metadata().Equal(right.Metadata())
 }
 
 type schemaCompatVisitor struct {

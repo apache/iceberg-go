@@ -694,6 +694,26 @@ func TestDataFileStatsFromMetaWithMalformedFixedLenDecimalStats(t *testing.T) {
 	assert.NotContains(t, dataFile.UpperBoundValues(), 15)
 }
 
+func TestDataFileStatsFromMetaDoesNotSkipInvalidatedColumnMetadata(t *testing.T) {
+	format := internal.GetFileFormat(iceberg.ParquetFile)
+
+	meta, tblMeta := constructTestTablePrimitiveTypes(t)
+	mapping, err := format.PathToIDMapping(tblMeta.CurrentSchema())
+	require.NoError(t, err)
+
+	const columnPos = 1
+	meta.RowGroups[0].Columns[columnPos].MetaData.Statistics = nil
+
+	secondRowGroup := *meta.RowGroups[0]
+	secondRowGroup.Columns = append(secondRowGroup.Columns[:0:0], secondRowGroup.Columns...)
+	secondRowGroup.Columns[columnPos] = nil
+	meta.RowGroups = append(meta.RowGroups, &secondRowGroup)
+
+	assert.Panics(t, func() {
+		format.DataFileStatsFromMeta(internal.Metadata(meta), getCollector(), mapping, nil, nil)
+	})
+}
+
 // TestNanosecondTimestampMetrics tests that nanosecond timestamp types (v3)
 // are correctly handled for Parquet stats collection and physical type mapping.
 func TestNanosecondTimestampMetrics(t *testing.T) {

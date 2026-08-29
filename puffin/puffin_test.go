@@ -28,8 +28,16 @@ import (
 	"testing"
 
 	"github.com/apache/iceberg-go/puffin"
+	"github.com/pierrec/lz4/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	puffinFooterTrailerSize       = 3 * puffin.MagicSize
+	compressedFooterLZ4FrameStart = 2 * puffin.MagicSize
+	compressedFooterLZ4FLGOffset  = compressedFooterLZ4FrameStart + puffin.MagicSize
+	compressedFooterLZ4BDOffset   = compressedFooterLZ4FLGOffset + 1
 )
 
 // --- Test Helpers ---
@@ -168,8 +176,58 @@ func validFileWithBlob() []byte {
 
 func fileWithFooterPayload(payload []byte) []byte {
 	data := append([]byte("PFA1PFA1"), payload...)
-	trailer := make([]byte, 12)
+	trailer := make([]byte, puffinFooterTrailerSize)
 	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(payload)))
+	copy(trailer[8:], "PFA1")
+
+	return append(data, trailer...)
+}
+
+func fileWithCompressedFooterPayload(t *testing.T, payload []byte) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(uint64(len(payload))))
+}
+
+func fileWithCompressedFooterPayloadWithSize(t *testing.T, payload []byte, size uint64) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload, lz4.SizeOption(size))
+}
+
+func fileWithCompressedFooterPayloadNoSize(t *testing.T, payload []byte) []byte {
+	return fileWithCompressedFooterPayloadWithOptions(t, payload)
+}
+
+func compressedLZ4Frame(t *testing.T, payload []byte, options ...lz4.Option) []byte {
+	t.Helper()
+
+	var compressed bytes.Buffer
+	writer := lz4.NewWriter(&compressed)
+	require.NoError(t, writer.Apply(options...))
+	_, err := writer.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	return compressed.Bytes()
+}
+
+func fileWithCompressedFooterPayloadWithOptions(t *testing.T, payload []byte, options ...lz4.Option) []byte {
+	compressed := compressedLZ4Frame(t, payload, options...)
+	data := append([]byte("PFA1PFA1"), compressed...)
+	trailer := make([]byte, puffinFooterTrailerSize)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
+	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
+	copy(trailer[8:], "PFA1")
+
+	return append(data, trailer...)
+}
+
+func fileWithCompressedFooterFrames(frames ...[]byte) []byte {
+	compressed := make([]byte, 0)
+	for _, frame := range frames {
+		compressed = append(compressed, frame...)
+	}
+	data := append([]byte("PFA1PFA1"), compressed...)
+	trailer := make([]byte, puffinFooterTrailerSize)
+	binary.LittleEndian.PutUint32(trailer[:4], uint32(len(compressed)))
+	binary.LittleEndian.PutUint32(trailer[4:8], puffin.FooterFlagCompressed)
 	copy(trailer[8:], "PFA1")
 
 	return append(data, trailer...)
@@ -642,6 +700,15 @@ func TestReaderInvalidFile(t *testing.T) {
 	})
 }
 
+func TestReaderRejectsNegativeFooterPayloadSize(t *testing.T) {
+	data := validFile()
+	trailerOffset := len(data) - puffinFooterTrailerSize
+	binary.LittleEndian.PutUint32(data[trailerOffset:trailerOffset+puffin.MagicSize], ^uint32(0))
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid footer payload size -1")
+}
+
 func TestReaderRejectsTrailingFooterData(t *testing.T) {
 	t.Parallel()
 
@@ -669,6 +736,191 @@ func TestReaderRejectsTrailingFooterData(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReaderReadsLZ4CompressedFooter(t *testing.T) {
+	data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[],"properties":{"source":"lz4"}}`))
+
+	r, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, "lz4", r.Properties()["source"])
+	assert.Empty(t, r.Blobs())
+}
+
+func TestReaderReadsExternalLZ4CompressedFooter(t *testing.T) {
+	data := readFixture(t, "compressed-footer-lz4-cli.puffin")
+
+	r, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, "lz4-cli", r.Properties()["source"])
+	assert.Empty(t, r.Blobs())
+}
+
+func TestReaderReadsLZ4CompressedFooterWithBlockChecksums(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	data := fileWithCompressedFooterPayloadWithOptions(
+		t,
+		payload,
+		lz4.SizeOption(uint64(len(payload))),
+		lz4.BlockChecksumOption(true),
+	)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.NoError(t, err)
+}
+
+func TestReaderPreservesLZ4ChecksumError(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	data := fileWithCompressedFooterPayloadWithOptions(
+		t,
+		payload,
+		lz4.SizeOption(uint64(len(payload))),
+		lz4.ChecksumOption(true),
+	)
+	data[len(data)-puffinFooterTrailerSize-1] ^= 0xff
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "invalid frame checksum")
+}
+
+func TestReaderRejectsLZ4CompressedFooterWithoutContentSize(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	data := fileWithCompressedFooterPayloadNoSize(t, payload)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "missing content size")
+}
+
+func TestReaderRejectsUnsupportedLZ4FrameFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func([]byte)
+		wantErr string
+	}{
+		{
+			name: "version",
+			mutate: func(data []byte) {
+				data[compressedFooterLZ4FLGOffset] = data[compressedFooterLZ4FLGOffset]&^byte(0xc0) | 0x80
+			},
+			wantErr: "frame version",
+		},
+		{
+			name: "reserved FLG flag",
+			mutate: func(data []byte) {
+				data[compressedFooterLZ4FLGOffset] |= 0x02
+			},
+			wantErr: "reserved flag",
+		},
+		{
+			name: "dictionary ID",
+			mutate: func(data []byte) {
+				data[compressedFooterLZ4FLGOffset] |= 0x01
+			},
+			wantErr: "dictionary ID",
+		},
+		{
+			name: "reserved BD flags",
+			mutate: func(data []byte) {
+				data[compressedFooterLZ4BDOffset] |= 0x01
+			},
+			wantErr: "reserved block descriptor flags",
+		},
+		{
+			name: "reserved BD high flag",
+			mutate: func(data []byte) {
+				data[compressedFooterLZ4BDOffset] |= 0x80
+			},
+			wantErr: "reserved block descriptor flags",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[]}`))
+			test.mutate(data)
+
+			_, err := puffin.NewReader(bytes.NewReader(data))
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
+}
+
+func TestReaderRejectsConcatenatedLZ4FooterFrames(t *testing.T) {
+	payload := []byte(`{"blobs":[]}`)
+	firstFrame := compressedLZ4Frame(t, payload, lz4.SizeOption(uint64(len(payload))))
+	emptySecondFrame := compressedLZ4Frame(t, nil)
+	data := fileWithCompressedFooterFrames(firstFrame, emptySecondFrame)
+
+	_, err := puffin.NewReader(bytes.NewReader(data))
+	require.ErrorContains(t, err, "trailing data")
+}
+
+func TestReaderEnforcesFooterSizeLimit(t *testing.T) {
+	t.Run("uncompressed JSON beyond limit", func(t *testing.T) {
+		data := fileWithFooterPayload([]byte(`{"blobs":[],"properties":{"large":"0123456789"}}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("uncompressed payload at limit", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}`)
+		data := fileWithFooterPayload(payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(int64(len(payload))))
+		require.NoError(t, err)
+	})
+
+	t.Run("uncompressed trailing content beyond limit", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithFooterPayload(payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("invalid limit is rejected for uncompressed JSON", func(t *testing.T) {
+		data := fileWithFooterPayload([]byte(`{"blobs":[]}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(0))
+		require.ErrorContains(t, err, "invalid maximum footer size")
+	})
+
+	t.Run("compressed output beyond limit", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, 16)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("compressed content size mismatch", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}`)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, uint64(len(payload)-1))
+		_, err := puffin.NewReader(bytes.NewReader(data))
+		require.ErrorContains(t, err, "decoded size")
+	})
+
+	t.Run("compressed advertised size", func(t *testing.T) {
+		payload := append([]byte(`{"blobs":[]}`), bytes.Repeat([]byte{' '}, 32)...)
+		data := fileWithCompressedFooterPayload(t, payload)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("compressed advertised size overflow", func(t *testing.T) {
+		data := fileWithCompressedFooterPayloadWithSize(t, []byte(`{"blobs":[]}`), uint64(math.MaxInt64)+1)
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(16))
+		require.ErrorContains(t, err, "footer exceeds maximum size")
+	})
+
+	t.Run("trailing JSON is reported before size limit", func(t *testing.T) {
+		payload := []byte(`{"blobs":[]}42`)
+		data := fileWithCompressedFooterPayloadWithSize(t, payload, uint64(len(payload)-1))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(int64(len(payload)-1)))
+		require.ErrorContains(t, err, "unexpected content after footer JSON")
+	})
+
+	t.Run("maximum int64 limit", func(t *testing.T) {
+		data := fileWithCompressedFooterPayload(t, []byte(`{"blobs":[]}`))
+		_, err := puffin.NewReader(bytes.NewReader(data), puffin.WithMaxFooterSize(math.MaxInt64))
+		require.NoError(t, err)
+	})
 }
 
 // TestReaderBlobAccess verifies blob access methods work correctly.

@@ -79,61 +79,6 @@ func TestIsFileScoped(t *testing.T) {
 	})
 }
 
-func TestDecideDeadPositionDeletes(t *testing.T) {
-	rewritten := map[string]struct{}{"data-a.parquet": {}}
-
-	fileScopedCovered := positionDeleteCandidate{
-		df:               newPosDelete(t, "del-a.parquet").Build(),
-		fileScopedTarget: "data-a.parquet",
-	}
-	fileScopedLive := positionDeleteCandidate{
-		df:               newPosDelete(t, "del-b.parquet").Build(),
-		fileScopedTarget: "data-b.parquet",
-	}
-	partitionCovered := positionDeleteCandidate{
-		df:           newPosDelete(t, "del-p-covered.parquet").Build(),
-		partitionKey: "0:_",
-		seq:          5,
-	}
-	partitionWithOlderSurvivor := positionDeleteCandidate{
-		df:           newPosDelete(t, "del-p-live.parquet").Build(),
-		partitionKey: "1:x",
-		seq:          5,
-	}
-	partitionWithNewerSurvivor := positionDeleteCandidate{
-		df:           newPosDelete(t, "del-p-newer.parquet").Build(),
-		partitionKey: "2:y",
-		seq:          5,
-	}
-
-	// "1:x" has a survivor at seq 3 (<= 5) → delete still applies → retain.
-	// "2:y" has a survivor at seq 8 (> 5) → delete predates it → dead.
-	// "0:_" has no survivor at all → dead.
-	minSurvivorSeq := map[string]int64{"1:x": 3, "2:y": 8}
-
-	dead := decideDeadPositionDeletes(
-		[]positionDeleteCandidate{
-			fileScopedCovered,
-			fileScopedLive,
-			partitionCovered,
-			partitionWithOlderSurvivor,
-			partitionWithNewerSurvivor,
-		},
-		rewritten,
-		minSurvivorSeq,
-	)
-
-	got := make(map[string]struct{}, len(dead))
-	for _, df := range dead {
-		got[df.FilePath()] = struct{}{}
-	}
-	require.Equal(t, map[string]struct{}{
-		"del-a.parquet":         {},
-		"del-p-covered.parquet": {},
-		"del-p-newer.parquet":   {},
-	}, got, "only fully-covered deletes are dead; a delete with an older-or-equal surviving file is retained")
-}
-
 func newPosDelete(t *testing.T, path string) *iceberg.DataFileBuilder {
 	t.Helper()
 

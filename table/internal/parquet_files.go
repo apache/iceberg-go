@@ -507,6 +507,7 @@ type ParquetFileWriter struct {
 	info             WriteFileInfo
 	partition        map[int]any
 	colMapping       map[string]int
+	variantFieldIDs  map[int]struct{}
 	geoCols          []geoColumn
 	geoNormalizeCols []int
 	geoAccs          map[int]*geoBoundsAccumulator
@@ -595,11 +596,19 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		return nil, err
 	}
 
-	colMapping, err := p.PathToIDMapping(info.FileSchema)
-	if err != nil {
-		fw.Close()
+	colMapping := info.ColMapping
+	if colMapping == nil {
+		colMapping, err = p.PathToIDMapping(info.FileSchema)
+		if err != nil {
+			fw.Close()
 
-		return nil, err
+			return nil, err
+		}
+	}
+
+	variantFieldIDs := info.VariantFieldIDs
+	if variantFieldIDs == nil {
+		variantFieldIDs = VariantFieldIDsFromSchema(info.FileSchema)
 	}
 
 	counter := &internal.CountingWriter{W: fw}
@@ -642,6 +651,7 @@ func (p parquetFormat) NewFileWriter(ctx context.Context, fs iceio.WriteFileIO,
 		info:             info,
 		partition:        partitionValues,
 		colMapping:       colMapping,
+		variantFieldIDs:  variantFieldIDs,
 		geoCols:          geoCols,
 		geoNormalizeCols: geoNormalizeCols,
 		geoAccs:          geoAccs,
@@ -1125,7 +1135,7 @@ func (w *ParquetFileWriter) Close() (_ iceberg.DataFile, err error) {
 		return nil, err
 	}
 
-	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, VariantFieldIDsFromSchema(w.info.FileSchema), w.arrowSchema)
+	stats := w.format.DataFileStatsFromMeta(filemeta, w.info.StatsCols, w.colMapping, w.variantFieldIDs, w.arrowSchema)
 	stats.EqualityFieldIDs = w.info.EqualityFieldIDs
 
 	if err = w.applyGeoBounds(stats); err != nil {
@@ -1470,23 +1480,24 @@ func (p parquetFormat) DataFileStatsFromMeta(meta Metadata, statsCols map[int]St
 		}
 
 		for pos := range rowGroup.NumColumns() {
+			column := columns[pos]
+			if column.resolveErr != nil {
+				if _, err = rowGroup.ColumnChunk(pos); err != nil {
+					panic(err)
+				}
+
+				panic(column.resolveErr)
+			}
+			if column.variantChild || column.skipStats || column.statsCol.Mode.Typ == MetricModeNone {
+				continue
+			}
+
+			fieldID, statsCol := column.fieldID, column.statsCol
 			colChunk, err = rowGroup.ColumnChunk(pos)
 			if err != nil {
 				panic(err)
 			}
 
-			column := columns[pos]
-			if column.resolveErr != nil {
-				panic(column.resolveErr)
-			}
-			if column.variantChild || column.skipStats {
-				continue
-			}
-
-			fieldID, statsCol := column.fieldID, column.statsCol
-			if statsCol.Mode.Typ == MetricModeNone {
-				continue
-			}
 			if _, invalid := invalidateCol[fieldID]; invalid {
 				continue
 			}
