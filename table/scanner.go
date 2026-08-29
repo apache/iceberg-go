@@ -895,14 +895,21 @@ func partitionsMatch(a, b map[int]any) bool {
 // buildDVIndex indexes deletion vectors by the data file path they reference.
 // The spec requires at most one DV per data file; a second entry for the same
 // path is rejected with an error.
-func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.ManifestEntry, error) {
-	dvIndex := make(map[string]iceberg.ManifestEntry, len(dvEntries))
+func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]deleteFileIndexEntry, error) {
+	dvIndex := make(map[string]deleteFileIndexEntry, len(dvEntries))
 	for _, del := range dvEntries {
-		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(del.DataFile()); ref != nil {
+		deleteFile := del.DataFile()
+		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(deleteFile); ref != nil {
 			if _, exists := dvIndex[*ref]; exists {
 				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
 			}
-			dvIndex[*ref] = del
+			indexedFile, err := compactDeleteFileForIndex(deleteFile, dataFilePartition(deleteFile), nil)
+			if err != nil {
+				return nil, err
+			}
+			dvIndex[*ref] = deleteFileIndexEntry{
+				file: indexedFile, sequenceNum: del.SequenceNum(),
+			}
 		}
 	}
 
@@ -923,13 +930,13 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]iceberg.Manifes
 // would never satisfy dataSeq <= -1 and would silently drop the DV,
 // resurfacing deleted rows; an unset data sequence likewise satisfies
 // -1 <= dvSeq for any known DV sequence.
-func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]iceberg.ManifestEntry) []iceberg.DataFile {
+func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]deleteFileIndexEntry) []iceberg.DataFile {
 	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
 	if !ok {
 		return nil
 	}
-	if dvSeq := dvEntry.SequenceNum(); dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
-		return []iceberg.DataFile{dvEntry.DataFile()}
+	if dvSeq := dvEntry.sequenceNum; dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {
+		return []iceberg.DataFile{dvEntry.file}
 	}
 
 	return nil
@@ -1203,7 +1210,7 @@ func (scan *Scan) planDataManifestTasks(
 	schema *iceberg.Schema,
 	minSeqNum int64,
 	posDeleteIndex *positionalDeleteIndex,
-	dvIndex map[string]iceberg.ManifestEntry,
+	dvIndex map[string]deleteFileIndexEntry,
 	eqDeleteIndex *equalityDeleteIndex,
 ) ([]FileScanTask, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
@@ -1352,7 +1359,7 @@ func (scan *Scan) planDataManifestTasks(
 func fileScanTaskForDataEntry(
 	entry iceberg.ManifestEntry,
 	posDeleteIndex *positionalDeleteIndex,
-	dvIndex map[string]iceberg.ManifestEntry,
+	dvIndex map[string]deleteFileIndexEntry,
 	eqDeleteIndex *equalityDeleteIndex,
 ) (FileScanTask, error) {
 	// Spec §Scan Planning: when a deletion vector applies to a data file,
@@ -1541,6 +1548,12 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil {
 		return nil, err
 	}
+	// The indexes keep compact copies of delete files. Release the full
+	// manifest-entry slices before streaming data entries so wide delete-file
+	// statistics do not remain live for the rest of planning.
+	deleteEntries.positionalDeleteEntries = nil
+	deleteEntries.equalityDeleteEntries = nil
+	deleteEntries.dvEntries = nil
 
 	// Step 4: Stream data entries into per-manifest task batches, then flatten
 	// them in manifest order.
