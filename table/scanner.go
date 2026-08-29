@@ -315,6 +315,41 @@ func (m *manifestEntries) merge(entries []iceberg.ManifestEntry) error {
 	return err
 }
 
+func flattenClassifiedManifestEntries(results []classifiedManifestEntries) *manifestEntries {
+	var counts [manifestEntryKindCount]int
+	for _, result := range results {
+		counts[manifestEntryData] += len(result.dataEntries)
+		counts[manifestEntryPositionalDelete] += len(result.positionalDeleteEntries)
+		counts[manifestEntryEqualityDelete] += len(result.equalityDeleteEntries)
+		counts[manifestEntryDV] += len(result.dvEntries)
+	}
+
+	flattened := &manifestEntries{
+		dataEntries:             make([]iceberg.ManifestEntry, counts[manifestEntryData]),
+		positionalDeleteEntries: make([]iceberg.ManifestEntry, counts[manifestEntryPositionalDelete]),
+		equalityDeleteEntries:   make([]iceberg.ManifestEntry, counts[manifestEntryEqualityDelete]),
+		dvEntries:               make([]iceberg.ManifestEntry, counts[manifestEntryDV]),
+	}
+
+	var offsets [manifestEntryKindCount]int
+	for _, result := range results {
+		offsets[manifestEntryData] += copy(
+			flattened.dataEntries[offsets[manifestEntryData]:], result.dataEntries,
+		)
+		offsets[manifestEntryPositionalDelete] += copy(
+			flattened.positionalDeleteEntries[offsets[manifestEntryPositionalDelete]:], result.positionalDeleteEntries,
+		)
+		offsets[manifestEntryEqualityDelete] += copy(
+			flattened.equalityDeleteEntries[offsets[manifestEntryEqualityDelete]:], result.equalityDeleteEntries,
+		)
+		offsets[manifestEntryDV] += copy(
+			flattened.dvEntries[offsets[manifestEntryDV]:], result.dvEntries,
+		)
+	}
+
+	return flattened
+}
+
 func newPartitionRecord(partitionData map[int]any, partitionType *iceberg.StructType) partitionRecord {
 	out := make(partitionRecord, len(partitionType.FieldList))
 	for i, f := range partitionType.FieldList {
@@ -1044,7 +1079,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	concurrencyLimit := min(scan.concurrency, len(manifestList))
 	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
-	entries := newManifestEntries()
+	manifestResults := make([]classifiedManifestEntries, len(manifestList))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
@@ -1053,11 +1088,12 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
 
-	for _, mf := range manifestList {
+	for manifestIndex, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
 			continue
 		}
 
+		manifestIndex, mf := manifestIndex, mf
 		g.Go(func() error {
 			fs, err := manifestIO.acquire(gctx)
 			if err != nil {
@@ -1071,9 +1107,11 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			if err != nil {
 				return err
 			}
-			if err := entries.merge(manifestEntries); err != nil {
+			classified, err := classifyManifestEntries(manifestEntries)
+			if err != nil {
 				return err
 			}
+			manifestResults[manifestIndex] = classified
 
 			return nil
 		})
@@ -1083,7 +1121,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		return nil, err
 	}
 
-	return entries, nil
+	return flattenClassifiedManifestEntries(manifestResults), nil
 }
 
 // PlanFiles orchestrates the fetching and filtering of manifests, building a
