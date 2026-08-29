@@ -3446,6 +3446,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
 	"base":          {}, // immutable snapshot, shared by design.
+	"schemaIndex":   {}, // immutable schema references, copied on schema mutation.
 	"snapshotIndex": {}, // immutable index positions, copied on snapshot mutation.
 }
 
