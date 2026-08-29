@@ -416,28 +416,7 @@ func (m *manifestFile) HasAddedFiles() bool    { return m.AddedFilesCount != 0 }
 func (m *manifestFile) HasExistingFiles() bool { return m.ExistingFilesCount != 0 }
 
 func (m *manifestFile) Entries(fs iceio.IO, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
-	return func(yield func(ManifestEntry, error) bool) {
-		f, err := fs.Open(m.FilePath())
-		if err != nil {
-			yield(nil, err)
-
-			return
-		}
-		aborted := false
-		defer func() {
-			if cerr := f.Close(); cerr != nil && !aborted {
-				yield(nil, cerr)
-			}
-		}()
-
-		for entry, err := range iterManifest(m, f, discardDeleted) {
-			if !yield(entry, err) {
-				aborted = true
-
-				return
-			}
-		}
-	}
+	return manifestEntries(fs, m, discardDeleted, nil)
 }
 
 func (m *manifestFile) FetchEntries(fs iceio.IO, discardDeleted bool) (_ []ManifestEntry, err error) {
@@ -723,13 +702,48 @@ type ManifestReader struct {
 // file. If the caller is interested in the manifest entries in the file, it must call
 // [ManifestReader.Entries] before closing the provided reader.
 func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error) {
-	rd, err := ocf.NewReader(in)
+	return newManifestReader(file, in, nil)
+}
+
+// NewManifestReaderWithProjection returns a manifest reader that decodes the
+// standard scan fields and optionally the column statistics selected by
+// projection. Manifest metadata validation and entry inheritance are the same
+// as in NewManifestReader; fields omitted by the projection retain their zero
+// values in the returned DataFile.
+func NewManifestReaderWithProjection(
+	file ManifestFile,
+	in io.Reader,
+	projection ManifestEntryProjection,
+) (*ManifestReader, error) {
+	return newManifestReader(file, in, &projection)
+}
+
+func newManifestReader(
+	file ManifestFile,
+	in io.Reader,
+	projection *ManifestEntryProjection,
+) (*ManifestReader, error) {
+	var writerSchema *avro.Schema
+	var rd *ocf.Reader
+	var err error
+	if projection == nil {
+		rd, err = ocf.NewReader(in)
+	} else {
+		rd, err = ocf.NewReader(in, ocf.WithReaderSchemaFunc(func(reader *ocf.Reader) (*avro.Schema, error) {
+			writerSchema = reader.Schema()
+
+			return projectedManifestEntrySchema(writerSchema, *projection)
+		}))
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	metadata := rd.Metadata()
-	sc := rd.Schema()
+	if writerSchema == nil {
+		writerSchema = rd.Schema()
+	}
+	sc := writerSchema
 
 	formatVersion := 1
 	// format-version is optional for v1 manifest files, so default to v1.
@@ -972,9 +986,20 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 // iterManifest returns an iterator that streams manifest entries from
 // the provided reader without buffering them. If discardDeleted is true,
 // entries whose status is "deleted" are skipped.
-func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[ManifestEntry, error] {
+func iterManifest(
+	m ManifestFile,
+	f io.Reader,
+	discardDeleted bool,
+	projection *ManifestEntryProjection,
+) iter.Seq2[ManifestEntry, error] {
 	return func(yield func(ManifestEntry, error) bool) {
-		manifestReader, err := NewManifestReader(m, f)
+		var manifestReader *ManifestReader
+		var err error
+		if projection == nil {
+			manifestReader, err = NewManifestReader(m, f)
+		} else {
+			manifestReader, err = NewManifestReaderWithProjection(m, f, *projection)
+		}
 		if err != nil {
 			yield(nil, err)
 
@@ -1016,7 +1041,7 @@ func iterManifest(m ManifestFile, f io.Reader, discardDeleted bool) iter.Seq2[Ma
 // is true, the returned slice omits entries whose status is "deleted".
 func ReadManifest(m ManifestFile, f io.Reader, discardDeleted bool) ([]ManifestEntry, error) {
 	var results []ManifestEntry
-	for entry, err := range iterManifest(m, f, discardDeleted) {
+	for entry, err := range iterManifest(m, f, discardDeleted, nil) {
 		if err != nil {
 			return results, err
 		}

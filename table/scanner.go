@@ -373,9 +373,23 @@ func GetPartitionRecord(dataFile iceberg.DataFile, partitionType *iceberg.Struct
 func openManifest(io io.IO, manifest iceberg.ManifestFile,
 	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
 ) ([]iceberg.ManifestEntry, error) {
+	return openManifestWithProjection(io, manifest, partitionFilter, metricsEval, nil, false)
+}
+
+func openManifestWithProjection(
+	io io.IO,
+	manifest iceberg.ManifestFile,
+	partitionFilter, metricsEval func(iceberg.DataFile) (bool, error),
+	projection *iceberg.ManifestEntryProjection,
+	dropColumnStats bool,
+) ([]iceberg.ManifestEntry, error) {
 	// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
 	out := make([]iceberg.ManifestEntry, 0, max(0, int(manifest.AddedDataFiles())+int(manifest.ExistingDataFiles())))
-	for entry, err := range manifest.Entries(io, true) {
+	entries := manifest.Entries(io, true)
+	if projection != nil {
+		entries = iceberg.EntriesWithProjection(io, manifest, true, *projection)
+	}
+	for entry, err := range entries {
 		if err != nil {
 			return nil, err
 		}
@@ -394,6 +408,9 @@ func openManifest(io io.IO, manifest iceberg.ManifestFile,
 		}
 
 		if m {
+			if dropColumnStats {
+				entry = iceberg.ManifestEntryWithoutColumnStats(entry)
+			}
 			out = append(out, entry)
 		}
 	}
@@ -1074,6 +1091,17 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	schema *iceberg.Schema,
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) (*manifestEntries, error) {
+	return scan.collectManifestEntriesWithSchemaOptions(
+		ctx, manifestList, schema, partitionFilters, false)
+}
+
+func (scan *Scan) collectManifestEntriesWithSchemaOptions(
+	ctx context.Context,
+	manifestList []iceberg.ManifestFile,
+	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+	projectScanColumns bool,
+) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
 		scan.rowFilter,
@@ -1095,6 +1123,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
+	retainDataFileStats := scan.manifestProjectionRetainsDataStats(manifestList)
 
 	for manifestIndex, mf := range manifestList {
 		if !scan.checkSequenceNumber(minSeqNum, mf) {
@@ -1110,7 +1139,19 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 			if err != nil {
 				return fmt.Errorf("failed to build partition evaluator for spec %d: %w", mf.PartitionSpecID(), err)
 			}
-			manifestEntries, err := openManifest(fs, mf, partEval, metricsEval)
+			var projection *iceberg.ManifestEntryProjection
+			dropColumnStats := false
+			if projectScanColumns {
+				p := iceberg.ManifestEntryProjection{
+					IncludeColumnStats: scan.manifestProjectionNeedsStats(mf, retainDataFileStats),
+				}
+				projection = &p
+				dropColumnStats = p.IncludeColumnStats &&
+					mf.ManifestContent() == iceberg.ManifestContentData &&
+					!retainDataFileStats
+			}
+			manifestEntries, err := openManifestWithProjection(
+				fs, mf, partEval, metricsEval, projection, dropColumnStats)
 			if err != nil {
 				return err
 			}
@@ -1131,12 +1172,36 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	return flattenClassifiedManifestEntries(manifestResults), nil
 }
 
+func (scan *Scan) manifestProjectionNeedsStats(manifest iceberg.ManifestFile, retainDataFileStats bool) bool {
+	return manifest.ManifestContent() == iceberg.ManifestContentDeletes ||
+		retainDataFileStats ||
+		(scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}))
+}
+
+func (scan *Scan) manifestProjectionRetainsDataStats(manifestList []iceberg.ManifestFile) bool {
+	for _, manifest := range manifestList {
+		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
+			return true
+		}
+	}
+
+	return false
+}
+
 // PlanFiles orchestrates the fetching and filtering of manifests, building a
 // list of FileScanTasks that match the current Scan criteria. When planning
 // happens locally it times the whole operation and emits a ScanReport to the
 // scan's reporter on success; remote (server-side) planning reports its own
 // metrics and does not emit here.
 func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
+	return scan.planFiles(ctx, false)
+}
+
+// planFiles performs scan planning. Projected local planning is used by
+// ToArrowRecords because manifest column statistics are only needed while
+// pruning; PlanFiles keeps the complete DataFile metadata for callers that
+// inspect planned tasks.
+func (scan *Scan) planFiles(ctx context.Context, projectScanColumns bool) ([]FileScanTask, error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)
 	}
@@ -1177,7 +1242,7 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 		return nil, err
 	}
 
-	results, err := scan.planFilesLocal(ctx, &acc, schema)
+	results, err := scan.planFilesLocal(ctx, &acc, schema, projectScanColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -1213,7 +1278,12 @@ func (scan *Scan) PlanFiles(ctx context.Context) ([]FileScanTask, error) {
 // local plan retires any previous remote plan; a failed local plan leaves it
 // usable. It returns a nil slice (not an empty one) when there is no snapshot
 // or every manifest is pruned.
-func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulator, schema *iceberg.Schema) (results []FileScanTask, err error) {
+func (scan *Scan) planFilesLocal(
+	ctx context.Context,
+	acc *scanMetricsAccumulator,
+	schema *iceberg.Schema,
+	projectScanColumns bool,
+) (results []FileScanTask, err error) {
 	defer func() {
 		if err == nil {
 			err = scan.closePlanIO()
@@ -1251,7 +1321,8 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema, partitionFilters)
+	entries, err := scan.collectManifestEntriesWithSchemaOptions(
+		ctx, manifestList, schema, partitionFilters, projectScanColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -1304,6 +1375,11 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		eqDeleteFiles, err := eqDeleteIndex.forDataFile(e)
 		if err != nil {
 			return nil, err
+		}
+		if projectScanColumns {
+			deleteFiles = dataFilesWithoutColumnStats(deleteFiles)
+			eqDeleteFiles = dataFilesWithoutColumnStats(eqDeleteFiles)
+			dvFiles = dataFilesWithoutColumnStats(dvFiles)
 		}
 
 		task := FileScanTask{
@@ -1359,7 +1435,35 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
 
+	acc.resultDataFiles = int64(len(results))
+	// Delete-file metrics are derived from the planned tasks so they are
+	// result-scoped, consistent with result-data-files and total-file-size (a
+	// DV-suppressed positional delete never lands on a task, so it is excluded).
+	acc.applyResultDeleteMetrics(results)
+	if projectScanColumns {
+		// The indexes retain the full delete entries while matching them to
+		// data files. Release those references before returning so only the
+		// compact task metadata remains live after planning.
+		entries = nil
+		posDeleteIndex = nil
+		dvIndex = nil
+		eqDeleteIndex = nil
+	}
+
 	return results, nil
+}
+
+func dataFilesWithoutColumnStats(files []iceberg.DataFile) []iceberg.DataFile {
+	if len(files) == 0 {
+		return files
+	}
+
+	projected := make([]iceberg.DataFile, len(files))
+	for i, file := range files {
+		projected[i] = iceberg.DataFileWithoutColumnStats(file)
+	}
+
+	return projected
 }
 
 // canLimitLocalPlanning reports whether the manifest-list row counts are
@@ -1633,7 +1737,7 @@ type FileScanTask struct {
 // The purpose for returning the schema up front is to handle the case where there are no
 // rows returned. The resulting Arrow Schema of the projection will still be known.
 func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
-	tasks, err := scan.PlanFiles(ctx)
+	tasks, err := scan.planFiles(ctx, true)
 	if err != nil {
 		return nil, nil, err
 	}
