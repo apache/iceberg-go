@@ -498,23 +498,47 @@ func (t Table) getReferencedFiles(ctx context.Context, fs iceio.IO, maxConcurren
 		}
 	}
 
-	if len(metadata.Snapshots()) > 0 && fs == nil {
+	snapshots := metadata.Snapshots()
+	if len(snapshots) > 0 && fs == nil {
 		return nil, errors.New("fs cannot be nil when table has snapshots")
 	}
 
 	// Pass 1: Read manifest lists (lightweight) to collect unique manifests.
+	// Each snapshot writes only to its own result slot, so the reads can run in
+	// parallel without locking or changing the order used for deduplication.
+	manifestLists := make([][]iceberg.ManifestFile, len(snapshots))
+	listGroup, listCtx := errgroup.WithContext(ctx)
+	listGroup.SetLimit(max(1, min(maxConcurrency, len(snapshots))))
+	for i := range snapshots {
+		listGroup.Go(func() error {
+			if err := listCtx.Err(); err != nil {
+				return err
+			}
+
+			manifestFiles, err := snapshots[i].Manifests(fs)
+			if err != nil {
+				return fmt.Errorf("failed to read manifests for snapshot %d: %w", snapshots[i].SnapshotID, err)
+			}
+			if err := listCtx.Err(); err != nil {
+				return err
+			}
+
+			manifestLists[i] = manifestFiles
+
+			return nil
+		})
+	}
+	if err := listGroup.Wait(); err != nil {
+		return nil, err
+	}
+
 	uniqueManifests := make(map[string]iceberg.ManifestFile)
-	for _, snapshot := range metadata.Snapshots() {
+	for i, snapshot := range snapshots {
 		if snapshot.ManifestList != "" {
 			referenced[snapshot.ManifestList] = false
 		}
 
-		manifestFiles, err := snapshot.Manifests(fs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read manifests for snapshot %d: %w", snapshot.SnapshotID, err)
-		}
-
-		for _, manifest := range manifestFiles {
+		for _, manifest := range manifestLists[i] {
 			path := manifest.FilePath()
 			if _, ok := uniqueManifests[path]; !ok {
 				uniqueManifests[path] = manifest
