@@ -1117,6 +1117,18 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		return nil, err
 	}
 
+	var boundRowFilter iceberg.BooleanExpression
+	if scan.rowFilter != nil {
+		boundRowFilter, err = iceberg.BindExpr(schema, scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var residualPlans map[int]*partitionResidualPlan
+	if boundRowFilter != nil {
+		residualPlans = make(map[int]*partitionResidualPlan)
+	}
+
 	// Step 3: Index positional deletes and match them to data files.
 	posDeleteIndex, err := buildPositionalDeleteIndex(entries.positionalDeleteEntries)
 	if err != nil {
@@ -1160,6 +1172,20 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 			DeletionVectorFiles: dvFiles,
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
+		}
+		if boundRowFilter != nil {
+			specID := int(e.DataFile().SpecID())
+			residualPlan, found := residualPlans[specID]
+			if !found {
+				residualPlan = newPartitionResidualPlan(
+					schema, scan.metadata.PartitionSpecByID(specID), boundRowFilter, scan.caseSensitive)
+				residualPlans[specID] = residualPlan
+			}
+			if residualPlan != nil {
+				if residual, simplified := residualPlan.residual(dataFilePartition(e.DataFile())); simplified {
+					task.Residual = residual
+				}
+			}
 		}
 		// Row lineage constants: readers use these to synthesize _row_id and
 		// _last_updated_sequence_number when requested. Per spec the
