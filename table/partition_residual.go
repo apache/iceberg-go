@@ -18,6 +18,7 @@
 package table
 
 import (
+	"math"
 	"slices"
 
 	"github.com/apache/iceberg-go"
@@ -60,6 +61,7 @@ type partitionResidualNode struct {
 
 type partitionResidualPredicate struct {
 	sourceID int
+	op       iceberg.Operation
 	evaluate func(iceberg.StructLike) (bool, error)
 }
 
@@ -170,6 +172,10 @@ func (b *partitionResidualPlanBuilder) VisitUnbound(pred iceberg.UnboundPredicat
 }
 
 func (b *partitionResidualPlanBuilder) VisitBound(pred iceberg.BoundPredicate) *partitionResidualNode {
+	if literal, ok := pred.(iceberg.BoundLiteralPredicate); ok && partitionResidualValueIsNaN(literal.Literal()) {
+		return &partitionResidualNode{kind: partitionResidualOpaque, expr: pred}
+	}
+
 	ref, ok := pred.Term().(iceberg.BoundReference)
 	if !ok {
 		return &partitionResidualNode{kind: partitionResidualOpaque, expr: pred}
@@ -215,6 +221,7 @@ func (b *partitionResidualPlanBuilder) VisitBound(pred iceberg.BoundPredicate) *
 		expr: pred,
 		predicate: &partitionResidualPredicate{
 			sourceID: ref.Field().ID,
+			op:       pred.Op(),
 			evaluate: evaluate,
 		},
 	}
@@ -258,14 +265,14 @@ func partitionResidualPathSupported(schema *iceberg.Schema, path []int) bool {
 // residual and use the scan filter as the conservative fallback.
 func (p *partitionResidualPlan) residual(partition map[int]any) (iceberg.BooleanExpression, bool) {
 	record := make(partitionSourceRecord, p.schema.NumFields())
-	knownSources := make(map[int]struct{}, len(p.sources))
+	knownSources := make(map[int]bool, len(p.sources))
 	for sourceID, source := range p.sources {
 		value, ok := partitionValue(partition, source.partitionFieldIDs)
 		if !ok || !setPartitionSourceValue(record, p.schema, source.path, value) {
 			continue
 		}
 
-		knownSources[sourceID] = struct{}{}
+		knownSources[sourceID] = value == nil || partitionResidualValueIsNaN(value)
 	}
 
 	residual, changed, _, _ := p.root.residual(knownSources, record)
@@ -354,7 +361,7 @@ func setPartitionSourceValue(
 }
 
 func (n *partitionResidualNode) residual(
-	knownSources map[int]struct{},
+	knownSources map[int]bool,
 	record iceberg.StructLike,
 ) (iceberg.BooleanExpression, bool, bool, bool) {
 	switch n.kind {
@@ -365,7 +372,14 @@ func (n *partitionResidualNode) residual(
 	case partitionResidualFalse:
 		return iceberg.AlwaysFalse{}, false, true, false
 	case partitionResidualPredicateKind:
-		if _, ok := knownSources[n.predicate.sourceID]; !ok {
+		requiresRowEvaluation, known := knownSources[n.predicate.sourceID]
+		if !known {
+			return n.expr, false, false, false
+		}
+		// Scalar comparisons order nulls and NaNs, while Arrow's row
+		// filters propagate nulls and use IEEE floating-point comparisons.
+		// Keep those predicates intact, including beneath NOT.
+		if requiresRowEvaluation && n.predicate.op != iceberg.OpIsNull && n.predicate.op != iceberg.OpNotNull {
 			return n.expr, false, false, false
 		}
 
@@ -428,6 +442,20 @@ func (n *partitionResidualNode) residual(
 	}
 
 	return n.expr, false, false, false
+}
+
+func partitionResidualValueIsNaN(value any) bool {
+	if literal, ok := value.(iceberg.Literal); ok {
+		value = literal.Any()
+	}
+	switch value := value.(type) {
+	case float32:
+		return math.IsNaN(float64(value))
+	case float64:
+		return math.IsNaN(value)
+	default:
+		return false
+	}
 }
 
 func boolExpressionForValue(value bool) iceberg.BooleanExpression {
