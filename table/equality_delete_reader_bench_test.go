@@ -115,7 +115,22 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 	}
 }
 
-func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.RecordBatch, buildDel func(int) *equalityDeleteSet) {
+func benchEqDeletes(
+	b *testing.B,
+	buildRec func(memory.Allocator, int) arrow.RecordBatch,
+	buildDel func(int) *equalityDeleteSet,
+	fileSchema *iceberg.Schema,
+) {
+	b.Helper()
+	benchEqDeletesForFile(b, buildRec, buildDel, fileSchema)
+}
+
+func benchEqDeletesForFile(
+	b *testing.B,
+	buildRec func(memory.Allocator, int) arrow.RecordBatch,
+	buildDel func(int) *equalityDeleteSet,
+	fileSchema *iceberg.Schema,
+) {
 	b.Helper()
 
 	dataRows := []int{1_000, 100_000, 1_000_000}
@@ -133,12 +148,8 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 				rec := buildRec(mem, nData)
 				defer rec.Release()
 
-				delSet := buildDel(nDel)
-				fileSchema := iceberg.NewSchema(0,
-					iceberg.NestedField{ID: 1, Name: "first", Type: iceberg.PrimitiveTypes.Int64},
-					iceberg.NestedField{ID: 2, Name: "second", Type: iceberg.PrimitiveTypes.Int64},
-				)
-				filterFn, err := processEqualityDeletesColumnarForFile(ctx, []*equalityDeleteSet{delSet}, fileSchema, "data.parquet")
+				delSets := []*equalityDeleteSet{buildDel(nDel)}
+				filterFn, err := processEqualityDeletesColumnarForFile(ctx, delSets, fileSchema, "bench.parquet")
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -158,6 +169,20 @@ func benchEqDeletes(b *testing.B, buildRec func(memory.Allocator, int) arrow.Rec
 			})
 		}
 	}
+}
+
+func benchIntFileSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "category", Type: iceberg.PrimitiveTypes.Int64},
+	)
+}
+
+func benchStringFileSchema() *iceberg.Schema {
+	return iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64},
+		iceberg.NestedField{ID: 2, Name: "name", Type: iceberg.PrimitiveTypes.String},
+	)
 }
 
 func buildBenchRecordInt(mem memory.Allocator, numRows int) arrow.RecordBatch {
@@ -187,9 +212,9 @@ func buildBenchDeleteSetInt(numDeletes int) *equalityDeleteSet {
 	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64(i*3))
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64((i*3)%100))
+		_ = binary.Write(&buf, binary.BigEndian, int64((i*3)%100))
 		keys[buf.String()] = struct{}{}
 	}
 
@@ -227,10 +252,10 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	for i := range numDeletes {
 		buf.Reset()
 		buf.WriteByte(1)
-		binary.Write(&buf, binary.BigEndian, int64(i*3))
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
 		buf.WriteByte(1)
 		s := fmt.Sprintf("user-%08d", i*3)
-		binary.Write(&buf, binary.BigEndian, int32(len(s)))
+		_ = binary.Write(&buf, binary.BigEndian, int32(len(s)))
 		buf.WriteString(s)
 		keys[buf.String()] = struct{}{}
 	}
@@ -242,10 +267,60 @@ func buildBenchDeleteSetString(numDeletes int) *equalityDeleteSet {
 	}
 }
 
+func buildBenchDeleteSetIntNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64((i*3+1)%100))
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "category"},
+	}
+}
+
+func buildBenchDeleteSetStringNoMatch(numDeletes int) *equalityDeleteSet {
+	keys := make(set[string])
+	var buf bytes.Buffer
+
+	for i := range numDeletes {
+		buf.Reset()
+		buf.WriteByte(1)
+		_ = binary.Write(&buf, binary.BigEndian, int64(i*3))
+		buf.WriteByte(1)
+		name := fmt.Sprintf("user-%08d", i*3+1)
+		_ = binary.Write(&buf, binary.BigEndian, int32(len(name)))
+		buf.WriteString(name)
+		keys[buf.String()] = struct{}{}
+	}
+
+	return &equalityDeleteSet{
+		keys:     keys,
+		fieldIDs: []int{1, 2},
+		colNames: []string{"id", "name"},
+	}
+}
+
 func BenchmarkProcessEqualityDeletesInt(b *testing.B) {
-	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt)
+	benchEqDeletes(b, buildBenchRecordInt, buildBenchDeleteSetInt, benchIntFileSchema())
 }
 
 func BenchmarkProcessEqualityDeletesString(b *testing.B) {
-	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString)
+	benchEqDeletes(b, buildBenchRecordString, buildBenchDeleteSetString, benchStringFileSchema())
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchInt(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordInt, buildBenchDeleteSetIntNoMatch, benchIntFileSchema())
+}
+
+func BenchmarkProcessEqualityDeletesNoMatchString(b *testing.B) {
+	benchEqDeletesForFile(b, buildBenchRecordString, buildBenchDeleteSetStringNoMatch, benchStringFileSchema())
 }

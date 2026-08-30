@@ -624,7 +624,7 @@ func TruncateUpperBoundBinary(val []byte, trunc int) []byte {
 		if result[i] < 255 {
 			result[i]++
 
-			return result
+			return result[:i+1]
 		}
 	}
 

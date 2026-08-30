@@ -817,14 +817,8 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 		mem := compute.GetAllocator(ctx)
 		numRows := int(r.NumRows())
 
-		maskBuf := memory.NewResizableBuffer(mem)
-		defer maskBuf.Release()
-		maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
-		maskBytes := maskBuf.Bytes()
-
-		for i := range maskBytes {
-			maskBytes[i] = 0xFF
-		}
+		var maskBuf *memory.Buffer
+		var maskBytes []byte
 
 		var keyBuf bytes.Buffer
 
@@ -839,7 +833,7 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 			}
 
 			for row := range numRows {
-				if !bitutil.BitIsSet(maskBytes, row) {
+				if maskBytes != nil && !bitutil.BitIsSet(maskBytes, row) {
 					continue
 				}
 
@@ -849,15 +843,36 @@ func processEqualityDeletesColumnarForFile(ctx context.Context, eqDeleteSets []*
 					enc(&keyBuf, row)
 				}
 
-				if _, deleted := eqDel.keys[bufString(&keyBuf)]; deleted {
-					bitutil.ClearBit(maskBytes, row)
+				if _, deleted := eqDel.keys[bufString(&keyBuf)]; !deleted {
+					continue
 				}
+
+				if maskBuf == nil {
+					maskBuf = memory.NewResizableBuffer(mem)
+					defer maskBuf.Release()
+					maskBuf.Resize(int(bitutil.BytesForBits(int64(numRows))))
+					maskBytes = maskBuf.Bytes()
+
+					for i := range maskBytes {
+						maskBytes[i] = 0xFF
+					}
+				}
+
+				bitutil.ClearBit(maskBytes, row)
 			}
 		}
 
-		mask := array.NewBooleanData(array.NewData(
+		if maskBuf == nil {
+			r.Retain()
+
+			return r, nil
+		}
+
+		maskData := array.NewData(
 			arrow.FixedWidthTypes.Boolean, numRows,
-			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0))
+			[]*memory.Buffer{nil, maskBuf}, nil, 0, 0)
+		mask := array.NewBooleanData(maskData)
+		maskData.Release()
 		defer mask.Release()
 
 		filtered, err := compute.Filter(ctx,
