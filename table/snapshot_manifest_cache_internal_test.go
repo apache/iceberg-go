@@ -211,3 +211,42 @@ func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
 
 	return fs.IO.Open(name)
 }
+
+func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T) {
+	const listPath = "mem://snapshot-manifest-cache/canceled-waiter.avro"
+	base := iceio.NewMemFS()
+	var list bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, nil))
+	require.NoError(t, base.WriteFile(listPath, list.Bytes()))
+	fs := &blockingSnapshotManifestIO{
+		IO: base, blockedPath: listPath, started: make(chan struct{}),
+		release: make(chan struct{}), opens: make(map[string]int),
+	}
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
+	cache := newSnapshotManifestCache()
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
+	first := make(chan error, 1)
+	go func() {
+		_, err := cache.get(t.Context(), snapshot, fs)
+		first <- err
+	}()
+	select {
+	case <-fs.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("manifest-list read did not start")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := cache.get(ctx, snapshot, fs)
+	require.ErrorIs(t, err, context.Canceled)
+	release.Do(func() { close(fs.release) })
+	require.NoError(t, <-first)
+	_, err = cache.get(t.Context(), snapshot, fs)
+	require.NoError(t, err)
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	assert.Equal(t, 1, fs.opens[listPath])
+}
