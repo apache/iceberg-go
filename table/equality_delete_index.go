@@ -431,7 +431,7 @@ func newEqualityDeleteIndexEntry(
 				field.typ, field.rangeKind, lowerBytes, true)
 			upperValue, upperOK := equalityDeleteMetricValueFromBytes(
 				field.typ, field.rangeKind, upperBytes, true)
-			if lowerOK && upperOK {
+			if lowerOK && upperOK && equalityDeleteMetricValueCompare(&lowerValue, &upperValue) <= 0 {
 				field.lowerValue = lowerValue
 				field.upperValue = upperValue
 				field.hasDecodedBounds = true
@@ -626,7 +626,7 @@ func equalityDeleteDataContainsNull(nullCounts map[int]int64, field *equalityDel
 
 	nullCount, ok := nullCounts[field.fieldID]
 
-	return !ok || nullCount > 0
+	return !ok || nullCount != 0
 }
 
 func equalityDeleteFieldContainsNull(field *equalityDeleteFieldMetrics) bool {
@@ -637,7 +637,7 @@ func equalityDeleteFieldContainsNull(field *equalityDeleteFieldMetrics) bool {
 		return true
 	}
 
-	return field.nullCount > 0
+	return field.nullCount != 0
 }
 
 func equalityDeleteDataAllNull(stats equalityDeleteDataFileStats, field *equalityDeleteFieldMetrics) bool {
@@ -648,7 +648,7 @@ func equalityDeleteDataAllNull(stats equalityDeleteDataFileStats, field *equalit
 	nullCount, hasNullCount := stats.nullCounts[field.fieldID]
 	valueCount, hasValueCount := stats.valueCounts[field.fieldID]
 
-	return hasNullCount && hasValueCount && nullCount == valueCount
+	return hasNullCount && hasValueCount && nullCount >= 0 && nullCount == valueCount
 }
 
 func equalityDeleteFieldAllNull(field *equalityDeleteFieldMetrics) bool {
@@ -656,7 +656,7 @@ func equalityDeleteFieldAllNull(field *equalityDeleteFieldMetrics) bool {
 		return false
 	}
 
-	return field.hasNullCount && field.hasValueCount && field.nullCount == field.valueCount
+	return field.hasNullCount && field.hasValueCount && field.nullCount >= 0 && field.nullCount == field.valueCount
 }
 
 func equalityDeleteDataAllNonNull(nullCounts map[int]int64, field *equalityDeleteFieldMetrics) bool {
@@ -669,7 +669,7 @@ func equalityDeleteDataAllNonNull(nullCounts map[int]int64, field *equalityDelet
 
 	nullCount, ok := nullCounts[field.fieldID]
 
-	return ok && nullCount <= 0
+	return ok && nullCount == 0
 }
 
 func equalityDeleteFieldAllNonNull(field *equalityDeleteFieldMetrics) bool {
@@ -677,7 +677,7 @@ func equalityDeleteFieldAllNonNull(field *equalityDeleteFieldMetrics) bool {
 		return true
 	}
 
-	return field.hasNullCount && field.nullCount <= 0
+	return field.hasNullCount && field.nullCount == 0
 }
 
 func equalityDeleteFloatRangesAreKnown(
@@ -707,7 +707,7 @@ func equalityDeleteDataFileBoundsFor(
 			field.typ, field.rangeKind, dataLower, false)
 		upperValue, upperOK := equalityDeleteMetricValueFromBytes(
 			field.typ, field.rangeKind, dataUpper, false)
-		if lowerOK && upperOK {
+		if lowerOK && upperOK && equalityDeleteMetricValueCompare(&lowerValue, &upperValue) <= 0 {
 			*bounds = equalityDeleteDataFileBounds{
 				lower:  lowerValue,
 				upper:  upperValue,

@@ -391,3 +391,94 @@ func TestEqualityDeleteMetricValueCompareSupportsRangeTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestEqualityDeleteIndexKeepsInvertedMetricRanges(t *testing.T) {
+	schema := equalityDeleteMetricsTestSchema(iceberg.PrimitiveTypes.Int32, true)
+	low, high := equalityDeleteMetricsTestBounds(t, int32(10), int32(20))
+	middle, _ := equalityDeleteMetricsTestBounds(t, int32(15), int32(15))
+	for _, invalidData := range []bool{false, true} {
+		name := "delete bounds"
+		if invalidData {
+			name = "data bounds"
+		}
+		t.Run(name, func(t *testing.T) {
+			dataLower, dataUpper := middle, middle
+			deleteLower, deleteUpper := middle, middle
+			if invalidData {
+				dataLower, dataUpper = high, low
+			} else {
+				deleteLower, deleteUpper = high, low
+			}
+			deleteEntry := newEqualityDeleteMetricsTestEntry(
+				"delete.parquet", 0, nil, iceberg.EntryContentEqDeletes, 2,
+				[]int{1}, nil, nil, nil, deleteLower, deleteUpper)
+			idx, err := buildEqualityDeleteIndex(
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), schema)
+			require.NoError(t, err)
+			dataEntry := newEqualityDeleteMetricsTestEntry(
+				"data.parquet", 0, nil, iceberg.EntryContentData, 1,
+				nil, nil, nil, nil, dataLower, dataUpper)
+			matched, err := idx.forDataFile(dataEntry)
+			require.NoError(t, err)
+			assert.Len(t, matched, 1, "inverted bounds cannot prove that an equality delete is disjoint")
+		})
+	}
+}
+
+func TestEqualityDeleteIndexKeepsUnknownNullCounts(t *testing.T) {
+	schema := equalityDeleteMetricsTestSchema(iceberg.PrimitiveTypes.Int32, false)
+	for _, unknownData := range []bool{false, true} {
+		name := "delete null count"
+		if unknownData {
+			name = "data null count"
+		}
+		t.Run(name, func(t *testing.T) {
+			dataNulls, deleteNulls := int64(1), int64(-1)
+			if unknownData {
+				dataNulls, deleteNulls = deleteNulls, dataNulls
+			}
+			deleteEntry := newEqualityDeleteMetricsTestEntry(
+				"delete.parquet", 0, nil, iceberg.EntryContentEqDeletes, 2,
+				[]int{1}, map[int]int64{1: 1}, map[int]int64{1: deleteNulls}, nil, nil, nil)
+			idx, err := buildEqualityDeleteIndex(
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), schema)
+			require.NoError(t, err)
+			dataEntry := newEqualityDeleteMetricsTestEntry(
+				"data.parquet", 0, nil, iceberg.EntryContentData, 1,
+				nil, map[int]int64{1: 1}, map[int]int64{1: dataNulls}, nil, nil, nil)
+			matched, err := idx.forDataFile(dataEntry)
+			require.NoError(t, err)
+			assert.Len(t, matched, 1, "negative null counts are not evidence that null keys are absent")
+		})
+	}
+}
+
+func TestEqualityDeleteIndexKeepsUnknownValueAndNullCounts(t *testing.T) {
+	schema := equalityDeleteMetricsTestSchema(iceberg.PrimitiveTypes.Int32, false)
+	for _, unknownData := range []bool{false, true} {
+		name := "delete counts"
+		if unknownData {
+			name = "data counts"
+		}
+		t.Run(name, func(t *testing.T) {
+			dataValues, deleteValues := int64(1), int64(-1)
+			dataNulls, deleteNulls := int64(0), int64(-1)
+			if unknownData {
+				dataValues, deleteValues = deleteValues, dataValues
+				dataNulls, deleteNulls = deleteNulls, dataNulls
+			}
+			deleteEntry := newEqualityDeleteMetricsTestEntry(
+				"delete.parquet", 0, nil, iceberg.EntryContentEqDeletes, 2,
+				[]int{1}, map[int]int64{1: deleteValues}, map[int]int64{1: deleteNulls}, nil, nil, nil)
+			idx, err := buildEqualityDeleteIndex(
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), schema)
+			require.NoError(t, err)
+			dataEntry := newEqualityDeleteMetricsTestEntry(
+				"data.parquet", 0, nil, iceberg.EntryContentData, 1,
+				nil, map[int]int64{1: dataValues}, map[int]int64{1: dataNulls}, nil, nil, nil)
+			matched, err := idx.forDataFile(dataEntry)
+			require.NoError(t, err)
+			assert.Len(t, matched, 1, "equal negative counts are not evidence that every key is null")
+		})
+	}
+}
