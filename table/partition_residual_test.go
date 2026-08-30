@@ -22,6 +22,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
@@ -77,6 +78,65 @@ func TestPartitionResidualEvaluatorElidesSatisfiedIdentityPredicate(t *testing.T
 	require.NoError(t, err)
 	require.True(t, simplified)
 	assert.Equal(t, iceberg.AlwaysFalse{}, residual)
+}
+
+func TestPartitionResidualEvaluatorNormalizesDecodedLiteralValues(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "price", Type: iceberg.DecimalTypeOf(10, 2),
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "price", Transform: iceberg.IdentityTransform{},
+	})
+	value := iceberg.Decimal{Val: decimal128.FromI64(123), Scale: 2}
+	evaluator := boundPartitionResidualEvaluator(t, schema, spec,
+		iceberg.EqualTo(iceberg.Reference("price"), value))
+
+	residual, simplified, err := evaluator.residual(map[int]any{1000: iceberg.DecimalLiteral(value)})
+	require.NoError(t, err)
+	require.True(t, simplified)
+	assert.Equal(t, iceberg.AlwaysTrue{}, residual)
+}
+
+func TestPartitionResidualEvaluatorHandlesNestedIdentityFields(t *testing.T) {
+	nested := &iceberg.StructType{FieldList: []iceberg.NestedField{
+		{ID: 2, Name: "tenant_id", Type: iceberg.PrimitiveTypes.String},
+		{ID: 3, Name: "amount", Type: iceberg.PrimitiveTypes.Int64},
+	}}
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "details", Type: nested,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "tenant_id", Transform: iceberg.IdentityTransform{},
+	})
+	filter := iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("details.tenant_id"), "acme"),
+		iceberg.GreaterThan(iceberg.Reference("details.amount"), int64(100)),
+	)
+	evaluator := boundPartitionResidualEvaluator(t, schema, spec, filter)
+
+	residual, simplified, err := evaluator.residual(map[int]any{1000: "acme"})
+	require.NoError(t, err)
+	require.True(t, simplified)
+	want, err := iceberg.BindExpr(schema,
+		iceberg.GreaterThan(iceberg.Reference("details.amount"), int64(100)), true)
+	require.NoError(t, err)
+	assert.True(t, residual.Equals(want), "expected %s, got %s", want, residual)
+}
+
+func TestPartitionResidualEvaluatorLeavesMismatchedTransformsUnchanged(t *testing.T) {
+	schema := partitionResidualTestSchema()
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1}, FieldID: 1000, Name: "tenant_id", Transform: iceberg.IdentityTransform{},
+	})
+	filter := iceberg.EqualTo(
+		iceberg.NewUnboundTransform(iceberg.BucketTransform{NumBuckets: 16}, iceberg.Reference("tenant_id")),
+		int32(1),
+	)
+	bound, err := iceberg.BindExpr(schema, filter, true)
+	require.NoError(t, err)
+	evaluator, err := newPartitionResidualEvaluator(schema, &spec, bound, true)
+	require.NoError(t, err)
+	assert.Nil(t, evaluator)
 }
 
 func TestPartitionResidualEvaluatorSimplifiesBooleanCombinations(t *testing.T) {
