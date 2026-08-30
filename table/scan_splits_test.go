@@ -405,3 +405,62 @@ func TestPlanFilesSplitsLargeParquetFileAndReadsEachRowOnce(t *testing.T) {
 	assert.Equal(t, map[int64]int64{1: 0, 2: 1, 4: 3, 5: 4, 7: 6, 8: 7}, gotRowIDs,
 		"deletion vectors must use original positions across split tasks")
 }
+
+type prepareReadTrackingIO struct {
+	iceio.IO
+	closed int
+}
+
+func (fs *prepareReadTrackingIO) Open(path string) (iceio.File, error) {
+	file, err := fs.IO.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &prepareReadTrackingFile{File: file, fs: fs}, nil
+}
+
+type prepareReadTrackingFile struct {
+	iceio.File
+	fs *prepareReadTrackingIO
+}
+
+func (f *prepareReadTrackingFile) Close() error {
+	f.fs.closed++
+
+	return f.File.Close()
+}
+
+func TestPrepareToReadClosesReaderOnSchemaError(t *testing.T) {
+	for _, cache := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cache), func(t *testing.T) {
+			for _, withIDs := range []bool{false, true} {
+				t.Run(fmt.Sprintf("field_ids=%t", withIDs), func(t *testing.T) {
+					field := arrow.Field{Name: "id", Type: arrow.FixedWidthTypes.Time64ns}
+					if withIDs {
+						field.Metadata = arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})
+					}
+					path := filepath.Join(t.TempDir(), "invalid-schema.parquet")
+					writeSplitParquetFile(t, path, arrow.NewSchema([]arrow.Field{field}, nil), `[{"id":"00:00:01.000000000"}]`)
+					file, err := iceberg.NewDataFileBuilder(*iceberg.UnpartitionedSpec,
+						iceberg.EntryContentData, path, iceberg.ParquetFile, nil, nil, nil, 1, 100)
+					require.NoError(t, err)
+					fs := &prepareReadTrackingIO{IO: iceio.LocalFS{}}
+					scanner := &arrowScan{fs: fs, cacheFileReadPlan: cache}
+					invariants := &arrowScanInvariants{projectedIDs: map[int]struct{}{1: {}}}
+					for attempt := 1; attempt <= 2; attempt++ {
+						_, _, reader, err := scanner.prepareToRead(context.Background(), file.Build(), invariants)
+						require.Error(t, err)
+						if withIDs {
+							require.ErrorContains(t, err, "unsupported arrow type")
+						} else {
+							require.ErrorContains(t, err, "missing field_id")
+						}
+						assert.Nil(t, reader)
+						assert.Equal(t, attempt, fs.closed)
+					}
+				})
+			}
+		})
+	}
+}

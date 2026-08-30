@@ -1092,11 +1092,11 @@ func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, i
 		return nil, nil, nil, err
 	}
 	keepReader := false
-	defer func() {
+	defer func(reader tblutils.FileReader) {
 		if !keepReader {
-			_ = rdr.Close()
+			_ = reader.Close()
 		}
-	}()
+	}(rdr)
 
 	if !as.cacheFileReadPlan {
 		var fileSchema *arrow.Schema
