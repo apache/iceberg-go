@@ -832,3 +832,27 @@ func newEqualityDeleteSetAssemblyTestFile(
 
 	return builder.EqualityFieldIDs(fieldIDs).Build()
 }
+
+func TestResolveRequestedArrowFieldsPreservesDeepAndSiblingPaths(t *testing.T) {
+	const depth = 12
+	field := iceberg.NestedField{ID: 100, Name: "leaf", Type: iceberg.PrimitiveTypes.Int64}
+	for id := depth; id > 0; id-- {
+		field = iceberg.NestedField{ID: id, Name: "nested", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{field},
+		}}
+	}
+	schema := iceberg.NewSchema(0, field,
+		iceberg.NestedField{ID: 101, Name: "sibling", Type: iceberg.PrimitiveTypes.Int64})
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	require.NoError(t, err)
+	want := arrowFieldRefsByID{
+		100: {{path: make([]int, depth+1)}},
+		101: {{path: []int{1}}},
+	}
+	assert.Equal(t, want, resolveArrowFieldsByID(schema, []int{100, 101, 100, 999}))
+	assert.Equal(t, want, resolveArrowFieldsByMetadata(arrowSchema, []int{100, 101, 100, 999}))
+	assert.Empty(t, resolveArrowFieldsByID(nil, []int{100}))
+	assert.Empty(t, resolveArrowFieldsByMetadata(nil, []int{100}))
+	assert.Empty(t, resolveArrowFieldsByID(schema, nil))
+	assert.Empty(t, resolveArrowFieldsByMetadata(arrowSchema, nil))
+}
