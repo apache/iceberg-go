@@ -538,6 +538,7 @@ func (a *posDeleteAccumulator) appendChunked(ctx context.Context, filePathCol, p
 	return ctx.Err()
 }
 
+// appendRecord requires columns projected in file_path, pos order.
 func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.RecordBatch) error {
 	if record.NumCols() != 2 {
 		return fmt.Errorf("%w: projected position delete record has %d columns, expected 2",
@@ -768,40 +769,41 @@ func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
 		return false, nil
 	}
 
-	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
-	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
-	for _, field := range []iceberg.NestedField{filePathField, posField} {
+	deleteFields := iceberg.PositionalDeleteSchema.Fields()
+	for _, field := range deleteFields {
 		if physicalIDs[field.ID] > 1 {
 			return false, fmt.Errorf("%w: position delete field ID %d is not unique",
 				iceberg.ErrInvalidSchema, field.ID)
 		}
 	}
 
-	for _, want := range []struct {
-		name string
-		id   int
-	}{
-		{name: filePathField.Name, id: filePathField.ID},
-		{name: posField.Name, id: posField.ID},
-	} {
-		indices := schema.FieldIndices(want.name)
+	pruningEnabled := true
+	for _, want := range deleteFields {
+		indices := schema.FieldIndices(want.Name)
 		if len(indices) != 1 {
 			return false, fmt.Errorf("%w: position delete file must contain exactly one %q column, found %d",
-				iceberg.ErrInvalidSchema, want.name, len(indices))
+				iceberg.ErrInvalidSchema, want.Name, len(indices))
 		}
 
 		fieldID := getFieldID(schema.Field(indices[0]))
 		if fieldID == nil {
-			return false, fmt.Errorf("%w: position delete column %q is missing its canonical field ID %d",
-				iceberg.ErrInvalidSchema, want.name, want.id)
+			if physicalIDs[want.ID] != 0 {
+				return false, fmt.Errorf("%w: position delete field ID %d is assigned to another column instead of %q",
+					iceberg.ErrInvalidSchema, want.ID, want.Name)
+			}
+			// Missing IDs only disable pruning. Keep checking the remaining
+			// columns so this fallback cannot hide an invalid ID mapping.
+			pruningEnabled = false
+
+			continue
 		}
-		if *fieldID != want.id {
+		if *fieldID != want.ID {
 			return false, fmt.Errorf("%w: position delete column %q has field ID %d, want %d",
-				iceberg.ErrInvalidSchema, want.name, *fieldID, want.id)
+				iceberg.ErrInvalidSchema, want.Name, *fieldID, want.ID)
 		}
 	}
 
-	return true, nil
+	return pruningEnabled, nil
 }
 
 func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {

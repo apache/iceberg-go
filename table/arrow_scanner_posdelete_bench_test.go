@@ -46,6 +46,9 @@ func BenchmarkReadDeletesWithFilePathFilter(b *testing.B) {
 		ParquetBatchSizeKey: "65536",
 	})
 
+	b.Run("all paths", func(b *testing.B) {
+		benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, nil)
+	})
 	for _, targetCount := range []int{1, 10, 100, 1_000} {
 		b.Run(fmt.Sprintf("targets=%d", targetCount), func(b *testing.B) {
 			targets := make(map[string]struct{}, targetCount)
@@ -53,12 +56,7 @@ func BenchmarkReadDeletesWithFilePathFilter(b *testing.B) {
 				targets[path] = struct{}{}
 			}
 
-			b.Run("all paths", func(b *testing.B) {
-				benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, nil)
-			})
-			b.Run("target paths", func(b *testing.B) {
-				benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, targets)
-			})
+			benchmarkReadDeletesWithFilePathFilter(b, ctx, memFS, deleteFile, targets)
 		})
 	}
 }
