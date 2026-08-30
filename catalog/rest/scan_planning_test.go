@@ -1832,3 +1832,94 @@ func TestPlanFilesPropagatesFailure(t *testing.T) {
 	_, err := cat.PlanFiles(context.Background(), planFilesReq())
 	require.ErrorIs(t, err, ErrPlanFailed)
 }
+
+func TestCollectScanTasksDeduplicatesAcrossFrontiers(t *testing.T) {
+	t.Parallel()
+
+	children := map[string][]string{
+		"a": {"c", "d", "a"},
+		"b": {"d", "e"},
+		"c": {"b"},
+	}
+	var mu sync.Mutex
+	calls := make(map[string]int)
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+			mu.Lock()
+			calls[body.PlanTask]++
+			mu.Unlock()
+			response := ScanTasks{
+				PlanTasks: children[body.PlanTask],
+				FileScanTasks: []RESTFileScanTask{{DataFile: &RESTDataFile{
+					RESTContentFile: RESTContentFile{FilePath: body.PlanTask},
+				}}},
+			}
+			_ = json.NewEncoder(w).Encode(response)
+		})
+	})
+
+	envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"a", "a", "b"},
+	})
+	require.NoError(t, err)
+	require.Len(t, envelopes, 6)
+	for i, name := range []string{"a", "b", "c", "d", "e"} {
+		require.Len(t, envelopes[i+1].FileScanTasks, 1)
+		assert.Equal(t, name, envelopes[i+1].FileScanTasks[0].DataFile.FilePath)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, map[string]int{"a": 1, "b": 1, "c": 1, "d": 1, "e": 1}, calls)
+}
+
+func TestCollectScanTasksCancelsSiblingRequestsOnFailure(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, func(mux *http.ServeMux) {
+		mux.HandleFunc("/v1/namespaces/db/tables/tbl/tasks", func(w http.ResponseWriter, req *http.Request) {
+			var body FetchScanTasksRequest
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+
+				return
+			}
+			switch body.PlanTask {
+			case "slow":
+				close(started)
+				<-req.Context().Done()
+				close(cancelled)
+			case "failed":
+				select {
+				case <-started:
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":{"message":"invalid handle","type":"BadRequestException","code":400}}`))
+				case <-req.Context().Done():
+				}
+			default:
+				http.Error(w, "unexpected handle", http.StatusBadRequest)
+			}
+		})
+	})
+
+	envelopes, err := cat.collectScanTasks(ctx, table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"slow", "failed"},
+	})
+	require.ErrorIs(t, err, ErrBadRequest)
+	assert.Nil(t, envelopes)
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("sibling request was not cancelled after a fetch failure")
+	}
+}
