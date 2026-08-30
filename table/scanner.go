@@ -952,6 +952,10 @@ func (b *manifestIOBatch) acquire(ctx context.Context) (io.IO, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if b.remaining == 0 {
 		fs, err := b.factory(ctx)
 		if err != nil {

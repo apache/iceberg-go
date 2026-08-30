@@ -102,12 +102,15 @@ func (fs *expiringManifestIO) Remove(name string) error {
 type failingManifestIO struct {
 	base        *iceio.MemFS
 	failingPath string
+	laterOpens  atomic.Int64
 }
 
 func (fs *failingManifestIO) Open(name string) (iceio.File, error) {
 	if name == fs.failingPath {
 		return nil, errors.New("manifest failed")
 	}
+
+	fs.laterOpens.Add(1)
 
 	return fs.base.Open(name)
 }
@@ -139,30 +142,51 @@ func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {
 func TestPlanFilesStopsLoadingManifestIOAfterWorkerError(t *testing.T) {
 	scan, fs := scanWithManifestCount(t, 2)
 	scan.concurrency = 1
+	failing := &failingManifestIO{
+		base:        fs,
+		failingPath: "mem://planning/table/metadata/manifest-0.avro",
+	}
 
 	var factoryCalls atomic.Int64
-	var canceledFactoryCalls atomic.Int64
-	scan.ioF = func(ctx context.Context) (iceio.IO, error) {
-		if ctx.Err() != nil {
-			canceledFactoryCalls.Add(1)
-
-			return nil, ctx.Err()
-		}
-
+	scan.ioF = func(context.Context) (iceio.IO, error) {
 		if factoryCalls.Add(1) == 1 {
 			return fs, nil
 		}
 
-		return &failingManifestIO{
-			base:        fs,
-			failingPath: "mem://planning/table/metadata/manifest-0.avro",
-		}, nil
+		return failing, nil
 	}
 
 	_, err := scan.PlanFiles(t.Context())
 	require.ErrorContains(t, err, "manifest failed")
-	assert.Equal(t, int64(1), canceledFactoryCalls.Load(),
-		"a later manifest worker should observe cancellation before loading FileIO")
+	assert.Equal(t, int64(2), factoryCalls.Load(),
+		"a later manifest worker must not load FileIO after cancellation")
+	assert.Zero(t, failing.laterOpens.Load())
+}
+
+func TestManifestIOBatchRejectsCanceledContext(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cached=%t", cached), func(t *testing.T) {
+			fs := iceio.NewMemFS()
+			var calls int
+			batch := newManifestIOBatch(func(context.Context) (iceio.IO, error) {
+				calls++
+
+				return fs, nil
+			}, 2)
+			if cached {
+				_, err := batch.acquire(t.Context())
+				require.NoError(t, err)
+			}
+			priorCalls := calls
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			got, err := batch.acquire(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Nil(t, got)
+			assert.Equal(t, priorCalls, calls)
+		})
+	}
 }
 
 func BenchmarkPlanFilesFileIOFactory(b *testing.B) {
