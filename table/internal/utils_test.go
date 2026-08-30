@@ -107,7 +107,8 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 		expected []byte
 	}{
 		{"increment", []byte{0x01, 0x02, 0x03}, 2, []byte{0x01, 0x03}},
-		{"carry", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03, 0xff}},
+		{"carry past ff suffix", []byte{0x01, 0x02, 0xff, 0x03}, 3, []byte{0x01, 0x03}},
+		{"carry past multiple ff bytes", []byte{0x01, 0xff, 0xff, 0x03}, 3, []byte{0x02}},
 		{"all ff", []byte{0xff, 0xff, 0x00}, 2, nil},
 		{"no truncation", []byte{0x01, 0x02}, 2, []byte{0x01, 0x02}},
 		{"negative width keeps bound", []byte{0x01, 0x02}, -1, []byte{0x01, 0x02}},
@@ -123,9 +124,15 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 			assert.Equal(t, first, second)
 			assert.Equal(t, original, tt.value)
 
+			if tt.truncate < len(tt.value) && len(first) > 0 {
+				assert.LessOrEqual(t, len(first), tt.truncate)
+				assert.Greater(t, bytes.Compare(first, tt.value), 0)
+			}
+
 			if len(first) > 0 {
 				first[0] ^= 0xff
 				assert.Equal(t, original, tt.value)
+				assert.Equal(t, tt.expected, second)
 			}
 		})
 	}
