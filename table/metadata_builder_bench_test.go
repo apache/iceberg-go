@@ -51,6 +51,14 @@ var bulkRemovalBenchmarkCases = []struct {
 	removedCount int
 }{
 	{entryCount: 8, removedCount: 1},
+	{entryCount: 8, removedCount: 2},
+	{entryCount: 8, removedCount: 4},
+	{entryCount: 32, removedCount: 8},
+	{entryCount: 32, removedCount: 9},
+	{entryCount: 32, removedCount: 16},
+	{entryCount: 128, removedCount: 16},
+	{entryCount: 128, removedCount: 17},
+	{entryCount: 128, removedCount: 32},
 	{entryCount: 128, removedCount: 64},
 	{entryCount: 1_024, removedCount: 512},
 	{entryCount: 8_192, removedCount: 4_096},
@@ -63,13 +71,15 @@ func BenchmarkRemovePartitionSpecs(b *testing.B) {
 			removed := benchmarkRemovedIDs(tc.removedCount)
 
 			b.ReportAllocs()
+			b.ResetTimer()
 			b.ReportMetric(float64(tc.entryCount), "spec_entries")
 			b.ReportMetric(float64(len(removed)), "removed_specs")
-			b.ResetTimer()
 
 			for range b.N {
+				b.StopTimer()
 				builder := template
-				builder.updates = nil
+				builder.specs = slices.Clone(template.specs)
+				b.StartTimer()
 
 				if err := builder.RemovePartitionSpecs(removed); err != nil {
 					b.Fatal(err)
@@ -87,15 +97,14 @@ func BenchmarkRemoveSchemas(b *testing.B) {
 			removed := benchmarkRemovedIDs(tc.removedCount)
 
 			b.ReportAllocs()
+			b.ResetTimer()
 			b.ReportMetric(float64(tc.entryCount), "schema_entries")
 			b.ReportMetric(float64(len(removed)), "removed_schemas")
-			b.ResetTimer()
 
 			for range b.N {
 				b.StopTimer()
 				builder := template
 				builder.schemaList = slices.Clone(template.schemaList)
-				builder.updates = nil
 				b.StartTimer()
 
 				if err := builder.RemoveSchemas(removed); err != nil {
