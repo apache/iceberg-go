@@ -95,6 +95,23 @@ func TestCommonMetadataSchemaIndexFallsBackAfterElementMutation(t *testing.T) {
 
 	schemas[1].ID = 3
 	assert.Nil(t, metadata.schemaByID(2))
+	got := metadata.schemaByID(3)
+	require.NotNil(t, got)
+	assert.Equal(t, 3, got.ID)
+}
+
+func TestMetadataBuilderSchemaIndexFindsRenamedSchema(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	schema, err := builder.GetSchemaByID(builder.currentSchemaID)
+	require.NoError(t, err)
+	originalID := schema.ID
+	schema.ID = 42
+
+	got, err := builder.GetSchemaByID(42)
+	require.NoError(t, err)
+	assert.Same(t, schema, got)
+	_, err = builder.GetSchemaByID(originalID)
+	assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 }
 
 func TestMetadataBuilderSchemaIndexFallsBackAfterSliceReplacement(t *testing.T) {

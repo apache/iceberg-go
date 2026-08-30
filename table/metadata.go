@@ -201,24 +201,13 @@ func schemaIndexNeedsRebuild(index *schemaIndexData, schemas []*iceberg.Schema) 
 
 func schemaIndexLookup(index *schemaIndexData, schemas []*iceberg.Schema, id int) (*iceberg.Schema, bool) {
 	if index != nil {
-		if schema, ok := index.schemas[id]; ok {
-			if schema != nil && schema.ID == id {
-				return schema, true
-			}
-
-			index = buildSchemaIndex(schemas)
-			if schema, ok := index.schemas[id]; ok && schema != nil && schema.ID == id {
-				return schema, true
-			}
-
-			return nil, false
-		}
-
-		if !schemaIndexNeedsRebuild(index, schemas) {
-			return nil, false
+		if schema, ok := index.schemas[id]; ok && schema != nil && schema.ID == id {
+			return schema, true
 		}
 	}
 
+	// Builder lookups return mutable schemas, so a changed ID may not have
+	// an entry in the index even when the slice itself is unchanged.
 	for _, schema := range schemas {
 		if schema != nil && schema.ID == id {
 			return schema, true
