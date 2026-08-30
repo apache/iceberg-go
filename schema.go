@@ -352,8 +352,7 @@ func (s *Schema) MarshalJSON() ([]byte, error) {
 
 	type Alias Schema
 
-	aliasCopy := *(*Alias)(s)
-	aliasCopy.IdentifierFieldIDs = ids
+	aliasCopy := Alias{ID: s.ID, IdentifierFieldIDs: ids}
 
 	return json.Marshal(struct {
 		Type   string        `json:"type"`

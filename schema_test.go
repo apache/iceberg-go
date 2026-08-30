@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -2299,4 +2300,49 @@ func TestVisitGeoSchemaWithSchemaVisitorPerPrimitiveType(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, v.geometryCalls)
 	assert.Equal(t, 1, v.geographyCalls)
+}
+
+func TestSchemaMarshalJSONConcurrentLazyLookups(t *testing.T) {
+	for range 32 {
+		schema := iceberg.NewSchemaWithIdentifiers(17, nil,
+			iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+			iceberg.NestedField{ID: 2, Name: "data", Type: iceberg.PrimitiveTypes.String},
+		)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				<-start
+				for range 8 {
+					_, err := json.Marshal(schema)
+					assert.NoError(t, err)
+				}
+			})
+			wg.Go(func() {
+				<-start
+				_, found := schema.FindFieldByID(1)
+				assert.True(t, found)
+				_, found = schema.FindFieldByName("data")
+				assert.True(t, found)
+				_, found = schema.FindFieldByNameCaseInsensitive("DATA")
+				assert.True(t, found)
+				name, found := schema.FindColumnName(2)
+				assert.True(t, found)
+				assert.Equal(t, "data", name)
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		data, err := json.Marshal(schema)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{
+			"type": "struct", "schema-id": 17, "identifier-field-ids": [],
+			"fields": [
+				{"id": 1, "name": "id", "type": "long", "required": true},
+				{"id": 2, "name": "data", "type": "string", "required": false}
+			]
+		}`, string(data))
+		assert.Nil(t, schema.IdentifierFieldIDs)
+	}
 }
