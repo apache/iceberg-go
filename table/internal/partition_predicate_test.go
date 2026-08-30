@@ -416,3 +416,27 @@ func TestLiteralForPartitionValue(t *testing.T) {
 		assert.ErrorIs(t, err, iceberg.ErrInvalidArgument)
 	})
 }
+
+func TestBuildPartitionMatchPredicate_RejectsInvalidTransforms(t *testing.T) {
+	unknown, err := iceberg.ParseTransform("future_transform")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name      string
+		transform iceberg.Transform
+		want      error
+	}{
+		{name: "nil", want: iceberg.ErrInvalidArgument},
+		{name: "typed nil identity", transform: (*iceberg.IdentityTransform)(nil), want: iceberg.ErrInvalidArgument},
+		{name: "typed nil bucket", transform: (*iceberg.BucketTransform)(nil), want: iceberg.ErrInvalidArgument},
+		{name: "unknown", transform: unknown, want: iceberg.ErrNotImplemented},
+		{name: "invalid source type", transform: iceberg.DayTransform{}, want: iceberg.ErrInvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := identitySpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "id_part", Transform: tc.transform,
+			})
+			_, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1000: int32(1)}})
+			require.ErrorIs(t, err, tc.want)
+		})
+	}
+}

@@ -65,19 +65,13 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				iceberg.ErrInvalidArgument, f.Name, len(f.SourceIDs))
 		}
 
-		src, ok := schema.FindFieldByID(f.SourceIDs[0])
-		if !ok {
-			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
-				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
-		}
 		sourceName, ok := schema.FindColumnName(f.SourceIDs[0])
 		if !ok {
 			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
 				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
 		}
-		if !f.Transform.CanTransform(src.Type) {
-			return nil, fmt.Errorf("%w: transform %s cannot be applied to source field %q of type %s",
-				iceberg.ErrInvalidArgument, f.Transform, src.Name, src.Type)
+		if _, err := iceberg.NewUnboundTransform(f.Transform, iceberg.Reference(sourceName)).Bind(schema, true); err != nil {
+			return nil, fmt.Errorf("partition field %q: %w", f.Name, err)
 		}
 
 		fields = append(fields, fieldRef{id: f.FieldID, name: sourceName, transform: f.Transform})
