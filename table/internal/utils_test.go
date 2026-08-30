@@ -124,7 +124,7 @@ func TestTruncateUpperBoundBinary(t *testing.T) {
 			assert.Equal(t, first, second)
 			assert.Equal(t, original, tt.value)
 
-			if tt.truncate < len(tt.value) && len(first) > 0 {
+			if tt.truncate >= 0 && tt.truncate < len(tt.value) && len(first) > 0 {
 				assert.LessOrEqual(t, len(first), tt.truncate)
 				assert.Greater(t, bytes.Compare(first, tt.value), 0)
 			}
