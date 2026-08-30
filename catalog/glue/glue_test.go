@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -864,16 +865,18 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 	assert := require.New(t)
 	ctx := context.Background()
 	const scheme = "gluepurgefail"
-	dropCalled := false
-	removeBeforeDrop := false
-	removeCalls := 0
+	var (
+		dropCalled       atomic.Bool
+		removeBeforeDrop atomic.Bool
+		removeCalls      atomic.Int64
+	)
 	failingFS := failRemoveIO{
 		MemFS: iceio.NewMemFS(),
 		err:   errGluePurgeRemove,
 		onRemove: func() {
-			removeCalls++
-			if !dropCalled {
-				removeBeforeDrop = true
+			removeCalls.Add(1)
+			if !dropCalled.Load() {
+				removeBeforeDrop.Store(true)
 			}
 		},
 	}
@@ -899,15 +902,15 @@ func TestGluePurgeTableSwallowsPurgeFilesError(t *testing.T) {
 		DatabaseName: aws.String("test_database"),
 		Name:         aws.String("test_table"),
 	}, mock.Anything).Run(func(mock.Arguments) {
-		dropCalled = true
+		dropCalled.Store(true)
 	}).Return(&glue.DeleteTableOutput{}, nil).Once()
 
 	glueCatalog := &Catalog{glueSvc: mockGlueSvc}
 
 	assert.NoError(glueCatalog.PurgeTable(ctx, TableIdentifier("test_database", "test_table")))
-	assert.True(dropCalled)
-	assert.Positive(removeCalls)
-	assert.False(removeBeforeDrop, "PurgeTable should drop the catalog entry before removing files")
+	assert.True(dropCalled.Load())
+	assert.Positive(removeCalls.Load())
+	assert.False(removeBeforeDrop.Load(), "PurgeTable should drop the catalog entry before removing files")
 	file, err := failingFS.Open(dataFile)
 	assert.NoError(err, "data file should remain when FileIO remove fails")
 	assert.NotNil(file)
