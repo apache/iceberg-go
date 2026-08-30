@@ -19,6 +19,7 @@ package iceberg
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -140,4 +141,28 @@ func TestManifestEntryWithoutColumnStatsPreservesEntry(t *testing.T) {
 	assert.Equal(t, entry.DataFile().FilePath(), projected.DataFile().FilePath())
 	assert.Empty(t, projected.DataFile().ValueCounts())
 	assert.Equal(t, map[int]int64{1: 1}, entry.DataFile().ValueCounts())
+}
+
+func TestDataFileWithoutColumnStatsConcurrentPartitionInitialization(t *testing.T) {
+	for range 32 {
+		file := &dataFile{
+			PartitionData: map[string]any{"partition": int32(7)},
+			fieldNameToID: map[string]int{"partition": 1000},
+		}
+		start := make(chan struct{})
+		var workers sync.WaitGroup
+		for range 8 {
+			workers.Go(func() {
+				<-start
+				assert.Equal(t, map[int]any{1000: int32(7)}, file.Partition())
+			})
+			workers.Go(func() {
+				<-start
+				projected := DataFileWithoutColumnStats(file)
+				assert.Equal(t, map[int]any{1000: int32(7)}, projected.Partition())
+			})
+		}
+		close(start)
+		workers.Wait()
+	}
 }

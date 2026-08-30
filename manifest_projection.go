@@ -174,6 +174,7 @@ func DataFileWithoutColumnStats(file DataFile) DataFile {
 		return file
 	}
 
+	d.initPartitionData()
 	out := cloneDataFileAvroFields(d)
 	out.ColSizes = nil
 	out.ValCounts = nil
