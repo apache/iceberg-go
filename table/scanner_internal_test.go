@@ -2400,3 +2400,26 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 		}
 	})
 }
+
+func TestPlanDataManifestTasksHandlesInaccurateCounts(t *testing.T) {
+	for _, counts := range [][]int32{{5, 5, 5}, {0, 2, 1}, {-1, -1, -1}} {
+		scan, schema, manifests, posIndex, dvIndex, eqIndex := newPlanTasksBenchmarkFixture(t, 3, 3)
+		for i, manifest := range manifests {
+			manifests[i] = iceberg.NewManifestFile(2, manifest.FilePath(), manifest.Length(),
+				manifest.PartitionSpecID(), manifest.SnapshotID()).
+				SequenceNum(manifest.SequenceNum(), manifest.MinSequenceNum()).
+				AddedFiles(counts[i]).
+				Build()
+		}
+
+		tasks, err := scan.planDataManifestTasks(t.Context(), manifests, schema,
+			minSequenceNum(manifests), posIndex, dvIndex, eqIndex)
+		require.NoError(t, err)
+		require.Len(t, tasks, 9)
+		for i, task := range tasks {
+			assert.Equal(t, "mem://plan-tasks-benchmark/data-"+strconv.Itoa(i/3)+"-"+strconv.Itoa(i%3)+".parquet",
+				task.File.FilePath(), "manifest counts: %v", counts)
+			assert.Equal(t, int64(i/3+1), *task.DataSequenceNumber)
+		}
+	}
+}
