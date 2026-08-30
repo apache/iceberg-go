@@ -747,32 +747,20 @@ func newPositionDeleteRowGroupTester(schema *arrow.Schema, targets map[string]st
 	}, nil
 }
 
-func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
-	if err != nil {
-		return nil, err
-	}
-	fileMetadata, ok := reader.Metadata().(*metadata.FileMetaData)
-	if !ok {
-		return nil, fmt.Errorf("%w: position delete reader does not expose Parquet metadata", iceberg.ErrInvalidSchema)
-	}
-
-	// Parquet projection uses leaf indices. A nested row column can shift
-	// those indices relative to the top-level Arrow fields.
-	columns := make([]int, 2)
-	for i, fieldIndex := range []int{filePathIndex, posIndex} {
-		name := schema.Field(fieldIndex).Name
-		columns[i] = fileMetadata.Schema.ColumnIndexByName(name)
-		if columns[i] < 0 {
-			return nil, fmt.Errorf("%w: position delete column %q must be a primitive column", iceberg.ErrInvalidSchema, name)
+func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
+	physicalIDs := make(map[int]int)
+	var collectIDs func([]arrow.Field)
+	collectIDs = func(fields []arrow.Field) {
+		for _, field := range fields {
+			if id := getFieldID(field); id != nil {
+				physicalIDs[*id]++
+			}
+			if nested, ok := field.Type.(arrow.NestedType); ok {
+				collectIDs(nested.Fields())
+			}
 		}
 	}
-
-	return columns, nil
-}
-
-func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
-	physicalIDs := indexArrowFieldsByMetadata(schema)
+	collectIDs(schema.Fields())
 	if len(physicalIDs) == 0 {
 		// External position-delete files are allowed to omit Iceberg field IDs.
 		// The name-based projection and row-level target filter remain safe, but
@@ -783,7 +771,7 @@ func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
 	filePathField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("file_path")
 	posField, _ := iceberg.PositionalDeleteSchema.FindFieldByName("pos")
 	for _, field := range []iceberg.NestedField{filePathField, posField} {
-		if len(physicalIDs[field.ID]) > 1 {
+		if physicalIDs[field.ID] > 1 {
 			return false, fmt.Errorf("%w: position delete field ID %d is not unique",
 				iceberg.ErrInvalidSchema, field.ID)
 		}
@@ -814,6 +802,30 @@ func positionDeletePruningEnabled(schema *arrow.Schema) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
+	if err != nil {
+		return nil, err
+	}
+	fileMetadata, ok := reader.Metadata().(*metadata.FileMetaData)
+	if !ok {
+		return nil, fmt.Errorf("%w: position delete reader does not expose Parquet metadata", iceberg.ErrInvalidSchema)
+	}
+
+	// Parquet projection uses leaf indices. A nested row column can shift
+	// those indices relative to the top-level Arrow fields.
+	columns := make([]int, 2)
+	for i, fieldIndex := range []int{filePathIndex, posIndex} {
+		name := schema.Field(fieldIndex).Name
+		columns[i] = fileMetadata.Schema.ColumnIndexByName(name)
+		if columns[i] < 0 {
+			return nil, fmt.Errorf("%w: position delete column %q must be a primitive column", iceberg.ErrInvalidSchema, name)
+		}
+	}
+
+	return columns, nil
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {

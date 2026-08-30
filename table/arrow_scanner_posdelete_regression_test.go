@@ -1362,10 +1362,36 @@ func TestReadDeletesProjectsLeafColumnsAroundNestedRow(t *testing.T) {
                 {"file_path": "other.parquet", "pos": 2, "row": {"id": 20, "name": "b"}},
                 {"file_path": "`+dataPath+`", "pos": 3, "row": {"id": 30, "name": "c"}}
             ]`)
-			deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128))
+			deletes, err := readDeletesForPaths(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128), map[string]struct{}{dataPath: {}})
 			require.NoError(t, err)
 			defer releasePosDeletes(deletes)
 			assert.Equal(t, []int64{1, 3}, int64Values(deletes[dataPath]))
+		})
+	}
+}
+
+func TestPositionDeleteRowGroupTesterRejectsNestedDuplicateFieldIDs(t *testing.T) {
+	duplicate := arrow.Field{
+		Name: "value", Type: arrow.BinaryTypes.String,
+		Metadata: PositionalDeleteArrowSchema.Field(0).Metadata,
+	}
+	for _, tc := range []struct {
+		name string
+		typ  arrow.DataType
+	}{
+		{"struct", arrow.StructOf(duplicate)},
+		{"list", arrow.ListOfField(duplicate)},
+		{"large list", arrow.LargeListOfField(duplicate)},
+		{"map key", arrow.MapOfFields(duplicate, arrow.Field{Name: "value", Type: arrow.BinaryTypes.String})},
+		{"map value", arrow.MapOfFields(arrow.Field{Name: "key", Type: arrow.BinaryTypes.String}, duplicate)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fields := PositionalDeleteArrowSchema.Fields()
+			fields = append(fields, arrow.Field{Name: "row", Type: tc.typ})
+			tester, err := newPositionDeleteRowGroupTester(
+				arrow.NewSchema(fields, nil), map[string]struct{}{"data.parquet": {}})
+			require.ErrorIs(t, err, iceberg.ErrInvalidSchema)
+			require.Nil(t, tester)
 		})
 	}
 }
