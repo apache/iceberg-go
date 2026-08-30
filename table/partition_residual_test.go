@@ -336,3 +336,76 @@ func TestPlanFilesLocalPopulatesPartitionResidual(t *testing.T) {
 	assert.Equal(t, iceberg.AlwaysTrue{}, tasks[0].Residual,
 		"the identity partition already proves id == 5")
 }
+
+func TestPartitionResidualEvaluatorPreservesRowsAtTransformBoundaries(t *testing.T) {
+	schema := iceberg.NewSchema(1,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32},
+	)
+	ref := iceberg.Reference("id")
+	filters := []iceberg.BooleanExpression{iceberg.IsNull(ref), iceberg.NotNull(ref)}
+	for _, boundary := range []int32{-10, -1, 0, 1, 10} {
+		for _, op := range []iceberg.Operation{
+			iceberg.OpEQ, iceberg.OpNEQ, iceberg.OpLT,
+			iceberg.OpLTEQ, iceberg.OpGT, iceberg.OpGTEQ,
+		} {
+			filters = append(filters, iceberg.LiteralPredicate(op, ref, iceberg.Int32Literal(boundary)))
+		}
+	}
+	filters = append(filters,
+		iceberg.IsIn(ref, int32(-10), int32(0), int32(10)),
+		iceberg.NotIn(ref, int32(-10), int32(0), int32(10)),
+	)
+	values := []any{
+		nil, int32(-21), int32(-20), int32(-11), int32(-10), int32(-1),
+		int32(0), int32(1), int32(9), int32(10), int32(11), int32(20), int32(21),
+	}
+	for _, transform := range []iceberg.Transform{
+		iceberg.IdentityTransform{},
+		iceberg.TruncateTransform{Width: 10},
+		iceberg.BucketTransform{NumBuckets: 4},
+	} {
+		t.Run(transform.String(), func(t *testing.T) {
+			spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+				SourceIDs: []int{1}, FieldID: 1000, Name: "partition", Transform: transform,
+			})
+			for _, filter := range filters {
+				t.Run(filter.String(), func(t *testing.T) {
+					bound, err := iceberg.BindExpr(schema, filter, true)
+					require.NoError(t, err)
+					residualEvaluator, err := newPartitionResidualEvaluator(schema, &spec, bound, true)
+					require.NoError(t, err)
+					if residualEvaluator == nil {
+						return
+					}
+					evaluate, err := iceberg.ExpressionEvaluator(schema, filter, true)
+					require.NoError(t, err)
+					for _, value := range values {
+						var literal iceberg.Optional[iceberg.Literal]
+						if value != nil {
+							literal = iceberg.Optional[iceberg.Literal]{Valid: true, Val: iceberg.Int32Literal(value.(int32))}
+						}
+						partitionLiteral := transform.Apply(literal)
+						var partition any
+						if partitionLiteral.Valid {
+							partition = partitionLiteral.Val.Any()
+						}
+						residual, changed, err := residualEvaluator.residual(map[int]any{1000: partition})
+						require.NoError(t, err)
+						if !changed {
+							continue
+						}
+						unbound, err := iceberg.TranslateColumnNames(residual, schema)
+						require.NoError(t, err)
+						evaluateResidual, err := iceberg.ExpressionEvaluator(schema, unbound, true)
+						require.NoError(t, err)
+						want, err := evaluate(partitionRecord{value})
+						require.NoError(t, err)
+						got, err := evaluateResidual(partitionRecord{value})
+						require.NoError(t, err)
+						assert.Equal(t, want, got, "value=%v partition=%v residual=%s", value, partition, residual)
+					}
+				})
+			}
+		})
+	}
+}

@@ -19,6 +19,7 @@ package table
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/apache/iceberg-go"
 )
@@ -58,6 +59,8 @@ type partitionResidualPredicate struct {
 }
 
 type partitionResidualProjection struct {
+	fieldID int
+
 	// strictComplement evaluates the inclusive projection of the negated
 	// predicate. If it is false, the original predicate is true for every
 	// value in this partition.
@@ -148,6 +151,10 @@ func (b *partitionResidualBuilder) VisitUnbound(pred iceberg.UnboundPredicate) *
 }
 
 func (b *partitionResidualBuilder) VisitBound(pred iceberg.BoundPredicate) *partitionResidualNode {
+	if literal, ok := pred.(iceberg.BoundLiteralPredicate); ok && partitionResidualValueIsNaN(literal.Literal()) {
+		return &partitionResidualNode{kind: partitionResidualOpaque, expr: pred}
+	}
+
 	parts := b.spec.FieldsBySourceID(pred.Ref().Field().ID)
 	if len(parts) == 0 {
 		return &partitionResidualNode{kind: partitionResidualOpaque, expr: pred}
@@ -192,7 +199,7 @@ func newPartitionResidualProjection(
 	pred iceberg.BoundPredicate,
 	caseSensitive bool,
 ) (partitionResidualProjection, error) {
-	var projection partitionResidualProjection
+	projection := partitionResidualProjection{fieldID: part.FieldID}
 
 	negated, ok := pred.Negate().(iceberg.BoundPredicate)
 	if ok {
@@ -244,7 +251,7 @@ func (p *partitionResidualEvaluator) residual(
 }
 
 func (n *partitionResidualNode) residual(
-	partition iceberg.StructLike,
+	partition borrowedPartitionRecord,
 ) (iceberg.BooleanExpression, bool, error) {
 	switch n.kind {
 	case partitionResidualOpaque:
@@ -253,6 +260,19 @@ func (n *partitionResidualNode) residual(
 		return n.expr, false, nil
 	case partitionResidualPredicateKind:
 		for _, projection := range n.predicate.projections {
+			value, known := partition.partition[projection.fieldID]
+			if !known {
+				continue
+			}
+			// Scalar comparisons order nulls and NaNs, while Arrow's row
+			// filters propagate nulls and use IEEE floating-point comparisons.
+			// Keep those predicates intact, including beneath NOT.
+			op := n.predicate.original.Op()
+			if op != iceberg.OpIsNull && op != iceberg.OpNotNull &&
+				(value == nil || partitionResidualValueIsNaN(value)) {
+				continue
+			}
+
 			if projection.strictComplement != nil {
 				matches, err := projection.strictComplement(partition)
 				if err != nil {
@@ -315,4 +335,18 @@ func (n *partitionResidualNode) residual(
 	}
 
 	return n.expr, false, nil
+}
+
+func partitionResidualValueIsNaN(value any) bool {
+	if literal, ok := value.(iceberg.Literal); ok {
+		value = literal.Any()
+	}
+	switch value := value.(type) {
+	case float32:
+		return math.IsNaN(float64(value))
+	case float64:
+		return math.IsNaN(value)
+	default:
+		return false
+	}
 }
