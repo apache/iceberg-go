@@ -1035,3 +1035,39 @@ func int64Values(chunked *arrow.Chunked) []int64 {
 
 	return out
 }
+
+func TestReadDeletesProjectsLeafColumnsAroundNestedRow(t *testing.T) {
+	rowField := arrow.Field{Name: "row", Type: arrow.StructOf(
+		arrow.Field{Name: "id", Type: arrow.PrimitiveTypes.Int64},
+		arrow.Field{Name: "name", Type: arrow.BinaryTypes.String},
+	)}
+	filePath := PositionalDeleteArrowSchema.Field(0)
+	pos := PositionalDeleteArrowSchema.Field(1)
+	for _, tc := range []struct {
+		name   string
+		fields []arrow.Field
+	}{
+		{"row first", []arrow.Field{rowField, filePath, pos}},
+		{"row between delete columns", []arrow.Field{filePath, rowField, pos}},
+		{"row last", []arrow.Field{filePath, pos, rowField}},
+		{"reversed delete columns", []arrow.Field{pos, rowField, filePath}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := memory.NewCheckedAllocator(memory.DefaultAllocator)
+			ctx := compute.WithAllocator(t.Context(), mem)
+			defer mem.AssertSize(t, 0)
+			deletePath := "mem://bucket/deletes/nested-row.parquet"
+			dataPath := "mem://bucket/data/needed.parquet"
+			memFS := iceio.NewMemFS()
+			writePosDeleteParquetToMemFSWithSchema(t, memFS, deletePath, arrow.NewSchema(tc.fields, nil), `[
+                {"file_path": "`+dataPath+`", "pos": 1, "row": {"id": 10, "name": "a"}},
+                {"file_path": "other.parquet", "pos": 2, "row": {"id": 20, "name": "b"}},
+                {"file_path": "`+dataPath+`", "pos": 3, "row": {"id": 30, "name": "c"}}
+            ]`)
+			deletes, err := readDeletes(ctx, memFS, newPosDeleteFile(t, deletePath, 3, 128))
+			require.NoError(t, err)
+			defer releasePosDeletes(deletes)
+			assert.Equal(t, []int64{1, 3}, int64Values(deletes[dataPath]))
+		})
+	}
+}

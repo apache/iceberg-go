@@ -32,6 +32,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/compute/exprs"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/metadata"
 	"github.com/apache/iceberg-go"
 	iceinternal "github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
@@ -605,12 +606,12 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 		return nil, err
 	}
 
-	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
+	columns, err := positionDeleteProjectionIndices(schema, rdr)
 	if err != nil {
 		return nil, err
 	}
 
-	records, err := rdr.GetRecords(ctx, []int{filePathIndex, posIndex}, nil)
+	records, err := rdr.GetRecords(ctx, columns, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -640,6 +641,30 @@ func readDeletes(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_
 	}
 
 	return acc.finish(), nil
+}
+
+func positionDeleteProjectionIndices(schema *arrow.Schema, reader tblutils.FileReader) ([]int, error) {
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(schema)
+	if err != nil {
+		return nil, err
+	}
+	fileMetadata, ok := reader.Metadata().(*metadata.FileMetaData)
+	if !ok {
+		return nil, fmt.Errorf("%w: position delete reader does not expose Parquet metadata", iceberg.ErrInvalidSchema)
+	}
+
+	// Parquet projection uses leaf indices. A nested row column can shift
+	// those indices relative to the top-level Arrow fields.
+	columns := make([]int, 2)
+	for i, fieldIndex := range []int{filePathIndex, posIndex} {
+		name := schema.Field(fieldIndex).Name
+		columns[i] = fileMetadata.Schema.ColumnIndexByName(name)
+		if columns[i] < 0 {
+			return nil, fmt.Errorf("%w: position delete column %q must be a primitive column", iceberg.ErrInvalidSchema, name)
+		}
+	}
+
+	return columns, nil
 }
 
 func positionDeleteColumnIndices(schema *arrow.Schema) (int, int, error) {
