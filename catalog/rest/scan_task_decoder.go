@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 
 	"github.com/apache/iceberg-go"
@@ -525,18 +526,27 @@ func (c *partitionDecodePlanCache) planFor(
 		return nil, fmt.Errorf("unknown partition spec ID %d", specID)
 	}
 
-	plan := newPartitionDecodePlan(spec, metadata)
+	plan, err := newPartitionDecodePlan(spec, metadata)
+	if err != nil {
+		return nil, err
+	}
 	c.plans[specID] = plan
 
 	return plan, nil
 }
 
-func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlanningMetadata) *partitionDecodePlan {
+func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlanningMetadata) (*partitionDecodePlan, error) {
 	plan := &partitionDecodePlan{
 		spec:   spec,
 		fields: make([]partitionDecodeField, spec.NumFields()),
 	}
 	for i, field := range spec.Fields() {
+		transform := reflect.ValueOf(field.Transform)
+		if !transform.IsValid() || (transform.Kind() == reflect.Pointer && transform.IsNil()) {
+			return nil, fmt.Errorf("%w: partition field %q (ID %d) has no transform",
+				iceberg.ErrInvalidTransform, field.Name, field.FieldID)
+		}
+
 		fieldPlan := partitionDecodeField{
 			fieldID:   field.FieldID,
 			fieldName: field.Name,
@@ -551,7 +561,7 @@ func newPartitionDecodePlan(spec *iceberg.PartitionSpec, metadata table.ScanPlan
 		plan.fields[i] = fieldPlan
 	}
 
-	return plan
+	return plan, nil
 }
 
 func decodePartition(
