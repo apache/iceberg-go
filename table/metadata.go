@@ -422,7 +422,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		if b.props == nil {
 			b.props = iceberg.Properties{}
 		}
-		b.snapshotList = cloneSnapshots(common.SnapshotList)
+		snapshots, err := common.snapshotsForMarshal()
+		if err != nil {
+			return nil, err
+		}
+		b.snapshotList = cloneSnapshots(snapshots)
 		b.snapshotLog = cloneCollected(common.SnapshotLog)
 		b.metadataLog = cloneCollected(common.MetadataLog)
 		b.sortOrderList = cloneSortOrders(common.SortOrderList)
