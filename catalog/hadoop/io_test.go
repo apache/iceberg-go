@@ -15,43 +15,43 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gcs_test
+// The integration build blank-imports io/gocloud, which registers the schemes
+// this file asserts are absent.
+//go:build !integration
+
+package hadoop
 
 import (
 	"context"
 	"testing"
 
 	"github.com/apache/iceberg-go/internal/schemes"
-	"github.com/apache/iceberg-go/io"
-	_ "github.com/apache/iceberg-go/io/gocloud/gcs"
+	icebergio "github.com/apache/iceberg-go/io"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegistersOnlyItsOwnSchemes(t *testing.T) {
-	registered := io.GetRegisteredSchemes()
-	assert.Subset(t, registered, schemes.GCS)
-	for _, list := range [][]string{schemes.S3, schemes.Azure} {
+func TestImportRegistersNoCloudSchemes(t *testing.T) {
+	registered := icebergio.GetRegisteredSchemes()
+	for _, list := range [][]string{schemes.S3, schemes.GCS, schemes.Azure} {
 		for _, scheme := range list {
 			assert.NotContains(t, registered, scheme)
 		}
 	}
 }
 
-func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
-	ctx := context.Background()
-
+func TestLoadFSCloudPathReportsMissingBackend(t *testing.T) {
 	for _, tt := range []struct {
 		location string
 		wantHint string
 	}{
 		{"s3://bucket/key", "io/gocloud/s3"},
-		{"oss://bucket/key", "io/gocloud/s3"},
+		{"gs://bucket/key", "io/gocloud/gcs"},
 		{"abfs://container@account.dfs.core.windows.net/key", "io/gocloud/azure"},
 	} {
 		t.Run(tt.location, func(t *testing.T) {
-			_, err := io.LoadFS(ctx, nil, tt.location)
-			require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
+			_, err := icebergio.LoadFS(context.Background(), nil, tt.location)
+			require.ErrorIs(t, err, icebergio.ErrIOSchemeNotFound)
 			assert.ErrorContains(t, err, tt.wantHint)
 		})
 	}

@@ -86,6 +86,8 @@ var ErrEmptyObjectKey = errors.New("object key is empty")
 // URI to access it; this backend does not route across authorities.
 var ErrUnsupportedObjectAuthority = errors.New("object URI authority is not supported by this FileIO")
 
+// ObjectLocation is a parsed object-store URI:
+// the scheme, the authority owning the object, and the object key within that authority.
 type ObjectLocation struct {
 	scheme       string
 	authority    string
@@ -125,6 +127,19 @@ func splitObjectLocation(location string) (ObjectLocation, error) {
 	return NewObjectLocation(scheme, authority, key), nil
 }
 
+// Scheme returns the URI scheme, empty for a location parsed from a bare key.
+func (o ObjectLocation) Scheme() string { return o.scheme }
+
+// Authority returns the bucket or container owning the object,
+// empty for a location parsed from a bare key.
+func (o ObjectLocation) Authority() string { return o.authority }
+
+// Key returns the object key within the authority.
+func (o ObjectLocation) Key() string { return o.key }
+
+// NewObjectLocation builds a location for a URI carrying an explicit authority.
+// Backends parsing their own URI grammar use it so the URI prefix stays
+// consistent with the scheme and authority they parsed.
 func NewObjectLocation(scheme, authority, key string) ObjectLocation {
 	return ObjectLocation{
 		scheme:       scheme,
@@ -135,8 +150,12 @@ func NewObjectLocation(scheme, authority, key string) ObjectLocation {
 	}
 }
 
+// ObjectLocationExtractor resolves an input path to the object location this
+// FileIO acts on, rejecting paths belonging to another authority.
 type ObjectLocationExtractor func(location string) (ObjectLocation, error)
 
+// KeyExtractorFromObjectLocation adapts an extractor to a KeyExtractor by
+// keeping only the object key.
 func KeyExtractorFromObjectLocation(extract ObjectLocationExtractor) KeyExtractor {
 	return func(location string) (string, error) {
 		parsed, err := extract(location)
@@ -148,6 +167,8 @@ func KeyExtractorFromObjectLocation(extract ObjectLocationExtractor) KeyExtracto
 	}
 }
 
+// DefaultObjectLocationExtractor extracts locations from URIs of the form scheme://bucket/key,
+// accepting only the given schemes and bucket.
 func DefaultObjectLocationExtractor(bucketName string, allowedSchemes ...string) ObjectLocationExtractor {
 	return func(location string) (ObjectLocation, error) {
 		parsed, err := splitObjectLocation(location)
@@ -183,6 +204,7 @@ func defaultKeyExtractor(bucketName string, allowedSchemes ...string) KeyExtract
 	return KeyExtractorFromObjectLocation(DefaultObjectLocationExtractor(bucketName, allowedSchemes...))
 }
 
+// FileIO is the iceberg-go/io implementation backed by a gocloud.dev bucket.
 type FileIO struct {
 	*blob.Bucket
 
@@ -285,13 +307,12 @@ func (bfs *FileIO) Open(path string) (icebergio.File, error) {
 }
 
 func (bfs *FileIO) Remove(name string) error {
-	var err error
-	name, err = bfs.preprocess(name)
+	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "remove", Path: name, Err: err}
 	}
 
-	if err := bfs.Delete(bfs.ctx, name); err != nil {
+	if err := bfs.Delete(bfs.ctx, key); err != nil {
 		if gcerrors.Code(err) == gcerrors.NotFound {
 			marker := directoryMarker(name)
 			if marker != "" {
@@ -316,13 +337,12 @@ func (bfs *FileIO) Create(name string) (icebergio.FileWriter, error) {
 }
 
 func (bfs *FileIO) WriteFile(name string, content []byte) error {
-	var err error
-	name, err = bfs.preprocess(name)
+	key, err := bfs.preprocess(name)
 	if err != nil {
 		return &fs.PathError{Op: "write file", Path: name, Err: err}
 	}
 
-	return bfs.WriteAll(bfs.ctx, name, content, nil)
+	return bfs.WriteAll(bfs.ctx, key, content, nil)
 }
 
 // NewWriter returns a Writer that writes to the blob stored at path.
@@ -333,17 +353,17 @@ func (bfs *FileIO) WriteFile(name string, content []byte) error {
 //
 // The caller must call Close on the returned Writer, even if the write is
 // aborted.
-func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *blobWriteFile, err error) {
-	path, err = bfs.preprocess(path)
+func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, opts *blob.WriterOptions) (w *Writer, err error) {
+	key, err := bfs.preprocess(path)
 	if err != nil {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 	}
-	if !fs.ValidPath(path) {
+	if !fs.ValidPath(key) {
 		return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 	}
 
 	if !overwrite {
-		if exists, err := bfs.Exists(ctx, path); err != nil || exists {
+		if exists, err := bfs.Exists(ctx, key); err != nil || exists {
 			if err != nil {
 				return nil, &fs.PathError{Op: "new writer", Path: path, Err: err}
 			}
@@ -351,18 +371,20 @@ func (bfs *FileIO) NewWriter(ctx context.Context, path string, overwrite bool, o
 			return nil, &fs.PathError{Op: "new writer", Path: path, Err: fs.ErrInvalid}
 		}
 	}
-	bw, err := bfs.Bucket.NewWriter(ctx, path, opts)
+	bw, err := bfs.Bucket.NewWriter(ctx, key, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	return &blobWriteFile{
+	return &Writer{
 			Writer: bw,
-			name:   path,
+			name:   key,
 		},
 		nil
 }
 
+// New returns a FileIO backed by bucket,
+// using extractObject to map input paths to object keys within it.
 func New(ctx context.Context, bucket *blob.Bucket, extractObject ObjectLocationExtractor) *FileIO {
 	return &FileIO{Bucket: bucket, extractObject: extractObject, ctx: ctx}
 }
@@ -688,13 +710,15 @@ func (bfs *FileIO) RemoveAll(name string) error {
 	return nil
 }
 
-type blobWriteFile struct {
+// Writer is the FileWriter returned by NewWriter.
+// It exposes the underlying gocloud.dev writer for callers that need its options.
+type Writer struct {
 	*blob.Writer
 	name string
 	b    *FileIO
 }
 
-func (f *blobWriteFile) Name() string                { return f.name }
-func (f *blobWriteFile) Sys() any                    { return f.b }
-func (f *blobWriteFile) Close() error                { return f.Writer.Close() }
-func (f *blobWriteFile) Write(p []byte) (int, error) { return f.Writer.Write(p) }
+func (f *Writer) Name() string                { return f.name }
+func (f *Writer) Sys() any                    { return f.b }
+func (f *Writer) Close() error                { return f.Writer.Close() }
+func (f *Writer) Write(p []byte) (int, error) { return f.Writer.Write(p) }

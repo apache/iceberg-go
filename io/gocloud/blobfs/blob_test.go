@@ -883,3 +883,32 @@ func TestBlobFileIORemoveAll(t *testing.T) {
 
 	require.NoError(t, bfs.RemoveAll("s3://test-bucket/missing"))
 }
+
+func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
+	t.Parallel()
+
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	fileIO := testBlobFileIO(context.Background(), "my-bucket", bucket)
+	name := "s3://other-bucket/file.parquet"
+
+	for _, tt := range []struct {
+		op  string
+		run func() error
+	}{
+		{"remove", func() error { return fileIO.Remove(name) }},
+		{"write file", func() error { return fileIO.WriteFile(name, nil) }},
+		{"new writer", func() error {
+			_, err := fileIO.NewWriter(context.Background(), name, true, nil)
+
+			return err
+		}},
+	} {
+		t.Run(tt.op, func(t *testing.T) {
+			var pathErr *fs.PathError
+			require.ErrorAs(t, tt.run(), &pathErr)
+			assert.Equal(t, tt.op, pathErr.Op)
+			assert.Equal(t, name, pathErr.Path)
+		})
+	}
+}

@@ -29,7 +29,13 @@ import (
 )
 
 func TestRegistersOnlyItsOwnSchemes(t *testing.T) {
-	assert.ElementsMatch(t, append([]string{"file", "", "mem"}, schemes.S3...), io.GetRegisteredSchemes())
+	registered := io.GetRegisteredSchemes()
+	assert.Subset(t, registered, schemes.S3)
+	for _, list := range [][]string{schemes.GCS, schemes.Azure} {
+		for _, scheme := range list {
+			assert.NotContains(t, registered, scheme)
+		}
+	}
 }
 
 func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {

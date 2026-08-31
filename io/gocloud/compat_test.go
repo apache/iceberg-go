@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/apache/iceberg-go/internal/schemes"
 	"github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/io/gocloud"
 	"github.com/apache/iceberg-go/io/gocloud/blobfs"
@@ -37,6 +38,13 @@ var (
 	_ error               = gocloud.ErrEmptyObjectKey
 	_ error               = gocloud.ErrUnsupportedObjectAuthority
 )
+
+func TestRegistersAllCloudSchemes(t *testing.T) {
+	registered := io.GetRegisteredSchemes()
+	for _, list := range [][]string{schemes.S3, schemes.GCS, schemes.Azure} {
+		assert.Subset(t, registered, list)
+	}
+}
 
 func TestDeprecatedParseConfigWrappers(t *testing.T) {
 	ctx := context.Background()

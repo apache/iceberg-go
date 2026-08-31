@@ -109,8 +109,8 @@ func newAdlsLocation(adlsURI *url.URL) (*adlsLocation, error) {
 
 // Construct a Azure bucket from a URL
 func createAzureBucket(ctx context.Context, parsed *url.URL, props map[string]string) (*blob.Bucket, error) {
-	adlsSasTokens := blobfs.PropertiesWithPrefix(props, io.ADLSSasTokenPrefix)
-	adlsConnectionStrings := blobfs.PropertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
+	adlsSasTokens := propertiesWithPrefix(props, io.ADLSSasTokenPrefix)
+	adlsConnectionStrings := propertiesWithPrefix(props, io.ADLSConnectionStringPrefix)
 
 	// Construct the client
 	location, err := newAdlsLocation(parsed)

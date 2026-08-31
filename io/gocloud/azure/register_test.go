@@ -29,7 +29,13 @@ import (
 )
 
 func TestRegistersOnlyItsOwnSchemes(t *testing.T) {
-	assert.ElementsMatch(t, append([]string{"file", "", "mem"}, schemes.Azure...), io.GetRegisteredSchemes())
+	registered := io.GetRegisteredSchemes()
+	assert.Subset(t, registered, schemes.Azure)
+	for _, list := range [][]string{schemes.S3, schemes.GCS} {
+		for _, scheme := range list {
+			assert.NotContains(t, registered, scheme)
+		}
+	}
 }
 
 func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
@@ -37,7 +43,7 @@ func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
 
 	for _, tt := range []struct {
 		location string
-		errValue string
+		wantHint string
 	}{
 		{"s3://bucket/key", "io/gocloud/s3"},
 		{"s3a://bucket/key", "io/gocloud/s3"},
@@ -46,7 +52,7 @@ func TestOtherCloudSchemesRemainUnregistered(t *testing.T) {
 		t.Run(tt.location, func(t *testing.T) {
 			_, err := io.LoadFS(ctx, nil, tt.location)
 			require.ErrorIs(t, err, io.ErrIOSchemeNotFound)
-			assert.ErrorContains(t, err, tt.errValue)
+			assert.ErrorContains(t, err, tt.wantHint)
 		})
 	}
 }

@@ -19,24 +19,26 @@ package schemes
 
 import "slices"
 
+// S3 covers oss because Alibaba OSS is reached through its S3-compatible API and the AWS SDK.
+// Unlike Java, which has a dedicated OSSFileIO.
+// OSS users here configure s3.* credential keys, not oss.*.
 var (
 	S3    = []string{"s3", "s3a", "s3n", "oss"}
 	GCS   = []string{"gs"}
 	Azure = []string{"abfs", "abfss", "wasb", "wasbs"}
 )
 
-var byBackend = map[string][]string{
-	"s3":    S3,
-	"gcs":   GCS,
-	"azure": Azure,
-}
-
+// BackendFor returns the io/gocloud subpackage that registers scheme, or
+// an empty string if no backend claims it.
 func BackendFor(scheme string) string {
-	for backend, list := range byBackend {
-		if slices.Contains(list, scheme) {
-			return backend
-		}
+	switch {
+	case slices.Contains(S3, scheme):
+		return "s3"
+	case slices.Contains(GCS, scheme):
+		return "gcs"
+	case slices.Contains(Azure, scheme):
+		return "azure"
+	default:
+		return ""
 	}
-
-	return ""
 }
