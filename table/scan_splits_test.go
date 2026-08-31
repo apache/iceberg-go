@@ -254,11 +254,11 @@ func TestAdjustParquetTaskRangeToPhysicalFileSize(t *testing.T) {
 			wantLength:   40,
 		},
 		{
-			name:         "extends last range when file grew",
+			name:         "does not extend caller-owned range when file grew",
 			task:         FileScanTask{File: file, Start: 40, Length: 60},
 			physicalSize: 120,
 			wantStart:    40,
-			wantLength:   80,
+			wantLength:   60,
 		},
 		{
 			name:         "keeps non-last range unchanged",

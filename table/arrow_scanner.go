@@ -1506,10 +1506,9 @@ func (as *arrowScan) processRecords(
 	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
 }
 
-// adjustParquetTaskRange keeps a planned last range aligned with the physical
-// file when manifest and footer sizes differ. A range that ends at the
-// manifest's file size is the last planned range, so it can safely extend to
-// the physical end or clamp to it without overlapping another task.
+// adjustParquetTaskRange keeps a planned range within the physical file when
+// manifest and footer sizes differ. It only clamps ranges that run past the
+// physical end; caller-owned task boundaries must never be extended.
 func adjustParquetTaskRange(task FileScanTask, physicalFileSize int64) (start, length int64) {
 	start, length = task.Start, task.Length
 	if task.File == nil || physicalFileSize <= 0 || start < 0 || start > physicalFileSize {
@@ -1517,9 +1516,7 @@ func adjustParquetTaskRange(task FileScanTask, physicalFileSize int64) (start, l
 	}
 
 	maxLength := physicalFileSize - start
-	manifestFileSize := task.File.FileSizeBytes()
-	lastRange := manifestFileSize >= start && length == manifestFileSize-start
-	if length > maxLength || (lastRange && physicalFileSize != manifestFileSize) {
+	if length > maxLength {
 		length = maxLength
 	}
 
