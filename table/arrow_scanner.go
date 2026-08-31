@@ -73,6 +73,8 @@ func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 	}
 }
 
+// readAllDeleteFiles is retained for the eager-path benchmark and regression
+// tests; scans use lazyPositionDeleteLoader instead.
 func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFilePosDeletes, error) {
 	deletesPerFile := make(perFilePosDeletes)
 	uniqueDeletes := make(map[string]iceberg.DataFile)
@@ -144,6 +146,9 @@ func readAllDeleteFiles(ctx context.Context, fs iceio.IO, tasks []FileScanTask, 
 // The grouped Arrow chunks are owned by the loader until release. The iterator
 // calls release after all workers have stopped, which keeps shared chunks alive
 // while multiple tasks use them and also covers early iterator termination.
+// The loader has the lifetime of exactly one scan. Each file's first load also
+// locks in its result, including context errors, for every caller; a loader
+// must not be reused for a retry with a different context.
 type lazyPositionDeleteLoader struct {
 	fs    iceio.IO
 	files map[string]*lazyPositionDeleteFile
@@ -222,6 +227,8 @@ func (l *lazyPositionDeleteLoader) load(ctx context.Context, task FileScanTask) 
 				// in case a future reader returns partial Arrow ownership.
 				releasePosDeletes(cached.deletes)
 				cached.deletes = nil
+				cached.err = fmt.Errorf("read position deletes from %s: %w",
+					cached.dataFile.FilePath(), cached.err)
 			}
 		})
 		if cached.err != nil {
@@ -1955,7 +1962,10 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 							var err error
 							positionalDeletes, err = positionDeleteLoader.load(scanCtx, task.Value)
 							if err != nil {
-								records <- enumeratedRecord{Task: task, Err: err}
+								select {
+								case records <- enumeratedRecord{Task: task, Err: err}:
+								case <-scanCtx.Done():
+								}
 								cancel(err)
 
 								return
@@ -2003,6 +2013,10 @@ func (as *arrowScan) recordBatchesFromTasksAndDeletes(ctx context.Context, tasks
 	}
 }
 
+// GetRecords prepares the projected Arrow schema and a single-use record
+// iterator. Positional-delete files are opened and read during iteration, so
+// errors from those files are returned by the iterator; deletion-vector and
+// equality-delete errors are returned before the iterator is created.
 func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	var err error
 	as.useLargeTypes, err = strconv.ParseBool(as.options.Get(ScanOptionArrowUseLargeTypes, "false"))

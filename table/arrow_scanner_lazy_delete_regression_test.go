@@ -20,14 +20,19 @@ package table
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table/internal"
@@ -37,11 +42,16 @@ import (
 
 type countingOpenMemFS struct {
 	*iceio.MemFS
-	opens atomic.Int64
+	opens        atomic.Int64
+	trackedPath  string
+	trackedOpens atomic.Int64
 }
 
 func (f *countingOpenMemFS) Open(name string) (iceio.File, error) {
 	f.opens.Add(1)
+	if name == f.trackedPath {
+		f.trackedOpens.Add(1)
+	}
 
 	return f.MemFS.Open(name)
 }
@@ -52,6 +62,42 @@ func newLazyDataFile(t *testing.T, path string) iceberg.DataFile {
 	builder, err := iceberg.NewDataFileBuilder(
 		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
 		path, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+
+	return builder.Build()
+}
+
+func writeLazyDataParquetToMemFS(t *testing.T, fs *iceio.MemFS, path string, start, count int) iceberg.DataFile {
+	t.Helper()
+
+	dataSchema := arrow.NewSchema([]arrow.Field{{
+		Name:     "value",
+		Type:     arrow.PrimitiveTypes.Int64,
+		Nullable: false,
+		Metadata: arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"}),
+	}}, nil)
+	bldr := array.NewInt64Builder(memory.DefaultAllocator)
+	defer bldr.Release()
+	for i := range count {
+		bldr.Append(int64(start + i))
+	}
+	values := bldr.NewArray()
+	defer values.Release()
+	record := array.NewRecordBatch(dataSchema, []arrow.Array{values}, int64(count))
+	defer record.Release()
+	tbl := array.NewTableFromRecords(dataSchema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+
+	file, err := fs.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, pqarrow.WriteTable(tbl, file, int64(count),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()))
+	require.NoError(t, file.Close())
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentData,
+		path, iceberg.ParquetFile, nil, nil, nil, int64(count), 128)
 	require.NoError(t, err)
 
 	return builder.Build()
@@ -163,6 +209,7 @@ func TestLazyPositionDeleteLoaderCachesErrors(t *testing.T) {
 	first, err := loader.load(context.Background(), task)
 	require.Error(t, err)
 	assert.Nil(t, first)
+	assert.Contains(t, err.Error(), deleteFile.FilePath())
 	assert.Equal(t, int64(1), fs.opens.Load())
 
 	second, secondErr := loader.load(context.Background(), task)
@@ -245,6 +292,72 @@ func TestArrowScanDefersPositionDeleteReadsUntilIteration(t *testing.T) {
 	}
 	require.Error(t, iterErr, "iteration should reach the missing data file after loading its delete")
 	assert.Equal(t, int64(2), memFS.opens.Load(), "the first task should open one delete and one data file")
+}
+
+func TestArrowScanReleasesLazyPositionDeletesOnEarlyStop(t *testing.T) {
+	mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
+	defer mem.AssertSize(t, 0)
+	ctx := compute.WithAllocator(t.Context(), mem)
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "value", Type: iceberg.PrimitiveTypes.Int64,
+	})
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec,
+		UnsortedSortOrder, "mem://bucket/table", nil)
+	require.NoError(t, err)
+
+	const (
+		deletePath = "mem://bucket/deletes/shared.parquet"
+		taskCount  = 8
+		rowCount   = 4
+	)
+	memFS := &countingOpenMemFS{
+		MemFS:       iceio.NewMemFS(),
+		trackedPath: deletePath,
+	}
+	tasks := make([]FileScanTask, taskCount)
+	var deleteJSON strings.Builder
+	deleteJSON.WriteByte('[')
+	for i := range tasks {
+		dataPath := fmt.Sprintf("mem://bucket/data/data-%d.parquet", i)
+		tasks[i].File = writeLazyDataParquetToMemFS(t, memFS.MemFS,
+			dataPath, i*rowCount, rowCount)
+		if i > 0 {
+			deleteJSON.WriteByte(',')
+		}
+		fmt.Fprintf(&deleteJSON, `{"file_path":"%s","pos":0}`, dataPath)
+	}
+	deleteJSON.WriteByte(']')
+	writePosDeleteParquetToMemFS(t, memFS.MemFS, deletePath, deleteJSON.String())
+	deleteFile := newPosDeleteFile(t, deletePath, taskCount, 128)
+	for i := range tasks {
+		tasks[i].DeleteFiles = []iceberg.DataFile{deleteFile}
+	}
+
+	scan := &arrowScan{
+		metadata:        metadata,
+		fs:              memFS,
+		scanSchema:      schema,
+		projectedSchema: schema,
+		boundRowFilter:  iceberg.AlwaysTrue{},
+		rowLimit:        -1,
+		concurrency:     4,
+	}
+	_, records, err := scan.GetRecords(ctx, tasks)
+	require.NoError(t, err)
+
+	var batches int
+	for record, err := range records {
+		require.NoError(t, err)
+		require.NotNil(t, record)
+		record.Release()
+		batches++
+		break
+	}
+
+	assert.Equal(t, 1, batches, "the test must stop after the first batch")
+	assert.Equal(t, int64(1), memFS.trackedOpens.Load(),
+		"all workers must share one lazily-loaded positional-delete file")
 }
 
 func TestLazyPositionDeleteLoaderReleasesChunksWhenIteratorStops(t *testing.T) {
