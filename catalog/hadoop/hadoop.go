@@ -15,6 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// Package hadoop implements a catalog over a Hadoop-style warehouse directory.
+//
+// It links no cloud SDK. Callers on cloud storage must blank-import the backend for their scheme.
+// For example io/gocloud/s3.
+//
+// Otherwise the first LoadFS for a cloud path fails with io.ErrIOSchemeNotFound naming the package to import.
 package hadoop
 
 import (

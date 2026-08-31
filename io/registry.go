@@ -24,6 +24,8 @@ import (
 	"net/url"
 	"slices"
 	"sync"
+
+	"github.com/apache/iceberg-go/internal/schemes"
 )
 
 type registry map[string]SchemeFactory
@@ -75,13 +77,18 @@ func init() {
 	Register("", localFSFactory)
 }
 
+func schemeImportHint(backend string) string {
+	return "hint: import the matching IO module for side-effect registration: " +
+		`_ "github.com/apache/iceberg-go/io/gocloud/` + backend + `"`
+}
+
 func schemeRegistrationHint(scheme string) string {
-	switch scheme {
-	case "s3", "s3a", "s3n", "gs", "abfs", "abfss", "wasb", "wasbs":
-		return `hint: import the matching IO module for side-effect registration: _ "github.com/apache/iceberg-go/io/gocloud"  // for s3/gcs/azblob`
-	default:
+	backend := schemes.BackendFor(scheme)
+	if backend == "" {
 		return ""
 	}
+
+	return schemeImportHint(backend)
 }
 
 func inferFileIOFromScheme(ctx context.Context, path string, props map[string]string) (IO, error) {
