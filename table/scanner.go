@@ -376,6 +376,35 @@ func IsDeletionVector(df iceberg.DataFile) bool {
 		df.ContentType() == iceberg.EntryContentPosDeletes
 }
 
+type dataFileKind int
+
+const (
+	dataFileKindData dataFileKind = iota
+	dataFileKindPosDeletes
+	dataFileKindEqDeletes
+	dataFileKindDeletionVector
+)
+
+// classifyDataFile buckets a file by content type. Deletion vectors are
+// Puffin position-delete files and are split out from regular pos-deletes.
+func classifyDataFile(f iceberg.DataFile) (dataFileKind, error) {
+	switch f.ContentType() {
+	case iceberg.EntryContentData:
+		return dataFileKindData, nil
+	case iceberg.EntryContentPosDeletes:
+		if IsDeletionVector(f) {
+			return dataFileKindDeletionVector, nil
+		}
+
+		return dataFileKindPosDeletes, nil
+	case iceberg.EntryContentEqDeletes:
+		return dataFileKindEqDeletes, nil
+	default:
+		return 0, fmt.Errorf("%w: unknown DataFileContent type (%s)",
+			ErrInvalidMetadata, f.ContentType())
+	}
+}
+
 // Scan represents a table scan. It implements [io.Closer]; callers should
 // close it when they are done, including early exits after remote planning
 // succeeds but before all records are consumed.
