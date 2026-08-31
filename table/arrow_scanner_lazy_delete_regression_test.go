@@ -352,6 +352,7 @@ func TestArrowScanReleasesLazyPositionDeletesOnEarlyStop(t *testing.T) {
 		require.NotNil(t, record)
 		record.Release()
 		batches++
+
 		break
 	}
 
