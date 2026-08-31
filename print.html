@@ -322,7 +322,7 @@ go get github.com/apache/iceberg-go@latest
 go get github.com/apache/arrow-go/v18@latest
 go get github.com/uptrace/bun/driver/sqliteshim@latest
 </code></pre>
-<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import <code>github.com/apache/iceberg-go/io/gocloud</code>. We are staying on local disk for this tutorial.</p>
+<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import the matching backend package, such as <code>github.com/apache/iceberg-go/io/gocloud/s3</code>. We are staying on local disk for this tutorial.</p>
 <h2 id="2-open-a-local-catalog"><a class="header" href="#2-open-a-local-catalog">2. Open a local catalog</a></h2>
 <p>The SQL catalog stores its metadata in a database, and the actual data files live under a &quot;warehouse&quot; directory. We will use SQLite for both the catalog DB and a local folder for the warehouse.</p>
 <pre><code class="language-go">package main
@@ -628,12 +628,15 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 </ul>
 <h2 id="file-system-credentials"><a class="header" href="#file-system-credentials">File-system credentials</a></h2>
 <p>iceberg-go registers the local file system (<code>file://</code>) automatically. Cloud schemes are <em>not</em> registered until you add a blank import:</p>
-<pre><code class="language-go">import _ &quot;github.com/apache/iceberg-go/io/gocloud&quot;
+<pre><code class="language-go">import _ &quot;github.com/apache/iceberg-go/io/gocloud/s3&quot;    // s3, s3a, s3n, oss
+import _ &quot;github.com/apache/iceberg-go/io/gocloud/gcs&quot;   // gs
+import _ &quot;github.com/apache/iceberg-go/io/gocloud/azure&quot; // abfs, abfss, wasb, wasbs
 </code></pre>
-<p>The <code>init()</code> function in <a href="https://github.com/apache/iceberg-go/blob/main/io/gocloud/register.go"><code>io/gocloud/register.go</code></a> registers <code>s3</code>, <code>s3a</code>, <code>s3n</code>, <code>oss</code>, <code>gs</code>, <code>abfs</code>, <code>abfss</code>, <code>wasb</code>, and <code>wasbs</code>. Without the blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint to add the import.</p>
+<p>Each backend package links its own cloud SDK. Importing <code>io/gocloud</code> registers all three at once and links all cloud SDKs.</p>
+<p>Without a matching blank import, these schemes return <code>ErrIOSchemeNotFound</code> with a hint naming the package to import.</p>
 <p>All credential and tuning property keys are constants in <a href="https://github.com/apache/iceberg-go/blob/main/io/config.go"><code>io/config.go</code></a>. They can be supplied through table properties, catalog properties, or per-call <code>iceberg.Properties</code> arguments depending on context.</p>
 <h3 id="s3"><a class="header" href="#s3">S3</a></h3>
-<p>Authentication is resolved in this order (<code>io/gocloud/s3.go</code>):</p>
+<p>Authentication is resolved in this order (<code>io/gocloud/s3/s3.go</code>):</p>
 <ol>
 <li>Static credentials in properties: <code>s3.access-key-id</code> + <code>s3.secret-access-key</code> (+ optional <code>s3.session-token</code>).</li>
 <li>The standard AWS SDK v2 default credential chain - environment variables (<code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>), <code>~/.aws/credentials</code>, container/IAM role.</li>
@@ -653,7 +656,7 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 </tbody></table>
 </div>
 <h3 id="google-cloud-storage"><a class="header" href="#google-cloud-storage">Google Cloud Storage</a></h3>
-<p>Authentication resolution (<code>io/gocloud/gcs.go</code>):</p>
+<p>Authentication resolution (<code>io/gocloud/gcs/gcs.go</code>):</p>
 <ol>
 <li>Explicit JSON key bytes via <code>gcs.jsonkey</code> or path via <code>gcs.keypath</code>.</li>
 <li>Optional <code>gcs.credtype</code> selecting one of <code>service_account</code>, <code>authorized_user</code>, <code>impersonated_service_account</code>, <code>external_account</code>.</li>
@@ -669,7 +672,7 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 </tbody></table>
 </div>
 <h3 id="azure-data-lake-storage--blob"><a class="header" href="#azure-data-lake-storage--blob">Azure Data Lake Storage / Blob</a></h3>
-<p>Authentication is selected based on the property keys present (<code>io/gocloud/azure.go</code>):</p>
+<p>Authentication is selected based on the property keys present (<code>io/gocloud/azure/azure.go</code>):</p>
 <ol>
 <li>Shared key: both <code>adls.auth.shared-key.account.name</code> and <code>adls.auth.shared-key.account.key</code> set.</li>
 <li>Per-host SAS token: <code>adls.sas-token.&lt;hostname&gt;</code> (prefix-matched against the storage account host).</li>
@@ -693,7 +696,7 @@ cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Pr
 <div class="table-wrapper"><table><thead><tr><th>Variable</th><th>Purpose</th><th>Read at</th></tr></thead><tbody>
 <tr><td><code>GOICEBERG_HOME</code></td><td>Directory containing <code>.iceberg-go.yaml</code>. Defaults to the user's home directory.</td><td><code>config/config.go:87</code></td></tr>
 <tr><td><code>ICEBERG_SQL_DEBUG</code></td><td>SQL catalog query logging - <code>1</code> (failed queries), <code>2</code> (all queries).</td><td><code>catalog/sql/sql.go:206</code></td></tr>
-<tr><td><code>AWS_S3_ENDPOINT</code></td><td>Fallback S3 endpoint when <code>s3.endpoint</code> is unset.</td><td><code>io/gocloud/s3.go:193</code></td></tr>
+<tr><td><code>AWS_S3_ENDPOINT</code></td><td>Fallback S3 endpoint when <code>s3.endpoint</code> is unset.</td><td><code>io/gocloud/s3/s3.go</code></td></tr>
 </tbody></table>
 </div>
 <p>There is no <code>PYICEBERG_*</code>-style env var convention. Use the YAML config file or pass <code>iceberg.Properties</code> to overrides programmatically.</p>
@@ -722,7 +725,8 @@ func init() {
     })
 }
 </code></pre>
-<p><code>io.Register</code> panics on <code>nil</code> factory or duplicate scheme. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme). Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered by <code>io/gocloud</code> only when its package is blank-imported.</p>
+<p><code>io.Register</code> panics on <code>nil</code> factory or duplicate scheme. Built-in schemes: <code>file</code>, <code>&quot;&quot;</code> (the empty scheme).
+Cloud schemes (<code>s3</code>, <code>gs</code>, <code>abfs</code>, etc.) are registered only when the matching backend package under <code>io/gocloud</code> is blank-imported.</p>
 <p><code>io.GetRegisteredSchemes()</code> returns the current scheme list; <code>io.Unregister(scheme)</code> removes one.</p>
 <h3 id="catalog-type-registry"><a class="header" href="#catalog-type-registry">Catalog type registry</a></h3>
 <p>Register a custom catalog type with <a href="https://github.com/apache/iceberg-go/blob/main/catalog/registry.go"><code>catalog.Register</code></a>:</p>
@@ -2010,7 +2014,7 @@ instance to <code>table.WithReporter</code> or <code>table.WithMetricsReporter</
 <tr><td style="text-align: center">Local Filesystem</td><td style="text-align: center">X</td></tr>
 </tbody></table>
 </div>
-<p>S3, GCS, and Azure require a blank import: <code>_ &quot;github.com/apache/iceberg-go/io/gocloud&quot;</code>. See <a href="./configuration.html">Configuration</a>.</p>
+<p>S3, GCS, and Azure each require a blank import of their backend package, for example <code>_ &quot;github.com/apache/iceberg-go/io/gocloud/s3&quot;</code>. See <a href="./configuration.html">Configuration</a>.</p>
 <h2 id="metadata-operations"><a class="header" href="#metadata-operations">Metadata operations</a></h2>
 <div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
 <tr><td style="text-align: left">Get Schema</td><td style="text-align: center">X</td></tr>

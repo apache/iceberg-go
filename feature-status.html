@@ -273,7 +273,7 @@
 <tr><td style="text-align: center">Local Filesystem</td><td style="text-align: center">X</td></tr>
 </tbody></table>
 </div>
-<p>S3, GCS, and Azure require a blank import: <code>_ &quot;github.com/apache/iceberg-go/io/gocloud&quot;</code>. See <a href="./configuration.html">Configuration</a>.</p>
+<p>S3, GCS, and Azure each require a blank import of their backend package, for example <code>_ &quot;github.com/apache/iceberg-go/io/gocloud/s3&quot;</code>. See <a href="./configuration.html">Configuration</a>.</p>
 <h2 id="metadata-operations"><a class="header" href="#metadata-operations">Metadata operations</a></h2>
 <div class="table-wrapper"><table><thead><tr><th style="text-align: left">Operation</th><th style="text-align: center">Supported</th></tr></thead><tbody>
 <tr><td style="text-align: left">Get Schema</td><td style="text-align: center">X</td></tr>

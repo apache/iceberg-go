@@ -248,7 +248,7 @@ go get github.com/apache/iceberg-go@latest
 go get github.com/apache/arrow-go/v18@latest
 go get github.com/uptrace/bun/driver/sqliteshim@latest
 </code></pre>
-<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import <code>github.com/apache/iceberg-go/io/gocloud</code>. We are staying on local disk for this tutorial.</p>
+<p><code>iceberg-go</code> itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import the matching backend package, such as <code>github.com/apache/iceberg-go/io/gocloud/s3</code>. We are staying on local disk for this tutorial.</p>
 <h2 id="2-open-a-local-catalog"><a class="header" href="#2-open-a-local-catalog">2. Open a local catalog</a></h2>
 <p>The SQL catalog stores its metadata in a database, and the actual data files live under a &quot;warehouse&quot; directory. We will use SQLite for both the catalog DB and a local folder for the warehouse.</p>
 <pre><code class="language-go">package main
