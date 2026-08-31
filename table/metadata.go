@@ -279,7 +279,9 @@ func partitionSpecIndexNeedsRebuild(index *partitionSpecIndexData, specs []icebe
 
 // partitionSpecIndexPosition returns the position for id. The map is the fast
 // path, while the linear scan preserves lookup behavior if an in-package
-// fixture mutates a spec in place without rebuilding the derived index.
+// fixture mutates a spec in place without rebuilding the derived index. An
+// absent map entry is indistinguishable from an in-place mutation that added a
+// new ID, so misses intentionally scan the slice too.
 func partitionSpecIndexPosition(index *partitionSpecIndexData, specs []iceberg.PartitionSpec, id int) (int, bool) {
 	if index != nil && len(specs) >= partitionSpecIndexMinSize {
 		if i, ok := index.positions[id]; ok {
@@ -2441,16 +2443,19 @@ func (c *commonMetadata) DefaultPartitionSpec() int {
 	return c.DefaultSpecID
 }
 
-func (c *commonMetadata) ensurePartitionSpecIndex() {
-	if partitionSpecIndexNeedsRebuild(c.partitionSpecIndex, c.Specs) {
-		c.partitionSpecIndex = buildPartitionSpecIndex(c.Specs)
+func (c *commonMetadata) partitionSpecIndexForLookup() *partitionSpecIndexData {
+	index := c.partitionSpecIndex
+	if partitionSpecIndexNeedsRebuild(index, c.Specs) {
+		index = buildPartitionSpecIndex(c.Specs)
 	}
+
+	return index
 }
 
 func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
-	c.ensurePartitionSpecIndex()
+	index := c.partitionSpecIndexForLookup()
 
-	if i, ok := partitionSpecIndexPosition(c.partitionSpecIndex, c.Specs, c.DefaultSpecID); ok {
+	if i, ok := partitionSpecIndexPosition(index, c.Specs, c.DefaultSpecID); ok {
 		return clonePartitionSpec(c.Specs[i])
 	}
 
@@ -2458,9 +2463,9 @@ func (c *commonMetadata) PartitionSpec() iceberg.PartitionSpec {
 }
 
 func (c *commonMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
-	c.ensurePartitionSpecIndex()
+	index := c.partitionSpecIndexForLookup()
 
-	if i, ok := partitionSpecIndexPosition(c.partitionSpecIndex, c.Specs, id); ok {
+	if i, ok := partitionSpecIndexPosition(index, c.Specs, id); ok {
 		clone := clonePartitionSpec(c.Specs[i])
 
 		return &clone
@@ -2893,10 +2898,21 @@ func (c *commonMetadata) checkSchemas() error {
 }
 
 func (c *commonMetadata) checkPartitionSpecs() error {
+	seen := make(map[int]struct{}, len(c.Specs))
+	defaultFound := false
 	for _, spec := range c.Specs {
-		if spec.ID() == c.DefaultSpecID {
-			return nil
+		id := spec.ID()
+		if _, ok := seen[id]; ok {
+			return fmt.Errorf("%w: duplicate partition spec ID %d", ErrInvalidMetadata, id)
 		}
+		seen[id] = struct{}{}
+
+		if id == c.DefaultSpecID {
+			defaultFound = true
+		}
+	}
+	if defaultFound {
+		return nil
 	}
 
 	return fmt.Errorf("%w: default-spec-id %d can't be found",

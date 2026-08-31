@@ -18,6 +18,7 @@
 package table
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestParsedMetadataBuildsPartitionSpecIndex(t *testing.T) {
 	require.NoError(t, err)
 
 	common := metadataCommon(metadata)
-	require.Len(t, common.partitionSpecIndex.positions, len(common.Specs))
+	require.Equal(t, len(common.Specs), common.partitionSpecIndex.sourceCount)
 	for i, spec := range common.Specs {
 		require.Equal(t, i, common.partitionSpecIndex.positions[spec.ID()])
 	}
@@ -73,7 +74,7 @@ func TestMetadataBuilderFromBaseBuildsPartitionSpecIndex(t *testing.T) {
 
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
-	require.Len(t, builder.partitionSpecIndex.positions, len(builder.specs))
+	require.Equal(t, len(builder.specs), builder.partitionSpecIndex.sourceCount)
 
 	id := builder.specs[len(builder.specs)-1].ID()
 	spec, err := builder.GetSpecByID(id)
@@ -85,7 +86,8 @@ func TestMetadataBuilderFromBaseBuildsPartitionSpecIndex(t *testing.T) {
 // Why: in-package fixtures can replace metadata slices directly, so a stale
 // derived index must not return a spec at the old position or hide a new one.
 // Condition: the indexed slice is replaced with another slice of equal length.
-// Assertion: lookups use the replacement slice and refresh the derived index.
+// Assertion: lookups use the replacement slice without mutating the cached
+// index.
 func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacement(t *testing.T) {
 	specs := partitionSpecIndexTestSpecs(1, 2)
 	metadata := commonMetadata{
@@ -103,9 +105,52 @@ func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacement(t *testi
 	defaultSpec := metadata.PartitionSpec()
 	assert.Equal(t, 4, defaultSpec.ID())
 	assert.Nil(t, metadata.PartitionSpecByID(2))
-	assert.NotSame(t, originalIndex, metadata.partitionSpecIndex)
-	assert.Equal(t, map[int]int{3: 0, 4: 1}, metadata.partitionSpecIndex.positions)
-	assert.Equal(t, map[int]int{1: 0, 2: 1}, originalIndex.positions)
+	assert.Same(t, originalIndex, metadata.partitionSpecIndex)
+	assert.Equal(t, map[int]int{1: 0, 2: 1}, metadata.partitionSpecIndex.positions)
+}
+
+func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacementConcurrent(t *testing.T) {
+	metadata := &commonMetadata{
+		Specs:              partitionSpecIndexTestSpecs(1, 2),
+		partitionSpecIndex: buildPartitionSpecIndex(partitionSpecIndexTestSpecs(1, 2)),
+	}
+	metadata.Specs = partitionSpecIndexTestSpecs(3, 4)
+	originalIndex := metadata.partitionSpecIndex
+
+	const goroutineCount = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutineCount)
+	for range goroutineCount {
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				if spec := metadata.PartitionSpecByID(4); spec == nil || spec.ID() != 4 {
+					t.Errorf("expected partition spec 4, got %v", spec)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Same(t, originalIndex, metadata.partitionSpecIndex)
+}
+
+func TestRejectsDuplicatePartitionSpecIDs(t *testing.T) {
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(ExampleTableMetadataV2), &raw))
+
+	var specs []json.RawMessage
+	require.NoError(t, json.Unmarshal(raw["partition-specs"], &specs))
+	specs = append(specs, specs[0])
+	encodedSpecs, err := json.Marshal(specs)
+	require.NoError(t, err)
+	raw["partition-specs"] = encodedSpecs
+	data, err := json.Marshal(raw)
+	require.NoError(t, err)
+
+	_, err = ParseMetadataBytes(data)
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "duplicate partition spec ID 0")
 }
 
 // Why: in-package fixtures can mutate an existing spec slice without changing
