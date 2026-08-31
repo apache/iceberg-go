@@ -218,8 +218,9 @@ func schemaIndexLookup(index *schemaIndexData, schemas []*iceberg.Schema, id int
 
 type partitionSpecIndexData struct {
 	positions map[int]int
-	// sourceCount records the number of specs used to build positions. It is
-	// separate from len(positions) because multiple specs may have the same ID.
+	// sourceCount records the number of specs used to build positions. Persisted
+	// metadata rejects duplicate IDs, but this remains separate from
+	// len(positions) for unvalidated in-package fixtures.
 	sourceCount int
 	// firstSpec identifies the spec slice used to build positions. It lets
 	// read-only lookups detect an index left behind by an in-package fixture
@@ -2898,6 +2899,9 @@ func (c *commonMetadata) checkSchemas() error {
 }
 
 func (c *commonMetadata) checkPartitionSpecs() error {
+	// Partition spec IDs are unique in persisted metadata. Keep this validation
+	// aligned with the schema and snapshot ID checks so normal read paths never
+	// need to tolerate duplicate IDs.
 	seen := make(map[int]struct{}, len(c.Specs))
 	defaultFound := false
 	for _, spec := range c.Specs {
