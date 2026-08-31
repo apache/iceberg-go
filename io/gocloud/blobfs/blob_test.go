@@ -912,3 +912,19 @@ func TestBlobFileIOPreprocessErrorRetainsOriginalPath(t *testing.T) {
 		})
 	}
 }
+
+func TestBlobFileIORemoveFallsBackToDirectoryMarker(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	bucket := memblob.OpenBucket(nil)
+	t.Cleanup(func() { require.NoError(t, bucket.Close()) })
+	require.NoError(t, bucket.WriteAll(ctx, "ns/tbl/", nil, nil))
+
+	fileIO := testBlobFileIO(ctx, "test-bucket", bucket)
+	require.NoError(t, fileIO.Remove("s3://test-bucket/ns/tbl"))
+
+	exists, err := bucket.Exists(ctx, "ns/tbl/")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}

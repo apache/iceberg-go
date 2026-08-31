@@ -314,7 +314,7 @@ func (bfs *FileIO) Remove(name string) error {
 
 	if err := bfs.Delete(bfs.ctx, key); err != nil {
 		if gcerrors.Code(err) == gcerrors.NotFound {
-			marker := directoryMarker(name)
+			marker := directoryMarker(key)
 			if marker != "" {
 				if markerErr := bfs.Delete(bfs.ctx, marker); markerErr == nil {
 					return nil
