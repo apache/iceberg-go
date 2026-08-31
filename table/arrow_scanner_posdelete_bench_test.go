@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -27,7 +28,138 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/arrow/scalar"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
+	tblutils "github.com/apache/iceberg-go/table/internal"
 )
+
+func BenchmarkReadDeletesProjected(b *testing.B) {
+	for _, numRows := range []int{100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
+			memFS, dataFile := benchmarkPositionDeleteFile(b, numRows)
+			ctx := tblutils.WithTableProperties(context.Background(), iceberg.Properties{
+				ParquetBatchSizeKey: "65536",
+			})
+
+			b.Run("before", func(b *testing.B) {
+				benchmarkReadDeletes(b, ctx, memFS, dataFile, readDeletesBefore)
+			})
+			b.Run("after", func(b *testing.B) {
+				benchmarkReadDeletes(b, ctx, memFS, dataFile, readDeletes)
+			})
+		})
+	}
+}
+
+func benchmarkReadDeletes(
+	b *testing.B,
+	ctx context.Context,
+	memFS *iceio.MemFS,
+	dataFile iceberg.DataFile,
+	read func(context.Context, iceio.IO, iceberg.DataFile) (map[string]*arrow.Chunked, error),
+) {
+	b.Helper()
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		deletes, err := read(ctx, memFS, dataFile)
+		if err != nil {
+			b.Fatal(err)
+		}
+		releasePosDeletes(deletes)
+	}
+}
+
+func benchmarkPositionDeleteFile(b *testing.B, numRows int) (*iceio.MemFS, iceberg.DataFile) {
+	b.Helper()
+
+	mem := memory.DefaultAllocator
+	schema := arrow.NewSchema([]arrow.Field{
+		{Name: "file_path", Type: arrow.BinaryTypes.String, Nullable: false},
+		{Name: "pos", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+		{Name: "unused", Type: arrow.BinaryTypes.String, Nullable: false},
+	}, nil)
+	pathBuilder := array.NewStringBuilder(mem)
+	posBuilder := array.NewInt64Builder(mem)
+	unusedBuilder := array.NewStringBuilder(mem)
+	unusedValue := strings.Repeat("unused-value-", 16)
+	for i := range numRows {
+		pathBuilder.Append("mem://bucket/data/data.parquet")
+		posBuilder.Append(int64(i))
+		unusedBuilder.Append(unusedValue)
+	}
+	paths := pathBuilder.NewStringArray()
+	pathBuilder.Release()
+	positions := posBuilder.NewInt64Array()
+	posBuilder.Release()
+	unused := unusedBuilder.NewStringArray()
+	unusedBuilder.Release()
+	record := array.NewRecordBatch(schema, []arrow.Array{paths, positions, unused}, int64(numRows))
+	paths.Release()
+	positions.Release()
+	unused.Release()
+	defer record.Release()
+	tbl := array.NewTableFromRecords(schema, []arrow.RecordBatch{record})
+	defer tbl.Release()
+
+	deletePath := "mem://bucket/deletes/benchmark.parquet"
+	memFS := iceio.NewMemFS()
+	fw, err := memFS.Create(deletePath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := pqarrow.WriteTable(tbl, fw, int64(numRows),
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps()); err != nil {
+		_ = fw.Close()
+		b.Fatal(err)
+	}
+	if err := fw.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		deletePath, iceberg.ParquetFile, nil, nil, nil, int64(numRows), 128)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return memFS, builder.Build()
+}
+
+func readDeletesBefore(ctx context.Context, fs iceio.IO, dataFile iceberg.DataFile) (_ map[string]*arrow.Chunked, err error) {
+	src, err := tblutils.GetFile(ctx, fs, dataFile, true)
+	if err != nil {
+		return nil, err
+	}
+	rdr, err := src.GetReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rdr.Close() }()
+
+	tbl, err := rdr.ReadTable(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tbl.Release()
+	tbl, err = array.UnifyTableDicts(compute.GetAllocator(ctx), tbl)
+	if err != nil {
+		return nil, err
+	}
+	defer tbl.Release()
+
+	filePathIndex, posIndex, err := positionDeleteColumnIndices(tbl.Schema())
+	if err != nil {
+		return nil, err
+	}
+
+	return groupPosDeletesByFilePath(ctx, tbl.Column(filePathIndex).Data(), tbl.Column(posIndex).Data())
+}
 
 func BenchmarkGroupPosDeletesByFilePath(b *testing.B) {
 	const numRows = 1_000_000
