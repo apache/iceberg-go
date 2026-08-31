@@ -428,6 +428,13 @@ func TestSchemaFieldRefLookupDoesNotAllocate(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, 1, field.ID)
 
+	var fields []iceberg.NestedField
+	assert.Zero(t, testing.AllocsPerRun(100, func() {
+		fields = schema.FieldsRef(internal.SchemaRef{})
+		runtime.KeepAlive(fields)
+	}))
+	assert.Len(t, fields, 1)
+
 	parent := field.Type.(*iceberg.StructType)
 	parent.FieldList[0].Name = "shared_child"
 	shared, ok := schema.FindFieldByIDRef(1, internal.SchemaRef{})
