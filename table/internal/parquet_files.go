@@ -1806,6 +1806,11 @@ type ParquetRowGroupTester struct {
 	// When RangeSet is true, Start and Length select row groups whose absolute
 	// Parquet row-group offset falls in [Start, Start+Length).
 	Start, Length int64
+	// PlanningSplitOffsets contains the split offsets used when the scan task
+	// was planned. When it contains one valid offset per row group, range
+	// selection uses these offsets instead of re-deriving them from the opened
+	// Parquet footer. Sparse split-offset lists fall back to the footer offsets.
+	PlanningSplitOffsets []int64
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full
 	// file. It lets callers reconstruct each emitted row's original position even
@@ -1887,6 +1892,20 @@ func validateParquetRowGroupRange(fileSize, start, length int64) error {
 	return nil
 }
 
+func validParquetRowGroupOffsets(offsets []int64, numRowGroups int, fileSize int64) bool {
+	if len(offsets) != numRowGroups {
+		return false
+	}
+
+	for i, offset := range offsets {
+		if offset < 0 || offset >= fileSize || (i > 0 && offset <= offsets[i-1]) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	var rowGroupTester *ParquetRowGroupTester
 
@@ -1898,8 +1917,7 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
-	rangeSet := rowGroupTester != nil &&
-		(rowGroupTester.RangeSet || rowGroupTester.Start != 0 || rowGroupTester.Length != 0)
+	rangeSet := rowGroupTester != nil && rowGroupTester.RangeSet
 	if rangeSet {
 		if err := validateParquetRowGroupRange(
 			w.SourceFileSize(), rowGroupTester.Start, rowGroupTester.Length); err != nil {
@@ -1912,6 +1930,10 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
+		planningOffsets := rowGroupTester.PlanningSplitOffsets
+		if !validParquetRowGroupOffsets(planningOffsets, numRg, w.SourceFileSize()) {
+			planningOffsets = nil
+		}
 
 		var (
 			fieldIDToColIdx map[int]int
@@ -1950,7 +1972,9 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 
 			use := true
 			if rangeSet {
-				if len(w.rowGroupInfos) != numRg {
+				if planningOffsets != nil {
+					offset = planningOffsets[rg]
+				} else if len(w.rowGroupInfos) != numRg {
 					offset = parquetRowGroupSplitOffset(rgMeta)
 				}
 				use = offset >= rangeStart && offset < rangeEnd

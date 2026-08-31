@@ -34,8 +34,19 @@ const (
 	ObjectStoreEnabledKey                   = "write.object-storage.enabled"
 	ObjectStoreEnabledDefault               = false
 
+	// ReadSplitTargetSizeKey controls coalescing of safe row-group ranges during
+	// local Parquet scan planning. Remote plans already contain catalog-owned
+	// ranges and do not use this property.
 	ReadSplitTargetSizeKey     = "read.split.target-size"
-	ReadSplitTargetSizeDefault = 128 * 1024 * 1024 // 128 MB
+	ReadSplitTargetSizeDefault = 128 * 1024 * 1024 // 128 MiB
+
+	// These Java-compatible properties are reserved for future task-group
+	// planning. They are exported so applications can share configuration
+	// names across Iceberg implementations.
+	ReadSplitPlanningLookbackKey     = "read.split.planning-lookback"
+	ReadSplitPlanningLookbackDefault = 10
+	ReadSplitOpenFileCostKey         = "read.split.open-file-cost"
+	ReadSplitOpenFileCostDefault     = 4 * 1024 * 1024 // 4 MiB
 
 	DefaultNameMappingKey = "schema.name-mapping.default"
 

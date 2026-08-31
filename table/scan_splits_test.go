@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -115,11 +116,11 @@ func TestSplitParquetScanTask(t *testing.T) {
 
 	assert.Equal(t, []int64{40, 30, 30}, []int64{got[0].Length, got[1].Length, got[2].Length})
 	assert.Equal(t, []int64{0, 40, 70}, []int64{got[0].Start, got[1].Start, got[2].Start})
-	for _, split := range got {
-		assert.Equal(t, task.File, split.File)
-		assert.Equal(t, task.DeleteFiles, split.DeleteFiles)
-		assert.Equal(t, task.Residual, split.Residual)
-		assert.Equal(t, task.FirstRowID, split.FirstRowID)
+	for _, taskSplit := range got {
+		assert.Equal(t, task.File, taskSplit.File)
+		assert.Equal(t, task.DeleteFiles, taskSplit.DeleteFiles)
+		assert.Equal(t, task.Residual, taskSplit.Residual)
+		assert.Equal(t, task.FirstRowID, taskSplit.FirstRowID)
 	}
 }
 
@@ -232,6 +233,47 @@ func TestSplitParquetScanTaskKeepsUnsafeTasksIntact(t *testing.T) {
 			got, split := splitParquetScanTask(task, tt.target)
 			assert.False(t, split)
 			assert.Nil(t, got)
+		})
+	}
+}
+
+func TestAdjustParquetTaskRangeToPhysicalFileSize(t *testing.T) {
+	file := splitTestDataFile(t, iceberg.ParquetFile, 100, []int64{8, 40, 70})
+	tests := []struct {
+		name         string
+		task         FileScanTask
+		physicalSize int64
+		wantStart    int64
+		wantLength   int64
+	}{
+		{
+			name:         "clamps last range when file was truncated",
+			task:         FileScanTask{File: file, Start: 40, Length: 60},
+			physicalSize: 80,
+			wantStart:    40,
+			wantLength:   40,
+		},
+		{
+			name:         "extends last range when file grew",
+			task:         FileScanTask{File: file, Start: 40, Length: 60},
+			physicalSize: 120,
+			wantStart:    40,
+			wantLength:   80,
+		},
+		{
+			name:         "keeps non-last range unchanged",
+			task:         FileScanTask{File: file, Start: 40, Length: 20},
+			physicalSize: 120,
+			wantStart:    40,
+			wantLength:   20,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStart, gotLength := adjustParquetTaskRange(tt.task, tt.physicalSize)
+			assert.Equal(t, tt.wantStart, gotStart)
+			assert.Equal(t, tt.wantLength, gotLength)
 		})
 	}
 }
@@ -433,9 +475,9 @@ func (f *prepareReadTrackingFile) Close() error {
 
 func TestPrepareToReadClosesReaderOnSchemaError(t *testing.T) {
 	for _, cache := range []bool{false, true} {
-		t.Run(fmt.Sprintf("cache=%t", cache), func(t *testing.T) {
+		t.Run("cache="+strconv.FormatBool(cache), func(t *testing.T) {
 			for _, withIDs := range []bool{false, true} {
-				t.Run(fmt.Sprintf("field_ids=%t", withIDs), func(t *testing.T) {
+				t.Run("field_ids="+strconv.FormatBool(withIDs), func(t *testing.T) {
 					field := arrow.Field{Name: "id", Type: arrow.FixedWidthTypes.Time64ns}
 					if withIDs {
 						field.Metadata = arrow.MetadataFrom(map[string]string{ArrowParquetFieldIDKey: "1"})

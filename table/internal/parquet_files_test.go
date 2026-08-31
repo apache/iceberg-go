@@ -2231,6 +2231,7 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 		name          string
 		start         int64
 		length        int64
+		rangeSet      bool
 		bloomPreds    []internal.RowGroupBloomPred
 		wantRows      int64
 		wantSurvivors []internal.RowGroupSpan
@@ -2239,6 +2240,7 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 			name:          "first row group",
 			start:         offsets[0],
 			length:        offsets[1] - offsets[0],
+			rangeSet:      true,
 			wantRows:      rgSize,
 			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
 		},
@@ -2246,13 +2248,15 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 			name:          "second row group",
 			start:         offsets[1],
 			length:        int64(len(data)) - offsets[1],
+			rangeSet:      true,
 			wantRows:      rgSize,
 			wantSurvivors: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
 		},
 		{
-			name:   "range and bloom pruning combine",
-			start:  offsets[0],
-			length: offsets[1] - offsets[0],
+			name:     "range and bloom pruning combine",
+			start:    offsets[0],
+			length:   offsets[1] - offsets[0],
+			rangeSet: true,
 			bloomPreds: []internal.RowGroupBloomPred{{
 				FieldID: 1, PhysBytes: [][]byte{int32PhysBytes(150)},
 			}},
@@ -2262,6 +2266,14 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 			name:          "whole file range",
 			start:         offsets[0],
 			length:        int64(len(data)) - offsets[0],
+			rangeSet:      true,
+			wantRows:      2 * rgSize,
+			wantSurvivors: nil,
+		},
+		{
+			name:          "nonzero range fields without explicit range keep legacy behavior",
+			start:         offsets[0],
+			length:        offsets[1] - offsets[0],
 			wantRows:      2 * rgSize,
 			wantSurvivors: nil,
 		},
@@ -2282,6 +2294,7 @@ func TestParquetRowGroupRangeSelection(t *testing.T) {
 			tester := &internal.ParquetRowGroupTester{
 				StatsFn:    alwaysKeep,
 				BloomPreds: tt.bloomPreds,
+				RangeSet:   tt.rangeSet,
 				Start:      tt.start,
 				Length:     tt.length,
 				Survivors:  &survivors,
@@ -2310,14 +2323,13 @@ func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
 		return true, nil
 	}
 	tests := []struct {
-		name     string
-		start    int64
-		length   int64
-		rangeSet bool
+		name   string
+		start  int64
+		length int64
 	}{
 		{name: "negative start", start: -1, length: 1},
 		{name: "zero length", start: firstOffset, length: 0},
-		{name: "zero length at file start", start: 0, length: 0, rangeSet: true},
+		{name: "zero length at file start", start: 0, length: 0},
 		{name: "negative length", start: 0, length: -1},
 		{name: "start beyond file", start: fileSize + 1, length: 1},
 		{name: "length beyond file", start: firstOffset, length: fileSize - firstOffset + 1},
@@ -2331,13 +2343,93 @@ func TestParquetRowGroupRangeSelectionRejectsInvalidRanges(t *testing.T) {
 
 			tester := &internal.ParquetRowGroupTester{
 				StatsFn:  alwaysKeep,
-				RangeSet: tt.rangeSet,
+				RangeSet: true,
 				Start:    tt.start,
 				Length:   tt.length,
 			}
 			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
 			assert.Nil(t, rr)
 			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+		})
+	}
+}
+
+func TestParquetRowGroupRangeSelectionUsesPlanningOffsets(t *testing.T) {
+	const rgSize = 100
+	alwaysKeep := func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) {
+		return true, nil
+	}
+
+	data := buildBloomTestParquet(t, rgSize)
+	pqReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	meta := pqReader.MetaData()
+	actualOffsets := make([]int64, meta.NumRowGroups())
+	for i := range actualOffsets {
+		rg := meta.RowGroup(i)
+		column, columnErr := rg.ColumnChunk(0)
+		require.NoError(t, columnErr)
+		actualOffsets[i] = column.DataPageOffset()
+		if column.HasDictionaryPage() && column.DictionaryPageOffset() < actualOffsets[i] {
+			actualOffsets[i] = column.DictionaryPageOffset()
+		}
+	}
+	require.Less(t, actualOffsets[1]+1, int64(len(data)))
+	require.NoError(t, pqReader.Close())
+
+	// A writer may record a row-group split offset that differs from the
+	// first data page offset used by the reader. The planning offsets must win
+	// when they are complete, otherwise a boundary can move a row group into
+	// the wrong split.
+	planningOffsets := append([]int64(nil), actualOffsets...)
+	planningOffsets[1]++
+
+	splitReader, err := file.NewParquetReader(bytes.NewReader(data))
+	require.NoError(t, err)
+	arrReader, err := pqarrow.NewFileReader(
+		splitReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	require.NoError(t, err)
+	rdr := internal.WrapParquetFileReader(arrReader)
+	defer rdr.Close()
+
+	tests := []struct {
+		name      string
+		start     int64
+		length    int64
+		wantRows  int64
+		wantSpans []internal.RowGroupSpan
+	}{
+		{
+			name:      "first planned range",
+			start:     0,
+			length:    planningOffsets[1],
+			wantRows:  rgSize,
+			wantSpans: []internal.RowGroupSpan{{FirstRowPos: 0, NumRows: rgSize}},
+		},
+		{
+			name:      "second planned range",
+			start:     planningOffsets[1],
+			length:    int64(len(data)) - planningOffsets[1],
+			wantRows:  rgSize,
+			wantSpans: []internal.RowGroupSpan{{FirstRowPos: rgSize, NumRows: rgSize}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var survivors []internal.RowGroupSpan
+			tester := &internal.ParquetRowGroupTester{
+				StatsFn:              alwaysKeep,
+				RangeSet:             true,
+				Start:                tt.start,
+				Length:               tt.length,
+				PlanningSplitOffsets: planningOffsets,
+				Survivors:            &survivors,
+			}
+			rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantRows, countRecords(t, rr))
+			assert.Equal(t, tt.wantSpans, survivors)
 		})
 	}
 }
@@ -2373,9 +2465,10 @@ func TestParquetRowGroupRangeSelectionFallsBackToFirstColumnOffset(t *testing.T)
 	defer rdr.Close()
 
 	tester := &internal.ParquetRowGroupTester{
-		StatsFn: func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil },
-		Start:   offsets[1],
-		Length:  int64(len(data)) - offsets[1],
+		StatsFn:  func(_ *metadata.RowGroupMetaData, _ []int) (bool, error) { return true, nil },
+		RangeSet: true,
+		Start:    offsets[1],
+		Length:   int64(len(data)) - offsets[1],
 	}
 	rr, err := rdr.GetRecords(context.Background(), []int{0}, tester)
 	require.NoError(t, err)

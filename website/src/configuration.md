@@ -319,6 +319,10 @@ Property key constants are in [`table/properties.go`](https://github.com/apache/
 |---|---|---|
 | `read.split.target-size` | `134217728` | Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely. |
 
+The Java-compatible `read.split.planning-lookback` and `read.split.open-file-cost`
+names and defaults are also exported by the Go API for shared configuration,
+but are reserved for future task-group planning and are not currently read.
+
 ### Metrics and metadata lifecycle
 
 | Key | Description |

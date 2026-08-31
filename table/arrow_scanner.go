@@ -1506,6 +1506,26 @@ func (as *arrowScan) processRecords(
 	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
 }
 
+// adjustParquetTaskRange keeps a planned last range aligned with the physical
+// file when manifest and footer sizes differ. A range that ends at the
+// manifest's file size is the last planned range, so it can safely extend to
+// the physical end or clamp to it without overlapping another task.
+func adjustParquetTaskRange(task FileScanTask, physicalFileSize int64) (start, length int64) {
+	start, length = task.Start, task.Length
+	if task.File == nil || physicalFileSize <= 0 || start < 0 || start > physicalFileSize {
+		return start, length
+	}
+
+	maxLength := physicalFileSize - start
+	manifestFileSize := task.File.FileSizeBytes()
+	lastRange := manifestFileSize >= start && length == manifestFileSize-start
+	if length > maxLength || (lastRange && physicalFileSize != manifestFileSize) {
+		length = maxLength
+	}
+
+	return start, length
+}
+
 func (as *arrowScan) processRecordsWithPlans(
 	ctx context.Context,
 	task tblutils.Enumerated[FileScanTask],
@@ -1596,8 +1616,8 @@ func (as *arrowScan) processRecordsWithPlans(
 		if task.Value.Start != 0 ||
 			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes()) {
 			tester.RangeSet = true
-			tester.Start = task.Value.Start
-			tester.Length = task.Value.Length
+			tester.Start, tester.Length = adjustParquetTaskRange(task.Value, rdr.SourceFileSize())
+			tester.PlanningSplitOffsets = task.Value.File.SplitOffsets()
 		}
 		if posSource != nil {
 			tester.Survivors = &posSource.spans
