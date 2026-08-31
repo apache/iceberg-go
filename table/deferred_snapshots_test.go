@@ -202,6 +202,43 @@ func TestDeferredSnapshotsConcurrentMaterialization(t *testing.T) {
 	wg.Wait()
 }
 
+func TestDeferredSnapshotsConcurrentLookupAndIndexRelease(t *testing.T) {
+	const (
+		attempts = 100
+		lookups  = 32
+	)
+	historicalID := int64(3051729675574597004)
+
+	for range attempts {
+		meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
+		require.NoError(t, err)
+
+		start := make(chan struct{})
+		results := make(chan bool, lookups+1)
+		for range lookups {
+			go func() {
+				<-start
+				snapshot := meta.SnapshotByID(historicalID)
+				results <- snapshot != nil && snapshot.SnapshotID == historicalID
+			}()
+		}
+		go func() {
+			<-start
+			results <- len(meta.Snapshots()) == 2
+		}()
+		close(start)
+
+		for range lookups + 1 {
+			assert.True(t, <-results)
+		}
+
+		state := commonMetadataOf(meta).deferredSnapshots
+		assert.Nil(t, state.raw)
+		assert.Nil(t, state.entries)
+		assert.Nil(t, state.byID)
+	}
+}
+
 func TestDeferredSnapshotsConcurrentSingleLookupDoesNotMaterializeHistory(t *testing.T) {
 	meta, err := ParseMetadataBytesDeferredSnapshots(metadataWithUnreferencedSnapshot(t))
 	require.NoError(t, err)

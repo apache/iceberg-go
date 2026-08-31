@@ -101,11 +101,13 @@ func (s *deferredSnapshotState) snapshotByID(id int64) (*Snapshot, error) {
 		return snapshot, nil
 	}
 	entryIndex, ok := s.byID[id]
-	s.mu.RUnlock()
 	if !ok {
+		s.mu.RUnlock()
+
 		return nil, nil
 	}
 	entry := &s.entries[entryIndex]
+	s.mu.RUnlock()
 
 	entry.once.Do(func() {
 		s.mu.RLock()
