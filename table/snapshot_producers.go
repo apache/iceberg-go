@@ -80,6 +80,14 @@ type supersededAccumulator interface {
 	supersededManifests(committed bool) []string
 }
 
+// retryManifestRebuilder lets a producer reuse parent-independent manifest
+// output when a retry's fresh parent still contains every manifest it rewrote.
+// Producers that do not implement it fall back to assembling and processing
+// the complete manifest set again.
+type retryManifestRebuilder interface {
+	rebuildManifests(ctx context.Context, parent *Snapshot, addedContent []iceberg.ManifestFile) ([]iceberg.ManifestFile, error)
+}
+
 func newManifestFileName(num int, commit uuid.UUID) string {
 	return fmt.Sprintf("%s-m%d.avro", commit, num)
 }
@@ -1523,11 +1531,18 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			return nil, err
 		}
 
-		// Recompute the parent-dependent manifests (inherited/filtered existing
-		// manifests plus DELETE tombstones) against the fresh parent and combine
-		// them with the reused added-content manifests. This drops the removed
-		// files from the fresh parent's manifests rather than resurrecting them.
-		combined, procErr := sp.assembleManifests(rebuildCtx, freshParent, addedContent)
+		// Rebuild or reuse the parent-dependent manifest set against the fresh
+		// parent and combine it with the producer's own manifests. This drops
+		// removed files from the fresh parent's manifests rather than
+		// resurrecting them; rewrite clustering can reuse its prior output when
+		// none of the rewritten inputs were displaced.
+		var combined []iceberg.ManifestFile
+		var procErr error
+		if rebuilder, ok := sp.producerImpl.(retryManifestRebuilder); ok {
+			combined, procErr = rebuilder.rebuildManifests(rebuildCtx, freshParent, addedContent)
+		} else {
+			combined, procErr = sp.assembleManifests(rebuildCtx, freshParent, addedContent)
+		}
 		if procErr != nil {
 			return nil, fmt.Errorf("rebuild manifest list: assemble manifests: %w", procErr)
 		}

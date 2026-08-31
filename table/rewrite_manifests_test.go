@@ -580,7 +580,10 @@ func TestRewriteManifestsPredicate(t *testing.T) {
 	}
 
 	txn := tbl.NewTransaction()
-	res, err := txn.RewriteManifests(ctx, table.WithRewriteManifestPredicate(pred))
+	res, err := txn.RewriteManifests(ctx,
+		table.WithRewriteManifestPredicate(pred),
+		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any { return "selected" }),
+	)
 	require.NoError(t, err)
 	tbl, err = txn.Commit(ctx)
 	require.NoError(t, err)
@@ -658,7 +661,10 @@ func TestRewriteManifestsSpecIDFilter(t *testing.T) {
 	require.Equal(t, 1, specCount[1], "setup must leave one spec-1 manifest")
 
 	txn = tbl.NewTransaction()
-	res, err := txn.RewriteManifests(ctx, table.WithRewriteSpecID(0))
+	res, err := txn.RewriteManifests(ctx,
+		table.WithRewriteSpecID(0),
+		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any { return "spec-0" }),
+	)
 	require.NoError(t, err)
 	tbl, err = txn.Commit(ctx)
 	require.NoError(t, err)
@@ -997,6 +1003,68 @@ func TestRewriteManifestsCleansSupersededOnExhaustedRetries(t *testing.T) {
 	for _, p := range merged {
 		assert.Truef(t, track.wasRemoved(p), "orphaned manifest %s must be cleaned on the failure path", p)
 	}
+}
+
+// TestRewriteManifestsClusterByReusesOutputOnOCCRetry verifies that a
+// concurrent append does not force an otherwise-valid clustered rewrite to
+// read and rewrite every original entry again. The fresh parent retains all
+// manifests replaced by the first attempt, so the existing clustered output
+// can be reused while the peer manifests are inherited as-is.
+func TestRewriteManifestsClusterByReusesOutputOnOCCRetry(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := &trackingFS{}
+	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
+
+	h0, h1, h2 := stagedRewriteHeads(t, ctx, dir, "2", fsF, track)
+	cat := &stagedHeadCatalog{current: h0, heads: []table.Metadata{h1, h2}, failures: 2, location: dir, fsF: fsF}
+	tbl := table.New(table.Identifier{"default", "staged-cluster"}, h0,
+		dir+"/metadata/00000.json", fsF, cat)
+
+	preExisting := track.snapshotCreated()
+	var clusterCalls atomic.Int32
+	txn := tbl.NewTransaction()
+	res, err := txn.RewriteManifests(ctx,
+		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+			clusterCalls.Add(1)
+
+			return "same"
+		}),
+	)
+	require.NoError(t, err)
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.EqualValues(t, 3, cat.commitTableCalls.Load(),
+		"expected two conflicts followed by one successful commit")
+	assert.EqualValues(t, 3, clusterCalls.Load(),
+		"reusing the clustered output must avoid re-reading entries on retries")
+
+	merged := mergedManifestsCreated(track, preExisting)
+	require.Len(t, merged, 1, "only the initial attempt should write clustered data manifests")
+
+	snap := committed.CurrentSnapshot()
+	require.NotNil(t, snap)
+	assert.Equal(t, "2", snap.Summary.Properties["manifests-kept"],
+		"concurrent manifests inherited by the reused output must be counted as kept")
+	after, err := snap.Manifests(track)
+	require.NoError(t, err)
+	require.Len(t, after, 3,
+		"the reused clustered output plus two concurrent manifests must be retained")
+
+	var clusteredEntries int
+	for _, manifest := range after {
+		for entry, entryErr := range manifest.Entries(track, true) {
+			require.NoError(t, entryErr)
+			if strings.HasPrefix(filepath.Base(entry.DataFile().FilePath()), "stale-") {
+				clusteredEntries++
+			}
+		}
+	}
+	assert.Equal(t, 3, clusteredEntries,
+		"all original files must remain in the reused clustered output")
+	assert.Len(t, res.RewrittenManifests, 3)
+	assert.Len(t, res.AddedManifests, 1)
 }
 
 // TestRewriteManifestsStaleCountsAfterOCCRetry forces a commit conflict and

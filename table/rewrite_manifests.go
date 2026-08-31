@@ -89,9 +89,10 @@ type rewriteManifestsCfg struct {
 // RewriteManifestsOpt configures [Transaction.RewriteManifests].
 type RewriteManifestsOpt func(*rewriteManifestsCfg)
 
-// WithManifestTargetSize overrides the target manifest size in bytes. A
-// non-positive size is ignored, leaving the default from the
-// commit.manifest.target-size-bytes property.
+// WithManifestTargetSize overrides the target manifest size in bytes. The
+// clustered writer observes the size after Avro blocks flush, so an output can
+// exceed the target by nearly one block. A non-positive size is ignored,
+// leaving the default from the commit.manifest.target-size-bytes property.
 func WithManifestTargetSize(size int64) RewriteManifestsOpt {
 	return func(c *rewriteManifestsCfg) {
 		if size > 0 {
@@ -114,7 +115,14 @@ func WithRewriteManifestPredicate(pred func(iceberg.ManifestFile) bool) RewriteM
 // WithRewriteManifestClusterBy groups rewritten data files by the key returned
 // by clusterBy. Files with the same key and partition spec are written to the
 // same manifest until the target size is reached, after which another manifest
-// is started for that key. The key must be non-nil, comparable, and equal to itself.
+// is started for that key. Clustering replaces normal size-only bin-packing,
+// including minCountToMerge. One writer remains open for each distinct
+// (partition spec, key) pair, so clusterBy should have reasonable cardinality
+// to avoid exhausting object-store handles. The key must be non-nil,
+// comparable, and equal to itself.
+// The callback should be deterministic because an OCC retry may need to
+// re-cluster manifests displaced by a concurrent writer. When all rewritten
+// inputs remain present, the existing clustered output is reused instead.
 func WithRewriteManifestClusterBy(clusterBy func(iceberg.DataFile) any) RewriteManifestsOpt {
 	return func(c *rewriteManifestsCfg) { c.clusterBy = clusterBy }
 }
@@ -175,6 +183,69 @@ func (r *rewriteManifests) deletedEntries(context.Context, *Snapshot) ([]iceberg
 	return nil, nil
 }
 
+// rebuildManifests reuses the clustered output when a concurrent commit only
+// added manifests and left every input manifest this rewrite replaced in the
+// fresh parent. This is the same requiresRewrite optimization used by Java's
+// rewrite-manifest producer: the old output remains valid, and only the fresh
+// parent's additional manifests need to be inherited.
+func (r *rewriteManifests) rebuildManifests(ctx context.Context, parent *Snapshot, addedContent []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
+	if r.cfg.clusterBy != nil {
+		if reused, ok, err := r.reuseManifests(parent); err != nil {
+			return nil, err
+		} else if ok {
+			return reused, nil
+		}
+	}
+
+	return r.base.assembleManifests(ctx, parent, addedContent)
+}
+
+func (r *rewriteManifests) reuseManifests(parent *Snapshot) ([]iceberg.ManifestFile, bool, error) {
+	if parent == nil || len(r.rewritten) == 0 || len(r.added) == 0 {
+		return nil, false, nil
+	}
+
+	current, err := parent.Manifests(r.base.io)
+	if err != nil {
+		return nil, false, err
+	}
+
+	required := make(map[string]struct{}, len(r.rewritten))
+	for _, manifest := range r.rewritten {
+		required[manifest.FilePath()] = struct{}{}
+	}
+	for _, manifest := range current {
+		delete(required, manifest.FilePath())
+	}
+	if len(required) > 0 {
+		return nil, false, nil
+	}
+	// The fresh parent may contain manifests added by a concurrent writer.
+	// They remain untouched in the reused output and must be included in the
+	// summary's kept count even though no re-merge was needed.
+	r.base.snapshotProps[manifestsKeptKey] = strconv.Itoa(len(current) - len(r.rewritten))
+
+	result := make([]iceberg.ManifestFile, 0, len(current)-len(r.rewritten)+len(r.added))
+	rewritten := make(map[string]struct{}, len(r.rewritten))
+	for _, manifest := range r.rewritten {
+		rewritten[manifest.FilePath()] = struct{}{}
+	}
+	inserted := false
+	for _, manifest := range current {
+		if _, ok := rewritten[manifest.FilePath()]; ok {
+			if !inserted {
+				result = append(result, r.added...)
+				inserted = true
+			}
+
+			continue
+		}
+		result = append(result, manifest)
+	}
+
+	return result, inserted, nil
+}
+
 func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	var toRewrite, kept []iceberg.ManifestFile
 	for _, m := range manifests {
@@ -207,8 +278,8 @@ func (r *rewriteManifests) processManifests(manifests []iceberg.ManifestFile) ([
 		}
 	}()
 
-	// Record on every pass, not just the first. An OCC retry re-runs this
-	// against the fresh parent and writes a different merged set; the last
+	// Record on every pass that actually re-merges, not just the first. An OCC
+	// retry that finds a displaced input writes a different merged set; the last
 	// pass is the one that commits, so its counts are the ones that must win.
 	// record also runs the file-count guard, so an error here leaves the
 	// merged files to the defer above for cleanup.

@@ -117,6 +117,19 @@ func validateManifestClusterKey(key any) error {
 	return nil
 }
 
+func validateManifestClusterKeyComparable(key any) error {
+	if key == nil {
+		return errors.New("manifest cluster key must be non-nil")
+	}
+
+	value := reflect.ValueOf(key)
+	if !value.Comparable() {
+		return fmt.Errorf("manifest cluster key type %s is not comparable", value.Type())
+	}
+
+	return nil
+}
+
 // clusterManifests rewrites entries into one rolling writer per cluster key and
 // partition spec. Writers stay open while entries for other keys are read so a
 // later file with the same key is still written beside the earlier files.
@@ -163,12 +176,15 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 			}
 
 			clusterValue := m.clusterBy(entry.DataFile())
-			if clusterErr := validateManifestClusterKey(clusterValue); clusterErr != nil {
+			if clusterErr := validateManifestClusterKeyComparable(clusterValue); clusterErr != nil {
 				return nil, fmt.Errorf("cluster data file %q: %w", entry.DataFile().FilePath(), clusterErr)
 			}
 			key := manifestClusterKey{specID: specID, value: clusterValue}
 			writer, ok := writers[key]
 			if !ok {
+				if clusterErr := validateManifestClusterKey(clusterValue); clusterErr != nil {
+					return nil, fmt.Errorf("cluster data file %q: %w", entry.DataFile().FilePath(), clusterErr)
+				}
 				writer, entryErr = m.newClusterWriter(specID)
 				if entryErr != nil {
 					return nil, entryErr
@@ -178,6 +194,8 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 				paths = append(paths, writer.path)
 			}
 
+			// The counter advances when the Avro writer flushes a block, so a
+			// manifest can exceed targetSizeBytes by nearly one block.
 			if writer.writer != nil && writer.hasEntries && m.targetSizeBytes > 0 && writer.counter.Count >= m.targetSizeBytes {
 				if entryErr := closeWriter(writer); entryErr != nil {
 					return nil, entryErr

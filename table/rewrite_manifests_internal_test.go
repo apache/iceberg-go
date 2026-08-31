@@ -19,6 +19,9 @@ package table
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -89,6 +92,64 @@ func TestManifestActiveFilesCountsEntriesWhenHeaderCountsAbsent(t *testing.T) {
 	got, err = manifestActiveFiles(fs, []iceberg.ManifestFile{known})
 	require.NoError(t, err)
 	require.EqualValues(t, n, got)
+}
+
+// TestManifestMergeClusterRollsAfterAvroBlockFlush uses enough incompressible
+// per-entry metadata to cross the Avro writer's 64 KiB block boundary. The
+// target is below one flushed block, so the test exercises the documented
+// block-granularity roll rather than a header-only threshold.
+func TestManifestMergeClusterRollsAfterAvroBlockFlush(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{})
+
+	const entryCount = 96
+	entries := make([]iceberg.ManifestEntry, 0, entryCount)
+	snapshotID := prod.snapshotID
+	sequenceNumber := int64(1)
+	for i := range entryCount {
+		metadata := make([]byte, 2<<10)
+		for offset := 0; offset < len(metadata); offset += sha256.Size {
+			var seed [16]byte
+			binary.LittleEndian.PutUint64(seed[:8], uint64(i))
+			binary.LittleEndian.PutUint64(seed[8:], uint64(offset))
+			digest := sha256.Sum256(seed[:])
+			copy(metadata[offset:], digest[:])
+		}
+
+		builder, err := iceberg.NewDataFileBuilder(
+			spec,
+			iceberg.EntryContentData,
+			"file://data-"+strconv.Itoa(i)+".parquet",
+			iceberg.ParquetFile,
+			nil, nil, nil, 1, 100,
+		)
+		require.NoError(t, err)
+		entries = append(entries, iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, &snapshotID, &sequenceNumber, nil,
+			builder.KeyMetadata(metadata).Build(),
+		))
+	}
+
+	path := "table-location/metadata/block-boundary-input.avro"
+	var buf bytes.Buffer
+	input, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, snapshotID, entries)
+	require.NoError(t, err)
+	require.NoError(t, mem.WriteFile(path, buf.Bytes()))
+
+	mgr := manifestMergeManager{
+		targetSizeBytes:  input.Length() / 4,
+		mergeEnabled:     true,
+		mergeConcurrency: 1,
+		clusterBy:        func(iceberg.DataFile) any { return "same" },
+		snap:             prod,
+	}
+	merged, err := mgr.mergeManifests([]iceberg.ManifestFile{input})
+	require.NoError(t, err)
+	require.Greater(t, len(merged), 1,
+		"a flushed Avro block must roll the clustered writer once it crosses the target")
 }
 
 // memKeys snapshots the set of paths a memIO currently holds.
