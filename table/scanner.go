@@ -884,32 +884,28 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	if err != nil {
 		return nil, err
 	}
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// This path has no reporter behind it, so the manifest counts recorded into
 	// this accumulator are intentionally discarded. A future caller that needs
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, &scanMetricsAccumulator{})
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, &scanMetricsAccumulator{})
 }
 
-// fetchPartitionSpecFilteredManifestsWithSchema filters the snapshot's manifests
-// using the given schema. It records total/scanned/skipped manifest counts
-// (split by data vs delete content) into acc.
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(ctx context.Context, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
-	snap, err := scan.ResolveSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	if snap == nil {
-		return nil, nil
-	}
-
-	afs, err := scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
+// fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
+// with fs and filters them using the given schema. It records
+// total/scanned/skipped manifest counts (split by data vs delete content) into acc.
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(snap *Snapshot, fs io.IO, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
-	manifestList, err := snap.Manifests(afs)
+	manifestList, err := snap.Manifests(fs)
 	if err != nil {
 		return nil, err
 	}
@@ -975,6 +971,46 @@ func (scan *Scan) filterManifestsWithSchema(
 	return filtered, nil
 }
 
+// manifestIOBatch shares a FileIO within a concurrency-sized batch. A new
+// batch loads through the factory again so factories that renew credentials
+// still get regular checkpoints without rebuilding the backend for every
+// manifest.
+type manifestIOBatch struct {
+	factory FSysF
+	limit   int
+
+	mu        sync.Mutex
+	fs        io.IO
+	remaining int
+}
+
+func newManifestIOBatch(factory FSysF, limit int) *manifestIOBatch {
+	return &manifestIOBatch{factory: factory, limit: max(limit, 1)}
+}
+
+func (b *manifestIOBatch) acquire(ctx context.Context) (io.IO, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if b.remaining == 0 {
+		fs, err := b.factory(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		b.fs = fs
+		b.remaining = b.limit
+	}
+
+	b.remaining--
+
+	return b.fs, nil
+}
+
 // collectManifestEntries concurrently opens manifests, applies partition and metrics
 // filters, and accumulates both data entries and positional-delete entries.
 func (scan *Scan) collectManifestEntries(
@@ -1006,9 +1042,10 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 
 	minSeqNum := minSequenceNum(manifestList)
 	concurrencyLimit := min(scan.concurrency, len(manifestList))
+	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 
 	entries := newManifestEntries()
-	g, _ := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
 	partitionFilters := scan.partitionFiltersForSchema(schema)
@@ -1022,7 +1059,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		}
 
 		g.Go(func() error {
-			fs, err := scan.ioF(ctx)
+			fs, err := manifestIO.acquire(gctx)
 			if err != nil {
 				return err
 			}
@@ -1138,8 +1175,20 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		}
 	}()
 
+	snap, err := scan.ResolveSnapshot()
+	if err != nil || snap == nil {
+		return nil, err
+	}
+	fs, err := scan.ioF(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Keep the manifest-list load separate from manifest workers. Workers reuse
+	// one FileIO within each concurrent batch, while the next batch loads again
+	// so credential-renewing factories retain their checkpoints.
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(ctx, schema, acc)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, acc)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
