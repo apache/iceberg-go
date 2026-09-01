@@ -1363,6 +1363,7 @@ func TestCollectScanTasksReturnsFirstErrorInHandleOrder(t *testing.T) {
 		PlanTasks: []string{"table", "plan-task"},
 	})
 	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	assert.Contains(t, err.Error(), `handle "table"`)
 	assert.NotErrorIs(t, err, ErrNoSuchPlanTask)
 	assert.Nil(t, envelopes)
 }

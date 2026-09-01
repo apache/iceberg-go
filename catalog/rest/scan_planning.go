@@ -326,7 +326,7 @@ func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, 
 			return nil, err
 		}
 
-		nextFrontier := make([]string, 0)
+		var nextFrontier []string
 		for _, response := range responses {
 			envelopes = append(envelopes, response.ScanTasks)
 			nextFrontier = append(nextFrontier, response.PlanTasks...)
@@ -351,7 +351,7 @@ func (r *Catalog) fetchScanTaskFrontier(
 		group.Go(func() error {
 			response, err := r.FetchScanTasks(groupCtx, ident, FetchScanTasksRequest{PlanTask: handle})
 			if err != nil {
-				errs[i] = err
+				errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, err)
 
 				return err
 			}
