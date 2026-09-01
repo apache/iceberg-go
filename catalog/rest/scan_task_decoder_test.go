@@ -236,6 +236,41 @@ func TestDecodeScanTasksKeepsDeleteReferencesEnvelopeLocal(t *testing.T) {
 	assert.Equal(t, "s3://bucket/table/second-delete.parquet", secondTasks[0].DeleteFiles[0].FilePath())
 }
 
+func TestDecodeScanTasksReusesPartitionDecodePlan(t *testing.T) {
+	t.Parallel()
+
+	baseMetadata := newScanTaskDecoderMetadata()
+	metadata := &countingScanTaskDecoderMetadata{scanTaskDecoderMetadata: baseMetadata}
+	wire := validScanTasksWire()
+	secondDataFile := *wire.FileScanTasks[0].DataFile
+	secondDataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	wire.FileScanTasks = append(wire.FileScanTasks, RESTFileScanTask{DataFile: &secondDataFile})
+
+	tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+	require.NoError(t, err)
+	assert.Len(t, tasks, 2)
+	assert.Equal(t, 1, metadata.specLookups)
+}
+
+func TestRemoteScanTasksReusesPartitionDecodePlanAcrossEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	baseMetadata := newScanTaskDecoderMetadata()
+	metadata := &countingScanTaskDecoderMetadata{scanTaskDecoderMetadata: baseMetadata}
+	first := validScanTasksWire()
+	second := validScanTasksWire()
+	second.FileScanTasks[0].DataFile.FilePath = "s3://bucket/table/second-data.parquet"
+	second.DeleteFiles[0].FilePath = "s3://bucket/table/second-delete.parquet"
+
+	tasks, err := remoteScanTasks([]ScanTasks{first, second}, table.ScanPlanningRequest{
+		Metadata: metadata,
+		Schema:   metadata.schema,
+	})
+	require.NoError(t, err)
+	assert.Len(t, tasks, 2)
+	assert.Equal(t, 1, metadata.specLookups)
+}
+
 func TestDecodeScanTasksDerivesDeletionVectorTargetWhenOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -623,6 +658,17 @@ type scanTaskDecoderMetadata struct {
 	spec   iceberg.PartitionSpec
 }
 
+type countingScanTaskDecoderMetadata struct {
+	*scanTaskDecoderMetadata
+	specLookups int
+}
+
+func (m *countingScanTaskDecoderMetadata) PartitionSpecByID(id int) *iceberg.PartitionSpec {
+	m.specLookups++
+
+	return m.scanTaskDecoderMetadata.PartitionSpecByID(id)
+}
+
 func newScanTaskDecoderMetadata() *scanTaskDecoderMetadata {
 	schema := iceberg.NewSchema(10,
 		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
@@ -671,3 +717,105 @@ func mustLiteral(t *testing.T, value string, typ iceberg.Type) iceberg.Literal {
 
 func intPtr(value int) *int       { return &value }
 func int64Ptr(value int64) *int64 { return &value }
+
+func TestPartitionDecodePlanKeepsValuesIndependent(t *testing.T) {
+	t.Parallel()
+
+	metadata := newScanTaskDecoderMetadata()
+	cache := newPartitionDecodePlanCache()
+	plan, err := cache.planFor(metadata.spec.ID(), metadata)
+	require.NoError(t, err)
+	first, firstLogical, firstFixed, err := decodePartition([]json.RawMessage{
+		json.RawMessage(`34`), json.RawMessage(`"2026-07-17"`), json.RawMessage(`"78797A21"`),
+	}, plan)
+	require.NoError(t, err)
+	second, secondLogical, secondFixed, err := decodePartition([]json.RawMessage{
+		json.RawMessage(`35`), json.RawMessage(`null`), json.RawMessage(`"41424344"`),
+	}, plan)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(34), first[1000])
+	assert.Equal(t, int64(35), second[1000])
+	assert.NotNil(t, first[1001])
+	assert.Nil(t, second[1001])
+	first[1002].([]byte)[0] = 0
+	assert.Equal(t, []byte("ABCD"), second[1002])
+	firstLogical[1001] = "changed"
+	assert.NotContains(t, secondLogical, 1001)
+	firstFixed[1002] = 99
+	assert.NotContains(t, secondFixed, 1002)
+
+	_, _, _, err = decodePartition([]json.RawMessage{json.RawMessage(`34`)}, plan)
+	require.ErrorContains(t, err, "has 1 values, want 3")
+	_, _, _, err = decodePartition([]json.RawMessage{
+		json.RawMessage(`34`), json.RawMessage(`"invalid-date"`), json.RawMessage(`"41424344"`),
+	}, plan)
+	require.ErrorContains(t, err, "date_part")
+}
+
+func TestDecodeScanTasksRejectsNilPartitionTransforms(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+	}{
+		{name: "nil"},
+		{name: "nil identity", transform: (*iceberg.IdentityTransform)(nil)},
+		{name: "nil bucket", transform: (*iceberg.BucketTransform)(nil)},
+		{name: "nil unknown", transform: (*iceberg.UnknownTransform)(nil)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, raw := range []string{"null", "34"} {
+				t.Run(raw, func(t *testing.T) {
+					metadata := newScanTaskDecoderMetadata()
+					field := metadata.spec.Field(0)
+					field.Transform = tt.transform
+					metadata.spec = iceberg.NewPartitionSpecID(metadata.spec.ID(), field)
+					wire := validScanTasksWire()
+					wire.DeleteFiles = nil
+					wire.FileScanTasks[0].DeleteFileReferences = nil
+					wire.FileScanTasks[0].DataFile.Partition = []json.RawMessage{json.RawMessage(raw)}
+
+					tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+					require.ErrorIs(t, err, iceberg.ErrInvalidTransform)
+					require.ErrorContains(t, err, `partition field "id_part" (ID 1000) has no transform`)
+					assert.Nil(t, tasks)
+				})
+			}
+		})
+	}
+}
+
+func TestDecodeScanTasksAcceptsPointerAndUnknownPartitionTransforms(t *testing.T) {
+	t.Parallel()
+
+	unknown, err := iceberg.ParseTransform("custom-transform")
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name      string
+		transform iceberg.Transform
+		raw       string
+		want      any
+	}{
+		{name: "identity pointer", transform: &iceberg.IdentityTransform{}, raw: "34", want: int64(34)},
+		{name: "void pointer", transform: &iceberg.VoidTransform{}, raw: "null"},
+		{name: "unknown", transform: unknown, raw: `"opaque"`, want: "opaque"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			metadata := newScanTaskDecoderMetadata()
+			field := metadata.spec.Field(0)
+			field.Transform = tt.transform
+			metadata.spec = iceberg.NewPartitionSpecID(metadata.spec.ID(), field)
+			wire := validScanTasksWire()
+			wire.DeleteFiles = nil
+			wire.FileScanTasks[0].DeleteFileReferences = nil
+			wire.FileScanTasks[0].DataFile.Partition = []json.RawMessage{json.RawMessage(tt.raw)}
+
+			tasks, err := DecodeScanTasks(wire, metadata, metadata.schema, nil)
+			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			assert.Equal(t, tt.want, tasks[0].File.Partition()[1000])
+		})
+	}
+}
