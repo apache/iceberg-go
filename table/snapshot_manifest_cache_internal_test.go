@@ -20,6 +20,7 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -159,6 +160,39 @@ func TestSnapshotManifestCacheRetriesFailedRead(t *testing.T) {
 	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
 	_, err = cache.get(context.Background(), snapshot, fs)
 	require.NoError(t, err)
+}
+
+func TestSnapshotManifestCacheBoundsCompletedEntries(t *testing.T) {
+	fs := newTrackingCallsIO()
+	cache := newSnapshotManifestCache()
+	sequenceNumber := int64(1)
+	snapshots := make([]Snapshot, snapshotManifestCacheSize+1)
+	for i := range snapshots {
+		var list bytes.Buffer
+		require.NoError(t, iceberg.WriteManifestList(2, &list, int64(i), nil, &sequenceNumber, 0, nil))
+		path := fmt.Sprintf("mem://snapshot-manifest-cache/bounded-%d.avro", i)
+		require.NoError(t, fs.WriteFile(path, list.Bytes()))
+		snapshots[i] = Snapshot{SnapshotID: int64(i), ManifestList: path}
+	}
+
+	for i := range snapshotManifestCacheSize {
+		_, err := cache.get(context.Background(), snapshots[i], fs)
+		require.NoError(t, err)
+	}
+	_, err := cache.get(context.Background(), snapshots[0], fs)
+	require.NoError(t, err)
+	_, err = cache.get(context.Background(), snapshots[snapshotManifestCacheSize], fs)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, fs.openCount[snapshots[0].ManifestList])
+	assert.Equal(t, 1, fs.openCount[snapshots[1].ManifestList])
+	_, err = cache.get(context.Background(), snapshots[0], fs)
+	require.NoError(t, err)
+	_, err = cache.get(context.Background(), snapshots[1], fs)
+	require.NoError(t, err)
+	assert.Equal(t, 1, fs.openCount[snapshots[0].ManifestList])
+	assert.Equal(t, 2, fs.openCount[snapshots[1].ManifestList])
+	assert.LessOrEqual(t, cache.complete.Len(), snapshotManifestCacheSize)
 }
 
 func TestTableRefreshReplacesSnapshotManifestCache(t *testing.T) {

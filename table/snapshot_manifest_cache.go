@@ -25,7 +25,13 @@ import (
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
+
+// snapshotManifestCacheSize bounds the number of decoded manifest lists held
+// by a table. A table normally reuses its current snapshot, while a bounded
+// history is enough to retain useful locality for repeated historical scans.
+const snapshotManifestCacheSize = 64
 
 // snapshotManifestSet keeps the complete manifest list and its content
 // partitions together. Manifest descriptors are immutable for an Iceberg
@@ -99,16 +105,25 @@ type snapshotManifestCacheEntry struct {
 }
 
 // snapshotManifestCache memoizes successful manifest-list reads and shares an
-// in-flight read with concurrent scans. Failed reads are removed so a
-// transient object-store error does not poison the cache.
+// in-flight read with concurrent scans. Completed reads use a bounded LRU so a
+// historical scan cannot retain every snapshot for the lifetime of a table.
+// Failed reads are removed so a transient object-store error does not poison
+// the cache.
 type snapshotManifestCache struct {
-	mu      sync.Mutex
-	entries map[snapshotManifestCacheKey]*snapshotManifestCacheEntry
+	mu       sync.Mutex
+	entries  map[snapshotManifestCacheKey]*snapshotManifestCacheEntry
+	complete *lru.Cache[snapshotManifestCacheKey, snapshotManifestSet]
 }
 
 func newSnapshotManifestCache() *snapshotManifestCache {
+	complete, err := lru.New[snapshotManifestCacheKey, snapshotManifestSet](snapshotManifestCacheSize)
+	if err != nil {
+		panic(err)
+	}
+
 	return &snapshotManifestCache{
-		entries: make(map[snapshotManifestCacheKey]*snapshotManifestCacheEntry),
+		entries:  make(map[snapshotManifestCacheKey]*snapshotManifestCacheEntry),
+		complete: complete,
 	}
 }
 
@@ -125,6 +140,11 @@ func (c *snapshotManifestCache) get(
 
 	key := snapshotManifestCacheKeyFor(snapshot)
 	c.mu.Lock()
+	if manifests, ok := c.complete.Get(key); ok {
+		c.mu.Unlock()
+
+		return manifests, nil
+	}
 	if entry, ok := c.entries[key]; ok {
 		c.mu.Unlock()
 
@@ -149,10 +169,11 @@ func (c *snapshotManifestCache) get(
 	value := newSnapshotManifestSet(manifests)
 
 	c.mu.Lock()
+	delete(c.entries, key)
 	entry.manifests = value
 	entry.err = err
-	if err != nil {
-		delete(c.entries, key)
+	if err == nil {
+		c.complete.Add(key, value)
 	}
 	close(entry.ready)
 	c.mu.Unlock()

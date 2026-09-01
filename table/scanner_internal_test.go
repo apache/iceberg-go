@@ -1242,7 +1242,7 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	snapshot, err := scan.ResolveSnapshot()
 	require.NoError(t, err)
 	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snapshot, memIO, schema, &acc, scan.partitionFiltersForSchema(schema))
+		context.Background(), snapshot, memIO, schema, &acc, scan.partitionFiltersForSchema(schema))
 	require.NoError(t, err)
 
 	// Two data manifests, one delete manifest.
