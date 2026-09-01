@@ -32,16 +32,14 @@ import (
 // scanMetricsAccumulator gathers scan-planning counts. Every field is written
 // from a single goroutine — the manifest counts in
 // fetchPartitionSpecFilteredManifestsWithSchema and the result/delete counts in
-// planFilesLocal after collectManifestEntriesWithSchema's concurrency barrier —
-// so plain integers are race-free; no field is touched from the concurrent
-// manifest workers.
+// planFilesLocal after its concurrent manifest/task barrier — so plain
+// integers are race-free; no field is touched from the concurrent workers.
 //
-// The scanned/skipped manifest counts measure manifest selection before opening
-// manifests, including partition-spec pruning and known-empty manifests. The
-// per-entry skipped-data-files / skipped-delete-files counts (which would be
-// incremented inside the concurrent openManifest loop, and would use atomics)
-// and indexed-delete-files are left for a follow-up and omitted rather than
-// reported as zero.
+// The scanned/skipped manifest counts measure partition-spec pruning (the
+// filter applied while listing manifests). The per-entry skipped-data-files /
+// skipped-delete-files counts (which would be incremented inside the concurrent
+// manifest-entry loop, and would use atomics) and indexed-delete-files are left
+// for a follow-up and omitted rather than reported as zero.
 type scanMetricsAccumulator struct {
 	totalDataManifests     int64
 	totalDeleteManifests   int64

@@ -893,6 +893,71 @@ func TestMinSequenceNum(t *testing.T) {
 	}
 }
 
+func TestSplitManifestListKeepsDataManifestOrder(t *testing.T) {
+	manifests := []iceberg.ManifestFile{
+		newDeleteManifest(1),
+		newDataManifest(2),
+		newDeleteManifest(3),
+		newDataManifest(4),
+	}
+
+	dataManifests, deleteManifests := splitManifestList(manifests)
+
+	assert.Equal(t, []iceberg.ManifestFile{manifests[1], manifests[3]}, dataManifests)
+	assert.Equal(t, []iceberg.ManifestFile{manifests[0], manifests[2]}, deleteManifests)
+}
+
+func TestPlanDataManifestTasksPreservesManifestOrder(t *testing.T) {
+	fs := newTrackingIO()
+	schema := simpleSchema()
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://streamed-planning", nil)
+	require.NoError(t, err)
+
+	const snapshotID = int64(1)
+	manifests := []iceberg.ManifestFile{
+		writeManifest(t, fs, snapshotID, 1,
+			"mem://streamed-planning/metadata/manifest-a.avro",
+			"mem://streamed-planning/data-a.parquet"),
+		writeManifest(t, fs, snapshotID, 2,
+			"mem://streamed-planning/metadata/manifest-b.avro",
+			"mem://streamed-planning/data-b.parquet"),
+	}
+	scan := &Scan{
+		metadata:      meta,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+		concurrency:   2,
+		ioF:           testFSF(fs),
+	}
+
+	posDeleteIndex, err := buildPositionalDeleteIndex(nil)
+	require.NoError(t, err)
+	dvIndex, err := buildDVIndex(nil)
+	require.NoError(t, err)
+	eqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta, schema)
+	require.NoError(t, err)
+
+	tasks, err := scan.planDataManifestTasks(context.Background(), manifests, schema, 0,
+		posDeleteIndex, dvIndex, eqDeleteIndex)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	assert.Equal(t, "mem://streamed-planning/data-a.parquet", tasks[0].File.FilePath())
+	assert.Equal(t, "mem://streamed-planning/data-b.parquet", tasks[1].File.FilePath())
+
+	unknownCounts := iceberg.NewManifestFile(
+		2, manifests[0].FilePath(), manifests[0].Length(), 0, snapshotID,
+	).
+		SequenceNum(1, 1).
+		AddedFiles(-1).
+		ExistingFiles(-1).
+		Build()
+	tasks, err = scan.planDataManifestTasks(context.Background(), []iceberg.ManifestFile{unknownCounts}, schema, 0,
+		posDeleteIndex, dvIndex, eqDeleteIndex)
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1, "unknown manifest counts should use the safe append path")
+}
+
 func TestSplitLineageMetadataFields(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -2334,4 +2399,27 @@ func TestArrowScanFiltersMissingColumnInitialDefault(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestPlanDataManifestTasksHandlesInaccurateCounts(t *testing.T) {
+	for _, counts := range [][]int32{{5, 5, 5}, {0, 2, 1}, {-1, -1, -1}} {
+		scan, schema, manifests, posIndex, dvIndex, eqIndex := newPlanTasksBenchmarkFixture(t, 3, 3)
+		for i, manifest := range manifests {
+			manifests[i] = iceberg.NewManifestFile(2, manifest.FilePath(), manifest.Length(),
+				manifest.PartitionSpecID(), manifest.SnapshotID()).
+				SequenceNum(manifest.SequenceNum(), manifest.MinSequenceNum()).
+				AddedFiles(counts[i]).
+				Build()
+		}
+
+		tasks, err := scan.planDataManifestTasks(t.Context(), manifests, schema,
+			minSequenceNum(manifests), posIndex, dvIndex, eqIndex)
+		require.NoError(t, err)
+		require.Len(t, tasks, 9)
+		for i, task := range tasks {
+			assert.Equal(t, "mem://plan-tasks-benchmark/data-"+strconv.Itoa(i/3)+"-"+strconv.Itoa(i%3)+".parquet",
+				task.File.FilePath(), "manifest counts: %v", counts)
+			assert.Equal(t, int64(i/3+1), *task.DataSequenceNumber)
+		}
+	}
 }
