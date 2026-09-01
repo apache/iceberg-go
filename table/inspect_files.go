@@ -135,7 +135,9 @@ func (i InspectTable) manifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
-	manifestSet, err := i.tbl.manifestCache.get(ctx, *snapshot, fs)
+	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, func(context.Context) (iceio.IO, error) {
+		return fs, nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -174,6 +176,7 @@ func (i InspectTable) allManifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
+	manifestFS := func(context.Context) (iceio.IO, error) { return fs, nil }
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,
@@ -185,7 +188,7 @@ func (i InspectTable) allManifestEntryReader(
 
 					return
 				}
-				manifestSet, err := i.tbl.manifestCache.get(ctx, snapshot, fs)
+				manifestSet, err := i.tbl.manifestSetWithFSF(ctx, snapshot, manifestFS)
 				if err != nil {
 					yield(nil, fmt.Errorf("read snapshot %d manifests: %w", snapshot.SnapshotID, err))
 
