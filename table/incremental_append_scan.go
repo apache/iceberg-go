@@ -159,20 +159,17 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	if s.scan.ioF == nil {
 		return nil, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
 	}
-	manifestListFS, err := s.scan.ioF(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	// An inherited manifest can occur in every later snapshot's manifest list.
 	// Read each manifest path once, just as the Java incremental append scan
 	// collects the selected manifests into a set before opening them.
 	manifestsByPath := make(map[string]iceberg.ManifestFile)
+	manifestFS := sharedSnapshotManifestFSF(s.scan.ioF)
 	for _, snapshot := range snapshots {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifestSet, err := planningScan.manifestSet(ctx, snapshot, manifestListFS)
+		manifestSet, err := planningScan.manifestSetWithFSF(ctx, snapshot, manifestFS)
 		if err != nil {
 			return nil, err
 		}

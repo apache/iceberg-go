@@ -31,6 +31,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testSnapshotManifestLoader(snapshot Snapshot, fs iceio.IO) snapshotManifestLoader {
+	return func(ctx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(ctx, snapshot, testFSF(fs))
+	}
+}
+
 func TestTableScansReuseSnapshotManifestList(t *testing.T) {
 	fs := newTrackingCallsIO()
 	meta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder,
@@ -85,7 +91,8 @@ func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
 	const listPath = "mem://snapshot-manifest-cache/separate.avro"
 	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
 
-	set, err := cache.get(context.Background(), Snapshot{SnapshotID: 1, ManifestList: listPath}, fs)
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
+	set, err := cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.NoError(t, err)
 	require.Len(t, set.allManifests(), 2)
 	require.Len(t, set.dataManifests(), 1)
@@ -120,9 +127,11 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 	const callers = 16
 	errs := make(chan error, callers)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 	for range callers {
 		go func() {
-			_, err := cache.get(context.Background(), snapshot, fs)
+			_, err := cache.get(t.Context(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 			errs <- err
 		}()
 	}
@@ -132,7 +141,7 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("manifest-list read did not start")
 	}
-	close(fs.release)
+	release.Do(func() { close(fs.release) })
 
 	for range callers {
 		require.NoError(t, <-errs)
@@ -150,7 +159,7 @@ func TestSnapshotManifestCacheRetriesFailedRead(t *testing.T) {
 	cache := newSnapshotManifestCache()
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 
-	_, err := cache.get(context.Background(), snapshot, fs)
+	_, err := cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.Error(t, err)
 
 	var list bytes.Buffer
@@ -158,7 +167,7 @@ func TestSnapshotManifestCacheRetriesFailedRead(t *testing.T) {
 	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0,
 		[]iceberg.ManifestFile{}))
 	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
-	_, err = cache.get(context.Background(), snapshot, fs)
+	_, err = cache.get(context.Background(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.NoError(t, err)
 }
 
@@ -176,19 +185,19 @@ func TestSnapshotManifestCacheBoundsCompletedEntries(t *testing.T) {
 	}
 
 	for i := range snapshotManifestCacheSize {
-		_, err := cache.get(context.Background(), snapshots[i], fs)
+		_, err := cache.get(context.Background(), snapshots[i], testSnapshotManifestLoader(snapshots[i], fs))
 		require.NoError(t, err)
 	}
-	_, err := cache.get(context.Background(), snapshots[0], fs)
+	_, err := cache.get(context.Background(), snapshots[0], testSnapshotManifestLoader(snapshots[0], fs))
 	require.NoError(t, err)
-	_, err = cache.get(context.Background(), snapshots[snapshotManifestCacheSize], fs)
+	_, err = cache.get(context.Background(), snapshots[snapshotManifestCacheSize], testSnapshotManifestLoader(snapshots[snapshotManifestCacheSize], fs))
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, fs.openCount[snapshots[0].ManifestList])
 	assert.Equal(t, 1, fs.openCount[snapshots[1].ManifestList])
-	_, err = cache.get(context.Background(), snapshots[0], fs)
+	_, err = cache.get(context.Background(), snapshots[0], testSnapshotManifestLoader(snapshots[0], fs))
 	require.NoError(t, err)
-	_, err = cache.get(context.Background(), snapshots[1], fs)
+	_, err = cache.get(context.Background(), snapshots[1], testSnapshotManifestLoader(snapshots[1], fs))
 	require.NoError(t, err)
 	assert.Equal(t, 1, fs.openCount[snapshots[0].ManifestList])
 	assert.Equal(t, 2, fs.openCount[snapshots[1].ManifestList])
@@ -246,6 +255,71 @@ func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
 	return fs.IO.Open(name)
 }
 
+type contextAwareSnapshotManifestIO struct {
+	iceio.IO
+	ctx     context.Context
+	started chan struct{}
+	once    sync.Once
+}
+
+func (fs *contextAwareSnapshotManifestIO) Open(string) (iceio.File, error) {
+	fs.once.Do(func() { close(fs.started) })
+	<-fs.ctx.Done()
+
+	return nil, fs.ctx.Err()
+}
+
+type notifyingContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+type producerContextKey struct{}
+
+func (c *notifyingContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+
+	return c.Context.Done()
+}
+
+func TestSnapshotManifestCacheProducerContextCancelsRead(t *testing.T) {
+	base := iceio.NewMemFS()
+	cache := newSnapshotManifestCache()
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/context-cancel.avro"}
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	load := func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, func(ioCtx context.Context) (iceio.IO, error) {
+			return &contextAwareSnapshotManifestIO{IO: base, ctx: ioCtx, started: started}, nil
+		})
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.get(ctx, snapshot, load)
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("manifest-list read did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("producer did not stop after context cancellation")
+	}
+
+	_, err := cache.get(t.Context(), snapshot, func(context.Context) (snapshotManifestSet, error) {
+		return snapshotManifestSet{}, nil
+	})
+	require.NoError(t, err)
+}
+
 func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T) {
 	const listPath = "mem://snapshot-manifest-cache/canceled-waiter.avro"
 	base := iceio.NewMemFS()
@@ -263,7 +337,7 @@ func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 	first := make(chan error, 1)
 	go func() {
-		_, err := cache.get(t.Context(), snapshot, fs)
+		_, err := cache.get(t.Context(), snapshot, testSnapshotManifestLoader(snapshot, fs))
 		first <- err
 	}()
 	select {
@@ -274,13 +348,118 @@ func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err := cache.get(ctx, snapshot, fs)
+	_, err := cache.get(ctx, snapshot, testSnapshotManifestLoader(snapshot, fs))
 	require.ErrorIs(t, err, context.Canceled)
+	retry := make(chan error, 1)
+	go func() {
+		_, err := cache.get(t.Context(), snapshot, testSnapshotManifestLoader(snapshot, fs))
+		retry <- err
+	}()
+	select {
+	case err := <-retry:
+		t.Fatalf("retry returned before the shared producer finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
 	release.Do(func() { close(fs.release) })
 	require.NoError(t, <-first)
-	_, err = cache.get(t.Context(), snapshot, fs)
-	require.NoError(t, err)
+	require.NoError(t, <-retry)
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	assert.Equal(t, 1, fs.opens[listPath])
+}
+
+func TestSnapshotManifestCachePanickingProducerUnblocksWaiters(t *testing.T) {
+	cache := newSnapshotManifestCache()
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/panic.avro"}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	load := func(context.Context) (snapshotManifestSet, error) {
+		close(started)
+		<-release
+		panic("manifest-list producer failed")
+	}
+
+	producerDone := make(chan any, 1)
+	go func() {
+		defer func() { producerDone <- recover() }()
+		_, _ = cache.get(t.Context(), snapshot, load)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("manifest-list producer did not start")
+	}
+
+	waiterDone := make(chan error, 1)
+	waiterCtx := &notifyingContext{Context: t.Context(), entered: make(chan struct{})}
+	go func() {
+		_, err := cache.get(waiterCtx, snapshot, load)
+		waiterDone <- err
+	}()
+	select {
+	case <-waiterCtx.entered:
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not start waiting on the producer")
+	}
+
+	close(release)
+	select {
+	case err := <-waiterDone:
+		require.Error(t, err)
+		require.ErrorContains(t, err, "panic while reading snapshot 1 manifest list")
+	case <-time.After(time.Second):
+		t.Fatal("waiter remained blocked after producer panic")
+	}
+	assert.Equal(t, "manifest-list producer failed", <-producerDone)
+
+	_, err := cache.get(t.Context(), snapshot, func(context.Context) (snapshotManifestSet, error) {
+		return snapshotManifestSet{}, nil
+	})
+	require.NoError(t, err)
+}
+
+func TestSnapshotManifestCachePassesProducerContextToLoader(t *testing.T) {
+	cache := newSnapshotManifestCache()
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/context.avro"}
+	ctx := context.WithValue(t.Context(), producerContextKey{}, "producer")
+	seen := make(chan context.Context, 1)
+
+	_, err := cache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		seen <- loadCtx
+
+		return snapshotManifestSet{}, nil
+	})
+	require.NoError(t, err)
+	assert.Same(t, ctx, <-seen)
+}
+
+func TestSnapshotManifestCacheDoesNotClassifyUnknownContentAsData(t *testing.T) {
+	unknown := iceberg.NewManifestFile(2, "unknown.avro", 1, 0, 1).
+		Content(iceberg.ManifestContent(2)).
+		Build()
+	set := newSnapshotManifestSet([]iceberg.ManifestFile{
+		iceberg.NewManifestFile(2, "data.avro", 1, 0, 1).Build(),
+		iceberg.NewManifestFile(2, "delete.avro", 1, 0, 1).
+			Content(iceberg.ManifestContentDeletes).
+			Build(),
+		unknown,
+	})
+
+	assert.Len(t, set.allManifests(), 3)
+	assert.Len(t, set.dataManifests(), 1)
+	assert.Len(t, set.deleteManifests(), 1)
+}
+
+func TestTransactionScanUsesAnIsolatedSnapshotManifestCache(t *testing.T) {
+	meta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://snapshot-manifest-cache-transaction", nil)
+	require.NoError(t, err)
+	tbl := New(Identifier{"db", "snapshot-manifest-cache-transaction"}, meta, "metadata.json",
+		testFSF(iceio.NewMemFS()), nil)
+	txn := tbl.NewTransaction()
+
+	scan, err := txn.Scan()
+	require.NoError(t, err)
+	assert.NotSame(t, tbl.manifestCache, scan.manifestCache)
 }

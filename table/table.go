@@ -362,14 +362,21 @@ func (t Table) Delete(ctx context.Context, filter iceberg.BooleanExpression, sna
 	return txn.Commit(ctx)
 }
 
-func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
-	fs, err := t.fsF(ctx)
-	if err != nil {
-		return func(yield func(iceberg.ManifestFile, error) bool) {
-			yield(nil, err)
-		}
-	}
+func (t Table) manifestSet(ctx context.Context, snapshot Snapshot) (snapshotManifestSet, error) {
+	return t.manifestSetWithFSF(ctx, snapshot, t.fsF)
+}
 
+func (t Table) manifestSetWithFSF(
+	ctx context.Context,
+	snapshot Snapshot,
+	fsF FSysF,
+) (snapshotManifestSet, error) {
+	return t.manifestCache.get(ctx, snapshot, func(loadCtx context.Context) (snapshotManifestSet, error) {
+		return readSnapshotManifestSet(loadCtx, snapshot, fsF)
+	})
+}
+
+func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile, error] {
 	type list = tblutils.Enumerated[[]iceberg.ManifestFile]
 	snapshots := t.metadata.Snapshots()
 	n := len(snapshots)
@@ -381,6 +388,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 	ch := make(chan list, allManifestsWorkerCount(n))
 	workers := allManifestsWorkerCount(n)
 	g, groupCtx := errgroup.WithContext(workCtx)
+	manifestFS := sharedSnapshotManifestFSF(t.fsF)
 
 	for range workers {
 		g.Go(func() error {
@@ -393,7 +401,7 @@ func (t Table) AllManifests(ctx context.Context) iter.Seq2[iceberg.ManifestFile,
 						return nil
 					}
 
-					manifestSet, err := t.manifestCache.get(groupCtx, snapshots[i], fs)
+					manifestSet, err := t.manifestSetWithFSF(groupCtx, snapshots[i], manifestFS)
 					if err != nil {
 						return err
 					}

@@ -19,6 +19,7 @@ package table
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -51,10 +52,11 @@ func newSnapshotManifestSet(manifests []iceberg.ManifestFile) snapshotManifestSe
 	set.data = make([]iceberg.ManifestFile, 0, len(manifests))
 	set.deletes = make([]iceberg.ManifestFile, 0, len(manifests))
 	for _, manifest := range set.all {
-		if manifest.ManifestContent() == iceberg.ManifestContentDeletes {
-			set.deletes = append(set.deletes, manifest)
-		} else {
+		switch manifest.ManifestContent() {
+		case iceberg.ManifestContentData:
 			set.data = append(set.data, manifest)
+		case iceberg.ManifestContentDeletes:
+			set.deletes = append(set.deletes, manifest)
 		}
 	}
 
@@ -87,6 +89,8 @@ func snapshotManifestCacheKeyFor(snapshot Snapshot) snapshotManifestCacheKey {
 	)
 	if snapshot.ManifestList == "" {
 		hasEmbeddedSources = snapshot.ManifestLocations != nil
+		// Valid file locations cannot contain a literal NUL, so this join is
+		// collision-free while preserving nil versus empty locations.
 		embeddedManifestSources = strings.Join(snapshot.ManifestLocations, "\x00")
 	}
 
@@ -103,6 +107,8 @@ type snapshotManifestCacheEntry struct {
 	manifests snapshotManifestSet
 	err       error
 }
+
+type snapshotManifestLoader func(context.Context) (snapshotManifestSet, error)
 
 // snapshotManifestCache memoizes successful manifest-list reads and shares an
 // in-flight read with concurrent scans. Completed reads use a bounded LRU so a
@@ -130,12 +136,10 @@ func newSnapshotManifestCache() *snapshotManifestCache {
 func (c *snapshotManifestCache) get(
 	ctx context.Context,
 	snapshot Snapshot,
-	fio iceio.IO,
+	load snapshotManifestLoader,
 ) (snapshotManifestSet, error) {
 	if c == nil {
-		manifests, err := snapshot.Manifests(fio)
-
-		return newSnapshotManifestSet(manifests), err
+		return load(ctx)
 	}
 
 	key := snapshotManifestCacheKeyFor(snapshot)
@@ -165,10 +169,38 @@ func (c *snapshotManifestCache) get(
 	c.entries[key] = entry
 	c.mu.Unlock()
 
-	manifests, err := snapshot.Manifests(fio)
-	value := newSnapshotManifestSet(manifests)
+	var (
+		value snapshotManifestSet
+		err   error
+	)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.finish(key, entry, snapshotManifestSet{}, fmt.Errorf(
+				"panic while reading snapshot %d manifest list: %v", snapshot.SnapshotID, recovered))
+			panic(recovered)
+		}
 
+		c.finish(key, entry, value, err)
+	}()
+
+	value, err = load(ctx)
+
+	return value, err
+}
+
+func (c *snapshotManifestCache) finish(
+	key snapshotManifestCacheKey,
+	entry *snapshotManifestCacheEntry,
+	value snapshotManifestSet,
+	err error,
+) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if current, ok := c.entries[key]; !ok || current != entry {
+		return
+	}
+
 	delete(c.entries, key)
 	entry.manifests = value
 	entry.err = err
@@ -176,7 +208,55 @@ func (c *snapshotManifestCache) get(
 		c.complete.Add(key, value)
 	}
 	close(entry.ready)
-	c.mu.Unlock()
+}
 
-	return value, err
+func readSnapshotManifestSet(
+	ctx context.Context,
+	snapshot Snapshot,
+	fsF FSysF,
+) (snapshotManifestSet, error) {
+	if err := ctx.Err(); err != nil {
+		return snapshotManifestSet{}, err
+	}
+	if fsF == nil {
+		return snapshotManifestSet{}, fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
+	}
+
+	// Resolve the IO inside the producer so context-aware factories bind the
+	// producer context to the underlying manifest-list read.
+	fio, err := fsF(ctx)
+	if err != nil {
+		return snapshotManifestSet{}, err
+	}
+	manifests, err := snapshot.Manifests(fio)
+	if err != nil {
+		return snapshotManifestSet{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshotManifestSet{}, err
+	}
+
+	return newSnapshotManifestSet(manifests), nil
+}
+
+func sharedSnapshotManifestFSF(fsF FSysF) FSysF {
+	var (
+		once sync.Once
+		fio  iceio.IO
+		err  error
+	)
+
+	return func(ctx context.Context) (iceio.IO, error) {
+		once.Do(func() {
+			if fsF == nil {
+				err = fmt.Errorf("%w: table file IO is not configured", ErrInvalidOperation)
+
+				return
+			}
+
+			fio, err = fsF(ctx)
+		})
+
+		return fio, err
+	}
 }
