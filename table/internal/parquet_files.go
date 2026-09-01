@@ -127,7 +127,7 @@ func (parquetFormat) Open(ctx context.Context, fs iceio.IO, path string) (_ File
 		return nil, err
 	}
 
-	return wrapPqArrowReader{arrRdr}, nil
+	return wrapPqArrowReader{FileReader: arrRdr}, nil
 }
 
 func (parquetFormat) PathToIDMapping(sc *iceberg.Schema) (map[string]int, error) {
@@ -1799,6 +1799,18 @@ type RowGroupBloomPred struct {
 type ParquetRowGroupTester struct {
 	StatsFn    func(*metadata.RowGroupMetaData, []int) (bool, error)
 	BloomPreds []RowGroupBloomPred // nil = no bloom filter pass
+	// RangeSet indicates that Start and Length came from an explicit scan task.
+	// Without it, the zero value keeps the historical full-file behavior for
+	// callers that construct a tester only for row-group pruning.
+	RangeSet bool
+	// When RangeSet is true, Start and Length select row groups whose absolute
+	// Parquet row-group offset falls in [Start, Start+Length).
+	Start, Length int64
+	// PlanningSplitOffsets contains the split offsets used when the scan task
+	// was planned. When it contains one valid offset per row group, range
+	// selection uses these offsets instead of re-deriving them from the opened
+	// Parquet footer. Sparse split-offset lists fall back to the footer offsets.
+	PlanningSplitOffsets []int64
 	// Survivors, if non-nil, is reset and then filled with one span per row group
 	// that survives pruning, in file order, with positions relative to the full
 	// file. It lets callers reconstruct each emitted row's original position even
@@ -1815,6 +1827,7 @@ type RowGroupSpan struct {
 
 type wrapPqArrowReader struct {
 	*pqarrow.FileReader
+	rowGroupInfos []parquetRowGroupInfo
 }
 
 func (w wrapPqArrowReader) Metadata() Metadata {
@@ -1833,6 +1846,66 @@ func (w wrapPqArrowReader) PrunedSchema(projectedIDs map[int]struct{}, mapping i
 	return pruneParquetColumns(w.Manifest, projectedIDs, false, mapping)
 }
 
+// parquetRowGroupSplitOffset returns the same first-page offset used when
+// DataFileStatistics.SplitOffsets is built. RowGroup.file_offset is optional
+// in Parquet and Arrow returns zero when it is absent, so relying on it can
+// discard every row group in a split task from an otherwise valid file.
+func parquetRowGroupSplitOffset(rgMeta *metadata.RowGroupMetaData) int64 {
+	if rgMeta.NumColumns() > 0 {
+		if firstColumn, err := rgMeta.ColumnChunk(0); err == nil {
+			dataOffset := firstColumn.DataPageOffset()
+			if firstColumn.HasDictionaryPage() {
+				dictOffset := firstColumn.DictionaryPageOffset()
+				if dictOffset >= 0 && (dataOffset < 0 || dictOffset < dataOffset) {
+					return dictOffset
+				}
+			}
+			if dataOffset >= 0 {
+				return dataOffset
+			}
+		}
+	}
+
+	return rgMeta.FileOffset()
+}
+
+func parquetRowGroupInfos(rdr *file.Reader) []parquetRowGroupInfo {
+	result := make([]parquetRowGroupInfo, rdr.NumRowGroups())
+	for i := range result {
+		rgMeta := rdr.MetaData().RowGroup(i)
+		result[i] = parquetRowGroupInfo{
+			splitOffset: parquetRowGroupSplitOffset(rgMeta),
+			numRows:     rgMeta.NumRows(),
+		}
+	}
+
+	return result
+}
+
+func validateParquetRowGroupRange(fileSize, start, length int64) error {
+	if start < 0 || length <= 0 || start > fileSize || length > fileSize-start {
+		return fmt.Errorf(
+			"%w: invalid parquet row-group range: start=%d, length=%d, file size=%d",
+			iceberg.ErrInvalidArgument, start, length, fileSize)
+	}
+
+	return nil
+}
+
+func validParquetRowGroupOffsets(offsets []int64, numRowGroups int, fileSize int64) bool {
+	if len(offsets) != numRowGroups {
+		return false
+	}
+
+	for i, offset := range offsets {
+		if offset < 0 || offset >= fileSize || (i > 0 && offset <= offsets[i-1]) {
+			return false
+		}
+	}
+
+	return true
+}
+
 func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester any) (array.RecordReader, error) {
 	var rowGroupTester *ParquetRowGroupTester
 
@@ -1844,10 +1917,23 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 		}
 	}
 
+	rangeSet := rowGroupTester != nil && rowGroupTester.RangeSet
+	if rangeSet {
+		if err := validateParquetRowGroupRange(
+			w.SourceFileSize(), rowGroupTester.Start, rowGroupTester.Length); err != nil {
+			return nil, err
+		}
+	}
+
 	var rgList []int
-	if rowGroupTester != nil && (rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
+	if rowGroupTester != nil && (rangeSet ||
+		rowGroupTester.StatsFn != nil || len(rowGroupTester.BloomPreds) > 0) {
 		fileMeta := w.ParquetReader().MetaData()
 		numRg := w.ParquetReader().NumRowGroups()
+		planningOffsets := rowGroupTester.PlanningSplitOffsets
+		if !validParquetRowGroupOffsets(planningOffsets, numRg, w.SourceFileSize()) {
+			planningOffsets = nil
+		}
 
 		var (
 			fieldIDToColIdx map[int]int
@@ -1863,16 +1949,40 @@ func (w wrapPqArrowReader) GetRecords(ctx context.Context, cols []int, tester an
 			*rowGroupTester.Survivors = (*rowGroupTester.Survivors)[:0]
 		}
 
+		rangeStart := rowGroupTester.Start
+		rangeEnd := rangeStart + rowGroupTester.Length
 		rgList = make([]int, 0)
 		var firstRowPos int64
 		for rg := range numRg {
-			rgMeta := fileMeta.RowGroup(rg)
-			numRows := rgMeta.NumRows()
 			pos := firstRowPos
+			var (
+				rgMeta  *metadata.RowGroupMetaData
+				numRows int64
+				offset  int64
+			)
+			if len(w.rowGroupInfos) == numRg {
+				info := w.rowGroupInfos[rg]
+				numRows = info.numRows
+				offset = info.splitOffset
+			} else {
+				rgMeta = fileMeta.RowGroup(rg)
+				numRows = rgMeta.NumRows()
+			}
 			firstRowPos += numRows
 
 			use := true
-			if rowGroupTester.StatsFn != nil {
+			if rangeSet {
+				if planningOffsets != nil {
+					offset = planningOffsets[rg]
+				} else if len(w.rowGroupInfos) != numRg {
+					offset = parquetRowGroupSplitOffset(rgMeta)
+				}
+				use = offset >= rangeStart && offset < rangeEnd
+			}
+			if use && (rowGroupTester.StatsFn != nil || bfReader != nil) && rgMeta == nil {
+				rgMeta = fileMeta.RowGroup(rg)
+			}
+			if use && rowGroupTester.StatsFn != nil {
 				var err error
 				use, err = rowGroupTester.StatsFn(rgMeta, cols)
 				if err != nil {
@@ -1986,10 +2096,42 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		}
 	}()
 
-	rdr, err := file.NewParquetReader(pf,
-		file.WithReadProps(parquet.NewReaderProperties(pfs.mem)))
-	if err != nil {
-		return nil, err
+	readProps := parquet.NewReaderProperties(pfs.mem)
+	var rdr *file.Reader
+	var rowGroupInfos []parquetRowGroupInfo
+	if cache := parquetMetadataCacheFromContext(ctx); cache != nil {
+		entry := cache.entry(parquetMetadataCacheKey{
+			path: pfs.file.FilePath(),
+			size: pfs.file.FileSizeBytes(),
+		})
+
+		var parsed *file.Reader
+		entry.once.Do(func() {
+			parsed, entry.err = file.NewParquetReader(pf, file.WithReadProps(readProps))
+			if entry.err == nil {
+				entry.fileMetadata = parsed.MetaData()
+				entry.rowGroupInfos = parquetRowGroupInfos(parsed)
+			}
+		})
+		if entry.err != nil {
+			return nil, entry.err
+		}
+		rowGroupInfos = entry.rowGroupInfos
+
+		if parsed != nil {
+			rdr = parsed
+		} else {
+			rdr, err = file.NewParquetReader(pf,
+				file.WithMetadata(entry.fileMetadata), file.WithReadProps(readProps))
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		rdr, err = file.NewParquetReader(pf, file.WithReadProps(readProps))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	props := TablePropertiesFromContext(ctx)
@@ -2008,7 +2150,7 @@ func (pfs *ParquetFileSource) GetReader(ctx context.Context) (result FileReader,
 		return nil, err
 	}
 
-	result = wrapPqArrowReader{fr}
+	result = wrapPqArrowReader{FileReader: fr, rowGroupInfos: rowGroupInfos}
 
 	return result, nil
 }

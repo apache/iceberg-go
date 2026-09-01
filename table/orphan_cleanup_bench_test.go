@@ -18,8 +18,14 @@
 package table
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/apache/iceberg-go"
+	iceio "github.com/apache/iceberg-go/io"
 )
 
 var orphanCleanupBenchmarkSink string
@@ -62,4 +68,59 @@ func BenchmarkApplyURIEquivalence(b *testing.B) {
 			orphanCleanupBenchmarkSink = result
 		})
 	}
+}
+
+func BenchmarkGetReferencedFilesManifestLists(b *testing.B) {
+	for _, snapshotCount := range []int{1, 16, 128, 1024} {
+		for _, maxWorkers := range []int{1, 4, 16} {
+			b.Run(fmt.Sprintf("snapshots=%d/concurrency=%d", snapshotCount, maxWorkers), func(b *testing.B) {
+				baseIO := newTrackingIO()
+				manifestPath := "s3://bucket/benchmark/manifest-shared.avro"
+				mf := writeManifest(b, baseIO, 1, 1, manifestPath, "s3://bucket/benchmark/data.parquet")
+				var snapshotJSON []string
+				for i := 1; i <= snapshotCount; i++ {
+					listPath := fmt.Sprintf("s3://bucket/benchmark/snap-%d.avro", i)
+					writeManifestList(b, baseIO, int64(i), listPath, []iceberg.ManifestFile{mf})
+					snapshotJSON = append(snapshotJSON,
+						fmt.Sprintf(`{"snapshot-id":%d,"timestamp-ms":%d,"manifest-list":%q}`,
+							i, i*1000, listPath))
+				}
+
+				meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+					snapshots: strings.Join(snapshotJSON, ","),
+				}))
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				fs := &benchmarkDelayIO{IO: baseIO, delay: time.Millisecond}
+				tbl := New(Identifier{"ns", "orphan-cleanup-benchmark"}, meta,
+					"metadata.json", testFSF(fs), nil)
+
+				b.ReportAllocs()
+				b.ReportMetric(float64(snapshotCount), "manifest_lists/op")
+				b.ResetTimer()
+				for b.Loop() {
+					if _, err := tbl.getReferencedFiles(context.Background(), fs, maxWorkers, true); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+type benchmarkDelayIO struct {
+	iceio.IO
+	delay time.Duration
+}
+
+func (fs *benchmarkDelayIO) Open(name string) (iceio.File, error) {
+	f, err := fs.IO.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	time.Sleep(fs.delay)
+
+	return f, nil
 }

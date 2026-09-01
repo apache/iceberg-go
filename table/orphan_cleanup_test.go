@@ -2259,3 +2259,42 @@ func TestGetReferencedFiles_ManySnapshotsShareManifest(t *testing.T) {
 	assert.Equal(t, 1, tio.openCount[manifestPath],
 		"shared manifest must be opened exactly once even with %d snapshots", numSnapshots)
 }
+
+func TestGetReferencedFilesFetchesManifestListsConcurrently(t *testing.T) {
+	const (
+		snapshotCount = 8
+		maxWorkers    = 4
+		dataPath      = "s3://bucket/data/file.parquet"
+		manifestPath  = "s3://bucket/meta/manifest-shared.avro"
+	)
+
+	baseIO := newTrackingIO()
+	mf := writeManifest(t, baseIO, 1, 1, manifestPath, dataPath)
+	var snapshotJSON []string
+	for i := 1; i <= snapshotCount; i++ {
+		listPath := fmt.Sprintf("s3://bucket/meta/snap-%d.avro", i)
+		writeManifestList(t, baseIO, int64(i), listPath, []iceberg.ManifestFile{mf})
+		snapshotJSON = append(snapshotJSON,
+			fmt.Sprintf(`{"snapshot-id":%d,"timestamp-ms":%d,"manifest-list":%q}`,
+				i, i*1000, listPath))
+	}
+
+	meta, err := ParseMetadataString(buildMetaJSON(metaJSONOpts{
+		snapshots: strings.Join(snapshotJSON, ","),
+	}))
+	require.NoError(t, err)
+
+	trackingFS := &manifestTrackingIO{IO: baseIO, delay: 10 * time.Millisecond}
+	tbl := New(Identifier{"ns", "tbl"}, meta, "metadata.json", testFSF(trackingFS), nil)
+	refs, err := tbl.getReferencedFiles(context.Background(), trackingFS, maxWorkers, true)
+	require.NoError(t, err)
+
+	assert.Contains(t, refs, dataPath)
+	assert.Contains(t, refs, manifestPath)
+
+	trackingFS.mu.Lock()
+	maxOpen := trackingFS.maxOpen
+	trackingFS.mu.Unlock()
+	assert.Greater(t, maxOpen, 1, "manifest lists should be fetched concurrently")
+	assert.LessOrEqual(t, maxOpen, maxWorkers, "manifest-list reads must respect the configured limit")
+}

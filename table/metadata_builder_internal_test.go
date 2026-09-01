@@ -358,11 +358,46 @@ func TestAddRemovePartitionSpec(t *testing.T) {
 }
 
 func TestRemovePartitionSpecsNoMatchDoesNotUpdate(t *testing.T) {
-	builder := builderWithoutChanges(2)
+	for _, count := range []int{1, 2, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := builderWithoutChanges(2)
+			originalSpecs := slices.Clone(builder.specs)
+			requested := make([]int, count)
+			for i := range requested {
+				requested[i] = 99 + i
+			}
 
-	require.NoError(t, builder.RemovePartitionSpecs([]int{99, 100}))
-	require.Empty(t, builder.updates)
-	require.Len(t, builder.specs, 1)
+			require.NoError(t, builder.RemovePartitionSpecs(requested))
+			require.Empty(t, builder.updates)
+			require.Equal(t, originalSpecs, builder.specs)
+		})
+	}
+}
+
+func TestRemovePartitionSpecsSingleID(t *testing.T) {
+	for _, id := range []int{1, 7} {
+		t.Run(fmt.Sprintf("id=%d", id), func(t *testing.T) {
+			builder := MetadataBuilder{
+				specs: []iceberg.PartitionSpec{
+					iceberg.NewPartitionSpecID(1),
+					iceberg.NewPartitionSpecID(4),
+					iceberg.NewPartitionSpecID(7),
+				},
+				defaultSpecID: 4,
+			}
+
+			require.NoError(t, builder.RemovePartitionSpecs([]int{id}))
+			require.Len(t, builder.specs, 2)
+			if id == 1 {
+				require.Equal(t, []int{4, 7}, []int{builder.specs[0].ID(), builder.specs[1].ID()})
+			} else {
+				require.Equal(t, []int{1, 4}, []int{builder.specs[0].ID(), builder.specs[1].ID()})
+			}
+			require.Equal(t, 4, builder.defaultSpecID)
+			require.Len(t, builder.updates, 1)
+			require.Equal(t, []int{id}, builder.updates[0].(*removeSpecUpdate).SpecIds)
+		})
+	}
 }
 
 func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
@@ -371,6 +406,60 @@ func TestRemovePartitionSpecsEmptyDoesNotUpdate(t *testing.T) {
 	require.NoError(t, builder.RemovePartitionSpecs(nil))
 	require.Empty(t, builder.updates)
 	require.Len(t, builder.specs, 1)
+}
+
+func TestRemovePartitionSpecsPreservesStoredOrderAndIgnoresDuplicates(t *testing.T) {
+	for _, count := range []int{4, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := MetadataBuilder{
+				specs: []iceberg.PartitionSpec{
+					iceberg.NewPartitionSpecID(4),
+					iceberg.NewPartitionSpecID(1),
+					iceberg.NewPartitionSpecID(8),
+					iceberg.NewPartitionSpecID(7),
+					iceberg.NewPartitionSpecID(2),
+				},
+				defaultSpecID: 4,
+			}
+			requested := []int{7, 1, 7, 123}
+			for len(requested) < count {
+				requested = append(requested, 123+len(requested))
+			}
+
+			require.NoError(t, builder.RemovePartitionSpecs(requested))
+			require.Len(t, builder.specs, 3)
+			require.Equal(t, []int{4, 8, 2}, []int{builder.specs[0].ID(), builder.specs[1].ID(), builder.specs[2].ID()})
+			require.Len(t, builder.updates, 1)
+			// Preserve the existing Go payload: only IDs found in metadata, in stored order.
+			require.Equal(t, []int{1, 7}, builder.updates[0].(*removeSpecUpdate).SpecIds)
+		})
+	}
+}
+
+func TestRemovePartitionSpecsProtectsDefaultSpecBeforeMutation(t *testing.T) {
+	for _, count := range []int{3, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := MetadataBuilder{
+				specs: []iceberg.PartitionSpec{
+					iceberg.NewPartitionSpecID(1),
+					iceberg.NewPartitionSpecID(2),
+				},
+				defaultSpecID: 2,
+			}
+			originalSpecs := slices.Clone(builder.specs)
+			requested := make([]int, count)
+			for i := range requested {
+				requested[i] = 1
+			}
+			requested[len(requested)-1] = 2
+
+			err := builder.RemovePartitionSpecs(requested)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "can't remove default partition spec with id 2")
+			require.Equal(t, originalSpecs, builder.specs)
+			require.Empty(t, builder.updates)
+		})
+	}
 }
 
 func TestSetDefaultPartitionSpec(t *testing.T) {
@@ -1767,14 +1856,100 @@ func TestRemoveSchemas(t *testing.T) {
 }
 
 func TestRemoveSchemasNoMatchDoesNotUpdate(t *testing.T) {
-	meta, err := getTestTableMetadata("TableMetadataV2Valid.json")
-	require.NoError(t, err)
+	for _, count := range []int{0, 1, 2, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := builderWithoutChanges(2)
+			originalSchemas := slices.Clone(builder.schemaList)
+			requested := make([]int, count)
+			for i := range requested {
+				requested[i] = 99 + i
+			}
 
-	builder, err := MetadataBuilderFromBase(meta, "")
-	require.NoError(t, err)
-	require.NoError(t, builder.RemoveSchemas([]int{99, 100}))
-	require.Empty(t, builder.updates)
-	require.Len(t, builder.schemaList, 2)
+			require.NoError(t, builder.RemoveSchemas(requested))
+			require.Empty(t, builder.updates)
+			require.Equal(t, originalSchemas, builder.schemaList)
+		})
+	}
+}
+
+func TestRemoveSchemasSingleID(t *testing.T) {
+	for _, id := range []int{1, 7} {
+		t.Run(fmt.Sprintf("id=%d", id), func(t *testing.T) {
+			builder := MetadataBuilder{
+				schemaList: []*iceberg.Schema{
+					iceberg.NewSchema(1),
+					iceberg.NewSchema(4),
+					iceberg.NewSchema(7),
+				},
+				currentSchemaID: 4,
+			}
+
+			require.NoError(t, builder.RemoveSchemas([]int{id}))
+			require.Len(t, builder.schemaList, 2)
+			if id == 1 {
+				require.Equal(t, []int{4, 7}, []int{builder.schemaList[0].ID, builder.schemaList[1].ID})
+			} else {
+				require.Equal(t, []int{1, 4}, []int{builder.schemaList[0].ID, builder.schemaList[1].ID})
+			}
+			require.Equal(t, 4, builder.currentSchemaID)
+			require.Len(t, builder.updates, 1)
+			require.Equal(t, []int{id}, builder.updates[0].(*removeSchemasUpdate).SchemaIDs)
+		})
+	}
+}
+
+func TestRemoveSchemasPreservesStoredOrderAndIgnoresDuplicates(t *testing.T) {
+	for _, count := range []int{4, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := MetadataBuilder{
+				schemaList: []*iceberg.Schema{
+					iceberg.NewSchema(4),
+					iceberg.NewSchema(1),
+					iceberg.NewSchema(8),
+					iceberg.NewSchema(7),
+					iceberg.NewSchema(2),
+				},
+				currentSchemaID: 4,
+			}
+			requested := []int{7, 1, 7, 123}
+			for len(requested) < count {
+				requested = append(requested, 123+len(requested))
+			}
+
+			require.NoError(t, builder.RemoveSchemas(requested))
+			require.Len(t, builder.schemaList, 3)
+			require.Equal(t, []int{4, 8, 2}, []int{builder.schemaList[0].ID, builder.schemaList[1].ID, builder.schemaList[2].ID})
+			require.Len(t, builder.updates, 1)
+			// Preserve the existing Go payload: only IDs found in metadata, in stored order.
+			require.Equal(t, []int{1, 7}, builder.updates[0].(*removeSchemasUpdate).SchemaIDs)
+		})
+	}
+}
+
+func TestRemoveSchemasProtectsCurrentSchemaBeforeMutation(t *testing.T) {
+	for _, count := range []int{3, 8, 9, 16, 17, 32, 33, 64} {
+		t.Run(fmt.Sprintf("requested=%d", count), func(t *testing.T) {
+			builder := MetadataBuilder{
+				schemaList: []*iceberg.Schema{
+					iceberg.NewSchema(1),
+					iceberg.NewSchema(2),
+				},
+				currentSchemaID: 2,
+			}
+			originalSchemas := slices.Clone(builder.schemaList)
+			requested := make([]int, count)
+			for i := range requested {
+				requested[i] = 1
+			}
+			requested[len(requested)-1] = 2
+
+			err := builder.RemoveSchemas(requested)
+			require.ErrorIs(t, err, iceberg.ErrInvalidArgument)
+			require.ErrorContains(t, err, "can't remove current schema with id 2")
+			require.Equal(t, originalSchemas, builder.schemaList)
+			require.Empty(t, builder.updates)
+		})
+	}
 }
 
 // Java: TestTableMetadata.testUpdateSchema
@@ -3446,6 +3621,7 @@ func TestSetFormatVersionV2ToV3FromDeserializedMetadata(t *testing.T) {
 // both the drift guard and its filler consult it.
 var sharedCloneFields = map[string]struct{}{
 	"base":          {}, // immutable snapshot, shared by design.
+	"schemaIndex":   {}, // immutable schema references, copied on schema mutation.
 	"snapshotIndex": {}, // immutable index positions, copied on snapshot mutation.
 }
 

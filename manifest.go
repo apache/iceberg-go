@@ -1202,6 +1202,14 @@ type partitionFieldStats[T LiteralType] struct {
 	convert partitionValueConverter[T]
 }
 
+func clonePartitionStatValue[T LiteralType](value T) T {
+	if data, ok := any(value).([]byte); ok {
+		return any(slices.Clone(data)).(T)
+	}
+
+	return value
+}
+
 type partitionValueConverter[T LiteralType] func(any) (T, bool)
 
 func partitionLiteralValue(value any) (any, bool) {
@@ -1609,10 +1617,6 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 		return fmt.Errorf("expected type %T, got %T", actualVal, value)
 	}
 
-	if data, ok := any(actualVal).([]byte); ok {
-		actualVal = any(slices.Clone(data)).(T)
-	}
-
 	switch f := any(actualVal).(type) {
 	case float32:
 		if math.IsNaN(float64(f)) {
@@ -1629,14 +1633,19 @@ func (p *partitionFieldStats[T]) update(value any) (err error) {
 	}
 
 	if p.min == nil {
+		actualVal = clonePartitionStatValue(actualVal)
 		p.min = &actualVal
 		p.max = &actualVal
 	} else {
-		if p.cmp(actualVal, *p.min) < 0 {
+		isMin := p.cmp(actualVal, *p.min) < 0
+		isMax := p.cmp(actualVal, *p.max) > 0
+		if isMin || isMax {
+			actualVal = clonePartitionStatValue(actualVal)
+		}
+		if isMin {
 			p.min = &actualVal
 		}
-
-		if p.cmp(actualVal, *p.max) > 0 {
+		if isMax {
 			p.max = &actualVal
 		}
 	}

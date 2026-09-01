@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"strconv"
@@ -54,6 +55,165 @@ func newDeleteManifest(minSeqNum int64) iceberg.ManifestFile {
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(minSeqNum, minSeqNum).
 		Build()
+}
+
+func TestPlanFilesReusesFileIOWithinManifestBatches(t *testing.T) {
+	const manifestCount = 17
+
+	scan, fs := scanWithManifestCount(t, manifestCount)
+	var calls atomic.Int64
+	scan.ioF = func(context.Context) (iceio.IO, error) {
+		calls.Add(1)
+
+		return fs, nil
+	}
+
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, tasks, manifestCount)
+	expectedCalls := int64(1 + (manifestCount+scan.concurrency-1)/scan.concurrency)
+	assert.Equal(t, expectedCalls, calls.Load(),
+		"manifest batches should share FileIO while retaining factory renewal checkpoints")
+}
+
+type expiringManifestIO struct {
+	base         *iceio.MemFS
+	manifestList string
+	expired      atomic.Bool
+}
+
+func (fs *expiringManifestIO) Open(name string) (iceio.File, error) {
+	if name != fs.manifestList && fs.expired.Load() {
+		return nil, errors.New("credentials expired")
+	}
+
+	file, err := fs.base.Open(name)
+	if err == nil && name == fs.manifestList {
+		fs.expired.Store(true)
+	}
+
+	return file, err
+}
+
+func (fs *expiringManifestIO) Remove(name string) error {
+	return fs.base.Remove(name)
+}
+
+type failingManifestIO struct {
+	base        *iceio.MemFS
+	failingPath string
+	laterOpens  atomic.Int64
+}
+
+func (fs *failingManifestIO) Open(name string) (iceio.File, error) {
+	if name == fs.failingPath {
+		return nil, errors.New("manifest failed")
+	}
+
+	fs.laterOpens.Add(1)
+
+	return fs.base.Open(name)
+}
+
+func (fs *failingManifestIO) Remove(name string) error {
+	return fs.base.Remove(name)
+}
+
+func TestPlanFilesRefreshesFileIODuringManifestPlanning(t *testing.T) {
+	scan, fs := scanWithManifestCount(t, 1)
+	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
+
+	expiring := &expiringManifestIO{base: fs, manifestList: manifestListPath}
+	var calls atomic.Int64
+	scan.ioF = func(context.Context) (iceio.IO, error) {
+		if calls.Add(1) == 1 {
+			return expiring, nil
+		}
+
+		return fs, nil
+	}
+
+	tasks, err := scan.PlanFiles(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, tasks, 1)
+	assert.Equal(t, int64(2), calls.Load(), "manifest workers must reacquire FileIO after the manifest list read")
+}
+
+func TestPlanFilesStopsLoadingManifestIOAfterWorkerError(t *testing.T) {
+	scan, fs := scanWithManifestCount(t, 2)
+	scan.concurrency = 1
+	failing := &failingManifestIO{
+		base:        fs,
+		failingPath: "mem://planning/table/metadata/manifest-0.avro",
+	}
+
+	var factoryCalls atomic.Int64
+	scan.ioF = func(context.Context) (iceio.IO, error) {
+		if factoryCalls.Add(1) == 1 {
+			return fs, nil
+		}
+
+		return failing, nil
+	}
+
+	_, err := scan.PlanFiles(t.Context())
+	require.ErrorContains(t, err, "manifest failed")
+	assert.Equal(t, int64(2), factoryCalls.Load(),
+		"a later manifest worker must not load FileIO after cancellation")
+	assert.Zero(t, failing.laterOpens.Load())
+}
+
+func TestManifestIOBatchRejectsCanceledContext(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cached=%t", cached), func(t *testing.T) {
+			fs := iceio.NewMemFS()
+			var calls int
+			batch := newManifestIOBatch(func(context.Context) (iceio.IO, error) {
+				calls++
+
+				return fs, nil
+			}, 2)
+			if cached {
+				_, err := batch.acquire(t.Context())
+				require.NoError(t, err)
+			}
+			priorCalls := calls
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+
+			got, err := batch.acquire(ctx)
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Nil(t, got)
+			assert.Equal(t, priorCalls, calls)
+		})
+	}
+}
+
+func BenchmarkPlanFilesFileIOFactory(b *testing.B) {
+	for _, manifestCount := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("manifests_%d", manifestCount), func(b *testing.B) {
+			scan, fs := scanWithManifestCount(b, manifestCount)
+			var calls atomic.Int64
+			scan.ioF = func(context.Context) (iceio.IO, error) {
+				calls.Add(1)
+
+				return fs, nil
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				tasks, err := scan.PlanFiles(b.Context())
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(tasks) != manifestCount {
+					b.Fatalf("unexpected task count: %d", len(tasks))
+				}
+			}
+			b.ReportMetric(float64(calls.Load())/float64(b.N), "fileio-factory-calls/op")
+		})
+	}
 }
 
 func TestArrowScanBindsTaskResidualAgainstScanSchema(t *testing.T) {
@@ -131,7 +291,7 @@ func TestEqualityDeleteIndexMatchesPartitionAndSequence(t *testing.T) {
 		newEqualityDeleteIndexTestEntry("global-same-sequence.parquet", 0, nil, 5),
 	}
 
-	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 5)
@@ -148,7 +308,7 @@ func TestEqualityDeleteIndexKeepsPartitionedDeletesScoped(t *testing.T) {
 	globalDelete := newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 3)
 
 	idx, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
@@ -163,7 +323,7 @@ func TestEqualityDeleteIndexTreatsVoidSpecAsGlobal(t *testing.T) {
 		"void-delete.parquet", 3, map[int]any{1000: nil}, 3)
 
 	idx, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
@@ -177,7 +337,7 @@ func TestEqualityDeleteIndexRejectsUnknownPartitionSpec(t *testing.T) {
 	deleteEntry := newEqualityDeleteIndexTestEntry("delete.parquet", 99, nil, 2)
 
 	_, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), nil)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "delete.parquet")
 }
@@ -190,7 +350,7 @@ func TestEqualityDeleteIndexSkipsPartitionKeysWithoutPartitionedDeletes(t *testi
 		nil,
 		{newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 2)},
 	} {
-		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs())
+		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs(), nil)
 		require.NoError(t, err)
 
 		matched, err := idx.forDataFile(dataEntry)
@@ -208,7 +368,7 @@ func TestEqualityDeleteIndexSortsBySequence(t *testing.T) {
 		newEqualityDeleteIndexTestEntry("sequence-2-b.parquet", 1, partition, 2),
 	}
 
-	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 1)
@@ -342,7 +502,7 @@ func TestEqualityDeleteIndexUsesFloatSemantics(t *testing.T) {
 			deleteEntry := newEqualityDeleteIndexTestEntry(
 				"delete.parquet", 1, map[int]any{1000: tt.deletePartition}, 2)
 			idx, err := buildEqualityDeleteIndex(
-				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), nil)
 			require.NoError(t, err)
 
 			dataEntry := newEqualityDeleteIndexTestEntry(
@@ -358,6 +518,101 @@ func TestEqualityDeleteIndexUsesFloatSemantics(t *testing.T) {
 			assert.Empty(t, matched)
 		})
 	}
+}
+
+func scanWithManifestCount(tb testing.TB, manifestCount int) (*Scan, *iceio.MemFS) {
+	tb.Helper()
+
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec()
+	metadata, err := NewMetadata(
+		schema,
+		&spec,
+		UnsortedSortOrder,
+		"mem://planning/table",
+		iceberg.Properties{PropertyFormatVersion: "2"},
+	)
+	require.NoError(tb, err)
+
+	snapshotID := int64(1)
+	fs := iceio.NewMemFS()
+	manifests := make([]iceberg.ManifestFile, manifestCount)
+	for i := range manifestCount {
+		dataFile, err := iceberg.NewDataFileBuilder(
+			spec,
+			iceberg.EntryContentData,
+			fmt.Sprintf("mem://planning/table/data/file-%d.parquet", i),
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			1,
+			128,
+		)
+		require.NoError(tb, err)
+
+		entry := iceberg.NewManifestEntryBuilder(
+			iceberg.EntryStatusADDED,
+			&snapshotID,
+			dataFile.Build(),
+		).SequenceNum(1).Build()
+		manifestPath := fmt.Sprintf("mem://planning/table/metadata/manifest-%d.avro", i)
+		var manifestData bytes.Buffer
+		manifests[i], err = iceberg.WriteManifest(
+			manifestPath,
+			&manifestData,
+			2,
+			spec,
+			schema,
+			snapshotID,
+			[]iceberg.ManifestEntry{entry},
+		)
+		require.NoError(tb, err)
+		require.NoError(tb, fs.WriteFile(manifestPath, manifestData.Bytes()))
+	}
+
+	const manifestListPath = "mem://planning/table/metadata/snap-1.avro"
+	sequenceNumber := int64(1)
+	var manifestListData bytes.Buffer
+	require.NoError(tb, iceberg.WriteManifestList(
+		2,
+		&manifestListData,
+		snapshotID,
+		nil,
+		&sequenceNumber,
+		0,
+		manifests,
+	))
+	require.NoError(tb, fs.WriteFile(manifestListPath, manifestListData.Bytes()))
+
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(tb, err)
+	schemaID := schema.ID
+	require.NoError(tb, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: sequenceNumber,
+		TimestampMs:    metadata.LastUpdatedMillis() + 1,
+		ManifestList:   manifestListPath,
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}))
+	require.NoError(tb, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	metadata, err = builder.Build()
+	require.NoError(tb, err)
+
+	return &Scan{
+		metadata:       metadata,
+		ioF:            func(context.Context) (iceio.IO, error) { return fs, nil },
+		planningMode:   ScanPlanningLocal,
+		rowFilter:      iceberg.AlwaysTrue{},
+		selectedFields: []string{"*"},
+		caseSensitive:  true,
+		options:        iceberg.Properties{},
+		limit:          ScanNoLimit,
+		concurrency:    8,
+	}, fs
 }
 
 func TestEqualityDeletePartitionKeyDistinguishesSignedZero(t *testing.T) {
@@ -877,15 +1132,18 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 
 	dataScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
 		Build()
 	dataSkipped := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/data-skipped.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentData).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: noMatch, UpperBound: noMatch}}).
 		Build()
 	deleteScanned := iceberg.NewManifestFile(2, "mem://default/table-location/metadata/delete-scanned.avro", 100, specID, snapshotID).
 		Content(iceberg.ManifestContentDeletes).
 		SequenceNum(1, 1).
+		AddedFiles(1).
 		Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: match, UpperBound: match}}).
 		Build()
 
@@ -916,7 +1174,10 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	require.NoError(t, err)
 
 	var acc scanMetricsAccumulator
-	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(context.Background(), schema, &acc)
+	snapshot, err := scan.ResolveSnapshot()
+	require.NoError(t, err)
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snapshot, memIO, schema, &acc, scan.partitionFiltersForSchema(schema))
 	require.NoError(t, err)
 
 	// Two data manifests, one delete manifest.
@@ -932,6 +1193,192 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
 	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
 	assert.Len(t, filtered, 2, "only the overlapping manifests survive partition-spec filtering")
+}
+
+func TestFilterManifestsWithSchemaSkipsKnownEmptyManifests(t *testing.T) {
+	schema := simpleSchema()
+	metadata, err := NewMetadata(
+		schema,
+		iceberg.UnpartitionedSpec,
+		UnsortedSortOrder,
+		"mem://empty-manifest-filter",
+		nil,
+	)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      metadata,
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+	}
+	knownEmptyData := iceberg.NewManifestFile(2, "data-empty.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(2).
+		Build()
+	knownEmptyDelete := iceberg.NewManifestFile(2, "delete-empty.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentDeletes).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(1).
+		Build()
+	unknownCounts := iceberg.NewManifestFile(2, "data-unknown.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(-1).
+		ExistingFiles(-1).
+		Build()
+	live := iceberg.NewManifestFile(2, "data-live.avro", 100, 0, 1).
+		Content(iceberg.ManifestContentData).
+		AddedFiles(0).
+		ExistingFiles(1).
+		Build()
+
+	var acc scanMetricsAccumulator
+	filtered, err := scan.filterManifestsWithSchema(
+		[]iceberg.ManifestFile{knownEmptyData, knownEmptyDelete, unknownCounts, live},
+		schema,
+		&acc,
+		scan.partitionFiltersForSchema(schema),
+	)
+	require.NoError(t, err)
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "data-unknown.avro", filtered[0].FilePath())
+	assert.Equal(t, "data-live.avro", filtered[1].FilePath())
+
+	assert.Equal(t, int64(3), acc.totalDataManifests)
+	assert.Equal(t, int64(1), acc.totalDeleteManifests)
+	assert.Equal(t, int64(2), acc.scannedDataManifests)
+	assert.Equal(t, int64(1), acc.skippedDataManifests)
+	assert.Equal(t, int64(0), acc.scannedDeleteManifests)
+	assert.Equal(t, int64(1), acc.skippedDeleteManifests)
+	assert.Equal(t, acc.totalDataManifests, acc.scannedDataManifests+acc.skippedDataManifests)
+	assert.Equal(t, acc.totalDeleteManifests, acc.scannedDeleteManifests+acc.skippedDeleteManifests)
+}
+
+func TestPlanFilesSkipsKnownEmptyManifestsBeforeOpening(t *testing.T) {
+	const (
+		tableLocation    = "mem://empty-manifest-plan"
+		snapshotID       = int64(1)
+		manifestListPath = tableLocation + "/metadata/snap-1.avro"
+	)
+
+	fs := newTrackingCallsIO()
+	schema := simpleSchema()
+	spec := iceberg.NewPartitionSpec()
+	metadata, err := NewMetadata(schema, &spec, UnsortedSortOrder, tableLocation, nil)
+	require.NoError(t, err)
+	builder, err := MetadataBuilderFromBase(metadata, "")
+	require.NoError(t, err)
+
+	dataPath := tableLocation + "/metadata/data-empty.avro"
+	deletePath := tableLocation + "/metadata/delete-empty.avro"
+	dataManifest := iceberg.NewManifestFile(2, dataPath, 100, int32(spec.ID()), snapshotID).
+		Content(iceberg.ManifestContentData).
+		SequenceNum(1, 1).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(2).
+		Build()
+	deleteManifest := iceberg.NewManifestFile(2, deletePath, 100, int32(spec.ID()), snapshotID).
+		Content(iceberg.ManifestContentDeletes).
+		SequenceNum(1, 1).
+		AddedFiles(0).
+		ExistingFiles(0).
+		DeletedFiles(1).
+		Build()
+
+	var listBuf bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &listBuf, snapshotID, nil, &sequenceNumber, 0,
+		[]iceberg.ManifestFile{dataManifest, deleteManifest}))
+	require.NoError(t, fs.WriteFile(manifestListPath, listBuf.Bytes()))
+
+	schemaID := metadata.CurrentSchema().ID
+	require.NoError(t, builder.AddSnapshot(&Snapshot{
+		SnapshotID:     snapshotID,
+		SequenceNumber: sequenceNumber,
+		TimestampMs:    metadata.LastUpdatedMillis() + 1,
+		ManifestList:   manifestListPath,
+		Summary:        &Summary{Operation: OpAppend},
+		SchemaID:       &schemaID,
+	}))
+	require.NoError(t, builder.SetSnapshotRef(MainBranch, snapshotID, BranchRef))
+	built, err := builder.Build()
+	require.NoError(t, err)
+
+	tbl := New(Identifier{"db", "empty-manifest-plan"}, built, tableLocation+"/metadata/metadata.json", testFSF(fs), nil)
+	tasks, err := tbl.Scan().PlanFiles(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Zero(t, fs.openCount[dataPath])
+	assert.Zero(t, fs.openCount[deletePath])
+}
+
+func TestScanReusesPartitionFiltersAcrossPlanningPhases(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "mem://default/table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	const manifestPath = "mem://default/table/metadata/manifest.avro"
+	snapshotID := int64(1)
+	dataFile, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"mem://default/table/data.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: int32(5)},
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	entry := iceberg.NewManifestEntryBuilder(
+		iceberg.EntryStatusADDED, &snapshotID, dataFile.Build(),
+	).SequenceNum(1).Build()
+	var manifestBytes bytes.Buffer
+	manifest, err := iceberg.WriteManifest(
+		manifestPath, &manifestBytes, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry},
+	)
+	require.NoError(t, err)
+
+	memIO := iceio.NewMemFS()
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+	scan := &Scan{
+		metadata:      metadata,
+		ioF:           func(context.Context) (iceio.IO, error) { return memIO, nil },
+		rowFilter:     iceberg.EqualTo(iceberg.Reference("id"), int32(5)),
+		caseSensitive: true,
+		concurrency:   1,
+	}
+	var projectionCalls atomic.Int32
+	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+		projectionCalls.Add(1)
+
+		return buildPartitionProjection(specID, metadata, schema, scan.rowFilter, scan.caseSensitive)
+	})
+	var acc scanMetricsAccumulator
+
+	_, err = scan.filterManifestsWithSchema([]iceberg.ManifestFile{manifest}, schema, &acc, partitionFilters)
+	require.NoError(t, err)
+	_, err = scan.collectManifestEntriesWithSchema(
+		context.Background(), []iceberg.ManifestFile{manifest}, schema, partitionFilters)
+	require.NoError(t, err)
+
+	assert.Len(t, partitionFilters.data, 1)
+	assert.Equal(t, int32(1), projectionCalls.Load())
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {
@@ -1763,6 +2210,7 @@ func TestPlanFilesUnknownTransformDoesNotPrune(t *testing.T) {
 		manifest := iceberg.NewManifestFile(2, manifestPath, int64(manifestBytes.Len()), int32(spec.ID()), snapshotID).
 			Partitions([]iceberg.FieldSummary{{ContainsNull: false, LowerBound: &lower, UpperBound: &upper}}).
 			SequenceNum(1, 1).
+			AddedFiles(1).
 			Build()
 
 		var listBytes bytes.Buffer

@@ -38,7 +38,7 @@ go get github.com/apache/arrow-go/v18@latest
 go get github.com/uptrace/bun/driver/sqliteshim@latest
 ```
 
-`iceberg-go` itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import `github.com/apache/iceberg-go/io/gocloud`. We are staying on local disk for this tutorial.
+`iceberg-go` itself only registers the local file system. For S3, GCS, or Azure Blob you would also blank-import the matching backend package, such as `github.com/apache/iceberg-go/io/gocloud/s3`. We are staying on local disk for this tutorial.
 
 ## 2. Open a local catalog
 

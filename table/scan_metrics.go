@@ -36,11 +36,12 @@ import (
 // so plain integers are race-free; no field is touched from the concurrent
 // manifest workers.
 //
-// The scanned/skipped manifest counts measure partition-spec pruning (the
-// filter applied while listing manifests). The per-entry skipped-data-files /
-// skipped-delete-files counts (which would be incremented inside the concurrent
-// openManifest loop, and would use atomics) and indexed-delete-files are left
-// for a follow-up and omitted rather than reported as zero.
+// The scanned/skipped manifest counts measure manifest selection before opening
+// manifests, including partition-spec pruning and known-empty manifests. The
+// per-entry skipped-data-files / skipped-delete-files counts (which would be
+// incremented inside the concurrent openManifest loop, and would use atomics)
+// and indexed-delete-files are left for a follow-up and omitted rather than
+// reported as zero.
 type scanMetricsAccumulator struct {
 	totalDataManifests     int64
 	totalDeleteManifests   int64
@@ -79,20 +80,24 @@ func counterBytes(v int64) *metrics.CounterResult {
 // so the Puffin length would over-count.
 func (acc *scanMetricsAccumulator) applyResultDeleteMetrics(tasks []FileScanTask) {
 	for _, t := range tasks {
-		for _, df := range t.DeleteFiles {
-			acc.positionalDeleteFiles++
-			acc.totalDeleteFileSize += df.FileSizeBytes()
-		}
-		for _, df := range t.EqualityDeleteFiles {
-			acc.equalityDeleteFiles++
-			acc.totalDeleteFileSize += df.FileSizeBytes()
-		}
-		for _, df := range t.DeletionVectorFiles {
-			acc.dvs++
-			_, _, _, _, csb := iceberginternal.BorrowedDataFilePointers(df)
-			if csb != nil {
-				acc.totalDeleteFileSize += *csb
-			}
+		acc.addResultDeleteMetrics(t)
+	}
+}
+
+func (acc *scanMetricsAccumulator) addResultDeleteMetrics(t FileScanTask) {
+	for _, df := range t.DeleteFiles {
+		acc.positionalDeleteFiles++
+		acc.totalDeleteFileSize += df.FileSizeBytes()
+	}
+	for _, df := range t.EqualityDeleteFiles {
+		acc.equalityDeleteFiles++
+		acc.totalDeleteFileSize += df.FileSizeBytes()
+	}
+	for _, df := range t.DeletionVectorFiles {
+		acc.dvs++
+		_, _, _, _, csb := iceberginternal.BorrowedDataFilePointers(df)
+		if csb != nil {
+			acc.totalDeleteFileSize += *csb
 		}
 	}
 

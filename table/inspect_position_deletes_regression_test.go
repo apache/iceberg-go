@@ -20,6 +20,8 @@ package table
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -217,8 +219,108 @@ func TestPositionDeletesPartitionTypeAvoidsHistoricalSchemaFieldIDs(t *testing.T
 		LastPartitionID: &lastPartitionID,
 	}}
 
-	partitionType, partitionIDs, err := positionDeletesPartitionType(metadata)
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
 	require.NoError(t, err)
 	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
 	require.Equal(t, 3, partitionType.FieldList[0].ID)
+}
+
+func TestPositionDeletesPartitionTypeAvoidsCurrentSchemaFieldIDs(t *testing.T) {
+	currentSchema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 2, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{2}, FieldID: 1000, Name: "id", Transform: iceberg.IdentityTransform{},
+	})
+	lastPartitionID := 1000
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		LastColumnId:    1,
+		SchemaList:      []*iceberg.Schema{currentSchema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   spec.ID(),
+		LastPartitionID: &lastPartitionID,
+	}}
+
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
+	require.NoError(t, err)
+	require.Equal(t, map[int]int{1000: 3}, partitionIDs)
+	require.Equal(t, 3, partitionType.FieldList[0].ID)
+	require.NotPanics(t, func() {
+		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.Version())
+	})
+}
+
+type metadataWithoutSchemaHistory struct {
+	Metadata
+}
+
+func (metadataWithoutSchemaHistory) Schemas() []*iceberg.Schema {
+	panic("position delete partition type should use LastColumnID instead of schema history")
+}
+
+func TestPositionDeletesPartitionTypeSkipsReservedIDsAfterLastColumnID(t *testing.T) {
+	currentSchema := simpleSchema()
+	spec := partitionedSpec()
+	lastPartitionID := 1000
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		LastColumnId:    positionDeleteContentSizeID - 1,
+		SchemaList:      []*iceberg.Schema{currentSchema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   spec.ID(),
+		LastPartitionID: &lastPartitionID,
+	}}
+
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
+	require.NoError(t, err)
+	require.Equal(t, map[int]int{1000: positionDeleteSpecID + 1}, partitionIDs)
+	require.Equal(t, positionDeleteSpecID+1, partitionType.FieldList[0].ID)
+}
+
+func TestPositionDeletesPartitionTypeFallsBackWhenFieldIDsReachLimit(t *testing.T) {
+	const partitionFieldCount = 193
+
+	currentFields := make([]iceberg.NestedField, partitionFieldCount)
+	partitionFields := make([]iceberg.PartitionField, partitionFieldCount)
+	for index := range partitionFieldCount {
+		fieldID := index + 1
+		currentFields[index] = iceberg.NestedField{
+			ID: fieldID, Name: fmt.Sprintf("field_%d", fieldID),
+			Type: iceberg.PrimitiveTypes.Int32, Required: true,
+		}
+		partitionFields[index] = iceberg.PartitionField{
+			SourceIDs: []int{fieldID}, FieldID: 1000 + index,
+			Name: fmt.Sprintf("partition_%d", fieldID), Transform: iceberg.IdentityTransform{},
+		}
+	}
+	currentSchema := iceberg.NewSchema(0, currentFields...)
+	spec := iceberg.NewPartitionSpec(partitionFields...)
+	lastPartitionID := 1000 + partitionFieldCount - 1
+	metadata := &metadataV2{commonMetadata: commonMetadata{
+		FormatVersion:   2,
+		UUID:            uuid.New(),
+		LastColumnId:    iceberg.MaxStructFieldID,
+		SchemaList:      []*iceberg.Schema{currentSchema},
+		CurrentSchemaID: 0,
+		Specs:           []iceberg.PartitionSpec{spec},
+		DefaultSpecID:   spec.ID(),
+		LastPartitionID: &lastPartitionID,
+	}}
+
+	partitionType, partitionIDs, err := positionDeletesPartitionType(metadataWithoutSchemaHistory{Metadata: metadata})
+	require.NoError(t, err)
+	require.Len(t, partitionType.FieldList, partitionFieldCount)
+	require.Equal(t, iceberg.MaxStructFieldID+1, partitionIDs[1000])
+	require.Equal(t, 194, partitionIDs[1000+partitionFieldCount-1])
+	for _, field := range partitionType.FieldList {
+		require.GreaterOrEqual(t, field.ID, 1)
+		require.LessOrEqual(t, field.ID, math.MaxInt32)
+	}
+	require.NotPanics(t, func() {
+		_ = PositionDeletesSchema(currentSchema, partitionType, metadata.Version())
+	})
 }

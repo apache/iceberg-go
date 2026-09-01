@@ -59,7 +59,7 @@ func BenchmarkEqualityDeleteIndex(b *testing.B) {
 				b.ReportMetric(float64(deleteFileCount), "delete_files")
 				b.ResetTimer()
 				for range b.N {
-					idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
+					idx, err := buildEqualityDeleteIndex(deleteEntries, specs, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -77,6 +77,93 @@ func BenchmarkEqualityDeleteIndex(b *testing.B) {
 			})
 		}
 	}
+}
+
+func BenchmarkEqualityDeleteIndexMetrics(b *testing.B) {
+	const (
+		dataFileCount   = 10_000
+		deleteFileCount = 10_000
+		groupCount      = 100
+		filesPerGroup   = deleteFileCount / groupCount
+	)
+
+	specs := equalityDeleteIndexTestSpecs()
+	schema := equalityDeleteMetricsTestSchema(iceberg.PrimitiveTypes.Int32, true)
+	partition := map[int]any{1000: int32(0)}
+
+	lowerBounds := make([][]byte, groupCount)
+	upperBounds := make([][]byte, groupCount)
+	for group := range groupCount {
+		lowerBounds[group], upperBounds[group] = equalityDeleteMetricsTestBounds(
+			b, int32(group*filesPerGroup), int32((group+1)*filesPerGroup-1))
+	}
+
+	deleteEntries := make([]iceberg.ManifestEntry, deleteFileCount)
+	for i := range deleteEntries {
+		group := i / filesPerGroup
+		deleteEntries[i] = newEqualityDeleteMetricsTestEntry(
+			fmt.Sprintf("delete-%d.parquet", i),
+			1,
+			partition,
+			iceberg.EntryContentEqDeletes,
+			int64(i+1),
+			[]int{1},
+			map[int]int64{1: 1},
+			map[int]int64{1: 0},
+			map[int]int64{1: 0},
+			lowerBounds[group],
+			upperBounds[group],
+		)
+	}
+
+	dataEntries := make([]iceberg.ManifestEntry, dataFileCount)
+	for i := range dataEntries {
+		group := i / filesPerGroup
+		dataEntries[i] = newEqualityDeleteMetricsTestEntry(
+			fmt.Sprintf("data-%d.parquet", i),
+			1,
+			partition,
+			iceberg.EntryContentData,
+			0,
+			nil,
+			map[int]int64{1: 1},
+			map[int]int64{1: 0},
+			map[int]int64{1: 0},
+			lowerBounds[group],
+			upperBounds[group],
+		)
+	}
+
+	benchmark := func(b *testing.B, schema *iceberg.Schema) {
+		b.ReportAllocs()
+		attached := 0
+		b.ResetTimer()
+		for range b.N {
+			idx, err := buildEqualityDeleteIndex(deleteEntries, specs, schema)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			attached = 0
+			for _, dataEntry := range dataEntries {
+				files, err := idx.forDataFile(dataEntry)
+				if err != nil {
+					b.Fatal(err)
+				}
+				attached += len(files)
+			}
+			equalityDeleteBenchmarkSink = attached
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(attached)/float64(dataFileCount), "attached_deletes_per_data_file")
+	}
+
+	b.Run("baseline", func(b *testing.B) {
+		benchmark(b, nil)
+	})
+	b.Run("metrics", func(b *testing.B) {
+		benchmark(b, schema)
+	})
 }
 
 func BenchmarkEqualityDeleteIndexOldData(b *testing.B) {
@@ -111,7 +198,7 @@ func BenchmarkEqualityDeleteIndexOldData(b *testing.B) {
 	b.ReportMetric(deleteFileCount, "delete_files")
 	b.ResetTimer()
 	for range b.N {
-		idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
+		idx, err := buildEqualityDeleteIndex(deleteEntries, specs, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -150,7 +237,7 @@ func BenchmarkEqualityDeleteIndexNoDataFiles(b *testing.B) {
 	b.ReportMetric(deleteFileCount, "delete_files")
 	b.ResetTimer()
 	for range b.N {
-		idx, err := buildEqualityDeleteIndex(deleteEntries, specs)
+		idx, err := buildEqualityDeleteIndex(deleteEntries, specs, nil)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -175,7 +262,7 @@ func BenchmarkEqualityDeleteIndexBuiltInPartition(b *testing.B) {
 			b.Run("build", func(b *testing.B) {
 				b.ReportAllocs()
 				for range b.N {
-					idx, err := buildEqualityDeleteIndex([]iceberg.ManifestEntry{deleteEntry}, specs)
+					idx, err := buildEqualityDeleteIndex([]iceberg.ManifestEntry{deleteEntry}, specs, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -183,7 +270,7 @@ func BenchmarkEqualityDeleteIndexBuiltInPartition(b *testing.B) {
 				}
 			})
 
-			idx, err := buildEqualityDeleteIndex([]iceberg.ManifestEntry{deleteEntry}, specs)
+			idx, err := buildEqualityDeleteIndex([]iceberg.ManifestEntry{deleteEntry}, specs, nil)
 			if err != nil {
 				b.Fatal(err)
 			}

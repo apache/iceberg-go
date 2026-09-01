@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package gocloud
+package azure
 
 import (
 	"context"
@@ -29,6 +29,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/apache/iceberg-go/io"
+	"github.com/apache/iceberg-go/io/gocloud/blobfs"
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/azureblob"
 )
@@ -209,40 +210,34 @@ func adlsAuthority(parsed *url.URL) string {
 	return parsed.User.Username() + "@" + parsed.Hostname()
 }
 
-func adlsObjectLocationExtractor(parsedURL *url.URL) objectLocationExtractor {
+func adlsObjectLocationExtractor(parsedURL *url.URL) blobfs.ObjectLocationExtractor {
 	expectedAuthority := adlsAuthority(parsedURL)
 
-	return func(location string) (objectLocation, error) {
+	return func(location string) (blobfs.ObjectLocation, error) {
 		matches := adlsURIPattern.FindStringSubmatch(location)
 		if len(matches) < 4 {
-			return objectLocation{}, fmt.Errorf("invalid ADLS location: %s", location)
+			return blobfs.ObjectLocation{}, fmt.Errorf("invalid ADLS location: %s", location)
 		}
 
 		authority := matches[2]
 		if authority != expectedAuthority {
-			return objectLocation{}, fmt.Errorf("%w: URI authority %q does not match configured authority %q",
-				ErrUnsupportedObjectAuthority,
+			return blobfs.ObjectLocation{}, fmt.Errorf("%w: URI authority %q does not match configured authority %q",
+				blobfs.ErrUnsupportedObjectAuthority,
 				authority, expectedAuthority)
 		}
 
 		uriPath := matches[3]
 		if uriPath != "" && !strings.HasPrefix(uriPath, "/") {
-			return objectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
+			return blobfs.ObjectLocation{}, fmt.Errorf("URI authority %q must be followed by an object path: %s",
 				authority, location)
 		}
 
 		key := strings.TrimPrefix(uriPath, "/")
 
-		parsed := objectLocation{
-			scheme:       matches[1],
-			authority:    authority,
-			key:          key,
-			uriPrefix:    matches[1] + "://" + authority + "/",
-			hasAuthority: true,
-		}
+		parsed := blobfs.NewObjectLocation(matches[1], authority, key)
 
 		if key == "" {
-			return parsed, fmt.Errorf("%w: %s", ErrEmptyObjectKey, location)
+			return parsed, fmt.Errorf("%w: %s", blobfs.ErrEmptyObjectKey, location)
 		}
 
 		return parsed, nil

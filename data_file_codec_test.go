@@ -143,6 +143,19 @@ func TestMarshalAvroEntryDoesNotMutateAnyAvroField(t *testing.T) {
 			"including pointer-typed fields whose backing storage is shared with the clone")
 }
 
+func TestDataFileAvroFieldIndexesCoverEveryAvroField(t *testing.T) {
+	typ := reflect.TypeOf(dataFile{})
+	want := make([]int, 0, typ.NumField())
+	for i := range typ.NumField() {
+		if _, ok := typ.Field(i).Tag.Lookup("avro"); ok {
+			want = append(want, i)
+		}
+	}
+
+	require.Equal(t, want, dataFileAvroFieldIndexes,
+		"the precomputed clone indexes must track every avro-tagged dataFile field")
+}
+
 func TestMarshalAvroEntryDecimalPartitionRoundTrip(t *testing.T) {
 	schema := NewSchema(0,
 		NestedField{ID: 1, Name: "price", Type: DecimalTypeOf(10, 2)},
@@ -246,7 +259,7 @@ func deepCopyReflect(src reflect.Value) reflect.Value {
 	}
 }
 
-func fullyPopulatedDataFileForCodec(t *testing.T, version int) (PartitionSpec, *Schema, DataFile) {
+func fullyPopulatedDataFileForCodec(t testing.TB, version int) (PartitionSpec, *Schema, DataFile) {
 	t.Helper()
 	schema := NewSchema(123,
 		NestedField{ID: 1, Name: "id", Type: Int64Type{}, Required: true},
@@ -295,4 +308,38 @@ func fullyPopulatedDataFileForCodec(t *testing.T, version int) (PartitionSpec, *
 	}
 
 	return spec, schema, builder.Build()
+}
+
+var (
+	benchmarkDataFileCloneSink *dataFile
+	benchmarkEncodedEntrySize  int
+)
+
+func BenchmarkCloneDataFileAvroFields(b *testing.B) {
+	_, _, df := fullyPopulatedDataFileForCodec(b, 2)
+	impl := df.(*dataFile)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		benchmarkDataFileCloneSink = cloneDataFileAvroFields(impl)
+	}
+}
+
+func BenchmarkMarshalAvroEntry(b *testing.B) {
+	for _, version := range []int{1, 2, 3} {
+		b.Run("v"+strconv.Itoa(version), func(b *testing.B) {
+			spec, schema, df := fullyPopulatedDataFileForCodec(b, version)
+			impl := df.(*dataFile)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				encoded, err := impl.MarshalAvroEntry(spec, schema, version)
+				if err != nil {
+					b.Fatal(err)
+				}
+				benchmarkEncodedEntrySize = len(encoded)
+			}
+		})
+	}
 }
