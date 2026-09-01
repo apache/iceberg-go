@@ -41,7 +41,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 		deleteFile := entry.DataFile()
 		partition := dataFilePartition(deleteFile)
 		if path := referencedDataFilePath(deleteFile); path != "" {
-			indexedFile, err := compactDeleteFileForIndex(deleteFile, partition, nil)
+			indexedFile, err := compactDeleteFileForIndexWithReference(deleteFile, partition, nil, &path)
 			if err != nil {
 				return nil, err
 			}

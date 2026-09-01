@@ -266,7 +266,7 @@ func TestDeleteIndexesRetainOnlyRequiredStats(t *testing.T) {
 	equalityEntry := iceberg.NewManifestEntry(
 		iceberg.EntryStatusADDED, nil, int64Ptr(2), nil, equalityDelete)
 	equalityIndex, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{equalityEntry}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{equalityEntry}, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 	equalityDataEntry := iceberg.NewManifestEntry(
 		iceberg.EntryStatusADDED, nil, int64Ptr(1), nil,
