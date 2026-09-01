@@ -792,6 +792,7 @@ func TestManifestWriterCopiesBinaryPartitionSummaryBounds(t *testing.T) {
 	}
 
 	low[0] = 3
+	high[0] = 0
 
 	manifest, err := writer.ToManifestFile("manifest.avro", 0)
 	if err != nil {
