@@ -154,7 +154,7 @@ func BenchmarkPurgeFilesNonBulkDeletion(b *testing.B) {
 							files,
 							concurrency,
 							deleteFunc,
-							func(string, error) error { return nil },
+							func(_ string, err error) error { return err },
 						)
 						if err != nil {
 							b.Fatal(err)

@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1755,13 +1756,50 @@ func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 	assert.False(t, called)
 }
 
-func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
-	maxWorkers := runtime.GOMAXPROCS(0)
-	if maxWorkers < 2 {
-		t.Skip("parallel deletion requires at least two workers")
+func TestDeleteFilesParallelStopsQueuedWorkOnMidFlightCancellation(t *testing.T) {
+	const (
+		fileCount      = 50
+		maxConcurrency = 4
+	)
+
+	files := make([]string, fileCount)
+	for i := range files {
+		files[i] = fmt.Sprintf("s3://bucket/table/file-%02d.parquet", i)
 	}
 
-	const fileCount = 16
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var calls atomic.Int32
+	release := make(chan struct{})
+	deleted, err := deleteFilesParallel(
+		ctx,
+		files,
+		maxConcurrency,
+		func(string) error {
+			call := calls.Add(1)
+			if call == maxConcurrency {
+				cancel()
+				close(release)
+			} else if call < maxConcurrency {
+				<-release
+			}
+
+			return nil
+		},
+		func(path string, err error) error {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(maxConcurrency), calls.Load())
+	assert.Less(t, len(deleted), fileCount)
+}
+
+func TestPurgeFilesDeletesNonBulkFilesConcurrently(t *testing.T) {
+	const maxWorkers = defaultPurgeMaxConcurrency
+	const fileCount = maxWorkers * 2
 	entries := make([]mockWalkEntry, 0, fileCount)
 	for i := range fileCount {
 		entries = append(entries, mockWalkEntry{

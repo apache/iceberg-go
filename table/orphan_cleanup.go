@@ -91,6 +91,8 @@ type orphanCleanupConfig struct {
 	validationErr      error
 }
 
+const defaultPurgeMaxConcurrency = 32
+
 type OrphanCleanupOption func(*orphanCleanupConfig)
 
 func WithLocation(location string) OrphanCleanupOption {
@@ -740,10 +742,13 @@ func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []strin
 		deleteFunc = cfg.deleteFunc
 	}
 
-	var result error
+	var (
+		result          error
+		cancellationErr error
+	)
 	for _, file := range orphanFiles {
 		if err := ctx.Err(); err != nil {
-			result = errors.Join(result, err)
+			cancellationErr = err
 
 			break
 		}
@@ -755,7 +760,7 @@ func deleteFilesSequential(ctx context.Context, fs iceio.IO, orphanFiles []strin
 		deletedFiles = append(deletedFiles, file)
 	}
 
-	return deletedFiles, result
+	return deletedFiles, errors.Join(result, cancellationErr)
 }
 
 func deleteFilesParallel(
@@ -793,6 +798,8 @@ func deleteFilesParallel(
 					if !ok {
 						return
 					}
+					// Both cases can be ready after cancellation, so check the context
+					// again before starting the deletion.
 					if err := ctx.Err(); err != nil {
 						recordCancellation(err)
 
@@ -823,7 +830,7 @@ send:
 	wg.Wait()
 
 	deletedFiles := make([]string, 0, len(files))
-	allErrors := make([]error, 0)
+	var allErrors []error
 	for index, file := range files {
 		if deleted[index] {
 			deletedFiles = append(deletedFiles, file)
@@ -1305,10 +1312,12 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // or write.metadata.path properties).
 //
 // It operates on a best-effort basis. Errors from individual file deletions are
-// collected and returned together. If files cannot be deleted (e.g. due to
-// permission errors or missing paths), the errors are logged but the overall
-// catalog drop operation should typically proceed so the catalog does not
-// get out of sync with storage.
+// collected and returned together as a joined error. If files cannot be deleted
+// (e.g. due to permission errors or missing paths), the errors are logged but
+// the overall catalog drop operation should typically proceed so the catalog
+// does not get out of sync with storage. Non-bulk deletion is bounded to
+// defaultPurgeMaxConcurrency concurrent operations because it is typically
+// I/O-bound.
 func (t Table) PurgeFiles(ctx context.Context) error {
 	gcEnabled := isGCEnabled(t.Metadata().Properties())
 
@@ -1385,7 +1394,7 @@ func (t Table) PurgeFiles(ctx context.Context) error {
 			_, removeErr := deleteFilesParallel(
 				ctx,
 				files,
-				runtime.GOMAXPROCS(0),
+				defaultPurgeMaxConcurrency,
 				func(file string) error {
 					if err := fs.Remove(file); err != nil && !os.IsNotExist(err) {
 						return err
