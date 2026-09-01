@@ -1341,6 +1341,7 @@ func (t *orderedScanTaskErrorTransport) RoundTrip(req *http.Request) (*http.Resp
 	}
 
 	data := fmt.Sprintf(`{"error":{"message":%q,"type":%q,"code":404}}`, errType, errType)
+
 	return &http.Response{
 		StatusCode:    http.StatusNotFound,
 		Header:        http.Header{"Content-Type": {"application/json"}},
