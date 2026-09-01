@@ -1821,6 +1821,31 @@ func TestVariantExtractResidualAbsentColumn(t *testing.T) {
 	assert.Nil(t, fn, "IsNull on an absent variant column keeps every row")
 }
 
+// TestVariantExtractOrAbsentColumnNoPanic: an extract OR'd with IsNull on a column absent from the file folds the record filter to AlwaysTrue while the plan still carries the extract; the residual must not call a nil base filter.
+func TestVariantExtractOrAbsentColumnNoPanic(t *testing.T) {
+	full := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+		iceberg.NestedField{ID: 3, Name: "other", Type: iceberg.PrimitiveTypes.Int64},
+	)
+	fileSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	filter := iceberg.NewOr(
+		iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5))),
+		iceberg.IsNull(iceberg.Reference("other")),
+	)
+	bound, err := iceberg.BindExpr(full, filter, true)
+	require.NoError(t, err)
+
+	fn, skip, err := (&arrowScan{boundRowFilter: bound, caseSensitive: true}).getRecordFilter(context.Background(), fileSchema, bound)
+	require.NoError(t, err)
+	assert.False(t, skip)
+	assert.Nil(t, fn, "OR-with-absent-column folds to keep-all: no residual, no nil-base panic")
+}
+
 // TestBuildExtractColumnNameFallback: a variant column whose Arrow field lacks
 // PARQUET:field_id (name-mapping reads) is still resolved by name.
 func TestBuildExtractColumnNameFallback(t *testing.T) {

@@ -110,6 +110,10 @@ func TestCastVariantLiteral(t *testing.T) {
 		{"decimal scale mismatch", func(b *variant.Builder) error { return b.AppendDecimal8(2, decimal.Decimal64(1234)) }, DecimalTypeOf(10, 3), nil},
 		{"string not castable to int64", func(b *variant.Builder) error { return b.AppendString("hi") }, PrimitiveTypes.Int64, nil},
 		{"nanos floor to micros pre-epoch", func(b *variant.Builder) error { return b.AppendTimestamp(arrow.Timestamp(-1500), false, false) }, PrimitiveTypes.Timestamp, Timestamp(-2)},
+		{"date to nanos overflows int64", func(b *variant.Builder) error { return b.AppendDate(arrow.Date32(200_000)) }, PrimitiveTypes.TimestampNs, nil},
+		{"micros to nanos overflows int64", func(b *variant.Builder) error {
+			return b.AppendTimestamp(arrow.Timestamp(9_300_000_000_000_000), true, false)
+		}, PrimitiveTypes.TimestampNs, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			lit, ok := CastVariantLiteral(scalarVariant(t, tt.build), tt.typ)

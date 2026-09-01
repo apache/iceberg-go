@@ -410,7 +410,7 @@ func (p *PartitionSpec) addSpecFieldInternal(schema *Schema, targetName string, 
 		return err
 	}
 	if _, ok := field.Type.(VariantType); ok {
-		return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, targetName)
+		return fmt.Errorf("%w: cannot partition by %s source field: %s", ErrInvalidArgument, field.Type, field.Name)
 	}
 	for _, existingField := range p.fields {
 		if existingField.Name == targetName {

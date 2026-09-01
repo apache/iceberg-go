@@ -966,7 +966,11 @@ func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Sc
 // per-batch variant extract residual when the plan carries extract terms.
 func (as *arrowScan) recordProcessorWithExtracts(ctx context.Context, plan *compiledFileFilterPlan) recProcessFn {
 	base := plan.recordProcessor(ctx)
-	if plan == nil || len(plan.extracts) == 0 {
+	if base == nil {
+		// No record filter (nil plan or filter folded to AlwaysTrue): keep every row, no residual.
+		return nil
+	}
+	if len(plan.extracts) == 0 {
 		return base
 	}
 

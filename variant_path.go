@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
 )
 
 // NormalizeVariantPath renders member names as the spec's RFC-9535 normalized JSON path. Exported for table/internal; not part of the stable public API.
@@ -154,15 +156,12 @@ func parseBracketSelector(s, path string) (string, int, error) {
 			case '\'', '\\', '/':
 				b.WriteByte(e)
 			case 'u':
-				if i+6 > len(s) {
-					return "", 0, fmt.Errorf("%w: invalid variant path %q (truncated \\u escape)", ErrInvalidArgument, path)
+				r, consumed, uerr := decodeUnicodeEscape(s, i)
+				if uerr != nil {
+					return "", 0, fmt.Errorf("%w: invalid variant path %q (%s)", ErrInvalidArgument, path, uerr)
 				}
-				r, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
-				if err != nil {
-					return "", 0, fmt.Errorf("%w: invalid variant path %q (bad \\u escape)", ErrInvalidArgument, path)
-				}
-				b.WriteRune(rune(r))
-				i += 6
+				b.WriteRune(r)
+				i += consumed
 
 				continue
 			default:
@@ -176,6 +175,35 @@ func parseBracketSelector(s, path string) (string, int, error) {
 	}
 
 	return "", 0, fmt.Errorf("%w: invalid variant path %q (unterminated member selector)", ErrInvalidArgument, path)
+}
+
+// decodeUnicodeEscape decodes the \uXXXX escape at s[i:], pairing a UTF-16 surrogate pair, and returns the rune and bytes consumed.
+func decodeUnicodeEscape(s string, i int) (rune, int, error) {
+	if i+6 > len(s) {
+		return 0, 0, fmt.Errorf("truncated \\u escape")
+	}
+	hi, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bad \\u escape")
+	}
+	if !utf16.IsSurrogate(rune(hi)) {
+		return rune(hi), 6, nil
+	}
+
+	// A surrogate must be a high surrogate followed by a low-surrogate \u escape.
+	if i+12 > len(s) || s[i+6] != '\\' || s[i+7] != 'u' {
+		return 0, 0, fmt.Errorf("unpaired surrogate \\u escape")
+	}
+	lo, err := strconv.ParseUint(s[i+8:i+12], 16, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("bad \\u escape")
+	}
+	r := utf16.DecodeRune(rune(hi), rune(lo))
+	if r == unicode.ReplacementChar {
+		return 0, 0, fmt.Errorf("invalid surrogate pair")
+	}
+
+	return r, 12, nil
 }
 
 // isRFC9535MemberName reports whether name is a valid RFC-9535 member-name shorthand.

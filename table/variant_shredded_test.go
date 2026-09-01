@@ -35,10 +35,13 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/arrow-go/v18/parquet/variant"
 	"github.com/apache/iceberg-go"
+	"github.com/apache/iceberg-go/catalog"
+	"github.com/apache/iceberg-go/catalog/sql"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun/driver/sqliteshim"
 )
 
 const shreddedFixtureDir = "testdata/shredded_variant"
@@ -338,6 +341,31 @@ func TestShreddedVariantArrowGoLeniency(t *testing.T) {
 	})
 }
 
+// writeVariantColumnParquet writes bldr's contents as a single "payload" variant column (field id fieldID) of shreddedType to path.
+func writeVariantColumnParquet(t *testing.T, path string, fieldID int, shreddedType arrow.DataType, bldr *extensions.VariantBuilder) {
+	t.Helper()
+	arr := bldr.NewArray()
+	defer arr.Release()
+
+	arrowSchema := arrow.NewSchema([]arrow.Field{{
+		Name: "payload", Type: shreddedType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{strconv.Itoa(fieldID)}),
+	}}, nil)
+	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(arr.Len()))
+	defer rec.Release()
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	wr, err := pqarrow.NewFileWriter(arrowSchema, f,
+		parquet.NewWriterProperties(parquet.WithStats(true)),
+		pqarrow.DefaultWriterProps())
+	require.NoError(t, err)
+	require.NoError(t, wr.Write(rec))
+	require.NoError(t, wr.Close())
+}
+
 // writeShreddedVariantFile writes a shredded variant column "payload" (typed
 // {a, b} + residual "extra") with nRows data rows then one null row.
 func writeShreddedVariantFile(t *testing.T, path string, fieldID, nRows int) {
@@ -348,8 +376,7 @@ func writeShreddedVariantFile(t *testing.T, path string, fieldID, nRows int) {
 		arrow.Field{Name: "b", Type: arrow.BinaryTypes.String},
 	))
 
-	mem := memory.DefaultAllocator
-	bldr := extensions.NewVariantBuilder(mem, shreddedType)
+	bldr := extensions.NewVariantBuilder(memory.DefaultAllocator, shreddedType)
 	defer bldr.Release()
 
 	for i := range nRows {
@@ -365,27 +392,7 @@ func writeShreddedVariantFile(t *testing.T, path string, fieldID, nRows int) {
 	}
 	bldr.AppendNull()
 
-	arr := bldr.NewArray()
-	defer arr.Release()
-
-	arrowSchema := arrow.NewSchema([]arrow.Field{{
-		Name: "payload", Type: shreddedType, Nullable: true,
-		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{strconv.Itoa(fieldID)}),
-	}}, nil)
-
-	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(arr.Len()))
-	defer rec.Release()
-
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-
-	wr, err := pqarrow.NewFileWriter(arrowSchema, f,
-		parquet.NewWriterProperties(parquet.WithStats(true)),
-		pqarrow.DefaultWriterProps())
-	require.NoError(t, err)
-	require.NoError(t, wr.Write(rec))
-	require.NoError(t, wr.Close())
+	writeVariantColumnParquet(t, path, fieldID, shreddedType, bldr)
 }
 
 // variantInt normalizes the integer Go value a variant scalar may surface as
@@ -563,21 +570,7 @@ func writeFullyShreddedVariantFile(t *testing.T, path string, fieldID, nRows int
 		require.NoError(t, err)
 		bldr.Append(v)
 	}
-	arr := bldr.NewArray()
-	defer arr.Release()
-	arrowSchema := arrow.NewSchema([]arrow.Field{{
-		Name: "payload", Type: shreddedType, Nullable: true,
-		Metadata: arrow.NewMetadata([]string{"PARQUET:field_id"}, []string{strconv.Itoa(fieldID)}),
-	}}, nil)
-	rec := array.NewRecordBatch(arrowSchema, []arrow.Array{arr}, int64(arr.Len()))
-	defer rec.Release()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	wr, err := pqarrow.NewFileWriter(arrowSchema, f, parquet.NewWriterProperties(parquet.WithStats(true)), pqarrow.DefaultWriterProps())
-	require.NoError(t, err)
-	require.NoError(t, wr.Write(rec))
-	require.NoError(t, wr.Close())
+	writeVariantColumnParquet(t, path, fieldID, shreddedType, bldr)
 }
 
 // TestShreddedVariantAddFilesBounds pins that AddFiles (which opens the file and
@@ -623,4 +616,117 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 
 	assert.Equal(t, buildObj(0, "row-A"), tasks[0].File.LowerBoundValues()[1], "AddFiles lower bound")
 	assert.Equal(t, buildObj(nData-1, "row-E"), tasks[0].File.UpperBoundValues()[1], "AddFiles upper bound")
+}
+
+// setupVariantScanTable writes a shredded variant table from rows and returns a closure reading the "id" column of a filtered scan.
+func setupVariantScanTable(t *testing.T, name string, rows []map[string]any) func(iceberg.BooleanExpression) []int64 {
+	t.Helper()
+	ctx := context.Background()
+	loc := "file://" + t.TempDir()
+
+	cat, err := catalog.Load(ctx, "default", iceberg.Properties{
+		"uri":          ":memory:",
+		"type":         "sql",
+		sql.DriverKey:  sqliteshim.ShimName,
+		sql.DialectKey: string(sql.SQLite),
+		"warehouse":    loc,
+	})
+	require.NoError(t, err)
+
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	require.NoError(t, cat.CreateNamespace(ctx, table.Identifier{"ns"}, nil))
+	tbl, err := cat.CreateTable(ctx, table.Identifier{"ns", name}, iceSchema,
+		catalog.WithProperties(iceberg.Properties{
+			table.PropertyFormatVersion:   "3",
+			table.ParquetShredVariantsKey: "true",
+		}),
+		catalog.WithLocation(loc))
+	require.NoError(t, err)
+
+	arrSchema, err := table.SchemaToArrowSchema(iceSchema, nil, true, false)
+	require.NoError(t, err)
+
+	mem := memory.DefaultAllocator
+	idb := array.NewInt64Builder(mem)
+	defer idb.Release()
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	for i, m := range rows {
+		idb.Append(int64(i))
+		var b variant.Builder
+		require.NoError(t, b.Append(m))
+		v, err := b.Build()
+		require.NoError(t, err)
+		vb.Append(v)
+	}
+	idArr := idb.NewArray()
+	defer idArr.Release()
+	pArr := vb.NewArray()
+	defer pArr.Release()
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{idArr, pArr}, int64(len(rows)))
+	defer rec.Release()
+
+	rdr, err := array.NewRecordReader(arrSchema, []arrow.RecordBatch{rec})
+	require.NoError(t, err)
+	defer rdr.Release()
+	tbl, err = tbl.Append(ctx, rdr, nil)
+	require.NoError(t, err)
+
+	return func(filter iceberg.BooleanExpression) []int64 {
+		scan := tbl.Scan(table.WithRowFilter(filter))
+		result, err := scan.ToArrowTable(ctx)
+		require.NoError(t, err)
+		defer result.Release()
+		col := result.Column(result.Schema().FieldIndices("id")[0]).Data()
+		out := make([]int64, 0, result.NumRows())
+		for _, ch := range col.Chunks() {
+			c := ch.(*array.Int64)
+			for i := range c.Len() {
+				out = append(out, c.Value(i))
+			}
+		}
+
+		return out
+	}
+}
+
+// TestVariantExtractScanEndToEnd covers variant predicate pushdown through the public API: write a shredded variant table, read it back via Scan.ToArrowTable with extract row filters.
+func TestVariantExtractScanEndToEnd(t *testing.T) {
+	idsFor := setupVariantScanTable(t, "variant_scan", []map[string]any{
+		{"a": int64(1), "b": "x"},
+		{"a": int64(2), "b": "y"},
+		{"a": int64(3), "b": "z"},
+		{"b": "only-b"}, // a absent
+	})
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+
+	require.Equal(t, []int64{2}, idsFor(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(3)))),
+		"$.a == 3 selects only row id 2")
+	require.ElementsMatch(t, []int64{0, 1, 2}, idsFor(iceberg.NotNull(ext)),
+		"NotNull($.a) selects the three a-present rows")
+	require.Equal(t, []int64{3}, idsFor(iceberg.IsNull(ext)),
+		"IsNull($.a) selects the a-absent row")
+}
+
+// TestVariantExtractResidualAndHeterogeneous covers extract over a non-uniform $.a, which stays in the residual value column, exercising arrow-go's reassembly and cast-to-null for the string-typed row.
+func TestVariantExtractResidualAndHeterogeneous(t *testing.T) {
+	idsFor := setupVariantScanTable(t, "variant_resid", []map[string]any{
+		{"a": int64(10), "b": "x"},
+		{"a": "hello", "b": "y"},
+		{"a": int64(30), "b": "z"},
+		{"b": "only-b"},
+	})
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+
+	require.Equal(t, []int64{0}, idsFor(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(10)))),
+		"$.a == 10 selects the residual-backed int row")
+	require.Empty(t, idsFor(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(0)))),
+		"string $.a='hello' never matches an Int64 predicate")
+	require.ElementsMatch(t, []int64{0, 2}, idsFor(iceberg.NotNull(ext)),
+		"NotNull($.a as Int64) = the two int rows only")
+	require.ElementsMatch(t, []int64{1, 3}, idsFor(iceberg.IsNull(ext)),
+		"IsNull($.a as Int64) = the string row and the absent row")
 }

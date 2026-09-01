@@ -202,7 +202,9 @@ func castVariantToMicros(pt variant.Type, raw any, tz bool) (any, bool) {
 	case tz && pt == variant.TimestampNanos, !tz && pt == variant.TimestampNanosNTZ:
 		return Timestamp(floorDiv(int64(raw.(arrow.Timestamp)), nanosPerMicro)), true
 	case !tz && pt == variant.Date:
-		return Timestamp(int64(raw.(arrow.Date32)) * microsPerDay), true
+		if micros, ok := mulNoOverflow(int64(raw.(arrow.Date32)), microsPerDay); ok {
+			return Timestamp(micros), true
+		}
 	}
 
 	return nil, false
@@ -212,9 +214,13 @@ func castVariantToMicros(pt variant.Type, raw any, tz bool) (any, bool) {
 func castVariantToNanos(pt variant.Type, raw any, tz bool) (any, bool) {
 	switch {
 	case tz && pt == variant.TimestampMicros, !tz && pt == variant.TimestampMicrosNTZ:
-		return TimestampNano(int64(raw.(arrow.Timestamp)) * nanosPerMicro), true
+		if nanos, ok := mulNoOverflow(int64(raw.(arrow.Timestamp)), nanosPerMicro); ok {
+			return TimestampNano(nanos), true
+		}
 	case !tz && pt == variant.Date:
-		return TimestampNano(int64(raw.(arrow.Date32)) * nanosPerDay), true
+		if nanos, ok := mulNoOverflow(int64(raw.(arrow.Date32)), nanosPerDay); ok {
+			return TimestampNano(nanos), true
+		}
 	}
 
 	return nil, false
@@ -240,6 +246,16 @@ func floorDiv(a, b int64) int64 {
 	}
 
 	return q
+}
+
+// mulNoOverflow returns a*b, reporting false if the product overflows int64.
+func mulNoOverflow(a, b int64) (int64, bool) {
+	p := a * b
+	if a != 0 && p/a != b {
+		return 0, false
+	}
+
+	return p, true
 }
 
 func literalFromCastValue(result any) Literal {

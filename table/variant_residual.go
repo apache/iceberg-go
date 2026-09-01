@@ -74,7 +74,7 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q is not a VariantArray (got %T)", iceberg.ErrInvalidArgument, varName, rec.Column(varIdx))
 	}
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if varr.IsNull(i) {
 			bldr.AppendNull()
 
@@ -111,42 +111,94 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 	return bldr.NewArray(), field, nil
 }
 
-// appendExtractLiteral appends a decoded extract literal to its typed builder.
+// appendExtractLiteral appends a decoded extract literal to its typed builder, erroring rather than panicking on a type mismatch.
 func appendExtractLiteral(bldr array.Builder, lit iceberg.Literal) error {
+	v := lit.Any()
+	wrongType := func() error {
+		return fmt.Errorf("%w: variant extract value %T does not match builder %T", iceberg.ErrNotImplemented, v, bldr)
+	}
 	switch b := bldr.(type) {
 	case *array.BooleanBuilder:
-		b.Append(lit.Any().(bool))
+		x, ok := v.(bool)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.Int32Builder:
-		b.Append(lit.Any().(int32))
+		x, ok := v.(int32)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.Int64Builder:
-		b.Append(lit.Any().(int64))
+		x, ok := v.(int64)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.Float32Builder:
-		b.Append(lit.Any().(float32))
+		x, ok := v.(float32)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.Float64Builder:
-		b.Append(lit.Any().(float64))
+		x, ok := v.(float64)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.StringBuilder:
-		b.Append(lit.Any().(string))
+		x, ok := v.(string)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.BinaryBuilder:
-		b.Append(lit.Any().([]byte))
+		x, ok := v.([]byte)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.FixedSizeBinaryBuilder:
-		b.Append(lit.Any().([]byte))
+		x, ok := v.([]byte)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *extensions.UUIDBuilder:
-		b.Append(lit.Any().(uuid.UUID))
+		x, ok := v.(uuid.UUID)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x)
 	case *array.Date32Builder:
-		b.Append(arrow.Date32(lit.Any().(iceberg.Date)))
+		x, ok := v.(iceberg.Date)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(arrow.Date32(x))
 	case *array.Time64Builder:
-		b.Append(arrow.Time64(lit.Any().(iceberg.Time)))
+		x, ok := v.(iceberg.Time)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(arrow.Time64(x))
 	case *array.TimestampBuilder:
-		switch v := lit.Any().(type) {
+		switch x := v.(type) {
 		case iceberg.Timestamp:
-			b.Append(arrow.Timestamp(v))
+			b.Append(arrow.Timestamp(x))
 		case iceberg.TimestampNano:
-			b.Append(arrow.Timestamp(v))
+			b.Append(arrow.Timestamp(x))
 		default:
-			return fmt.Errorf("%w: variant extract timestamp value %T", iceberg.ErrNotImplemented, v)
+			return wrongType()
 		}
 	case *array.Decimal128Builder:
-		b.Append(lit.Any().(iceberg.Decimal).Val)
+		x, ok := v.(iceberg.Decimal)
+		if !ok {
+			return wrongType()
+		}
+		b.Append(x.Val)
 	default:
 		return fmt.Errorf("%w: variant extract target builder %T", iceberg.ErrNotImplemented, bldr)
 	}

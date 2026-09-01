@@ -64,6 +64,8 @@ func TestParseVariantPath(t *testing.T) {
 		{"bracket escaped backslash", `$['a\\b']`, []string{`a\b`}},
 		{"bracket star is literal", "$['a*b']", []string{"a*b"}},
 		{"mixed dot and bracket", "$['a'].b", []string{"a", "b"}},
+		{"bracket unicode BMP escape", "$['\\u00e9']", []string{"é"}},
+		{"bracket surrogate pair escape", "$['\\uD840\\uDC00']", []string{"\U00020000"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseVariantPath(tt.path)
@@ -85,6 +87,7 @@ func TestParseVariantPathRoundTrip(t *testing.T) {
 		{"a\x01b"},
 		{"a*b"},
 		{"1abc"},
+		{""},
 	} {
 		got, err := parseVariantPath(NormalizeVariantPath(fields))
 		require.NoError(t, err)
@@ -107,6 +110,9 @@ func TestParseVariantPathRejects(t *testing.T) {
 		{"unquoted bracket", "$[event_id]"},
 		{"unterminated bracket", "$['event_id"},
 		{"missing close bracket", "$['event_id'"},
+		{"lone high surrogate", "$['\\uD840']"},
+		{"lone low surrogate", "$['\\uDC00']"},
+		{"unpaired high surrogate", "$['\\uD840x']"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parseVariantPath(tt.path)
