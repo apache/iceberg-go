@@ -2182,22 +2182,41 @@ func TestAssignMissingPartitionFieldIDsAcrossSpecs(t *testing.T) {
 	require.Equal(t, 1005, parsed.Specs[1].Fields[0].FieldID)
 }
 
-func TestAssignMissingPartitionFieldIDsPreservesUnrelatedJSON(t *testing.T) {
-	const untouched = ` { "nested": [1, {"value":"keep spacing"}] } `
-	input := []byte(`{
-		"format-version": 1,
-		"last-updated-ms": 0,
-		"partition-spec": [{"source-id": 1, "transform": "identity", "name": "id"}],
-		"unknown":` + untouched + `
-	}`)
+func TestInspectMetadataHeaderSelectsNormalizationPath(t *testing.T) {
+	for _, data := range []string{ExampleTableMetadataV1, ExampleTableMetadataV2, ExampleTableMetadataV3} {
+		header, err := inspectMetadataHeader([]byte(data))
+		require.NoError(t, err)
+		assert.False(t, header.needsPartitionNormalization)
+	}
 
-	normalized, err := assignMissingPartitionFieldIDs(input)
-	require.NoError(t, err)
-	assert.Contains(t, string(normalized), `"unknown":`+untouched)
-	assert.Contains(t, string(normalized), `"field-id":1000`)
+	for name, data := range map[string]string{
+		"legacy partition-spec": `{
+			"format-version": 1,
+			"last-updated-ms": 0,
+			"partition-spec": [
+				{"source-id": 1, "transform": "identity", "name": "id"}
+			]
+		}`,
+		"partition-specs list": `{
+			"format-version": 2,
+			"last-updated-ms": 0,
+			"partition-specs": [{
+				"spec-id": 0,
+				"fields": [
+					{"source-id": 1, "transform": "identity", "name": "id"}
+				]
+			}]
+		}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			header, err := inspectMetadataHeader([]byte(data))
+			require.NoError(t, err)
+			assert.True(t, header.needsPartitionNormalization)
+		})
+	}
 }
 
-func TestMetadataStructuralScanHandlesEscapedKeysAndNestedValues(t *testing.T) {
+func TestParseMetadataHandlesEscapedKeysAndNestedValues(t *testing.T) {
 	data := strings.ReplaceAll(ExampleTableMetadataV2, `"format-version"`, `"format\u002dversion"`)
 	data = strings.ReplaceAll(data, `"last-updated-ms"`, `"last\u002dupdated-ms"`)
 	data = strings.TrimSuffix(data, "}") + `,
@@ -2209,7 +2228,7 @@ func TestMetadataStructuralScanHandlesEscapedKeysAndNestedValues(t *testing.T) {
 	assert.Equal(t, 2, meta.Version())
 }
 
-func TestMetadataStructuralScanRejectsMalformedJSON(t *testing.T) {
+func TestParseMetadataRejectsMalformedJSON(t *testing.T) {
 	tests := []string{
 		`{"format-version":2,"last-updated-ms":0 "value":1}`,
 		`{"format-version":2,"last-updated-ms":0,"value":[1,]}`,
@@ -2227,7 +2246,7 @@ func TestMetadataStructuralScanRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
-func TestMetadataStructuralScanUsesLastDuplicateField(t *testing.T) {
+func TestInspectMetadataHeaderUsesLastDuplicateField(t *testing.T) {
 	data := []byte(`{
 		"format-version": 1,
 		"last-updated-ms": 0,
@@ -2235,10 +2254,9 @@ func TestMetadataStructuralScanUsesLastDuplicateField(t *testing.T) {
 		"last-updated-ms": 1
 	}`)
 
-	fields, err := scanMetadataJSON(data)
+	header, err := inspectMetadataHeader(data)
 	require.NoError(t, err)
-	assert.Equal(t, "2", string(fields.formatVersion.slice(data)))
-	assert.Equal(t, "1", string(fields.lastUpdatedMS.slice(data)))
+	assert.Equal(t, 2, header.formatVersion)
 }
 
 func TestParseMetadataNullPreservesFormatVersionError(t *testing.T) {

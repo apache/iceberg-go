@@ -50,6 +50,7 @@ func BenchmarkParseMetadataBytes(b *testing.B) {
 	}{
 		{name: "snapshot-history", build: snapshotHistoryMetadataForBenchmark},
 		{name: "properties", build: propertyMetadataForBenchmark},
+		{name: "legacy-field-id-fallback", build: legacyFieldIDFallbackMetadataForBenchmark},
 	}
 
 	for _, profile := range profiles {
@@ -57,8 +58,8 @@ func BenchmarkParseMetadataBytes(b *testing.B) {
 			raw := profile.build(b, size.bytes)
 			b.Run(fmt.Sprintf("profile=%s/target=%s/metadata=%d-bytes", profile.name, size.name, len(raw)), func(b *testing.B) {
 				b.ReportAllocs()
-				b.ReportMetric(float64(len(raw)), "metadata-bytes")
 				b.ResetTimer()
+				b.ReportMetric(float64(len(raw)), "metadata-bytes")
 
 				for range b.N {
 					metadata, err := ParseMetadataBytes(raw)
@@ -121,12 +122,41 @@ func buildSnapshotHistoryMetadata(tb testing.TB, count int) []byte {
 }
 
 func propertyMetadataForBenchmark(tb testing.TB, targetBytes int) []byte {
+	return propertyMetadataFromExampleForBenchmark(tb, ExampleTableMetadataV2, targetBytes)
+}
+
+func legacyFieldIDFallbackMetadataForBenchmark(tb testing.TB, targetBytes int) []byte {
+	tb.Helper()
+
+	fields := benchmarkMetadataFieldsFromExample(tb, ExampleTableMetadataV1)
+	var spec []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["partition-spec"], &spec); err != nil {
+		tb.Fatal(err)
+	}
+	for _, field := range spec {
+		delete(field, "field-id")
+	}
+	fields["partition-spec"] = mustMarshalBenchmarkJSON(tb, spec)
+
+	return propertyMetadataFromFieldsForBenchmark(tb, fields, targetBytes)
+}
+
+func propertyMetadataFromExampleForBenchmark(tb testing.TB, example string, targetBytes int) []byte {
+	tb.Helper()
+
+	return propertyMetadataFromFieldsForBenchmark(tb, benchmarkMetadataFieldsFromExample(tb, example), targetBytes)
+}
+
+func propertyMetadataFromFieldsForBenchmark(tb testing.TB, base map[string]json.RawMessage, targetBytes int) []byte {
 	tb.Helper()
 
 	count := max(1, targetBytes/300)
 	var raw []byte
 	for range 5 {
-		fields := benchmarkMetadataFields(tb)
+		fields := make(map[string]json.RawMessage, len(base)+1)
+		for key, value := range base {
+			fields[key] = value
+		}
 		properties := make(iceberg.Properties, count)
 		for i := range count {
 			properties[fmt.Sprintf("property-%06d", i)] = strings.Repeat("v", 256)
@@ -145,10 +175,14 @@ func propertyMetadataForBenchmark(tb testing.TB, targetBytes int) []byte {
 }
 
 func benchmarkMetadataFields(tb testing.TB) map[string]json.RawMessage {
+	return benchmarkMetadataFieldsFromExample(tb, ExampleTableMetadataV2)
+}
+
+func benchmarkMetadataFieldsFromExample(tb testing.TB, example string) map[string]json.RawMessage {
 	tb.Helper()
 
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(ExampleTableMetadataV2), &fields); err != nil {
+	if err := json.Unmarshal([]byte(example), &fields); err != nil {
 		tb.Fatal(err)
 	}
 
