@@ -343,6 +343,7 @@ func (r *Catalog) fetchScanTaskFrontier(
 	handles []string,
 ) ([]FetchScanTasksResponse, error) {
 	responses := make([]FetchScanTasksResponse, len(handles))
+	errs := make([]error, len(handles))
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.SetLimit(remoteScanTaskFetchConcurrency)
 
@@ -350,6 +351,8 @@ func (r *Catalog) fetchScanTaskFrontier(
 		group.Go(func() error {
 			response, err := r.FetchScanTasks(groupCtx, ident, FetchScanTasksRequest{PlanTask: handle})
 			if err != nil {
+				errs[i] = err
+
 				return err
 			}
 
@@ -359,8 +362,17 @@ func (r *Catalog) fetchScanTaskFrontier(
 		})
 	}
 
-	if err := group.Wait(); err != nil {
-		return nil, err
+	if waitErr := group.Wait(); waitErr != nil {
+		// Preserve the serial fetch contract: when multiple handles fail, the
+		// first error in handle order wins. Sibling requests cancelled by the
+		// first failure are not meaningful candidates for the returned error.
+		for _, err := range errs {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				return nil, err
+			}
+		}
+
+		return nil, waitErr
 	}
 
 	return responses, nil

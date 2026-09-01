@@ -1318,6 +1318,54 @@ func TestCollectScanTasksFetchesFrontierConcurrentlyInOrder(t *testing.T) {
 	}
 }
 
+type orderedScanTaskErrorTransport struct {
+	planTaskReturned chan struct{}
+}
+
+func (t *orderedScanTaskErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body FetchScanTasksRequest
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+
+	var errType string
+	switch body.PlanTask {
+	case "table":
+		<-t.planTaskReturned
+		errType = errTypeNoSuchTable
+	case "plan-task":
+		close(t.planTaskReturned)
+		errType = errTypeNoSuchPlanTask
+	default:
+		return nil, fmt.Errorf("unexpected plan task %q", body.PlanTask)
+	}
+
+	data := fmt.Sprintf(`{"error":{"message":%q,"type":%q,"code":404}}`, errType, errType)
+	return &http.Response{
+		StatusCode:    http.StatusNotFound,
+		Header:        http.Header{"Content-Type": {"application/json"}},
+		Body:          io.NopCloser(strings.NewReader(data)),
+		ContentLength: int64(len(data)),
+		Request:       req,
+	}, nil
+}
+
+func TestCollectScanTasksReturnsFirstErrorInHandleOrder(t *testing.T) {
+	t.Parallel()
+
+	cat := newScanPlanningTestCatalog(t, []endpoint{endpointFetchScanTasks}, nil)
+	cat.cl = &http.Client{Transport: &orderedScanTaskErrorTransport{
+		planTaskReturned: make(chan struct{}),
+	}}
+
+	envelopes, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		PlanTasks: []string{"table", "plan-task"},
+	})
+	require.ErrorIs(t, err, catalog.ErrNoSuchTable)
+	assert.NotErrorIs(t, err, ErrNoSuchPlanTask)
+	assert.Nil(t, envelopes)
+}
+
 func TestCollectScanTasksBoundsFrontierConcurrency(t *testing.T) {
 	t.Parallel()
 
