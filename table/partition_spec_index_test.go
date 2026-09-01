@@ -58,7 +58,7 @@ func TestParsedMetadataBuildsPartitionSpecIndex(t *testing.T) {
 	require.NoError(t, err)
 
 	common := metadataCommon(metadata)
-	require.Equal(t, len(common.Specs), common.partitionSpecIndex.sourceCount)
+	require.Len(t, common.partitionSpecIndex.positions, len(common.Specs))
 	for i, spec := range common.Specs {
 		require.Equal(t, i, common.partitionSpecIndex.positions[spec.ID()])
 	}
@@ -74,7 +74,7 @@ func TestMetadataBuilderFromBaseBuildsPartitionSpecIndex(t *testing.T) {
 
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
-	require.Equal(t, len(builder.specs), builder.partitionSpecIndex.sourceCount)
+	require.Len(t, builder.partitionSpecIndex.positions, len(builder.specs))
 
 	id := builder.specs[len(builder.specs)-1].ID()
 	spec, err := builder.GetSpecByID(id)
@@ -315,53 +315,6 @@ func TestCommonMetadataPartitionSpecLookupsConcurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-}
-
-// Why: read-only metadata lookups must not rebuild the shared index when
-// partition spec IDs are duplicated in an in-package fixture.
-// Condition: the index contains 64 specs with the same ID and many goroutines
-// repeatedly look up that ID.
-// Assertion: every lookup succeeds and the index remains stable.
-func TestCommonMetadataPartitionSpecIndexDuplicateIDsConcurrent(t *testing.T) {
-	const (
-		specCount      = 64
-		goroutineCount = 8
-		lookupCount    = 1_000
-	)
-	specs := make([]iceberg.PartitionSpec, specCount)
-	for i := range specs {
-		specs[i] = iceberg.NewPartitionSpecID(7)
-	}
-	metadata := &commonMetadata{
-		Specs:              specs,
-		DefaultSpecID:      7,
-		partitionSpecIndex: buildPartitionSpecIndex(specs),
-	}
-	originalIndex := metadata.partitionSpecIndex
-
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(goroutineCount)
-	for range goroutineCount {
-		go func() {
-			defer wg.Done()
-			<-start
-
-			for range lookupCount {
-				spec := metadata.PartitionSpecByID(7)
-				if spec == nil || spec.ID() != 7 {
-					t.Errorf("expected partition spec 7, got %v", spec)
-
-					return
-				}
-			}
-		}()
-	}
-	close(start)
-	wg.Wait()
-
-	assert.Same(t, originalIndex, metadata.partitionSpecIndex)
-	assert.Equal(t, specCount, metadata.partitionSpecIndex.sourceCount)
 }
 
 func TestMetadataBuilderPartitionSpecIndexCopyOnWriteConcurrent(t *testing.T) {

@@ -218,10 +218,6 @@ func schemaIndexLookup(index *schemaIndexData, schemas []*iceberg.Schema, id int
 
 type partitionSpecIndexData struct {
 	positions map[int]int
-	// sourceCount records the number of specs used to build positions. Persisted
-	// metadata rejects duplicate IDs, but this remains separate from
-	// len(positions) for unvalidated in-package fixtures.
-	sourceCount int
 	// firstSpec identifies the spec slice used to build positions. It lets
 	// read-only lookups detect an index left behind by an in-package fixture
 	// that replaced the slice.
@@ -252,9 +248,8 @@ func buildPartitionSpecIndex(specs []iceberg.PartitionSpec) *partitionSpecIndexD
 	}
 
 	return &partitionSpecIndexData{
-		positions:   positions,
-		sourceCount: len(specs),
-		firstSpec:   partitionSpecListFirst(specs),
+		positions: positions,
+		firstSpec: partitionSpecListFirst(specs),
 	}
 }
 
@@ -264,14 +259,13 @@ func clonePartitionSpecIndex(index *partitionSpecIndexData) *partitionSpecIndexD
 	}
 
 	return &partitionSpecIndexData{
-		positions:   maps.Clone(index.positions),
-		sourceCount: index.sourceCount,
-		firstSpec:   index.firstSpec,
+		positions: maps.Clone(index.positions),
+		firstSpec: index.firstSpec,
 	}
 }
 
 func partitionSpecIndexNeedsRebuild(index *partitionSpecIndexData, specs []iceberg.PartitionSpec) bool {
-	if index == nil || index.sourceCount != len(specs) {
+	if index == nil || len(index.positions) != len(specs) {
 		return true
 	}
 
@@ -647,10 +641,9 @@ func (b *MetadataBuilder) clone() *MetadataBuilder {
 	}
 	if b.partitionSpecIndex != nil {
 		cloned.partitionSpecIndex = &partitionSpecIndexData{
-			positions:   b.partitionSpecIndex.positions,
-			sourceCount: b.partitionSpecIndex.sourceCount,
-			firstSpec:   partitionSpecListFirst(cloned.specs),
-			shared:      true,
+			positions: b.partitionSpecIndex.positions,
+			firstSpec: partitionSpecListFirst(cloned.specs),
+			shared:    true,
 		}
 		b.partitionSpecIndex.shared = true
 	}
@@ -862,7 +855,6 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 		b.ensurePartitionSpecIndexMutable()
 		b.specs = append(b.specs, freshSpec)
 		b.partitionSpecIndex.positions[newSpecID] = len(b.specs) - 1
-		b.partitionSpecIndex.sourceCount = len(b.specs)
 		b.partitionSpecIndex.firstSpec = partitionSpecListFirst(b.specs)
 	}
 
@@ -2447,6 +2439,8 @@ func (c *commonMetadata) DefaultPartitionSpec() int {
 func (c *commonMetadata) partitionSpecIndexForLookup() *partitionSpecIndexData {
 	index := c.partitionSpecIndex
 	if partitionSpecIndexNeedsRebuild(index, c.Specs) {
+		// Keep fixture recovery local: validated metadata has a stable index, and
+		// read-only lookups must not write to shared metadata state.
 		index = buildPartitionSpecIndex(c.Specs)
 	}
 
