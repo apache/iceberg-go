@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"io/fs"
 	"math"
 	"testing"
 
@@ -322,10 +323,13 @@ func TestStandardEncryptionManager_EmptyFile_ZeroLengthReadAt(t *testing.T) {
 
 // failAfterNWriter is an icebergio.FileWriter stub that fails the Nth call
 // to Write, simulating a mid-stream flush failure on the underlying storage.
+// It also counts Close calls, since memFileWriter.Close is a no-op and would
+// otherwise mask a leaked/never-closed underlying writer.
 type failAfterNWriter struct {
 	memFileWriter
 	failAt int
 	writes int
+	closes int
 }
 
 func (w *failAfterNWriter) Write(p []byte) (int, error) {
@@ -335,6 +339,12 @@ func (w *failAfterNWriter) Write(p []byte) (int, error) {
 	}
 
 	return w.memFileWriter.Write(p)
+}
+
+func (w *failAfterNWriter) Close() error {
+	w.closes++
+
+	return w.memFileWriter.Close()
 }
 
 func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.T) {
@@ -350,6 +360,7 @@ func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.
 	n, err := out.Write([]byte("aaaabbbb"))
 	require.Error(t, err)
 	assert.Equal(t, 4, n, "only the first block reached storage")
+	assert.Equal(t, 1, fw.closes, "a poisoned flush must close the underlying writer, not leak it")
 
 	// A subsequent Write must return the same sticky error, not attempt more I/O.
 	_, err2 := out.Write([]byte("c"))
@@ -364,6 +375,7 @@ func TestStandardEncryptionManager_FlushFailurePoisonsWriterAndClose(t *testing.
 	// A retried Close must keep reporting the same error, not nil.
 	closeErr2 := out.Close()
 	require.Error(t, closeErr2)
+	assert.Equal(t, 1, fw.closes, "a retried Close must not close the underlying writer again")
 }
 
 func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
@@ -375,4 +387,58 @@ func TestStandardEncryptionManager_WriteAfterCloseRejected(t *testing.T) {
 	_, err = out.Write([]byte("late"))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, encryption.ErrOutputFileClosed))
+	assert.True(t, errors.Is(err, fs.ErrClosed))
+}
+
+func TestNewStandardEncryptionManager_NilKMSPanics(t *testing.T) {
+	assert.PanicsWithValue(t, "encryption: NewStandardEncryptionManager: kms must not be nil", func() {
+		encryption.NewStandardEncryptionManager(nil)
+	})
+}
+
+func TestStandardEncryptionManager_StreamHeaderBlockLengthMismatchRejected(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(16))
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", []byte("hello iceberg"))
+	// A header block length that is itself in-range, but does not match the
+	// (trusted) block-size recorded in key metadata.
+	binary.LittleEndian.PutUint32(ciphertext[4:8], 32)
+
+	_, err := mgr.NewDecryptedInputFile(t.Context(), newMemFile(ciphertext), keyMetadata)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, encryption.ErrInvalidStreamHeader))
+}
+
+// countingReadAtFile wraps a memFile and counts ReadAt calls, to verify that
+// repeated small reads landing in the same block reuse the decrypted-block
+// cache instead of re-decrypting on every call.
+type countingReadAtFile struct {
+	*memFile
+	reads int
+}
+
+func (f *countingReadAtFile) ReadAt(p []byte, off int64) (int, error) {
+	f.reads++
+
+	return f.memFile.ReadAt(p, off)
+}
+
+func TestStandardEncryptionManager_RepeatedSmallReadsReuseDecryptedBlockCache(t *testing.T) {
+	mgr, _ := newTestStandardManager(t, encryption.WithBlockSize(4096))
+	plaintext := bytes.Repeat([]byte("x"), 5000) // spans exactly two blocks (4096 + 904)
+
+	ciphertext, keyMetadata := encryptAll(t, mgr, "kek-1", plaintext)
+	counting := &countingReadAtFile{memFile: newMemFile(ciphertext)}
+
+	in, err := mgr.NewDecryptedInputFile(t.Context(), counting, keyMetadata)
+	require.NoError(t, err)
+	baseline := counting.reads // the stream header was already read once above
+
+	buf := make([]byte, 1)
+	for range plaintext {
+		n, err := in.Read(buf)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+	}
+
+	assert.LessOrEqual(t, counting.reads-baseline, 2, "5000 one-byte reads across two blocks must decrypt each block at most once")
 }
