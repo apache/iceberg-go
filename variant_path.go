@@ -80,9 +80,7 @@ func rfc9535Escape(name string) string {
 	return b.String()
 }
 
-// parseVariantPath parses a variant path into its member names. It accepts both
-// dot shorthand ($.a.b) and RFC-9535 bracket notation ($['a']['b']) so a path
-// emitted by NormalizeVariantPath round-trips. Array indices and wildcards are unsupported.
+// parseVariantPath parses a variant path into member names, accepting dot ($.a.b) and bracket ($['a']) notation.
 func parseVariantPath(path string) ([]string, error) {
 	if !strings.HasPrefix(path, "$") {
 		return nil, fmt.Errorf("%w: invalid variant path, does not start with $: %q", ErrInvalidArgument, path)

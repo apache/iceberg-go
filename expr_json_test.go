@@ -314,6 +314,14 @@ func TestSanitizeExpressionExtractCollapses(t *testing.T) {
 	raw, err := json.Marshal(sanitized)
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), `"id"`, "the non-extract predicate survives in the sanitized filter")
+
+	schema := iceberg.NewSchema(0, iceberg.NestedField{ID: 1, Name: "payload", Type: iceberg.VariantType{}})
+	boundExt, err := iceberg.BindExpr(schema,
+		iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5))), true)
+	require.NoError(t, err)
+	sanitizedBound, err := iceberg.SanitizeExpression(boundExt)
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.AlwaysTrue{}, sanitizedBound)
 }
 
 func mustLit(t *testing.T, s string, typ iceberg.Type) iceberg.Literal {

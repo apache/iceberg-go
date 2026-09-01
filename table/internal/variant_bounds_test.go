@@ -111,6 +111,14 @@ func TestSerializeVariantBounds(t *testing.T) {
 	lo := lv.Value().(variant.ObjectValue)
 	uo := uv.Value().(variant.ObjectValue)
 	assert.Equal(t, lo.NumElements(), uo.NumElements())
+
+	var loKeys []string
+	for i := range lo.NumElements() {
+		f, ferr := lo.FieldAt(i)
+		require.NoError(t, ferr)
+		loKeys = append(loKeys, f.Key)
+	}
+	assert.Equal(t, []string{"$['a']", "$['name']"}, loKeys)
 }
 
 func TestSerializeVariantBoundsEmpty(t *testing.T) {
@@ -517,8 +525,10 @@ func TestVariantBoundLiteralTypeMismatch(t *testing.T) {
 func TestVariantBoundLiteralMalformed(t *testing.T) {
 	// Malformed / truncated bytes must return an error, never panic.
 	for _, raw := range [][]byte{{}, {0x01}, {0xff, 0xff, 0xff}, {0x01, 0x00, 0x00, 0x7f, 0x7f}} {
+		var ok bool
 		require.NotPanics(t, func() {
-			_, _, _ = VariantBoundLiteral(raw, "$['a']", iceberg.PrimitiveTypes.Int64)
+			_, ok, _ = VariantBoundLiteral(raw, "$['a']", iceberg.PrimitiveTypes.Int64)
 		})
+		assert.False(t, ok, "malformed bytes yield no usable bound")
 	}
 }

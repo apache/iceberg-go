@@ -619,7 +619,7 @@ func TestShreddedVariantAddFilesBounds(t *testing.T) {
 }
 
 // setupVariantScanTable writes a shredded variant table from rows and returns a closure reading the "id" column of a filtered scan.
-func setupVariantScanTable(t *testing.T, name string, rows []map[string]any) func(iceberg.BooleanExpression) []int64 {
+func setupVariantScanTable(t *testing.T, name string, rows []map[string]any) (*table.Table, func(iceberg.BooleanExpression) []int64) {
 	t.Helper()
 	ctx := context.Background()
 	loc := "file://" + t.TempDir()
@@ -675,7 +675,7 @@ func setupVariantScanTable(t *testing.T, name string, rows []map[string]any) fun
 	tbl, err = tbl.Append(ctx, rdr, nil)
 	require.NoError(t, err)
 
-	return func(filter iceberg.BooleanExpression) []int64 {
+	return tbl, func(filter iceberg.BooleanExpression) []int64 {
 		scan := tbl.Scan(table.WithRowFilter(filter))
 		result, err := scan.ToArrowTable(ctx)
 		require.NoError(t, err)
@@ -695,7 +695,7 @@ func setupVariantScanTable(t *testing.T, name string, rows []map[string]any) fun
 
 // TestVariantExtractScanEndToEnd covers variant predicate pushdown through the public API: write a shredded variant table, read it back via Scan.ToArrowTable with extract row filters.
 func TestVariantExtractScanEndToEnd(t *testing.T) {
-	idsFor := setupVariantScanTable(t, "variant_scan", []map[string]any{
+	_, idsFor := setupVariantScanTable(t, "variant_scan", []map[string]any{
 		{"a": int64(1), "b": "x"},
 		{"a": int64(2), "b": "y"},
 		{"a": int64(3), "b": "z"},
@@ -713,7 +713,7 @@ func TestVariantExtractScanEndToEnd(t *testing.T) {
 
 // TestVariantExtractResidualAndHeterogeneous covers extract over a non-uniform $.a, which stays in the residual value column, exercising arrow-go's reassembly and cast-to-null for the string-typed row.
 func TestVariantExtractResidualAndHeterogeneous(t *testing.T) {
-	idsFor := setupVariantScanTable(t, "variant_resid", []map[string]any{
+	_, idsFor := setupVariantScanTable(t, "variant_resid", []map[string]any{
 		{"a": int64(10), "b": "x"},
 		{"a": "hello", "b": "y"},
 		{"a": int64(30), "b": "z"},
@@ -729,4 +729,62 @@ func TestVariantExtractResidualAndHeterogeneous(t *testing.T) {
 		"NotNull($.a as Int64) = the two int rows only")
 	require.ElementsMatch(t, []int64{1, 3}, idsFor(iceberg.IsNull(ext)),
 		"IsNull($.a as Int64) = the string row and the absent row")
+}
+
+// NOT($.a == 1) must keep the $.a == 2 row, not prune its row group.
+func TestVariantExtractNegatedNotPruned(t *testing.T) {
+	tbl, idsFor := setupVariantScanTable(t, "variant_neg", []map[string]any{
+		{"a": int64(1), "b": "x"},
+		{"a": int64(2), "b": "y"},
+	})
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	filter := iceberg.NewNot(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(1))))
+
+	require.Equal(t, []int64{1}, idsFor(filter),
+		"NOT($.a == 1) must keep the a=2 row (id 1), not prune its row group")
+
+	result, err := tbl.Scan(table.WithRowFilter(filter)).ToArrowTable(context.Background())
+	require.NoError(t, err)
+	defer result.Release()
+	require.Equal(t, int64(1), result.NumRows(), "exactly one surviving row")
+	payload := result.Column(result.Schema().FieldIndices("payload")[0]).Data().Chunk(0).(*extensions.VariantArray)
+	v, err := payload.Value(0)
+	require.NoError(t, err)
+	obj, ok := v.Value().(variant.ObjectValue)
+	require.True(t, ok, "surviving payload must be a variant object")
+	aField, err := obj.ValueByKey("a")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, aField.Value.Value(), "surviving row's $.a must be 2")
+}
+
+// An extract filter on the incremental-scan read path must not abort with ErrNotImplemented.
+func TestVariantExtractIncrementalScanReadTasks(t *testing.T) {
+	ctx := context.Background()
+	tbl, _ := setupVariantScanTable(t, "variant_incr", []map[string]any{
+		{"a": int64(1), "b": "x"},
+		{"a": int64(2), "b": "y"},
+		{"a": int64(3), "b": "z"},
+	})
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	filter := iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(2)))
+
+	tasks, err := tbl.NewIncrementalAppendScan(table.WithRowFilter(filter)).PlanFiles(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+	require.NotNil(t, tasks[0].Residual, "incremental tasks carry a non-nil residual")
+
+	_, recs, err := tbl.Scan(table.WithRowFilter(filter)).ReadTasks(ctx, tasks)
+	require.NoError(t, err)
+	var ids []int64
+	for rec, err := range recs {
+		require.NoError(t, err, "extract filter on incremental read must not abort")
+		if idxs := rec.Schema().FieldIndices("id"); len(idxs) == 1 {
+			c := rec.Column(idxs[0]).(*array.Int64)
+			for i := range c.Len() {
+				ids = append(ids, c.Value(i))
+			}
+		}
+		rec.Release()
+	}
+	require.Equal(t, []int64{1}, ids, "$.a == 2 selects the a=2 row (id 1) on the incremental path")
 }

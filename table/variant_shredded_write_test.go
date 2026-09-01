@@ -1846,6 +1846,64 @@ func TestVariantExtractOrAbsentColumnNoPanic(t *testing.T) {
 	assert.Nil(t, fn, "OR-with-absent-column folds to keep-all: no residual, no nil-base panic")
 }
 
+// A NOT nested over an extract strips to AlwaysTrue, never a prunable term.
+func TestStripExtractPredicatesNestedNot(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	filter := iceberg.NewNot(iceberg.NewAnd(
+		iceberg.EqualTo(iceberg.Reference("id"), int64(0)),
+		iceberg.NewNot(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(1)))),
+	))
+	bound, err := iceberg.BindExpr(schema, filter, true)
+	require.NoError(t, err)
+	stripped, err := stripExtractPredicates(bound)
+	require.NoError(t, err)
+	_, ok := stripped.(iceberg.AlwaysTrue)
+	assert.True(t, ok, "nested NOT over an extract must strip to AlwaysTrue, got %T", stripped)
+
+	single, err := iceberg.BindExpr(schema, iceberg.NewNot(
+		iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(1)))), true)
+	require.NoError(t, err)
+	singleStripped, err := stripExtractPredicates(single)
+	require.NoError(t, err)
+	_, okSingle := singleStripped.(iceberg.AlwaysTrue)
+	assert.True(t, okSingle, "NOT(extract) must strip to AlwaysTrue, got %T", singleStripped)
+}
+
+// `a OR extract` strips to AlwaysTrue; `a AND extract` strips to just `a`.
+func TestStripExtractPredicatesOrAnd(t *testing.T) {
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+	ext := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64)
+	idEq := iceberg.EqualTo(iceberg.Reference("id"), int64(0))
+	extEq := iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(1)))
+	boundID, err := iceberg.BindExpr(schema, idEq, true)
+	require.NoError(t, err)
+
+	orBound, err := iceberg.BindExpr(schema, iceberg.NewOr(idEq, extEq), true)
+	require.NoError(t, err)
+	orStripped, err := stripExtractPredicates(orBound)
+	require.NoError(t, err)
+	_, ok := orStripped.(iceberg.AlwaysTrue)
+	assert.True(t, ok, "a OR extract must strip to AlwaysTrue (keep-all), got %T", orStripped)
+
+	andBound, err := iceberg.BindExpr(schema, iceberg.NewAnd(idEq, extEq), true)
+	require.NoError(t, err)
+	andStripped, err := stripExtractPredicates(andBound)
+	require.NoError(t, err)
+	assert.True(t, andStripped.Equals(boundID), "a AND extract must strip to just the id predicate, got %s", andStripped)
+
+	falseStripped, err := stripExtractPredicates(iceberg.AlwaysFalse{})
+	require.NoError(t, err)
+	_, isFalse := falseStripped.(iceberg.AlwaysFalse)
+	assert.True(t, isFalse, "AlwaysFalse passes through unchanged, got %T", falseStripped)
+}
+
 // TestBuildExtractColumnNameFallback: a variant column whose Arrow field lacks
 // PARQUET:field_id (name-mapping reads) is still resolved by name.
 func TestBuildExtractColumnNameFallback(t *testing.T) {

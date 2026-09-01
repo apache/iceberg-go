@@ -352,38 +352,56 @@ func compileFileFilterPlan(
 	return plan, nil
 }
 
-// stripExtractPredicates replaces variant extract predicates with AlwaysTrue,
-// leaving the rest of the boolean structure intact. Extract terms carry no
-// row-group statistics, so they are dropped from stats/bloom pruning (variant
-// bounds prune them at the file level per the Iceberg spec).
+// stripExtractPredicates replaces variant extract predicates, and any NOT over them, with AlwaysTrue for stats/bloom pruning.
 func stripExtractPredicates(expr iceberg.BooleanExpression) (iceberg.BooleanExpression, error) {
-	return iceberg.VisitExpr(expr, extractStripper{})
+	res, err := iceberg.VisitExpr(expr, extractStripper{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.expr, nil
+}
+
+// strippedResult is the rewritten expression plus whether its subtree referenced an extract.
+type strippedResult struct {
+	expr       iceberg.BooleanExpression
+	hasExtract bool
 }
 
 type extractStripper struct{}
 
-func (extractStripper) VisitTrue() iceberg.BooleanExpression  { return iceberg.AlwaysTrue{} }
-func (extractStripper) VisitFalse() iceberg.BooleanExpression { return iceberg.AlwaysFalse{} }
-func (extractStripper) VisitNot(child iceberg.BooleanExpression) iceberg.BooleanExpression {
-	return iceberg.NewNot(child)
+func (extractStripper) VisitTrue() strippedResult {
+	return strippedResult{expr: iceberg.AlwaysTrue{}}
 }
 
-func (extractStripper) VisitAnd(left, right iceberg.BooleanExpression) iceberg.BooleanExpression {
-	return iceberg.NewAnd(left, right)
+func (extractStripper) VisitFalse() strippedResult {
+	return strippedResult{expr: iceberg.AlwaysFalse{}}
 }
 
-func (extractStripper) VisitOr(left, right iceberg.BooleanExpression) iceberg.BooleanExpression {
-	return iceberg.NewOr(left, right)
-}
-
-func (extractStripper) VisitUnbound(pred iceberg.UnboundPredicate) iceberg.BooleanExpression {
-	return pred
-}
-
-func (extractStripper) VisitBound(pred iceberg.BoundPredicate) iceberg.BooleanExpression {
-	if _, ok := pred.Term().(iceberg.BoundExtract); ok {
-		return iceberg.AlwaysTrue{}
+func (extractStripper) VisitNot(child strippedResult) strippedResult {
+	if child.hasExtract {
+		return strippedResult{expr: iceberg.AlwaysTrue{}, hasExtract: true}
 	}
 
-	return pred
+	return strippedResult{expr: iceberg.NewNot(child.expr)}
+}
+
+func (extractStripper) VisitAnd(left, right strippedResult) strippedResult {
+	return strippedResult{expr: iceberg.NewAnd(left.expr, right.expr), hasExtract: left.hasExtract || right.hasExtract}
+}
+
+func (extractStripper) VisitOr(left, right strippedResult) strippedResult {
+	return strippedResult{expr: iceberg.NewOr(left.expr, right.expr), hasExtract: left.hasExtract || right.hasExtract}
+}
+
+func (extractStripper) VisitUnbound(pred iceberg.UnboundPredicate) strippedResult {
+	return strippedResult{expr: pred}
+}
+
+func (extractStripper) VisitBound(pred iceberg.BoundPredicate) strippedResult {
+	if _, ok := pred.Term().(iceberg.BoundExtract); ok {
+		return strippedResult{expr: iceberg.AlwaysTrue{}, hasExtract: true}
+	}
+
+	return strippedResult{expr: pred}
 }

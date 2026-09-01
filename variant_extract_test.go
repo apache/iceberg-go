@@ -72,18 +72,23 @@ func TestExtractBindBracketPath(t *testing.T) {
 
 func TestExtractBindRejects(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		term UnboundTerm
+		name   string
+		term   UnboundTerm
+		wantIs error
 	}{
-		{"non-variant source", Extract("name", "$.a", PrimitiveTypes.Int64)},
-		{"nil target type", Extract("payload", "$.a", nil)},
-		{"unknown target type", Extract("payload", "$.a", UnknownType{})},
-		{"array index path", Extract("payload", "$[0]", PrimitiveTypes.Int64)},
-		{"unknown field", Extract("missing", "$.a", PrimitiveTypes.Int64)},
+		{"non-variant source", Extract("name", "$.a", PrimitiveTypes.Int64), ErrInvalidArgument},
+		{"nil target type", Extract("payload", "$.a", nil), ErrInvalidArgument},
+		{"unknown target type", Extract("payload", "$.a", UnknownType{}), ErrInvalidArgument},
+		{"array index path", Extract("payload", "$[0]", PrimitiveTypes.Int64), ErrInvalidArgument},
+		{"unknown field", Extract("missing", "$.a", PrimitiveTypes.Int64), nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := tt.term.Bind(extractBindSchema(), true)
-			require.Error(t, err)
+			if tt.wantIs != nil {
+				require.ErrorIs(t, err, tt.wantIs)
+			} else {
+				require.Error(t, err)
+			}
 		})
 	}
 }
@@ -91,7 +96,7 @@ func TestExtractBindRejects(t *testing.T) {
 // TestExtractBindRequiredColumnNoFastPath: IsNull/NotNull over an extract on a required
 // variant column must not collapse via the required-field fast path, since the column
 // being required says nothing about the sub-path.
-func TestExtractBindRequiredColumnNoFastPath(t *testing.T) {
+func TestExtractBindRequiredColumnStaysPredicate(t *testing.T) {
 	schema := NewSchema(0,
 		NestedField{ID: 1, Name: "payload", Type: VariantType{}, Required: true},
 	)
@@ -146,7 +151,7 @@ func TestExtractFieldIDsIncludesVariantColumn(t *testing.T) {
 
 	ids, err := ExtractFieldIDs(bound)
 	require.NoError(t, err)
-	assert.Contains(t, ids, 1, "variant column field id (payload=1) must be in the projected read set")
+	assert.Equal(t, []int{1}, ids, "only the variant column field id (payload=1) is in the projected read set")
 }
 
 func TestBoundExtractExtractValue(t *testing.T) {
@@ -161,4 +166,34 @@ func TestBoundExtractExtractValue(t *testing.T) {
 
 	_, ok = be.ExtractValue(variantObject(t, map[string]any{"a": map[string]any{"c": "other"}}))
 	assert.False(t, ok, "absent nested path is not extractable")
+}
+
+func TestExtractBindAllTargetTypes(t *testing.T) {
+	schema := extractBindSchema()
+	for _, typ := range []PrimitiveType{
+		PrimitiveTypes.Bool, PrimitiveTypes.Int32, PrimitiveTypes.Int64,
+		PrimitiveTypes.Float32, PrimitiveTypes.Float64, PrimitiveTypes.Date,
+		PrimitiveTypes.Time, PrimitiveTypes.Timestamp, PrimitiveTypes.TimestampTz,
+		PrimitiveTypes.TimestampNs, PrimitiveTypes.TimestampTzNs, PrimitiveTypes.String,
+		PrimitiveTypes.Binary, PrimitiveTypes.UUID, FixedTypeOf(16), DecimalTypeOf(10, 2),
+	} {
+		t.Run(typ.String(), func(t *testing.T) {
+			bound, err := Extract("payload", "$.a", typ).Bind(schema, true)
+			require.NoError(t, err)
+			assert.True(t, bound.Type().Equals(typ), "bound type = %s, want %s", bound.Type(), typ)
+			_, ok := bound.(BoundExtract)
+			assert.True(t, ok, "bound term must be a BoundExtract")
+		})
+	}
+}
+
+func TestUnboundExtractAccessors(t *testing.T) {
+	e, ok := Extract("payload", "$.a", PrimitiveTypes.Int64).(*unboundExtract)
+	require.True(t, ok)
+	assert.Equal(t, Reference("payload"), e.Ref())
+	assert.Equal(t, "$.a", e.Path())
+	assert.True(t, e.Type().Equals(PrimitiveTypes.Int64))
+	assert.Contains(t, e.String(), "extract")
+	assert.True(t, e.Equals(Extract("payload", "$.a", PrimitiveTypes.Int64)))
+	assert.False(t, e.Equals(Extract("payload", "$.b", PrimitiveTypes.Int64)), "different path is not equal")
 }

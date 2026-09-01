@@ -1375,6 +1375,11 @@ func (as *arrowScan) processRecordsWithPlans(
 				pruningFilter = iceberg.AlwaysTrue{}
 			}
 
+			pruningFilter, err = stripExtractPredicates(pruningFilter)
+			if err != nil {
+				return err
+			}
+
 			filePruningFilter, err := iceberg.TranslateColumnNames(pruningFilter, fileSchema)
 			if err != nil {
 				return err

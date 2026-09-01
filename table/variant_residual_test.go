@@ -23,6 +23,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/decimal128"
+	"github.com/apache/arrow-go/v18/arrow/extensions"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/iceberg-go"
 	"github.com/google/uuid"
@@ -38,21 +39,22 @@ func TestAppendExtractLiteral(t *testing.T) {
 		name string
 		typ  iceberg.PrimitiveType
 		lit  iceberg.Literal
+		want any
 	}{
-		{"bool", iceberg.PrimitiveTypes.Bool, iceberg.NewLiteral(true)},
-		{"int32", iceberg.PrimitiveTypes.Int32, iceberg.NewLiteral(int32(5))},
-		{"int64", iceberg.PrimitiveTypes.Int64, iceberg.NewLiteral(int64(5))},
-		{"float32", iceberg.PrimitiveTypes.Float32, iceberg.NewLiteral(float32(1.5))},
-		{"float64", iceberg.PrimitiveTypes.Float64, iceberg.NewLiteral(float64(1.5))},
-		{"string", iceberg.PrimitiveTypes.String, iceberg.NewLiteral("hi")},
-		{"binary", iceberg.PrimitiveTypes.Binary, iceberg.NewLiteral([]byte{1, 2})},
-		{"uuid", iceberg.PrimitiveTypes.UUID, iceberg.NewLiteral(uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})},
-		{"fixed", iceberg.FixedTypeOf(16), iceberg.NewLiteral(make([]byte, 16))},
-		{"date", iceberg.PrimitiveTypes.Date, iceberg.NewLiteral(iceberg.Date(100))},
-		{"time", iceberg.PrimitiveTypes.Time, iceberg.NewLiteral(iceberg.Time(1_000_000))},
-		{"timestamp micros", iceberg.PrimitiveTypes.Timestamp, iceberg.NewLiteral(iceberg.Timestamp(123))},
-		{"timestamp nanos", iceberg.PrimitiveTypes.TimestampNs, iceberg.NewLiteral(iceberg.TimestampNano(123))},
-		{"decimal", iceberg.DecimalTypeOf(10, 2), iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2})},
+		{"bool", iceberg.PrimitiveTypes.Bool, iceberg.NewLiteral(true), true},
+		{"int32", iceberg.PrimitiveTypes.Int32, iceberg.NewLiteral(int32(5)), int32(5)},
+		{"int64", iceberg.PrimitiveTypes.Int64, iceberg.NewLiteral(int64(5)), int64(5)},
+		{"float32", iceberg.PrimitiveTypes.Float32, iceberg.NewLiteral(float32(1.5)), float32(1.5)},
+		{"float64", iceberg.PrimitiveTypes.Float64, iceberg.NewLiteral(float64(1.5)), float64(1.5)},
+		{"string", iceberg.PrimitiveTypes.String, iceberg.NewLiteral("hi"), "hi"},
+		{"binary", iceberg.PrimitiveTypes.Binary, iceberg.NewLiteral([]byte{1, 2}), []byte{1, 2}},
+		{"uuid", iceberg.PrimitiveTypes.UUID, iceberg.NewLiteral(uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}), uuid.UUID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+		{"fixed", iceberg.FixedTypeOf(16), iceberg.NewLiteral(make([]byte, 16)), make([]byte, 16)},
+		{"date", iceberg.PrimitiveTypes.Date, iceberg.NewLiteral(iceberg.Date(100)), arrow.Date32(100)},
+		{"time", iceberg.PrimitiveTypes.Time, iceberg.NewLiteral(iceberg.Time(1_000_000)), arrow.Time64(1_000_000)},
+		{"timestamp micros", iceberg.PrimitiveTypes.Timestamp, iceberg.NewLiteral(iceberg.Timestamp(123)), arrow.Timestamp(123)},
+		{"timestamp nanos", iceberg.PrimitiveTypes.TimestampNs, iceberg.NewLiteral(iceberg.TimestampNano(123)), arrow.Timestamp(123)},
+		{"decimal", iceberg.DecimalTypeOf(10, 2), iceberg.NewLiteral(iceberg.Decimal{Val: decimal128.FromI64(1234), Scale: 2}), decimal128.FromI64(1234)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			dt, err := TypeToArrowType(tt.typ, false, false)
@@ -64,8 +66,45 @@ func TestAppendExtractLiteral(t *testing.T) {
 			require.NoError(t, appendExtractLiteral(bldr, tt.lit))
 			arr := bldr.NewArray()
 			defer arr.Release()
-			assert.Equal(t, 1, arr.Len())
+			require.Equal(t, 1, arr.Len())
+			assert.Equal(t, tt.want, arrowValueAt0(t, arr))
 		})
+	}
+}
+
+func arrowValueAt0(t *testing.T, arr arrow.Array) any {
+	t.Helper()
+	switch a := arr.(type) {
+	case *array.Boolean:
+		return a.Value(0)
+	case *array.Int32:
+		return a.Value(0)
+	case *array.Int64:
+		return a.Value(0)
+	case *array.Float32:
+		return a.Value(0)
+	case *array.Float64:
+		return a.Value(0)
+	case *array.String:
+		return a.Value(0)
+	case *array.Binary:
+		return a.Value(0)
+	case *array.FixedSizeBinary:
+		return a.Value(0)
+	case *extensions.UUIDArray:
+		return a.Value(0)
+	case *array.Date32:
+		return a.Value(0)
+	case *array.Time64:
+		return a.Value(0)
+	case *array.Timestamp:
+		return a.Value(0)
+	case *array.Decimal128:
+		return a.Value(0)
+	default:
+		t.Fatalf("unhandled arrow array %T", arr)
+
+		return nil
 	}
 }
 
