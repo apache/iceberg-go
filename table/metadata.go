@@ -18,7 +18,6 @@
 package table
 
 import (
-	"bytes"
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
@@ -1786,15 +1785,22 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
-	ver := struct {
-		FormatVersion int `json:"format-version"`
-	}{}
-	if err := json.Unmarshal(b, &ver); err != nil {
+	// Keep the raw top-level object for all preflight checks so it is only
+	// decoded once before the version-specific metadata decode below.
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	var formatVersion int
+	if rawVersion, ok := metadata["format-version"]; ok {
+		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+		}
+	}
+
 	var ret Metadata
-	switch ver.FormatVersion {
+	switch formatVersion {
 	case 1:
 		ret = &metadataV1{}
 	case 2:
@@ -1805,11 +1811,8 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		return nil, ErrInvalidMetadataFormatVersion
 	}
 
-	normalized, err := assignMissingPartitionFieldIDs(b)
+	normalized, err := assignMissingPartitionFieldIDsFromMetadata(b, metadata)
 	if err != nil {
-		return nil, err
-	}
-	if err := requirePartitionSpecIDs(normalized); err != nil {
 		return nil, err
 	}
 
@@ -1819,6 +1822,10 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		}
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+	if ret.Version() != formatVersion {
+		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
+			ErrInvalidMetadataFormatVersion, formatVersion, ret.Version())
 	}
 
 	return ret, nil
@@ -1830,22 +1837,31 @@ func requirePartitionSpecIDs(b []byte) error {
 		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
 
+	return requirePartitionSpecIDsFromMetadata(metadata)
+}
+
+func requirePartitionSpecIDsFromMetadata(metadata map[string]json.RawMessage) error {
 	rawSpecs, ok := metadata["partition-specs"]
 	if !ok {
 		return nil
 	}
 
-	var specs []json.RawMessage
+	var specs []rawPartitionSpec
 	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
 		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
 	}
-	for i, rawSpec := range specs {
-		var spec map[string]json.RawMessage
-		if err := json.Unmarshal(rawSpec, &spec); err != nil {
-			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
-		}
-		rawID, ok := spec["spec-id"]
-		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
+
+	return validatePartitionSpecIDs(specs)
+}
+
+type rawPartitionSpec struct {
+	ID     *int                         `json:"spec-id"`
+	Fields []map[string]json.RawMessage `json:"fields"`
+}
+
+func validatePartitionSpecIDs(specs []rawPartitionSpec) error {
+	for i, spec := range specs {
+		if spec.ID == nil {
 			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
 		}
 	}
@@ -1858,13 +1874,13 @@ func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 	if err := json.Unmarshal(b, &metadata); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
+
+	return assignMissingPartitionFieldIDsFromMetadata(b, metadata)
+}
+
+func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]json.RawMessage) ([]byte, error) {
 	if err := requireLastUpdatedMS(metadata); err != nil {
 		return nil, err
-	}
-
-	type rawPartitionSpec struct {
-		ID     int                          `json:"spec-id"`
-		Fields []map[string]json.RawMessage `json:"fields"`
 	}
 
 	var specs []rawPartitionSpec
@@ -1874,6 +1890,9 @@ func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
 			return nil, err
 		}
 		usesSpecList = true
+		if err := validatePartitionSpecIDs(specs); err != nil {
+			return nil, err
+		}
 	} else if rawFields, ok := metadata["partition-spec"]; ok {
 		var fields []map[string]json.RawMessage
 		if err := json.Unmarshal(rawFields, &fields); err != nil {
