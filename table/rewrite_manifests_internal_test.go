@@ -208,6 +208,30 @@ func TestRewriteManifestsCleansOrphanOnValidationError(t *testing.T) {
 	}
 }
 
+// TestManifestMergeClusterCleansOrphanOnWriterConstructionError checks that
+// a manifest path created before writer construction fails is removed.
+func TestManifestMergeClusterCleansOrphanOnWriterConstructionError(t *testing.T) {
+	spec := iceberg.NewPartitionSpec()
+	mem := newMemIO(1<<20, errLimitedWrite)
+	txn := createTestTransaction(t, mem, spec)
+	prod := newRewriteManifestsProducer(txn, mem, iceberg.Properties{}, rewriteManifestsCfg{})
+	input := writeTestManifestFile(t, mem, spec, simpleSchema(), prod.snapshotID, 0)
+
+	// Make the writer factory fail after it has created its output path.
+	prod.txn.meta.formatVersion = 4
+	before := memKeys(mem)
+	mgr := manifestMergeManager{
+		mergeEnabled: true,
+		clusterBy:    func(iceberg.DataFile) any { return "same" },
+		snap:         prod,
+	}
+
+	_, err := mgr.mergeManifests([]iceberg.ManifestFile{input})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported manifest version")
+	assert.Equal(t, before, memKeys(mem), "writer construction failure must not leave an orphan")
+}
+
 // TestRewriteManifestsCleansOrphansOnInvalidClusterKey checks that a writer
 // opened for an earlier key is removed when a later callback returns an invalid
 // key.

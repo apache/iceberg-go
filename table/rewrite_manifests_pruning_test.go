@@ -106,9 +106,10 @@ func TestRewriteManifestsClusterByPrunesManifests(t *testing.T) {
 	sizeOnly := newManager(false)
 	clustered := newManager(true)
 	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), targetValue)))
-	sizeOnlySelected, err := scan.filterManifestsWithSchema(sizeOnly, schema, &scanMetricsAccumulator{})
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	sizeOnlySelected, err := scan.filterManifestsWithSchema(sizeOnly, schema, &scanMetricsAccumulator{}, partitionFilters)
 	require.NoError(t, err)
-	clusteredSelected, err := scan.filterManifestsWithSchema(clustered, schema, &scanMetricsAccumulator{})
+	clusteredSelected, err := scan.filterManifestsWithSchema(clustered, schema, &scanMetricsAccumulator{}, partitionFilters)
 	require.NoError(t, err)
 
 	require.Len(t, sizeOnlySelected, len(sizeOnly),

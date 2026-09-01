@@ -216,7 +216,8 @@ func benchmarkManifestPruningMode(b *testing.B, cluster bool) {
 	}
 
 	scan := tbl.Scan(WithRowFilter(iceberg.EqualTo(iceberg.Reference("id"), targetValue)))
-	filtered, err := scan.filterManifestsWithSchema(merged, schema, &scanMetricsAccumulator{})
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+	filtered, err := scan.filterManifestsWithSchema(merged, schema, &scanMetricsAccumulator{}, partitionFilters)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func benchmarkManifestPruningMode(b *testing.B, cluster bool) {
 	b.ReportMetric(float64(len(merged)), "manifests/op")
 	b.ReportMetric(float64(wantSelected), "selected-manifests/op")
 	for range b.N {
-		filtered, err := scan.filterManifestsWithSchema(merged, schema, &scanMetricsAccumulator{})
+		filtered, err := scan.filterManifestsWithSchema(merged, schema, &scanMetricsAccumulator{}, partitionFilters)
 		if err != nil {
 			b.Fatal(err)
 		}

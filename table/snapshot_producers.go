@@ -732,7 +732,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts .
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
 		sp.txn.meta.CurrentSchema(), sp.snapshotID, opts...)
 	if err != nil {
-		return nil, "", nil, nil, errors.Join(err, out.Close())
+		return nil, "", nil, nil, errors.Join(err, out.Close(), sp.io.Remove(path))
 	}
 
 	return wr, path, counter, out, nil
