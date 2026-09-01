@@ -172,7 +172,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		manifestSet, err := planningScan.manifestSet(ctx, snapshot, fs)
+		manifestSet, err := planningScan.manifestSet(ctx, snapshot, manifestListFS)
 		if err != nil {
 			return nil, err
 		}

@@ -976,13 +976,14 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
 	return scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snap, fs, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
+		ctx, snap, fs, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
 }
 
 // fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
 // with fs and filters them using the given schema. It records
 // total/scanned/skipped manifest counts (split by data vs delete content) into acc.
 func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
+	ctx context.Context,
 	snap *Snapshot,
 	fs io.IO,
 	schema *iceberg.Schema,
@@ -1004,7 +1005,6 @@ func (scan *Scan) manifestSet(
 	fio io.IO,
 ) (snapshotManifestSet, error) {
 	return scan.manifestCache.get(ctx, snapshot, fio)
->>>>>>> 90c4371 (perf(table): cache snapshot manifests across scans)
 }
 
 // filterManifestsWithSchema applies partition-summary pruning to an existing
@@ -1604,7 +1604,7 @@ func (scan *Scan) planFilesLocal(
 
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
 	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
-		snap, fs, schema, acc, partitionFilters)
+		ctx, snap, fs, schema, acc, partitionFilters)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
