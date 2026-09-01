@@ -29,6 +29,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"sync"
 
 	icebergio "github.com/apache/iceberg-go/io"
 )
@@ -94,7 +95,8 @@ var (
 
 	// ErrOutputFileClosed is returned by [standardOutputFile.Write] when
 	// called after Close, or after a previous flush has poisoned the writer.
-	ErrOutputFileClosed = errors.New("encryption: write to closed StandardEncryptionManager output file")
+	// It wraps [fs.ErrClosed] so callers can test with errors.Is(err, fs.ErrClosed).
+	ErrOutputFileClosed = fmt.Errorf("encryption: write to closed StandardEncryptionManager output file: %w", fs.ErrClosed)
 )
 
 // Constants describing the Iceberg AES GCM Stream ("AGS1") wire format used
@@ -141,6 +143,14 @@ type standardKeyMetadata struct {
 	Version    int    `json:"v"`
 	KeyID      string `json:"key-id"`
 	WrappedKey []byte `json:"wrapped-key"`
+
+	// BlockSize is the trusted plaintext block size the file was written
+	// with. It is validated bounded before any file I/O, and is what's
+	// actually used to size reads; the stream header's block-length field
+	// is untrusted (unauthenticated, attacker-influenced storage bytes) and
+	// is only compared against this value, never used directly to size an
+	// allocation.
+	BlockSize int64 `json:"block-size"`
 
 	// AADPrefix is combined with each block's little-endian index to form
 	// the AES GCM Stream additional authenticated data, binding every
@@ -201,8 +211,12 @@ func WithBlockSize(size int) StandardManagerOption {
 }
 
 // NewStandardEncryptionManager creates a [StandardEncryptionManager] backed
-// by kms. kms must not be nil.
+// by kms. kms must not be nil; NewStandardEncryptionManager panics if it is.
 func NewStandardEncryptionManager(kms KeyManagementClient, opts ...StandardManagerOption) *StandardEncryptionManager {
+	if kms == nil {
+		panic("encryption: NewStandardEncryptionManager: kms must not be nil")
+	}
+
 	m := &StandardEncryptionManager{
 		kms:       kms,
 		dekLength: StandardDefaultDEKLength,
@@ -245,7 +259,7 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 		}
 	} else {
 		plainDEK = make([]byte, m.dekLength)
-		if _, err = rand.Read(plainDEK); err != nil {
+		if _, err = io.ReadFull(rand.Reader, plainDEK); err != nil {
 			return nil, fmt.Errorf("encryption: failed to generate DEK: %w", err)
 		}
 		if wrappedDEK, err = m.kms.WrapKey(ctx, keyID, plainDEK); err != nil {
@@ -259,7 +273,7 @@ func (m *StandardEncryptionManager) NewEncryptedOutputFile(ctx context.Context, 
 	}
 
 	aadPrefix := make([]byte, standardAADPrefixLength)
-	if _, err := rand.Read(aadPrefix); err != nil {
+	if _, err := io.ReadFull(rand.Reader, aadPrefix); err != nil {
 		return nil, fmt.Errorf("encryption: failed to generate AAD prefix: %w", err)
 	}
 
@@ -298,6 +312,9 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 	if meta.Version != standardKeyMetadataVersion {
 		return nil, fmt.Errorf("%w: %d", ErrUnsupportedKeyMetadataVersion, meta.Version)
 	}
+	if meta.BlockSize <= 0 || meta.BlockSize > StandardMaxBlockSize {
+		return nil, fmt.Errorf("%w: block-size must be positive and at most %d, got %d", ErrInvalidKeyMetadata, StandardMaxBlockSize, meta.BlockSize)
+	}
 	if meta.PlaintextLength < 0 {
 		return nil, fmt.Errorf("%w: plaintext-length must be non-negative, got %d", ErrInvalidKeyMetadata, meta.PlaintextLength)
 	}
@@ -315,16 +332,22 @@ func (m *StandardEncryptionManager) NewDecryptedInputFile(ctx context.Context, f
 		return nil, err
 	}
 
-	blockSize, err := readStandardStreamHeader(file)
+	// headerBlockSize is untrusted (unauthenticated bytes read from
+	// storage): it is only ever compared against the trusted, already
+	// bounded meta.BlockSize below, never used to size a read or allocation.
+	headerBlockSize, err := readStandardStreamHeader(file)
 	if err != nil {
 		return nil, err
+	}
+	if headerBlockSize != meta.BlockSize {
+		return nil, fmt.Errorf("%w: stream header block length %d does not match key metadata block-size %d", ErrInvalidStreamHeader, headerBlockSize, meta.BlockSize)
 	}
 
 	return &standardInputFile{
 		underlying:      file,
 		aead:            aead,
 		aadPrefix:       meta.AADPrefix,
-		blockSize:       blockSize,
+		blockSize:       meta.BlockSize,
 		plaintextLength: meta.PlaintextLength,
 		keyMetadata:     keyMetadata,
 	}, nil
@@ -427,10 +450,27 @@ type standardOutputFile struct {
 	closed     bool
 	err        error
 
+	// underlyingClosed tracks whether FileWriter.Close has already been
+	// attempted, so a poisoned writer is closed exactly once regardless of
+	// whether the failure is first observed in Write or in Close.
+	underlyingClosed bool
+
 	keyMetadata EncryptionKeyMetadata
 }
 
 var _ EncryptedOutputFile = (*standardOutputFile)(nil)
+
+// closeUnderlyingIgnoringError closes the underlying writer at most once.
+// The error is ignored: the caller is already reporting a more specific
+// failure (a flush or encode error), and this is best-effort cleanup so a
+// poisoned writer never leaks its underlying file descriptor or connection.
+func (f *standardOutputFile) closeUnderlyingIgnoringError() {
+	if f.underlyingClosed {
+		return
+	}
+	f.underlyingClosed = true
+	_ = f.FileWriter.Close()
+}
 
 func (f *standardOutputFile) Write(p []byte) (int, error) {
 	if f.err != nil {
@@ -452,6 +492,7 @@ func (f *standardOutputFile) Write(p []byte) (int, error) {
 		if len(f.buf) == f.blockSize {
 			if err := f.flushBlock(); err != nil {
 				f.err = err
+				f.closeUnderlyingIgnoringError()
 
 				return accepted, err
 			}
@@ -472,7 +513,7 @@ func (f *standardOutputFile) flushBlock() error {
 	}
 
 	nonce := make([]byte, standardNonceLength)
-	if _, err := rand.Read(nonce); err != nil {
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return fmt.Errorf("encryption: failed to generate block nonce: %w", err)
 	}
 
@@ -530,7 +571,7 @@ func (f *standardOutputFile) Close() error {
 	if len(f.buf) > 0 {
 		if err := f.flushBlock(); err != nil {
 			f.err = err
-			_ = f.FileWriter.Close()
+			f.closeUnderlyingIgnoringError()
 
 			return err
 		}
@@ -540,22 +581,25 @@ func (f *standardOutputFile) Close() error {
 		Version:         standardKeyMetadataVersion,
 		KeyID:           f.keyID,
 		WrappedKey:      f.wrappedKey,
+		BlockSize:       int64(f.blockSize),
 		AADPrefix:       f.aadPrefix,
 		PlaintextLength: f.written,
 	}
 	encoded, err := json.Marshal(meta)
 	if err != nil {
 		f.err = fmt.Errorf("encryption: failed to encode key metadata: %w", err)
-		_ = f.FileWriter.Close()
+		f.closeUnderlyingIgnoringError()
 
 		return f.err
 	}
 
 	if err := f.FileWriter.Close(); err != nil {
+		f.underlyingClosed = true
 		f.err = fmt.Errorf("encryption: failed to close underlying writer: %w", err)
 
 		return f.err
 	}
+	f.underlyingClosed = true
 
 	f.keyMetadata = encoded
 	f.closed = true
@@ -583,6 +627,15 @@ type standardInputFile struct {
 	keyMetadata     EncryptionKeyMetadata
 
 	pos int64
+
+	// cacheMu guards cacheIdx/cacheBlock/cacheValid below. Serializing
+	// readBlock keeps the single-entry cache correct under the concurrent
+	// ReadAt usage this type documents, and also avoids re-decrypting the
+	// same block for runs of small, sequential reads that land in it.
+	cacheMu    sync.Mutex
+	cacheIdx   int64
+	cacheBlock []byte
+	cacheValid bool
 }
 
 var _ EncryptedInputFile = (*standardInputFile)(nil)
@@ -609,11 +662,10 @@ func (f *standardInputFile) blockPlainLen(idx int64) int64 {
 }
 
 // blockPhysicalOffset computes the physical offset of block idx in the
-// underlying ciphertext, using overflow-checked arithmetic. blockSize
-// originates from the untrusted stream header and idx is derived from the
-// untrusted plaintext-length in key metadata; a small blockSize combined
-// with a huge plaintext-length could otherwise overflow int64 before the
-// resulting (implausible) offset is ever used in a read.
+// underlying ciphertext, using overflow-checked arithmetic. idx is derived
+// from the untrusted plaintext-length in key metadata, so a small blockSize
+// combined with a huge plaintext-length could otherwise overflow int64
+// before the resulting (implausible) offset is ever used in a read.
 func blockPhysicalOffset(idx, blockSize int64) (int64, error) {
 	physicalBlockSize, ok := checkedAddInt64(blockSize, standardBlockOverhead)
 	if !ok {
@@ -631,14 +683,22 @@ func blockPhysicalOffset(idx, blockSize int64) (int64, error) {
 	return offset, nil
 }
 
-// readBlock decrypts block idx. It validates idx and the computed block
-// length before reading, since metadata (plaintextLength) and the stream
-// header (blockSize) can originate from untrusted input. It also honors the
+// readBlock decrypts block idx, or returns it from the single-entry cache
+// if it was the most recently decrypted block. It validates idx and the
+// computed block length before reading, since metadata (blockSize,
+// plaintextLength) can originate from untrusted input. It also honors the
 // actual byte count returned by ReadAt: a short, non-EOF-explained read is
 // reported as [ErrCiphertextTooShort] (truncated storage) rather than being
 // silently zero-padded into the AEAD, which would otherwise surface as a
 // misleading [ErrAuthenticationFailed].
 func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
+	f.cacheMu.Lock()
+	defer f.cacheMu.Unlock()
+
+	if f.cacheValid && f.cacheIdx == idx {
+		return f.cacheBlock, nil
+	}
+
 	numBlocks := f.numBlocks()
 	if idx < 0 || idx >= numBlocks {
 		return nil, fmt.Errorf("%w: block index %d out of range [0, %d)", ErrInvalidKeyMetadata, idx, numBlocks)
@@ -675,6 +735,10 @@ func (f *standardInputFile) readBlock(idx int64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: block %d: %w", ErrAuthenticationFailed, idx, err)
 	}
+
+	f.cacheIdx = idx
+	f.cacheBlock = plaintext
+	f.cacheValid = true
 
 	return plaintext, nil
 }
