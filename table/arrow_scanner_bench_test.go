@@ -18,13 +18,18 @@
 package table
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
@@ -187,6 +192,144 @@ func BenchmarkArrowScanManyFilesAndBatches(b *testing.B) {
 			}
 			b.ReportMetric(fileCount, "files/op")
 			b.ReportMetric(fileCount*batchCount, "batches/op")
+		})
+	}
+}
+
+func benchmarkSplitParquetScan(b *testing.B) (Metadata, iceio.IO, []FileScanTask, []FileScanTask, int64) {
+	b.Helper()
+
+	const (
+		rowGroups    = 8
+		rowsPerGroup = 32768
+	)
+	rowCount := int64(rowGroups * rowsPerGroup)
+	schema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.PrimitiveTypes.String},
+	)
+	arrowSchema, err := SchemaToArrowSchema(schema, nil, true, false)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	idBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	payloadBuilder := array.NewStringBuilder(memory.DefaultAllocator)
+	for i := range rowCount {
+		idBuilder.Append(i)
+		payloadBuilder.Append(fmt.Sprintf("payload-%d", i%128))
+	}
+	ids := idBuilder.NewArray()
+	payload := payloadBuilder.NewArray()
+	idBuilder.Release()
+	payloadBuilder.Release()
+	record := array.NewRecordBatch(arrowSchema, []arrow.Array{ids, payload}, rowCount)
+	ids.Release()
+	payload.Release()
+	table := array.NewTableFromRecords(arrowSchema, []arrow.RecordBatch{record})
+	record.Release()
+	defer table.Release()
+
+	var buf bytes.Buffer
+	writerProps := parquet.NewWriterProperties(
+		parquet.WithStats(true),
+		parquet.WithMaxRowGroupLength(rowsPerGroup),
+	)
+	if err := pqarrow.WriteTable(table, &buf, rowsPerGroup, writerProps, pqarrow.DefaultWriterProps()); err != nil {
+		b.Fatal(err)
+	}
+
+	// MemFS intentionally returns a copy from Open. Use a local file here so
+	// B/op measures scanner allocations instead of one full-file copy per task.
+	path := filepath.Join(b.TempDir(), "data.parquet")
+	fs := iceio.LocalFS{}
+	if err := fs.WriteFile(path, buf.Bytes()); err != nil {
+		b.Fatal(err)
+	}
+
+	pqReader, err := file.NewParquetReader(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		b.Fatal(err)
+	}
+	offsets := make([]int64, pqReader.NumRowGroups())
+	for i := range offsets {
+		offsets[i] = pqReader.MetaData().RowGroup(i).FileOffset()
+	}
+	if err := pqReader.Close(); err != nil {
+		b.Fatal(err)
+	}
+
+	dataFileBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		path,
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		rowCount,
+		int64(buf.Len()),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	dataFile := dataFileBuilder.SplitOffsets(offsets).Build()
+	fullTask := FileScanTask{File: dataFile, Start: 0, Length: int64(buf.Len())}
+	splitTasks, split := splitParquetScanTask(fullTask, 1)
+	if !split || len(splitTasks) != rowGroups {
+		b.Fatalf("expected one split task per row group, got %d", len(splitTasks))
+	}
+
+	metadata, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://split-benchmark", nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return metadata, fs, []FileScanTask{fullTask}, splitTasks, rowCount
+}
+
+func BenchmarkArrowScanLargeParquetFileSplitTasks(b *testing.B) {
+	metadata, fs, fullTasks, splitTasks, wantRows := benchmarkSplitParquetScan(b)
+
+	for _, tc := range []struct {
+		name  string
+		tasks []FileScanTask
+	}{
+		{name: "one_task", tasks: fullTasks},
+		{name: "row_group_tasks", tasks: splitTasks},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ReportMetric(float64(len(tc.tasks)), "tasks/op")
+			b.ResetTimer()
+			for b.Loop() {
+				scan := &arrowScan{
+					fs:              fs,
+					metadata:        metadata,
+					scanSchema:      metadata.CurrentSchema(),
+					projectedSchema: metadata.CurrentSchema(),
+					boundRowFilter:  iceberg.AlwaysTrue{},
+					rowLimit:        -1,
+					concurrency:     8,
+				}
+				_, records, err := scan.GetRecords(context.Background(), tc.tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				var rows int64
+				for record, err := range records {
+					if err != nil {
+						b.Fatal(err)
+					}
+					rows += record.NumRows()
+					record.Release()
+				}
+				if rows != wantRows {
+					b.Fatalf("unexpected row count: got %d, want %d", rows, wantRows)
+				}
+			}
 		})
 	}
 }

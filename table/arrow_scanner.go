@@ -931,15 +931,54 @@ type arrowScan struct {
 	// rowGroupFilter is used only for Parquet statistics and bloom-filter
 	// pruning. It lets callers keep boundRowFilter as AlwaysTrue while they
 	// must evaluate the real row filter after position-dependent enrichment.
-	rowGroupFilter  iceberg.BooleanExpression
-	filterSchema    *iceberg.Schema
-	caseSensitive   bool
-	rowLimit        int64
-	options         iceberg.Properties
-	filterPlanCache compiledFileFilterPlanCache
+	rowGroupFilter    iceberg.BooleanExpression
+	filterSchema      *iceberg.Schema
+	caseSensitive     bool
+	rowLimit          int64
+	options           iceberg.Properties
+	filterPlanCache   compiledFileFilterPlanCache
+	fileReadPlanCache preparedFileReadPlanCache
+	cacheFileReadPlan bool
 
 	useLargeTypes bool
 	concurrency   int
+}
+
+// preparedFileRead contains the physical schema projection shared by all
+// tasks reading the same data file during one scan. The actual FileReader is
+// intentionally not shared: split tasks may run concurrently and each reader
+// owns its column readers and input handle.
+type preparedFileRead struct {
+	schema     *iceberg.Schema
+	colIndices []int
+}
+
+type preparedFileReadEntry struct {
+	once sync.Once
+	plan *preparedFileRead
+	err  error
+}
+
+type preparedFileReadPlanCache struct {
+	mu      sync.Mutex
+	entries map[string]*preparedFileReadEntry
+}
+
+func (c *preparedFileReadPlanCache) entry(path string) *preparedFileReadEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.entries == nil {
+		c.entries = make(map[string]*preparedFileReadEntry)
+	}
+	if entry, ok := c.entries[path]; ok {
+		return entry
+	}
+
+	entry := &preparedFileReadEntry{}
+	c.entries[path] = entry
+
+	return entry
 }
 
 // arrowScanInvariants holds metadata-derived values that cannot change during
@@ -1060,36 +1099,75 @@ type enumeratedRecord struct {
 	Err    error
 }
 
-func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (*iceberg.Schema, []int, tblutils.FileReader, error) {
+func (as *arrowScan) prepareToRead(ctx context.Context, file iceberg.DataFile, invariants *arrowScanInvariants) (iceSchema *iceberg.Schema, colIndices []int, rdr tblutils.FileReader, err error) {
 	src, err := tblutils.GetFile(ctx, as.fs, file, false)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	rdr, err := src.GetReader(ctx)
+	rdr, err = src.GetReader(ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	keepReader := false
+	defer func(reader tblutils.FileReader) {
+		if !keepReader {
+			_ = reader.Close()
+		}
+	}(rdr)
 
-	fileSchema, colIndices, err := rdr.PrunedSchema(invariants.projectedIDs, invariants.nameMapping)
-	if err != nil {
-		rdr.Close()
+	if !as.cacheFileReadPlan {
+		var fileSchema *arrow.Schema
+		fileSchema, colIndices, err = rdr.PrunedSchema(
+			invariants.projectedIDs, invariants.nameMapping)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 
-		return nil, nil, nil, err
+		iceSchema, err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+			NameMapping:     invariants.nameMapping,
+			TableSchema:     invariants.tableSchema,
+			TableProperties: invariants.tableProperties,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		keepReader = true
+
+		return iceSchema, colIndices, rdr, nil
 	}
 
-	iceSchema, err := ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
-		NameMapping:     invariants.nameMapping,
-		TableSchema:     invariants.tableSchema,
-		TableProperties: invariants.tableProperties,
+	entry := as.fileReadPlanCache.entry(file.FilePath())
+	entry.once.Do(func() {
+		var fileSchema *arrow.Schema
+		var colIndices []int
+		fileSchema, colIndices, entry.err = rdr.PrunedSchema(
+			invariants.projectedIDs, invariants.nameMapping)
+		if entry.err != nil {
+			return
+		}
+
+		var iceSchema *iceberg.Schema
+		iceSchema, entry.err = ArrowSchemaToIcebergWithOptions(fileSchema, ArrowToIcebergOptions{
+			NameMapping:     invariants.nameMapping,
+			TableSchema:     invariants.tableSchema,
+			TableProperties: invariants.tableProperties,
+		})
+		if entry.err == nil {
+			entry.plan = &preparedFileRead{
+				schema:     iceSchema,
+				colIndices: colIndices,
+			}
+		}
 	})
-	if err != nil {
-		rdr.Close()
-
-		return nil, nil, nil, err
+	if entry.err != nil {
+		return nil, nil, nil, entry.err
 	}
 
-	return iceSchema, colIndices, rdr, nil
+	keepReader = true
+
+	return entry.plan.schema, entry.plan.colIndices, rdr, nil
 }
 
 func (as *arrowScan) getRecordFilter(ctx context.Context, fileSchema *iceberg.Schema, rowFilter iceberg.BooleanExpression) (recProcessFn, bool, error) {
@@ -1446,6 +1524,23 @@ func (as *arrowScan) processRecords(
 	return as.processRecordsWithPlans(ctx, task, fileSchema, rowFilter, rdr, columns, pipeline, posSource, out, nil)
 }
 
+// adjustParquetTaskRange keeps a planned range within the physical file when
+// manifest and footer sizes differ. It only clamps ranges that run past the
+// physical end; caller-owned task boundaries must never be extended.
+func adjustParquetTaskRange(task FileScanTask, physicalFileSize int64) (start, length int64) {
+	start, length = task.Start, task.Length
+	if task.File == nil || physicalFileSize <= 0 || start < 0 || start > physicalFileSize {
+		return start, length
+	}
+
+	maxLength := physicalFileSize - start
+	if length > maxLength {
+		length = maxLength
+	}
+
+	return start, length
+}
+
 func (as *arrowScan) processRecordsWithPlans(
 	ctx context.Context,
 	task tblutils.Enumerated[FileScanTask],
@@ -1527,6 +1622,17 @@ func (as *arrowScan) processRecordsWithPlans(
 				StatsFn:    statsFn,
 				BloomPreds: bloomPreds,
 			}
+		}
+		// A complete task already reads every row group. Leave its byte range
+		// unset so malformed or legacy row-group offsets cannot change the
+		// historical full-file behavior. A zero-value task is also treated as
+		// complete for callers that omit the range. Split and remote partial
+		// tasks carry their range through to the reader.
+		if task.Value.Start != 0 ||
+			(task.Value.Length != 0 && task.Value.Length != task.Value.File.FileSizeBytes()) {
+			tester.RangeSet = true
+			tester.Start, tester.Length = adjustParquetTaskRange(task.Value, rdr.SourceFileSize())
+			tester.PlanningSplitOffsets = task.Value.File.SplitOffsets()
 		}
 		if posSource != nil {
 			tester.Survivors = &posSource.spans
@@ -2017,6 +2123,13 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 
 	if as.rowLimit == 0 {
 		return resultSchema, func(yield func(arrow.RecordBatch, error) bool) {}, nil
+	}
+
+	if len(tasks) > 1 {
+		as.cacheFileReadPlan = true
+		ctx = tblutils.WithParquetMetadataCache(ctx)
+	} else {
+		as.cacheFileReadPlan = false
 	}
 
 	invariants, err := as.scanInvariants(tableProperties)
