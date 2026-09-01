@@ -143,24 +143,38 @@ func TestEqualityDeleteReadRoundTrip(t *testing.T) {
 
 	assert.Equal(t, []int64{1, 3, 5}, ids, "expected rows with id=2 and id=4 deleted")
 
-	resultSchema, itr, err := tbl.Scan(table.WithSelectedFields("data")).ToArrowRecords(t.Context())
-	require.NoError(t, err)
-	require.Len(t, resultSchema.Fields(), 1)
-	assert.Equal(t, "data", resultSchema.Fields()[0].Name)
-
-	var data []string
-	for rec, err := range itr {
+	scanData := func(tbl *table.Table) []string {
+		resultSchema, itr, err := tbl.Scan(table.WithSelectedFields("data")).ToArrowRecords(t.Context())
 		require.NoError(t, err)
-		require.EqualValues(t, 1, rec.NumCols())
-		col := rec.Column(0).(*array.String)
-		for i := range col.Len() {
-			data = append(data, col.Value(i))
+		require.Len(t, resultSchema.Fields(), 1)
+		assert.Equal(t, "data", resultSchema.Fields()[0].Name)
+
+		var data []string
+		for rec, err := range itr {
+			require.NoError(t, err)
+			require.EqualValues(t, 1, rec.NumCols())
+			col := rec.Column(0).(*array.String)
+			for i := range col.Len() {
+				data = append(data, col.Value(i))
+			}
+			rec.Release()
 		}
-		rec.Release()
+
+		return data
 	}
 
-	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, data,
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, scanData(tbl),
 		"expected equality deletes to apply when the equality field is not projected")
+
+	tx3 := tbl.NewTransaction()
+	require.NoError(t, tx3.UpdateSchema(true, false).DeleteColumn([]string{"id"}).Commit())
+	tbl, err = tx3.Commit(t.Context())
+	require.NoError(t, err)
+	_, currentHasEqualityField := tbl.Schema().FindFieldByID(1)
+	require.False(t, currentHasEqualityField)
+
+	assert.Equal(t, []string{"alpha", "gamma", "epsilon"}, scanData(tbl),
+		"expected equality deletes to apply when the equality field exists only in schema history")
 }
 
 func TestEqualityDeleteReadPrunesNonOverlappingDeleteFiles(t *testing.T) {

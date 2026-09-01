@@ -168,7 +168,7 @@ func BenchmarkLazyEqualityDeleteLoading(b *testing.B) {
 			b.ResetTimer()
 			for b.Loop() {
 				loader, err := newLazyEqualityDeleteLoader(
-					input.fs, input.tableSchema, nil, input.tasks)
+					input.fs, input.tableSchema, nil, nil, input.tasks)
 				if err != nil {
 					b.Fatal(err)
 				}

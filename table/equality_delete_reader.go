@@ -302,9 +302,35 @@ func newEqualityDeleteFileSet(id int, deleteSet *equalityDeleteSet) *equalityDel
 	}
 }
 
+func schemaForEqualityFields(current *iceberg.Schema, schemas []*iceberg.Schema, fieldIDs []int) *iceberg.Schema {
+	hasAllFields := func(schema *iceberg.Schema) bool {
+		for _, fieldID := range fieldIDs {
+			if _, ok := schema.FindFieldByID(fieldID); !ok {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	if hasAllFields(current) {
+		return current
+	}
+	// Scan tasks do not retain the equality delete's sequence number, so use
+	// the newest schema that can resolve the file's complete equality key.
+	for i := len(schemas) - 1; i >= 0; i-- {
+		if hasAllFields(schemas[i]) {
+			return schemas[i]
+		}
+	}
+
+	return current
+}
+
 type lazyEqualityDeleteLoader struct {
 	fs           iceio.IO
 	tableSchema  *iceberg.Schema
+	tableSchemas []*iceberg.Schema
 	nameMapping  iceberg.NameMapping
 	files        map[string]*lazyEqualityDeleteFile
 	combinations sync.Map
@@ -328,14 +354,16 @@ type lazyEqualityDeleteCombination struct {
 func newLazyEqualityDeleteLoader(
 	fs iceio.IO,
 	tableSchema *iceberg.Schema,
+	tableSchemas []*iceberg.Schema,
 	nameMapping iceberg.NameMapping,
 	tasks []FileScanTask,
 ) (*lazyEqualityDeleteLoader, error) {
 	loader := &lazyEqualityDeleteLoader{
-		fs:          fs,
-		tableSchema: tableSchema,
-		nameMapping: nameMapping,
-		files:       make(map[string]*lazyEqualityDeleteFile),
+		fs:           fs,
+		tableSchema:  tableSchema,
+		tableSchemas: tableSchemas,
+		nameMapping:  nameMapping,
+		files:        make(map[string]*lazyEqualityDeleteFile),
 	}
 
 	for _, task := range tasks {
@@ -383,8 +411,9 @@ func (l *lazyEqualityDeleteLoader) addFieldIDs(idset set[int]) {
 
 func (l *lazyEqualityDeleteLoader) loadFile(ctx context.Context, file *lazyEqualityDeleteFile) (*equalityDeleteFileSet, error) {
 	file.once.Do(func() {
+		deleteSchema := schemaForEqualityFields(l.tableSchema, l.tableSchemas, file.fieldIDs)
 		keys, colNames, err := readEqualityDeleteFile(
-			ctx, l.fs, l.tableSchema, l.nameMapping, file.dataFile, file.fieldIDs)
+			ctx, l.fs, deleteSchema, l.nameMapping, file.dataFile, file.fieldIDs)
 		if err != nil {
 			file.err = err
 
