@@ -18,6 +18,7 @@
 package iceberg
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -180,11 +181,11 @@ func parseBracketSelector(s, path string) (string, int, error) {
 // decodeUnicodeEscape decodes the \uXXXX escape at s[i:], pairing a UTF-16 surrogate pair, and returns the rune and bytes consumed.
 func decodeUnicodeEscape(s string, i int) (rune, int, error) {
 	if i+6 > len(s) {
-		return 0, 0, fmt.Errorf("truncated \\u escape")
+		return 0, 0, errors.New("truncated \\u escape")
 	}
 	hi, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
 	if err != nil {
-		return 0, 0, fmt.Errorf("bad \\u escape")
+		return 0, 0, errors.New("bad \\u escape")
 	}
 	if !utf16.IsSurrogate(rune(hi)) {
 		return rune(hi), 6, nil
@@ -192,15 +193,15 @@ func decodeUnicodeEscape(s string, i int) (rune, int, error) {
 
 	// A surrogate must be a high surrogate followed by a low-surrogate \u escape.
 	if i+12 > len(s) || s[i+6] != '\\' || s[i+7] != 'u' {
-		return 0, 0, fmt.Errorf("unpaired surrogate \\u escape")
+		return 0, 0, errors.New("unpaired surrogate \\u escape")
 	}
 	lo, err := strconv.ParseUint(s[i+8:i+12], 16, 32)
 	if err != nil {
-		return 0, 0, fmt.Errorf("bad \\u escape")
+		return 0, 0, errors.New("bad \\u escape")
 	}
 	r := utf16.DecodeRune(rune(hi), rune(lo))
 	if r == unicode.ReplacementChar {
-		return 0, 0, fmt.Errorf("invalid surrogate pair")
+		return 0, 0, errors.New("invalid surrogate pair")
 	}
 
 	return r, 12, nil
