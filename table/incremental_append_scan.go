@@ -197,7 +197,9 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 		manifestList = append(manifestList, manifestsByPath[path])
 	}
 
-	manifestList, err = planningScan.filterManifestsWithSchema(manifestList, schema, &acc)
+	// Use one projection cache for manifest-summary and data-file pruning.
+	partitionFilters := planningScan.partitionFiltersForSchema(schema)
+	manifestList, err = planningScan.filterManifestsWithSchema(manifestList, schema, &acc, partitionFilters)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +210,7 @@ func (s *IncrementalAppendScan) PlanFiles(ctx context.Context) ([]FileScanTask, 
 	// one factory result per concurrent batch, then reacquire through the factory
 	// so long-running incremental plans can renew vended credentials between
 	// batches.
-	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	entries, err := planningScan.collectManifestEntriesWithSchema(ctx, manifestList, schema, partitionFilters)
 	if err != nil {
 		return nil, err
 	}

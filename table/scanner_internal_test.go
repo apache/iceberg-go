@@ -1176,7 +1176,8 @@ func TestFetchManifestCountersWithRealSnapshot(t *testing.T) {
 	var acc scanMetricsAccumulator
 	snapshot, err := scan.ResolveSnapshot()
 	require.NoError(t, err)
-	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snapshot, memIO, schema, &acc)
+	filtered, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snapshot, memIO, schema, &acc, scan.partitionFiltersForSchema(schema))
 	require.NoError(t, err)
 
 	// Two data manifests, one delete manifest.
@@ -1238,6 +1239,7 @@ func TestFilterManifestsWithSchemaSkipsKnownEmptyManifests(t *testing.T) {
 		[]iceberg.ManifestFile{knownEmptyData, knownEmptyDelete, unknownCounts, live},
 		schema,
 		&acc,
+		scan.partitionFiltersForSchema(schema),
 	)
 	require.NoError(t, err)
 	require.Len(t, filtered, 2)
@@ -1311,6 +1313,72 @@ func TestPlanFilesSkipsKnownEmptyManifestsBeforeOpening(t *testing.T) {
 	assert.Empty(t, tasks)
 	assert.Zero(t, fs.openCount[dataPath])
 	assert.Zero(t, fs.openCount[deletePath])
+}
+
+func TestScanReusesPartitionFiltersAcrossPlanningPhases(t *testing.T) {
+	schema := iceberg.NewSchema(1, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+	spec := iceberg.NewPartitionSpec(iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+	metadata, err := NewMetadata(
+		schema, &spec, UnsortedSortOrder, "mem://default/table", iceberg.Properties{},
+	)
+	require.NoError(t, err)
+
+	const manifestPath = "mem://default/table/metadata/manifest.avro"
+	snapshotID := int64(1)
+	dataFile, err := iceberg.NewDataFileBuilder(
+		spec,
+		iceberg.EntryContentData,
+		"mem://default/table/data.parquet",
+		iceberg.ParquetFile,
+		map[int]any{1000: int32(5)},
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	entry := iceberg.NewManifestEntryBuilder(
+		iceberg.EntryStatusADDED, &snapshotID, dataFile.Build(),
+	).SequenceNum(1).Build()
+	var manifestBytes bytes.Buffer
+	manifest, err := iceberg.WriteManifest(
+		manifestPath, &manifestBytes, 2, spec, schema, snapshotID, []iceberg.ManifestEntry{entry},
+	)
+	require.NoError(t, err)
+
+	memIO := iceio.NewMemFS()
+	require.NoError(t, memIO.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+	scan := &Scan{
+		metadata:      metadata,
+		ioF:           func(context.Context) (iceio.IO, error) { return memIO, nil },
+		rowFilter:     iceberg.EqualTo(iceberg.Reference("id"), int32(5)),
+		caseSensitive: true,
+		concurrency:   1,
+	}
+	var projectionCalls atomic.Int32
+	partitionFilters := newKeyDefaultMapWrapErr(func(specID int) (iceberg.BooleanExpression, error) {
+		projectionCalls.Add(1)
+
+		return buildPartitionProjection(specID, metadata, schema, scan.rowFilter, scan.caseSensitive)
+	})
+	var acc scanMetricsAccumulator
+
+	_, err = scan.filterManifestsWithSchema([]iceberg.ManifestFile{manifest}, schema, &acc, partitionFilters)
+	require.NoError(t, err)
+	_, err = scan.collectManifestEntriesWithSchema(
+		context.Background(), []iceberg.ManifestFile{manifest}, schema, partitionFilters)
+	require.NoError(t, err)
+
+	assert.Len(t, partitionFilters.data, 1)
+	assert.Equal(t, int32(1), projectionCalls.Load())
 }
 
 func TestBuildManifestEvaluatorWithInvalidSpecID(t *testing.T) {

@@ -897,20 +897,27 @@ func (scan *Scan) fetchPartitionSpecFilteredManifests(ctx context.Context) ([]ic
 	// this accumulator are intentionally discarded. A future caller that needs
 	// those counts should use fetchPartitionSpecFilteredManifestsWithSchema and
 	// pass in an accumulator it actually reads.
-	return scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, &scanMetricsAccumulator{})
+	return scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snap, fs, schema, &scanMetricsAccumulator{}, scan.partitionFiltersForSchema(schema))
 }
 
 // fetchPartitionSpecFilteredManifestsWithSchema loads the snapshot's manifests
 // with fs and filters them using the given schema. It records
 // total/scanned/skipped manifest counts (split by data vs delete content) into acc.
-func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(snap *Snapshot, fs io.IO, schema *iceberg.Schema, acc *scanMetricsAccumulator) ([]iceberg.ManifestFile, error) {
+func (scan *Scan) fetchPartitionSpecFilteredManifestsWithSchema(
+	snap *Snapshot,
+	fs io.IO,
+	schema *iceberg.Schema,
+	acc *scanMetricsAccumulator,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
+) ([]iceberg.ManifestFile, error) {
 	// Fetch all manifests for the current snapshot.
 	manifestList, err := snap.Manifests(fs)
 	if err != nil {
 		return nil, err
 	}
 
-	return scan.filterManifestsWithSchema(manifestList, schema, acc)
+	return scan.filterManifestsWithSchema(manifestList, schema, acc, partitionFilters)
 }
 
 // filterManifestsWithSchema applies partition-summary pruning to an existing
@@ -920,9 +927,9 @@ func (scan *Scan) filterManifestsWithSchema(
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
 	acc *scanMetricsAccumulator,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) ([]iceberg.ManifestFile, error) {
 	// Build per-spec manifest evaluators and filter out irrelevant manifests.
-	partitionFilters := scan.partitionFiltersForSchema(schema)
 	manifestEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.ManifestFile) (bool, error), error) {
 		return buildManifestEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
@@ -1022,13 +1029,15 @@ func (scan *Scan) collectManifestEntries(
 		return nil, err
 	}
 
-	return scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	return scan.collectManifestEntriesWithSchema(
+		ctx, manifestList, schema, scan.partitionFiltersForSchema(schema))
 }
 
 func (scan *Scan) collectManifestEntriesWithSchema(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
 	schema *iceberg.Schema,
+	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) (*manifestEntries, error) {
 	metricsEval, err := newInclusiveMetricsEvaluator(
 		schema,
@@ -1048,7 +1057,6 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
-	partitionFilters := scan.partitionFiltersForSchema(schema)
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
@@ -1187,8 +1195,13 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	// one FileIO within each concurrent batch, while the next batch loads again
 	// so credential-renewing factories retain their checkpoints.
 
+	// Keep the projection cache alive across both local planning phases. The
+	// manifest and data-file evaluators need the same per-spec projections.
+	partitionFilters := scan.partitionFiltersForSchema(schema)
+
 	// Step 1: Retrieve filtered manifests based on snapshot and partition specs.
-	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(snap, fs, schema, acc)
+	manifestList, err := scan.fetchPartitionSpecFilteredManifestsWithSchema(
+		snap, fs, schema, acc, partitionFilters)
 	if err != nil || len(manifestList) == 0 {
 		return nil, err
 	}
@@ -1201,7 +1214,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	}
 
 	// Step 2: Read manifest entries concurrently, accumulating data and positional deletes.
-	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema)
+	entries, err := scan.collectManifestEntriesWithSchema(ctx, manifestList, schema, partitionFilters)
 	if err != nil {
 		return nil, err
 	}
