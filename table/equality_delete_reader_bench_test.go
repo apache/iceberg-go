@@ -22,9 +22,11 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -112,6 +114,186 @@ func BenchmarkReadEqualityDeleteFile(b *testing.B) {
 				})
 			}
 		})
+	}
+}
+
+var equalityDeleteLoadingBenchmarkSink int
+
+type equalityDeleteLoadingBenchmarkInput struct {
+	fs          *countingEqualityDeleteOpenFS
+	tableSchema *iceberg.Schema
+	tasks       []FileScanTask
+	deleteFiles int
+}
+
+func BenchmarkLazyEqualityDeleteLoading(b *testing.B) {
+	input := newEqualityDeleteLoadingBenchmarkInput(b)
+
+	b.Run("eager/all_tasks", func(b *testing.B) {
+		input.fs.opens.Store(0)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			perTask, err := readAllEqualityDeleteFiles(
+				b.Context(), input.fs, input.tableSchema, nil, input.tasks, 16)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			totalKeys := 0
+			for _, sets := range perTask {
+				for _, deleteSet := range sets {
+					totalKeys += len(deleteSet.keys)
+				}
+			}
+			equalityDeleteLoadingBenchmarkSink = totalKeys
+		}
+		b.StopTimer()
+		b.ReportMetric(float64(input.deleteFiles), "delete_files/op")
+		b.ReportMetric(float64(input.fs.opens.Load())/float64(b.N), "opens/op")
+	})
+
+	for _, benchmark := range []struct {
+		name      string
+		taskCount int
+	}{
+		{name: "lazy/unread", taskCount: 0},
+		{name: "lazy/first_task", taskCount: 1},
+		{name: "lazy/ten_tasks", taskCount: 10},
+		{name: "lazy/full_scan", taskCount: len(input.tasks)},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			input.fs.opens.Store(0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				loader, err := newLazyEqualityDeleteLoader(
+					input.fs, input.tableSchema, nil, input.tasks)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				totalKeys, err := loadEqualityDeleteTasksConcurrently(
+					b.Context(), loader, input.tasks[:benchmark.taskCount], 16)
+				if err != nil {
+					b.Fatal(err)
+				}
+				equalityDeleteLoadingBenchmarkSink = totalKeys
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(input.deleteFiles), "delete_files/op")
+			b.ReportMetric(float64(input.fs.opens.Load())/float64(b.N), "opens/op")
+		})
+	}
+}
+
+func loadEqualityDeleteTasksConcurrently(
+	ctx context.Context,
+	loader *lazyEqualityDeleteLoader,
+	tasks []FileScanTask,
+	concurrency int,
+) (int, error) {
+	if len(tasks) == 0 {
+		return 0, nil
+	}
+
+	taskChan := make(chan FileScanTask, len(tasks))
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+	totals := make(chan int, len(tasks))
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	workerCount := min(concurrency, len(tasks))
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				sets, err := loader.load(ctx, task)
+				if err != nil {
+					select {
+					case errs <- err:
+					default:
+					}
+
+					return
+				}
+
+				total := 0
+				for _, deleteSet := range sets {
+					total += len(deleteSet.keys)
+				}
+				totals <- total
+			}
+		}()
+	}
+	wg.Wait()
+	close(totals)
+
+	total := 0
+	for count := range totals {
+		total += count
+	}
+
+	select {
+	case err := <-errs:
+		return total, err
+	default:
+		return total, nil
+	}
+}
+
+func newEqualityDeleteLoadingBenchmarkInput(b *testing.B) equalityDeleteLoadingBenchmarkInput {
+	b.Helper()
+
+	const (
+		deleteFileCount = 1_000
+		taskCount       = 10_000
+	)
+	tableSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true},
+	)
+	fs := &countingEqualityDeleteOpenFS{MemFS: iceio.NewMemFS()}
+	firstPath := "mem://benchmark-lazy-equality/delete-0000.parquet"
+	writeEqualityDeleteParquetToMemFS(b, fs.MemFS, firstPath,
+		`[{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}]`)
+	file, err := fs.MemFS.Open(firstPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	contents, err := io.ReadAll(file)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	deleteFiles := make([]iceberg.DataFile, deleteFileCount)
+	for i := range deleteFileCount {
+		path := fmt.Sprintf("mem://benchmark-lazy-equality/delete-%04d.parquet", i)
+		if i > 0 {
+			if err := fs.WriteFile(path, contents); err != nil {
+				b.Fatal(err)
+			}
+		}
+		deleteFiles[i] = newEqualityDeleteSetAssemblyTestFile(b, path, []int{1})
+	}
+
+	tasks := make([]FileScanTask, taskCount)
+	for i := range tasks {
+		tasks[i] = FileScanTask{
+			EqualityDeleteFiles: []iceberg.DataFile{deleteFiles[i%deleteFileCount]},
+		}
+	}
+
+	return equalityDeleteLoadingBenchmarkInput{
+		fs:          fs,
+		tableSchema: tableSchema,
+		tasks:       tasks,
+		deleteFiles: deleteFileCount,
 	}
 }
 

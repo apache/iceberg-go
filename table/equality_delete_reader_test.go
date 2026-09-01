@@ -472,8 +472,21 @@ func TestEqualityDeleteReadRejectsAmbiguousColumns(t *testing.T) {
 	tbl, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 
-	_, _, err = tbl.Scan().ToArrowRecords(t.Context())
-	require.ErrorIs(t, err, table.ErrAmbiguousEqualityColumn)
+	_, records, err := tbl.Scan().ToArrowRecords(t.Context())
+	require.NoError(t, err)
+
+	var scanErr error
+	for record, err := range records {
+		if record != nil {
+			record.Release()
+		}
+		if err != nil {
+			scanErr = err
+
+			break
+		}
+	}
+	require.ErrorIs(t, scanErr, table.ErrAmbiguousEqualityColumn)
 }
 
 func TestEqualityDeleteMatchingAcrossPartitionSpecEvolution(t *testing.T) {
