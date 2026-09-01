@@ -470,6 +470,14 @@ func init() {
 <tr><td><code>write.target-file-size-bytes</code></td><td>(set by writer)</td><td>Target size for newly written data files. Read in <code>table/arrow_utils.go</code> and <code>table/equality_delete_writer.go</code>.</td></tr>
 </tbody></table>
 </div>
+<h3 id="scan-reads"><a class="header" href="#scan-reads">Scan reads</a></h3>
+<div class="table-wrapper"><table><thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead><tbody>
+<tr><td><code>read.split.target-size</code></td><td><code>134217728</code></td><td>Target size for coalescing safe row-group ranges when splitting large local Parquet files. A range may exceed the target when no supplied offset can divide it safely.</td></tr>
+</tbody></table>
+</div>
+<p>The Java-compatible <code>read.split.planning-lookback</code> and <code>read.split.open-file-cost</code>
+names and defaults are also exported by the Go API for shared configuration,
+but are reserved for future task-group planning and are not currently read.</p>
 <h3 id="metrics-and-metadata-lifecycle"><a class="header" href="#metrics-and-metadata-lifecycle">Metrics and metadata lifecycle</a></h3>
 <div class="table-wrapper"><table><thead><tr><th>Key</th><th>Description</th></tr></thead><tbody>
 <tr><td><code>write.metadata.metrics.default</code></td><td>Default per-column metrics mode.</td></tr>
