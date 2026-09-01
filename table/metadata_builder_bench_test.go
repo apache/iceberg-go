@@ -206,6 +206,7 @@ func BenchmarkTransactionApplyNoRequirements(b *testing.B) {
 			txn := &Transaction{meta: template.clone()}
 
 			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
 			b.ResetTimer()
 
 			for b.Loop() {
@@ -214,7 +215,6 @@ func BenchmarkTransactionApplyNoRequirements(b *testing.B) {
 				}
 				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
 			}
-			b.ReportMetric(float64(snapshotCount), "snapshot_entries/op")
 		})
 	}
 }
@@ -231,6 +231,7 @@ func BenchmarkTransactionApplyDuplicateRequirement(b *testing.B) {
 			}
 
 			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
 			b.ResetTimer()
 
 			for b.Loop() {
@@ -239,7 +240,6 @@ func BenchmarkTransactionApplyDuplicateRequirement(b *testing.B) {
 				}
 				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
 			}
-			b.ReportMetric(float64(snapshotCount), "snapshot_entries/op")
 		})
 	}
 }
@@ -253,6 +253,7 @@ func BenchmarkTransactionApplyNewRequirement(b *testing.B) {
 			requirement := AssertCurrentSchemaID(0)
 
 			b.ReportAllocs()
+			b.ReportMetric(float64(snapshotCount), "snapshot_entries")
 			b.ResetTimer()
 
 			for b.Loop() {
@@ -262,7 +263,6 @@ func BenchmarkTransactionApplyNewRequirement(b *testing.B) {
 				}
 				metadataBuilderBenchmarkSink = len(txn.meta.snapshotList)
 			}
-			b.ReportMetric(float64(snapshotCount), "snapshot_entries/op")
 		})
 	}
 }

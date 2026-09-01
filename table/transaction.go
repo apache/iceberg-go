@@ -209,10 +209,11 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 			continue
 		}
 		if current == nil {
-			current, err = stagedMeta.Build()
+			built, err := stagedMeta.Build()
 			if err != nil {
 				return err
 			}
+			current = built
 		}
 		if err := r.Validate(current); err != nil {
 			return err
