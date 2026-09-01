@@ -1024,7 +1024,7 @@ func TestRewriteDataFiles_DeadEqualityDeletesDropped(t *testing.T) {
 //
 //	commit 1: small-0.parquet      (data, will survive — low seq)
 //	commit 2: small-1.parquet      (data, will survive — low seq)
-//	commit 3: eq-delete (id=99)    (eq-delete; seq > both small files)
+//	commit 3: eq-delete (id=1)     (eq-delete; seq > both small files)
 //	commit 4: preserve.parquet     (data, will be rewritten — high seq)
 //
 // The post-rewrite check: eq-delete must remain because small-0/1
@@ -1048,7 +1048,7 @@ func TestRewriteDataFiles_PartialRewritePreservesEqDelete(t *testing.T) {
 	}
 
 	// commit 3: eq-delete.
-	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id": 99}]`)
+	tbl = appendEqualityDelete(t, tbl, []int{1}, `[{"id": 1}]`)
 
 	// commit 4: preserve.parquet — the high-seq file we'll compact alone.
 	preserveDataPath := tbl.Location() + "/data/preserve.parquet"

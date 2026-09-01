@@ -131,7 +131,7 @@ func TestEqualityDeleteIndexMatchesPartitionAndSequence(t *testing.T) {
 		newEqualityDeleteIndexTestEntry("global-same-sequence.parquet", 0, nil, 5),
 	}
 
-	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 5)
@@ -148,7 +148,7 @@ func TestEqualityDeleteIndexKeepsPartitionedDeletesScoped(t *testing.T) {
 	globalDelete := newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 3)
 
 	idx, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{partitionedDelete, globalDelete}, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
@@ -163,7 +163,7 @@ func TestEqualityDeleteIndexTreatsVoidSpecAsGlobal(t *testing.T) {
 		"void-delete.parquet", 3, map[int]any{1000: nil}, 3)
 
 	idx, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{voidDelete}, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	unpartitionedData := newEqualityDeleteIndexTestEntry("data.parquet", 0, nil, 1)
@@ -177,7 +177,7 @@ func TestEqualityDeleteIndexRejectsUnknownPartitionSpec(t *testing.T) {
 	deleteEntry := newEqualityDeleteIndexTestEntry("delete.parquet", 99, nil, 2)
 
 	_, err := buildEqualityDeleteIndex(
-		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+		[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), nil)
 	require.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.ErrorContains(t, err, "delete.parquet")
 }
@@ -190,7 +190,7 @@ func TestEqualityDeleteIndexSkipsPartitionKeysWithoutPartitionedDeletes(t *testi
 		nil,
 		{newEqualityDeleteIndexTestEntry("global-delete.parquet", 0, nil, 2)},
 	} {
-		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs())
+		idx, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs(), nil)
 		require.NoError(t, err)
 
 		matched, err := idx.forDataFile(dataEntry)
@@ -208,7 +208,7 @@ func TestEqualityDeleteIndexSortsBySequence(t *testing.T) {
 		newEqualityDeleteIndexTestEntry("sequence-2-b.parquet", 1, partition, 2),
 	}
 
-	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs())
+	idx, err := buildEqualityDeleteIndex(deleteEntries, equalityDeleteIndexTestSpecs(), nil)
 	require.NoError(t, err)
 
 	dataEntry := newEqualityDeleteIndexTestEntry("data.parquet", 1, partition, 1)
@@ -342,7 +342,7 @@ func TestEqualityDeleteIndexUsesFloatSemantics(t *testing.T) {
 			deleteEntry := newEqualityDeleteIndexTestEntry(
 				"delete.parquet", 1, map[int]any{1000: tt.deletePartition}, 2)
 			idx, err := buildEqualityDeleteIndex(
-				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs())
+				[]iceberg.ManifestEntry{deleteEntry}, equalityDeleteIndexTestSpecs(), nil)
 			require.NoError(t, err)
 
 			dataEntry := newEqualityDeleteIndexTestEntry(
