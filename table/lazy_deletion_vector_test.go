@@ -65,6 +65,18 @@ func TestLazyDeletionVectorLoaderLoadsSharedPuffinGroupsOnDemand(t *testing.T) {
 	assert.Equal(t, int64(1), fs.opens.Load(), "a shared Puffin group must be loaded once")
 }
 
+func TestLazyDeletionVectorLoaderRejectsEmptyReferencedDataFile(t *testing.T) {
+	dvFile := newDVMockDataFile("empty-ref.puffin", "", 0, 1, 1)
+
+	loader, err := newLazyDeletionVectorLoader(&countingDVOpenIO{}, []FileScanTask{{
+		DeletionVectorFiles: []iceberg.DataFile{dvFile},
+	}})
+
+	assert.Nil(t, loader)
+	require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
+	assert.ErrorContains(t, err, "missing or empty referenced_data_file")
+}
+
 func TestLazyDeletionVectorLoaderSingleflightsConcurrentGroupLoads(t *testing.T) {
 	files := writeSharedDVPuffinFixture(t, 2)
 	refs := make([]string, len(files))

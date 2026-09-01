@@ -241,7 +241,12 @@ func collectUniqueDeletionVectors(tasks []FileScanTask) (map[string]iceberg.Data
 		for _, d := range t.DeletionVectorFiles {
 			_, _, ref, contentOffset, contentSize := iceinternal.BorrowedDataFilePointers(d)
 			if ref == nil {
-				return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", d.FilePath())
+				return nil, fmt.Errorf("%w: deletion vector %s missing referenced_data_file",
+					dv.ErrInvalidDeletionVector, d.FilePath())
+			}
+			if *ref == "" {
+				return nil, fmt.Errorf("%w: deletion vector %s missing or empty referenced_data_file",
+					dv.ErrInvalidDeletionVector, d.FilePath())
 			}
 			if contentOffset == nil || contentSize == nil {
 				// Spec §Manifest Files: content_offset and content_size_in_
