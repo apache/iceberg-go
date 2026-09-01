@@ -149,7 +149,7 @@ func newPlanTasksBenchmarkFixture(
 	if err != nil {
 		b.Fatal(err)
 	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta)
+	eqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta, schema)
 	if err != nil {
 		b.Fatal(err)
 	}

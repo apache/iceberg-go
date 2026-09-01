@@ -935,7 +935,7 @@ func TestPlanDataManifestTasksPreservesManifestOrder(t *testing.T) {
 	require.NoError(t, err)
 	dvIndex, err := buildDVIndex(nil)
 	require.NoError(t, err)
-	eqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta)
+	eqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta, schema)
 	require.NoError(t, err)
 
 	tasks, err := scan.planDataManifestTasks(context.Background(), manifests, schema, 0,

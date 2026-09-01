@@ -1098,7 +1098,7 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
 ) (*manifestEntries, error) {
 	return scan.collectManifestEntriesWithSchemaMinSequenceNum(
-		ctx, manifestList, schema, scan.partitionFiltersForSchema(schema), minSequenceNum(manifestList))
+		ctx, manifestList, schema, partitionFilters, minSequenceNum(manifestList))
 }
 
 func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
@@ -1245,6 +1245,7 @@ func (scan *Scan) planDataManifestTasks(
 	}
 
 	concurrencyLimit := min(scan.concurrency, len(manifestList))
+	manifestIO := newManifestIOBatch(scan.ioF, concurrencyLimit)
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(concurrencyLimit)
 
@@ -1259,7 +1260,7 @@ func (scan *Scan) planDataManifestTasks(
 		}
 
 		g.Go(func() error {
-			fs, err := scan.ioF(gctx)
+			fs, err := manifestIO.acquire(gctx)
 			if err != nil {
 				return err
 			}
@@ -1520,7 +1521,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	minSeqNum := minSequenceNum(manifestList)
 	deleteEntries := newManifestEntries()
 	if len(deleteManifests) > 0 {
-	deleteEntries, err = scan.collectManifestEntriesWithSchemaMinSequenceNum(
+		deleteEntries, err = scan.collectManifestEntriesWithSchemaMinSequenceNum(
 			ctx, deleteManifests, schema, partitionFilters, minSeqNum)
 		if err != nil {
 			return nil, err
@@ -1536,7 +1537,7 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil {
 		return nil, err
 	}
-	eqDeleteIndex, err := buildEqualityDeleteIndex(deleteEntries.equalityDeleteEntries, scan.metadata)
+	eqDeleteIndex, err := buildEqualityDeleteIndex(deleteEntries.equalityDeleteEntries, scan.metadata, schema)
 	if err != nil {
 		return nil, err
 	}
