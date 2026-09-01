@@ -478,10 +478,7 @@ func buildEqualityDeleteIndex(
 			isUnpartitioned = spec.IsUnpartitioned()
 			unpartitionedBySpecID[df.SpecID()] = isUnpartitioned
 		}
-		indexedFile, err := compactDeleteFileForIndex(df, partition, df.EqualityFieldIDs())
-		if err != nil {
-			return nil, err
-		}
+		indexedFile := compactDeleteFileForIndex(df, partition, df.EqualityFieldIDs())
 		indexedEntry := newEqualityDeleteIndexEntry(entry, indexedFile, schema)
 		if isUnpartitioned {
 			idx.global = append(idx.global, indexedEntry)

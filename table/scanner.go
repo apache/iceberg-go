@@ -903,10 +903,7 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]deleteFileIndex
 			if _, exists := dvIndex[*ref]; exists {
 				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
 			}
-			indexedFile, err := compactDeleteFileForIndex(deleteFile, dataFilePartition(deleteFile), nil)
-			if err != nil {
-				return nil, err
-			}
+			indexedFile := compactDeleteFileForIndex(deleteFile, dataFilePartition(deleteFile), nil)
 			dvIndex[*ref] = deleteFileIndexEntry{
 				file: indexedFile, sequenceNum: del.SequenceNum(),
 			}

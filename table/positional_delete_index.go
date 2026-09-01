@@ -41,10 +41,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 		deleteFile := entry.DataFile()
 		partition := dataFilePartition(deleteFile)
 		if path := referencedDataFilePath(deleteFile); path != "" {
-			indexedFile, err := compactDeleteFileForIndexWithReference(deleteFile, partition, nil, &path)
-			if err != nil {
-				return nil, err
-			}
+			indexedFile := compactDeleteFileForIndexWithReference(deleteFile, partition, nil, &path)
 			if idx.byPath == nil {
 				idx.byPath = make(map[string][]deleteFileIndexEntry)
 			}
@@ -59,10 +56,7 @@ func buildPositionalDeleteIndex(entries []iceberg.ManifestEntry) (*positionalDel
 		if err != nil {
 			return nil, fmt.Errorf("indexing positional delete file %s: %w", deleteFile.FilePath(), err)
 		}
-		indexedFile, err := compactDeleteFileForIndex(deleteFile, partition, []int{filePathFieldID})
-		if err != nil {
-			return nil, err
-		}
+		indexedFile := compactDeleteFileForIndex(deleteFile, partition, []int{filePathFieldID})
 		if idx.byPartition == nil {
 			idx.byPartition = make(map[string][]deleteFileIndexEntry)
 		}
