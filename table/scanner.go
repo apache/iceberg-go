@@ -1123,6 +1123,10 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptions(
 	partitionEvaluators := newKeyDefaultMapWrapErr(func(specID int) (func(iceberg.DataFile) (bool, error), error) {
 		return buildPartitionEvaluator(specID, scan.metadata, schema, partitionFilters, scan.caseSensitive)
 	})
+	// Delete manifests do not identify whether they contain positional or
+	// equality deletes in the manifest-list metadata. Keep data-file stats when
+	// any delete manifest is present so equality-delete pruning remains
+	// available after the entries are classified.
 	retainDataFileStats := scan.manifestProjectionRetainsDataStats(manifestList)
 
 	for manifestIndex, mf := range manifestList {
@@ -1142,13 +1146,9 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptions(
 			var projection *iceberg.ManifestEntryProjection
 			dropColumnStats := false
 			if projectScanColumns {
-				p := iceberg.ManifestEntryProjection{
-					IncludeColumnStats: scan.manifestProjectionNeedsStats(mf, retainDataFileStats),
-				}
+				var p iceberg.ManifestEntryProjection
+				p, dropColumnStats = scan.manifestProjectionForManifest(mf, retainDataFileStats)
 				projection = &p
-				dropColumnStats = p.IncludeColumnStats &&
-					mf.ManifestContent() == iceberg.ManifestContentData &&
-					!retainDataFileStats
 			}
 			manifestEntries, err := openManifestWithProjection(
 				fs, mf, partEval, metricsEval, projection, dropColumnStats)
@@ -1172,10 +1172,18 @@ func (scan *Scan) collectManifestEntriesWithSchemaOptions(
 	return flattenClassifiedManifestEntries(manifestResults), nil
 }
 
-func (scan *Scan) manifestProjectionNeedsStats(manifest iceberg.ManifestFile, retainDataFileStats bool) bool {
-	return manifest.ManifestContent() == iceberg.ManifestContentDeletes ||
+func (scan *Scan) manifestProjectionForManifest(
+	manifest iceberg.ManifestFile,
+	retainDataFileStats bool,
+) (iceberg.ManifestEntryProjection, bool) {
+	includeColumnStats := manifest.ManifestContent() == iceberg.ManifestContentDeletes ||
 		retainDataFileStats ||
 		(scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}))
+	dropColumnStats := includeColumnStats &&
+		manifest.ManifestContent() == iceberg.ManifestContentData &&
+		!retainDataFileStats
+
+	return iceberg.ManifestEntryProjection{IncludeColumnStats: includeColumnStats}, dropColumnStats
 }
 
 func (scan *Scan) manifestProjectionRetainsDataStats(manifestList []iceberg.ManifestFile) bool {
@@ -1435,11 +1443,6 @@ func (scan *Scan) planFilesLocal(
 		acc.totalFileSize += e.DataFile().FileSizeBytes()
 	}
 
-	acc.resultDataFiles = int64(len(results))
-	// Delete-file metrics are derived from the planned tasks so they are
-	// result-scoped, consistent with result-data-files and total-file-size (a
-	// DV-suppressed positional delete never lands on a task, so it is excluded).
-	acc.applyResultDeleteMetrics(results)
 	if projectScanColumns {
 		// The indexes retain the full delete entries while matching them to
 		// data files. Release those references before returning so only the

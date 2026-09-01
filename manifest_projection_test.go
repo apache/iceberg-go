@@ -116,6 +116,97 @@ func TestManifestEntryProjectionDropsTransientStats(t *testing.T) {
 	assert.Empty(t, withStats.DataFile().ColumnSizes())
 }
 
+func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T) {
+	tests := []struct {
+		name            string
+		version         int
+		manifestContent ManifestContent
+		entryContent    ManifestEntryContent
+		format          FileFormat
+	}{
+		{name: "v1 data", version: 1, manifestContent: ManifestContentData, entryContent: EntryContentData, format: ParquetFile},
+		{name: "v2 data", version: 2, manifestContent: ManifestContentData, entryContent: EntryContentData, format: ParquetFile},
+		{name: "v3 data", version: 3, manifestContent: ManifestContentData, entryContent: EntryContentData, format: ParquetFile},
+		{name: "v2 equality delete", version: 2, manifestContent: ManifestContentDeletes, entryContent: EntryContentEqDeletes, format: ParquetFile},
+		{name: "v3 deletion vector", version: 3, manifestContent: ManifestContentDeletes, entryContent: EntryContentPosDeletes, format: PuffinFile},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			schema := NewSchema(1, NestedField{
+				ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
+			})
+			builder, err := NewDataFileBuilder(
+				*UnpartitionedSpec,
+				tt.entryContent,
+				tt.name+".data",
+				tt.format,
+				nil,
+				nil,
+				nil,
+				1,
+				128,
+			)
+			require.NoError(t, err)
+			builder.
+				ValueCounts(map[int]int64{1: 1}).
+				NullValueCounts(map[int]int64{1: 0}).
+				NaNValueCounts(map[int]int64{1: 0}).
+				LowerBoundValues(map[int][]byte{1: {0x01}}).
+				UpperBoundValues(map[int][]byte{1: {0x01}})
+			if tt.entryContent == EntryContentEqDeletes {
+				builder.EqualityFieldIDs([]int{1})
+			}
+			if tt.entryContent == EntryContentPosDeletes && tt.format == PuffinFile {
+				builder.ReferencedDataFile("data.parquet").ContentOffset(4).ContentSizeInBytes(8)
+			}
+
+			snapshotID := int64(5)
+			sequenceNumber := int64(6)
+			entry := NewManifestEntry(
+				EntryStatusADDED,
+				&snapshotID,
+				&sequenceNumber,
+				nil,
+				builder.Build(),
+			)
+			var manifestBytes bytes.Buffer
+			writer, err := NewManifestWriter(
+				tt.version,
+				&manifestBytes,
+				*UnpartitionedSpec,
+				schema,
+				snapshotID,
+				WithManifestWriterContent(tt.manifestContent),
+			)
+			require.NoError(t, err)
+			require.NoError(t, writer.Add(entry))
+			manifest, err := writer.ToManifestFile(
+				tt.name+".manifest.avro", int64(manifestBytes.Len()))
+			require.NoError(t, err)
+
+			reader, err := NewManifestReaderWithProjection(
+				manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{},
+			)
+			require.NoError(t, err)
+			projected, err := reader.ReadEntry()
+			require.NoError(t, err)
+			require.NoError(t, reader.Close())
+
+			assert.Equal(t, tt.entryContent, projected.DataFile().ContentType())
+			assert.Equal(t, entry.DataFile().FilePath(), projected.DataFile().FilePath())
+			assert.Empty(t, projected.DataFile().ValueCounts())
+			assert.Empty(t, projected.DataFile().LowerBoundValues())
+			if tt.entryContent == EntryContentPosDeletes && tt.format == PuffinFile {
+				require.NotNil(t, projected.DataFile().ReferencedDataFile())
+				assert.Equal(t, "data.parquet", *projected.DataFile().ReferencedDataFile())
+				assert.Equal(t, int64(4), *projected.DataFile().ContentOffset())
+				assert.Equal(t, int64(8), *projected.DataFile().ContentSizeInBytes())
+			}
+		})
+	}
+}
+
 func TestManifestEntryWithoutColumnStatsPreservesEntry(t *testing.T) {
 	builder, err := NewDataFileBuilder(
 		*UnpartitionedSpec,

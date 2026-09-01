@@ -92,3 +92,30 @@ func TestOpenManifestWithProjectionDropsStatsAfterFiltering(t *testing.T) {
 	assert.Empty(t, entries[0].DataFile().ValueCounts())
 	assert.Empty(t, entries[0].DataFile().LowerBoundValues())
 }
+
+func TestManifestProjectionRetainsDataFileStatsForDeleteScans(t *testing.T) {
+	scan := &Scan{rowFilter: iceberg.AlwaysTrue{}}
+	dataManifest := iceberg.NewManifestFile(
+		2, "data-manifest.avro", 100, 0, 1,
+	).Build()
+	deleteManifest := iceberg.NewManifestFile(
+		2, "delete-manifest.avro", 100, 0, 1,
+	).Content(iceberg.ManifestContentDeletes).Build()
+
+	projection, dropStats := scan.manifestProjectionForManifest(dataManifest, false)
+	assert.False(t, projection.IncludeColumnStats)
+	assert.False(t, dropStats)
+
+	retainDataStats := scan.manifestProjectionRetainsDataStats(
+		[]iceberg.ManifestFile{dataManifest, deleteManifest})
+	assert.True(t, retainDataStats)
+
+	projection, dropStats = scan.manifestProjectionForManifest(dataManifest, retainDataStats)
+	assert.True(t, projection.IncludeColumnStats)
+	assert.False(t, dropStats,
+		"data-file stats must survive planning for equality-delete pruning")
+
+	projection, dropStats = scan.manifestProjectionForManifest(deleteManifest, retainDataStats)
+	assert.True(t, projection.IncludeColumnStats)
+	assert.False(t, dropStats)
+}
