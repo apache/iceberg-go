@@ -51,7 +51,7 @@ func BenchmarkDeleteIndexRetainsOnlyRequiredStats(b *testing.B) {
 					}
 					index = built
 				} else {
-					built, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs())
+					built, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs(), nil)
 					if err != nil {
 						b.Fatal(err)
 					}

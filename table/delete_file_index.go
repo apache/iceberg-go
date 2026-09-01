@@ -47,6 +47,15 @@ func compactDeleteFileForIndex(
 	partition map[int]any,
 	statFieldIDs []int,
 ) (iceberg.DataFile, error) {
+	return compactDeleteFileForIndexWithReference(file, partition, statFieldIDs, nil)
+}
+
+func compactDeleteFileForIndexWithReference(
+	file iceberg.DataFile,
+	partition map[int]any,
+	statFieldIDs []int,
+	referencedDataFile *string,
+) (iceberg.DataFile, error) {
 	partitionSpec := syntheticPartitionSpec(file.SpecID(), partition)
 	builder, err := iceberg.NewDataFileBuilder(
 		partitionSpec,
@@ -100,7 +109,7 @@ func compactDeleteFileForIndex(
 		builder.EqualityFieldIDs(equalityFieldIDs)
 	}
 
-	sortOrderID, firstRowID, referencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(file)
+	sortOrderID, firstRowID, manifestReferencedDataFile, contentOffset, contentSize := iceberginternal.BorrowedDataFilePointers(file)
 	if sortOrderID != nil {
 		builder.SortOrderID(*sortOrderID)
 	}
@@ -109,6 +118,8 @@ func compactDeleteFileForIndex(
 	}
 	if referencedDataFile != nil {
 		builder.ReferencedDataFile(*referencedDataFile)
+	} else if manifestReferencedDataFile != nil {
+		builder.ReferencedDataFile(*manifestReferencedDataFile)
 	}
 	if contentOffset != nil {
 		builder.ContentOffset(*contentOffset)
