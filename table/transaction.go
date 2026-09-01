@@ -3263,6 +3263,9 @@ func (t *Transaction) StagedTable() (*StagedTable, error) {
 	}, nil
 }
 
+// Commit persists the transaction's staged changes. Metadata validation may be
+// deferred until Commit, StagedTable, or Scan when applying an operation only
+// adds no-op updates or duplicate requirements.
 func (t *Transaction) Commit(ctx context.Context) (*Table, error) {
 	if err := t.checkNotNil(); err != nil {
 		return nil, err

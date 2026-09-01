@@ -1266,6 +1266,58 @@ func TestTransactionApplyKeepsRequirementsUnchangedOnUpdateFailure(t *testing.T)
 	require.Equal(t, AssertTableUUID(baseMeta.TableUUID()), txn.reqs[0])
 }
 
+func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
+	t.Run("no requirements", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		txn.meta.defaultSpecID = 999
+
+		require.NoError(t, txn.apply(nil, nil))
+		_, err := txn.meta.Build()
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+	})
+
+	t.Run("duplicate requirement", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		requirement := AssertCurrentSchemaID(0)
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+
+		// A duplicate requirement only needs its conflict check. Make Build fail
+		// after the first apply so this path cannot accidentally rebuild metadata.
+		txn.meta.defaultSpecID = 999
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+		_, err := txn.meta.Build()
+		require.ErrorIs(t, err, ErrInvalidMetadata)
+	})
+}
+
+func TestTransactionApplyBuildsMetadataForNewRequirement(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+	txn.meta.defaultSpecID = 999
+
+	err := txn.apply(nil, []Requirement{AssertDefaultSpecID(0)})
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+}
+
+func TestTransactionApplyPreservesRequirementValidationErrorAfterDuplicate(t *testing.T) {
+	const expected = "Requirement failed: current schema id has changed: expected 1, found 0"
+
+	t.Run("new requirement", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+		err := txn.apply(nil, []Requirement{AssertCurrentSchemaID(1)})
+		require.EqualError(t, err, expected)
+	})
+
+	t.Run("new requirement after duplicate", func(t *testing.T) {
+		txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+		requirement := AssertCurrentSchemaID(0)
+		require.NoError(t, txn.apply(nil, []Requirement{requirement}))
+
+		err := txn.apply(nil, []Requirement{requirement, AssertCurrentSchemaID(1)})
+		require.EqualError(t, err, expected)
+	})
+}
+
 // TestTransactionApplyDedupesIdenticalSameRefAssertions covers repeated
 // producer commits in one transaction: producers build their assertion from
 // the BASE table's branch head, so a second commit re-asserts exactly the
