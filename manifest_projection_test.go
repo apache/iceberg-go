@@ -19,12 +19,75 @@ package iceberg
 
 import (
 	"bytes"
+	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestManifestEntryProjectionWhitelistCoversDataFileSchema(t *testing.T) {
+	schema := NewSchema(1, NestedField{
+		ID: 1, Name: "id", Type: PrimitiveTypes.Int64, Required: true,
+	})
+	dataFileType := reflect.TypeOf(dataFile{})
+	dataFileFields := make(map[string]struct{}, len(dataFileAvroFieldIndexes))
+	for _, index := range dataFileAvroFieldIndexes {
+		name := dataFileType.Field(index).Tag.Get("avro")
+		dataFileFields[name] = struct{}{}
+	}
+	optionalFields := map[string]struct{}{
+		"column_sizes":      {},
+		"distinct_counts":   {},
+		"value_counts":      {},
+		"null_value_counts": {},
+		"nan_value_counts":  {},
+		"lower_bounds":      {},
+		"upper_bounds":      {},
+	}
+	statsFields := map[string]struct{}{
+		"value_counts":      {},
+		"null_value_counts": {},
+		"nan_value_counts":  {},
+		"lower_bounds":      {},
+		"upper_bounds":      {},
+	}
+
+	for version := 1; version <= 3; version++ {
+		writerSchema, _, err := manifestEntrySchemaFor(*UnpartitionedSpec, schema, version)
+		require.NoError(t, err)
+
+		var foundDataFile bool
+		for _, field := range writerSchema.Root().Fields {
+			if field.Name != "data_file" {
+				continue
+			}
+			foundDataFile = true
+			for _, dataField := range field.Type.Fields {
+				_, tagged := dataFileFields[dataField.Name]
+				assert.True(t, tagged, "v%d field %q is missing from dataFile", version, dataField.Name)
+				if !manifestScanDataFileField(dataField.Name, false) {
+					_, optional := optionalFields[dataField.Name]
+					assert.True(t, optional, "v%d field %q is silently omitted by projection", version, dataField.Name)
+				}
+				if _, stats := statsFields[dataField.Name]; stats {
+					assert.True(t, manifestScanDataFileField(dataField.Name, true),
+						"v%d optional stats field %q is not retained when requested", version, dataField.Name)
+				}
+			}
+		}
+		assert.True(t, foundDataFile, "v%d manifest schema has no data_file field", version)
+	}
+
+	for name := range dataFileFields {
+		if manifestScanDataFileField(name, false) {
+			continue
+		}
+		_, optional := optionalFields[name]
+		assert.True(t, optional, "dataFile field %q is not classified by projection", name)
+	}
+}
 
 func TestManifestEntryProjectionDropsTransientStats(t *testing.T) {
 	schema := NewSchema(1, NestedField{
@@ -149,6 +212,7 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			)
 			require.NoError(t, err)
 			builder.
+				BlockSizeInBytes(64 * 1024).
 				ValueCounts(map[int]int64{1: 1}).
 				NullValueCounts(map[int]int64{1: 0}).
 				NaNValueCounts(map[int]int64{1: 0}).
@@ -197,6 +261,9 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 			assert.Equal(t, entry.DataFile().FilePath(), projected.DataFile().FilePath())
 			assert.Empty(t, projected.DataFile().ValueCounts())
 			assert.Empty(t, projected.DataFile().LowerBoundValues())
+			if tt.version == 1 {
+				assert.Equal(t, int64(64*1024), projected.DataFile().(*dataFile).BlockSizeInBytes)
+			}
 			if tt.entryContent == EntryContentPosDeletes && tt.format == PuffinFile {
 				require.NotNil(t, projected.DataFile().ReferencedDataFile())
 				assert.Equal(t, "data.parquet", *projected.DataFile().ReferencedDataFile())

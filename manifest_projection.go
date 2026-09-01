@@ -102,6 +102,9 @@ func projectedManifestEntrySchema(
 	projection ManifestEntryProjection,
 ) (*avro.Schema, error) {
 	key := manifestEntryProjectionCacheKey{
+		// avro.Schema.String returns the original header JSON; it is an O(1)
+		// accessor, not a serialization. The bounded cache retains at most one
+		// copy of each writer-schema string per projection mode.
 		writerSchema:       writerSchema.String(),
 		includeColumnStats: projection.IncludeColumnStats,
 	}
@@ -110,6 +113,8 @@ func projectedManifestEntrySchema(
 	}
 
 	root := writerSchema.Root()
+	// SchemaNode.Schema reads the node tree without mutating it, so the shallow
+	// copy intentionally shares immutable Props and Aliases with the writer.
 	projectedRoot := *root
 	projectedRoot.Fields = slices.Clone(root.Fields)
 	dataFileFound := false
@@ -151,15 +156,15 @@ func projectedManifestEntrySchema(
 func manifestScanDataFileField(name string, includeColumnStats bool) bool {
 	switch name {
 	case "content", "file_path", "file_format", "partition", "record_count",
-		"file_size_in_bytes", "key_metadata", "split_offsets", "equality_ids",
+		"file_size_in_bytes", "block_size_in_bytes", "key_metadata", "split_offsets", "equality_ids",
 		"sort_order_id", "first_row_id", "referenced_data_file", "content_offset",
 		"content_size_in_bytes":
 		return true
 	case "value_counts", "null_value_counts", "nan_value_counts", "lower_bounds", "upper_bounds":
 		return includeColumnStats
 	default:
-		// block_size_in_bytes, column_sizes, and distinct_counts are not
-		// needed to build or read a FileScanTask.
+		// column_sizes and distinct_counts are not needed to build or read a
+		// FileScanTask.
 		return false
 	}
 }
