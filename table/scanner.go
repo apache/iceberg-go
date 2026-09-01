@@ -1157,6 +1157,18 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 		return nil, err
 	}
 
+	var boundRowFilter iceberg.BooleanExpression
+	if scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}) {
+		boundRowFilter, err = iceberg.BindExpr(schema, scan.rowFilter, scan.caseSensitive)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var residualEvaluators map[int]*partitionResidualEvaluator
+	if boundRowFilter != nil {
+		residualEvaluators = make(map[int]*partitionResidualEvaluator)
+	}
+
 	// Step 3: Index positional deletes and match them to data files.
 	posDeleteIndex, err := buildPositionalDeleteIndex(entries.positionalDeleteEntries)
 	if err != nil {
@@ -1202,6 +1214,28 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 			DeletionVectorFiles: dvFiles,
 			Start:               0,
 			Length:              e.DataFile().FileSizeBytes(),
+		}
+		if boundRowFilter != nil {
+			specID := int(e.DataFile().SpecID())
+			residualEvaluator, found := residualEvaluators[specID]
+			if !found {
+				residualEvaluator, err = newPartitionResidualEvaluator(
+					schema, scan.metadata.PartitionSpecByID(specID), boundRowFilter, scan.caseSensitive)
+				if err != nil {
+					return nil, fmt.Errorf("build partition residual evaluator for spec %d: %w", specID, err)
+				}
+				residualEvaluators[specID] = residualEvaluator
+			}
+			if residualEvaluator != nil {
+				var simplified bool
+				task.Residual, simplified, err = residualEvaluator.residual(dataFilePartition(e.DataFile()))
+				if err != nil {
+					return nil, fmt.Errorf("evaluate partition residual for %s: %w", e.DataFile().FilePath(), err)
+				}
+				if !simplified {
+					task.Residual = nil
+				}
+			}
 		}
 		// Row lineage constants: readers use these to synthesize _row_id and
 		// _last_updated_sequence_number when requested. Per spec the
@@ -1479,7 +1513,7 @@ type FileScanTask struct {
 	DeletionVectorFiles []iceberg.DataFile // deletion vectors (puffin files)
 	Start, Length       int64
 	// Residual is the portion of the scan filter that must still be evaluated
-	// for this task. Remote planners may simplify the original filter using
+	// for this task. Local and remote planners may simplify the original filter using
 	// file metadata; nil means the caller did not provide a task residual.
 	// ReadTasks applies the scan's original row filter and each task residual.
 	Residual iceberg.BooleanExpression
