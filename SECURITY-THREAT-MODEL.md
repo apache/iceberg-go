@@ -59,14 +59,29 @@ rules. A finding that crosses an Iceberg Go-owned boundary or demonstrates a
 security impact must be reviewed even when it also has a normally trusted
 precondition.
 
-In this document, a **new audience** is any log, error, CLI text or JSON output,
-serialized metadata, host, catalog or client, or principal that was not already
-authorized to receive the secret, credential, or credential-bearing request.
+## Definitions
+
+A **new audience** is any log, error, CLI text or JSON output, serialized
+metadata, host, catalog or client, or principal that was not already authorized
+to receive the secret, credential, or credential-bearing request.
 
 A **documented Iceberg Go-owned availability boundary** is an explicit
-project-owned resource limit that Iceberg Go documents and enforces, such as
-the Puffin reader's configured maximum blob size (256 MB by default). It is not
+project-owned resource limit that Iceberg Go documents and enforces. It is not
 a general availability guarantee for an embedding service.
+
+Current examples include:
+
+- the Puffin reader's configured
+  [`puffin.WithMaxBlobSize`](puffin/puffin_reader.go) limit (256 MB by default);
+  and
+- the REST metrics reporter's documented per-report deadline, configured with
+  [`rest-metrics-reporting-timeout-ms`](website/src/configuration.md#metrics-reporting)
+  (10 seconds by default).
+
+This list is non-exhaustive. An integer-width check, slice bound, worker count,
+batch size, or other internal implementation constraint is not a documented
+availability boundary unless a public API or project document presents it as a
+resource limit and Iceberg Go enforces it.
 
 ## Scope
 
@@ -93,8 +108,9 @@ Iceberg Go should:
 - prevent tokens, client secrets, storage credentials, signed requests, and
   credential-bearing configuration from reaching a new audience;
 - preserve per-catalog and per-client authentication and credential isolation
-  for state Iceberg Go creates, including internally managed auth, transport,
-  metrics, and delegated-credential state;
+  for state Iceberg Go creates, including internally managed authentication and
+  transport state, REST metrics reporters and dispatchers, and
+  delegated-credential state;
 - avoid creating network, signing, storage, or destructive capabilities that
   the configured principal did not authorize;
 - preserve documented Iceberg Go-owned availability boundaries by enforcing
@@ -140,7 +156,8 @@ capability.
 
 The embedding application decides which users may invoke Iceberg Go and owns
 its user and tenant boundaries. It may intentionally share an `AuthManager`,
-custom transport, database handle or implementation, registry implementation,
+custom transport, `metrics.Reporter`, a reporter factory registered with
+`metrics.Register`, database handle or implementation, registry implementation,
 or other mutable dependency.
 Such deliberate sharing is caller-owned; Iceberg Go-created state that crosses
 otherwise separate catalog or client instances is not.
@@ -219,24 +236,25 @@ deletes or mutates objects outside the actor's proven storage capability.
 
 ### Boundary 5: Iceberg Go-owned client state
 
-Iceberg Go internally creates REST sessions and per-catalog authentication,
-transport, metrics, and delegated-credential state. Separately constructed
-catalogs and clients must not receive one another's internally managed state.
+Iceberg Go internally creates REST sessions, per-catalog authentication and
+transport state, REST metrics reporters and dispatchers, and
+delegated-credential state. Separately constructed catalogs and clients must
+not receive one another's internally managed state.
 
-Callers may intentionally share an `AuthManager`, custom transport, database
-handle or implementation, registry implementation, or other mutable dependency.
-Effects inherent in an explicitly shared object are caller-owned by default.
-This exception does not
-disclaim credential crossover or state reuse caused by Iceberg Go-owned
-per-catalog or per-client state.
+Callers may intentionally share an `AuthManager`, custom transport,
+`metrics.Reporter`, a reporter factory registered with `metrics.Register`,
+database handle or implementation, registry implementation, or other mutable
+dependency. Effects inherent in an explicitly shared object are caller-owned by
+default. This exception does not disclaim credential crossover or state reuse
+caused by Iceberg Go-owned per-catalog or per-client state.
 
 ### Boundary 6: configuration discovery and process-global registries
 
 Iceberg Go loads operator-controlled configuration from
 `~/.iceberg-go.yaml`, from the directory selected by `GOICEBERG_HOME`, or from
 an explicit CLI `--config` path. The library also initializes process-global
-configuration state, and its catalog and IO registries are process-global
-plugin mechanisms that callers can extend.
+configuration state, and its catalog, IO, and metrics reporter-factory
+registries are process-global plugin mechanisms that callers can extend.
 
 Those documented configuration sources and registries are not tenant-isolation
 boundaries. Control of them normally demonstrates operator or
@@ -283,10 +301,10 @@ and the Iceberg Go-owned path that disclosed it.
 
 ### 2. Iceberg Go-owned trust-boundary violations
 
-Internally managed auth, transport, metrics, or delegated-credential state
-crossing separately constructed catalog or client instances is in scope. This
-includes unintended caching or reuse even when both instances run in one
-process.
+Internally managed authentication or transport state, REST metrics reporters
+or dispatchers, or delegated-credential state crossing separately constructed
+catalog or client instances is in scope. This includes unintended caching or
+reuse even when both instances run in one process.
 
 The mere existence of a process-global registry or a caller-supplied shared
 object is not sufficient. The report must show that Iceberg Go-owned state
@@ -402,11 +420,11 @@ downgrade.
 ### 6. Caller-owned shared objects and process-global registries
 
 Effects that follow directly from a caller deliberately sharing an
-`AuthManager`, custom transport, database handle or implementation, registry
+`AuthManager`, custom transport, `metrics.Reporter`, a reporter factory
+registered with `metrics.Register`, database handle or implementation, registry
 implementation, or other mutable dependency are normally caller-owned.
-Process-global catalog and IO registries are plugin mechanisms, and their
-existence alone is not a
-credential-isolation failure.
+Process-global catalog, IO, and metrics reporter-factory registries are plugin
+mechanisms, and their existence alone is not a credential-isolation failure.
 
 Reassess when Iceberg Go-owned per-catalog or per-client state crosses into the
 shared object unexpectedly, a secret gains a new audience, or the behavior
