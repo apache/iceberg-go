@@ -46,7 +46,7 @@ func compactDeleteFileForIndex(
 	file iceberg.DataFile,
 	partition map[int]any,
 	statFieldIDs []int,
-) (iceberg.DataFile, error) {
+) iceberg.DataFile {
 	return compactDeleteFileForIndexWithReference(file, partition, statFieldIDs, nil)
 }
 
@@ -55,7 +55,7 @@ func compactDeleteFileForIndexWithReference(
 	partition map[int]any,
 	statFieldIDs []int,
 	referencedDataFile *string,
-) (iceberg.DataFile, error) {
+) iceberg.DataFile {
 	partitionSpec := syntheticPartitionSpec(file.SpecID(), partition)
 	builder, err := iceberg.NewDataFileBuilder(
 		partitionSpec,
@@ -73,7 +73,7 @@ func compactDeleteFileForIndexWithReference(
 		// construction historically accepted such DataFile implementations;
 		// valid manifest files take the compact path above without changing the
 		// error behavior of the surrounding planner.
-		return file, nil
+		return file
 	}
 
 	valueCounts, nullCounts, nanCounts, lowerBounds, upperBounds := dataFileStatsForFields(file, statFieldIDs)
@@ -128,13 +128,16 @@ func compactDeleteFileForIndexWithReference(
 		builder.ContentSizeInBytes(*contentSize)
 	}
 
-	return builder.Build(), nil
+	return builder.Build()
 }
 
 // syntheticPartitionSpec gives the built-in DataFile implementation enough
 // field metadata to expose the copied partition map and to remain usable by
 // the DataFile codec. Partition values are already transformed values, so the
-// identity transforms here are only a local storage description.
+// identity transforms here are only a local storage description. SourceIDs
+// are synthetic because DataFile exposes the partition values and spec ID,
+// but not the original partition spec; callers must not use this local spec
+// for schema resolution.
 func syntheticPartitionSpec(specID int32, partition map[int]any) iceberg.PartitionSpec {
 	fields := make([]iceberg.PartitionField, 0, len(partition))
 	for fieldID := range partition {
