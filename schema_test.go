@@ -2302,6 +2302,8 @@ func TestVisitGeoSchemaWithSchemaVisitorPerPrimitiveType(t *testing.T) {
 	assert.Equal(t, 1, v.geographyCalls)
 }
 
+// This test is intended to be run with -race; without the detector, the old
+// MarshalJSON implementation also passes these assertions.
 func TestSchemaMarshalJSONConcurrentLazyLookups(t *testing.T) {
 	for range 32 {
 		schema := iceberg.NewSchemaWithIdentifiers(17, nil,
