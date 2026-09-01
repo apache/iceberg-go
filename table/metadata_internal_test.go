@@ -2182,6 +2182,70 @@ func TestAssignMissingPartitionFieldIDsAcrossSpecs(t *testing.T) {
 	require.Equal(t, 1005, parsed.Specs[1].Fields[0].FieldID)
 }
 
+func TestAssignMissingPartitionFieldIDsPreservesUnrelatedJSON(t *testing.T) {
+	const untouched = ` { "nested": [1, {"value":"keep spacing"}] } `
+	input := []byte(`{
+		"format-version": 1,
+		"last-updated-ms": 0,
+		"partition-spec": [{"source-id": 1, "transform": "identity", "name": "id"}],
+		"unknown":` + untouched + `
+	}`)
+
+	normalized, err := assignMissingPartitionFieldIDs(input)
+	require.NoError(t, err)
+	assert.Contains(t, string(normalized), `"unknown":`+untouched)
+	assert.Contains(t, string(normalized), `"field-id":1000`)
+}
+
+func TestMetadataStructuralScanHandlesEscapedKeysAndNestedValues(t *testing.T) {
+	data := strings.ReplaceAll(ExampleTableMetadataV2, `"format-version"`, `"format\u002dversion"`)
+	data = strings.ReplaceAll(data, `"last-updated-ms"`, `"last\u002dupdated-ms"`)
+	data = strings.TrimSuffix(data, "}") + `,
+		"unknown": {"array": [true, false, null, -1.25e+3, {"escaped": "\\u263a"}]}
+	}`
+
+	meta, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	assert.Equal(t, 2, meta.Version())
+}
+
+func TestMetadataStructuralScanRejectsMalformedJSON(t *testing.T) {
+	tests := []string{
+		`{"format-version":2,"last-updated-ms":0 "value":1}`,
+		`{"format-version":2,"last-updated-ms":0,"value":[1,]}`,
+		`{"format-version":2,"last-updated-ms":0,"value":{"a":1,}}`,
+		`{"format-version":2,"last-updated-ms":0,"value":"\\x"}`,
+		`{"format-version":2,"last-updated-ms":0,"value":01}`,
+		`{"format-version":2,"last-updated-ms":0} trailing`,
+	}
+
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			_, err := ParseMetadataBytes([]byte(input))
+			require.ErrorIs(t, err, ErrInvalidMetadata)
+		})
+	}
+}
+
+func TestMetadataStructuralScanUsesLastDuplicateField(t *testing.T) {
+	data := []byte(`{
+		"format-version": 1,
+		"last-updated-ms": 0,
+		"format-version": 2,
+		"last-updated-ms": 1
+	}`)
+
+	fields, err := scanMetadataJSON(data)
+	require.NoError(t, err)
+	assert.Equal(t, "2", string(fields.formatVersion.slice(data)))
+	assert.Equal(t, "1", string(fields.lastUpdatedMS.slice(data)))
+}
+
+func TestParseMetadataNullPreservesFormatVersionError(t *testing.T) {
+	_, err := ParseMetadataBytes([]byte("null"))
+	assert.ErrorIs(t, err, ErrInvalidMetadataFormatVersion)
+}
+
 func TestTableDataV2NoSnapshots(t *testing.T) {
 	data := `{
             "format-version" : 2,

@@ -1786,15 +1786,13 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
-	ver := struct {
-		FormatVersion int `json:"format-version"`
-	}{}
-	if err := json.Unmarshal(b, &ver); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	normalized, formatVersion, err := prepareMetadataJSON(b)
+	if err != nil {
+		return nil, err
 	}
 
 	var ret Metadata
-	switch ver.FormatVersion {
+	switch formatVersion {
 	case 1:
 		ret = &metadataV1{}
 	case 2:
@@ -1803,14 +1801,6 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 		ret = &metadataV3{}
 	default:
 		return nil, ErrInvalidMetadataFormatVersion
-	}
-
-	normalized, err := assignMissingPartitionFieldIDs(b)
-	if err != nil {
-		return nil, err
-	}
-	if err := requirePartitionSpecIDs(normalized); err != nil {
-		return nil, err
 	}
 
 	if err := json.Unmarshal(normalized, ret); err != nil {
@@ -1824,129 +1814,20 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	return ret, nil
 }
 
-func requirePartitionSpecIDs(b []byte) error {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	rawSpecs, ok := metadata["partition-specs"]
-	if !ok {
-		return nil
-	}
-
-	var specs []json.RawMessage
-	if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-		return fmt.Errorf("%w: invalid partition-specs: %w", ErrInvalidMetadata, err)
-	}
-	for i, rawSpec := range specs {
-		var spec map[string]json.RawMessage
-		if err := json.Unmarshal(rawSpec, &spec); err != nil {
-			return fmt.Errorf("%w: invalid partition spec at index %d: %w", ErrInvalidMetadata, i, err)
-		}
-		rawID, ok := spec["spec-id"]
-		if !ok || bytes.Equal(bytes.TrimSpace(rawID), []byte("null")) {
-			return fmt.Errorf("%w: partition spec at index %d is missing required spec-id", ErrInvalidMetadata, i)
-		}
-	}
-
-	return nil
-}
-
 func assignMissingPartitionFieldIDs(b []byte) ([]byte, error) {
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
+	fields, err := scanMetadataJSON(b)
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
 	}
-	if err := requireLastUpdatedMS(metadata); err != nil {
+	if fields.lastUpdatedMS.empty() || bytes.Equal(bytes.TrimSpace(fields.lastUpdatedMS.slice(b)), []byte("null")) {
+		return nil, fmt.Errorf("%w: last-updated-ms is absent or null", ErrInvalidMetadata)
+	}
+	replacements, err := partitionSpecReplacements(b, fields)
+	if err != nil {
 		return nil, err
 	}
 
-	type rawPartitionSpec struct {
-		ID     int                          `json:"spec-id"`
-		Fields []map[string]json.RawMessage `json:"fields"`
-	}
-
-	var specs []rawPartitionSpec
-	usesSpecList := false
-	if rawSpecs, ok := metadata["partition-specs"]; ok {
-		if err := json.Unmarshal(rawSpecs, &specs); err != nil {
-			return nil, err
-		}
-		usesSpecList = true
-	} else if rawFields, ok := metadata["partition-spec"]; ok {
-		var fields []map[string]json.RawMessage
-		if err := json.Unmarshal(rawFields, &fields); err != nil {
-			return nil, err
-		}
-		specs = []rawPartitionSpec{{Fields: fields}}
-	} else {
-		return b, nil
-	}
-
-	lastAssignedID := iceberg.PartitionDataIDStart - 1
-	lastPartitionIDSet := false
-	if rawLastPartitionID, ok := metadata["last-partition-id"]; ok {
-		var lastPartitionID *int
-		if err := json.Unmarshal(rawLastPartitionID, &lastPartitionID); err == nil && lastPartitionID != nil {
-			lastAssignedID = max(lastAssignedID, *lastPartitionID)
-			lastPartitionIDSet = true
-		}
-	}
-
-	missingFields := make([]map[string]json.RawMessage, 0)
-	for _, spec := range specs {
-		for _, field := range spec.Fields {
-			rawFieldID, ok := field["field-id"]
-			if !ok {
-				missingFields = append(missingFields, field)
-
-				continue
-			}
-
-			var fieldID *int
-			if err := json.Unmarshal(rawFieldID, &fieldID); err == nil && fieldID != nil {
-				lastAssignedID = max(lastAssignedID, *fieldID)
-			}
-		}
-	}
-
-	if len(missingFields) == 0 {
-		return b, nil
-	}
-
-	for _, field := range missingFields {
-		lastAssignedID++
-		rawFieldID, err := json.Marshal(lastAssignedID)
-		if err != nil {
-			return nil, err
-		}
-		field["field-id"] = rawFieldID
-	}
-
-	if usesSpecList {
-		rawSpecs, err := json.Marshal(specs)
-		if err != nil {
-			return nil, err
-		}
-		metadata["partition-specs"] = rawSpecs
-	} else {
-		rawFields, err := json.Marshal(specs[0].Fields)
-		if err != nil {
-			return nil, err
-		}
-		metadata["partition-spec"] = rawFields
-	}
-
-	if lastPartitionIDSet {
-		rawLastPartitionID, err := json.Marshal(lastAssignedID)
-		if err != nil {
-			return nil, err
-		}
-		metadata["last-partition-id"] = rawLastPartitionID
-	}
-
-	return json.Marshal(metadata)
+	return applyJSONReplacements(b, replacements), nil
 }
 
 // https://iceberg.apache.org/spec/#iceberg-table-spec
@@ -1993,15 +1874,6 @@ func initCommonMetadataForDeserialization() commonMetadata {
 		SortOrderList:      nil,
 		Specs:              nil,
 	}
-}
-
-func requireLastUpdatedMS(fields map[string]json.RawMessage) error {
-	value, ok := fields["last-updated-ms"]
-	if !ok || string(value) == "null" {
-		return fmt.Errorf("%w: last-updated-ms is absent or null", ErrInvalidMetadata)
-	}
-
-	return nil
 }
 
 // checkRequiredFields validates fields required when reading persisted table
