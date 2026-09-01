@@ -486,12 +486,13 @@ func TestBuildPartitionMatchPredicate_EvaluatesBucketCollision(t *testing.T) {
 	var collisionBucket int32
 	var collisionValues []int32
 
-	for value := int32(0); value < 10000; value++ {
+	for value := range int32(10000) {
 		bucket := bucketValueForInt32(t, transform, value)
 		valuesByBucket[bucket] = append(valuesByBucket[bucket], value)
 		if len(valuesByBucket[bucket]) == 2 {
 			collisionBucket = bucket
 			collisionValues = valuesByBucket[bucket]
+
 			break
 		}
 	}
@@ -499,9 +500,10 @@ func TestBuildPartitionMatchPredicate_EvaluatesBucketCollision(t *testing.T) {
 	assert.NotEqual(t, collisionValues[0], collisionValues[1])
 
 	nonMatchingValue := int32(-1)
-	for value := int32(0); value < 10000; value++ {
+	for value := range int32(10000) {
 		if bucketValueForInt32(t, transform, value) != collisionBucket {
 			nonMatchingValue = value
+
 			break
 		}
 	}
