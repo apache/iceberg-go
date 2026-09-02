@@ -183,43 +183,50 @@ func (t *Transaction) apply(updates []Update, reqs []Requirement) error {
 	// staged metadata: a deduplicated twin re-asserts base state the
 	// staged metadata has intentionally moved past, and its kept twin
 	// was validated when first added.
-	existing := make(map[string]Requirement, len(t.reqs))
-	stagedReqs := make([]Requirement, 0, len(t.reqs)+len(reqs))
-	for _, r := range t.reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
-	}
-
-	for _, r := range reqs {
-		key, err := requirementSemanticKey(r)
-		if err != nil {
-			return err
-		}
-
-		if prev, ok := existing[key]; ok {
-			if err := checkRequirementConflict(prev, r); err != nil {
-				return err
-			}
-
-			continue
-		}
-		if current == nil {
-			built, err := stagedMeta.Build()
+	stagedReqs := t.reqs
+	if len(reqs) > 0 {
+		existing := make(map[string]Requirement, len(t.reqs))
+		for _, r := range t.reqs {
+			key, err := requirementSemanticKey(r)
 			if err != nil {
 				return err
 			}
-			current = built
+
+			existing[key] = r
 		}
-		if err := r.Validate(current); err != nil {
-			return err
+
+		copiedReqs := false
+		for _, r := range reqs {
+			key, err := requirementSemanticKey(r)
+			if err != nil {
+				return err
+			}
+
+			if prev, ok := existing[key]; ok {
+				if err := checkRequirementConflict(prev, r); err != nil {
+					return err
+				}
+
+				continue
+			}
+			if current == nil {
+				built, err := stagedMeta.Build()
+				if err != nil {
+					return err
+				}
+				current = built
+			}
+			if err := r.Validate(current); err != nil {
+				return err
+			}
+			if !copiedReqs {
+				stagedReqs = make([]Requirement, len(t.reqs), len(t.reqs)+len(reqs))
+				copy(stagedReqs, t.reqs)
+				copiedReqs = true
+			}
+			existing[key] = r
+			stagedReqs = append(stagedReqs, r)
 		}
-		existing[key] = r
-		stagedReqs = append(stagedReqs, r)
 	}
 
 	prevUpdates, prevLastUpdated := len(stagedMeta.updates), stagedMeta.lastUpdatedMS
