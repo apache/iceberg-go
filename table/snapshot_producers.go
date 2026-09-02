@@ -511,6 +511,7 @@ func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) 
 		return manifests, nil
 	}
 	if m.clusterBy != nil {
+		// Clustering replaces size-only bin-packing, including minCountToMerge.
 		return m.clusterManifests(manifests)
 	}
 

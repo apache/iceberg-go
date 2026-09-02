@@ -44,6 +44,8 @@ func BenchmarkManifestMergeModes(b *testing.B) {
 }
 
 func benchmarkManifestMergeMode(b *testing.B, cluster bool) {
+	b.Helper()
+
 	spec := iceberg.NewPartitionSpec()
 	schema := simpleSchema()
 	mem := newMemIO(1<<30, errLimitedWrite)

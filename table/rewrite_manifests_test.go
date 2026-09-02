@@ -547,150 +547,178 @@ func TestRewriteManifestsUnknownSpecID(t *testing.T) {
 // TestRewriteManifestsPredicate rewrites only the manifests the predicate
 // selects and leaves the rest untouched.
 func TestRewriteManifestsPredicate(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	fs := iceio.LocalFS{}
+	for _, tc := range []struct {
+		name      string
+		clustered bool
+	}{
+		{name: "SizeOnly"},
+		{name: "Clustered", clustered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			fs := iceio.LocalFS{}
 
-	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, dir, iceberg.Properties{
-			table.ManifestMergeEnabledKey: "false",
+			meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+				table.UnsortedSortOrder, dir, iceberg.Properties{
+					table.ManifestMergeEnabledKey: "false",
+				})
+			require.NoError(t, err)
+
+			cat := &mergeCatalog{meta: meta}
+			tbl := table.New(table.Identifier{"default", "pred"}, meta, dir+"/metadata/00000.json",
+				func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+			const numCommits = 3
+			tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", numCommits)
+
+			before, err := tbl.CurrentSnapshot().Manifests(fs)
+			require.NoError(t, err)
+			require.Len(t, before, numCommits)
+
+			// Select two of the three manifests by path; the third must be left alone.
+			selected := map[string]struct{}{
+				before[0].FilePath(): {},
+				before[1].FilePath(): {},
+			}
+			pred := func(m iceberg.ManifestFile) bool {
+				_, ok := selected[m.FilePath()]
+
+				return ok
+			}
+
+			opts := []table.RewriteManifestsOpt{table.WithRewriteManifestPredicate(pred)}
+			if tc.clustered {
+				opts = append(opts, table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+					return "selected"
+				}))
+			}
+
+			txn := tbl.NewTransaction()
+			res, err := txn.RewriteManifests(ctx, opts...)
+			require.NoError(t, err)
+			tbl, err = txn.Commit(ctx)
+			require.NoError(t, err)
+
+			assert.Len(t, res.AddedManifests, 1, "the two selected manifests merge into one")
+			assert.Len(t, res.RewrittenManifests, 2)
+
+			snap := tbl.CurrentSnapshot()
+			require.NotNil(t, snap)
+			assert.Equal(t, "1", snap.Summary.Properties["manifests-created"])
+			assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
+			assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"])
+
+			after, err := snap.Manifests(fs)
+			require.NoError(t, err)
+			assert.Len(t, after, 2, "one merged manifest plus the untouched one")
+			assert.Equal(t, numCommits, activeFiles(t, after), "no data file may be dropped")
+
+			// The untouched manifest must survive verbatim.
+			var keptPaths []string
+			for _, m := range after {
+				keptPaths = append(keptPaths, m.FilePath())
+			}
+			assert.Contains(t, keptPaths, before[2].FilePath(), "unselected manifest must be kept as-is")
 		})
-	require.NoError(t, err)
-
-	cat := &mergeCatalog{meta: meta}
-	tbl := table.New(table.Identifier{"default", "pred"}, meta, dir+"/metadata/00000.json",
-		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
-
-	const numCommits = 3
-	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "data", numCommits)
-
-	before, err := tbl.CurrentSnapshot().Manifests(fs)
-	require.NoError(t, err)
-	require.Len(t, before, numCommits)
-
-	// Select two of the three manifests by path; the third must be left alone.
-	selected := map[string]struct{}{
-		before[0].FilePath(): {},
-		before[1].FilePath(): {},
 	}
-	pred := func(m iceberg.ManifestFile) bool {
-		_, ok := selected[m.FilePath()]
-
-		return ok
-	}
-
-	txn := tbl.NewTransaction()
-	res, err := txn.RewriteManifests(ctx,
-		table.WithRewriteManifestPredicate(pred),
-		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any { return "selected" }),
-	)
-	require.NoError(t, err)
-	tbl, err = txn.Commit(ctx)
-	require.NoError(t, err)
-
-	assert.Len(t, res.AddedManifests, 1, "the two selected manifests merge into one")
-	assert.Len(t, res.RewrittenManifests, 2)
-
-	snap := tbl.CurrentSnapshot()
-	require.NotNil(t, snap)
-	assert.Equal(t, "1", snap.Summary.Properties["manifests-created"])
-	assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
-	assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"])
-
-	after, err := snap.Manifests(fs)
-	require.NoError(t, err)
-	assert.Len(t, after, 2, "one merged manifest plus the untouched one")
-	assert.Equal(t, numCommits, activeFiles(t, after), "no data file may be dropped")
-
-	// The untouched manifest must survive verbatim.
-	var keptPaths []string
-	for _, m := range after {
-		keptPaths = append(keptPaths, m.FilePath())
-	}
-	assert.Contains(t, keptPaths, before[2].FilePath(), "unselected manifest must be kept as-is")
 }
 
 // TestRewriteManifestsSpecIDFilter rewrites only the manifests of the requested
 // partition spec and leaves manifests written under another spec untouched.
 func TestRewriteManifestsSpecIDFilter(t *testing.T) {
-	ctx := context.Background()
-	dir := t.TempDir()
-	fs := iceio.LocalFS{}
+	for _, tc := range []struct {
+		name      string
+		clustered bool
+	}{
+		{name: "SizeOnly"},
+		{name: "Clustered", clustered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			fs := iceio.LocalFS{}
 
-	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
-		table.UnsortedSortOrder, dir, iceberg.Properties{
-			table.ManifestMergeEnabledKey: "false",
+			meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+				table.UnsortedSortOrder, dir, iceberg.Properties{
+					table.ManifestMergeEnabledKey: "false",
+				})
+			require.NoError(t, err)
+
+			cat := &mergeCatalog{meta: meta}
+			tbl := table.New(table.Identifier{"default", "specfilter"}, meta, dir+"/metadata/00000.json",
+				func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
+
+			// Two manifests under the original unpartitioned spec (id 0).
+			tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "spec0", 2)
+
+			// Evolve the spec, then add a file so it lands in a manifest of the new spec.
+			txn := tbl.NewTransaction()
+			require.NoError(t, table.NewUpdateSpec(txn, false).
+				AddField("id", iceberg.IdentityTransform{}, "id_part").Commit())
+			tbl, err = txn.Commit(ctx)
+			require.NoError(t, err)
+
+			specOneFile := dir + "/spec1-0.parquet"
+			writeOneRowParquet(t, fs, specOneFile)
+			txn = tbl.NewTransaction()
+			require.NoError(t, txn.AddFiles(ctx, []string{specOneFile}, nil, false))
+			tbl, err = txn.Commit(ctx)
+			require.NoError(t, err)
+
+			before, err := tbl.CurrentSnapshot().Manifests(fs)
+			require.NoError(t, err)
+			require.Len(t, before, 3, "two spec-0 manifests plus one spec-1 manifest")
+
+			// Find the lone spec-1 manifest so we can prove it survives verbatim.
+			var specOnePath string
+			specCount := map[int]int{}
+			for _, m := range before {
+				specCount[int(m.PartitionSpecID())]++
+				if int(m.PartitionSpecID()) == 1 {
+					specOnePath = m.FilePath()
+				}
+			}
+			require.Equal(t, 2, specCount[0], "setup must leave two spec-0 manifests")
+			require.Equal(t, 1, specCount[1], "setup must leave one spec-1 manifest")
+
+			opts := []table.RewriteManifestsOpt{table.WithRewriteSpecID(0)}
+			if tc.clustered {
+				opts = append(opts, table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+					return "spec-0"
+				}))
+			}
+
+			txn = tbl.NewTransaction()
+			res, err := txn.RewriteManifests(ctx, opts...)
+			require.NoError(t, err)
+			tbl, err = txn.Commit(ctx)
+			require.NoError(t, err)
+
+			assert.Len(t, res.AddedManifests, 1, "the two spec-0 manifests merge into one")
+			assert.Len(t, res.RewrittenManifests, 2)
+			for _, m := range res.RewrittenManifests {
+				assert.EqualValues(t, 0, m.PartitionSpecID(), "only spec-0 manifests may be rewritten")
+			}
+
+			snap := tbl.CurrentSnapshot()
+			require.NotNil(t, snap)
+			assert.Equal(t, "1", snap.Summary.Properties["manifests-created"])
+			assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
+			assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"], "the spec-1 manifest is kept")
+
+			after, err := snap.Manifests(fs)
+			require.NoError(t, err)
+			assert.Len(t, after, 2, "one merged spec-0 manifest plus the untouched spec-1 manifest")
+			assert.Equal(t, 3, activeFiles(t, after), "no data file may be dropped")
+
+			var keptPaths []string
+			for _, m := range after {
+				keptPaths = append(keptPaths, m.FilePath())
+			}
+			assert.Contains(t, keptPaths, specOnePath, "spec-1 manifest must be kept as-is")
 		})
-	require.NoError(t, err)
-
-	cat := &mergeCatalog{meta: meta}
-	tbl := table.New(table.Identifier{"default", "specfilter"}, meta, dir+"/metadata/00000.json",
-		func(_ context.Context) (iceio.IO, error) { return fs, nil }, cat)
-
-	// Two manifests under the original unpartitioned spec (id 0).
-	tbl = appendSeparateManifests(t, ctx, tbl, fs, dir, "spec0", 2)
-
-	// Evolve the spec, then add a file so it lands in a manifest of the new spec.
-	txn := tbl.NewTransaction()
-	require.NoError(t, table.NewUpdateSpec(txn, false).
-		AddField("id", iceberg.IdentityTransform{}, "id_part").Commit())
-	tbl, err = txn.Commit(ctx)
-	require.NoError(t, err)
-
-	specOneFile := dir + "/spec1-0.parquet"
-	writeOneRowParquet(t, fs, specOneFile)
-	txn = tbl.NewTransaction()
-	require.NoError(t, txn.AddFiles(ctx, []string{specOneFile}, nil, false))
-	tbl, err = txn.Commit(ctx)
-	require.NoError(t, err)
-
-	before, err := tbl.CurrentSnapshot().Manifests(fs)
-	require.NoError(t, err)
-	require.Len(t, before, 3, "two spec-0 manifests plus one spec-1 manifest")
-
-	// Find the lone spec-1 manifest so we can prove it survives verbatim.
-	var specOnePath string
-	specCount := map[int]int{}
-	for _, m := range before {
-		specCount[int(m.PartitionSpecID())]++
-		if int(m.PartitionSpecID()) == 1 {
-			specOnePath = m.FilePath()
-		}
 	}
-	require.Equal(t, 2, specCount[0], "setup must leave two spec-0 manifests")
-	require.Equal(t, 1, specCount[1], "setup must leave one spec-1 manifest")
-
-	txn = tbl.NewTransaction()
-	res, err := txn.RewriteManifests(ctx,
-		table.WithRewriteSpecID(0),
-		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any { return "spec-0" }),
-	)
-	require.NoError(t, err)
-	tbl, err = txn.Commit(ctx)
-	require.NoError(t, err)
-
-	assert.Len(t, res.AddedManifests, 1, "the two spec-0 manifests merge into one")
-	assert.Len(t, res.RewrittenManifests, 2)
-	for _, m := range res.RewrittenManifests {
-		assert.EqualValues(t, 0, m.PartitionSpecID(), "only spec-0 manifests may be rewritten")
-	}
-
-	snap := tbl.CurrentSnapshot()
-	require.NotNil(t, snap)
-	assert.Equal(t, "1", snap.Summary.Properties["manifests-created"])
-	assert.Equal(t, "2", snap.Summary.Properties["manifests-replaced"])
-	assert.Equal(t, "1", snap.Summary.Properties["manifests-kept"], "the spec-1 manifest is kept")
-
-	after, err := snap.Manifests(fs)
-	require.NoError(t, err)
-	assert.Len(t, after, 2, "one merged spec-0 manifest plus the untouched spec-1 manifest")
-	assert.Equal(t, 3, activeFiles(t, after), "no data file may be dropped")
-
-	var keptPaths []string
-	for _, m := range after {
-		keptPaths = append(keptPaths, m.FilePath())
-	}
-	assert.Contains(t, keptPaths, specOnePath, "spec-1 manifest must be kept as-is")
 }
 
 // classifyManifests counts data vs delete manifests and returns the path of the
@@ -1065,6 +1093,100 @@ func TestRewriteManifestsClusterByReusesOutputOnOCCRetry(t *testing.T) {
 		"all original files must remain in the reused clustered output")
 	assert.Len(t, res.RewrittenManifests, 3)
 	assert.Len(t, res.AddedManifests, 1)
+}
+
+// TestRewriteManifestsClusterByDoesNotReuseDisplacedOutput verifies that a
+// concurrent rewrite replacing every input manifest forces a fresh clustering
+// pass. Reusing the first attempt's output in that case would retain the peer's
+// replacement and duplicate every data file from the stale inputs.
+func TestRewriteManifestsClusterByDoesNotReuseDisplacedOutput(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	track := &trackingFS{}
+	fsF := func(_ context.Context) (iceio.IO, error) { return track, nil }
+
+	props := iceberg.Properties{
+		table.PropertyFormatVersion:        "2",
+		table.ManifestMergeEnabledKey:      "false",
+		table.CommitMinRetryWaitMsKey:      "0",
+		table.CommitMaxRetryWaitMsKey:      "0",
+		table.CommitTotalRetryTimeoutMsKey: "60000",
+		table.CommitNumRetriesKey:          "1",
+	}
+	meta, err := table.NewMetadata(rewriteSchema(), iceberg.UnpartitionedSpec,
+		table.UnsortedSortOrder, dir, props)
+	require.NoError(t, err)
+
+	setup := &mergeCatalog{meta: meta}
+	tbl := table.New(table.Identifier{"default", "displaced"}, meta,
+		dir+"/metadata/00000.json", fsF, setup)
+	tbl = appendSeparateManifests(t, ctx, tbl, track, dir, "stale", 3)
+	staleMeta := tbl.Metadata()
+
+	// Build the concurrent head by replacing all three manifests the stale
+	// rewrite will consume. None of those original paths survives in the fresh
+	// parent, so the retry must not reuse the stale rewrite output.
+	peerCat := &mergeCatalog{meta: staleMeta}
+	peer := table.New(table.Identifier{"default", "displaced"}, staleMeta,
+		dir+"/metadata/peer.json", fsF, peerCat)
+	peerTxn := peer.NewTransaction()
+	_, err = peerTxn.RewriteManifests(ctx)
+	require.NoError(t, err)
+	peer, err = peerTxn.Commit(ctx)
+	require.NoError(t, err)
+	peerMeta := peer.Metadata()
+	peerManifests, err := peer.CurrentSnapshot().Manifests(track)
+	require.NoError(t, err)
+	require.Len(t, peerManifests, 1, "the peer must replace all stale manifests")
+
+	cat := &stagedHeadCatalog{
+		current:  staleMeta,
+		heads:    []table.Metadata{peerMeta},
+		failures: 1,
+		location: dir,
+		fsF:      fsF,
+	}
+	staleTbl := table.New(table.Identifier{"default", "displaced"}, staleMeta,
+		dir+"/metadata/00000.json", fsF, cat)
+
+	var clusterCalls atomic.Int32
+	txn := staleTbl.NewTransaction()
+	res, err := txn.RewriteManifests(ctx,
+		table.WithRewriteManifestClusterBy(func(iceberg.DataFile) any {
+			clusterCalls.Add(1)
+
+			return "same"
+		}),
+	)
+	require.NoError(t, err)
+	committed, err := txn.Commit(ctx)
+	require.NoError(t, err)
+
+	require.EqualValues(t, 2, cat.commitTableCalls.Load(),
+		"expected one conflict followed by one successful commit")
+	assert.EqualValues(t, 6, clusterCalls.Load(),
+		"displaced inputs must be clustered again on the retry")
+	assert.Len(t, res.RewrittenManifests, 1,
+		"the winning retry should report the peer manifest it replaced")
+	assert.Len(t, res.AddedManifests, 1)
+
+	snap := committed.CurrentSnapshot()
+	require.NotNil(t, snap)
+	after, err := snap.Manifests(track)
+	require.NoError(t, err)
+	require.Len(t, after, 1, "the retry should replace the peer manifest once")
+
+	counts := make(map[string]int)
+	for _, manifest := range after {
+		for entry, entryErr := range manifest.Entries(track, true) {
+			require.NoError(t, entryErr)
+			counts[filepath.Base(entry.DataFile().FilePath())]++
+		}
+	}
+	for i := range 3 {
+		assert.Equal(t, 1, counts[fmt.Sprintf("stale-%d.parquet", i)],
+			"each stale data file must appear exactly once after the retry")
+	}
 }
 
 // TestRewriteManifestsStaleCountsAfterOCCRetry forces a commit conflict and

@@ -132,7 +132,9 @@ func validateManifestClusterKeyComparable(key any) error {
 
 // clusterManifests rewrites entries into one rolling writer per cluster key and
 // partition spec. Writers stay open while entries for other keys are read so a
-// later file with the same key is still written beside the earlier files.
+// later file with the same key is still written beside the earlier files. This
+// assumes a producer that only reorganizes live data entries; it does not add
+// new files or preserve tombstones.
 func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	// One output writer is tracked per key, so reserve space for the common
 	// case where each input manifest introduces a new cluster.
@@ -185,9 +187,10 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 				if clusterErr := validateManifestClusterKey(clusterValue); clusterErr != nil {
 					return nil, fmt.Errorf("cluster data file %q: %w", entry.DataFile().FilePath(), clusterErr)
 				}
-				writer, entryErr = m.newClusterWriter(specID)
-				if entryErr != nil {
-					return nil, entryErr
+				var openErr error
+				writer, openErr = m.newClusterWriter(specID)
+				if openErr != nil {
+					return nil, openErr
 				}
 				writers[key] = writer
 				order = append(order, key)
@@ -224,6 +227,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 	for _, key := range order {
 		writer := writers[key]
 		if writer.writer == nil || !writer.hasEntries {
+			writer.abort()
 			continue
 		}
 		if err := closeWriter(writer); err != nil {
@@ -231,7 +235,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 		}
 	}
 
-	result := make([]iceberg.ManifestFile, 0)
+	result := make([]iceberg.ManifestFile, 0, len(order))
 	for _, key := range order {
 		result = append(result, writers[key].manifests...)
 	}
