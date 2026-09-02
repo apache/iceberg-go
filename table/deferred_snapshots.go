@@ -168,10 +168,15 @@ func validateStringArray(raw json.RawMessage) error {
 		if i == len(raw)-1 {
 			return nil
 		}
-		if raw[i] != '"' {
+		switch {
+		case raw[i] == '"':
+			i = scanJSONString(raw, i)
+		case hasJSONNullAt(raw, i):
+			// Match encoding/json's []string behavior: null decodes to "".
+			i += len("null")
+		default:
 			return errors.New("cannot unmarshal manifest location into string")
 		}
-		i = scanJSONString(raw, i)
 		i = skipJSONSpace(raw, i)
 		if i < len(raw)-1 && raw[i] == ',' {
 			i++
@@ -194,10 +199,15 @@ func validateSummaryObject(raw json.RawMessage) error {
 	if raw[0] != '{' || raw[len(raw)-1] != '}' {
 		return errors.New("cannot unmarshal summary into map[string]string")
 	}
+	// Summary.UnmarshalJSON decodes through map[string]string. Preserve its
+	// acceptance contract here: null becomes "", and duplicate keys use the
+	// last value. In particular, only the final operation value determines
+	// whether ErrInvalidOperation is returned.
+	operationSeen, operationEmpty := false, false
 	for i := 1; i < len(raw)-1; {
 		i = skipJSONSpace(raw, i)
 		if i == len(raw)-1 {
-			return nil
+			break
 		}
 		if raw[i] != '"' {
 			return errors.New("invalid summary key")
@@ -210,13 +220,27 @@ func validateSummaryObject(raw json.RawMessage) error {
 			return errors.New("invalid summary object")
 		}
 		i = skipJSONSpace(raw, i+1)
-		if i >= len(raw)-1 || raw[i] != '"' {
+		if i >= len(raw)-1 {
 			return errors.New("cannot unmarshal summary value into string")
 		}
-		valueStart := i
-		i = scanJSONString(raw, i)
-		if summaryKeyIsOperation(key) && i == valueStart+2 {
-			return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
+
+		valueEmpty := false
+		switch {
+		case raw[i] == '"':
+			valueStart := i
+			i = scanJSONString(raw, i)
+			valueEmpty = i == valueStart+2
+		case hasJSONNullAt(raw, i):
+			// Match encoding/json's map[string]string behavior: null decodes
+			// to "". A final null operation is therefore invalid.
+			i += len("null")
+			valueEmpty = true
+		default:
+			return errors.New("cannot unmarshal summary value into string")
+		}
+		if summaryKeyIsOperation(key) {
+			operationSeen = true
+			operationEmpty = valueEmpty
 		}
 		i = skipJSONSpace(raw, i)
 		if i < len(raw)-1 && raw[i] == ',' {
@@ -227,9 +251,18 @@ func validateSummaryObject(raw json.RawMessage) error {
 		if i != len(raw)-1 {
 			return errors.New("invalid summary object")
 		}
+
+		break
+	}
+	if operationSeen && operationEmpty {
+		return fmt.Errorf("%w: found empty operation", ErrInvalidOperation)
 	}
 
 	return nil
+}
+
+func hasJSONNullAt(raw []byte, i int) bool {
+	return i+len("null") <= len(raw) && bytes.Equal(raw[i:i+len("null")], []byte("null"))
 }
 
 func summaryKeyIsOperation(raw []byte) bool {
@@ -276,14 +309,14 @@ type rawJSONSpan struct {
 }
 
 func splitJSONArray(raw []byte) ([]rawJSONSpan, error) {
-	raw = bytes.TrimSpace(raw)
-	if len(raw) < 2 || raw[0] != '[' || raw[len(raw)-1] != ']' {
+	arrayStart, arrayEnd := trimJSONSpan(raw, 0, len(raw))
+	if arrayEnd-arrayStart < 2 || raw[arrayStart] != '[' || raw[arrayEnd-1] != ']' {
 		return nil, errors.New("expected JSON array")
 	}
 
 	elements := make([]rawJSONSpan, 0)
-	start, depth := 1, 0
-	for i := 1; i < len(raw)-1; i++ {
+	start, depth := arrayStart+1, 0
+	for i := start; i < arrayEnd-1; i++ {
 		switch raw[i] {
 		case '"':
 			i = scanJSONString(raw, i) - 1
@@ -299,7 +332,7 @@ func splitJSONArray(raw []byte) ([]rawJSONSpan, error) {
 			}
 		}
 	}
-	elementStart, elementEnd := trimJSONSpan(raw, start, len(raw)-1)
+	elementStart, elementEnd := trimJSONSpan(raw, start, arrayEnd-1)
 	if elementStart < elementEnd {
 		elements = append(elements, rawJSONSpan{start: elementStart, end: elementEnd})
 	}
@@ -329,6 +362,10 @@ func parseNormalizedMetadataBytesDeferredSnapshots(normalized []byte, formatVers
 		}
 
 		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+	if metadata.Version() != formatVersion {
+		return nil, fmt.Errorf("%w: preflight selected version %d, decoded version %d",
+			ErrInvalidMetadataFormatVersion, formatVersion, metadata.Version())
 	}
 
 	common := commonMetadataOf(metadata)

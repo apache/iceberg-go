@@ -448,7 +448,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 			b.nextRowID = &nextRowID
 		}
 		if common.CurrentSnapshotID != nil {
-			if _, ok := snapshotIndexPosition(common.snapshotIndex, common.SnapshotList, *common.CurrentSnapshotID); ok {
+			if _, ok := snapshotIndexPosition(b.snapshotIndex, b.snapshotList, *common.CurrentSnapshotID); ok {
 				b.currentSnapshotID = clonePtr(common.CurrentSnapshotID)
 			}
 		}
@@ -1901,18 +1901,9 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
-	// Keep the raw top-level object for all preflight checks so it is only
-	// decoded once before the version-specific metadata decode below.
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	var formatVersion int
-	if rawVersion, ok := metadata["format-version"]; ok {
-		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-		}
+	metadata, formatVersion, err := preflightMetadataBytes(b)
+	if err != nil {
+		return nil, err
 	}
 
 	var ret Metadata
@@ -1949,20 +1940,13 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 
 // ParseMetadataBytesDeferredSnapshots parses metadata while retaining the full
 // snapshot array as raw JSON. Snapshots targeted by refs are decoded eagerly;
-// unreferenced history is materialized on first access.
+// unreferenced history is materialized on first access. Operations requiring
+// the complete snapshot collection, including MetadataBuilderFromBase, decode
+// the full history and therefore may cost more than eager parsing overall.
 func ParseMetadataBytesDeferredSnapshots(b []byte) (Metadata, error) {
-	// Keep the raw top-level object for normalization and format selection so
-	// deferred parsing does not add another full-document preflight decode.
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	var formatVersion int
-	if rawVersion, ok := metadata["format-version"]; ok {
-		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-		}
+	metadata, formatVersion, err := preflightMetadataBytes(b)
+	if err != nil {
+		return nil, err
 	}
 
 	normalized, err := assignMissingPartitionFieldIDsFromMetadata(b, metadata)
@@ -1971,6 +1955,24 @@ func ParseMetadataBytesDeferredSnapshots(b []byte) (Metadata, error) {
 	}
 
 	return parseNormalizedMetadataBytesDeferredSnapshots(normalized, formatVersion)
+}
+
+// preflightMetadataBytes keeps the raw top-level object for normalization and
+// format selection so eager and deferred parsing share one document scan.
+func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	var formatVersion int
+	if rawVersion, ok := metadata["format-version"]; ok {
+		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
+			return nil, 0, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+		}
+	}
+
+	return metadata, formatVersion, nil
 }
 
 func requirePartitionSpecIDs(b []byte) error {
@@ -2372,6 +2374,9 @@ func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	if c.deferredSnapshots != nil {
 		snapshot, err := c.deferredSnapshots.snapshotByID(id)
 		if err != nil {
+			// Parser-created deferred state is synchronously validated before
+			// publication, so a later typed decode cannot fail. Keep this branch
+			// for defensive handling of manually constructed in-package state.
 			return nil
 		}
 
@@ -2384,6 +2389,10 @@ func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 func (c *commonMetadata) allSnapshots() []Snapshot {
 	snapshots, err := c.snapshotsForMarshal()
 	if err != nil {
+		// prepareDeferredSnapshots validates JSON syntax and every Snapshot
+		// field whose typed decoding can fail before deferred state is
+		// published. This error is therefore unreachable for parser-created
+		// state; callers with an error channel use snapshotsForMarshal directly.
 		return nil
 	}
 
@@ -3068,7 +3077,7 @@ func (m *metadataV1) finishUnmarshal() error {
 	return nil
 }
 
-func (m *metadataV1) MarshalJSON() ([]byte, error) {
+func (m metadataV1) MarshalJSON() ([]byte, error) {
 	snapshots, err := m.snapshotsForMarshal()
 	if err != nil {
 		return nil, err
@@ -3080,7 +3089,7 @@ func (m *metadataV1) MarshalJSON() ([]byte, error) {
 		*Alias
 		SnapshotList []Snapshot `json:"snapshots,omitempty"`
 	}{
-		Alias:        (*Alias)(m),
+		Alias:        (*Alias)(&m),
 		SnapshotList: snapshots,
 	})
 }
@@ -3166,7 +3175,7 @@ func (m *metadataV2) finishUnmarshal() error {
 	return nil
 }
 
-func (m *metadataV2) MarshalJSON() ([]byte, error) {
+func (m metadataV2) MarshalJSON() ([]byte, error) {
 	snapshots, err := m.snapshotsForMarshal()
 	if err != nil {
 		return nil, err
@@ -3178,7 +3187,7 @@ func (m *metadataV2) MarshalJSON() ([]byte, error) {
 		*Alias
 		SnapshotList []Snapshot `json:"snapshots,omitempty"`
 	}{
-		Alias:        (*Alias)(m),
+		Alias:        (*Alias)(&m),
 		SnapshotList: snapshots,
 	})
 }
@@ -3286,7 +3295,7 @@ func (m *metadataV3) finishUnmarshal() error {
 // rejects writes of malformed in-memory state (builder/parser paths
 // always populate it, so this only fires when code constructs metadataV3
 // directly and skips the builder).
-func (m *metadataV3) MarshalJSON() ([]byte, error) {
+func (m metadataV3) MarshalJSON() ([]byte, error) {
 	if m.LastPartitionID == nil {
 		return nil, fmt.Errorf("%w: last-partition-id must be set for v3 metadata", ErrInvalidMetadata)
 	}
@@ -3304,7 +3313,7 @@ func (m *metadataV3) MarshalJSON() ([]byte, error) {
 		CurrentSnapshotID *int64     `json:"current-snapshot-id"`
 		SnapshotList      []Snapshot `json:"snapshots,omitempty"`
 	}{
-		Alias:             (*Alias)(m),
+		Alias:             (*Alias)(&m),
 		CurrentSnapshotID: m.CurrentSnapshotID,
 		SnapshotList:      snapshots,
 	})

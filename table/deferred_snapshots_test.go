@@ -39,6 +39,37 @@ func metadataWithUnreferencedSnapshot(t testing.TB) []byte {
 	return data
 }
 
+func metadataWithHistoricalSnapshotFields(
+	t testing.TB,
+	summary, manifests json.RawMessage,
+) []byte {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(metadataWithUnreferencedSnapshot(t), &fields))
+
+	var snapshots []json.RawMessage
+	require.NoError(t, json.Unmarshal(fields["snapshots"], &snapshots))
+	var historical map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(snapshots[0], &historical))
+	if summary != nil {
+		historical["summary"] = summary
+	}
+	if manifests != nil {
+		historical["manifests"] = manifests
+	}
+
+	var err error
+	snapshots[0], err = json.Marshal(historical)
+	require.NoError(t, err)
+	fields["snapshots"], err = json.Marshal(snapshots)
+	require.NoError(t, err)
+	data, err := json.Marshal(fields)
+	require.NoError(t, err)
+
+	return data
+}
+
 func TestParseMetadataBytesDeferredSnapshots(t *testing.T) {
 	data := metadataWithUnreferencedSnapshot(t)
 	eager, err := ParseMetadataBytes(data)
@@ -165,6 +196,100 @@ func TestDeferredSnapshotsRoundTripAllMetadataVersions(t *testing.T) {
 			reparsed, err := ParseMetadataBytes(serialized)
 			require.NoError(t, err)
 			assert.True(t, eager.Equals(reparsed))
+		})
+	}
+}
+
+func TestDeferredSnapshotsValidationMatchesEagerJSONSemantics(t *testing.T) {
+	tests := []struct {
+		name      string
+		summary   json.RawMessage
+		manifests json.RawMessage
+		wantErr   error
+	}{
+		{
+			name:    "null summary property",
+			summary: json.RawMessage(`{"operation":"append","extra":null}`),
+		},
+		{
+			name:      "null manifest location",
+			manifests: json.RawMessage(`["a.avro",null]`),
+		},
+		{
+			name:    "duplicate operation uses last value",
+			summary: json.RawMessage(`{"operation":"","operation":"append"}`),
+		},
+		{
+			name:    "null final operation remains invalid",
+			summary: json.RawMessage(`{"operation":"append","operation":null}`),
+			wantErr: ErrInvalidOperation,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := metadataWithHistoricalSnapshotFields(t, tt.summary, tt.manifests)
+			eager, eagerErr := ParseMetadataBytes(data)
+			deferred, deferredErr := ParseMetadataBytesDeferredSnapshots(data)
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, eagerErr, tt.wantErr)
+				require.ErrorIs(t, deferredErr, tt.wantErr)
+
+				return
+			}
+
+			require.NoError(t, eagerErr)
+			require.NoError(t, deferredErr)
+			assert.Equal(t, eager.SnapshotByID(3051729675574597004), deferred.SnapshotByID(3051729675574597004))
+		})
+	}
+}
+
+func TestSplitJSONArrayOffsetsReferToOriginalInput(t *testing.T) {
+	raw := []byte(" \n [ {\"id\":1}, [\"comma,brace}\"] ] \t")
+	spans, err := splitJSONArray(raw)
+	require.NoError(t, err)
+	require.Len(t, spans, 2)
+	assert.Equal(t, `{"id":1}`, string(raw[spans[0].start:spans[0].end]))
+	assert.Equal(t, `["comma,brace}"]`, string(raw[spans[1].start:spans[1].end]))
+}
+
+func TestDeferredSnapshotsMarshalMetadataValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data string
+	}{
+		{name: "v1", data: ExampleTableMetadataV1},
+		{name: "v2", data: ExampleTableMetadataV2},
+		{name: "v3", data: ExampleTableMetadataV3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(tc.data), &fields))
+			fields["refs"] = json.RawMessage(`{}`)
+			data, err := json.Marshal(fields)
+			require.NoError(t, err)
+
+			meta, err := ParseMetadataBytesDeferredSnapshots(data)
+			require.NoError(t, err)
+
+			var serialized []byte
+			switch typed := meta.(type) {
+			case *metadataV1:
+				serialized, err = json.Marshal(*typed)
+			case *metadataV2:
+				serialized, err = json.Marshal(*typed)
+			case *metadataV3:
+				serialized, err = json.Marshal(*typed)
+			default:
+				t.Fatalf("unexpected metadata type %T", meta)
+			}
+			require.NoError(t, err)
+
+			reparsed, err := ParseMetadataBytes(serialized)
+			require.NoError(t, err)
+			assert.Len(t, reparsed.Snapshots(), len(meta.Snapshots()))
 		})
 	}
 }
