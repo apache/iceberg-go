@@ -1928,13 +1928,91 @@ func TestBuildExtractColumnNameFallback(t *testing.T) {
 
 	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
 	require.NoError(t, err)
-	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x"}
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "payload"}
 
 	arr, _, err := buildExtractColumn(col, rec, mem)
 	require.NoError(t, err)
 	defer arr.Release()
 	require.Equal(t, 1, arr.Len())
 	assert.EqualValues(t, 42, arr.(*array.Int64).Value(0), "column resolved by name despite missing field id")
+}
+
+func TestBuildExtractColumnRenamedSource(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 2, Name: "payload", Type: iceberg.VariantType{}},
+	)
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(7)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	defer pArr.Release()
+
+	// Name-mapped rename: the Arrow batch keeps the legacy physical name.
+	arrSchema := arrow.NewSchema([]arrow.Field{{Name: "old_payload", Type: pArr.DataType(), Nullable: true}}, nil)
+	rec := array.NewRecordBatch(arrSchema, []arrow.Array{pArr}, 1)
+	defer rec.Release()
+
+	term, err := iceberg.Extract("payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "old_payload"}
+
+	arr, _, err := buildExtractColumn(col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	assert.EqualValues(t, 7, arr.(*array.Int64).Value(0), "resolved by file-schema physical path after rename")
+}
+
+func TestBuildExtractColumnNested(t *testing.T) {
+	mem := memory.DefaultAllocator
+	iceSchema := iceberg.NewSchema(0,
+		iceberg.NestedField{ID: 3, Name: "wrapper", Type: &iceberg.StructType{
+			FieldList: []iceberg.NestedField{{ID: 2, Name: "payload", Type: iceberg.VariantType{}}},
+		}},
+	)
+
+	vb := extensions.NewVariantBuilder(mem, extensions.NewDefaultVariantType())
+	defer vb.Release()
+	var b variant.Builder
+	require.NoError(t, b.Append(map[string]any{"a": int64(9)}))
+	v, err := b.Build()
+	require.NoError(t, err)
+	vb.Append(v)
+	pArr := vb.NewArray()
+	defer pArr.Release()
+
+	childField := arrow.Field{
+		Name: "payload", Type: pArr.DataType(), Nullable: true,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"2"}),
+	}
+	structType := arrow.StructOf(childField)
+	structData := array.NewData(structType, pArr.Len(), []*memory.Buffer{nil}, []arrow.ArrayData{pArr.Data()}, 0, 0)
+	defer structData.Release()
+	structArr := array.NewStructData(structData)
+	defer structArr.Release()
+
+	wrapperField := arrow.Field{
+		Name: "wrapper", Type: structType, Nullable: true,
+		Metadata: arrow.NewMetadata([]string{ArrowParquetFieldIDKey}, []string{"3"}),
+	}
+	rec := array.NewRecordBatch(arrow.NewSchema([]arrow.Field{wrapperField}, nil), []arrow.Array{structArr}, 1)
+	defer rec.Release()
+
+	term, err := iceberg.Extract("wrapper.payload", "$.a", iceberg.PrimitiveTypes.Int64).Bind(iceSchema, true)
+	require.NoError(t, err)
+	col := iceberg.VariantExtractColumn{Term: term.(iceberg.BoundExtract), FieldID: 100, Name: "_x", SourcePath: "wrapper.payload"}
+
+	arr, _, err := buildExtractColumn(col, rec, mem)
+	require.NoError(t, err)
+	defer arr.Release()
+	require.Equal(t, 1, arr.Len())
+	assert.EqualValues(t, 9, arr.(*array.Int64).Value(0), "nested variant resolved by descending the struct")
 }
 
 // TestBuildExtractColumnWrongType: a present-but-non-variant column errors instead of silently null-filling.

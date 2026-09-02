@@ -660,9 +660,10 @@ func TranslateColumnNames(expr BooleanExpression, fileSchema *Schema) (BooleanEx
 
 // VariantExtractColumn describes a synthetic column that materializes one variant extract term for filtering.
 type VariantExtractColumn struct {
-	Term    BoundExtract
-	FieldID int
-	Name    string
+	Term       BoundExtract
+	FieldID    int
+	Name       string
+	SourcePath string
 }
 
 // TranslateColumnNamesForScan translates a bound filter to the file schema, mapping variant extract terms to synthetic reference columns.
@@ -717,11 +718,13 @@ func (t *scanTranslator) extractRef(ext BoundExtract) Reference {
 	key := ext.String()
 	idx, ok := t.byKey[key]
 	if !ok {
+		sourcePath, _ := t.fileSchema.FindColumnName(ext.Ref().Field().ID)
 		idx = len(t.columns)
 		t.columns = append(t.columns, VariantExtractColumn{
-			Term:    ext,
-			FieldID: t.nextID,
-			Name:    t.syntheticName(),
+			Term:       ext,
+			FieldID:    t.nextID,
+			Name:       t.syntheticName(),
+			SourcePath: sourcePath,
 		})
 		t.nextID++
 		t.byKey[key] = idx
@@ -881,29 +884,44 @@ const sanitizedLiteralMask = "(redacted)"
 // predicates (IN / NOT IN) keep their arity so the operation is not
 // misrepresented, but the members are masked.
 func SanitizeExpression(expr BooleanExpression) (BooleanExpression, error) {
-	return VisitExpr(expr, sanitizeVisitor{})
+	res, err := VisitExpr(expr, sanitizeVisitor{})
+	if err != nil {
+		return nil, err
+	}
+
+	return res.expr, nil
+}
+
+// sanitizedResult is the masked expression plus whether its subtree held a non-serializable term.
+type sanitizedResult struct {
+	expr              BooleanExpression
+	hasUnserializable bool
 }
 
 type sanitizeVisitor struct{}
 
-func (sanitizeVisitor) VisitTrue() BooleanExpression  { return AlwaysTrue{} }
-func (sanitizeVisitor) VisitFalse() BooleanExpression { return AlwaysFalse{} }
-func (sanitizeVisitor) VisitNot(child BooleanExpression) BooleanExpression {
-	return NewNot(child)
+func (sanitizeVisitor) VisitTrue() sanitizedResult  { return sanitizedResult{expr: AlwaysTrue{}} }
+func (sanitizeVisitor) VisitFalse() sanitizedResult { return sanitizedResult{expr: AlwaysFalse{}} }
+func (sanitizeVisitor) VisitNot(child sanitizedResult) sanitizedResult {
+	if child.hasUnserializable {
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
+	}
+
+	return sanitizedResult{expr: NewNot(child.expr)}
 }
 
-func (sanitizeVisitor) VisitAnd(left, right BooleanExpression) BooleanExpression {
-	return NewAnd(left, right)
+func (sanitizeVisitor) VisitAnd(left, right sanitizedResult) sanitizedResult {
+	return sanitizedResult{expr: NewAnd(left.expr, right.expr), hasUnserializable: left.hasUnserializable || right.hasUnserializable}
 }
 
-func (sanitizeVisitor) VisitOr(left, right BooleanExpression) BooleanExpression {
-	return NewOr(left, right)
+func (sanitizeVisitor) VisitOr(left, right sanitizedResult) sanitizedResult {
+	return sanitizedResult{expr: NewOr(left.expr, right.expr), hasUnserializable: left.hasUnserializable || right.hasUnserializable}
 }
 
-func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
+func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) sanitizedResult {
 	// An extract term has no REST expression-JSON form; keeping it would fail json.Marshal. Collapse it like bbox (mirrors VisitBound).
 	if _, ok := pred.Term().(*unboundExtract); ok {
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	}
 
 	switch p := pred.(type) {
@@ -912,20 +930,20 @@ func (sanitizeVisitor) VisitUnbound(pred UnboundPredicate) BooleanExpression {
 		// literal, and has no REST expression-JSON form (see MarshalJSON).
 		// Collapse it to always-true so the surrounding expression still
 		// sanitizes and serializes; nothing user-provided leaks.
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	case *unboundUnaryPredicate:
 		// No literal to mask; the op and term are safe to keep as-is.
-		return pred
+		return sanitizedResult{expr: pred}
 	case *unboundLiteralPredicate:
-		return sanitizeLiteralPredicate(p.op, p.term)
+		return sanitizedResult{expr: sanitizeLiteralPredicate(p.op, p.term)}
 	case *unboundSetPredicate:
-		return sanitizeSetPredicate(p.op, p.term, p.lits.Len())
+		return sanitizedResult{expr: sanitizeSetPredicate(p.op, p.term, p.lits.Len())}
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}
 }
 
-func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
+func (sanitizeVisitor) VisitBound(pred BoundPredicate) sanitizedResult {
 	// A bbox predicate carries query-box coordinates, not a per-row user literal,
 	// and has no REST expression-JSON form (see MarshalJSON), so it cannot be
 	// rebuilt as a reference predicate like the cases below. Collapse it to
@@ -933,12 +951,12 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	// nothing user-provided leaks. Matched before ref is taken and on the exported
 	// BoundBBoxPredicate interface (mirrors scanTranslator).
 	if _, ok := pred.(BoundBBoxPredicate); ok {
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	}
 
 	// An extract term has no reference form; rebuilding over its Ref() would leak the whole variant column name. Collapse it like bbox.
 	if _, ok := pred.Term().(BoundExtract); ok {
-		return AlwaysTrue{}
+		return sanitizedResult{expr: AlwaysTrue{}, hasUnserializable: true}
 	}
 
 	// Rebuild over the column name as an unbound reference: the sanitized form is
@@ -948,11 +966,11 @@ func (sanitizeVisitor) VisitBound(pred BoundPredicate) BooleanExpression {
 	term := unboundTermForBound(pred.Term(), ref)
 	switch p := pred.(type) {
 	case BoundUnaryPredicate:
-		return UnaryPredicate(p.Op(), term)
+		return sanitizedResult{expr: UnaryPredicate(p.Op(), term)}
 	case BoundLiteralPredicate:
-		return sanitizeLiteralPredicate(p.Op(), term)
+		return sanitizedResult{expr: sanitizeLiteralPredicate(p.Op(), term)}
 	case BoundSetPredicate:
-		return sanitizeSetPredicate(p.Op(), term, boundSetLiteralsForVisit(p).Len())
+		return sanitizedResult{expr: sanitizeSetPredicate(p.Op(), term, boundSetLiteralsForVisit(p).Len())}
 	default:
 		panic(fmt.Errorf("%w: unsupported predicate: %s", ErrNotImplemented, pred))
 	}

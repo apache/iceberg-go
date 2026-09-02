@@ -322,6 +322,15 @@ func TestSanitizeExpressionExtractCollapses(t *testing.T) {
 	sanitizedBound, err := iceberg.SanitizeExpression(boundExt)
 	require.NoError(t, err)
 	assert.Equal(t, iceberg.AlwaysTrue{}, sanitizedBound)
+
+	negated, err := iceberg.SanitizeExpression(
+		iceberg.NewNot(iceberg.LiteralPredicate(iceberg.OpEQ, ext, iceberg.NewLiteral(int64(5)))))
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.AlwaysTrue{}, negated)
+
+	negatedBound, err := iceberg.SanitizeExpression(iceberg.NewNot(boundExt))
+	require.NoError(t, err)
+	assert.Equal(t, iceberg.AlwaysTrue{}, negatedBound)
 }
 
 func mustLit(t *testing.T, s string, typ iceberg.Type) iceberg.Literal {

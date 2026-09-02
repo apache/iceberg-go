@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -59,19 +60,13 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 
 	n := int(rec.NumRows())
 	varName := col.Term.Ref().Field().Name
-	varIdx := fieldIndexByID(rec.Schema(), col.Term.Ref().Field().ID)
-	if varIdx < 0 {
-		// Arrow field may lack PARQUET:field_id metadata on name-mapping reads; fall back to the column name.
-		if idxs := rec.Schema().FieldIndices(varName); len(idxs) == 1 {
-			varIdx = idxs[0]
-		}
-	}
-	if varIdx < 0 {
+	arr := resolveVariantSource(rec, col.Term.Ref().Field().ID, col.SourcePath)
+	if arr == nil {
 		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q not found in file", iceberg.ErrInvalidArgument, varName)
 	}
-	varr, ok := rec.Column(varIdx).(*extensions.VariantArray)
+	varr, ok := arr.(*extensions.VariantArray)
 	if !ok {
-		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q is not a VariantArray (got %T)", iceberg.ErrInvalidArgument, varName, rec.Column(varIdx))
+		return nil, arrow.Field{}, fmt.Errorf("%w: variant extract column %q is not a VariantArray (got %T)", iceberg.ErrInvalidArgument, varName, arr)
 	}
 
 	for i := range n {
@@ -109,6 +104,75 @@ func buildExtractColumn(col iceberg.VariantExtractColumn, rec arrow.RecordBatch,
 	}
 
 	return bldr.NewArray(), field, nil
+}
+
+// resolveVariantSource locates the extract's source array by field id, descending
+// nested structs; it falls back to the file-schema path when field ids are absent.
+func resolveVariantSource(rec arrow.RecordBatch, fieldID int, sourcePath string) arrow.Array {
+	for i, f := range rec.Schema().Fields() {
+		if a := descendByFieldID(f, rec.Column(i), fieldID); a != nil {
+			return a
+		}
+	}
+	if sourcePath == "" {
+		return nil
+	}
+
+	return descendByPath(rec.Schema(), rec.Columns(), strings.Split(sourcePath, "."))
+}
+
+func descendByFieldID(f arrow.Field, col arrow.Array, fieldID int) arrow.Array {
+	if v, ok := f.Metadata.GetValue(ArrowParquetFieldIDKey); ok {
+		if id, err := strconv.Atoi(v); err == nil && id == fieldID {
+			return col
+		}
+	}
+	st, ok := col.(*array.Struct)
+	if !ok {
+		return nil
+	}
+	for i, cf := range f.Type.(*arrow.StructType).Fields() {
+		if a := descendByFieldID(cf, st.Field(i), fieldID); a != nil {
+			return a
+		}
+	}
+
+	return nil
+}
+
+func descendByPath(schema *arrow.Schema, cols []arrow.Array, path []string) arrow.Array {
+	var (
+		col   arrow.Array
+		ftype arrow.DataType
+	)
+	found := false
+	for i, f := range schema.Fields() {
+		if f.Name == path[0] {
+			col, ftype, found = cols[i], f.Type, true
+
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	for _, seg := range path[1:] {
+		st, ok := col.(*array.Struct)
+		if !ok {
+			return nil
+		}
+		stype, ok := ftype.(*arrow.StructType)
+		if !ok {
+			return nil
+		}
+		idx, ok := stype.FieldIdx(seg)
+		if !ok {
+			return nil
+		}
+		col, ftype = st.Field(idx), stype.Field(idx).Type
+	}
+
+	return col
 }
 
 // appendExtractLiteral appends a decoded extract literal to its typed builder, erroring rather than panicking on a type mismatch.
