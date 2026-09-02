@@ -20,6 +20,7 @@ package table
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -1288,6 +1289,18 @@ func TestTransactionApplyDefersMetadataBuildForNoopRequirements(t *testing.T) {
 		_, err := txn.meta.Build()
 		require.ErrorIs(t, err, ErrInvalidMetadata)
 	})
+}
+
+func TestTransactionStagedTableBuildsOnePreviousMetadataLogEntry(t *testing.T) {
+	txn, _ := createTestTransactionWithMemIO(t, *iceberg.UnpartitionedSpec)
+
+	for range 3 {
+		require.NoError(t, txn.SetProperties(iceberg.Properties{"key": "value"}))
+	}
+
+	staged, err := txn.StagedTable()
+	require.NoError(t, err)
+	require.Len(t, slices.Collect(staged.Metadata().PreviousFiles()), 1)
 }
 
 func TestTransactionApplyBuildsMetadataForNewRequirement(t *testing.T) {
