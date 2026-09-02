@@ -917,6 +917,13 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
+	if df, ok := tmp.DataFile().(*dataFile); ok {
+		format, err := FileFormatFromString(string(df.Format))
+		if err != nil {
+			return nil, fmt.Errorf("manifest entry for %q has invalid file format: %w", df.Path, err)
+		}
+		df.Format = format
+	}
 	switch tmp.Status() {
 	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
 	default:

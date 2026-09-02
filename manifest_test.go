@@ -2426,6 +2426,63 @@ func (m *ManifestTestSuite) TestManifestReaderRejectsInvalidEntries() {
 	}
 }
 
+func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
+	partitionSpec := NewPartitionSpecID(1,
+		PartitionField{FieldID: 1000, SourceIDs: []int{1}, Name: "VendorID", Transform: IdentityTransform{}},
+		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
+	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
+	m.Require().NoError(err)
+	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
+	m.Require().NoError(err)
+
+	tests := []struct {
+		name          string
+		written       FileFormat
+		expected      FileFormat
+		errorContains string
+	}{
+		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
+		{name: "mixed case", written: "Parquet", expected: ParquetFile},
+		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
+		{name: "lowercase avro", written: "avro", expected: AvroFile},
+		{name: "unknown format", written: "csv", errorContains: "unknown file format: csv"},
+	}
+
+	for _, tt := range tests {
+		m.Run(tt.name, func() {
+			entry := *manifestEntryV2Records[0]
+			file := cloneDataFileAvroFields(entry.Data.(*dataFile))
+			file.Format = tt.written
+			entry.Data = file
+
+			mw := ManifestWriter{version: 2, spec: partitionSpec, schema: testSchema, content: ManifestContentData}
+			metadata, err := mw.meta()
+			m.Require().NoError(err)
+
+			var buf bytes.Buffer
+			writer, err := ocf.NewWriter(&buf, entrySchema,
+				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
+			m.Require().NoError(err)
+			m.Require().NoError(writer.Encode(&entry))
+			m.Require().NoError(writer.Close())
+
+			manifest := &manifestFile{version: 2, SpecID: 1, Content: ManifestContentData}
+			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
+			m.Require().NoError(err)
+			defer reader.Close()
+
+			got, err := reader.ReadEntry()
+			if tt.errorContains != "" {
+				m.ErrorContains(err, tt.errorContains)
+
+				return
+			}
+			m.Require().NoError(err)
+			m.Equal(tt.expected, got.DataFile().FileFormat())
+		})
+	}
+}
+
 func (m *ManifestTestSuite) TestManifestEntryBuilder() {
 	dataFileBuilder, err := NewDataFileBuilder(
 		NewPartitionSpec(),
