@@ -2432,11 +2432,12 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 		PartitionField{FieldID: 1001, SourceIDs: []int{2}, Name: "tpep_pickup_datetime", Transform: IdentityTransform{}})
 	partitionSchema, err := partitionTypeToAvroSchema(partitionSpec.PartitionType(testSchema))
 	m.Require().NoError(err)
-	entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, 2)
-	m.Require().NoError(err)
 
 	tests := []struct {
 		name          string
+		version       int
+		content       ManifestContent
+		entryContent  ManifestEntryContent
 		written       FileFormat
 		expected      FileFormat
 		errorContains string
@@ -2445,17 +2446,40 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 		{name: "mixed case", written: "Parquet", expected: ParquetFile},
 		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
 		{name: "lowercase avro", written: "avro", expected: AvroFile},
+		{name: "lowercase orc", written: "orc", expected: OrcFile},
+		{
+			name: "lowercase puffin in delete manifest", content: ManifestContentDeletes,
+			entryContent: EntryContentPosDeletes, written: "puffin", expected: PuffinFile,
+		},
+		{name: "v1 fallback entry", version: 1, written: "parquet", expected: ParquetFile},
 		{name: "unknown format", written: "csv", errorContains: "unknown file format: csv"},
+		{name: "empty format", written: "", errorContains: "unknown file format: "},
 	}
 
 	for _, tt := range tests {
 		m.Run(tt.name, func() {
-			entry := *manifestEntryV2Records[0]
+			version := tt.version
+			if version == 0 {
+				version = 2
+			}
+			content := tt.content
+			if content == 0 {
+				content = ManifestContentData
+			}
+			entrySchema, err := internal.NewManifestEntrySchema(partitionSchema, version)
+			m.Require().NoError(err)
+
+			records := manifestEntryV2Records
+			if version == 1 {
+				records = manifestEntryV1Records
+			}
+			entry := *records[0]
 			file := cloneDataFileAvroFields(entry.Data.(*dataFile))
 			file.Format = tt.written
+			file.Content = tt.entryContent
 			entry.Data = file
 
-			mw := ManifestWriter{version: 2, spec: partitionSpec, schema: testSchema, content: ManifestContentData}
+			mw := ManifestWriter{version: version, spec: partitionSpec, schema: testSchema, content: content}
 			metadata, err := mw.meta()
 			m.Require().NoError(err)
 
@@ -2463,10 +2487,14 @@ func (m *ManifestTestSuite) TestManifestReaderNormalizesFileFormat() {
 			writer, err := ocf.NewWriter(&buf, entrySchema,
 				ocf.WithSchema(entrySchema.String()), ocf.WithMetadata(metadata))
 			m.Require().NoError(err)
-			m.Require().NoError(writer.Encode(&entry))
+			var toEncode any = &entry
+			if version == 1 {
+				toEncode = &fallbackManifestEntry{manifestEntry: entry}
+			}
+			m.Require().NoError(writer.Encode(toEncode))
 			m.Require().NoError(writer.Close())
 
-			manifest := &manifestFile{version: 2, SpecID: 1, Content: ManifestContentData}
+			manifest := &manifestFile{version: version, SpecID: 1, Content: content}
 			reader, err := NewManifestReader(manifest, bytes.NewReader(buf.Bytes()))
 			m.Require().NoError(err)
 			defer reader.Close()
