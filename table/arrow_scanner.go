@@ -551,8 +551,15 @@ func (a *posDeleteAccumulator) appendRecord(ctx context.Context, record arrow.Re
 		posCol.DataType(), posCol.NullN()); err != nil {
 		return err
 	}
+	if err := validatePosDeleteColumnLengths(filePathCol.Len(), posCol.Len()); err != nil {
+		return err
+	}
 
-	posArr := posCol.(*array.Int64)
+	posArr, ok := posCol.(*array.Int64)
+	if !ok {
+		return fmt.Errorf("%w: unsupported pos record array type %T in position delete file",
+			iceberg.ErrInvalidSchema, posCol)
+	}
 	posCursor := posDeleteCursor{chunks: []*array.Int64{posArr}}
 	if err := a.appendFilePathChunk(ctx, filePathCol, &posCursor); err != nil {
 		return err
