@@ -228,6 +228,7 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 		writer := writers[key]
 		if writer.writer == nil || !writer.hasEntries {
 			writer.abort()
+
 			continue
 		}
 		if err := closeWriter(writer); err != nil {
