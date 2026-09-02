@@ -59,7 +59,7 @@ func TestReadDeletesForPathsRejectsNestedBloomFieldIDCollision(t *testing.T) {
 	require.NoError(t, writer.Close())
 
 	file := newPosDeleteFile(t, deletePath, 1, 128)
-	allDeletes, err := readDeletes(ctx, fs, file)
+	allDeletes, err := readDeletesForPaths(ctx, fs, file, nil)
 	require.NoError(t, err)
 	defer releasePosDeletes(allDeletes)
 	assert.Equal(t, []int64{1}, int64Values(allDeletes["data.parquet"]))
