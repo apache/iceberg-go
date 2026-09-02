@@ -947,19 +947,13 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 					return nil, err
 				}
 
-				out, path, err := sp.newManifestOutput()
+				wr, path, counter, out, err := sp.newManifestWriter(spec,
+					iceberg.WithManifestWriterContent(key.content))
 				if err != nil {
 					return nil, err
 				}
 				defer internal.CheckedClose(out, &retErr)
 
-				counter := &internal.CountingWriter{W: out}
-				wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-					spec, sp.txn.meta.CurrentSchema(),
-					sp.snapshotID, iceberg.WithManifestWriterContent(key.content))
-				if err != nil {
-					return nil, err
-				}
 				writerClosed := false
 				defer func() {
 					if !writerClosed {
