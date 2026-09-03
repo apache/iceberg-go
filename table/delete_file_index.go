@@ -18,10 +18,6 @@
 package table
 
 import (
-	"cmp"
-	"fmt"
-	"slices"
-
 	"github.com/apache/iceberg-go"
 	iceberginternal "github.com/apache/iceberg-go/internal"
 )
@@ -56,7 +52,12 @@ func compactDeleteFileForIndexWithReference(
 	statFieldIDs []int,
 	referencedDataFile *string,
 ) iceberg.DataFile {
-	partitionSpec := syntheticPartitionSpec(file.SpecID(), partition)
+	// DataFile does not expose its original partition spec. The compact copy
+	// only needs the spec ID and the field-ID keyed partition values; codecs
+	// receive the actual spec separately when encoding the file. Keeping an
+	// ID-only spec avoids allocating synthetic field metadata that no caller
+	// can use for schema resolution.
+	partitionSpec := iceberg.NewPartitionSpecID(int(file.SpecID()))
 	builder, err := iceberg.NewDataFileBuilder(
 		partitionSpec,
 		file.ContentType(),
@@ -96,9 +97,7 @@ func compactDeleteFileForIndexWithReference(
 	// Read these small non-statistics fields directly. The borrowed collection
 	// helper also exposes column sizes and the built-in implementation lazily
 	// initializes every statistics map while preparing that view.
-	keyMetadata := file.KeyMetadata()
-	splitOffsets := file.SplitOffsets()
-	equalityFieldIDs := file.EqualityFieldIDs()
+	_, keyMetadata, splitOffsets, equalityFieldIDs := dataFileCollections(file)
 	if keyMetadata != nil {
 		builder.KeyMetadata(keyMetadata)
 	}
@@ -129,30 +128,6 @@ func compactDeleteFileForIndexWithReference(
 	}
 
 	return builder.Build()
-}
-
-// syntheticPartitionSpec gives the built-in DataFile implementation enough
-// field metadata to expose the copied partition map and to remain usable by
-// the DataFile codec. Partition values are already transformed values, so the
-// identity transforms here are only a local storage description. SourceIDs
-// are synthetic because DataFile exposes the partition values and spec ID,
-// but not the original partition spec; callers must not use this local spec
-// for schema resolution.
-func syntheticPartitionSpec(specID int32, partition map[int]any) iceberg.PartitionSpec {
-	fields := make([]iceberg.PartitionField, 0, len(partition))
-	for fieldID := range partition {
-		fields = append(fields, iceberg.PartitionField{
-			SourceIDs: []int{fieldID},
-			FieldID:   fieldID,
-			Name:      fmt.Sprintf("partition_%d", fieldID),
-			Transform: iceberg.IdentityTransform{},
-		})
-	}
-	slices.SortFunc(fields, func(a, b iceberg.PartitionField) int {
-		return cmp.Compare(a.FieldID, b.FieldID)
-	})
-
-	return iceberg.NewPartitionSpecID(int(specID), fields...)
 }
 
 func dataFileStatsForFields(
@@ -209,7 +184,7 @@ func selectByteStats(source map[int][]byte, fields map[int]struct{}) map[int][]b
 	selected := make(map[int][]byte, len(fields))
 	for fieldID := range fields {
 		if value, ok := source[fieldID]; ok {
-			selected[fieldID] = slices.Clone(value)
+			selected[fieldID] = value
 		}
 	}
 	if len(selected) == 0 {

@@ -34,9 +34,11 @@ func BenchmarkDeleteIndexRetainsOnlyRequiredStats(b *testing.B) {
 	for _, kind := range []string{"positional", "equality"} {
 		b.Run(fmt.Sprintf("%s/files=%d/fields=%d", kind, deleteFileCount, fieldCount), func(b *testing.B) {
 			entries := wideDeleteIndexBenchmarkEntries(b, kind, deleteFileCount, fieldCount)
-			sourceStatsPerFile := 5 * fieldCount
-			if kind == "positional" {
-				sourceStatsPerFile += 5
+			sourceStatsPerFile := countDataFileStats(entries[0].DataFile())
+			var schema *iceberg.Schema
+			if kind == "equality" {
+				// Include schema-driven metric decoding in the equality benchmark.
+				schema = equalityDeleteMetricsTestSchema(iceberg.PrimitiveTypes.Int32, true)
 			}
 
 			b.ReportAllocs()
@@ -51,7 +53,7 @@ func BenchmarkDeleteIndexRetainsOnlyRequiredStats(b *testing.B) {
 					}
 					index = built
 				} else {
-					built, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs(), nil)
+					built, err := buildEqualityDeleteIndex(entries, equalityDeleteIndexTestSpecs(), schema)
 					if err != nil {
 						b.Fatal(err)
 					}
