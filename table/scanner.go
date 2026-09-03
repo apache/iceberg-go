@@ -1503,10 +1503,6 @@ func (scan *Scan) planFilesLocal(ctx context.Context, acc *scanMetricsAccumulato
 	if err != nil || snap == nil {
 		return nil, err
 	}
-	// Keep the manifest-list load separate from manifest workers. Workers reuse
-	// one FileIO within each concurrent batch, while the next batch loads again
-	// so credential-renewing factories retain their checkpoints.
-
 	// Keep the projection cache alive across both local planning phases. The
 	// manifest and data-file evaluators need the same per-spec projections.
 	partitionFilters := scan.partitionFiltersForSchema(schema)

@@ -96,15 +96,12 @@ func TestSnapshotManifestCacheSeparatesContentAndProtectsSlices(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, set.allManifests(), 2)
 	require.Len(t, set.dataManifests(), 1)
-	require.Len(t, set.deleteManifests(), 1)
 
 	all := set.allManifests()
 	all[0] = nil
 	assert.Equal(t, "data.avro", set.allManifests()[0].FilePath())
 	dataManifests := set.dataManifests()
-	deleteManifests := set.deleteManifests()
 	assert.Equal(t, "data.avro", dataManifests[0].FilePath())
-	assert.Equal(t, "delete.avro", deleteManifests[0].FilePath())
 }
 
 func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
@@ -127,11 +124,13 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
 	const callers = 16
 	errs := make(chan error, callers)
+	waitersStarted := make(chan struct{}, callers)
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(fs.release) }) })
 	for range callers {
+		ctx := &countingContext{Context: t.Context(), entered: waitersStarted}
 		go func() {
-			_, err := cache.get(t.Context(), snapshot, testSnapshotManifestLoader(snapshot, fs))
+			_, err := cache.get(ctx, snapshot, testSnapshotManifestLoader(snapshot, fs))
 			errs <- err
 		}()
 	}
@@ -140,6 +139,13 @@ func TestSnapshotManifestCacheSharesInFlightRead(t *testing.T) {
 	case <-fs.started:
 	case <-time.After(time.Second):
 		t.Fatal("manifest-list read did not start")
+	}
+	for range callers - 1 {
+		select {
+		case <-waitersStarted:
+		case <-time.After(time.Second):
+			t.Fatal("all concurrent callers did not wait on the shared read")
+		}
 	}
 	release.Do(func() { close(fs.release) })
 
@@ -204,6 +210,21 @@ func TestSnapshotManifestCacheBoundsCompletedEntries(t *testing.T) {
 	assert.LessOrEqual(t, cache.complete.Len(), snapshotManifestCacheSize)
 }
 
+func TestSnapshotManifestCacheBoundsManifestDescriptors(t *testing.T) {
+	cache := newSnapshotManifestCache()
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/large.avro"}
+	largeSet := snapshotManifestSet{
+		all: make([]iceberg.ManifestFile, snapshotManifestCacheManifestLimit+1),
+	}
+
+	_, err := cache.get(context.Background(), snapshot, func(context.Context) (snapshotManifestSet, error) {
+		return largeSet, nil
+	})
+	require.NoError(t, err)
+	assert.Zero(t, cache.complete.Len(), "an oversized manifest set should not be retained")
+	assert.Zero(t, cache.completeManifestCount)
+}
+
 func TestTableRefreshReplacesSnapshotManifestCache(t *testing.T) {
 	meta, err := NewMetadata(simpleSchema(), iceberg.UnpartitionedSpec, UnsortedSortOrder,
 		"mem://snapshot-manifest-cache-refresh", nil)
@@ -255,27 +276,17 @@ func (fs *blockingSnapshotManifestIO) Open(name string) (iceio.File, error) {
 	return fs.IO.Open(name)
 }
 
-type contextAwareSnapshotManifestIO struct {
-	iceio.IO
-	ctx     context.Context
-	started chan struct{}
-	once    sync.Once
-}
-
-func (fs *contextAwareSnapshotManifestIO) Open(string) (iceio.File, error) {
-	fs.once.Do(func() { close(fs.started) })
-	<-fs.ctx.Done()
-
-	return nil, fs.ctx.Err()
-}
-
 type notifyingContext struct {
 	context.Context
 	entered chan struct{}
 	once    sync.Once
 }
 
-type producerContextKey struct{}
+type countingContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
 
 func (c *notifyingContext) Done() <-chan struct{} {
 	c.once.Do(func() { close(c.entered) })
@@ -283,41 +294,86 @@ func (c *notifyingContext) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
-func TestSnapshotManifestCacheProducerContextCancelsRead(t *testing.T) {
-	base := iceio.NewMemFS()
+func (c *countingContext) Done() <-chan struct{} {
+	c.once.Do(func() { c.entered <- struct{}{} })
+
+	return c.Context.Done()
+}
+
+type producerContextKey struct{}
+
+func TestSnapshotManifestCacheProducerCancellationDoesNotCancelSharedRead(t *testing.T) {
 	cache := newSnapshotManifestCache()
-	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/context-cancel.avro"}
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/detached-context.avro"}
 	ctx, cancel := context.WithCancel(t.Context())
 	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	load := func(loadCtx context.Context) (snapshotManifestSet, error) {
-		return readSnapshotManifestSet(loadCtx, snapshot, func(ioCtx context.Context) (iceio.IO, error) {
-			return &contextAwareSnapshotManifestIO{IO: base, ctx: ioCtx, started: started}, nil
-		})
+		close(started)
+		select {
+		case <-release:
+			return snapshotManifestSet{}, nil
+		case <-loadCtx.Done():
+			return snapshotManifestSet{}, loadCtx.Err()
+		}
 	}
 
-	done := make(chan error, 1)
+	producerDone := make(chan error, 1)
 	go func() {
 		_, err := cache.get(ctx, snapshot, load)
-		done <- err
+		producerDone <- err
 	}()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("manifest-list read did not start")
 	}
+	waiterEntered := make(chan struct{}, 1)
+	waiterDone := make(chan error, 1)
+	waiterCtx := &countingContext{Context: t.Context(), entered: waiterEntered}
+	go func() {
+		_, err := cache.get(waiterCtx, snapshot, load)
+		waiterDone <- err
+	}()
+	select {
+	case <-waiterEntered:
+	case <-time.After(time.Second):
+		t.Fatal("waiter did not start waiting on the shared read")
+	}
 	cancel()
 
 	select {
-	case err := <-done:
-		require.ErrorIs(t, err, context.Canceled)
-	case <-time.After(time.Second):
-		t.Fatal("producer did not stop after context cancellation")
+	case err := <-producerDone:
+		t.Fatalf("producer stopped after its context was canceled: %v", err)
+	case <-time.After(100 * time.Millisecond):
 	}
 
-	_, err := cache.get(t.Context(), snapshot, func(context.Context) (snapshotManifestSet, error) {
-		return snapshotManifestSet{}, nil
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, <-producerDone)
+	require.NoError(t, <-waiterDone)
+}
+
+func TestReadSnapshotManifestSetKeepsCompletedReadAfterCancellation(t *testing.T) {
+	fs := iceio.NewMemFS()
+	var list bytes.Buffer
+	sequenceNumber := int64(1)
+	require.NoError(t, iceberg.WriteManifestList(2, &list, 1, nil, &sequenceNumber, 0, nil))
+	const listPath = "mem://snapshot-manifest-cache/late-cancel.avro"
+	require.NoError(t, fs.WriteFile(listPath, list.Bytes()))
+
+	snapshot := Snapshot{SnapshotID: 1, ManifestList: listPath}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	set, err := readSnapshotManifestSet(ctx, snapshot, func(context.Context) (iceio.IO, error) {
+		cancel()
+
+		return fs, nil
 	})
+
 	require.NoError(t, err)
+	assert.Empty(t, set.allManifests())
 }
 
 func TestSnapshotManifestCacheCanceledWaiterDoesNotCancelSharedRead(t *testing.T) {
@@ -374,6 +430,8 @@ func TestSnapshotManifestCachePanickingProducerUnblocksWaiters(t *testing.T) {
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/panic.avro"}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	load := func(context.Context) (snapshotManifestSet, error) {
 		close(started)
 		<-release
@@ -403,7 +461,7 @@ func TestSnapshotManifestCachePanickingProducerUnblocksWaiters(t *testing.T) {
 		t.Fatal("waiter did not start waiting on the producer")
 	}
 
-	close(release)
+	releaseOnce.Do(func() { close(release) })
 	select {
 	case err := <-waiterDone:
 		require.Error(t, err)
@@ -419,7 +477,7 @@ func TestSnapshotManifestCachePanickingProducerUnblocksWaiters(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestSnapshotManifestCachePassesProducerContextToLoader(t *testing.T) {
+func TestSnapshotManifestCacheUsesDetachedProducerContext(t *testing.T) {
 	cache := newSnapshotManifestCache()
 	snapshot := Snapshot{SnapshotID: 1, ManifestList: "mem://snapshot-manifest-cache/context.avro"}
 	ctx := context.WithValue(t.Context(), producerContextKey{}, "producer")
@@ -431,7 +489,9 @@ func TestSnapshotManifestCachePassesProducerContextToLoader(t *testing.T) {
 		return snapshotManifestSet{}, nil
 	})
 	require.NoError(t, err)
-	assert.Same(t, ctx, <-seen)
+	loadCtx := <-seen
+	assert.Equal(t, "producer", loadCtx.Value(producerContextKey{}))
+	assert.Nil(t, loadCtx.Done())
 }
 
 func TestSnapshotManifestCacheDoesNotClassifyUnknownContentAsData(t *testing.T) {
@@ -448,7 +508,6 @@ func TestSnapshotManifestCacheDoesNotClassifyUnknownContentAsData(t *testing.T) 
 
 	assert.Len(t, set.allManifests(), 3)
 	assert.Len(t, set.dataManifests(), 1)
-	assert.Len(t, set.deleteManifests(), 1)
 }
 
 func TestTransactionScanUsesAnIsolatedSnapshotManifestCache(t *testing.T) {
