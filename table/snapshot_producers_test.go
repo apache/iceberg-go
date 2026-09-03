@@ -1092,6 +1092,111 @@ func TestCreateManifestClosesUnderlyingFile(t *testing.T) {
 	require.Empty(t, unclosed, "all file writerFactory should be closed after createManifest, but these are still open: %v", unclosed)
 }
 
+func TestManifestMergeDropsHistoricalDeleteOnlyBin(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	historicalSnapshotID := sp.snapshotID - 1
+	sequenceNumber := int64(1)
+	fileSequenceNumber := int64(1)
+
+	manifests := make([]iceberg.ManifestFile, 0, 2)
+	for i := 0; i < cap(manifests); i++ {
+		path := "table-location/metadata/deleted-source-" + strconv.Itoa(i) + ".avro"
+		dataFile := newTestDataFile(t, spec, "file://deleted-data-"+strconv.Itoa(i)+".parquet", nil)
+		entries := []iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(
+				iceberg.EntryStatusDELETED,
+				&historicalSnapshotID,
+				&sequenceNumber,
+				&fileSequenceNumber,
+				dataFile,
+			),
+		}
+
+		var buf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, historicalSnapshotID, entries)
+		require.NoError(t, err, "write historical delete manifest")
+		require.NoError(t, trackIO.WriteFile(path, buf.Bytes()))
+		manifests = append(manifests, manifest)
+	}
+
+	mgr := manifestMergeManager{
+		targetSizeBytes:  1 << 30,
+		minCountToMerge:  1,
+		mergeEnabled:     true,
+		mergeConcurrency: 1,
+		snap:             sp,
+	}
+
+	writersBefore := trackIO.GetWriterCount()
+	merged, err := mgr.mergeGroup(manifests[0], spec.ID(), manifests)
+	require.NoError(t, err)
+	require.Empty(t, merged, "a bin containing only historical deletes should not produce a manifest")
+	require.Equal(t, writersBefore, trackIO.GetWriterCount(), "an empty replacement manifest should not be opened")
+	require.Empty(t, trackIO.GetUnclosedWriters())
+}
+
+func TestCreateManifestRetainsCurrentSnapshotDeletes(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	schema := simpleSchema()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	sequenceNumber := int64(1)
+	fileSequenceNumber := int64(1)
+
+	manifests := make([]iceberg.ManifestFile, 0, 2)
+	for i := 0; i < cap(manifests); i++ {
+		path := "table-location/metadata/current-delete-source-" + strconv.Itoa(i) + ".avro"
+		dataFile := newTestDataFile(t, spec, "file://current-delete-data-"+strconv.Itoa(i)+".parquet", nil)
+		entries := []iceberg.ManifestEntry{
+			iceberg.NewManifestEntry(
+				iceberg.EntryStatusDELETED,
+				&sp.snapshotID,
+				&sequenceNumber,
+				&fileSequenceNumber,
+				dataFile,
+			),
+		}
+
+		var buf bytes.Buffer
+		manifest, err := iceberg.WriteManifest(path, &buf, 2, spec, schema, sp.snapshotID, entries)
+		require.NoError(t, err, "write current delete manifest")
+		require.NoError(t, trackIO.WriteFile(path, buf.Bytes()))
+		manifests = append(manifests, manifest)
+	}
+
+	mgr := manifestMergeManager{snap: sp}
+	created, err := mgr.createManifest(spec.ID(), manifests)
+	require.NoError(t, err)
+	require.NotNil(t, created)
+	require.EqualValues(t, 2, created.DeletedDataFiles())
+	require.Empty(t, trackIO.GetUnclosedWriters())
+}
+
+func TestCreateManifestPropagatesReadErrorWithoutCreatingOutput(t *testing.T) {
+	trackIO := newTrackingIO()
+	spec := iceberg.NewPartitionSpec()
+	txn := createTestTransaction(t, trackIO, spec)
+	sp := newFastAppendFilesProducer(OpAppend, txn, trackIO, nil, nil)
+	missing := iceberg.NewManifestFile(
+		2,
+		"table-location/metadata/missing.avro",
+		1,
+		int32(spec.ID()),
+		sp.snapshotID,
+	).Build()
+
+	mgr := manifestMergeManager{snap: sp}
+	created, err := mgr.createManifest(spec.ID(), []iceberg.ManifestFile{missing})
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	require.Nil(t, created)
+	require.Zero(t, trackIO.GetWriterCount(), "a read failure before any retained entry should not create an output manifest")
+}
+
 func TestManifestMergeMaxConcurrencyProperty(t *testing.T) {
 	spec := iceberg.NewPartitionSpec()
 	io := newMemIO(1<<20, nil)

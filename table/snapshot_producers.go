@@ -376,15 +376,20 @@ func (m *manifestMergeManager) groupBySpec(manifests []iceberg.ManifestFile) map
 }
 
 func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.ManifestFile) (mf iceberg.ManifestFile, err error) {
-	wr, path, counter, fileCloser, err := m.snap.newManifestWriter(m.snap.spec(specID))
-	if err != nil {
-		return nil, err
-	}
-	defer internal.CheckedClose(fileCloser, &err)
-	writerClosed := false
+	spec := m.snap.spec(specID)
+	var (
+		wr           *iceberg.ManifestWriter
+		path         string
+		counter      *internal.CountingWriter
+		fileCloser   io.Closer
+		writerClosed bool
+	)
 	defer func() {
-		if !writerClosed {
+		if wr != nil && !writerClosed {
 			internal.CheckedClose(wr, &err)
+		}
+		if fileCloser != nil {
+			internal.CheckedClose(fileCloser, &err)
 		}
 	}()
 
@@ -394,14 +399,27 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 				return nil, err
 			}
 
+			status := entry.Status()
+			if status == iceberg.EntryStatusDELETED && entry.SnapshotID() != m.snap.snapshotID {
+				// Entries deleted by an earlier snapshot are not retained in a merged manifest.
+				continue
+			}
+
+			if wr == nil {
+				wr, path, counter, fileCloser, err = m.snap.newManifestWriter(spec)
+				if err != nil {
+					return nil, err
+				}
+			}
+
 			switch {
-			case entry.Status() == iceberg.EntryStatusDELETED && entry.SnapshotID() == m.snap.snapshotID:
+			case status == iceberg.EntryStatusDELETED:
 				// only files deleted by this snapshot should be added to the new manifest
 				err = wr.Delete(entry)
-			case entry.Status() == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
+			case status == iceberg.EntryStatusADDED && entry.SnapshotID() == m.snap.snapshotID:
 				// added entries from this snapshot are still added, otherwise they should be existing
 				err = wr.Add(entry)
-			case entry.Status() != iceberg.EntryStatusDELETED:
+			default:
 				// add all non-deleted files from the old manifest as existing files
 				err = wr.Existing(entry)
 			}
@@ -410,6 +428,10 @@ func (m *manifestMergeManager) createManifest(specID int, bin []iceberg.Manifest
 				return nil, err
 			}
 		}
+	}
+
+	if wr == nil {
+		return nil, nil
 	}
 
 	// close the writer to force a flush and ensure counter.Count is accurate
@@ -446,7 +468,9 @@ func (m *manifestMergeManager) mergeGroup(firstManifest iceberg.ManifestFile, sp
 			if err != nil {
 				return nil, err
 			}
-			output = append(output, created)
+			if created != nil {
+				output = append(output, created)
+			}
 		}
 
 		return output, nil
