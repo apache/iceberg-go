@@ -34,29 +34,35 @@ import (
 // history is enough to retain useful locality for repeated historical scans.
 const snapshotManifestCacheSize = 64
 
-// snapshotManifestSet keeps the complete manifest list and its content
-// partitions together. Manifest descriptors are immutable for an Iceberg
-// snapshot, so a table can safely share this decoded result across scans.
+// snapshotManifestCacheManifestLimit bounds the total number of manifest
+// descriptors retained by the cache. This keeps a small number of unusually
+// large snapshots from consuming an unbounded amount of memory.
+const snapshotManifestCacheManifestLimit = 16 * 1024
+
+// snapshotManifestSet keeps the complete manifest list and data partition
+// together. Manifest descriptors are immutable for an Iceberg snapshot, so a
+// table can safely share this decoded result across scans.
 type snapshotManifestSet struct {
-	all     []iceberg.ManifestFile
-	data    []iceberg.ManifestFile
-	deletes []iceberg.ManifestFile
+	all  []iceberg.ManifestFile
+	data []iceberg.ManifestFile
 }
 
 func newSnapshotManifestSet(manifests []iceberg.ManifestFile) snapshotManifestSet {
-	set := snapshotManifestSet{all: slices.Clone(manifests)}
-	if len(manifests) == 0 {
+	set := snapshotManifestSet{all: manifests}
+	dataCount := 0
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() == iceberg.ManifestContentData {
+			dataCount++
+		}
+	}
+	if dataCount == 0 {
 		return set
 	}
 
-	set.data = make([]iceberg.ManifestFile, 0, len(manifests))
-	set.deletes = make([]iceberg.ManifestFile, 0, len(manifests))
-	for _, manifest := range set.all {
-		switch manifest.ManifestContent() {
-		case iceberg.ManifestContentData:
+	set.data = make([]iceberg.ManifestFile, 0, dataCount)
+	for _, manifest := range manifests {
+		if manifest.ManifestContent() == iceberg.ManifestContentData {
 			set.data = append(set.data, manifest)
-		case iceberg.ManifestContentDeletes:
-			set.deletes = append(set.deletes, manifest)
 		}
 	}
 
@@ -71,8 +77,8 @@ func (s snapshotManifestSet) dataManifests() []iceberg.ManifestFile {
 	return slices.Clone(s.data)
 }
 
-func (s snapshotManifestSet) deleteManifests() []iceberg.ManifestFile {
-	return slices.Clone(s.deletes)
+func snapshotManifestSetSize(set snapshotManifestSet) int {
+	return len(set.all) + len(set.data)
 }
 
 type snapshotManifestCacheKey struct {
@@ -116,21 +122,28 @@ type snapshotManifestLoader func(context.Context) (snapshotManifestSet, error)
 // Failed reads are removed so a transient object-store error does not poison
 // the cache.
 type snapshotManifestCache struct {
-	mu       sync.Mutex
-	entries  map[snapshotManifestCacheKey]*snapshotManifestCacheEntry
-	complete *lru.Cache[snapshotManifestCacheKey, snapshotManifestSet]
+	mu                    sync.Mutex
+	entries               map[snapshotManifestCacheKey]*snapshotManifestCacheEntry
+	complete              *lru.Cache[snapshotManifestCacheKey, snapshotManifestSet]
+	completeManifestCount int
 }
 
 func newSnapshotManifestCache() *snapshotManifestCache {
-	complete, err := lru.New[snapshotManifestCacheKey, snapshotManifestSet](snapshotManifestCacheSize)
+	cache := &snapshotManifestCache{
+		entries: make(map[snapshotManifestCacheKey]*snapshotManifestCacheEntry),
+	}
+	complete, err := lru.NewWithEvict(
+		snapshotManifestCacheSize,
+		func(_ snapshotManifestCacheKey, value snapshotManifestSet) {
+			cache.completeManifestCount -= snapshotManifestSetSize(value)
+		},
+	)
 	if err != nil {
 		panic(err)
 	}
+	cache.complete = complete
 
-	return &snapshotManifestCache{
-		entries:  make(map[snapshotManifestCacheKey]*snapshotManifestCacheEntry),
-		complete: complete,
-	}
+	return cache
 }
 
 func (c *snapshotManifestCache) get(
@@ -140,6 +153,9 @@ func (c *snapshotManifestCache) get(
 ) (snapshotManifestSet, error) {
 	if c == nil {
 		return load(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return snapshotManifestSet{}, err
 	}
 
 	key := snapshotManifestCacheKeyFor(snapshot)
@@ -183,7 +199,9 @@ func (c *snapshotManifestCache) get(
 		c.finish(key, entry, value, err)
 	}()
 
-	value, err = load(ctx)
+	// The read is shared with callers whose contexts may outlive this one. Do
+	// not let the producer's cancellation abort a healthy waiter's read.
+	value, err = load(context.WithoutCancel(ctx))
 
 	return value, err
 }
@@ -205,7 +223,16 @@ func (c *snapshotManifestCache) finish(
 	entry.manifests = value
 	entry.err = err
 	if err == nil {
+		if c.complete.Contains(key) {
+			c.complete.Remove(key)
+		}
 		c.complete.Add(key, value)
+		c.completeManifestCount += snapshotManifestSetSize(value)
+		for c.completeManifestCount > snapshotManifestCacheManifestLimit {
+			if _, _, ok := c.complete.RemoveOldest(); !ok {
+				break
+			}
+		}
 	}
 	close(entry.ready)
 }
@@ -223,16 +250,13 @@ func readSnapshotManifestSet(
 	}
 
 	// Resolve the IO inside the producer so context-aware factories bind the
-	// producer context to the underlying manifest-list read.
+	// detached producer context to the underlying manifest-list read.
 	fio, err := fsF(ctx)
 	if err != nil {
 		return snapshotManifestSet{}, err
 	}
 	manifests, err := snapshot.Manifests(fio)
 	if err != nil {
-		return snapshotManifestSet{}, err
-	}
-	if err := ctx.Err(); err != nil {
 		return snapshotManifestSet{}, err
 	}
 
