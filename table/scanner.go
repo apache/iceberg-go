@@ -1120,17 +1120,6 @@ func (scan *Scan) collectManifestEntriesWithSchema(
 		ctx, manifestList, schema, partitionFilters, minSequenceNum(manifestList), false)
 }
 
-func (scan *Scan) collectManifestEntriesWithSchemaOptions(
-	ctx context.Context,
-	manifestList []iceberg.ManifestFile,
-	schema *iceberg.Schema,
-	partitionFilters *keyDefaultMapErr[int, iceberg.BooleanExpression],
-	projectScanColumns bool,
-) (*manifestEntries, error) {
-	return scan.collectManifestEntriesWithSchemaMinSequenceNum(
-		ctx, manifestList, schema, partitionFilters, minSequenceNum(manifestList), projectScanColumns)
-}
-
 func (scan *Scan) collectManifestEntriesWithSchemaMinSequenceNum(
 	ctx context.Context,
 	manifestList []iceberg.ManifestFile,
@@ -1363,9 +1352,11 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 			}
 			var projection *iceberg.ManifestEntryProjection
 			dropColumnStats := false
+			stripTaskColumnStats := false
 			if projectScanColumns {
 				var p iceberg.ManifestEntryProjection
 				p, dropColumnStats = scan.manifestProjectionForManifest(manifest, retainDataFileStats)
+				stripTaskColumnStats = p.IncludeColumnStats && !dropColumnStats
 				projection = &p
 			}
 			err = streamManifest(fs, manifest, partEval, metricsEval, projection, dropColumnStats, func(entry iceberg.ManifestEntry) error {
@@ -1379,13 +1370,10 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				if err != nil {
 					return err
 				}
-				if projectScanColumns {
+				if stripTaskColumnStats {
 					// Statistics are needed while filtering and matching deletes, but
 					// are transient for the task returned to Arrow readers.
 					task.File = iceberg.DataFileWithoutColumnStats(task.File)
-					task.DeleteFiles = dataFilesWithoutColumnStats(task.DeleteFiles)
-					task.EqualityDeleteFiles = dataFilesWithoutColumnStats(task.EqualityDeleteFiles)
-					task.DeletionVectorFiles = dataFilesWithoutColumnStats(task.DeletionVectorFiles)
 				}
 				tasks = append(tasks, task)
 
@@ -1405,6 +1393,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 		return nil, err
 	}
 
+	var results []FileScanTask
 	if directBuffer {
 		overflowed := false
 		for index, tasks := range taskBatches {
@@ -1427,20 +1416,33 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 				taskBatches[index] = nil
 			}
 
-			return taskBuffer[:writeIndex:writeIndex], nil
+			results = taskBuffer[:writeIndex:writeIndex]
+		} else {
+			directBuffer = false
 		}
 	}
 
-	totalTasks := 0
-	for _, tasks := range taskBatches {
-		totalTasks += len(tasks)
+	if !directBuffer {
+		totalTasks := 0
+		for _, tasks := range taskBatches {
+			totalTasks += len(tasks)
+		}
+		results = make([]FileScanTask, 0, totalTasks)
+		for i, tasks := range taskBatches {
+			results = append(results, tasks...)
+			// Release the per-manifest backing array as soon as it has been copied
+			// into the final result slice.
+			taskBatches[i] = nil
+		}
 	}
-	results := make([]FileScanTask, 0, totalTasks)
-	for i, tasks := range taskBatches {
-		results = append(results, tasks...)
-		// Release the per-manifest backing array as soon as it has been copied
-		// into the final result slice.
-		taskBatches[i] = nil
+
+	if projectScanColumns && retainDataFileStats {
+		memo := make(map[iceberg.DataFile]iceberg.DataFile)
+		for i := range results {
+			results[i].DeleteFiles = dataFilesWithoutColumnStats(results[i].DeleteFiles, memo)
+			results[i].EqualityDeleteFiles = dataFilesWithoutColumnStats(results[i].EqualityDeleteFiles, memo)
+			results[i].DeletionVectorFiles = dataFilesWithoutColumnStats(results[i].DeletionVectorFiles, memo)
+		}
 	}
 
 	return results, nil
@@ -1725,13 +1727,27 @@ func (scan *Scan) planFilesLocal(
 	return results, nil
 }
 
-func dataFilesWithoutColumnStats(files []iceberg.DataFile) []iceberg.DataFile {
+func dataFilesWithoutColumnStats(
+	files []iceberg.DataFile,
+	memo map[iceberg.DataFile]iceberg.DataFile,
+) []iceberg.DataFile {
 	if len(files) == 0 {
 		return files
 	}
 
 	projected := make([]iceberg.DataFile, len(files))
 	for i, file := range files {
+		if file != nil && reflect.TypeOf(file).Comparable() {
+			if cached, ok := memo[file]; ok {
+				projected[i] = cached
+
+				continue
+			}
+			projected[i] = iceberg.DataFileWithoutColumnStats(file)
+			memo[file] = projected[i]
+
+			continue
+		}
 		projected[i] = iceberg.DataFileWithoutColumnStats(file)
 	}
 

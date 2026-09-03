@@ -35,6 +35,8 @@ import (
 // A projected read is intended for planning paths that use statistics
 // transiently. Callers that need the complete DataFile metadata should use
 // ManifestFile.Entries or ReadManifest instead.
+// Projected entries are read-only planning values and must not be passed to a
+// ManifestWriter, because omitted statistics cannot be recovered on rewrite.
 type ManifestEntryProjection struct {
 	IncludeColumnStats bool
 }
@@ -58,6 +60,8 @@ var manifestEntryProjectionCache = func() *lru.Cache[manifestEntryProjectionCach
 // EntriesWithProjection streams manifest entries using a reader-schema
 // projection. It is the projected counterpart to ManifestFile.Entries and is
 // useful when a caller needs only the fields required for scan planning.
+// The returned entries must not be passed to a ManifestWriter, because the
+// projection may omit statistics that would be silently lost on rewrite.
 func EntriesWithProjection(
 	fs iceio.IO,
 	m ManifestFile,
@@ -172,14 +176,14 @@ func manifestScanDataFileField(name string, includeColumnStats bool) bool {
 // DataFileWithoutColumnStats returns a copy of the built-in DataFile with
 // transient column statistics removed. Other DataFile implementations are
 // returned unchanged because the package cannot safely clone their private
-// state.
+// state. The returned value is for read-only planning and must not be passed
+// to a ManifestWriter, because the omitted statistics cannot be recovered.
 func DataFileWithoutColumnStats(file DataFile) DataFile {
 	d, ok := file.(*dataFile)
 	if !ok {
 		return file
 	}
 
-	d.initPartitionData()
 	out := cloneDataFileAvroFields(d)
 	out.ColSizes = nil
 	out.ValCounts = nil
@@ -190,15 +194,17 @@ func DataFileWithoutColumnStats(file DataFile) DataFile {
 	out.UpperBounds = nil
 	out.fieldNameToID = d.fieldNameToID
 	out.fieldIDToLogicalType = d.fieldIDToLogicalType
-	out.fieldIDToPartitionData = d.fieldIDToPartitionData
 	out.fieldIDToDecimalScale = d.fieldIDToDecimalScale
 	out.specID = d.specID
+	out.initPartitionData()
 
 	return out
 }
 
 // ManifestEntryWithoutColumnStats returns a copy of an entry whose built-in
 // DataFile has had transient column statistics removed.
+// The returned entry must not be passed to a ManifestWriter, because omitted
+// statistics would be silently lost on rewrite.
 func ManifestEntryWithoutColumnStats(entry ManifestEntry) ManifestEntry {
 	m, ok := entry.(*manifestEntry)
 	if !ok {

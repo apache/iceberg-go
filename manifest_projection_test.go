@@ -324,3 +324,15 @@ func TestDataFileWithoutColumnStatsConcurrentPartitionInitialization(t *testing.
 		workers.Wait()
 	}
 }
+
+func TestDataFileWithoutColumnStatsDoesNotInitializeSourcePartition(t *testing.T) {
+	file := &dataFile{
+		PartitionData: map[string]any{"partition": int32(7)},
+		fieldNameToID: map[string]int{"partition": 1000},
+	}
+
+	projected := DataFileWithoutColumnStats(file)
+
+	assert.Nil(t, file.fieldIDToPartitionData)
+	assert.Equal(t, map[int]any{1000: int32(7)}, projected.Partition())
+}

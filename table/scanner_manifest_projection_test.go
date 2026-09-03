@@ -119,3 +119,152 @@ func TestManifestProjectionRetainsDataFileStatsForDeleteScans(t *testing.T) {
 	assert.True(t, projection.IncludeColumnStats)
 	assert.False(t, dropStats)
 }
+
+func TestDataFilesWithoutColumnStatsReusesSharedFiles(t *testing.T) {
+	dataFile, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentEqDeletes,
+		"mem://default/table/delete.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		128,
+	)
+	require.NoError(t, err)
+	dataFile.ValueCounts(map[int]int64{1: 1})
+	file := dataFile.Build()
+	memo := make(map[iceberg.DataFile]iceberg.DataFile)
+
+	projected := dataFilesWithoutColumnStats([]iceberg.DataFile{file, file}, memo)
+
+	require.Len(t, projected, 2)
+	assert.NotSame(t, file, projected[0])
+	assert.Same(t, projected[0], projected[1])
+	assert.Empty(t, projected[0].ValueCounts())
+}
+
+func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *testing.T) {
+	fs := iceio.NewMemFS()
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int64, Required: true,
+	})
+	meta, err := NewMetadata(schema, iceberg.UnpartitionedSpec, UnsortedSortOrder,
+		"mem://projection-planning", nil)
+	require.NoError(t, err)
+
+	bound := func(value int64) []byte {
+		encoded, err := iceberg.Int64Literal(value).MarshalBinary()
+		require.NoError(t, err)
+
+		return encoded
+	}
+	dataEntry := func(path string, lower, upper int64) iceberg.ManifestEntry {
+		builder, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentData,
+			path,
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			2,
+			128,
+		)
+		require.NoError(t, err)
+		builder.
+			ValueCounts(map[int]int64{1: 2}).
+			NullValueCounts(map[int]int64{1: 0}).
+			NaNValueCounts(map[int]int64{1: 0}).
+			LowerBoundValues(map[int][]byte{1: bound(lower)}).
+			UpperBoundValues(map[int][]byte{1: bound(upper)})
+		sequenceNumber := int64(1)
+
+		return iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, &sequenceNumber, nil, builder.Build())
+	}
+
+	dataEntries := []iceberg.ManifestEntry{
+		dataEntry("mem://projection-planning/data-1.parquet", 1, 2),
+		dataEntry("mem://projection-planning/data-2.parquet", 3, 4),
+	}
+	manifestPath := "mem://projection-planning/data-manifest.avro"
+	var manifestBytes bytes.Buffer
+	manifest, err := iceberg.WriteManifest(
+		manifestPath,
+		&manifestBytes,
+		2,
+		*iceberg.UnpartitionedSpec,
+		schema,
+		1,
+		dataEntries,
+	)
+	require.NoError(t, err)
+	require.NoError(t, fs.WriteFile(manifestPath, manifestBytes.Bytes()))
+
+	deleteEntry := func(path string, value int64) iceberg.ManifestEntry {
+		builder, err := iceberg.NewDataFileBuilder(
+			*iceberg.UnpartitionedSpec,
+			iceberg.EntryContentEqDeletes,
+			path,
+			iceberg.ParquetFile,
+			nil,
+			nil,
+			nil,
+			1,
+			128,
+		)
+		require.NoError(t, err)
+		builder.
+			EqualityFieldIDs([]int{1}).
+			ValueCounts(map[int]int64{1: 1}).
+			NullValueCounts(map[int]int64{1: 0}).
+			NaNValueCounts(map[int]int64{1: 0}).
+			LowerBoundValues(map[int][]byte{1: bound(value)}).
+			UpperBoundValues(map[int][]byte{1: bound(value)})
+		sequenceNumber := int64(2)
+
+		return iceberg.NewManifestEntry(
+			iceberg.EntryStatusADDED, nil, &sequenceNumber, nil, builder.Build())
+	}
+	deleteEntries := []iceberg.ManifestEntry{
+		deleteEntry("mem://projection-planning/delete-2.parquet", 2),
+		deleteEntry("mem://projection-planning/delete-3.parquet", 3),
+	}
+	eqDeleteIndex, err := buildEqualityDeleteIndex(deleteEntries, meta, schema)
+	require.NoError(t, err)
+	posDeleteIndex, err := buildPositionalDeleteIndex(nil)
+	require.NoError(t, err)
+	dvIndex, err := buildDVIndex(nil)
+	require.NoError(t, err)
+
+	scan := &Scan{
+		metadata:      meta,
+		ioF:           testFSF(fs),
+		rowFilter:     iceberg.AlwaysTrue{},
+		caseSensitive: true,
+		concurrency:   2,
+	}
+	tasks, err := scan.planDataManifestTasksWithOptions(
+		t.Context(),
+		[]iceberg.ManifestFile{manifest},
+		schema,
+		0,
+		posDeleteIndex,
+		dvIndex,
+		eqDeleteIndex,
+		true,
+		true,
+	)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+
+	for _, task := range tasks {
+		require.Len(t, task.EqualityDeleteFiles, 1)
+		assert.Empty(t, task.File.ValueCounts())
+		assert.Empty(t, task.EqualityDeleteFiles[0].ValueCounts())
+	}
+	assert.Equal(t, "mem://projection-planning/delete-2.parquet", tasks[0].EqualityDeleteFiles[0].FilePath())
+	assert.Equal(t, "mem://projection-planning/delete-3.parquet", tasks[1].EqualityDeleteFiles[0].FilePath())
+}

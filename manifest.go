@@ -709,7 +709,9 @@ func NewManifestReader(file ManifestFile, in io.Reader) (*ManifestReader, error)
 // standard scan fields and optionally the column statistics selected by
 // projection. Manifest metadata validation and entry inheritance are the same
 // as in NewManifestReader; fields omitted by the projection retain their zero
-// values in the returned DataFile.
+// values in the returned DataFile. Entries returned by this reader are
+// read-only planning values and must not be passed to a ManifestWriter, because
+// omitted statistics cannot be recovered on rewrite.
 func NewManifestReaderWithProjection(
 	file ManifestFile,
 	in io.Reader,
