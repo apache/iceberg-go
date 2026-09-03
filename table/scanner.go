@@ -899,13 +899,15 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]deleteFileIndex
 	dvIndex := make(map[string]deleteFileIndexEntry, len(dvEntries))
 	for _, del := range dvEntries {
 		deleteFile := del.DataFile()
-		if ref := iceberginternal.BorrowedDataFileReferencedDataFile(deleteFile); ref != nil && *ref != "" {
-			if _, exists := dvIndex[*ref]; exists {
-				return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
-			}
-			dvIndex[*ref] = deleteFileIndexEntry{
-				file: deleteFile, sequenceNum: del.SequenceNum(),
-			}
+		ref := iceberginternal.BorrowedDataFileReferencedDataFile(deleteFile)
+		if ref == nil || *ref == "" {
+			return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", deleteFile.FilePath())
+		}
+		if _, exists := dvIndex[*ref]; exists {
+			return nil, fmt.Errorf("can't index multiple deletion vectors for %s", *ref)
+		}
+		dvIndex[*ref] = deleteFileIndexEntry{
+			file: deleteFile, sequenceNum: del.SequenceNum(),
 		}
 	}
 
@@ -913,8 +915,9 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]deleteFileIndex
 }
 
 // matchDVToData returns the deletion vector that applies to the given data
-// entry, if any. A DV applies when the data file's sequence number is less
-// than or equal to the DV's sequence number.
+// entry, if any. A DV applies when its referenced path, partition spec and
+// partition values match the data file, and the data file's sequence number is
+// less than or equal to the DV's sequence number.
 //
 // SequenceNum reports the -1 sentinel when an entry's sequence number is
 // unset (see manifest.go). Entries arrive here already inherited, so a
@@ -927,8 +930,13 @@ func buildDVIndex(dvEntries []iceberg.ManifestEntry) (map[string]deleteFileIndex
 // resurfacing deleted rows; an unset data sequence likewise satisfies
 // -1 <= dvSeq for any known DV sequence.
 func matchDVToData(dataEntry iceberg.ManifestEntry, dvIndex map[string]deleteFileIndexEntry) []iceberg.DataFile {
-	dvEntry, ok := dvIndex[dataEntry.DataFile().FilePath()]
+	dataFile := dataEntry.DataFile()
+	dvEntry, ok := dvIndex[dataFile.FilePath()]
 	if !ok {
+		return nil
+	}
+	if dvEntry.file.SpecID() != dataFile.SpecID() ||
+		!partitionsMatch(dataFilePartition(dvEntry.file), dataFilePartition(dataFile)) {
 		return nil
 	}
 	if dvSeq := dvEntry.sequenceNum; dvSeq < 0 || dataEntry.SequenceNum() <= dvSeq {

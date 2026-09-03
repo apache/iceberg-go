@@ -152,11 +152,15 @@ func filePathMayMatch(deleteFile iceberg.DataFile, dataFilePath string) bool {
 		}
 	}
 
-	if lower := lowerBounds[filePathFieldID]; lower != nil && bytes.Compare(lower, []byte(dataFilePath)) > 0 {
-		return false
-	}
-	if upper := upperBounds[filePathFieldID]; upper != nil && bytes.Compare(upper, []byte(dataFilePath)) < 0 {
-		return false
+	lower, hasLower := lowerBounds[filePathFieldID]
+	upper, hasUpper := upperBounds[filePathFieldID]
+	if !(hasLower && hasUpper && lower != nil && upper != nil && bytes.Compare(lower, upper) > 0) {
+		if lower != nil && bytes.Compare(lower, []byte(dataFilePath)) > 0 {
+			return false
+		}
+		if upper != nil && bytes.Compare(upper, []byte(dataFilePath)) < 0 {
+			return false
+		}
 	}
 
 	return true

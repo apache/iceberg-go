@@ -167,7 +167,7 @@ func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTa
 	for _, t := range tasks {
 		for _, d := range t.DeletionVectorFiles {
 			_, _, ref, contentOffset, contentSize := iceinternal.BorrowedDataFilePointers(d)
-			if ref == nil {
+			if ref == nil || *ref == "" {
 				return nil, fmt.Errorf("deletion vector %s missing referenced_data_file", d.FilePath())
 			}
 			if contentOffset == nil || contentSize == nil {
