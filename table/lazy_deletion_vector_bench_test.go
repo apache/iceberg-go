@@ -119,26 +119,9 @@ func BenchmarkLazyDeletionVectorLoading(b *testing.B) {
 		})
 	}
 
-	b.Run("eager_all_groups", func(b *testing.B) {
-		fs.opens.Store(0)
-		b.ReportAllocs()
-		b.ResetTimer()
-		for b.Loop() {
-			bitmaps, err := readAllDeletionVectors(b.Context(), fs, fixture.tasks, 16)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if len(bitmaps) != lazyDVBenchmarkTotalDVs {
-				b.Fatalf("got %d bitmaps, expected %d", len(bitmaps), lazyDVBenchmarkTotalDVs)
-			}
-		}
-		b.StopTimer()
-		b.ReportMetric(float64(fs.opens.Load())/float64(b.N), "puffin-opens/op")
-	})
-
 	benchmark("lazy_unread", func(loader *lazyDeletionVectorLoader) error {
-		if len(loader.groups) != lazyDVBenchmarkGroupCount {
-			return fmt.Errorf("got %d groups, expected %d", len(loader.groups), lazyDVBenchmarkGroupCount)
+		if len(loader.byDataFile) != lazyDVBenchmarkTotalDVs {
+			return fmt.Errorf("got %d indexed data files, expected %d", len(loader.byDataFile), lazyDVBenchmarkTotalDVs)
 		}
 
 		return nil

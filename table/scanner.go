@@ -1872,6 +1872,10 @@ type FileScanTask struct {
 // If an error is encountered, during the planning and setup then this will return the
 // error directly. If the error occurs while iterating the records, it will be returned
 // by the iterator.
+// Deletion-vector references are validated during setup. Deletion-vector Puffin files
+// are loaded lazily, so a Puffin read error is returned by the iterator when a task
+// referencing that file is reached. If no such task is processed, the file is not read
+// and its error is not returned.
 //
 // The purpose for returning the schema up front is to handle the case where there are no
 // rows returned. The resulting Arrow Schema of the projection will still be known.
@@ -1887,6 +1891,10 @@ func (scan *Scan) ToArrowRecords(ctx context.Context) (*arrow.Schema, iter.Seq2[
 // ReadTasks reads Arrow records from a specific set of FileScanTasks, applying the
 // scan's projection, per-task residual filters, and positional delete handling. This
 // is useful when the caller has already planned or selected specific tasks to read.
+// Deletion-vector references are validated during setup. Deletion-vector Puffin files
+// are loaded lazily, so a Puffin read error is returned by the iterator when a task
+// referencing that file is reached. If no such task is processed, the file is not read
+// and its error is not returned.
 func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.Schema, iter.Seq2[arrow.RecordBatch, error], error) {
 	if atomic.LoadUint32(&scan.closed) != 0 {
 		return nil, nil, fmt.Errorf("%w: scan is closed", ErrInvalidOperation)

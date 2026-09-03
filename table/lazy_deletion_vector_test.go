@@ -18,7 +18,9 @@
 package table
 
 import (
+	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,7 +49,7 @@ func TestLazyDeletionVectorLoaderLoadsSharedPuffinGroupsOnDemand(t *testing.T) {
 
 	loader, err := newLazyDeletionVectorLoader(fs, tasks)
 	require.NoError(t, err)
-	require.Len(t, loader.groups, 1)
+	require.Len(t, loader.byDataFile, 2)
 	assert.Zero(t, fs.opens.Load(), "indexing must not open a Puffin file")
 
 	bitmap, err := loader.load(t.Context(), refs[0])
@@ -75,6 +77,20 @@ func TestLazyDeletionVectorLoaderRejectsEmptyReferencedDataFile(t *testing.T) {
 	assert.Nil(t, loader)
 	require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
 	assert.ErrorContains(t, err, "missing or empty referenced_data_file")
+}
+
+func TestReadTasksRejectsEmptyReferencedDataFile(t *testing.T) {
+	fs := iceio.LocalFS{}
+	tmp := t.TempDir()
+	tbl := buildDVScanTestTable(t, fs, tmp)
+	dataPath := filepath.Join(tmp, "data.parquet")
+	dataFile := writeIntParquetWithFieldID(t, fs, dataPath, 0, 1)
+	dvFile := newDVMockDataFile("empty-ref.puffin", "", 0, 1, 1)
+
+	_, _, err := tbl.Scan().ReadTasks(t.Context(), []FileScanTask{
+		{File: dataFile, DeletionVectorFiles: []iceberg.DataFile{dvFile}},
+	})
+	require.ErrorIs(t, err, dv.ErrInvalidDeletionVector)
 }
 
 func TestLazyDeletionVectorLoaderSingleflightsConcurrentGroupLoads(t *testing.T) {
@@ -149,6 +165,58 @@ func TestLazyDeletionVectorLoaderCachesGroupErrors(t *testing.T) {
 		assert.ErrorContains(t, loadErr, "read deletion vectors from missing.puffin")
 		assert.ErrorContains(t, loadErr, "boom")
 	}
+}
+
+type cancelOnOpenIO struct {
+	iceio.LocalFS
+	cancel context.CancelFunc
+	opens  atomic.Int64
+}
+
+func (f *cancelOnOpenIO) Open(name string) (iceio.File, error) {
+	file, err := f.LocalFS.Open(name)
+	if err == nil {
+		f.opens.Add(1)
+		f.cancel()
+	}
+
+	return file, err
+}
+
+func TestLazyDeletionVectorLoaderDoesNotCacheCallerCancellation(t *testing.T) {
+	files := writeSharedDVPuffinFixture(t, 1)
+	dataFilePath := *files[0].ReferencedDataFile()
+	ctx, cancel := context.WithCancel(t.Context())
+	fs := &cancelOnOpenIO{cancel: cancel}
+	loader, err := newLazyDeletionVectorLoader(fs, []FileScanTask{{
+		DeletionVectorFiles: files,
+	}})
+	require.NoError(t, err)
+
+	bitmap, err := loader.load(ctx, dataFilePath)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, bitmap)
+
+	bitmap, err = loader.load(context.Background(), dataFilePath)
+	require.NoError(t, err)
+	require.NotNil(t, bitmap)
+	assert.True(t, bitmap.Contains(0))
+	assert.Equal(t, int64(1), fs.opens.Load())
+}
+
+func TestLazyDeletionVectorLoaderSurfacesPuffinReadErrors(t *testing.T) {
+	const dataFilePath = "file:///table/data/truncated.parquet"
+	puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{1}, dataFilePath)
+	require.NoError(t, os.Truncate(puffinPath, 1))
+	dvFile := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
+	loader, err := newLazyDeletionVectorLoader(iceio.LocalFS{}, []FileScanTask{{
+		DeletionVectorFiles: []iceberg.DataFile{dvFile},
+	}})
+	require.NoError(t, err)
+
+	_, err = loader.load(t.Context(), dataFilePath)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "read deletion vectors from")
 }
 
 type countingPuffinOpenIO struct {

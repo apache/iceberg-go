@@ -430,7 +430,7 @@ func TestReleasePerFilePosDeletes(t *testing.T) {
 	t.Run("nil chunk in slice does not panic", func(t *testing.T) {
 		// Defensive: production code paths never insert a nil *arrow.Chunked
 		// into the map. This subtest pins the guard so a future caller (the
-		// in-flight readAllDeletionVectors merger, or a refactor of readDeletes)
+		// in-flight delete-file merger, or a refactor of readDeletes)
 		// can't silently NPE the cleanup path.
 		mem := memory.NewCheckedAllocator(memory.NewGoAllocator())
 		defer mem.AssertSize(t, 0)

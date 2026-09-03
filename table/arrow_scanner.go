@@ -64,8 +64,7 @@ type (
 // GC, so dropping the map on the floor leaks the chunks. Safe to call on a
 // nil map; the nil-chunk guard is defensive — readDeletes never inserts a
 // nil *arrow.Chunked, but the guard keeps callers safe if that invariant
-// ever changes (e.g. when readAllDeletionVectors lands and starts merging
-// into the same map).
+// ever changes.
 func releasePerFilePosDeletes(deletesPerFile perFilePosDeletes) {
 	for _, chunks := range deletesPerFile {
 		for _, chunk := range chunks {
@@ -151,7 +150,6 @@ type perFileDVBitmaps = map[string]*dv.RoaringPositionBitmap
 type lazyDeletionVectorLoader struct {
 	fs iceio.IO
 
-	groups     map[string]*lazyDeletionVectorGroup
 	byDataFile map[string]*lazyDeletionVectorGroup
 }
 
@@ -174,7 +172,6 @@ func newLazyDeletionVectorLoader(fs iceio.IO, tasks []FileScanTask) (*lazyDeleti
 	groups := groupDeletionVectors(uniqueDVs)
 	loader := &lazyDeletionVectorLoader{
 		fs:         fs,
-		groups:     groups,
 		byDataFile: make(map[string]*lazyDeletionVectorGroup, len(uniqueDVs)),
 	}
 	for _, group := range groups {
@@ -206,18 +203,6 @@ func (l *lazyDeletionVectorLoader) load(ctx context.Context, dataFilePath string
 
 			return
 		}
-		if err := ctx.Err(); err != nil {
-			group.err = err
-
-			return
-		}
-		if len(bitmaps) != len(group.referencedDataFiles) {
-			group.err = fmt.Errorf("read deletion vectors from %s: got %d bitmaps, expected %d",
-				group.puffinPath, len(bitmaps), len(group.referencedDataFiles))
-
-			return
-		}
-
 		group.bitmaps = make(perFileDVBitmaps, len(bitmaps))
 		for i, ref := range group.referencedDataFiles {
 			group.bitmaps[ref] = bitmaps[i]
@@ -254,7 +239,8 @@ func collectUniqueDeletionVectors(tasks []FileScanTask) (map[string]iceberg.Data
 				// field cause directly here — otherwise the dedup check
 				// below would produce the misleading "multiple deletion
 				// vectors" error when two equally-broken entries collide.
-				return nil, fmt.Errorf("deletion vector %s missing content_offset/content_size_in_bytes", d.FilePath())
+				return nil, fmt.Errorf("%w: deletion vector %s missing content_offset/content_size_in_bytes",
+					dv.ErrInvalidDeletionVector, d.FilePath())
 			}
 			if existing, seen := uniqueDVs[*ref]; seen {
 				if !sameDVBlob(existing, d) {
@@ -288,105 +274,18 @@ func groupDeletionVectors(uniqueDVs map[string]iceberg.DataFile) map[string]*laz
 	return groups
 }
 
-// readAllDeletionVectors reads every deletion-vector puffin blob referenced
-// by the input tasks and returns a perFileDVBitmaps map keyed by the
-// referenced data-file path.
-//
-// Dedup is by referenced-data-file path, not by puffin file path: a single
-// puffin file can carry multiple DV blobs (one per data file). Keying by the
-// puffin path would silently drop all but the first blob. This matches Java's
-// DeleteFileIndex.findDV, which keys by data-file path. As a side-effect we
-// can detect spec violations: two distinct DV blobs targeting the same data
-// file is rejected (mirrors Java's "Can't index multiple DVs for %s"
-// ValidationException — over-deletion risk if silently unioned).
-//
-// Validation happens up front, before any goroutines are launched, so the
-// goroutine fan-out has no early-exit path. (An early return after g.Go
-// dispatches but before g.Wait would close resultsChan while in-flight
-// workers were still sending, panicking with "send on closed channel".)
-func readAllDeletionVectors(ctx context.Context, fs iceio.IO, tasks []FileScanTask, concurrency int) (perFileDVBitmaps, error) {
-	out := make(perFileDVBitmaps)
-	uniqueDVs, err := collectUniqueDeletionVectors(tasks)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(uniqueDVs) == 0 {
-		return out, nil
-	}
-	if len(uniqueDVs) == 1 {
-		for ref, dvFile := range uniqueDVs {
-			bitmap, err := dv.ReadDV(fs, dvFile)
-			if err != nil {
-				return nil, fmt.Errorf("read deletion vector %s: %w", dvFile.FilePath(), err)
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			out[ref] = bitmap
-		}
-
-		return out, nil
-	}
-
-	groups := groupDeletionVectors(uniqueDVs)
-
-	type dvResult struct {
-		referencedDataFiles []string
-		bitmaps             []*dv.RoaringPositionBitmap
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(concurrency)
-
-	resultsChan := make(chan dvResult, concurrency)
-	go func() {
-		// g.Wait() before the deferred close so workers finish sending
-		// before the channel is closed — otherwise a late worker would
-		// panic on send to a closed channel. The error is collected via
-		// the outer g.Wait() below, not stored on a shared variable.
-		defer close(resultsChan)
-		for puffinPath, group := range groups {
-			g.Go(func() error {
-				bitmaps, err := dv.ReadDVs(fs, group.files)
-				if err != nil {
-					return fmt.Errorf("read deletion vectors from %s: %w", puffinPath, err)
-				}
-				select {
-				case resultsChan <- dvResult{referencedDataFiles: group.referencedDataFiles, bitmaps: bitmaps}:
-					return nil
-				case <-gctx.Done():
-					return gctx.Err()
-				}
-			})
-		}
-		_ = g.Wait()
-	}()
-
-	for r := range resultsChan {
-		for i, ref := range r.referencedDataFiles {
-			out[ref] = r.bitmaps[i]
-		}
-	}
-
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-
-	return out, nil
-}
-
 // sameDVBlob reports whether two DV manifest entries point at the same puffin
 // blob — identical puffin file path and content offset. Different of either
 // means two distinct DVs for the same data file, the over-deletion case
-// readAllDeletionVectors rejects.
+// collectUniqueDeletionVectors rejects.
 //
 // Java's DeleteFileIndex is stricter: any second DV for the same data file is
 // rejected with ValidationException("Can't index multiple DVs for %s"), even
 // when both entries reference the same underlying blob. Same-blob dedup here
 // is a deliberate divergence — reading the same blob twice is wasteful, not
 // incorrect. ContentOffset is required to be non-nil by the spec and by the
-// pre-pass in readAllDeletionVectors, so the comparison below assumes both.
+// pre-pass in collectUniqueDeletionVectors, so the comparison below assumes
+// both.
 func sameDVBlob(a, b iceberg.DataFile) bool {
 	if a.FilePath() != b.FilePath() {
 		return false
