@@ -357,6 +357,26 @@ func TestBuildDVIndex_RejectsMultipleDVsPerDataFile(t *testing.T) {
 	assert.Contains(t, err.Error(), dataFilePath)
 }
 
+func TestBuildDVIndex_SkipsEmptyReferencedDataFile(t *testing.T) {
+	snapshotID := int64(1)
+	seqNum := int64(1)
+	dvFile := &dvMockDataFile{
+		mockDataFile: mockDataFile{
+			path:        "s3://bucket/data/dv-001.puffin",
+			contentType: iceberg.EntryContentPosDeletes,
+		},
+		referencedDataFile: strPtr(""),
+	}
+
+	dvEntries := []iceberg.ManifestEntry{
+		iceberg.NewManifestEntry(iceberg.EntryStatusADDED, &snapshotID, &seqNum, nil, dvFile),
+	}
+
+	dvIndex, err := buildDVIndex(dvEntries)
+	assert.NoError(t, err)
+	assert.Empty(t, dvIndex)
+}
+
 func TestMatchDVToData_SequenceNumberGuard(t *testing.T) {
 	dataFilePath := "s3://bucket/data/data-001.parquet"
 	snapshotID := int64(1)
