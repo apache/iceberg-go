@@ -151,6 +151,19 @@ func TestRejectsDuplicatePartitionSpecIDs(t *testing.T) {
 	assert.ErrorContains(t, err, "duplicate partition spec ID 0")
 }
 
+// Why: builder-produced metadata must enforce the same unique partition spec
+// ID invariant as metadata read from JSON.
+// Condition: an in-package builder is given duplicate spec IDs before Build.
+// Assertion: Build rejects the metadata instead of publishing an ambiguous index.
+func TestMetadataBuilderBuildRejectsDuplicatePartitionSpecIDs(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	builder.specs = append(builder.specs, builder.specs[0])
+
+	_, err := builder.Build()
+	require.ErrorIs(t, err, ErrInvalidMetadata)
+	assert.ErrorContains(t, err, "duplicate partition spec ID 0")
+}
+
 // Why: in-package fixtures can mutate an existing spec slice without changing
 // its length or backing array, which cannot be detected by index metadata alone.
 // Condition: a spec is replaced in place after the index is built.

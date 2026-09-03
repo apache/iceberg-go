@@ -218,9 +218,9 @@ func schemaIndexLookup(index *schemaIndexData, schemas []*iceberg.Schema, id int
 
 type partitionSpecIndexData struct {
 	positions map[int]int
-	// firstSpec identifies the spec slice used to build positions. It lets
-	// read-only lookups detect an index left behind by an in-package fixture
-	// that replaced the slice.
+	// firstSpec identifies the first element of the spec slice used to build
+	// positions. It lets read-only lookups detect an index left behind by an
+	// in-package fixture that replaced the slice.
 	firstSpec *iceberg.PartitionSpec
 	// shared means positions is owned by more than one builder or metadata
 	// value and must be copied before a builder mutates it.
