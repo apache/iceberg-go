@@ -58,11 +58,16 @@ func BenchmarkCollectScanTasks64Handles(b *testing.B) {
 	tasks := ScanTasks{PlanTasks: handles}
 	ident := table.Identifier{"db", "tbl"}
 
-	b.ResetTimer()
-	for range b.N {
-		_, err := catalog.collectScanTasks(context.Background(), ident, tasks)
-		if err != nil {
-			b.Fatal(err)
-		}
+	for _, maxConcurrency := range []int{1, 2, 4, 8, 16, 32, 64} {
+		b.Run(fmt.Sprintf("concurrency-%d", maxConcurrency), func(b *testing.B) {
+			b.ResetTimer()
+			for range b.N {
+				_, err := catalog.collectScanTasksWithConcurrency(
+					context.Background(), ident, tasks, maxConcurrency)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

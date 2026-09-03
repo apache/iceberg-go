@@ -30,6 +30,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,11 +52,6 @@ var _ table.ScanPlanner = (*Catalog)(nil)
 // Compile-time proof that the REST catalog exposes the optional full-capability
 // extension used by table.Scan's auto planning mode.
 var _ table.FullRemoteScanPlanner = (*Catalog)(nil)
-
-// remoteScanTaskFetchConcurrency bounds in-flight fetchScanTasks requests for
-// each frontier. Keeping frontiers separate preserves breadth-first response
-// ordering while allowing independent plan-task handles to fetch concurrently.
-const remoteScanTaskFetchConcurrency = 8
 
 // ErrPlanExpired is returned when polling a plan that the server no longer
 // knows about: a fetchPlanningResult 404 whose error.type is exactly
@@ -253,7 +249,8 @@ func (r *Catalog) PlanFiles(ctx context.Context, req table.ScanPlanningRequest) 
 			"%w: unexpected plan status %q from planTableScan", ErrRESTError, resp.Status)
 	}
 
-	envelopes, err := r.collectScanTasks(ctx, req.Identifier, completed.ScanTasks)
+	envelopes, err := r.collectScanTasksWithConcurrency(
+		ctx, req.Identifier, completed.ScanTasks, req.MaxConcurrency)
 	if err != nil {
 		cleanup()
 
@@ -307,6 +304,23 @@ func (r *Catalog) planIOBaseProps(req table.ScanPlanningRequest) iceberg.Propert
 // forever. The envelope boundaries are retained because delete-file references
 // are local to each response.
 func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, tasks ScanTasks) ([]ScanTasks, error) {
+	return r.collectScanTasksWithConcurrency(ctx, ident, tasks, runtime.GOMAXPROCS(0))
+}
+
+// collectScanTasksWithConcurrency expands plan-task handles using the
+// requested maximum number of concurrent fetches. A non-positive limit uses
+// runtime.GOMAXPROCS. On a fetch error, at most the configured number of
+// requests can already be in flight when cancellation reaches their contexts.
+func (r *Catalog) collectScanTasksWithConcurrency(
+	ctx context.Context,
+	ident table.Identifier,
+	tasks ScanTasks,
+	maxConcurrency int,
+) ([]ScanTasks, error) {
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+
 	envelopes := []ScanTasks{tasks}
 
 	frontier := append([]string(nil), tasks.PlanTasks...)
@@ -320,8 +334,11 @@ func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, 
 			seen[handle] = true
 			handles = append(handles, handle)
 		}
+		if len(handles) == 0 {
+			break
+		}
 
-		responses, err := r.fetchScanTaskFrontier(ctx, ident, handles)
+		responses, err := r.fetchScanTaskFrontier(ctx, ident, handles, maxConcurrency)
 		if err != nil {
 			return nil, err
 		}
@@ -337,21 +354,39 @@ func (r *Catalog) collectScanTasks(ctx context.Context, ident table.Identifier, 
 	return envelopes, nil
 }
 
+// fetchScanTaskFrontier fetches one breadth-first frontier concurrently while
+// placing responses back into handle order. The explicit cancellation context
+// keeps sibling transport errors as context.Canceled instead of propagating an
+// errgroup cancellation cause into those errors.
 func (r *Catalog) fetchScanTaskFrontier(
 	ctx context.Context,
 	ident table.Identifier,
 	handles []string,
+	maxConcurrency int,
 ) ([]FetchScanTasksResponse, error) {
 	responses := make([]FetchScanTasksResponse, len(handles))
 	errs := make([]error, len(handles))
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(remoteScanTaskFetchConcurrency)
+	if len(handles) == 0 {
+		return responses, nil
+	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = runtime.GOMAXPROCS(0)
+	}
+	maxConcurrency = min(maxConcurrency, len(handles))
+
+	fetchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var group errgroup.Group
+	group.SetLimit(maxConcurrency)
 
 	for i, handle := range handles {
+		i, handle := i, handle
 		group.Go(func() error {
-			response, err := r.FetchScanTasks(groupCtx, ident, FetchScanTasksRequest{PlanTask: handle})
+			response, err := r.FetchScanTasks(fetchCtx, ident, FetchScanTasksRequest{PlanTask: handle})
 			if err != nil {
 				errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, err)
+				cancel()
 
 				return err
 			}
@@ -367,7 +402,16 @@ func (r *Catalog) fetchScanTaskFrontier(
 		// first error in handle order wins. Sibling requests cancelled by the
 		// first failure are not meaningful candidates for the returned error.
 		for _, err := range errs {
-			if err != nil && !errors.Is(err, context.Canceled) {
+			if err != nil &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+		}
+		// If cancellation is the only error, still return the handle-aware
+		// error recorded for the first handle rather than the bare group error.
+		for _, err := range errs {
+			if err != nil {
 				return nil, err
 			}
 		}

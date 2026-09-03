@@ -1331,7 +1331,11 @@ func (t *orderedScanTaskErrorTransport) RoundTrip(req *http.Request) (*http.Resp
 	var errType string
 	switch body.PlanTask {
 	case "table":
-		<-t.planTaskReturned
+		select {
+		case <-t.planTaskReturned:
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		}
 		errType = errTypeNoSuchTable
 	case "plan-task":
 		close(t.planTaskReturned)
@@ -1371,7 +1375,8 @@ func TestCollectScanTasksReturnsFirstErrorInHandleOrder(t *testing.T) {
 func TestCollectScanTasksBoundsFrontierConcurrency(t *testing.T) {
 	t.Parallel()
 
-	const handleCount = remoteScanTaskFetchConcurrency + 1
+	const maxConcurrency = 8
+	const handleCount = maxConcurrency + 1
 	started := make(chan string, handleCount)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -1399,13 +1404,13 @@ func TestCollectScanTasksBoundsFrontierConcurrency(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := cat.collectScanTasks(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
+		_, err := cat.collectScanTasksWithConcurrency(t.Context(), table.Identifier{"db", "tbl"}, ScanTasks{
 			PlanTasks: handles,
-		})
+		}, maxConcurrency)
 		done <- err
 	}()
 
-	for range remoteScanTaskFetchConcurrency {
+	for range maxConcurrency {
 		select {
 		case <-started:
 		case <-time.After(time.Second):

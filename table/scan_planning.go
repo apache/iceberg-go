@@ -105,6 +105,9 @@ type ScanPlanningRequest struct {
 	RowFilter        iceberg.BooleanExpression
 	MinRowsRequested *int64
 	StatsFields      []string
+	// MaxConcurrency is the maximum number of concurrent operations a planner
+	// may use for this scan. Zero means use the planner's default.
+	MaxConcurrency int
 	// CaseSensitive must carry the Scan's value (which defaults to true), not
 	// Go's false zero value, or the wire request would flip the spec default.
 	// Nil means use the scan default.
