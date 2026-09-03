@@ -131,13 +131,11 @@ func (i InspectTable) manifestEntryReader(
 		return nil, errors.New("table file IO is not configured")
 	}
 
-	fs, err := i.tbl.fsF(ctx)
+	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, sharedSnapshotManifestFSF(i.tbl.fsF))
 	if err != nil {
 		return nil, err
 	}
-	manifestSet, err := i.tbl.manifestSetWithFSF(ctx, *snapshot, func(context.Context) (iceio.IO, error) {
-		return fs, nil
-	})
+	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +174,7 @@ func (i InspectTable) allManifestEntryReader(
 	if err != nil {
 		return nil, err
 	}
-	manifestFS := func(context.Context) (iceio.IO, error) { return fs, nil }
+	manifestFS := sharedSnapshotManifestFSF(i.tbl.fsF)
 
 	return i.manifestEntryReaderFromManifestSource(
 		ctx, arrowSchema, fs, discardDeleted, includeManifest, appendEntry,

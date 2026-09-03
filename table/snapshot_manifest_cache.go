@@ -37,7 +37,7 @@ const snapshotManifestCacheSize = 64
 // snapshotManifestCacheManifestLimit bounds the total number of manifest
 // descriptors retained by the cache. This keeps a small number of unusually
 // large snapshots from consuming an unbounded amount of memory.
-const snapshotManifestCacheManifestLimit = 16 * 1024
+const snapshotManifestCacheManifestLimit = 32 * 1024
 
 // snapshotManifestSet keeps the complete manifest list and data partition
 // together. Manifest descriptors are immutable for an Iceberg snapshot, so a
@@ -110,6 +110,7 @@ func snapshotManifestCacheKeyFor(snapshot Snapshot) snapshotManifestCacheKey {
 
 type snapshotManifestCacheEntry struct {
 	ready     chan struct{}
+	readyOnce sync.Once
 	manifests snapshotManifestSet
 	err       error
 }
@@ -215,26 +216,25 @@ func (c *snapshotManifestCache) finish(
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if current, ok := c.entries[key]; !ok || current != entry {
-		return
-	}
-
-	delete(c.entries, key)
-	entry.manifests = value
-	entry.err = err
-	if err == nil {
-		if c.complete.Contains(key) {
-			c.complete.Remove(key)
-		}
-		c.complete.Add(key, value)
-		c.completeManifestCount += snapshotManifestSetSize(value)
-		for c.completeManifestCount > snapshotManifestCacheManifestLimit {
-			if _, _, ok := c.complete.RemoveOldest(); !ok {
-				break
+	if current, ok := c.entries[key]; ok && current == entry {
+		delete(c.entries, key)
+		if err == nil {
+			if c.complete.Contains(key) {
+				c.complete.Remove(key)
+			}
+			c.complete.Add(key, value)
+			c.completeManifestCount += snapshotManifestSetSize(value)
+			for c.completeManifestCount > snapshotManifestCacheManifestLimit {
+				if _, _, ok := c.complete.RemoveOldest(); !ok {
+					break
+				}
 			}
 		}
 	}
-	close(entry.ready)
+
+	entry.manifests = value
+	entry.err = err
+	entry.readyOnce.Do(func() { close(entry.ready) })
 }
 
 func readSnapshotManifestSet(

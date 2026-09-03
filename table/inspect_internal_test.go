@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2193,6 +2194,44 @@ func TestInspectFilesTables(t *testing.T) {
 			require.Equal(t, tt.wantContent, contents)
 		})
 	}
+}
+
+type inspectManifestListContextIO struct {
+	iceio.IO
+	rejectManifestList bool
+}
+
+func (fs inspectManifestListContextIO) Open(path string) (iceio.File, error) {
+	if fs.rejectManifestList && strings.Contains(path, "manifest-list") {
+		return nil, errors.New("manifest list opened with caller-bound IO")
+	}
+
+	return fs.IO.Open(path)
+}
+
+func TestInspectFilesUseDetachedContextForManifestListRead(t *testing.T) {
+	tbl := inspectAllFilesTable(t)
+	baseFS, err := tbl.fsF(context.Background())
+	require.NoError(t, err)
+
+	var calls int
+	tbl.fsF = func(ctx context.Context) (iceio.IO, error) {
+		calls++
+
+		return inspectManifestListContextIO{
+			IO:                 baseFS,
+			rejectManifestList: ctx.Done() != nil,
+		}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rr, err := tbl.Inspect().Files(ctx)
+	require.NoError(t, err)
+	paths, contents := inspectFileRows(t, rr)
+	require.Len(t, paths, 3)
+	require.Len(t, contents, 3)
+	require.Equal(t, 2, calls)
 }
 
 func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {

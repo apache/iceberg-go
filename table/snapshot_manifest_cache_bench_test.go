@@ -56,6 +56,13 @@ func BenchmarkPlanFilesSnapshotManifestCache(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for range b.N {
+						b.StopTimer()
+						if cached {
+							tbl.manifestCache = newSnapshotManifestCache()
+						} else {
+							tbl.manifestCache = nil
+						}
+						b.StartTimer()
 						for range scanCount {
 							tasks, err := tbl.Scan(WithMaxConcurrency(1)).PlanFiles(context.Background())
 							if err != nil {
@@ -68,7 +75,7 @@ func BenchmarkPlanFilesSnapshotManifestCache(b *testing.B) {
 					fs.mu.Lock()
 					listOpens := fs.opens[manifestListPath]
 					fs.mu.Unlock()
-					b.ReportMetric(float64(listOpens), "manifest-list-opens")
+					b.ReportMetric(float64(listOpens)/float64(b.N), "manifest-list-opens")
 				})
 			}
 		}
