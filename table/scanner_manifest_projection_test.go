@@ -118,6 +118,14 @@ func TestManifestProjectionRetainsDataFileStatsForDeleteScans(t *testing.T) {
 	projection, dropStats = scan.manifestProjectionForManifest(deleteManifest, retainDataStats)
 	assert.True(t, projection.IncludeColumnStats)
 	assert.False(t, dropStats)
+
+	filteredScan := &Scan{
+		rowFilter: iceberg.EqualTo(iceberg.Reference("id"), int64(1)),
+	}
+	projection, dropStats = filteredScan.manifestProjectionForManifest(dataManifest, false)
+	assert.True(t, projection.IncludeColumnStats)
+	assert.True(t, dropStats,
+		"row-filter stats should be dropped after filtering when no delete scan needs them")
 }
 
 func TestDataFilesWithoutColumnStatsReusesSharedFiles(t *testing.T) {

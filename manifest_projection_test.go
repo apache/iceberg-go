@@ -270,6 +270,20 @@ func TestManifestEntryProjectionSupportsManifestVersionsAndDeletes(t *testing.T)
 				assert.Equal(t, int64(4), *projected.DataFile().ContentOffset())
 				assert.Equal(t, int64(8), *projected.DataFile().ContentSizeInBytes())
 			}
+
+			statsReader, err := NewManifestReaderWithProjection(
+				manifest, bytes.NewReader(manifestBytes.Bytes()), ManifestEntryProjection{IncludeColumnStats: true},
+			)
+			require.NoError(t, err)
+			withStats, err := statsReader.ReadEntry()
+			require.NoError(t, err)
+			require.NoError(t, statsReader.Close())
+			assert.Equal(t, map[int]int64{1: 1}, withStats.DataFile().ValueCounts())
+			assert.Equal(t, map[int]int64{1: 0}, withStats.DataFile().NullValueCounts())
+			assert.Equal(t, map[int]int64{1: 0}, withStats.DataFile().NaNValueCounts())
+			assert.Equal(t, map[int][]byte{1: {0x01}}, withStats.DataFile().LowerBoundValues())
+			assert.Equal(t, map[int][]byte{1: {0x01}}, withStats.DataFile().UpperBoundValues())
+			assert.Empty(t, withStats.DataFile().ColumnSizes())
 		})
 	}
 }

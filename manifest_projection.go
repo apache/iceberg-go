@@ -30,7 +30,9 @@ import (
 
 // ManifestEntryProjection selects the optional data-file fields decoded while
 // reading a manifest. The fields needed to build a scan task are always read.
-// Column statistics are read only when IncludeColumnStats is true.
+// When IncludeColumnStats is true, the metric maps used for pruning are also
+// read: value_counts, null_value_counts, nan_value_counts, lower_bounds, and
+// upper_bounds. column_sizes and deprecated distinct_counts remain omitted.
 //
 // A projected read is intended for planning paths that use statistics
 // transiently. Callers that need the complete DataFile metadata should use
