@@ -570,7 +570,7 @@ func TestBuildPartitionMatchPredicate_EvaluatesTransformedNull(t *testing.T) {
 
 func TestBuildPartitionMatchPredicate_VoidBindsAlwaysTrue(t *testing.T) {
 	spec := specWithFields(iceberg.PartitionField{
-		SourceIDs: []int{2}, FieldID: 1001, Name: "category_void", Transform: iceberg.VoidTransform{},
+		SourceIDs: []int{0}, FieldID: 1001, Name: "category_void", Transform: iceberg.VoidTransform{},
 	})
 
 	expr, err := BuildPartitionMatchPredicate(spec, dynamicOverwriteSchema(), []map[int]any{{1001: nil}})
@@ -579,6 +579,39 @@ func TestBuildPartitionMatchPredicate_VoidBindsAlwaysTrue(t *testing.T) {
 	bound, err := iceberg.BindExpr(dynamicOverwriteSchema(), expr, true)
 	require.NoError(t, err)
 	assert.True(t, bound.Equals(iceberg.AlwaysTrue{}), "void-only predicate should bind to AlwaysTrue, got %s", bound)
+}
+
+func TestBuildPartitionMatchPredicate_SourceLessVoidDoesNotDropOtherFields(t *testing.T) {
+	schema := dynamicOverwriteSchema()
+	spec := specWithFields(
+		iceberg.PartitionField{
+			SourceIDs: []int{0}, FieldID: 1000, Name: "old_category", Transform: iceberg.VoidTransform{},
+		},
+		identityField(1, 1001, "id"),
+	)
+
+	expr, err := BuildPartitionMatchPredicate(spec, schema, []map[int]any{
+		{1000: nil, 1001: int32(5)},
+	})
+	require.NoError(t, err)
+
+	want := iceberg.EqualTo(iceberg.Reference("id"), int32(5))
+	assert.True(t, expr.Equals(want), "want %s, got %s", want, expr)
+
+	bound, err := iceberg.BindExpr(schema, expr, true)
+	require.NoError(t, err)
+
+	eval, err := iceberg.ExpressionEvaluator(schema, expr, true)
+	require.NoError(t, err)
+
+	matched, err := eval(partitionPredicateRow{int32(5), nil, nil, nil, nil})
+	require.NoError(t, err)
+	assert.True(t, matched)
+
+	wantBound, err := iceberg.BindExpr(schema, want, true)
+	require.NoError(t, err)
+	assert.True(t, bound.Equals(wantBound),
+		"bound predicate should retain non-void field, got %s", bound)
 }
 
 func TestBuildPartitionMatchPredicate_CoercesRawDayValue(t *testing.T) {
