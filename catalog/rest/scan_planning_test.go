@@ -1968,7 +1968,7 @@ func TestCollectScanTasksCancelsSiblingRequestsOnFailure(t *testing.T) {
 	})
 
 	envelopes, err := cat.collectScanTasks(ctx, table.Identifier{"db", "tbl"}, ScanTasks{
-		PlanTasks: []string{"slow", "failed"},
+		PlanTasks: []string{"failed", "slow"},
 	})
 	require.ErrorIs(t, err, ErrBadRequest)
 	assert.Nil(t, envelopes)

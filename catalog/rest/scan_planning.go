@@ -355,9 +355,9 @@ func (r *Catalog) collectScanTasksWithConcurrency(
 }
 
 // fetchScanTaskFrontier fetches one breadth-first frontier concurrently while
-// placing responses back into handle order. The explicit cancellation context
-// keeps sibling transport errors as context.Canceled instead of propagating an
-// errgroup cancellation cause into those errors.
+// placing responses back into handle order. When a handle fails, unfinished
+// later handles are canceled, but earlier handles are allowed to finish so the
+// first error in the old serial handle order remains deterministic.
 func (r *Catalog) fetchScanTaskFrontier(
 	ctx context.Context,
 	ident table.Identifier,
@@ -374,8 +374,23 @@ func (r *Catalog) fetchScanTaskFrontier(
 	}
 	maxConcurrency = min(maxConcurrency, len(handles))
 
-	fetchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	requestCtxs := make([]context.Context, len(handles))
+	requestCancels := make([]context.CancelFunc, len(handles))
+	for i := range handles {
+		requestCtxs[i], requestCancels[i] = context.WithCancel(ctx)
+	}
+	defer func() {
+		for _, cancel := range requestCancels {
+			cancel()
+		}
+	}()
+
+	var (
+		mu               sync.Mutex
+		completed        = make([]bool, len(handles))
+		siblingCanceled  = make([]bool, len(handles))
+		lowestFailureIdx = -1
+	)
 
 	var group errgroup.Group
 	group.SetLimit(maxConcurrency)
@@ -383,35 +398,46 @@ func (r *Catalog) fetchScanTaskFrontier(
 	for i, handle := range handles {
 		i, handle := i, handle
 		group.Go(func() error {
-			response, err := r.FetchScanTasks(fetchCtx, ident, FetchScanTasksRequest{PlanTask: handle})
-			if err != nil {
-				errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, err)
-				cancel()
+			response, fetchErr := r.FetchScanTasks(requestCtxs[i], ident, FetchScanTasksRequest{PlanTask: handle})
 
-				return err
+			mu.Lock()
+			defer mu.Unlock()
+			completed[i] = true
+			if fetchErr == nil {
+				responses[i] = response
+
+				return nil
 			}
 
-			responses[i] = response
+			errs[i] = fmt.Errorf("fetching scan tasks for handle %q: %w", handle, fetchErr)
+			if siblingCanceled[i] || (lowestFailureIdx >= 0 && i > lowestFailureIdx) {
+				return fetchErr
+			}
 
-			return nil
+			if lowestFailureIdx < 0 || i < lowestFailureIdx {
+				lowestFailureIdx = i
+				for j := i + 1; j < len(handles); j++ {
+					if completed[j] || siblingCanceled[j] {
+						continue
+					}
+					siblingCanceled[j] = true
+					requestCancels[j]()
+				}
+			}
+
+			return fetchErr
 		})
 	}
 
 	if waitErr := group.Wait(); waitErr != nil {
-		// Preserve the serial fetch contract: when multiple handles fail, the
-		// first error in handle order wins. Sibling requests cancelled by the
-		// first failure are not meaningful candidates for the returned error.
-		for _, err := range errs {
-			if err != nil &&
-				!errors.Is(err, context.Canceled) &&
-				!errors.Is(err, context.DeadlineExceeded) {
-				return nil, err
-			}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		// If cancellation is the only error, still return the handle-aware
-		// error recorded for the first handle rather than the bare group error.
-		for _, err := range errs {
-			if err != nil {
+
+		mu.Lock()
+		defer mu.Unlock()
+		for i, err := range errs {
+			if err != nil && !siblingCanceled[i] {
 				return nil, err
 			}
 		}
