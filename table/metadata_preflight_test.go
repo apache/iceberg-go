@@ -85,6 +85,16 @@ func TestParseMetadataBytesAssignsMissingPartitionFieldIDs(t *testing.T) {
 	}
 }
 
+func TestParseMetadataBytesNormalizesStaleLastPartitionID(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+
+	parsed, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	require.NotNil(t, parsed.LastPartitionSpecID())
+	assert.Equal(t, 1000, *parsed.LastPartitionSpecID())
+}
+
 func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T) {
 	data := strings.Replace(
 		ExampleTableMetadataV2,
