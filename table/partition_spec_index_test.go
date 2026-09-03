@@ -33,7 +33,7 @@ import (
 // index is initialized from the same slice.
 // Assertion: first, default, and missing lookups return the expected values.
 func TestCommonMetadataPartitionSpecIndexLookups(t *testing.T) {
-	specs := partitionSpecIndexTestSpecs(0, 7, 42)
+	specs := partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 0, 7, 42)
 	metadata := commonMetadata{
 		Specs:              specs,
 		DefaultSpecID:      42,
@@ -49,32 +49,29 @@ func TestCommonMetadataPartitionSpecIndexLookups(t *testing.T) {
 	assert.Nil(t, metadata.PartitionSpecByID(99))
 }
 
-// Why: decoded metadata must initialize the same derived index as metadata
-// built by a writer, rather than rebuilding it on every lookup.
-// Condition: parse a valid metadata document containing partition specs.
-// Assertion: the decoded common metadata owns one index entry per spec.
-func TestParsedMetadataBuildsPartitionSpecIndex(t *testing.T) {
+// Why: small metadata should not allocate an index that its linear lookup path
+// will never read.
+// Condition: parse a valid metadata document containing one partition spec.
+// Assertion: the decoded common metadata keeps only the slice identity.
+func TestParsedMetadataSkipsSmallPartitionSpecIndex(t *testing.T) {
 	metadata, err := ParseMetadataBytes([]byte(ExampleTableMetadataV2))
 	require.NoError(t, err)
 
 	common := metadataCommon(metadata)
-	require.Len(t, common.partitionSpecIndex.positions, len(common.Specs))
-	for i, spec := range common.Specs {
-		require.Equal(t, i, common.partitionSpecIndex.positions[spec.ID()])
-	}
+	require.Nil(t, common.partitionSpecIndex)
 }
 
-// Why: builders created from existing metadata must get an index before their
-// first partition-spec lookup.
+// Why: builders created from existing metadata should use the same small-slice
+// lookup policy as parsed metadata.
 // Condition: create a builder from parsed metadata and look up its final spec.
-// Assertion: the builder index covers every copied partition spec.
-func TestMetadataBuilderFromBaseBuildsPartitionSpecIndex(t *testing.T) {
+// Assertion: the lookup works without allocating a map for one spec.
+func TestMetadataBuilderFromBaseSkipsSmallPartitionSpecIndex(t *testing.T) {
 	metadata, err := ParseMetadataBytes([]byte(ExampleTableMetadataV2))
 	require.NoError(t, err)
 
 	builder, err := MetadataBuilderFromBase(metadata, "")
 	require.NoError(t, err)
-	require.Len(t, builder.partitionSpecIndex.positions, len(builder.specs))
+	require.Nil(t, builder.partitionSpecIndex)
 
 	id := builder.specs[len(builder.specs)-1].ID()
 	spec, err := builder.GetSpecByID(id)
@@ -89,7 +86,7 @@ func TestMetadataBuilderFromBaseBuildsPartitionSpecIndex(t *testing.T) {
 // Assertion: lookups use the replacement slice without mutating the cached
 // index.
 func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacement(t *testing.T) {
-	specs := partitionSpecIndexTestSpecs(1, 2)
+	specs := partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2)
 	metadata := commonMetadata{
 		Specs:              specs,
 		DefaultSpecID:      2,
@@ -97,7 +94,7 @@ func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacement(t *testi
 	}
 	originalIndex := metadata.partitionSpecIndex
 
-	metadata.Specs = partitionSpecIndexTestSpecs(3, 4)
+	metadata.Specs = partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 3, 4)
 	metadata.DefaultSpecID = 4
 	byID := metadata.PartitionSpecByID(4)
 	require.NotNil(t, byID)
@@ -106,15 +103,16 @@ func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacement(t *testi
 	assert.Equal(t, 4, defaultSpec.ID())
 	assert.Nil(t, metadata.PartitionSpecByID(2))
 	assert.Same(t, originalIndex, metadata.partitionSpecIndex)
-	assert.Equal(t, map[int]int{1: 0, 2: 1}, metadata.partitionSpecIndex.positions)
+	assert.Equal(t, 0, metadata.partitionSpecIndex.positions[1])
+	assert.Equal(t, 1, metadata.partitionSpecIndex.positions[2])
 }
 
 func TestCommonMetadataPartitionSpecIndexFallsBackAfterSliceReplacementConcurrent(t *testing.T) {
 	metadata := &commonMetadata{
-		Specs:              partitionSpecIndexTestSpecs(1, 2),
-		partitionSpecIndex: buildPartitionSpecIndex(partitionSpecIndexTestSpecs(1, 2)),
+		Specs:              partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2),
+		partitionSpecIndex: buildPartitionSpecIndex(partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2)),
 	}
-	metadata.Specs = partitionSpecIndexTestSpecs(3, 4)
+	metadata.Specs = partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 3, 4)
 	originalIndex := metadata.partitionSpecIndex
 
 	const goroutineCount = 8
@@ -158,19 +156,20 @@ func TestRejectsDuplicatePartitionSpecIDs(t *testing.T) {
 // Condition: a spec is replaced in place after the index is built.
 // Assertion: lookup still finds the replacement and does not return the old ID.
 func TestCommonMetadataPartitionSpecIndexFallsBackAfterElementMutation(t *testing.T) {
-	specs := partitionSpecIndexTestSpecs(1, 2)
+	specs := partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2)
+	oldID := specs[7].ID()
 	metadata := commonMetadata{
 		Specs:              specs,
 		DefaultSpecID:      1,
 		partitionSpecIndex: buildPartitionSpecIndex(specs),
 	}
 
-	specs[1] = iceberg.NewPartitionSpecID(3)
+	specs[7] = iceberg.NewPartitionSpecID(3)
 
 	byID := metadata.PartitionSpecByID(3)
 	require.NotNil(t, byID)
 	assert.Equal(t, 3, byID.ID())
-	assert.Nil(t, metadata.PartitionSpecByID(2))
+	assert.Nil(t, metadata.PartitionSpecByID(oldID))
 }
 
 // Why: builders can also be used by package-level fixtures that replace their
@@ -178,14 +177,14 @@ func TestCommonMetadataPartitionSpecIndexFallsBackAfterElementMutation(t *testin
 // Condition: an indexed builder receives a replacement slice of equal length.
 // Assertion: GetSpecByID resolves the replacement slice and refreshes its index.
 func TestMetadataBuilderPartitionSpecIndexFallsBackAfterSliceReplacement(t *testing.T) {
-	specs := partitionSpecIndexTestSpecs(1, 2)
+	specs := partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2)
 	builder := MetadataBuilder{
 		specs:              specs,
 		partitionSpecIndex: buildPartitionSpecIndex(specs),
 	}
 	originalIndex := builder.partitionSpecIndex
 
-	builder.specs = partitionSpecIndexTestSpecs(3, 4)
+	builder.specs = partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 3, 4)
 	byID, err := builder.GetSpecByID(4)
 	require.NoError(t, err)
 	require.NotNil(t, byID)
@@ -193,8 +192,10 @@ func TestMetadataBuilderPartitionSpecIndexFallsBackAfterSliceReplacement(t *test
 	_, err = builder.GetSpecByID(2)
 	assert.ErrorIs(t, err, ErrPartitionSpecNotFound)
 	assert.NotSame(t, originalIndex, builder.partitionSpecIndex)
-	assert.Equal(t, map[int]int{3: 0, 4: 1}, builder.partitionSpecIndex.positions)
-	assert.Equal(t, map[int]int{1: 0, 2: 1}, originalIndex.positions)
+	assert.Equal(t, 0, builder.partitionSpecIndex.positions[3])
+	assert.Equal(t, 1, builder.partitionSpecIndex.positions[4])
+	assert.Equal(t, 0, originalIndex.positions[1])
+	assert.Equal(t, 1, originalIndex.positions[2])
 }
 
 // Why: builder updates and clones must keep the spec index aligned without
@@ -204,26 +205,31 @@ func TestMetadataBuilderPartitionSpecIndexFallsBackAfterSliceReplacement(t *test
 // Assertion: each builder resolves the IDs in its own current spec slice.
 func TestMetadataBuilderPartitionSpecIndexFollowsUpdates(t *testing.T) {
 	builder := builderWithoutChanges(2)
-	require.Len(t, builder.specs, 1)
-	require.Equal(t, map[int]int{0: 0}, builder.partitionSpecIndex.positions)
+	for id := 1; len(builder.specs) < partitionSpecIndexMinSize; id++ {
+		builder.specs = append(builder.specs, iceberg.NewPartitionSpecID(id))
+	}
+	builder.partitionSpecIndex = buildPartitionSpecIndex(builder.specs)
+	require.Len(t, builder.specs, partitionSpecIndexMinSize)
+	require.Equal(t, 0, builder.partitionSpecIndex.positions[0])
 
 	added := iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
 		SourceIDs: []int{1}, Name: "x", Transform: iceberg.IdentityTransform{},
 	})
 	require.NoError(t, builder.AddPartitionSpec(&added, false))
-	require.Equal(t, 1, builder.partitionSpecIndex.positions[1])
+	require.Equal(t, partitionSpecIndexMinSize, builder.partitionSpecIndex.positions[partitionSpecIndexMinSize])
 
-	got, err := builder.GetSpecByID(1)
+	got, err := builder.GetSpecByID(partitionSpecIndexMinSize)
 	require.NoError(t, err)
 	require.NotNil(t, got)
+	assert.Equal(t, partitionSpecIndexMinSize, got.ID())
 
 	clone := builder.clone()
 	cloneAdded := iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
 		SourceIDs: []int{3}, Name: "z", Transform: iceberg.IdentityTransform{},
 	})
 	require.NoError(t, clone.AddPartitionSpec(&cloneAdded, false))
-	assert.NotContains(t, builder.partitionSpecIndex.positions, 2)
-	assert.Equal(t, 2, clone.partitionSpecIndex.positions[2])
+	assert.NotContains(t, builder.partitionSpecIndex.positions, partitionSpecIndexMinSize+1)
+	assert.Equal(t, partitionSpecIndexMinSize+1, clone.partitionSpecIndex.positions[partitionSpecIndexMinSize+1])
 
 	require.NoError(t, builder.RemovePartitionSpecs([]int{1}))
 	assert.NotContains(t, builder.partitionSpecIndex.positions, 1)
@@ -232,6 +238,23 @@ func TestMetadataBuilderPartitionSpecIndexFollowsUpdates(t *testing.T) {
 	got, err = clone.GetSpecByID(1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.ID())
+}
+
+func TestMetadataBuilderPartitionSpecIndexBuildsAtThreshold(t *testing.T) {
+	builder := builderWithoutChanges(2)
+	for id := 1; len(builder.specs) < partitionSpecIndexMinSize-1; id++ {
+		builder.specs = append(builder.specs, iceberg.NewPartitionSpecID(id))
+	}
+	builder.partitionSpecIndex = buildPartitionSpecIndex(builder.specs)
+	require.Nil(t, builder.partitionSpecIndex)
+
+	added := iceberg.NewPartitionSpecID(99, iceberg.PartitionField{
+		SourceIDs: []int{1}, Name: "threshold", Transform: iceberg.IdentityTransform{},
+	})
+	require.NoError(t, builder.AddPartitionSpec(&added, false))
+	require.NotNil(t, builder.partitionSpecIndex.positions)
+	assert.Equal(t, partitionSpecIndexMinSize-1,
+		builder.partitionSpecIndex.positions[partitionSpecIndexMinSize-1])
 }
 
 // Why: removing unknown IDs is a no-op and must not leave the derived index
@@ -255,6 +278,10 @@ func TestMetadataBuilderRemoveUnknownPartitionSpecKeepsIndex(t *testing.T) {
 // remains unchanged.
 func TestMetadataBuilderPartitionSpecIndexIsolatedFromBuiltMetadata(t *testing.T) {
 	builder := builderWithoutChanges(2)
+	for id := 1; len(builder.specs) < partitionSpecIndexMinSize; id++ {
+		builder.specs = append(builder.specs, iceberg.NewPartitionSpecID(id))
+	}
+	builder.partitionSpecIndex = buildPartitionSpecIndex(builder.specs)
 	metadata, err := builder.Build()
 	require.NoError(t, err)
 	common := metadataCommon(metadata)
@@ -266,9 +293,9 @@ func TestMetadataBuilderPartitionSpecIndexIsolatedFromBuiltMetadata(t *testing.T
 	require.NoError(t, builder.AddPartitionSpec(&added, false))
 
 	assert.NotSame(t, originalIndex, builder.partitionSpecIndex)
-	assert.Contains(t, builder.partitionSpecIndex.positions, 1)
-	assert.NotContains(t, originalIndex.positions, 1)
-	assert.Nil(t, common.PartitionSpecByID(1))
+	assert.NotContains(t, originalIndex.positions, partitionSpecIndexMinSize)
+	assert.Contains(t, builder.partitionSpecIndex.positions, partitionSpecIndexMinSize)
+	assert.Nil(t, common.PartitionSpecByID(partitionSpecIndexMinSize))
 	got, err := builder.GetSpecByID(1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.ID())
@@ -375,6 +402,15 @@ func partitionSpecIndexTestSpecs(ids ...int) []iceberg.PartitionSpec {
 	specs := make([]iceberg.PartitionSpec, len(ids))
 	for i, id := range ids {
 		specs[i] = iceberg.NewPartitionSpecID(id)
+	}
+
+	return specs
+}
+
+func partitionSpecIndexTestSpecsAtLeast(count int, ids ...int) []iceberg.PartitionSpec {
+	specs := partitionSpecIndexTestSpecs(ids...)
+	for id := 1_000; len(specs) < count; id++ {
+		specs = append(specs, iceberg.NewPartitionSpecID(id))
 	}
 
 	return specs

@@ -228,6 +228,7 @@ type partitionSpecIndexData struct {
 }
 
 // Small spec slices are faster to search directly than to hash-map lookup.
+// 32 is a conservative cutoff; keep it aligned with the lookup benchmarks.
 const partitionSpecIndexMinSize = 32
 
 func partitionSpecListFirst(specs []iceberg.PartitionSpec) *iceberg.PartitionSpec {
@@ -239,6 +240,10 @@ func partitionSpecListFirst(specs []iceberg.PartitionSpec) *iceberg.PartitionSpe
 }
 
 func buildPartitionSpecIndex(specs []iceberg.PartitionSpec) *partitionSpecIndexData {
+	if len(specs) < partitionSpecIndexMinSize {
+		return nil
+	}
+
 	positions := make(map[int]int, len(specs))
 	for i := range specs {
 		id := specs[i].ID()
@@ -265,7 +270,15 @@ func clonePartitionSpecIndex(index *partitionSpecIndexData) *partitionSpecIndexD
 }
 
 func partitionSpecIndexNeedsRebuild(index *partitionSpecIndexData, specs []iceberg.PartitionSpec) bool {
-	if index == nil || len(index.positions) != len(specs) {
+	if len(specs) < partitionSpecIndexMinSize {
+		return false
+	}
+	if index == nil {
+		return true
+	}
+	// Persisted metadata rejects duplicate IDs, so map and source cardinality
+	// are equal on the indexed read path.
+	if index.positions == nil || len(index.positions) != len(specs) {
 		return true
 	}
 
@@ -734,7 +747,7 @@ func (b *MetadataBuilder) ensurePartitionSpecIndex() {
 
 func (b *MetadataBuilder) ensurePartitionSpecIndexMutable() {
 	b.ensurePartitionSpecIndex()
-	if b.partitionSpecIndex.shared {
+	if b.partitionSpecIndex != nil && b.partitionSpecIndex.shared {
 		b.partitionSpecIndex = clonePartitionSpecIndex(b.partitionSpecIndex)
 	}
 }
@@ -854,8 +867,15 @@ func (b *MetadataBuilder) AddPartitionSpec(spec *iceberg.PartitionSpec, initial 
 	} else {
 		b.ensurePartitionSpecIndexMutable()
 		b.specs = append(b.specs, freshSpec)
-		b.partitionSpecIndex.positions[newSpecID] = len(b.specs) - 1
-		b.partitionSpecIndex.firstSpec = partitionSpecListFirst(b.specs)
+		if len(b.specs) >= partitionSpecIndexMinSize {
+			if len(b.specs) == partitionSpecIndexMinSize ||
+				b.partitionSpecIndex == nil || b.partitionSpecIndex.positions == nil {
+				b.partitionSpecIndex = buildPartitionSpecIndex(b.specs)
+			} else {
+				b.partitionSpecIndex.positions[newSpecID] = len(b.specs) - 1
+				b.partitionSpecIndex.firstSpec = partitionSpecListFirst(b.specs)
+			}
+		}
 	}
 
 	b.lastPartitionID = &lastPartitionID
@@ -1466,7 +1486,9 @@ func (b *MetadataBuilder) buildCommonMetadata() (*commonMetadata, error) {
 		b.schemaIndex.shared = true
 	}
 	b.ensurePartitionSpecIndex()
-	b.partitionSpecIndex.shared = true
+	if b.partitionSpecIndex != nil {
+		b.partitionSpecIndex.shared = true
+	}
 	b.ensureSnapshotIndex()
 	if b.snapshotIndex != nil {
 		b.snapshotIndex.shared = true
@@ -2898,8 +2920,8 @@ func (c *commonMetadata) checkPartitionSpecs() error {
 	// need to tolerate duplicate IDs.
 	seen := make(map[int]struct{}, len(c.Specs))
 	defaultFound := false
-	for _, spec := range c.Specs {
-		id := spec.ID()
+	for i := range c.Specs {
+		id := c.Specs[i].ID()
 		if _, ok := seen[id]; ok {
 			return fmt.Errorf("%w: duplicate partition spec ID %d", ErrInvalidMetadata, id)
 		}
