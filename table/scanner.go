@@ -1198,8 +1198,9 @@ func (scan *Scan) manifestProjectionForManifest(
 	retainDataFileStats bool,
 ) (iceberg.ManifestEntryProjection, bool) {
 	// Manifest-list metadata does not distinguish equality from positional
-	// deletes, so delete scans retain data-file stats for equality-delete
-	// pruning even when the row filter is AlwaysTrue.
+	// deletes, so delete manifests retain their stats while they are being
+	// classified. Once classification is complete, retainDataFileStats is set
+	// only when an equality delete actually needs data-file metrics for pruning.
 	includeColumnStats := manifest.ManifestContent() == iceberg.ManifestContentDeletes ||
 		retainDataFileStats ||
 		(scan.rowFilter != nil && !scan.rowFilter.Equals(iceberg.AlwaysTrue{}))
@@ -1436,7 +1437,7 @@ func (scan *Scan) planDataManifestTasksWithOptions(
 		}
 	}
 
-	if projectScanColumns && retainDataFileStats {
+	if projectScanColumns {
 		memo := make(map[iceberg.DataFile]iceberg.DataFile)
 		for i := range results {
 			results[i].DeleteFiles = dataFilesWithoutColumnStats(results[i].DeleteFiles, memo)
@@ -1631,7 +1632,6 @@ func (scan *Scan) planFilesLocal(
 	// tasks immediately after their delete indexes are ready.
 	dataManifests, deleteManifests := splitManifestList(manifestList)
 	minSeqNum := minSequenceNum(manifestList)
-	retainDataFileStats := scan.manifestProjectionRetainsDataStats(manifestList)
 	deleteEntries := newManifestEntries()
 	if len(deleteManifests) > 0 {
 		deleteEntries, err = scan.collectManifestEntriesWithSchemaMinSequenceNum(
@@ -1640,6 +1640,11 @@ func (scan *Scan) planFilesLocal(
 			return nil, err
 		}
 	}
+	// Equality-delete pruning is the only data-manifest consumer of column
+	// metrics after the delete entries have been indexed. Positional deletes and
+	// deletion vectors use path/reference metadata instead, so they should not
+	// force every data file to materialize metric maps.
+	retainDataFileStats := len(deleteEntries.equalityDeleteEntries) > 0
 	// Step 3: Index positional deletes and match them to data files.
 	posDeleteIndex, err := buildPositionalDeleteIndex(deleteEntries.positionalDeleteEntries)
 	if err != nil {

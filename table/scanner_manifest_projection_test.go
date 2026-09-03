@@ -275,4 +275,45 @@ func TestPlanDataManifestTasksWithProjectionRetainsEqualityDeletePruning(t *test
 	}
 	assert.Equal(t, "mem://projection-planning/delete-2.parquet", tasks[0].EqualityDeleteFiles[0].FilePath())
 	assert.Equal(t, "mem://projection-planning/delete-3.parquet", tasks[1].EqualityDeleteFiles[0].FilePath())
+
+	posDeleteBuilder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentPosDeletes,
+		"mem://projection-planning/position-delete.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		128,
+	)
+	require.NoError(t, err)
+	posDeleteBuilder.
+		ReferencedDataFile("mem://projection-planning/data-1.parquet").
+		ValueCounts(map[int]int64{1: 1}).
+		LowerBoundValues(map[int][]byte{1: bound(1)}).
+		UpperBoundValues(map[int][]byte{1: bound(1)})
+	posSequenceNumber := int64(2)
+	posDeleteEntry := iceberg.NewManifestEntry(
+		iceberg.EntryStatusADDED, nil, &posSequenceNumber, nil, posDeleteBuilder.Build())
+	posDeleteIndex, err = buildPositionalDeleteIndex([]iceberg.ManifestEntry{posDeleteEntry})
+	require.NoError(t, err)
+	emptyEqDeleteIndex, err := buildEqualityDeleteIndex(nil, meta, schema)
+	require.NoError(t, err)
+	tasks, err = scan.planDataManifestTasksWithOptions(
+		t.Context(),
+		[]iceberg.ManifestFile{manifest},
+		schema,
+		0,
+		posDeleteIndex,
+		dvIndex,
+		emptyEqDeleteIndex,
+		true,
+		false,
+	)
+	require.NoError(t, err)
+	require.Len(t, tasks, 2)
+	require.Len(t, tasks[0].DeleteFiles, 1)
+	assert.Empty(t, tasks[0].File.ValueCounts())
+	assert.Empty(t, tasks[0].DeleteFiles[0].ValueCounts())
 }
