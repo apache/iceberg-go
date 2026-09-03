@@ -396,7 +396,6 @@ func (r *Catalog) fetchScanTaskFrontier(
 	group.SetLimit(maxConcurrency)
 
 	for i, handle := range handles {
-		i, handle := i, handle
 		group.Go(func() error {
 			response, fetchErr := r.FetchScanTasks(requestCtxs[i], ident, FetchScanTasksRequest{PlanTask: handle})
 

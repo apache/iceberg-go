@@ -214,8 +214,11 @@ func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
 
 	for i, payload := range []string{
 		`{"status":"submitted","plan-id":"abc","file-scan-tasks":[]}`,
+		`{"status":"submitted","plan-id":"abc","file-scan-tasks":null}`,
 		`{"status":"submitted","plan-id":"abc","delete-files":[]}`,
+		`{"status":"submitted","plan-id":"abc","delete-files":null}`,
 		`{"status":"failed","plan-tasks":[]}`,
+		`{"status":"failed","plan-tasks":null}`,
 		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
 		`{"status":"failed","plan-id":"abc"}`,
 	} {
@@ -316,8 +319,11 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 
 		for i, payload := range []string{
 			`{"status":"submitted","plan-tasks":[]}`,
+			`{"status":"submitted","plan-tasks":null}`,
 			`{"status":"submitted","delete-files":[]}`,
+			`{"status":"submitted","delete-files":null}`,
 			`{"status":"cancelled","file-scan-tasks":[]}`,
+			`{"status":"cancelled","file-scan-tasks":null}`,
 			`{"status":"completed","delete-files":[{}]}`,
 		} {
 			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
