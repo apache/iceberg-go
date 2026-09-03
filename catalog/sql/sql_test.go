@@ -2067,6 +2067,12 @@ func (c *pgAbortConn) QueryContext(ctx context.Context, query string, args []dri
 		return nil, errEmulatedAborted
 	}
 
+	// Postgres probes information_schema for schema-version detection; sqlite has
+	// no such view, so answer as the V1 table this suite creates (column present).
+	if strings.Contains(query, "information_schema") {
+		return &boolRows{val: true}, nil
+	}
+
 	// The namespace exists on the re-check only in the unique-violation case: a
 	// concurrent winner committed the row. An unrelated failure leaves it absent.
 	if isNamespaceExistsProbe(query) {
@@ -2118,7 +2124,7 @@ func (r *boolRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) *sqlcat.Catalog {
+func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) (*sqlcat.Catalog, *pgAbortDriver) {
 	base, err := sql.Open(sqliteshim.ShimName, ":memory:")
 	s.Require().NoError(err)
 	s.Require().NoError(base.Close())
@@ -2126,7 +2132,8 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) *sqlcat.Cat
 	// drvName derives from databaseName() (unique per call); sql.Register panics
 	// on a duplicate name, so this must not become a fixed string.
 	drvName := "sqlite-pgabort-" + databaseName()
-	sql.Register(drvName, &pgAbortDriver{base: base.Driver(), mode: mode})
+	drv := &pgAbortDriver{base: base.Driver(), mode: mode}
+	sql.Register(drvName, drv)
 
 	sqldb, err := sql.Open(drvName, s.catalogUri())
 	s.Require().NoError(err)
@@ -2135,33 +2142,37 @@ func (s *SqliteCatalogTestSuite) newAbortCatalog(mode insertFailure) *sqlcat.Cat
 	// transaction that follows it.
 	sqldb.SetMaxOpenConns(1)
 
-	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.SQLite, iceberg.Properties{"warehouse": "file://" + s.warehouse})
+	// Postgres dialect so the savepoint-backed recovery path runs; the driver
+	// above emulates Postgres aborting the tx over an sqlite base.
+	cat, err := sqlcat.NewCatalog("default", sqldb, sqlcat.Postgres, iceberg.Properties{"warehouse": "file://" + s.warehouse})
 	s.Require().NoError(err)
 
-	return cat
+	return cat, drv
 }
 
 // Emulates Postgres aborting the transaction: only passes if the savepoint let
 // the re-check recover the sentinel, which SQLite alone cannot show.
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceLosesInsertRace() {
 	namespace := table.Identifier{databaseName()}
-	cat := s.newAbortCatalog(failUnique)
+	cat, drv := s.newAbortCatalog(failUnique)
 
 	err := cat.CreateNamespace(context.Background(), namespace, nil)
 	s.ErrorIs(err, catalog.ErrNamespaceAlreadyExists)
 	s.Contains(err.Error(), namespace[0])
+	s.True(drv.insertAttempted.Load(), "the emulated insert must have run")
 }
 
 // An unrelated insert failure on an absent namespace must surface its own
 // error, not a misleading ErrNamespaceAlreadyExists.
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceInsertFailureSurfacesOriginalError() {
 	namespace := table.Identifier{databaseName()}
-	cat := s.newAbortCatalog(failUnrelated)
+	cat, drv := s.newAbortCatalog(failUnrelated)
 
 	err := cat.CreateNamespace(context.Background(), namespace, nil)
 	s.Error(err)
 	s.NotErrorIs(err, catalog.ErrNamespaceAlreadyExists)
 	s.Contains(err.Error(), "disk I/O error")
+	s.True(drv.insertAttempted.Load(), "the emulated insert must have run")
 }
 
 func (s *SqliteCatalogTestSuite) TestCreateNamespaceRejectsReservedProperty() {
