@@ -185,6 +185,23 @@ func TestCommonMetadataPartitionSpecIndexFallsBackAfterElementMutation(t *testin
 	assert.Nil(t, metadata.PartitionSpecByID(oldID))
 }
 
+// Why: the default-spec lookup must not return a stale indexed value after an
+// in-place fixture mutation removes the configured default ID.
+// Condition: the spec at the indexed default position is replaced in place.
+// Assertion: PartitionSpec falls back to the unpartitioned spec, as before the index.
+func TestCommonMetadataPartitionSpecIndexFallsBackAfterDefaultElementMutation(t *testing.T) {
+	specs := partitionSpecIndexTestSpecsAtLeast(partitionSpecIndexMinSize+8, 1, 2)
+	metadata := commonMetadata{
+		Specs:              specs,
+		DefaultSpecID:      specs[7].ID(),
+		partitionSpecIndex: buildPartitionSpecIndex(specs),
+	}
+
+	specs[7] = iceberg.NewPartitionSpecID(3)
+
+	assert.True(t, metadata.PartitionSpec().IsUnpartitioned())
+}
+
 // Why: builders can also be used by package-level fixtures that replace their
 // spec slice without updating derived state.
 // Condition: an indexed builder receives a replacement slice of equal length.

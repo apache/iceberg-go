@@ -282,7 +282,7 @@ func partitionSpecIndexNeedsRebuild(index *partitionSpecIndexData, specs []icebe
 		return true
 	}
 
-	return len(specs) > 0 && index.firstSpec != &specs[0]
+	return index.firstSpec != partitionSpecListFirst(specs)
 }
 
 // partitionSpecIndexPosition returns the position for id. The map is the fast
