@@ -807,7 +807,12 @@ func deleteFilesParallel(
 					}
 
 					if err := deleteFunc(files[index]); err != nil {
-						deleteErrors[index] = wrapError(files[index], err)
+						wrappedErr := wrapError(files[index], err)
+						if wrappedErr == nil {
+							// Keep failed deletions observable even if the wrapper suppresses the error.
+							wrappedErr = err
+						}
+						deleteErrors[index] = wrappedErr
 					} else {
 						deleted[index] = true
 					}
@@ -1315,9 +1320,9 @@ func pathPrefix(path string) (scheme, authority string, ok bool) {
 // collected and returned together as a joined error. If files cannot be deleted
 // (e.g. due to permission errors or missing paths), the errors are logged but
 // the overall catalog drop operation should typically proceed so the catalog
-// does not get out of sync with storage. Non-bulk deletion is bounded to
-// defaultPurgeMaxConcurrency concurrent operations because it is typically
-// I/O-bound.
+// does not get out of sync with storage. Non-bulk deletion invokes Remove
+// concurrently and is bounded to defaultPurgeMaxConcurrency operations because
+// it is typically I/O-bound.
 func (t Table) PurgeFiles(ctx context.Context) error {
 	gcEnabled := isGCEnabled(t.Metadata().Properties())
 

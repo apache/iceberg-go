@@ -137,7 +137,7 @@ func BenchmarkPurgeFilesNonBulkDeletion(b *testing.B) {
 		}
 
 		for _, delay := range []time.Duration{0, 100 * time.Microsecond, time.Millisecond} {
-			for _, concurrency := range []int{1, 4, 16} {
+			for _, concurrency := range []int{1, 4, 16, 32, 64} {
 				b.Run(fmt.Sprintf("files=%d/delay=%s/concurrency=%d", fileCount, delay, concurrency), func(b *testing.B) {
 					deleteFunc := func(string) error {
 						time.Sleep(delay)

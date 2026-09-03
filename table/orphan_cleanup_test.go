@@ -1733,6 +1733,31 @@ func TestDeleteFilesParallelCollectsPurgeErrors(t *testing.T) {
 	mu.Unlock()
 }
 
+func TestDeleteFilesParallelPreservesErrorWithNilWrapper(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	files := []string{
+		"s3://bucket/table/ok.parquet",
+		"s3://bucket/table/failed.parquet",
+	}
+
+	deleted, err := deleteFilesParallel(
+		context.Background(),
+		files,
+		2,
+		func(path string) error {
+			if path == files[1] {
+				return deleteErr
+			}
+
+			return nil
+		},
+		func(string, error) error { return nil },
+	)
+
+	assert.Equal(t, []string{files[0]}, deleted)
+	require.ErrorIs(t, err, deleteErr)
+}
+
 func TestDeleteFilesParallelStopsQueuedWorkOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
