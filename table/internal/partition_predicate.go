@@ -49,12 +49,17 @@ import (
 //
 // The transform is kept in the row predicate so the match is evaluated against
 // the partition value rather than comparing the post-transform value directly
-// with the source column.
+// with the source column. This is phase 1 of issue #1216. The current overwrite
+// path cannot execute non-identity predicates for partial-file rewrites because
+// source-column metrics are conservative and the Substrait row-filter converter
+// rejects transformed terms; partition-level strict matching is still needed
+// before this helper can drive those rewrites (tracked in issue #1215).
 func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Schema, partitions []map[int]any) (iceberg.BooleanExpression, error) {
 	type fieldRef struct {
-		id        int
-		name      string
-		transform iceberg.Transform
+		id         int
+		name       string
+		transform  iceberg.Transform
+		resultType iceberg.Type
 	}
 
 	var fields []fieldRef
@@ -70,11 +75,17 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 			return nil, fmt.Errorf("%w: partition field %q references unknown source id %d",
 				iceberg.ErrInvalidArgument, f.Name, f.SourceIDs[0])
 		}
-		if _, err := iceberg.NewUnboundTransform(f.Transform, iceberg.Reference(sourceName)).Bind(schema, true); err != nil {
+		bound, err := iceberg.NewUnboundTransform(f.Transform, iceberg.Reference(sourceName)).Bind(schema, true)
+		if err != nil {
+			return nil, fmt.Errorf("partition field %q: %w", f.Name, err)
+		}
+		if _, err := f.Transform.MarshalText(); err != nil {
 			return nil, fmt.Errorf("partition field %q: %w", f.Name, err)
 		}
 
-		fields = append(fields, fieldRef{id: f.FieldID, name: sourceName, transform: f.Transform})
+		fields = append(fields, fieldRef{
+			id: f.FieldID, name: sourceName, transform: f.Transform, resultType: bound.Type(),
+		})
 	}
 
 	// NewAnd/NewOr fold away the AlwaysTrue/AlwaysFalse seeds, so a single-field,
@@ -94,18 +105,31 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 		for _, fr := range fields {
 			term := partitionTerm(fr.transform, fr.name)
 
-			// A missing key (!ok) is treated like an explicit nil. In practice
 			// DataFile.Partition() stores a null partition value as a nil-valued
-			// entry rather than an absent key; !ok is a defensive guard.
+			// entry. A missing field ID is malformed and must fail closed rather
+			// than silently under-deleting.
 			val, ok := part[fr.id]
-			if !ok || val == nil {
+			if !ok {
+				return nil, fmt.Errorf("%w: partition field %q (field id %d) is missing from partition tuple",
+					iceberg.ErrInvalidArgument, fr.name, fr.id)
+			}
+			if val == nil {
 				clause = iceberg.NewAnd(clause, iceberg.IsNull(term))
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":null")
 
 				continue
 			}
 
-			if isNaN(val) {
+			lit, err := LiteralForPartitionValue(val)
+			if err != nil {
+				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
+			}
+			lit, err = validatePartitionValue(fr.transform, fr.resultType, lit)
+			if err != nil {
+				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
+			}
+
+			if isNaN(lit.Any()) {
 				// x == NaN is never true (IEEE 754), so a NaN partition value must
 				// match via IsNaN. This intentionally diverges from PyIceberg's
 				// _build_partition_predicate, which emits EqualTo for every value:
@@ -119,11 +143,6 @@ func BuildPartitionMatchPredicate(spec iceberg.PartitionSpec, schema *iceberg.Sc
 				sigParts = append(sigParts, strconv.Itoa(fr.id)+":nan")
 
 				continue
-			}
-
-			lit, err := LiteralForPartitionValue(val)
-			if err != nil {
-				return nil, fmt.Errorf("partition field %q: %w", fr.name, err)
 			}
 
 			clause = iceberg.NewAnd(clause, iceberg.LiteralPredicate(iceberg.OpEQ, term, lit))
@@ -152,6 +171,11 @@ func partitionTerm(transform iceberg.Transform, name string) iceberg.UnboundTerm
 	if isIdentityTransform(transform) {
 		return ref
 	}
+	if isVoidTransform(transform) {
+		// Use the value form so binding the null predicate can fold it to
+		// AlwaysTrue. Pointer forms are accepted by the Transform interface too.
+		return iceberg.NewUnboundTransform(iceberg.VoidTransform{}, ref)
+	}
 
 	return iceberg.NewUnboundTransform(transform, ref)
 }
@@ -165,6 +189,85 @@ func isIdentityTransform(transform iceberg.Transform) bool {
 	default:
 		return false
 	}
+}
+
+func isVoidTransform(transform iceberg.Transform) bool {
+	switch t := transform.(type) {
+	case iceberg.VoidTransform:
+		return true
+	case *iceberg.VoidTransform:
+		return t != nil
+	default:
+		return false
+	}
+}
+
+func isTruncateTransform(transform iceberg.Transform) bool {
+	switch t := transform.(type) {
+	case iceberg.TruncateTransform:
+		return true
+	case *iceberg.TruncateTransform:
+		return t != nil
+	default:
+		return false
+	}
+}
+
+func validatePartitionValue(transform iceberg.Transform, resultType iceberg.Type, lit iceberg.Literal) (iceberg.Literal, error) {
+	normalized, err := lit.To(resultType)
+	if err != nil {
+		return nil, fmt.Errorf("%w: partition value type %s cannot be converted to transform result type %s: %v",
+			iceberg.ErrInvalidArgument, lit.Type(), resultType, err)
+	}
+
+	switch normalized.(type) {
+	case iceberg.AboveMaxLiteral, iceberg.BelowMinLiteral:
+		return nil, fmt.Errorf("%w: partition value %s is outside transform result type %s",
+			iceberg.ErrInvalidArgument, normalized, resultType)
+	}
+
+	switch t := transform.(type) {
+	case iceberg.BucketTransform:
+		if err := validateBucketPartitionValue(t.NumBuckets, normalized); err != nil {
+			return nil, err
+		}
+	case *iceberg.BucketTransform:
+		if t == nil {
+			return nil, fmt.Errorf("%w: bucket transform cannot be nil", iceberg.ErrInvalidArgument)
+		}
+		if err := validateBucketPartitionValue(t.NumBuckets, normalized); err != nil {
+			return nil, err
+		}
+	case iceberg.VoidTransform, *iceberg.VoidTransform:
+		return nil, fmt.Errorf("%w: void transform only accepts a nil partition value", iceberg.ErrInvalidArgument)
+	}
+
+	if (isIdentityTransform(transform) || isTruncateTransform(transform)) && !isNaN(normalized.Any()) {
+		applied := transform.Apply(iceberg.Optional[iceberg.Literal]{Valid: true, Val: normalized})
+		if !applied.Valid || !applied.Val.Equals(normalized) {
+			return nil, fmt.Errorf("%w: partition value %s is not in the range of transform %s",
+				iceberg.ErrInvalidArgument, normalized, transform)
+		}
+	}
+
+	return normalized, nil
+}
+
+func validateBucketPartitionValue(numBuckets int, lit iceberg.Literal) error {
+	value, ok := lit.(iceberg.Int32Literal)
+	if !ok {
+		return fmt.Errorf("%w: bucket partition value must be int32, got %s", iceberg.ErrInvalidArgument, lit.Type())
+	}
+	if numBuckets <= 0 || numBuckets > math.MaxInt32 {
+		return fmt.Errorf("%w: bucket transform requires numBuckets in [1, %d], got %d",
+			iceberg.ErrInvalidArgument, math.MaxInt32, numBuckets)
+	}
+	if value.Value() < 0 || int64(value.Value()) >= int64(numBuckets) {
+		return fmt.Errorf("%w: bucket partition value %d is outside [0, %d)",
+			iceberg.ErrInvalidArgument, value.Value(), numBuckets)
+	}
+
+	return nil
 }
 
 // isNaN reports whether v is a floating-point NaN.
