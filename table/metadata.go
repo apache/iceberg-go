@@ -2016,12 +2016,14 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 	}
 
 	lastAssignedID := iceberg.PartitionDataIDStart - 1
-	lastPartitionID := lastAssignedID
+	lastPartitionID := 0
+	normalizedLastPartitionID := 0
 	lastPartitionIDSet := false
 	if rawLastPartitionID, ok := metadata["last-partition-id"]; ok {
 		var parsedLastPartitionID *int
 		if err := json.Unmarshal(rawLastPartitionID, &parsedLastPartitionID); err == nil && parsedLastPartitionID != nil {
 			lastPartitionID = *parsedLastPartitionID
+			normalizedLastPartitionID = lastPartitionID
 			lastAssignedID = max(lastAssignedID, lastPartitionID)
 			lastPartitionIDSet = true
 		}
@@ -2040,11 +2042,12 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 			var fieldID *int
 			if err := json.Unmarshal(rawFieldID, &fieldID); err == nil && fieldID != nil {
 				lastAssignedID = max(lastAssignedID, *fieldID)
+				normalizedLastPartitionID = max(normalizedLastPartitionID, *fieldID)
 			}
 		}
 	}
 
-	if len(missingFields) == 0 && (!lastPartitionIDSet || lastPartitionID == lastAssignedID) {
+	if len(missingFields) == 0 && (!lastPartitionIDSet || lastPartitionID == normalizedLastPartitionID) {
 		return b, nil
 	}
 
@@ -2055,6 +2058,7 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 			return nil, err
 		}
 		field["field-id"] = rawFieldID
+		normalizedLastPartitionID = max(normalizedLastPartitionID, lastAssignedID)
 	}
 
 	if len(missingFields) > 0 {
@@ -2074,7 +2078,7 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 	}
 
 	if lastPartitionIDSet {
-		rawLastPartitionID, err := json.Marshal(lastAssignedID)
+		rawLastPartitionID, err := json.Marshal(normalizedLastPartitionID)
 		if err != nil {
 			return nil, err
 		}
