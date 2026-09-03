@@ -2226,6 +2226,9 @@ func TestInspectFilesUseDetachedContextForManifestListRead(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	manifests, err := tbl.Inspect().Manifests(ctx)
+	require.NoError(t, err)
+	manifests.Release()
 	rr, err := tbl.Inspect().Files(ctx)
 	require.NoError(t, err)
 	paths, contents := inspectFileRows(t, rr)

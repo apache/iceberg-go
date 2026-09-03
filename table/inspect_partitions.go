@@ -146,14 +146,15 @@ func (i InspectTable) partitionAggregates(ctx context.Context, partitionType *ic
 	if i.tbl.fsF == nil {
 		return nil, errors.New("table file IO is not configured")
 	}
+	manifestSet, err := i.tbl.manifestSet(ctx, *snapshot)
+	if err != nil {
+		return nil, err
+	}
 	fs, err := i.tbl.fsF(ctx)
 	if err != nil {
 		return nil, err
 	}
-	manifests, err := snapshot.Manifests(fs)
-	if err != nil {
-		return nil, err
-	}
+	manifests := manifestSet.allManifests()
 
 	snapshotTimes := make(map[int64]int64, len(i.tbl.metadata.Snapshots()))
 	for _, snapshot := range i.tbl.metadata.Snapshots() {
