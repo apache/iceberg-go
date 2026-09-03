@@ -220,6 +220,9 @@ func TestPlanTableScanResponseRejectsInvalidStatusEnvelope(t *testing.T) {
 		`{"status":"failed","plan-tasks":[]}`,
 		`{"status":"failed","plan-tasks":null}`,
 		`{"status":"completed","plan-id":"abc","delete-files":[{}]}`,
+		`{"status":"completed","plan-id":"abc","plan-tasks":null}`,
+		`{"status":"completed","plan-id":"abc","file-scan-tasks":null}`,
+		`{"status":"completed","plan-id":"abc","delete-files":null}`,
 		`{"status":"failed","plan-id":"abc"}`,
 	} {
 		t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
@@ -325,6 +328,9 @@ func TestFetchPlanningResultResponseValidation(t *testing.T) {
 			`{"status":"cancelled","file-scan-tasks":[]}`,
 			`{"status":"cancelled","file-scan-tasks":null}`,
 			`{"status":"completed","delete-files":[{}]}`,
+			`{"status":"completed","plan-tasks":null}`,
+			`{"status":"completed","file-scan-tasks":null}`,
+			`{"status":"completed","delete-files":null}`,
 		} {
 			t.Run(fmt.Sprintf("payload-%d", i), func(t *testing.T) {
 				t.Parallel()
