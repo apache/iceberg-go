@@ -333,6 +333,19 @@ func TestReadAllDeletionVectors(t *testing.T) {
 		assert.Contains(t, err.Error(), "multiple deletion vectors for data file")
 	})
 
+	t.Run("same puffin path and offset with different sizes are rejected", func(t *testing.T) {
+		const dataFilePath = "file:///table/data/data-005.parquet"
+		puffinPath, offset, length, card := writeDVPuffinFixture(t, []uint64{5}, dataFilePath)
+		first := newDVMockDataFile(puffinPath, dataFilePath, offset, length, card)
+		second := newDVMockDataFile(puffinPath, dataFilePath, offset, length+1, card)
+
+		_, err := readAllDeletionVectors(ctx, fs, []FileScanTask{{DeletionVectorFiles: []iceberg.DataFile{
+			first, second,
+		}}}, 1)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple deletion vectors for data file")
+	})
+
 	t.Run("nil referenced_data_file is rejected before any goroutine launches", func(t *testing.T) {
 		// The prior implementation validated inside the goroutine-dispatch
 		// loop, so a bad entry hit AFTER one or more g.Go() calls would
