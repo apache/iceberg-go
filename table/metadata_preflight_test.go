@@ -85,6 +85,66 @@ func TestParseMetadataBytesAssignsMissingPartitionFieldIDs(t *testing.T) {
 	}
 }
 
+func TestParseMetadataBytesNormalizesStaleLastPartitionID(t *testing.T) {
+	data := strings.Replace(ExampleTableMetadataV2,
+		`"last-partition-id": 1000`, `"last-partition-id": 999`, 1)
+
+	parsed, err := ParseMetadataBytes([]byte(data))
+	require.NoError(t, err)
+	require.NotNil(t, parsed.LastPartitionSpecID())
+	assert.Equal(t, 1000, *parsed.LastPartitionSpecID())
+}
+
+func TestAssignMissingPartitionFieldIDsPreservesConsistentMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "counter below assignment floor with no fields",
+			input: `{"last-updated-ms":0,"last-partition-id":0,"partition-specs":[{"spec-id":0,"fields":[]}]}`,
+		},
+		{
+			name:  "counter above greatest field ID",
+			input: `{"last-updated-ms":0,"last-partition-id":1001,"partition-specs":[{"spec-id":0,"fields":[{"field-id":1000}]}]}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			normalized, err := assignMissingPartitionFieldIDs([]byte(tt.input))
+			require.NoError(t, err)
+			assert.Equal(t, tt.input, string(normalized))
+		})
+	}
+}
+
+func TestAssignMissingPartitionFieldIDsNormalizesStaleCounter(t *testing.T) {
+	input := []byte(`{
+		"last-updated-ms": 0,
+		"last-partition-id": 999,
+		"partition-specs": [{
+			"spec-id": 0,
+			"fields": [{"field-id": 1000}, {}]
+		}]
+	}`)
+
+	normalized, err := assignMissingPartitionFieldIDs(input)
+	require.NoError(t, err)
+
+	var parsed struct {
+		LastPartitionID int `json:"last-partition-id"`
+		Specs           []struct {
+			Fields []struct {
+				FieldID int `json:"field-id"`
+			} `json:"fields"`
+		} `json:"partition-specs"`
+	}
+	require.NoError(t, json.Unmarshal(normalized, &parsed))
+	assert.Equal(t, 1001, parsed.LastPartitionID)
+	require.Len(t, parsed.Specs, 1)
+	require.Len(t, parsed.Specs[0].Fields, 2)
+	assert.Equal(t, 1001, parsed.Specs[0].Fields[1].FieldID)
+}
+
 func TestParseMetadataBytesRejectsCaseFoldedFormatVersionCollision(t *testing.T) {
 	data := strings.Replace(
 		ExampleTableMetadataV2,

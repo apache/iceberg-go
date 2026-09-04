@@ -2048,11 +2048,15 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 	}
 
 	lastAssignedID := iceberg.PartitionDataIDStart - 1
+	lastPartitionID := 0
+	normalizedLastPartitionID := 0
 	lastPartitionIDSet := false
 	if rawLastPartitionID, ok := metadata["last-partition-id"]; ok {
-		var lastPartitionID *int
-		if err := json.Unmarshal(rawLastPartitionID, &lastPartitionID); err == nil && lastPartitionID != nil {
-			lastAssignedID = max(lastAssignedID, *lastPartitionID)
+		var parsedLastPartitionID *int
+		if err := json.Unmarshal(rawLastPartitionID, &parsedLastPartitionID); err == nil && parsedLastPartitionID != nil {
+			lastPartitionID = *parsedLastPartitionID
+			normalizedLastPartitionID = lastPartitionID
+			lastAssignedID = max(lastAssignedID, lastPartitionID)
 			lastPartitionIDSet = true
 		}
 	}
@@ -2070,11 +2074,12 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 			var fieldID *int
 			if err := json.Unmarshal(rawFieldID, &fieldID); err == nil && fieldID != nil {
 				lastAssignedID = max(lastAssignedID, *fieldID)
+				normalizedLastPartitionID = max(normalizedLastPartitionID, *fieldID)
 			}
 		}
 	}
 
-	if len(missingFields) == 0 {
+	if len(missingFields) == 0 && (!lastPartitionIDSet || lastPartitionID == normalizedLastPartitionID) {
 		return b, nil
 	}
 
@@ -2085,24 +2090,27 @@ func assignMissingPartitionFieldIDsFromMetadata(b []byte, metadata map[string]js
 			return nil, err
 		}
 		field["field-id"] = rawFieldID
+		normalizedLastPartitionID = max(normalizedLastPartitionID, lastAssignedID)
 	}
 
-	if usesSpecList {
-		rawSpecs, err := json.Marshal(specs)
-		if err != nil {
-			return nil, err
+	if len(missingFields) > 0 {
+		if usesSpecList {
+			rawSpecs, err := json.Marshal(specs)
+			if err != nil {
+				return nil, err
+			}
+			metadata["partition-specs"] = rawSpecs
+		} else {
+			rawFields, err := json.Marshal(specs[0].Fields)
+			if err != nil {
+				return nil, err
+			}
+			metadata["partition-spec"] = rawFields
 		}
-		metadata["partition-specs"] = rawSpecs
-	} else {
-		rawFields, err := json.Marshal(specs[0].Fields)
-		if err != nil {
-			return nil, err
-		}
-		metadata["partition-spec"] = rawFields
 	}
 
 	if lastPartitionIDSet {
-		rawLastPartitionID, err := json.Marshal(lastAssignedID)
+		rawLastPartitionID, err := json.Marshal(normalizedLastPartitionID)
 		if err != nil {
 			return nil, err
 		}
