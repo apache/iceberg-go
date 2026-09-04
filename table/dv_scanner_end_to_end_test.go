@@ -145,7 +145,7 @@ func collectDVScanRows(t *testing.T, scan *Scan, tasks []FileScanTask) []int64 {
 
 // TestDVScanEndToEnd locks the contract that DV-deleted row positions actually
 // disappear from scan output for a real on-disk Parquet data file. The loader
-// (readAllDeletionVectors) and the per-batch filter (filterByDeletionVector)
+// (lazyDeletionVectorLoader) and the per-batch filter (filterByDeletionVector)
 // are unit-tested separately in dv_scanner_read_test.go; this is the missing
 // link asserting they compose correctly through the public ReadTasks API and
 // that nothing in recordBatchesFromTasksAndDeletes drops the wiring.
