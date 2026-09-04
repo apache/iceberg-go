@@ -917,6 +917,11 @@ func (c *ManifestReader) ReadEntry() (ManifestEntry, error) {
 	if c.isFallback {
 		tmp = tmp.(*fallbackManifestEntry).toEntry()
 	}
+	if df, ok := tmp.DataFile().(*dataFile); ok {
+		if err := df.normalizeFormat(); err != nil {
+			return nil, err
+		}
+	}
 	switch tmp.Status() {
 	case EntryStatusEXISTING, EntryStatusADDED, EntryStatusDELETED:
 	default:
@@ -2769,6 +2774,20 @@ func (d *dataFile) setFieldIDToLogicalTypeMap(m map[int]string) {
 
 func (d *dataFile) setFieldIDToDecimalScaleMap(m map[int]int) {
 	d.fieldIDToDecimalScale = m
+}
+
+// normalizeFormat sets d.Format to the FileFormat constant matching its
+// decoded spelling, or returns an error if it names no known format.
+// Every Avro decode path must call it before the value is compared or
+// exposed.
+func (d *dataFile) normalizeFormat() error {
+	format, err := FileFormatFromString(string(d.Format))
+	if err != nil {
+		return fmt.Errorf("data file %q has invalid file format: %w", d.FilePath(), err)
+	}
+	d.Format = format
+
+	return nil
 }
 
 func (d *dataFile) ContentType() ManifestEntryContent { return d.Content }

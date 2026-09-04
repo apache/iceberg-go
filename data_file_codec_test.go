@@ -93,6 +93,46 @@ func TestDataFileCodecWithDroppedPartitionSource(t *testing.T) {
 	require.Equal(t, map[int]any{1000: nil, 1001: int32(3)}, decoded.Partition())
 }
 
+func TestUnmarshalAvroDataFileEntryNormalizesFileFormat(t *testing.T) {
+	spec := NewPartitionSpec()
+	schema := NewSchema(0)
+
+	tests := []struct {
+		name          string
+		written       FileFormat
+		expected      FileFormat
+		errorContains string
+	}{
+		{name: "spec lowercase", written: "parquet", expected: ParquetFile},
+		{name: "mixed case", written: "Parquet", expected: ParquetFile},
+		{name: "uppercase", written: ParquetFile, expected: ParquetFile},
+		{name: "lowercase orc", written: "orc", expected: OrcFile},
+		{name: "unknown format", written: "csv", errorContains: "unknown file format: csv"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder, err := NewDataFileBuilder(spec, EntryContentData,
+				"s3://bucket/table/data.parquet", ParquetFile, nil, nil, nil, 1, 1024)
+			require.NoError(t, err)
+			source := builder.Build().(*dataFile)
+			source.Format = tt.written
+
+			encoded, err := source.MarshalAvroEntry(spec, schema, 2)
+			require.NoError(t, err)
+
+			decoded, err := unmarshalAvroDataFileEntry(encoded, spec, schema, 2)
+			if tt.errorContains != "" {
+				require.ErrorContains(t, err, tt.errorContains)
+
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, decoded.FileFormat())
+		})
+	}
+}
+
 // TestManifestEntrySchemaForDistinguishesSameSpecIDDifferentPartitionTypes
 // guards against the cache-key collision that would occur if the cache
 // were keyed only by spec.ID(). Two tables can both use
