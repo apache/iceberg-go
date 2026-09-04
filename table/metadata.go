@@ -422,7 +422,11 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 		if b.props == nil {
 			b.props = iceberg.Properties{}
 		}
-		b.snapshotList = cloneSnapshots(common.SnapshotList)
+		snapshots, err := common.snapshotsForMarshal()
+		if err != nil {
+			return nil, err
+		}
+		b.snapshotList = cloneSnapshots(snapshots)
 		b.snapshotLog = cloneCollected(common.SnapshotLog)
 		b.metadataLog = cloneCollected(common.MetadataLog)
 		b.sortOrderList = cloneSortOrders(common.SortOrderList)
@@ -444,7 +448,7 @@ func MetadataBuilderFromBase(metadata Metadata, currentFileLocation string) (*Me
 			b.nextRowID = &nextRowID
 		}
 		if common.CurrentSnapshotID != nil {
-			if _, ok := snapshotIndexPosition(common.snapshotIndex, common.SnapshotList, *common.CurrentSnapshotID); ok {
+			if _, ok := snapshotIndexPosition(b.snapshotIndex, b.snapshotList, *common.CurrentSnapshotID); ok {
 				b.currentSnapshotID = clonePtr(common.CurrentSnapshotID)
 			}
 		}
@@ -1897,18 +1901,9 @@ func ParseMetadataString(s string) (Metadata, error) {
 
 // ParseMetadataBytes is like [ParseMetadataString] but for a byte slice.
 func ParseMetadataBytes(b []byte) (Metadata, error) {
-	// Keep the raw top-level object for all preflight checks so it is only
-	// decoded once before the version-specific metadata decode below.
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal(b, &metadata); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-	}
-
-	var formatVersion int
-	if rawVersion, ok := metadata["format-version"]; ok {
-		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
-		}
+	metadata, formatVersion, err := preflightMetadataBytes(b)
+	if err != nil {
+		return nil, err
 	}
 
 	var ret Metadata
@@ -1941,6 +1936,43 @@ func ParseMetadataBytes(b []byte) (Metadata, error) {
 	}
 
 	return ret, nil
+}
+
+// ParseMetadataBytesDeferredSnapshots parses metadata while retaining the full
+// snapshot array as raw JSON. Snapshots targeted by refs are decoded eagerly;
+// unreferenced history is materialized on first access. Operations requiring
+// the complete snapshot collection, including MetadataBuilderFromBase, decode
+// the full history and therefore may cost more than eager parsing overall.
+func ParseMetadataBytesDeferredSnapshots(b []byte) (Metadata, error) {
+	metadata, formatVersion, err := preflightMetadataBytes(b)
+	if err != nil {
+		return nil, err
+	}
+
+	normalized, err := assignMissingPartitionFieldIDsFromMetadata(b, metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseNormalizedMetadataBytesDeferredSnapshots(normalized, formatVersion)
+}
+
+// preflightMetadataBytes keeps the raw top-level object for normalization and
+// format selection so eager and deferred parsing share one document scan.
+func preflightMetadataBytes(b []byte) (map[string]json.RawMessage, int, error) {
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(b, &metadata); err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+	}
+
+	var formatVersion int
+	if rawVersion, ok := metadata["format-version"]; ok {
+		if err := json.Unmarshal(rawVersion, &formatVersion); err != nil {
+			return nil, 0, fmt.Errorf("%w: %w", ErrInvalidMetadata, err)
+		}
+	}
+
+	return metadata, formatVersion, nil
 }
 
 func requirePartitionSpecIDs(b []byte) error {
@@ -2108,8 +2140,9 @@ type commonMetadata struct {
 	// V3+ fields
 	NextRowID *int64 `json:"next-row-id,omitempty"` // V3: Next available row ID
 
-	schemaIndex   *schemaIndexData
-	snapshotIndex *snapshotIndexData
+	schemaIndex       *schemaIndexData
+	snapshotIndex     *snapshotIndexData
+	deferredSnapshots *deferredSnapshotState
 }
 
 func (c *commonMetadata) metadataBuilderCommon() *commonMetadata { return c }
@@ -2230,7 +2263,7 @@ func (c *commonMetadata) Equals(other *commonMetadata) bool {
 	switch {
 	case !iceinternal.SliceEqualHelper(c.SchemaList, other.SchemaList):
 		fallthrough
-	case !iceinternal.SliceEqualHelper(c.SnapshotList, other.SnapshotList):
+	case !iceinternal.SliceEqualHelper(c.allSnapshots(), other.allSnapshots()):
 		fallthrough
 	case !iceinternal.SliceEqualHelper(c.Specs, other.Specs):
 		fallthrough
@@ -2325,7 +2358,7 @@ func (c *commonMetadata) LastPartitionSpecID() *int {
 }
 
 func (c *commonMetadata) Snapshots() []Snapshot {
-	return cloneSnapshots(c.SnapshotList)
+	return cloneSnapshots(c.allSnapshots())
 }
 
 func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
@@ -2338,8 +2371,42 @@ func (c *commonMetadata) SnapshotByID(id int64) *Snapshot {
 	if ok {
 		return cloneSnapshotPtr(&c.SnapshotList[i])
 	}
+	if c.deferredSnapshots != nil {
+		snapshot, err := c.deferredSnapshots.snapshotByID(id)
+		if err != nil {
+			// Parser-created deferred state is synchronously validated before
+			// publication, so a later typed decode cannot fail. Keep this branch
+			// for defensive handling of manually constructed in-package state.
+			return nil
+		}
+
+		return snapshot
+	}
 
 	return nil
+}
+
+func (c *commonMetadata) allSnapshots() []Snapshot {
+	snapshots, err := c.snapshotsForMarshal()
+	if err != nil {
+		// prepareDeferredSnapshots validates JSON syntax and every Snapshot
+		// field whose typed decoding can fail before deferred state is
+		// published. This error is therefore unreachable for parser-created
+		// state; callers with an error channel use snapshotsForMarshal directly.
+		return nil
+	}
+
+	return snapshots
+}
+
+func (c *commonMetadata) snapshotsForMarshal() ([]Snapshot, error) {
+	if c.deferredSnapshots == nil {
+		return c.SnapshotList, nil
+	}
+
+	snapshots, _, err := c.deferredSnapshots.load()
+
+	return snapshots, err
 }
 
 func (c *commonMetadata) SnapshotByName(name string) *Snapshot {
@@ -2969,32 +3036,7 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
-
-	if err := rejectFieldsBeyondVersion(
-		aux.FormatVersion,
-		versionScopedField{name: "last-sequence-number", introduced: 2, present: aux.LastSequenceNumber != nil},
-		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
-		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
-	); err != nil {
-		return err
-	}
-
-	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
-	if aux.CurrentSchemaID == -1 && aux.Schema != nil {
-		aux.CurrentSchemaID = aux.Schema.ID
-		if !slices.ContainsFunc(aux.SchemaList, func(s *iceberg.Schema) bool {
-			return s.Equals(aux.Schema) && s.ID == aux.CurrentSchemaID
-		}) {
-			aux.SchemaList = append(aux.SchemaList, aux.Schema)
-		}
-	}
-
-	next.preValidate()
-	if err := next.checkRequiredFields(); err != nil {
-		return err
-	}
-
-	if err := next.validate(); err != nil {
+	if err := next.finishUnmarshal(); err != nil {
 		return err
 	}
 
@@ -3003,8 +3045,60 @@ func (m *metadataV1) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (m *metadataV1) finishUnmarshal() error {
+	if err := rejectFieldsBeyondVersion(
+		m.FormatVersion,
+		versionScopedField{name: "last-sequence-number", introduced: 2, present: m.commonMetadata.LastSequenceNumber != nil},
+		versionScopedField{name: "next-row-id", introduced: 3, present: m.commonMetadata.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(m.EncryptionKeyList) > 0},
+	); err != nil {
+		return err
+	}
+
+	// CurrentSchemaID was optional in v1, it can also be expressed via Schema.
+	if m.CurrentSchemaID == -1 && m.Schema != nil {
+		m.CurrentSchemaID = m.Schema.ID
+		if !slices.ContainsFunc(m.SchemaList, func(s *iceberg.Schema) bool {
+			return s.Equals(m.Schema) && s.ID == m.CurrentSchemaID
+		}) {
+			m.SchemaList = append(m.SchemaList, m.Schema)
+		}
+	}
+
+	m.preValidate()
+	if err := m.checkRequiredFields(); err != nil {
+		return err
+	}
+
+	if err := m.validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m metadataV1) MarshalJSON() ([]byte, error) {
+	snapshots, err := m.snapshotsForMarshal()
+	if err != nil {
+		return nil, err
+	}
+
+	type Alias metadataV1
+
+	return json.Marshal(&struct {
+		*Alias
+		SnapshotList []Snapshot `json:"snapshots,omitempty"`
+	}{
+		Alias:        (*Alias)(&m),
+		SnapshotList: snapshots,
+	})
+}
+
 func (m *metadataV1) ToV2() metadataV2 {
 	commonOut := m.commonMetadata
+	commonOut.SnapshotList = m.allSnapshots()
+	commonOut.snapshotIndex = buildSnapshotIndex(commonOut.SnapshotList)
+	commonOut.deferredSnapshots = nil
 	commonOut.FormatVersion = 2
 	if commonOut.UUID == uuid.Nil {
 		commonOut.UUID = uuid.New()
@@ -3051,27 +3145,51 @@ func (m *metadataV2) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
-
-	if err := rejectFieldsBeyondVersion(
-		aux.FormatVersion,
-		versionScopedField{name: "next-row-id", introduced: 3, present: aux.NextRowID != nil},
-		versionScopedField{name: "encryption-keys", introduced: 3, present: len(aux.EncryptionKeyList) > 0},
-	); err != nil {
-		return err
-	}
-
-	next.preValidate()
-	if err := next.checkRequiredFields(); err != nil {
-		return err
-	}
-
-	if err := next.validate(); err != nil {
+	if err := next.finishUnmarshal(); err != nil {
 		return err
 	}
 
 	*m = *next
 
 	return nil
+}
+
+func (m *metadataV2) finishUnmarshal() error {
+	if err := rejectFieldsBeyondVersion(
+		m.FormatVersion,
+		versionScopedField{name: "next-row-id", introduced: 3, present: m.commonMetadata.NextRowID != nil},
+		versionScopedField{name: "encryption-keys", introduced: 3, present: len(m.EncryptionKeyList) > 0},
+	); err != nil {
+		return err
+	}
+
+	m.preValidate()
+	if err := m.checkRequiredFields(); err != nil {
+		return err
+	}
+
+	if err := m.validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m metadataV2) MarshalJSON() ([]byte, error) {
+	snapshots, err := m.snapshotsForMarshal()
+	if err != nil {
+		return nil, err
+	}
+
+	type Alias metadataV2
+
+	return json.Marshal(&struct {
+		*Alias
+		SnapshotList []Snapshot `json:"snapshots,omitempty"`
+	}{
+		Alias:        (*Alias)(&m),
+		SnapshotList: snapshots,
+	})
 }
 
 func (m *metadataV2) validate() error {
@@ -3134,21 +3252,28 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, aux); err != nil {
 		return err
 	}
-
-	if err := rejectFieldsBeyondVersion(aux.FormatVersion); err != nil {
-		return err
-	}
-
-	next.preValidate()
-	if err := next.checkRequiredFields(); err != nil {
-		return err
-	}
-
-	if err := next.validate(); err != nil {
+	if err := next.finishUnmarshal(); err != nil {
 		return err
 	}
 
 	*m = *next
+
+	return nil
+}
+
+func (m *metadataV3) finishUnmarshal() error {
+	if err := rejectFieldsBeyondVersion(m.FormatVersion); err != nil {
+		return err
+	}
+
+	m.preValidate()
+	if err := m.checkRequiredFields(); err != nil {
+		return err
+	}
+
+	if err := m.validate(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -3170,9 +3295,13 @@ func (m *metadataV3) UnmarshalJSON(b []byte) error {
 // rejects writes of malformed in-memory state (builder/parser paths
 // always populate it, so this only fires when code constructs metadataV3
 // directly and skips the builder).
-func (m *metadataV3) MarshalJSON() ([]byte, error) {
+func (m metadataV3) MarshalJSON() ([]byte, error) {
 	if m.LastPartitionID == nil {
 		return nil, fmt.Errorf("%w: last-partition-id must be set for v3 metadata", ErrInvalidMetadata)
+	}
+	snapshots, err := m.snapshotsForMarshal()
+	if err != nil {
+		return nil, err
 	}
 
 	// Alias strips the MarshalJSON method off metadataV3 so json.Marshal
@@ -3181,10 +3310,12 @@ func (m *metadataV3) MarshalJSON() ([]byte, error) {
 
 	return json.Marshal(&struct {
 		*Alias
-		CurrentSnapshotID *int64 `json:"current-snapshot-id"`
+		CurrentSnapshotID *int64     `json:"current-snapshot-id"`
+		SnapshotList      []Snapshot `json:"snapshots,omitempty"`
 	}{
-		Alias:             (*Alias)(m),
+		Alias:             (*Alias)(&m),
 		CurrentSnapshotID: m.CurrentSnapshotID,
+		SnapshotList:      snapshots,
 	})
 }
 
@@ -3230,16 +3361,24 @@ type SequenceNumberValidator interface {
 
 // checkLastSequenceNumber validates that all snapshots have sequence numbers <= the last sequence number
 func checkLastSequenceNumber(validator SequenceNumberValidator, snapshotList []Snapshot) error {
-	lastSequenceNumber := validator.LastSequenceNumber()
-	if lastSequenceNumber == -1 {
-		return fmt.Errorf("%w: last-sequence-number is required for format versions greater than 1", ErrInvalidMetadata)
+	if err := requireLastSequenceNumber(validator); err != nil {
+		return err
 	}
 
+	lastSequenceNumber := validator.LastSequenceNumber()
 	for _, snap := range snapshotList {
 		if snap.SequenceNumber > lastSequenceNumber {
 			return fmt.Errorf("%w: snapshot %d has sequence number %d which is greater than last-sequence-number %d",
 				ErrInvalidMetadata, snap.SnapshotID, snap.SequenceNumber, lastSequenceNumber)
 		}
+	}
+
+	return nil
+}
+
+func requireLastSequenceNumber(validator SequenceNumberValidator) error {
+	if validator.LastSequenceNumber() == -1 {
+		return fmt.Errorf("%w: last-sequence-number is required for format versions greater than 1", ErrInvalidMetadata)
 	}
 
 	return nil
