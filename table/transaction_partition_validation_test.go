@@ -81,6 +81,27 @@ func TestPartitionValidationPlanPreservesPartitionValidationErrors(t *testing.T)
 		})
 	}
 
+	duplicateSpec := iceberg.NewPartitionSpecID(7,
+		iceberg.PartitionField{
+			SourceIDs: []int{1},
+			FieldID:   1000,
+			Name:      "first",
+			Transform: iceberg.IdentityTransform{},
+		},
+		iceberg.PartitionField{
+			SourceIDs: []int{2},
+			FieldID:   1000,
+			Name:      "duplicate",
+			Transform: iceberg.IdentityTransform{},
+		},
+	)
+	duplicatePlan := newPartitionValidationPlan(&duplicateSpec)
+	duplicateFile := newTestDataFile(t, duplicateSpec, "mem://partition-validation-test-duplicate.parquet", map[int]any{
+		1000: int32(1),
+		9999: int32(3),
+	})
+	require.ErrorContains(t, duplicatePlan.validate(duplicateFile), "unknown partition field id 9999 for spec id 7")
+
 	valid := newTestDataFile(t, spec, "mem://partition-validation-test-valid.parquet", map[int]any{
 		1000: int32(1),
 		1001: int32(2),

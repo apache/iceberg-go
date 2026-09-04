@@ -1023,29 +1023,39 @@ type partitionValidationField struct {
 	name string
 }
 
-// partitionValidationPlan contains the immutable metadata needed to validate
+// partitionValidationPlan contains the metadata needed to validate
 // a data file's partition tuple against one partition spec. The field slice
-// preserves spec order for deterministic missing-field errors, while the map
-// makes unknown-field checks independent of the number of partition fields.
+// preserves spec order for deterministic missing-field errors. The lookup map
+// for unknown fields is built only when a malformed tuple needs that check.
 type partitionValidationPlan struct {
-	specID           int
-	fields           []partitionValidationField
-	expectedFieldIDs map[int]string
+	specID             int
+	fields             []partitionValidationField
+	expectedFieldCount int
+	expectedFieldIDs   map[int]string
 }
 
 func newPartitionValidationPlan(spec *iceberg.PartitionSpec) *partitionValidationPlan {
 	plan := &partitionValidationPlan{
-		specID:           spec.ID(),
-		fields:           make([]partitionValidationField, 0, spec.NumFields()),
-		expectedFieldIDs: make(map[int]string, spec.NumFields()),
+		specID: spec.ID(),
+		fields: make([]partitionValidationField, 0, spec.NumFields()),
 	}
 
 	for _, field := range spec.Fields() {
+		duplicateID := false
+		for _, expected := range plan.fields {
+			if expected.id == field.FieldID {
+				duplicateID = true
+
+				break
+			}
+		}
+		if !duplicateID {
+			plan.expectedFieldCount++
+		}
 		plan.fields = append(plan.fields, partitionValidationField{
 			id:   field.FieldID,
 			name: field.Name,
 		})
-		plan.expectedFieldIDs[field.FieldID] = field.Name
 	}
 
 	return plan
@@ -1060,8 +1070,15 @@ func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 		}
 	}
 
-	if len(partitionData) == len(p.expectedFieldIDs) {
+	if len(partitionData) == p.expectedFieldCount {
 		return nil
+	}
+
+	if p.expectedFieldIDs == nil {
+		p.expectedFieldIDs = make(map[int]string, len(p.fields))
+		for _, field := range p.fields {
+			p.expectedFieldIDs[field.id] = field.name
+		}
 	}
 
 	for fieldID := range partitionData {
@@ -1177,11 +1194,10 @@ type deletionVectorBlobKey struct {
 }
 
 type deleteFilesToAddSet struct {
-	paths        map[string]struct{}
-	regularPaths map[string]struct{}
-	dvPaths      map[string]struct{}
-	dvBlobs      map[deletionVectorBlobKey]struct{}
-	dvsByRef     map[string]rewriteDeleteFileAddition
+	paths    map[string]struct{}
+	dvPaths  map[string]struct{}
+	dvBlobs  map[deletionVectorBlobKey]struct{}
+	dvsByRef map[string]rewriteDeleteFileAddition
 }
 
 // validateDeleteFilesToAdd performs metadata-only validation for delete files
@@ -1194,11 +1210,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		return nil, err
 	}
 	setToAdd := &deleteFilesToAddSet{
-		paths:        make(map[string]struct{}, len(deleteFiles)),
-		regularPaths: make(map[string]struct{}, len(deleteFiles)),
-		dvPaths:      make(map[string]struct{}, len(deleteFiles)),
-		dvBlobs:      make(map[deletionVectorBlobKey]struct{}, len(deleteFiles)),
-		dvsByRef:     make(map[string]rewriteDeleteFileAddition, len(deleteFiles)),
+		paths: make(map[string]struct{}, len(deleteFiles)),
 	}
 	if len(deleteFiles) == 0 {
 		return setToAdd, nil
@@ -1221,6 +1233,7 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 		if path == "" {
 			return nil, fmt.Errorf("delete file path cannot be empty for %s", operation)
 		}
+		_, pathAlreadyAdded := setToAdd.paths[path]
 		setToAdd.paths[path] = struct{}{}
 
 		switch df.ContentType() {
@@ -1260,14 +1273,14 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("position delete file %s must be a deletion vector for v%d table for %s",
 					path, meta.formatVersion, operation)
 			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
+			if pathAlreadyAdded {
+				if _, ok := setToAdd.dvPaths[path]; ok {
+					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+						path, operation)
+				}
+
 				return nil, fmt.Errorf("add delete file paths must be unique for %s", operation)
 			}
-			if _, ok := setToAdd.dvPaths[path]; ok {
-				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-					path, operation)
-			}
-			setToAdd.regularPaths[path] = struct{}{}
 
 			continue
 		}
@@ -1297,6 +1310,9 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 			}
 
 			blob := deletionVectorBlobKey{path: path, offset: *offset, length: *length}
+			if setToAdd.dvBlobs == nil {
+				setToAdd.dvBlobs = make(map[deletionVectorBlobKey]struct{}, len(deleteFiles))
+			}
 			if _, ok := setToAdd.dvBlobs[blob]; ok {
 				return nil, fmt.Errorf("deletion vector blob identity must be unique for %s: %s at offset %d with length %d",
 					operation, path, *offset, *length)
@@ -1305,9 +1321,17 @@ func (t *Transaction) validateDeleteFilesToAdd(deleteFiles []rewriteDeleteFileAd
 				return nil, fmt.Errorf("deletion vectors to add must reference distinct data files for %s: %s",
 					operation, *ref)
 			}
-			if _, ok := setToAdd.regularPaths[path]; ok {
-				return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
-					path, operation)
+			if pathAlreadyAdded {
+				if _, ok := setToAdd.dvPaths[path]; !ok {
+					return nil, fmt.Errorf("delete file path %s cannot identify both a deletion vector container and a regular delete file for %s",
+						path, operation)
+				}
+			}
+			if setToAdd.dvPaths == nil {
+				setToAdd.dvPaths = make(map[string]struct{}, len(deleteFiles))
+			}
+			if setToAdd.dvsByRef == nil {
+				setToAdd.dvsByRef = make(map[string]rewriteDeleteFileAddition, len(deleteFiles))
 			}
 			setToAdd.dvPaths[path] = struct{}{}
 			setToAdd.dvBlobs[blob] = struct{}{}
@@ -1949,8 +1973,10 @@ func (t *Transaction) replaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		if _, ok := setToAdd[path]; ok {
 			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
 		}
-		if _, ok := setDeleteFilesToAdd.regularPaths[path]; ok {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+		if _, ok := setDeleteFilesToAdd.paths[path]; ok {
+			if _, isDeletionVector := setDeleteFilesToAdd.dvPaths[path]; !isDeletionVector {
+				return fmt.Errorf("cannot add files that are already referenced by table, files: %s", path)
+			}
 		}
 		if _, ok := setDeleteFilesToAdd.dvPaths[path]; ok && isLive {
 			if !IsDeletionVector(df) {
