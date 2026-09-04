@@ -2203,13 +2203,13 @@ type inspectManifestListContextIO struct {
 
 func (fs inspectManifestListContextIO) Open(path string) (iceio.File, error) {
 	if fs.rejectManifestList && strings.Contains(path, "manifest-list") {
-		return nil, errors.New("manifest list opened with caller-bound IO")
+		return nil, errors.New("manifest list opened with uncancellable IO")
 	}
 
 	return fs.IO.Open(path)
 }
 
-func TestInspectFilesUseDetachedContextForManifestListRead(t *testing.T) {
+func TestInspectFilesKeepCallerContextForManifestListRead(t *testing.T) {
 	tbl := inspectAllFilesTable(t)
 	baseFS, err := tbl.fsF(context.Background())
 	require.NoError(t, err)
@@ -2220,7 +2220,7 @@ func TestInspectFilesUseDetachedContextForManifestListRead(t *testing.T) {
 
 		return inspectManifestListContextIO{
 			IO:                 baseFS,
-			rejectManifestList: ctx.Done() != nil,
+			rejectManifestList: ctx.Done() == nil,
 		}, nil
 	}
 
@@ -2235,6 +2235,31 @@ func TestInspectFilesUseDetachedContextForManifestListRead(t *testing.T) {
 	require.Len(t, paths, 3)
 	require.Len(t, contents, 3)
 	require.Equal(t, 2, calls)
+}
+
+func TestInspectFilesReuseManifestListIO(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		t.Run(fmt.Sprintf("all=%t", all), func(t *testing.T) {
+			tbl := inspectAllFilesTable(t)
+			baseFS, err := tbl.fsF(t.Context())
+			require.NoError(t, err)
+			calls := 0
+			tbl.fsF = func(context.Context) (iceio.IO, error) {
+				calls++
+
+				return baseFS, nil
+			}
+			read := tbl.Inspect().Files
+			if all {
+				read = tbl.Inspect().AllFiles
+			}
+			rr, err := read(t.Context())
+			require.NoError(t, err)
+			paths, _ := inspectFileRows(t, rr)
+			require.NotEmpty(t, paths)
+			require.Equal(t, 1, calls, "manifest lists and entries should share the operation's IO")
+		})
+	}
 }
 
 func TestInspectAllFilesStopsOnContextCancellation(t *testing.T) {
