@@ -429,7 +429,10 @@ var tableSchemaNested = iceberg.NewSchemaWithIdentifiers(1,
 
 func TestStatsTypes(t *testing.T) {
 	statsCols, err := iceberg.PreOrderVisit(tableSchemaNested,
-		&arrowStatsCollector{schema: tableSchemaNested, defaultMode: "full"})
+		&arrowStatsCollector{
+			schema:      tableSchemaNested,
+			defaultMode: internal.MetricsMode{Typ: internal.MetricModeFull},
+		})
 
 	require.NoError(t, err)
 
@@ -456,6 +459,34 @@ func TestStatsTypes(t *testing.T) {
 		iceberg.PrimitiveTypes.String,
 		iceberg.PrimitiveTypes.Int32,
 	}, actual)
+}
+
+func TestComputeStatsPlanTraversesNestedFields(t *testing.T) {
+	plan, err := computeStatsPlan(tableSchemaNested, iceberg.Properties{
+		DefaultWriteMetricsModeKey: string(internal.MetricModeFull),
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, plan, 11)
+	for _, fieldID := range []int{1, 2, 3, 5, 7, 9, 10, 13, 14, 16, 17} {
+		assert.Contains(t, plan, fieldID)
+	}
+	for _, fieldID := range []int{4, 6, 8, 11, 15} {
+		assert.NotContains(t, plan, fieldID)
+	}
+}
+
+func TestComputeStatsPlanIgnoresInvalidUnusedColumnMode(t *testing.T) {
+	schema := iceberg.NewSchema(0, iceberg.NestedField{
+		ID: 1, Name: "id", Type: iceberg.PrimitiveTypes.Int32, Required: true,
+	})
+
+	_, err := computeStatsPlan(schema, iceberg.Properties{
+		DefaultWriteMetricsModeKey:                   "counts",
+		MetricsModeColumnConfPrefix + ".not_present": "truncate(0)",
+	})
+
+	require.NoError(t, err)
 }
 
 func TestIcebergCRSToGeoArrowMetadata(t *testing.T) {
