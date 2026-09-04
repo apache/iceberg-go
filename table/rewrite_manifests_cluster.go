@@ -227,8 +227,6 @@ func (m *manifestMergeManager) clusterManifests(manifests []iceberg.ManifestFile
 	for _, key := range order {
 		writer := writers[key]
 		if writer.writer == nil || !writer.hasEntries {
-			writer.abort()
-
 			return nil, fmt.Errorf("cluster writer for key %v is incomplete", key.value)
 		}
 		if err := closeWriter(writer); err != nil {
