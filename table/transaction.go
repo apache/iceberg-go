@@ -1039,33 +1039,23 @@ type partitionValidationField struct {
 
 // partitionValidationPlan contains the metadata needed to validate
 // a data file's partition tuple against one partition spec. The field slice
-// preserves spec order for deterministic missing-field errors. The lookup map
-// for unknown fields is built only when a malformed tuple needs that check.
+// preserves spec order for deterministic missing-field errors. The plan is
+// immutable after construction and can be reused for concurrent validation.
 type partitionValidationPlan struct {
-	specID             int
-	fields             []partitionValidationField
-	expectedFieldCount int
-	expectedFieldIDs   map[int]string
+	specID           int
+	fields           []partitionValidationField
+	expectedFieldIDs map[int]struct{}
 }
 
 func newPartitionValidationPlan(spec *iceberg.PartitionSpec) *partitionValidationPlan {
 	plan := &partitionValidationPlan{
-		specID: spec.ID(),
-		fields: make([]partitionValidationField, 0, spec.NumFields()),
+		specID:           spec.ID(),
+		fields:           make([]partitionValidationField, 0, spec.NumFields()),
+		expectedFieldIDs: make(map[int]struct{}, spec.NumFields()),
 	}
 
 	for _, field := range spec.Fields() {
-		duplicateID := false
-		for _, expected := range plan.fields {
-			if expected.id == field.FieldID {
-				duplicateID = true
-
-				break
-			}
-		}
-		if !duplicateID {
-			plan.expectedFieldCount++
-		}
+		plan.expectedFieldIDs[field.FieldID] = struct{}{}
 		plan.fields = append(plan.fields, partitionValidationField{
 			id:   field.FieldID,
 			name: field.Name,
@@ -1084,15 +1074,8 @@ func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 		}
 	}
 
-	if len(partitionData) == p.expectedFieldCount {
+	if len(partitionData) == len(p.expectedFieldIDs) {
 		return nil
-	}
-
-	if p.expectedFieldIDs == nil {
-		p.expectedFieldIDs = make(map[int]string, len(p.fields))
-		for _, field := range p.fields {
-			p.expectedFieldIDs[field.id] = field.name
-		}
 	}
 
 	for fieldID := range partitionData {
@@ -1102,12 +1085,6 @@ func (p *partitionValidationPlan) validate(df iceberg.DataFile) error {
 	}
 
 	return nil
-}
-
-// validateDataFilePartitionData verifies that DataFile partition values match
-// the given partition spec's fields by ID without reading file contents.
-func validateDataFilePartitionData(df iceberg.DataFile, spec *iceberg.PartitionSpec) error {
-	return newPartitionValidationPlan(spec).validate(df)
 }
 
 // validateDataFilesToAdd performs metadata-only validation for caller-provided

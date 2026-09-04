@@ -18,6 +18,7 @@
 package table
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/apache/iceberg-go"
@@ -108,4 +109,40 @@ func TestPartitionValidationPlanPreservesPartitionValidationErrors(t *testing.T)
 	})
 	require.NoError(t, plan.validate(valid))
 	require.NoError(t, plan.validate(valid))
+}
+
+func TestPartitionValidationPlanConcurrentValidation(t *testing.T) {
+	spec := iceberg.NewPartitionSpecID(7, iceberg.PartitionField{
+		SourceIDs: []int{1},
+		FieldID:   1000,
+		Name:      "id",
+		Transform: iceberg.IdentityTransform{},
+	})
+	plan := newPartitionValidationPlan(&spec)
+
+	for i := range 16 {
+		for _, tc := range []struct {
+			name      string
+			partition map[int]any
+			wantError string
+		}{
+			{"valid", map[int]any{1000: int32(1)}, ""},
+			{"missing", nil, "missing partition value for field id 1000 (id)"},
+			{"unknown", map[int]any{1000: int32(1), 9999: int32(2)}, "unknown partition field id 9999 for spec id 7"},
+		} {
+			t.Run(fmt.Sprintf("%s/%d", tc.name, i), func(t *testing.T) {
+				t.Parallel()
+
+				df := newTestDataFile(t, spec, "mem://concurrent-validation.parquet", tc.partition)
+				for range 100 {
+					err := plan.validate(df)
+					if tc.wantError == "" {
+						require.NoError(t, err)
+					} else {
+						require.EqualError(t, err, tc.wantError)
+					}
+				}
+			})
+		}
+	}
 }
