@@ -80,6 +80,14 @@ type supersededAccumulator interface {
 	supersededManifests(committed bool) []string
 }
 
+// retryManifestRebuilder lets a producer reuse parent-independent manifest
+// output when a retry's fresh parent still contains every manifest it rewrote.
+// Producers that do not implement it fall back to assembling and processing
+// the complete manifest set again.
+type retryManifestRebuilder interface {
+	rebuildManifests(ctx context.Context, parent *Snapshot, addedContent []iceberg.ManifestFile) ([]iceberg.ManifestFile, error)
+}
+
 func newManifestFileName(num int, commit uuid.UUID) string {
 	return fmt.Sprintf("%s-m%d.avro", commit, num)
 }
@@ -354,6 +362,7 @@ type manifestMergeManager struct {
 	minCountToMerge  int
 	mergeEnabled     bool
 	mergeConcurrency int
+	clusterBy        func(iceberg.DataFile) any
 	snap             *snapshotProducer
 }
 
@@ -500,6 +509,10 @@ func (m *manifestMergeManager) removeOrphans(input, output []iceberg.ManifestFil
 func (m *manifestMergeManager) mergeManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error) {
 	if !m.mergeEnabled || len(manifests) == 0 {
 		return manifests, nil
+	}
+	if m.clusterBy != nil {
+		// Clustering replaces size-only bin-packing, including minCountToMerge.
+		return m.clusterManifests(manifests)
 	}
 
 	first := manifests[0]
@@ -720,7 +733,7 @@ func (sp *snapshotProducer) newManifestWriter(spec iceberg.PartitionSpec, opts .
 	wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter, spec,
 		sp.txn.meta.CurrentSchema(), sp.snapshotID, opts...)
 	if err != nil {
-		return nil, "", nil, nil, errors.Join(err, out.Close())
+		return nil, "", nil, nil, errors.Join(err, out.Close(), sp.io.Remove(path))
 	}
 
 	return wr, path, counter, out, nil
@@ -934,19 +947,13 @@ func (sp *snapshotProducer) parentDependentManifests(ctx context.Context, parent
 					return nil, err
 				}
 
-				out, path, err := sp.newManifestOutput()
+				wr, path, counter, out, err := sp.newManifestWriter(spec,
+					iceberg.WithManifestWriterContent(key.content))
 				if err != nil {
 					return nil, err
 				}
 				defer internal.CheckedClose(out, &retErr)
 
-				counter := &internal.CountingWriter{W: out}
-				wr, err := iceberg.NewManifestWriter(sp.txn.meta.formatVersion, counter,
-					spec, sp.txn.meta.CurrentSchema(),
-					sp.snapshotID, iceberg.WithManifestWriterContent(key.content))
-				if err != nil {
-					return nil, err
-				}
 				writerClosed := false
 				defer func() {
 					if !writerClosed {
@@ -1519,11 +1526,18 @@ func (sp *snapshotProducer) commitManifests(newManifests, addedContent []iceberg
 			return nil, err
 		}
 
-		// Recompute the parent-dependent manifests (inherited/filtered existing
-		// manifests plus DELETE tombstones) against the fresh parent and combine
-		// them with the reused added-content manifests. This drops the removed
-		// files from the fresh parent's manifests rather than resurrecting them.
-		combined, procErr := sp.assembleManifests(rebuildCtx, freshParent, addedContent)
+		// Rebuild or reuse the parent-dependent manifest set against the fresh
+		// parent and combine it with the producer's own manifests. This drops
+		// removed files from the fresh parent's manifests rather than
+		// resurrecting them; rewrite clustering can reuse its prior output when
+		// none of the rewritten inputs were displaced.
+		var combined []iceberg.ManifestFile
+		var procErr error
+		if rebuilder, ok := sp.producerImpl.(retryManifestRebuilder); ok {
+			combined, procErr = rebuilder.rebuildManifests(rebuildCtx, freshParent, addedContent)
+		} else {
+			combined, procErr = sp.assembleManifests(rebuildCtx, freshParent, addedContent)
+		}
 		if procErr != nil {
 			return nil, fmt.Errorf("rebuild manifest list: assemble manifests: %w", procErr)
 		}

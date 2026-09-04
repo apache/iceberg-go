@@ -179,18 +179,6 @@ type identifier struct {
 type commitTableResponse struct {
 	MetadataLoc string          `json:"metadata-location"`
 	RawMetadata json.RawMessage `json:"metadata"`
-	Metadata    table.Metadata  `json:"-"`
-}
-
-func (t *commitTableResponse) UnmarshalJSON(b []byte) (err error) {
-	type Alias commitTableResponse
-	if err = json.Unmarshal(b, (*Alias)(t)); err != nil {
-		return err
-	}
-
-	t.Metadata, err = table.ParseMetadataBytes(t.RawMetadata)
-
-	return err
 }
 
 // StorageCredential carries REST-vended storage credentials scoped to matching
@@ -1645,8 +1633,20 @@ func (r *Catalog) CommitTable(ctx context.Context, ident table.Identifier, requi
 	if err != nil {
 		return nil, "", err
 	}
+	metadata, err := r.parseCommitMetadata(ret.RawMetadata)
+	if err != nil {
+		return nil, "", err
+	}
 
-	return ret.Metadata, ret.MetadataLoc, nil
+	return metadata, ret.MetadataLoc, nil
+}
+
+func (r *Catalog) parseCommitMetadata(raw json.RawMessage) (table.Metadata, error) {
+	if r.snapshotMode == SnapshotModeRefs {
+		return table.ParseMetadataBytesDeferredSnapshots(raw)
+	}
+
+	return table.ParseMetadataBytes(raw)
 }
 
 // CommitTransaction atomically commits changes to multiple tables in a
@@ -1853,11 +1853,15 @@ func (r *Catalog) UpdateTable(ctx context.Context, ident table.Identifier, requi
 	if err != nil {
 		return nil, err
 	}
+	metadata, err := r.parseCommitMetadata(ret.RawMetadata)
+	if err != nil {
+		return nil, err
+	}
 
 	config := maps.Clone(r.props)
-	maps.Copy(config, ret.Metadata.Properties())
+	maps.Copy(config, metadata.Properties())
 
-	return r.tableFromResponse(ctx, ident, ret.Metadata, ret.MetadataLoc, config, config, false)
+	return r.tableFromResponse(ctx, ident, metadata, ret.MetadataLoc, config, config, false)
 }
 
 func (r *Catalog) DropTable(ctx context.Context, identifier table.Identifier) error {

@@ -524,6 +524,33 @@ func (s *Schema) accessorForField(id int) (accessor, bool) {
 	return acc, ok
 }
 
+// columnPathSegments returns the own-name path segments from the top-level column down to id, so a name containing '.' stays one segment.
+func (s *Schema) columnPathSegments(id int) []string {
+	idToField, err := s.lazyIDToField()
+	if err != nil {
+		return nil
+	}
+	parents, err := s.lazyIDToParent()
+	if err != nil {
+		return nil
+	}
+	var segs []string
+	for cur := id; ; {
+		f, ok := idToField[cur]
+		if !ok {
+			return nil
+		}
+		segs = append([]string{f.Name}, segs...)
+		p, ok := parents[cur]
+		if !ok {
+			break
+		}
+		cur = p
+	}
+
+	return segs
+}
+
 // Equals compares the fields and identifierIDs, but does not compare
 // the schema ID itself.
 func (s *Schema) Equals(other *Schema) bool {
